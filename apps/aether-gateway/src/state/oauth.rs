@@ -1381,6 +1381,7 @@ impl AppState {
                         message: match err {
                             GatewayError::UpstreamUnavailable { message, .. }
                             | GatewayError::ControlUnavailable { message, .. }
+                            | GatewayError::Client { message, .. }
                             | GatewayError::Internal(message) => message,
                         },
                     },

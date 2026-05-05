@@ -11,7 +11,7 @@ use crate::ai_serving::transport::{
 };
 use crate::{
     append_execution_contract_fields_to_value, append_local_failover_policy_to_value,
-    AiExecutionDecision, AppState,
+    AiExecutionDecision, AppState, GatewayError,
 };
 
 use super::request::resolve_local_openai_chat_candidate_payload_parts;
@@ -28,7 +28,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
     decision_kind: &str,
     report_kind: &str,
     upstream_is_stream: bool,
-) -> Option<AiExecutionDecision> {
+) -> Result<Option<AiExecutionDecision>, GatewayError> {
     let attempt_identity = attempt.attempt_identity();
     let LocalOpenAiChatCandidateAttempt {
         eligible,
@@ -36,7 +36,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         candidate_id,
         ..
     } = attempt;
-    let resolved = resolve_local_openai_chat_candidate_payload_parts(
+    let Some(resolved) = resolve_local_openai_chat_candidate_payload_parts(
         state,
         parts,
         trace_id,
@@ -49,7 +49,10 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         report_kind,
         upstream_is_stream,
     )
-    .await?;
+    .await?
+    else {
+        return Ok(None);
+    };
     let candidate = &eligible.candidate;
 
     let prompt_cache_key = resolved
@@ -142,9 +145,10 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         report_kind,
         envelope_name: _,
         transport,
+        request_redacted: _,
     } = resolved;
 
-    Some(build_ai_execution_decision_response(
+    Ok(Some(build_ai_execution_decision_response(
         AiExecutionDecisionResponseParts {
             decision_is_stream: upstream_is_stream,
             decision_kind: decision_kind.to_string(),
@@ -178,5 +182,5 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
             report_context: Some(report_context),
             auth_context: input.auth_context.clone(),
         },
-    ))
+    )))
 }

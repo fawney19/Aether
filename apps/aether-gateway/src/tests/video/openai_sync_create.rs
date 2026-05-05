@@ -363,7 +363,8 @@ async fn gateway_executes_openai_video_create_via_local_decision_gate_with_local
                         .unwrap_or_default()
                         .to_string(),
                     tls_profile: payload
-                        .get("tls_profile")
+                        .get("transport_profile")
+                        .and_then(|value| value.get("profile_id"))
                         .and_then(|value| value.as_str())
                         .unwrap_or_default()
                         .to_string(),

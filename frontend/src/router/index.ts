@@ -227,6 +227,12 @@ const routes: RouteRecordRaw[] = [
         meta: { module: 'model_directives' }
       },
       {
+        path: 'modules/chat-pii-redaction',
+        name: 'ChatPiiRedactionModule',
+        component: () => importWithRetry(() => import('@/views/admin/modules/ChatPiiRedaction.vue')),
+        meta: { module: 'chat_pii_redaction' }
+      },
+      {
         path: 'email',
         name: 'EmailSettings',
         component: () => importWithRetry(() => import('@/views/admin/EmailSettings.vue'))

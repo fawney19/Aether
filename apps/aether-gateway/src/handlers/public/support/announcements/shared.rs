@@ -138,6 +138,7 @@ pub(super) fn announcements_internal_detail(err: GatewayError) -> String {
     match err {
         GatewayError::UpstreamUnavailable { message, .. }
         | GatewayError::ControlUnavailable { message, .. }
+        | GatewayError::Client { message, .. }
         | GatewayError::Internal(message) => message,
     }
 }

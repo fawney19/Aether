@@ -13,6 +13,7 @@ use crate::insert_header_if_missing;
 pub(crate) enum GatewayError {
     UpstreamUnavailable { trace_id: String, message: String },
     ControlUnavailable { trace_id: String, message: String },
+    Client { status: StatusCode, message: String },
     Internal(String),
 }
 
@@ -55,6 +56,15 @@ impl IntoResponse for GatewayError {
                 );
                 response
             }
+            Self::Client { status, message } => (
+                status,
+                Json(json!({
+                    "error": {
+                        "message": message,
+                    }
+                })),
+            )
+                .into_response(),
             Self::Internal(message) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
