@@ -131,7 +131,7 @@ async fn gateway_handles_admin_providers_locally_with_trusted_admin_principal() 
             .expect("gateway should build")
             .with_data_state_for_tests(
                 GatewayDataState::with_provider_catalog_repository_for_tests(
-                    provider_catalog_repository,
+                    provider_catalog_repository.clone(),
                 ),
             ),
     );
@@ -240,6 +240,7 @@ async fn gateway_handles_admin_provider_summary_locally_with_trusted_admin_princ
                 "claude_code_advanced": {"pool_size": 3},
                 "pool_advanced": {"enabled": true},
                 "failover_rules": {"strategy": "ordered"},
+                "chat_pii_redaction": {"enabled": true},
                 "provider_ops": {"architecture_id": "anyrouter"}
             })),
         );
@@ -351,6 +352,7 @@ async fn gateway_handles_admin_provider_summary_locally_with_trusted_admin_princ
     );
     assert_eq!(payload["ops_configured"], true);
     assert_eq!(payload["ops_architecture_id"], "anyrouter");
+    assert_eq!(payload["chat_pii_redaction"], json!({"enabled": true}));
     assert_eq!(payload["created_at"], "2024-03-21T05:46:40Z");
     assert_eq!(payload["updated_at"], "2024-03-21T05:48:20Z");
     assert_eq!(
@@ -774,6 +776,20 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![
             sample_provider("provider-openai", "openai", 10)
+                .with_transport_fields(
+                    true,
+                    false,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(json!({
+                        "pool_advanced": {},
+                        "failover_rules": {"strategy": "ordered"}
+                    })),
+                )
                 .with_timestamps(Some(1_711_000_000), Some(1_711_000_100)),
             sample_provider("provider-other", "other", 20),
         ],
@@ -792,7 +808,7 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
             .expect("gateway should build")
             .with_data_state_for_tests(
                 GatewayDataState::with_provider_catalog_repository_for_tests(
-                    provider_catalog_repository,
+                    provider_catalog_repository.clone(),
                 ),
             ),
     );
@@ -817,10 +833,11 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
             "request_timeout": 55.0,
             "stream_first_byte_timeout": 11.0,
             "enable_format_conversion": false,
-            "config": {"provider_ops": {"architecture_id": "cubence"}},
+            "config": {
+                "provider_ops": {"architecture_id": "cubence"},
+                "chat_pii_redaction": {"enabled": true}
+            },
             "claude_code_advanced": {"pool_size": 2},
-            "pool_advanced": {},
-            "failover_rules": {"strategy": "ordered"},
             "proxy": {"url": "https://proxy.example"}
         }))
         .send()
@@ -847,8 +864,88 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
     assert_eq!(payload["claude_code_advanced"], json!({"pool_size": 2}));
     assert_eq!(payload["pool_advanced"], json!({}));
     assert_eq!(payload["failover_rules"], json!({"strategy": "ordered"}));
+    assert_eq!(payload["chat_pii_redaction"], json!({"enabled": true}));
     assert_eq!(payload["ops_configured"], true);
     assert_eq!(payload["ops_architecture_id"], "cubence");
+
+    let disable_response = reqwest::Client::new()
+        .patch(format!("{gateway_url}/api/admin/providers/provider-openai"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "config": {
+                "chat_pii_redaction": {"enabled": false}
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    let disable_status = disable_response.status();
+    let disable_body = disable_response.text().await.expect("body should read");
+    assert_eq!(disable_status, StatusCode::OK, "body={disable_body}");
+    let disable_payload: serde_json::Value =
+        serde_json::from_str(&disable_body).expect("json body should parse");
+    assert_eq!(
+        disable_payload["chat_pii_redaction"],
+        json!({"enabled": false})
+    );
+    assert_eq!(disable_payload["pool_advanced"], json!({}));
+    assert_eq!(
+        disable_payload["failover_rules"],
+        json!({"strategy": "ordered"})
+    );
+    assert_eq!(disable_payload["ops_architecture_id"], "cubence");
+
+    let invalid_response = reqwest::Client::new()
+        .patch(format!("{gateway_url}/api/admin/providers/provider-openai"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "config": {
+                "chat_pii_redaction": {"enabled": true, "entities": ["email"]}
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+
+    let providers = provider_catalog_repository
+        .list_providers(false)
+        .await
+        .expect("providers should list");
+    let updated_provider = providers
+        .iter()
+        .find(|provider| provider.id == "provider-openai")
+        .expect("provider should exist");
+    assert_eq!(
+        updated_provider
+            .config
+            .as_ref()
+            .and_then(|value| value.get("chat_pii_redaction"))
+            .cloned(),
+        Some(json!({"enabled": false}))
+    );
+    assert_eq!(
+        updated_provider
+            .config
+            .as_ref()
+            .and_then(|value| value.get("pool_advanced"))
+            .cloned(),
+        Some(json!({}))
+    );
+    assert_eq!(
+        updated_provider
+            .config
+            .as_ref()
+            .and_then(|value| value.get("failover_rules"))
+            .cloned(),
+        Some(json!({"strategy": "ordered"}))
+    );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -901,6 +998,7 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
             "website": "codex.example",
             "keep_priority_on_conversion": true,
             "max_retries": 7,
+            "config": {"chat_pii_redaction": {"enabled": true}},
             "pool_advanced": {},
             "failover_rules": {"strategy": "ordered"},
             "proxy": {"url": "https://proxy.example"}
@@ -943,6 +1041,38 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
             .cloned(),
         Some(json!({}))
     );
+    assert_eq!(
+        created
+            .config
+            .as_ref()
+            .and_then(|value| value.get("chat_pii_redaction"))
+            .cloned(),
+        Some(json!({"enabled": true}))
+    );
+    assert_eq!(
+        created
+            .config
+            .as_ref()
+            .and_then(|value| value.get("failover_rules"))
+            .cloned(),
+        Some(json!({"strategy": "ordered"}))
+    );
+
+    let invalid_response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/providers/"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "name": "invalid-redaction-provider",
+            "provider_type": "custom",
+            "config": {"chat_pii_redaction": {"enabled": true, "entities": ["email"]}}
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
 
     let endpoints = provider_catalog_repository
         .list_endpoints_by_provider_ids(std::slice::from_ref(&created.id))

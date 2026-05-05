@@ -144,7 +144,7 @@ impl LocalOpenAiChatSyncAttemptSource<'_> {
             "openai_chat_sync_success",
             upstream_is_stream,
         )
-        .await
+        .await?
         else {
             return Ok(None);
         };
@@ -250,7 +250,7 @@ pub(crate) async fn build_local_openai_chat_sync_plan_and_reports(
             "openai_chat_sync_success",
             upstream_is_stream,
         )
-        .await
+        .await?
         else {
             continue;
         };

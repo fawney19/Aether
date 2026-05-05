@@ -133,6 +133,13 @@
             {{ module.description }}
           </p>
 
+          <p
+            v-if="module.name === 'chat_pii_redaction'"
+            class="mt-3 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+          >
+            {{ getModuleStatusCopy(module) }}
+          </p>
+
           <!-- 不可用提示 -->
           <div
             v-if="!module.available"
@@ -244,6 +251,15 @@ function getCategoryIcon(category: string) {
     integration: Link,
   }
   return icons[category] || Puzzle
+}
+
+function getModuleStatusCopy(module: { name: string; enabled: boolean; active: boolean; config_validated: boolean; config_error: string | null }) {
+  if (module.name !== 'chat_pii_redaction') {
+    return module.enabled ? '已启用' : '已禁用'
+  }
+  if (!module.config_validated) return '配置异常，替换保护未生效'
+  if (!module.enabled) return '全局替换开关未开启，所有供应商均不会执行替换保护'
+  return '全局替换开关已开启，可在供应商中单独启用'
 }
 
 // 所有模块列表（按 admin_menu_order 排序）

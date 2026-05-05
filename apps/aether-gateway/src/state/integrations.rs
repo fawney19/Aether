@@ -63,6 +63,7 @@ impl provider_transport::VideoTaskTransportSnapshotLookup for AppState {
             .map_err(|err| match err {
                 GatewayError::UpstreamUnavailable { message, .. }
                 | GatewayError::ControlUnavailable { message, .. }
+                | GatewayError::Client { message, .. }
                 | GatewayError::Internal(message) => message,
             })
     }
@@ -79,6 +80,7 @@ impl ModelFetchTransportRuntime for AppState {
             .map_err(|err| match err {
                 GatewayError::UpstreamUnavailable { message, .. }
                 | GatewayError::ControlUnavailable { message, .. }
+                | GatewayError::Client { message, .. }
                 | GatewayError::Internal(message) => message,
             })
     }
@@ -100,6 +102,7 @@ impl ModelFetchTransportRuntime for AppState {
             .map_err(|err| match err {
                 GatewayError::UpstreamUnavailable { message, .. }
                 | GatewayError::ControlUnavailable { message, .. }
+                | GatewayError::Client { message, .. }
                 | GatewayError::Internal(message) => message,
             })
     }
