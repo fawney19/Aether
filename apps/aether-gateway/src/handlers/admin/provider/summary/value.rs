@@ -176,6 +176,7 @@ pub(crate) fn build_admin_provider_summary_value(
         "claude_code_advanced": config.and_then(|cfg| cfg.get("claude_code_advanced")).cloned(),
         "pool_advanced": config.and_then(|cfg| cfg.get("pool_advanced")).cloned(),
         "failover_rules": config.and_then(|cfg| cfg.get("failover_rules")).cloned(),
+        "chat_pii_redaction": config.and_then(|cfg| cfg.get("chat_pii_redaction")).cloned(),
         "total_endpoints": total_endpoints,
         "active_endpoints": active_endpoints,
         "total_keys": total_keys,
