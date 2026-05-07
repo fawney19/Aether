@@ -10,8 +10,9 @@ mod url;
 pub use auth::{
     build_kiro_request_auth_from_config, is_kiro_claude_messages_transport,
     is_kiro_provider_transport, resolve_local_kiro_bearer_auth, resolve_local_kiro_request_auth,
-    supports_local_kiro_auth_prerequisites, supports_local_kiro_request_auth_resolution,
-    KiroBearerAuth, KiroRequestAuth, KIRO_AUTH_HEADER, PROVIDER_TYPE,
+    supports_kiro_fixed_provider_auth_bridge, supports_local_kiro_auth_prerequisites,
+    supports_local_kiro_request_auth_resolution, KiroBearerAuth, KiroRequestAuth, KIRO_AUTH_HEADER,
+    PROVIDER_TYPE,
 };
 pub use converter::convert_claude_messages_to_conversation_state;
 pub use credentials::{generate_machine_id, normalize_machine_id, KiroAuthConfig};

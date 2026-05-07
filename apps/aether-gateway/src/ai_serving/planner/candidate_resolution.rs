@@ -399,6 +399,7 @@ pub(crate) fn candidate_auth_channel_skip_reason(
     let upstream_auth_channel = resolve_transport_request_auth_channel(transport)?;
     if request_auth_channel == upstream_auth_channel
         || allow_auth_channel_mismatch_for_format(transport)
+        || kiro_fixed_provider_auth_bridge_allows_auth_channel_mismatch(transport)
     {
         None
     } else {
@@ -470,6 +471,15 @@ fn allow_auth_channel_mismatch_for_format(transport: &GatewayProviderTransportSn
                 .filter_map(serde_json::Value::as_str)
                 .any(|item| crate::ai_serving::normalize_api_format_alias(item) == api_format)
         })
+}
+
+fn kiro_fixed_provider_auth_bridge_allows_auth_channel_mismatch(
+    transport: &GatewayProviderTransportSnapshot,
+) -> bool {
+    crate::ai_serving::transport::kiro::supports_kiro_fixed_provider_auth_bridge(
+        transport,
+        transport.endpoint.api_format.as_str(),
+    )
 }
 
 pub(crate) async fn read_candidate_transport_snapshot(
@@ -616,6 +626,70 @@ mod tests {
             candidate_auth_channel_skip_reason(&transport, Some("bearer_like")),
             None
         );
+        assert_eq!(
+            candidate_auth_channel_skip_reason(&transport, Some("api_key")),
+            Some("auth_channel_mismatch")
+        );
+    }
+
+    #[test]
+    fn auth_channel_gate_allows_claude_api_key_request_for_resolvable_kiro_oauth() {
+        let mut transport = sample_transport("oauth");
+        transport.provider.provider_type = "kiro".to_string();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config = Some(
+            r#"{
+                "access_token":"cached-kiro-access-token",
+                "expires_at":4102444800,
+                "machine_id":"123e4567-e89b-12d3-a456-426614174000"
+            }"#
+            .to_string(),
+        );
+
+        assert_eq!(
+            candidate_auth_channel_skip_reason(&transport, Some("api_key")),
+            None
+        );
+    }
+
+    #[test]
+    fn auth_channel_gate_keeps_custom_bearer_provider_blocked_for_api_key_request() {
+        let transport = sample_transport("bearer");
+
+        assert_eq!(
+            candidate_auth_channel_skip_reason(&transport, Some("api_key")),
+            Some("auth_channel_mismatch")
+        );
+    }
+
+    #[test]
+    fn auth_channel_gate_rejects_kiro_bridge_for_non_claude_messages_endpoint() {
+        let mut transport = sample_transport("oauth");
+        transport.provider.provider_type = "kiro".to_string();
+        transport.endpoint.api_format = "openai:responses".to_string();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config = Some(
+            r#"{
+                "access_token":"cached-kiro-access-token",
+                "expires_at":4102444800,
+                "machine_id":"123e4567-e89b-12d3-a456-426614174000"
+            }"#
+            .to_string(),
+        );
+
+        assert_eq!(
+            candidate_auth_channel_skip_reason(&transport, Some("api_key")),
+            Some("auth_channel_mismatch")
+        );
+    }
+
+    #[test]
+    fn auth_channel_gate_rejects_kiro_bridge_without_resolvable_auth() {
+        let mut transport = sample_transport("oauth");
+        transport.provider.provider_type = "kiro".to_string();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config = None;
+
         assert_eq!(
             candidate_auth_channel_skip_reason(&transport, Some("api_key")),
             Some("auth_channel_mismatch")

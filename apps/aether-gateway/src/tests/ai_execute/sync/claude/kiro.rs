@@ -608,6 +608,449 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
 }
 
 #[test]
+fn gateway_executes_kiro_claude_cli_sync_with_api_key_request_auth_channel_via_oauth_catalog_key() {
+    run_kiro_claude_cli_sync_test(
+        "gateway_executes_kiro_claude_cli_sync_with_api_key_request_auth_channel_via_oauth_catalog_key",
+        gateway_executes_kiro_claude_cli_sync_with_api_key_request_auth_channel_via_oauth_catalog_key_impl,
+    );
+}
+
+async fn gateway_executes_kiro_claude_cli_sync_with_api_key_request_auth_channel_via_oauth_catalog_key_impl(
+) {
+    use base64::Engine as _;
+
+    #[derive(Debug, Clone)]
+    struct SeenExecutionRuntimeSyncRequest {
+        trace_id: String,
+        authorization: String,
+        mapped_model: String,
+        current_content: String,
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xffff_ffffu32;
+        for &byte in data {
+            crc ^= byte as u32;
+            for _ in 0..8 {
+                let mask = if crc & 1 == 1 { 0xedb8_8320 } else { 0 };
+                crc = (crc >> 1) ^ mask;
+            }
+        }
+        !crc
+    }
+
+    fn encode_string_header(name: &str, value: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(name.len() as u8);
+        out.extend_from_slice(name.as_bytes());
+        out.push(7);
+        out.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        out.extend_from_slice(value.as_bytes());
+        out
+    }
+
+    fn encode_event_frame(
+        message_type: &str,
+        event_type: Option<&str>,
+        payload: serde_json::Value,
+    ) -> Vec<u8> {
+        let mut headers = encode_string_header(":message-type", message_type);
+        if let Some(event_type) = event_type {
+            headers.extend_from_slice(&encode_string_header(":event-type", event_type));
+        }
+        let payload = serde_json::to_vec(&payload).expect("payload should encode");
+        let total_len = 12 + headers.len() + payload.len() + 4;
+        let mut out = Vec::with_capacity(total_len);
+        out.extend_from_slice(&(total_len as u32).to_be_bytes());
+        out.extend_from_slice(&(headers.len() as u32).to_be_bytes());
+        let prelude_crc = crc32(&out[..8]);
+        out.extend_from_slice(&prelude_crc.to_be_bytes());
+        out.extend_from_slice(&headers);
+        out.extend_from_slice(&payload);
+        let message_crc = crc32(&out);
+        out.extend_from_slice(&message_crc.to_be_bytes());
+        out
+    }
+
+    fn hash_api_key(value: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(value.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn sample_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
+        StoredAuthApiKeySnapshot::new(
+            user_id.to_string(),
+            "alice".to_string(),
+            Some("alice@example.com".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            Some(serde_json::json!(["claude", "kiro"])),
+            Some(serde_json::json!(["claude:messages"])),
+            Some(serde_json::json!(["claude-sonnet-4"])),
+            api_key_id.to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            Some(5),
+            Some(4_102_444_800),
+            Some(serde_json::json!(["claude", "kiro"])),
+            Some(serde_json::json!(["claude:messages"])),
+            Some(serde_json::json!(["claude-sonnet-4"])),
+        )
+        .expect("auth snapshot should build")
+    }
+
+    fn sample_candidate_row() -> StoredMinimalCandidateSelectionRow {
+        StoredMinimalCandidateSelectionRow {
+            provider_id: "provider-kiro-api-key-bridge-sync-1".to_string(),
+            provider_name: "kiro".to_string(),
+            provider_type: "kiro".to_string(),
+            provider_priority: 10,
+            provider_is_active: true,
+            endpoint_id: "endpoint-kiro-api-key-bridge-sync-1".to_string(),
+            endpoint_api_format: "claude:messages".to_string(),
+            endpoint_api_family: Some("claude".to_string()),
+            endpoint_kind: Some("cli".to_string()),
+            endpoint_is_active: true,
+            key_id: "key-kiro-api-key-bridge-sync-1".to_string(),
+            key_name: "prod".to_string(),
+            key_auth_type: "oauth".to_string(),
+            key_is_active: true,
+            key_api_formats: Some(vec!["claude:messages".to_string()]),
+            key_allowed_models: None,
+            key_capabilities: None,
+            key_internal_priority: 5,
+            key_global_priority_by_format: Some(serde_json::json!({"claude:messages": 1})),
+            model_id: "model-kiro-api-key-bridge-sync-1".to_string(),
+            global_model_id: "global-model-kiro-api-key-bridge-sync-1".to_string(),
+            global_model_name: "claude-sonnet-4".to_string(),
+            global_model_mappings: None,
+            global_model_supports_streaming: Some(true),
+            model_provider_model_name: "claude-sonnet-4-upstream".to_string(),
+            model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
+                name: "claude-sonnet-4-upstream".to_string(),
+                priority: 1,
+                api_formats: Some(vec!["claude:messages".to_string()]),
+                endpoint_ids: None,
+            }]),
+            model_supports_streaming: Some(true),
+            model_is_active: true,
+            model_is_available: true,
+        }
+    }
+
+    fn sample_provider_catalog_provider() -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            "provider-kiro-api-key-bridge-sync-1".to_string(),
+            "kiro".to_string(),
+            Some("https://example.com".to_string()),
+            "kiro".to_string(),
+        )
+        .expect("provider should build")
+        .with_transport_fields(
+            true,
+            false,
+            false,
+            None,
+            Some(2),
+            None,
+            Some(20.0),
+            None,
+            None,
+        )
+    }
+
+    fn sample_provider_catalog_endpoint() -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            "endpoint-kiro-api-key-bridge-sync-1".to_string(),
+            "provider-kiro-api-key-bridge-sync-1".to_string(),
+            "claude:messages".to_string(),
+            Some("claude".to_string()),
+            Some("cli".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://kiro.{region}.example?tenant=demo".to_string(),
+            None,
+            None,
+            Some(2),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")
+    }
+
+    fn sample_provider_catalog_key() -> StoredProviderCatalogKey {
+        let auth_config = serde_json::json!({
+            "provider_type": "kiro",
+            "access_token": "cached-kiro-access-token",
+            "expires_at": 4102444800_u64,
+            "refresh_token": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+            "machine_id": "123e4567-e89b-12d3-a456-426614174000",
+            "api_region": "us-east-1",
+            "kiro_version": "0.8.0",
+            "system_version": "darwin#24.6.0",
+            "node_version": "22.21.1",
+            "profile_arn": "arn:aws:bedrock:us-east-1:123456789012:inference-profile/demo"
+        });
+
+        StoredProviderCatalogKey::new(
+            "key-kiro-api-key-bridge-sync-1".to_string(),
+            "provider-kiro-api-key-bridge-sync-1".to_string(),
+            "prod".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(serde_json::json!(["claude:messages"])),
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
+                .expect("api key should encrypt"),
+            Some(
+                encrypt_python_fernet_plaintext(
+                    DEVELOPMENT_ENCRYPTION_KEY,
+                    auth_config.to_string().as_str(),
+                )
+                .expect("auth config should encrypt"),
+            ),
+            None,
+            Some(serde_json::json!({"claude:messages": 1})),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build")
+    }
+
+    let seen_execution_runtime = Arc::new(Mutex::new(None::<SeenExecutionRuntimeSyncRequest>));
+    let seen_execution_runtime_clone = Arc::clone(&seen_execution_runtime);
+
+    let upstream = Router::new()
+        .route(
+            "/api/internal/gateway/resolve",
+            any(|_request: Request| async move {
+                Json(json!({
+                    "action": "proxy_public",
+                    "route_class": "ai_public",
+                    "route_family": "claude",
+                    "route_kind": "messages",
+                    "request_auth_channel": "api_key",
+                    "auth_endpoint_signature": "claude:messages",
+                    "execution_runtime_candidate": true,
+                    "auth_context": {
+                        "user_id": "user-kiro-api-key-bridge-sync-123",
+                        "api_key_id": "key-kiro-api-key-bridge-sync-123",
+                        "access_allowed": true
+                    },
+                    "public_path": "/v1/messages"
+                }))
+            }),
+        )
+        .route(
+            "/api/internal/gateway/decision-sync",
+            any(|_request: Request| async move { Json(json!({"action": "proxy_public"})) }),
+        )
+        .route(
+            "/api/internal/gateway/plan-sync",
+            any(|_request: Request| async move { Json(json!({"action": "proxy_public"})) }),
+        )
+        .route(
+            "/api/internal/gateway/report-sync",
+            any(|_request: Request| async move { Json(json!({"ok": true})) }),
+        )
+        .route(
+            "/v1/messages",
+            any(|_request: Request| async move {
+                (StatusCode::IM_A_TEAPOT, Body::from("public-route-hit"))
+            }),
+        );
+
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |request: Request| {
+            let seen_execution_runtime_inner = Arc::clone(&seen_execution_runtime_clone);
+            async move {
+                let (parts, body) = request.into_parts();
+                let raw_body = to_bytes(body, usize::MAX).await.expect("body should read");
+                let payload: serde_json::Value =
+                    serde_json::from_slice(&raw_body).expect("execution runtime payload should parse");
+                *seen_execution_runtime_inner.lock().expect("mutex should lock") =
+                    Some(SeenExecutionRuntimeSyncRequest {
+                        trace_id: parts
+                            .headers
+                            .get(TRACE_ID_HEADER)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string(),
+                        authorization: payload
+                            .get("headers")
+                            .and_then(|value| value.get("authorization"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        mapped_model: payload
+                            .get("body")
+                            .and_then(|value| value.get("json_body"))
+                            .and_then(|value| value.get("conversationState"))
+                            .and_then(|value| value.get("currentMessage"))
+                            .and_then(|value| value.get("userInputMessage"))
+                            .and_then(|value| value.get("modelId"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        current_content: payload
+                            .get("body")
+                            .and_then(|value| value.get("json_body"))
+                            .and_then(|value| value.get("conversationState"))
+                            .and_then(|value| value.get("currentMessage"))
+                            .and_then(|value| value.get("userInputMessage"))
+                            .and_then(|value| value.get("content"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                    });
+
+                let kiro_frames = [
+                    encode_event_frame(
+                        "event",
+                        Some("assistantResponseEvent"),
+                        json!({"content": "Hello from Kiro api-key bridge"}),
+                    ),
+                    encode_event_frame(
+                        "event",
+                        Some("contextUsageEvent"),
+                        json!({"contextUsagePercentage": 1.0}),
+                    ),
+                ]
+                .concat();
+
+                Json(json!({
+                    "request_id": "trace-kiro-api-key-bridge-sync-123",
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/vnd.amazon.eventstream"
+                    },
+                    "body": {
+                        "body_bytes_b64": base64::engine::general_purpose::STANDARD.encode(kiro_frames)
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 27
+                    }
+                }))
+            }
+        }),
+    );
+
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-client-kiro-api-key-bridge-sync")),
+        sample_auth_snapshot(
+            "key-kiro-api-key-bridge-sync-123",
+            "user-kiro-api-key-bridge-sync-123",
+        ),
+    )]));
+    let candidate_selection_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_candidate_row(),
+        ]));
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider_catalog_provider()],
+        vec![sample_provider_catalog_endpoint()],
+        vec![sample_provider_catalog_key()],
+    ));
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url.clone())
+    .with_data_state_for_tests(
+        crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+            auth_repository,
+            candidate_selection_repository,
+            provider_catalog_repository,
+            Arc::clone(&request_candidate_repository),
+            DEVELOPMENT_ENCRYPTION_KEY,
+        ),
+    );
+    let gateway = build_router_with_state(gateway_state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/messages"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header("x-api-key", "sk-client-kiro-api-key-bridge-sync")
+        .header(TRACE_ID_HEADER, "trace-kiro-api-key-bridge-sync-123")
+        .body("{\"model\":\"claude-sonnet-4\",\"messages\":[{\"role\":\"user\",\"content\":\"hello api-key bridge\"}]}")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let response_body = response.text().await.expect("body should read");
+    assert!(
+        status == StatusCode::OK,
+        "unexpected status={status} body={response_body}"
+    );
+    let response_json: serde_json::Value =
+        serde_json::from_str(&response_body).expect("body should parse");
+    assert_eq!(response_json["model"], "claude-sonnet-4-upstream");
+    assert_eq!(
+        response_json["content"][0]["text"],
+        json!("Hello from Kiro api-key bridge")
+    );
+
+    let seen_execution_runtime_request = seen_execution_runtime
+        .lock()
+        .expect("mutex should lock")
+        .clone()
+        .expect("execution runtime sync should be captured");
+    assert_eq!(
+        seen_execution_runtime_request.trace_id,
+        "trace-kiro-api-key-bridge-sync-123"
+    );
+    assert_eq!(
+        seen_execution_runtime_request.authorization,
+        "Bearer cached-kiro-access-token"
+    );
+    assert_ne!(
+        seen_execution_runtime_request.authorization,
+        "Bearer sk-client-kiro-api-key-bridge-sync"
+    );
+    assert_ne!(
+        seen_execution_runtime_request.authorization,
+        "sk-client-kiro-api-key-bridge-sync"
+    );
+    assert_eq!(
+        seen_execution_runtime_request.mapped_model,
+        "claude-sonnet-4-upstream"
+    );
+    assert_eq!(
+        seen_execution_runtime_request.current_content,
+        "hello api-key bridge"
+    );
+
+    let stored_candidates = request_candidate_repository
+        .list_by_request_id("trace-kiro-api-key-bridge-sync-123")
+        .await
+        .expect("request candidate trace should read");
+    assert_eq!(stored_candidates.len(), 1);
+    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Success);
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+    upstream_handle.abort();
+}
+
+#[test]
 fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candidate_after_refresh() {
     run_kiro_claude_cli_sync_test(
         "gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candidate_after_refresh",

@@ -34,6 +34,14 @@ pub fn is_kiro_claude_messages_transport(
         && aether_ai_formats::api_format_alias_matches(provider_api_format, "claude:messages")
 }
 
+pub fn supports_kiro_fixed_provider_auth_bridge(
+    transport: &GatewayProviderTransportSnapshot,
+    provider_api_format: &str,
+) -> bool {
+    is_kiro_claude_messages_transport(transport, provider_api_format)
+        && supports_local_kiro_request_auth_resolution(transport)
+}
+
 pub fn build_kiro_request_auth_from_config(
     auth_config: KiroAuthConfig,
     fallback_secret: Option<&str>,
@@ -154,8 +162,8 @@ mod tests {
     };
     use super::{
         resolve_local_kiro_bearer_auth, resolve_local_kiro_request_auth,
-        supports_local_kiro_auth_prerequisites, supports_local_kiro_request_auth_resolution,
-        KIRO_AUTH_HEADER,
+        supports_kiro_fixed_provider_auth_bridge, supports_local_kiro_auth_prerequisites,
+        supports_local_kiro_request_auth_resolution, KIRO_AUTH_HEADER,
     };
 
     fn sample_transport() -> GatewayProviderTransportSnapshot {
@@ -258,6 +266,50 @@ mod tests {
             .expect("request auth should resolve from legacy oauth auth_type");
         assert_eq!(auth.value, "Bearer cached-token");
         assert!(supports_local_kiro_request_auth_resolution(&transport));
+    }
+
+    #[test]
+    fn supports_fixed_provider_auth_bridge_for_claude_messages_with_resolvable_auth() {
+        let mut transport = sample_transport();
+        transport.key.auth_type = "oauth".to_string();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config = Some(
+            r#"{
+                "access_token":"cached-token",
+                "expires_at":4102444800,
+                "machine_id":"123e4567-e89b-12d3-a456-426614174000"
+            }"#
+            .to_string(),
+        );
+
+        assert!(supports_kiro_fixed_provider_auth_bridge(
+            &transport,
+            "claude:messages"
+        ));
+    }
+
+    #[test]
+    fn rejects_fixed_provider_auth_bridge_for_non_claude_messages_endpoint() {
+        let mut transport = sample_transport();
+        transport.endpoint.api_format = "openai:responses".to_string();
+
+        assert!(!supports_kiro_fixed_provider_auth_bridge(
+            &transport,
+            "openai:responses"
+        ));
+    }
+
+    #[test]
+    fn rejects_fixed_provider_auth_bridge_without_resolvable_auth() {
+        let mut transport = sample_transport();
+        transport.key.auth_type = "oauth".to_string();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config = None;
+
+        assert!(!supports_kiro_fixed_provider_auth_bridge(
+            &transport,
+            "claude:messages"
+        ));
     }
 
     #[test]
