@@ -582,6 +582,59 @@ mod tests {
     }
 
     #[test]
+    fn standard_request_body_rules_match_original_model_after_format_conversion() {
+        let request = json!({
+            "model": "gpt-5.5-xhigh",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let body_rules = json!([
+            {
+                "action": "set",
+                "path": "metadata.original_model_hit",
+                "value": true,
+                "condition": {"path": "model", "op": "eq", "value": "gpt-5.5-xhigh"}
+            },
+            {
+                "action": "set",
+                "path": "metadata.default_mapped_model_hit",
+                "value": true,
+                "condition": {"path": "model", "op": "eq", "value": "gpt-5.5"}
+            },
+            {
+                "action": "set",
+                "path": "metadata.current_model_hit",
+                "value": true,
+                "condition": {
+                    "source": "current",
+                    "path": "model",
+                    "op": "eq",
+                    "value": "gpt-5.5"
+                }
+            }
+        ]);
+
+        let converted = build_standard_request_body(
+            &request,
+            "openai:chat",
+            "gpt-5.5",
+            "openai",
+            "openai:responses",
+            "/v1/chat/completions",
+            false,
+            Some(&body_rules),
+            None,
+        )
+        .expect("openai chat should convert to responses");
+
+        assert_eq!(converted["model"], "gpt-5.5");
+        assert_eq!(converted["metadata"]["original_model_hit"], true);
+        assert_eq!(converted["metadata"]["current_model_hit"], true);
+        assert!(converted["metadata"]
+            .get("default_mapped_model_hit")
+            .is_none());
+    }
+
+    #[test]
     fn openai_chat_request_uses_typed_canonical_without_changing_target_payloads() {
         let request = json!({
             "model": "gpt-5",

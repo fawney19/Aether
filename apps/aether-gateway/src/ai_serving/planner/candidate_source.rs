@@ -701,7 +701,9 @@ mod tests {
     use crate::data::GatewayDataState;
     use crate::AppState;
     use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
-    use aether_data_contracts::repository::candidate_selection::MinimalCandidateSelectionReadRepository;
+    use aether_data_contracts::repository::candidate_selection::{
+        MinimalCandidateSelectionReadRepository, StoredProviderModelMapping,
+    };
     use std::sync::Arc;
 
     fn unrestricted_auth_snapshot() -> GatewayAuthApiKeySnapshot {
@@ -766,6 +768,25 @@ mod tests {
         }
     }
 
+    fn openai_responses_provider_model_mapping_row() -> StoredMinimalCandidateSelectionRow {
+        let mut row = openai_responses_mapping_row();
+        row.provider_id = "provider-openai-responses-exact-mapped-1".to_string();
+        row.endpoint_id = "endpoint-openai-responses-exact-mapped-1".to_string();
+        row.key_id = "key-openai-responses-exact-mapped-1".to_string();
+        row.model_id = "model-openai-responses-exact-mapped-1".to_string();
+        row.global_model_id = "global-model-openai-responses-exact-mapped-1".to_string();
+        row.global_model_name = "catalog-gpt-5".to_string();
+        row.global_model_mappings = None;
+        row.model_provider_model_name = "default-upstream-gpt-5".to_string();
+        row.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+            name: "gpt-5.5".to_string(),
+            priority: 1,
+            api_formats: Some(vec!["openai:responses".to_string()]),
+            endpoint_ids: Some(vec!["endpoint-openai-responses-exact-mapped-1".to_string()]),
+        }]);
+        row
+    }
+
     #[tokio::test]
     async fn paged_preselection_falls_back_to_format_scan_for_directive_mapping_match() {
         let repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
@@ -809,5 +830,128 @@ mod tests {
             page.candidates[0].selected_provider_model_name,
             "gpt-5-upstream"
         );
+    }
+
+    #[tokio::test]
+    async fn paged_preselection_uses_default_directive_mapping_for_streaming_suffix() {
+        let repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed([
+                openai_responses_mapping_row(),
+            ]));
+        let data_state =
+            GatewayDataState::with_minimal_candidate_selection_reader_for_tests(repository)
+                .with_system_config_values_for_tests([
+                    (
+                        crate::system_features::ENABLE_MODEL_DIRECTIVES_CONFIG_KEY.to_string(),
+                        serde_json::json!(true),
+                    ),
+                    (
+                        crate::system_features::MODEL_DIRECTIVES_CONFIG_KEY.to_string(),
+                        serde_json::json!({
+                            "reasoning_effort": {
+                                "enabled": true,
+                                "api_formats": {
+                                    "openai:responses": {
+                                        "enabled": true,
+                                        "mappings": {
+                                            "low": { "reasoning": { "effort": "low" } }
+                                        }
+                                    }
+                                }
+                            }
+                        }),
+                    ),
+                ]);
+        let app = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(data_state);
+        let auth_snapshot = unrestricted_auth_snapshot();
+        let mut cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            "claude:messages",
+            "gpt-5.5-xhigh",
+            true,
+            None,
+            &auth_snapshot,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+        )
+        .await;
+
+        let page = cursor
+            .next_page()
+            .await
+            .expect("preselection should succeed")
+            .expect("streaming directive fallback should find a provider");
+
+        assert_eq!(page.skipped_candidates.len(), 0);
+        assert_eq!(page.candidates.len(), 1);
+        assert_eq!(page.candidates[0].endpoint_api_format, "openai:responses");
+        assert_eq!(page.candidates[0].global_model_name, "gpt-5");
+        assert_eq!(
+            page.candidates[0].selected_provider_model_name,
+            "gpt-5-upstream"
+        );
+    }
+
+    #[tokio::test]
+    async fn paged_preselection_applies_provider_model_mapping_after_format_conversion() {
+        let repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed([
+                openai_responses_provider_model_mapping_row(),
+            ]));
+        let data_state =
+            GatewayDataState::with_minimal_candidate_selection_reader_for_tests(repository)
+                .with_system_config_values_for_tests([
+                    (
+                        crate::system_features::ENABLE_MODEL_DIRECTIVES_CONFIG_KEY.to_string(),
+                        serde_json::json!(true),
+                    ),
+                    (
+                        crate::system_features::MODEL_DIRECTIVES_CONFIG_KEY.to_string(),
+                        serde_json::json!({
+                            "reasoning_effort": {
+                                "enabled": true,
+                                "api_formats": {
+                                    "openai:responses": {
+                                        "enabled": true,
+                                        "mappings": {
+                                            "low": { "reasoning": { "effort": "low" } }
+                                        }
+                                    }
+                                }
+                            }
+                        }),
+                    ),
+                ]);
+        let app = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(data_state);
+        let auth_snapshot = unrestricted_auth_snapshot();
+        let mut cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            "claude:messages",
+            "gpt-5.5-xhigh",
+            true,
+            None,
+            &auth_snapshot,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+        )
+        .await;
+
+        let page = cursor
+            .next_page()
+            .await
+            .expect("preselection should succeed")
+            .expect("provider model mapping should find a converted-format provider");
+
+        assert_eq!(page.skipped_candidates.len(), 0);
+        assert_eq!(page.candidates.len(), 1);
+        assert_eq!(page.candidates[0].endpoint_api_format, "openai:responses");
+        assert_eq!(page.candidates[0].global_model_name, "catalog-gpt-5");
+        assert_eq!(page.candidates[0].selected_provider_model_name, "gpt-5.5");
     }
 }

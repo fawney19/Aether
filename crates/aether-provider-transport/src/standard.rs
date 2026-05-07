@@ -402,6 +402,116 @@ mod tests {
     }
 
     #[test]
+    fn standard_body_rules_match_original_model_after_provider_mapping() {
+        let body = apply_standard_provider_request_body_rules(
+            json!({"model":"gpt-5.5"}),
+            Some(&json!([
+                {
+                    "action": "set",
+                    "path": "metadata.original_model_hit",
+                    "value": true,
+                    "condition": {"path": "model", "op": "eq", "value": "gpt-5.5-xhigh"}
+                },
+                {
+                    "action": "set",
+                    "path": "metadata.default_mapped_model_hit",
+                    "value": true,
+                    "condition": {"path": "model", "op": "eq", "value": "gpt-5.5"}
+                },
+                {
+                    "action": "set",
+                    "path": "metadata.current_model_hit",
+                    "value": true,
+                    "condition": {
+                        "source": "current",
+                        "path": "model",
+                        "op": "eq",
+                        "value": "gpt-5.5"
+                    }
+                }
+            ])),
+            &json!({"model":"gpt-5.5-xhigh"}),
+        )
+        .expect("body rules should apply");
+
+        assert_eq!(body["model"], "gpt-5.5");
+        assert_eq!(body["metadata"]["original_model_hit"], true);
+        assert_eq!(body["metadata"]["current_model_hit"], true);
+        assert!(body["metadata"].get("default_mapped_model_hit").is_none());
+    }
+
+    #[test]
+    fn header_rules_match_original_model_after_provider_mapping() {
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert("x-mode", "debug".parse().expect("header"));
+        let transport = sample_transport("openai:responses");
+        let resolved =
+            build_standard_provider_request_headers(StandardProviderRequestHeadersInput {
+                transport: &transport,
+                provider_api_format: "openai:responses",
+                same_format: false,
+                headers: &request_headers,
+                auth_header: "authorization",
+                auth_value: "Bearer secret",
+                extra_headers: &BTreeMap::new(),
+                header_rules: Some(&json!([
+                    {
+                        "action": "set",
+                        "key": "x-original-model-hit",
+                        "value": "true",
+                        "condition": {"path": "model", "op": "eq", "value": "gpt-5.5-xhigh"}
+                    },
+                    {
+                        "action": "set",
+                        "key": "x-default-mapped-model-hit",
+                        "value": "true",
+                        "condition": {"path": "model", "op": "eq", "value": "gpt-5.5"}
+                    },
+                    {
+                        "action": "set",
+                        "key": "x-current-model-hit",
+                        "value": "true",
+                        "condition": {
+                            "source": "current",
+                            "path": "model",
+                            "op": "eq",
+                            "value": "gpt-5.5"
+                        }
+                    },
+                    {
+                        "action": "set",
+                        "key": "x-request-header-hit",
+                        "value": "true",
+                        "condition": {
+                            "source": "request_headers",
+                            "path": "x-mode",
+                            "op": "eq",
+                            "value": "debug"
+                        }
+                    }
+                ])),
+                provider_request_body: &json!({"model":"gpt-5.5"}),
+                original_request_body: &json!({"model":"gpt-5.5-xhigh"}),
+                upstream_is_stream: false,
+            })
+            .expect("headers should build");
+
+        assert_eq!(
+            resolved.headers.get("x-original-model-hit"),
+            Some(&"true".to_string())
+        );
+        assert_eq!(
+            resolved.headers.get("x-current-model-hit"),
+            Some(&"true".to_string())
+        );
+        assert_eq!(
+            resolved.headers.get("x-request-header-hit"),
+            Some(&"true".to_string())
+        );
+        assert!(!resolved.headers.contains_key("x-default-mapped-model-hit"));
+    }
+
+    #[test]
     fn builds_plan_fallback_headers_from_request_when_enabled() {
         let mut request_headers = HeaderMap::new();
         request_headers.insert("x-client", "demo".parse().expect("header"));

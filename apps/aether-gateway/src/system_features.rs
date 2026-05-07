@@ -94,9 +94,9 @@ pub(crate) async fn reasoning_model_directive_enabled_for_api_format_and_model(
 
     settings
         .as_ref()
-        .and_then(|settings| settings.api_format_mappings(&api_format))
-        .map(|mappings| mappings.contains_key(&suffix))
-        .unwrap_or_else(|| DEFAULT_REASONING_SUFFIXES.contains(&suffix.as_str()))
+        .and_then(|settings| settings.api_format_mapping(&api_format, &suffix))
+        .or_else(|| default_reasoning_mapping(&api_format, &suffix))
+        .is_some()
 }
 
 pub(crate) async fn reasoning_model_directive_mapping_for_api_format_and_model(
@@ -118,8 +118,7 @@ pub(crate) async fn reasoning_model_directive_mapping_for_api_format_and_model(
     let settings = read_reasoning_model_directive_settings(state).await;
     settings
         .as_ref()
-        .and_then(|settings| settings.api_format_mappings(&api_format))
-        .and_then(|mappings| mappings.get(&suffix).cloned())
+        .and_then(|settings| settings.api_format_mapping(&api_format, &suffix))
         .or_else(|| default_reasoning_mapping(&api_format, &suffix))
 }
 
@@ -180,6 +179,11 @@ impl ReasoningModelDirectiveSettings {
                 .collect::<serde_json::Map<_, _>>();
             Some(mappings)
         })
+    }
+
+    fn api_format_mapping(&self, api_format: &str, suffix: &str) -> Option<serde_json::Value> {
+        self.api_format_mappings(api_format)
+            .and_then(|mappings| mappings.get(suffix).cloned())
     }
 }
 
@@ -325,9 +329,7 @@ mod tests {
         assert_eq!(settings.api_format_enabled("openai:chat"), Some(false));
         assert_eq!(settings.api_format_enabled("claude:messages"), Some(true));
         assert_eq!(
-            settings
-                .api_format_mappings("claude:messages")
-                .and_then(|mappings| mappings.get("max").cloned()),
+            settings.api_format_mapping("claude:messages", "max"),
             Some(json!({ "thinking": { "type": "enabled", "budget_tokens": 32768 } }))
         );
         assert_eq!(settings.api_format_enabled("gemini:generate_content"), None);

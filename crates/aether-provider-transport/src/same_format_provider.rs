@@ -557,6 +557,57 @@ mod tests {
     }
 
     #[test]
+    fn same_format_body_rules_match_original_model_after_provider_mapping() {
+        let body = build_same_format_provider_request_body(SameFormatProviderRequestBodyInput {
+            body_json: &json!({
+                "model": "gpt-5.5-xhigh",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            mapped_model: "gpt-5.5",
+            client_api_format: "openai:chat",
+            provider_api_format: "openai:chat",
+            source_model: Some("gpt-5.5-xhigh"),
+            family: SameFormatProviderFamily::Standard,
+            body_rules: Some(&json!([
+                {
+                    "action": "set",
+                    "path": "metadata.original_model_hit",
+                    "value": true,
+                    "condition": {"path": "model", "op": "eq", "value": "gpt-5.5-xhigh"}
+                },
+                {
+                    "action": "set",
+                    "path": "metadata.default_mapped_model_hit",
+                    "value": true,
+                    "condition": {"path": "model", "op": "eq", "value": "gpt-5.5"}
+                },
+                {
+                    "action": "set",
+                    "path": "metadata.current_model_hit",
+                    "value": true,
+                    "condition": {
+                        "source": "current",
+                        "path": "model",
+                        "op": "eq",
+                        "value": "gpt-5.5"
+                    }
+                }
+            ])),
+            request_headers: None,
+            upstream_is_stream: false,
+            kiro_auth_config: None,
+            is_claude_code: false,
+            enable_model_directives: false,
+        })
+        .expect("body should build");
+
+        assert_eq!(body["model"], "gpt-5.5");
+        assert_eq!(body["metadata"]["original_model_hit"], true);
+        assert_eq!(body["metadata"]["current_model_hit"], true);
+        assert!(body["metadata"].get("default_mapped_model_hit").is_none());
+    }
+
+    #[test]
     fn builds_same_format_headers_with_auth_and_stream_accept() {
         let provider_request_body = json!({"model": "upstream-model"});
         let original_request_body = json!({"model": "client-model"});
