@@ -195,6 +195,23 @@
                     variant="ghost"
                     size="icon"
                     class="h-8 w-8"
+                    :title="apiKey.is_active ? '复制客户端一键配置命令' : '密钥已停用'"
+                    :disabled="!apiKey.is_active || provisioningLoadingId === apiKey.id"
+                    @click="openClientConfigCommand(apiKey)"
+                  >
+                    <Loader2
+                      v-if="provisioningLoadingId === apiKey.id"
+                      class="h-4 w-4 animate-spin"
+                    />
+                    <Terminal
+                      v-else
+                      class="h-4 w-4"
+                    />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="h-8 w-8"
                     :title="apiKey.is_locked ? '已锁定' : '编辑'"
                     :disabled="apiKey.is_locked"
                     @click="openEditApiKeyDialog(apiKey)"
@@ -273,6 +290,23 @@
                 </Badge>
               </div>
               <div class="flex items-center gap-0.5 flex-shrink-0">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="h-7 w-7"
+                  :title="apiKey.is_active ? '一键配置' : '密钥已停用'"
+                  :disabled="!apiKey.is_active || provisioningLoadingId === apiKey.id"
+                  @click="openClientConfigCommand(apiKey)"
+                >
+                  <Loader2
+                    v-if="provisioningLoadingId === apiKey.id"
+                    class="h-3.5 w-3.5 animate-spin"
+                  />
+                  <Terminal
+                    v-else
+                    class="h-3.5 w-3.5"
+                  />
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon"
@@ -498,6 +532,30 @@
             </Button>
           </div>
         </div>
+        <div
+          v-if="clientConfigCommand"
+          class="space-y-2 rounded-lg border border-primary/20 bg-primary/5 p-3"
+        >
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <Label class="text-sm font-medium">客户端一键配置命令</Label>
+              <p class="mt-1 text-xs text-muted-foreground">
+                命令中使用短期 provisioning token，不会暴露原始 API Key；过期时间 {{ clientConfigExpiresAtText }}。
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              @click="copyTextToClipboard(clientConfigCommand)"
+            >
+              <Copy class="mr-2 h-3.5 w-3.5" />
+              复制命令
+            </Button>
+          </div>
+          <code class="block whitespace-pre-wrap break-all rounded-md bg-background/80 px-3 py-2 font-mono text-xs text-foreground">
+            {{ clientConfigCommand }}
+          </code>
+        </div>
       </div>
 
       <template #footer>
@@ -506,6 +564,56 @@
           @click="showKeyDialog = false"
         >
           确定
+        </Button>
+      </template>
+    </Dialog>
+
+    <!-- 客户端配置命令对话框 -->
+    <Dialog
+      v-model="showClientConfigDialog"
+      size="lg"
+    >
+      <template #header>
+        <div class="border-b border-border px-6 py-4">
+          <div class="flex items-center gap-3">
+            <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 flex-shrink-0">
+              <Terminal class="h-5 w-5 text-primary" />
+            </div>
+            <div class="flex-1 min-w-0">
+              <h3 class="text-lg font-semibold text-foreground leading-tight">
+                客户端一键配置
+              </h3>
+              <p class="text-xs text-muted-foreground">
+                {{ clientConfigKeyName }} · token 过期时间 {{ clientConfigExpiresAtText }}
+              </p>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <div class="space-y-3">
+        <p class="text-sm text-muted-foreground">
+          在目标机器执行以下命令，会自动写入 <code class="rounded bg-muted px-1 py-0.5">~/.aether/client.env</code>，重复执行会安全覆盖同一配置文件。
+        </p>
+        <code class="block whitespace-pre-wrap break-all rounded-lg border bg-muted/40 px-3 py-3 font-mono text-xs text-foreground">
+          {{ clientConfigCommand }}
+        </code>
+      </div>
+
+      <template #footer>
+        <Button
+          variant="outline"
+          class="h-10 px-5"
+          @click="showClientConfigDialog = false"
+        >
+          关闭
+        </Button>
+        <Button
+          class="h-10 px-5"
+          @click="copyTextToClipboard(clientConfigCommand)"
+        >
+          <Copy class="mr-2 h-4 w-4" />
+          复制命令
         </Button>
       </template>
     </Dialog>
@@ -543,7 +651,7 @@ import {
   TableRow
 } from '@/components/ui'
 import RefreshButton from '@/components/ui/refresh-button.vue'
-import { Plus, Key, Copy, Trash2, Loader2, Activity, CheckCircle, Power, SquarePen } from 'lucide-vue-next'
+import { Plus, Key, Copy, Trash2, Loader2, Activity, CheckCircle, Power, SquarePen, Terminal } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { log } from '@/utils/logger'
 import { parseApiError } from '@/utils/errorParser'
@@ -568,14 +676,26 @@ const paginatedApiKeys = computed(() => {
   return apiKeys.value.slice(start, start + pageSize.value)
 })
 
+const clientConfigExpiresAtText = computed(() => {
+  if (!clientConfigExpiresAt.value) return '未知'
+  const date = new Date(clientConfigExpiresAt.value)
+  if (Number.isNaN(date.getTime())) return clientConfigExpiresAt.value
+  return date.toLocaleString('zh-CN')
+})
+
 const showCreateDialog = ref(false)
 const showKeyDialog = ref(false)
+const showClientConfigDialog = ref(false)
 const showDeleteDialog = ref(false)
 
 const newKeyName = ref('')
 const newKeyRateLimit = ref<number | undefined>(undefined)
 const newKeyConcurrentLimit = ref<number | undefined>(undefined)
 const newKeyValue = ref('')
+const clientConfigCommand = ref('')
+const clientConfigExpiresAt = ref('')
+const clientConfigKeyName = ref('')
+const provisioningLoadingId = ref<string | null>(null)
 const keyToDelete = ref<ApiKey | null>(null)
 const editingApiKey = ref<ApiKey | null>(null)
 
@@ -615,6 +735,9 @@ function openCreateApiKeyDialog() {
   newKeyName.value = ''
   newKeyRateLimit.value = undefined
   newKeyConcurrentLimit.value = undefined
+  clientConfigCommand.value = ''
+  clientConfigExpiresAt.value = ''
+  clientConfigKeyName.value = ''
   showCreateDialog.value = true
 }
 
@@ -648,6 +771,12 @@ async function saveApiKey() {
         concurrent_limit: newKeyConcurrentLimit.value,
       })
       newKeyValue.value = newKey.key || ''
+      try {
+        await prepareClientConfigCommand(newKey)
+      } catch (error) {
+        log.warn('API 密钥已创建，但客户端配置命令生成失败:', error)
+        showError(parseApiError(error, 'API 密钥已创建，但客户端配置命令生成失败'))
+      }
       showKeyDialog.value = true
       success('API 密钥创建成功')
     }
@@ -708,6 +837,33 @@ async function copyApiKey(apiKey: ApiKey) {
     log.error('复制密钥失败:', error)
     showError('复制失败，请重试')
   }
+}
+
+async function openClientConfigCommand(apiKey: ApiKey) {
+  try {
+    await prepareClientConfigCommand(apiKey)
+    showClientConfigDialog.value = true
+  } catch (error) {
+    log.error('生成客户端配置命令失败:', error)
+    showError(parseApiError(error, '生成客户端配置命令失败'))
+  }
+}
+
+async function prepareClientConfigCommand(apiKey: ApiKey) {
+  provisioningLoadingId.value = apiKey.id
+  try {
+    const response = await meApi.createApiKeyProvisioningToken(apiKey.id)
+    const baseUrl = window.location.origin.replace(/\/$/, '')
+    clientConfigCommand.value = `curl -fsSL '${shellSingleQuote(baseUrl)}/install/client-config.sh' | AETHER_BASE_URL='${shellSingleQuote(baseUrl)}' AETHER_PROVISIONING_TOKEN='${shellSingleQuote(response.provisioning_token)}' sh`
+    clientConfigExpiresAt.value = response.expires_at
+    clientConfigKeyName.value = apiKey.name || 'API Key'
+  } finally {
+    provisioningLoadingId.value = null
+  }
+}
+
+function shellSingleQuote(value: string): string {
+  return value.replace(/'/g, `'\\''`)
 }
 
 async function copyTextToClipboard(text: string, showToast: boolean = true) {

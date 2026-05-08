@@ -171,6 +171,13 @@ export interface ApiKey {
   force_capabilities?: Record<string, boolean> | null  // 强制能力配置
 }
 
+export interface ApiKeyProvisioningTokenResponse {
+  provisioning_token: string
+  expires_at: string
+  ttl_seconds: number
+  message: string
+}
+
 // 不再需要 ProviderBinding 接口
 
 export interface ChangePasswordRequest {
@@ -245,6 +252,13 @@ export const meApi = {
     const response = await apiClient.get<{ key: string }>(
       `/api/users/me/api-keys/${keyId}`,
       { params: { include_key: true } }
+    )
+    return response.data
+  },
+
+  async createApiKeyProvisioningToken(keyId: string): Promise<ApiKeyProvisioningTokenResponse> {
+    const response = await apiClient.post<ApiKeyProvisioningTokenResponse>(
+      `/api/users/me/api-keys/${keyId}/provisioning-token`
     )
     return response.data
   },
