@@ -443,7 +443,15 @@ pub(crate) fn public_support_local_requires_buffered_body(
                 ) | (
                     Some("users_me"),
                     http::Method::POST,
-                    Some("api_keys_create" | "management_tokens_create"),
+                    Some(
+                        "api_keys_create"
+                            | "management_tokens_create"
+                            | "api_key_provisioning_token_create"
+                    ),
+                ) | (
+                    Some("client_provisioning"),
+                    http::Method::POST,
+                    Some("exchange"),
                 ) | (
                     Some("wallet"),
                     http::Method::POST,
@@ -463,4 +471,24 @@ pub(crate) fn local_proxy_route_requires_buffered_body(
     admin_proxy_local_requires_buffered_body(request_context)
         || internal_proxy_local_requires_buffered_body(request_context)
         || public_support_local_requires_buffered_body(request_context)
+}
+
+pub(crate) fn local_proxy_route_body_limit_bytes(
+    request_context: &GatewayPublicRequestContext,
+) -> usize {
+    const CLIENT_PROVISIONING_EXCHANGE_BODY_LIMIT_BYTES: usize = 8 * 1024;
+
+    if request_context
+        .control_decision
+        .as_ref()
+        .is_some_and(|decision| {
+            decision.route_class.as_deref() == Some("public_support")
+                && decision.route_family.as_deref() == Some("client_provisioning")
+                && decision.route_kind.as_deref() == Some("exchange")
+        })
+    {
+        CLIENT_PROVISIONING_EXCHANGE_BODY_LIMIT_BYTES
+    } else {
+        usize::MAX
+    }
 }

@@ -1,5 +1,8 @@
 use http::Uri;
 
+use crate::control::GatewayPublicRequestContext;
+use crate::handlers::shared::local_proxy_route_body_limit_bytes;
+
 use super::{classify_control_route, headers};
 
 #[test]
@@ -412,6 +415,11 @@ fn classifies_users_me_routes_as_public_support_route() {
             "management_tokens_create",
         ),
         (
+            http::Method::POST,
+            "/api/users/me/api-keys/key-1/provisioning-token",
+            "api_key_provisioning_token_create",
+        ),
+        (
             http::Method::GET,
             "/api/me/management-tokens/token-1",
             "management_token_detail",
@@ -450,6 +458,58 @@ fn classifies_users_me_routes_as_public_support_route() {
         );
         assert!(!decision.is_execution_runtime_candidate());
     }
+}
+
+#[test]
+fn classifies_client_provisioning_routes_as_public_support_route() {
+    let headers = headers(&[]);
+    for (method, uri, route_kind) in [
+        (
+            http::Method::GET,
+            "/install/client-config.sh",
+            "install_script",
+        ),
+        (
+            http::Method::POST,
+            "/api/client-provisioning/exchange",
+            "exchange",
+        ),
+    ] {
+        let uri: Uri = uri.parse().expect("uri should parse");
+        let decision =
+            classify_control_route(&method, &uri, &headers).expect("route should classify");
+
+        assert_eq!(decision.route_class.as_deref(), Some("public_support"));
+        assert_eq!(
+            decision.route_family.as_deref(),
+            Some("client_provisioning")
+        );
+        assert_eq!(decision.route_kind.as_deref(), Some(route_kind));
+        assert_eq!(
+            decision.auth_endpoint_signature.as_deref(),
+            Some("public:client_provisioning")
+        );
+        assert!(!decision.is_execution_runtime_candidate());
+    }
+}
+
+#[test]
+fn limits_client_provisioning_exchange_buffered_body() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/client-provisioning/exchange"
+        .parse()
+        .expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::POST, &uri, &headers).expect("route should classify");
+    let context = GatewayPublicRequestContext::from_request_parts(
+        "trace-test",
+        &http::Method::POST,
+        &uri,
+        &headers,
+        Some(decision),
+    );
+
+    assert_eq!(local_proxy_route_body_limit_bytes(&context), 8 * 1024);
 }
 
 #[test]

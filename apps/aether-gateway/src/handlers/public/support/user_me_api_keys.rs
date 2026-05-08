@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use axum::{
     body::Body,
@@ -15,7 +16,7 @@ use crate::handlers::shared::{
 };
 
 use super::{
-    build_auth_error_response, decrypt_catalog_secret_with_fallbacks,
+    build_auth_error_response, create_auth_token, decrypt_catalog_secret_with_fallbacks,
     encrypt_catalog_secret_with_fallbacks, format_users_me_optional_unix_secs_iso8601,
     known_capability_names, normalize_user_model_capability_settings_input,
     query_param_optional_bool, resolve_authenticated_local_user,
@@ -23,6 +24,8 @@ use super::{
 };
 
 const USERS_ME_API_KEY_WRITE_UNAVAILABLE_DETAIL: &str = "用户 API 密钥写入暂不可用";
+const USERS_ME_API_KEY_PROVISIONING_TOKEN_TTL_SECS: i64 = 10 * 60;
+const USERS_ME_API_KEY_PROVISIONING_KV_PREFIX: &str = "client_provisioning:";
 
 #[derive(Debug, Deserialize)]
 struct UsersMeCreateApiKeyRequest {
@@ -116,6 +119,10 @@ pub(super) fn users_me_api_key_providers_path_matches(request_path: &str) -> boo
 
 pub(super) fn users_me_api_key_capabilities_path_matches(request_path: &str) -> bool {
     users_me_api_key_nested_id_from_path(request_path, "capabilities").is_some()
+}
+
+pub(super) fn users_me_api_key_provisioning_token_path_matches(request_path: &str) -> bool {
+    users_me_api_key_nested_id_from_path(request_path, "provisioning-token").is_some()
 }
 
 fn users_me_masked_api_key_display(state: &AppState, ciphertext: Option<&str>) -> String {
@@ -426,6 +433,113 @@ pub(super) async fn handle_users_me_api_key_detail_get(
     Json(build_users_me_api_key_detail_payload(
         state, &record, is_locked,
     ))
+    .into_response()
+}
+
+pub(super) async fn handle_users_me_api_key_provisioning_token_create(
+    state: &AppState,
+    request_context: &GatewayPublicRequestContext,
+    headers: &http::HeaderMap,
+) -> Response<Body> {
+    let auth = match resolve_authenticated_local_user(state, request_context, headers).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Some(api_key_id) =
+        users_me_api_key_nested_id_from_path(&request_context.request_path, "provisioning-token")
+    else {
+        return build_auth_error_response(http::StatusCode::NOT_FOUND, "API密钥不存在", false);
+    };
+
+    let records = match state
+        .list_auth_api_key_export_records_by_user_ids(std::slice::from_ref(&auth.user.id))
+        .await
+    {
+        Ok(value) => value,
+        Err(err) => {
+            return build_auth_error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("user api key lookup failed: {err:?}"),
+                false,
+            )
+        }
+    };
+    let Some(record) = records
+        .into_iter()
+        .find(|record| !record.is_standalone && record.api_key_id == api_key_id)
+    else {
+        return build_auth_error_response(http::StatusCode::NOT_FOUND, "API密钥不存在", false);
+    };
+    if !record.is_active {
+        return build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "API密钥已停用，无法生成客户端配置命令",
+            false,
+        );
+    }
+    let Some(ciphertext) = record.key_encrypted.as_deref().map(str::trim) else {
+        return build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "该密钥没有存储完整密钥信息",
+            false,
+        );
+    };
+    if ciphertext.is_empty()
+        || decrypt_catalog_secret_with_fallbacks(state.encryption_key(), ciphertext).is_none()
+    {
+        return build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "该密钥没有可用于客户端配置的完整密钥信息",
+            false,
+        );
+    }
+
+    let jti = uuid::Uuid::new_v4().to_string();
+    let expires_at = chrono::Utc::now()
+        + chrono::Duration::seconds(USERS_ME_API_KEY_PROVISIONING_TOKEN_TTL_SECS);
+    let mut token_payload = serde_json::Map::new();
+    token_payload.insert("jti".to_string(), json!(jti.clone()));
+    token_payload.insert("user_id".to_string(), json!(auth.user.id));
+    token_payload.insert("api_key_id".to_string(), json!(record.api_key_id));
+    token_payload.insert(
+        "api_key_name".to_string(),
+        json!(record.name.unwrap_or_else(|| "API Key".to_string())),
+    );
+    if let Err(err) = state
+        .runtime_state
+        .kv_set(
+            &format!("{USERS_ME_API_KEY_PROVISIONING_KV_PREFIX}{jti}"),
+            "pending",
+            Some(Duration::from_secs(
+                USERS_ME_API_KEY_PROVISIONING_TOKEN_TTL_SECS as u64,
+            )),
+        )
+        .await
+    {
+        return build_auth_error_response(
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("client provisioning token store failed: {err:?}"),
+            false,
+        );
+    }
+    let provisioning_token =
+        match create_auth_token("client_provisioning", token_payload, expires_at) {
+            Ok(value) => value,
+            Err(detail) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    detail,
+                    false,
+                )
+            }
+        };
+
+    Json(json!({
+        "provisioning_token": provisioning_token,
+        "expires_at": expires_at.to_rfc3339(),
+        "ttl_seconds": USERS_ME_API_KEY_PROVISIONING_TOKEN_TTL_SECS,
+        "message": "客户端配置令牌已生成，请在过期前使用",
+    }))
     .into_response()
 }
 

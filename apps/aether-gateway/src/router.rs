@@ -86,6 +86,7 @@ fn frontend_path_bypasses_static(path: &str) -> bool {
         || path.starts_with("/v1/")
         || path.starts_with("/v1beta/")
         || path.starts_with("/upload/")
+        || path.starts_with("/install/")
         || path.starts_with("/_gateway/")
         || path.starts_with("/.well-known/")
 }

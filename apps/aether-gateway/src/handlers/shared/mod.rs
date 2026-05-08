@@ -42,7 +42,7 @@ pub(crate) use self::payloads::{
 };
 pub(crate) use self::request_utils::{
     admin_proxy_local_requires_buffered_body, internal_proxy_local_requires_buffered_body,
-    json_string_list, local_proxy_route_requires_buffered_body,
+    json_string_list, local_proxy_route_body_limit_bytes, local_proxy_route_requires_buffered_body,
     mark_external_models_official_providers, public_support_local_requires_buffered_body,
     query_param_bool, query_param_optional_bool, query_param_value,
     request_enables_control_execute, rust_auth_terminates_provider_credentials,

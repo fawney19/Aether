@@ -1,4 +1,4 @@
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 
 use crate::{handlers::proxy::proxy_request, state::AppState};
@@ -20,9 +20,11 @@ pub(crate) fn mount_public_support_routes(router: Router<AppState>) -> Router<Ap
         .route("/api/public/stats", get(proxy_request))
         .route("/api/public/global-models", get(proxy_request))
         .route("/api/public/health/api-formats", get(proxy_request))
+        .route("/api/client-provisioning/exchange", post(proxy_request))
         .route("/api/modules/auth-status", get(proxy_request))
         .route("/api/capabilities", get(proxy_request))
         .route("/api/capabilities/user-configurable", get(proxy_request))
         .route("/api/capabilities/model/{*model_path}", get(proxy_request))
+        .route("/install/client-config.sh", get(proxy_request))
         .route("/", get(proxy_request))
 }

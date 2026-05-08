@@ -468,6 +468,23 @@ pub(super) fn classify_public_support_route(
             "user:self",
             false,
         ))
+    } else if method == http::Method::GET && normalized_path == "/install/client-config.sh" {
+        Some(classified(
+            "public_support",
+            "client_provisioning",
+            "install_script",
+            "public:client_provisioning",
+            false,
+        ))
+    } else if method == http::Method::POST && normalized_path == "/api/client-provisioning/exchange"
+    {
+        Some(classified(
+            "public_support",
+            "client_provisioning",
+            "exchange",
+            "public:client_provisioning",
+            false,
+        ))
     } else if method == http::Method::POST
         && normalized_path.starts_with("/api/me/management-tokens/")
         && normalized_path.ends_with("/regenerate")
@@ -556,6 +573,20 @@ pub(super) fn classify_public_support_route(
             "public_support",
             "users_me",
             route_kind,
+            "user:self",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && has_single_nested_suffix_after_prefix(
+            normalized_path,
+            "/api/users/me/api-keys/",
+            "provisioning-token",
+        )
+    {
+        Some(classified(
+            "public_support",
+            "users_me",
+            "api_key_provisioning_token_create",
             "user:self",
             false,
         ))

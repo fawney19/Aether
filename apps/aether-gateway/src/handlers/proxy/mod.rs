@@ -46,8 +46,9 @@ use crate::frontdoor_loop_guard::{
 };
 use crate::handlers::shared::{
     build_admin_proxy_auth_required_response, build_unhandled_admin_proxy_response,
-    local_proxy_route_requires_buffered_body, request_enables_control_execute,
-    should_strip_forwarded_provider_credential_header, should_strip_forwarded_trusted_admin_header,
+    local_proxy_route_body_limit_bytes, local_proxy_route_requires_buffered_body,
+    request_enables_control_execute, should_strip_forwarded_provider_credential_header,
+    should_strip_forwarded_trusted_admin_header,
 };
 use crate::headers::{
     extract_or_generate_trace_id, request_origin_from_headers_and_remote_addr,
@@ -822,16 +823,35 @@ pub(crate) async fn proxy_request(
     }
     let mut request_body = Some(body);
     let local_proxy_body = if local_proxy_route_requires_buffered_body(&request_context) {
-        Some(
-            to_bytes(
-                request_body
-                    .take()
-                    .expect("local proxy body buffering should own request body"),
-                usize::MAX,
-            )
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?,
+        let body_limit = local_proxy_route_body_limit_bytes(&request_context);
+        let buffered = to_bytes(
+            request_body
+                .take()
+                .expect("local proxy body buffering should own request body"),
+            body_limit,
         )
+        .await;
+        match buffered {
+            Ok(value) => Some(value),
+            Err(_) if body_limit != usize::MAX => {
+                let response = build_local_http_error_response(
+                    &trace_id,
+                    None,
+                    http::StatusCode::PAYLOAD_TOO_LARGE,
+                    &format!("request body exceeds {body_limit} bytes"),
+                )?;
+                return Ok(finalize_gateway_response_with_context(
+                    &state,
+                    response,
+                    &remote_addr,
+                    &request_context,
+                    EXECUTION_PATH_PUBLIC_PROXY_PASSTHROUGH,
+                    &started_at,
+                    request_permit.take(),
+                ));
+            }
+            Err(err) => return Err(GatewayError::Internal(err.to_string())),
+        }
     } else {
         None
     };

@@ -26,6 +26,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod support_announcements;
 #[path = "support/auth.rs"]
 mod support_auth;
+#[path = "support/client_provisioning.rs"]
+mod support_client_provisioning;
 #[path = "support/dashboard.rs"]
 mod support_dashboard;
 #[path = "support/models.rs"]
@@ -53,13 +55,14 @@ use self::support_auth::auth_registration::{
     auth_password_policy_level, validate_auth_register_password,
 };
 use self::support_auth::auth_session::{
-    build_auth_wallet_summary_payload, handle_auth_me, resolve_authenticated_local_user,
-    AuthenticatedLocalUserContext,
+    build_auth_wallet_summary_payload, create_auth_token, decode_auth_token, handle_auth_me,
+    resolve_authenticated_local_user, AuthenticatedLocalUserContext,
 };
 use self::support_auth::{
     build_auth_error_response, build_auth_json_response, build_auth_registration_settings_payload,
     build_auth_settings_payload, extract_client_device_id, maybe_build_local_auth_response,
 };
+use self::support_client_provisioning::maybe_build_local_client_provisioning_response;
 use self::support_dashboard::maybe_build_local_dashboard_response;
 use self::support_models::{
     build_models_auth_error_response, maybe_build_local_models_response, models_api_format,
@@ -144,6 +147,16 @@ pub(crate) async fn maybe_build_local_public_support_response(
     if decision.route_family.as_deref() == Some("users_me") {
         return maybe_build_local_users_me_response(state, request_context, headers, request_body)
             .await;
+    }
+
+    if decision.route_family.as_deref() == Some("client_provisioning") {
+        return maybe_build_local_client_provisioning_response(
+            state,
+            request_context,
+            headers,
+            request_body,
+        )
+        .await;
     }
 
     if decision.route_family.as_deref() == Some("payment_callback") {
