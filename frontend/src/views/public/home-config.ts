@@ -63,6 +63,7 @@ disable_response_storage = true
 name = "OpenAI"
 base_url = "${baseUrl.value}/v1"
 wire_api = "responses"
+supports_websockets = true
 requires_openai_auth = true`)
 
   const codexAuthConfig = computed(() => `{

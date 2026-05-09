@@ -10,7 +10,7 @@ OpenAI API 端点
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, WebSocket
 from sqlalchemy.orm import Session
 
 from src.api.base.pipeline import get_pipeline
@@ -102,3 +102,16 @@ async def create_responses(
         mode=adapter.mode,
         api_format_hint=adapter.allowed_api_formats[0],
     )
+
+
+@router.websocket("/v1/responses")
+async def create_responses_websocket(websocket: WebSocket) -> None:
+    """
+    OpenAI Responses WebSocket API (Codex CLI)
+
+    新版 Codex CLI 可通过 WebSocket 连接 /v1/responses。业务处理仍复用
+    HTTP Responses pipeline，仅在这里完成 WS JSON frame 与 SSE 事件之间的转换。
+    """
+    from src.api.handlers.openai_cli.ws_bridge import handle_codex_responses_websocket
+
+    await handle_codex_responses_websocket(websocket, pipeline=pipeline)
