@@ -345,7 +345,6 @@ fn canonical_block_to_gemini_part(
             ..
         } => Some(Some(json!({
             "functionResponse": {
-                "id": tool_use_id,
                 "name": name.clone()
                     .or_else(|| tool_name_by_id.get(tool_use_id).cloned())
                     .unwrap_or_else(|| tool_use_id.clone()),
@@ -685,5 +684,43 @@ fn clean_gemini_schema(value: &mut Value) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CanonicalContentBlock;
+
+    #[test]
+    fn canonical_tool_result_to_gemini_request_omits_function_response_id() {
+        let mut tool_name_by_id = BTreeMap::new();
+        tool_name_by_id.insert("call_1".to_string(), "lookup".to_string());
+
+        let part = canonical_block_to_gemini_part(
+            &CanonicalContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                name: None,
+                output: Some(serde_json::json!({"ok": true})),
+                content_text: None,
+                is_error: false,
+                extensions: BTreeMap::new(),
+            },
+            &mut tool_name_by_id,
+        )
+        .expect("part should be representable")
+        .expect("part should not be omitted");
+
+        let function_response = part
+            .get("functionResponse")
+            .and_then(Value::as_object)
+            .expect("functionResponse should exist");
+
+        assert!(!function_response.contains_key("id"));
+        assert_eq!(function_response["name"], "lookup");
+        assert_eq!(
+            function_response["response"],
+            serde_json::json!({"result": {"ok": true}})
+        );
     }
 }
