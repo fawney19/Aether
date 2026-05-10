@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
@@ -16,6 +17,9 @@ use serde_json::json;
 use super::super::super::{
     build_router_with_state, build_state_with_execution_runtime_override, sample_endpoint,
     sample_key, sample_proxy_node, start_server,
+};
+use crate::admin_api::{
+    probe_oauth_provider_key_with_classification, AdminAppState, OauthKeyProbeClassification,
 };
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
@@ -1181,4 +1185,676 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_tru
     gateway_handle.abort();
     execution_runtime_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn probe_oauth_provider_key_routes_all_supported_providers_with_classification() {
+    let seen_provider_formats = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen_provider_formats_clone = Arc::clone(&seen_provider_formats);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |request: Request| {
+            let seen_provider_formats_inner = Arc::clone(&seen_provider_formats_clone);
+            async move {
+                let plan: aether_contracts::ExecutionPlan = serde_json::from_slice(
+                    &to_bytes(request.into_body(), usize::MAX)
+                        .await
+                        .expect("body should read"),
+                )
+                .expect("plan should parse");
+                seen_provider_formats_inner
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(plan.provider_api_format.clone());
+                let result = match plan.provider_api_format.as_str() {
+                    "openai:responses" => aether_contracts::ExecutionResult {
+                        request_id: plan.request_id,
+                        candidate_id: None,
+                        status_code: 200,
+                        headers: BTreeMap::new(),
+                        body: Some(aether_contracts::ResponseBody {
+                            json_body: Some(json!({
+                                "plan_type": "plus",
+                                "rate_limit": {
+                                    "primary_window": {
+                                        "used_percent": 20.0,
+                                        "window_minutes": 300
+                                    }
+                                }
+                            })),
+                            body_bytes_b64: None,
+                        }),
+                        telemetry: None,
+                        error: None,
+                    },
+                    "kiro:usage" => aether_contracts::ExecutionResult {
+                        request_id: plan.request_id,
+                        candidate_id: None,
+                        status_code: 401,
+                        headers: BTreeMap::new(),
+                        body: Some(aether_contracts::ResponseBody {
+                            json_body: Some(json!({ "message": "Bearer token invalid" })),
+                            body_bytes_b64: None,
+                        }),
+                        telemetry: None,
+                        error: None,
+                    },
+                    "antigravity:fetch_available_models" => aether_contracts::ExecutionResult {
+                        request_id: plan.request_id,
+                        candidate_id: None,
+                        status_code: 403,
+                        headers: BTreeMap::new(),
+                        body: Some(aether_contracts::ResponseBody {
+                            json_body: Some(json!({
+                                "error": { "message": "account forbidden by policy" }
+                            })),
+                            body_bytes_b64: None,
+                        }),
+                        telemetry: None,
+                        error: None,
+                    },
+                    "chatgpt_web:conversation_init" => aether_contracts::ExecutionResult {
+                        request_id: plan.request_id,
+                        candidate_id: None,
+                        status_code: 200,
+                        headers: BTreeMap::new(),
+                        body: Some(aether_contracts::ResponseBody {
+                            json_body: Some(json!({
+                                "plan_type": "free",
+                                "limits_progress": [{
+                                    "feature_name": "image_gen",
+                                    "remaining": 24.0,
+                                    "total": 25.0,
+                                    "reset_after": "3600"
+                                }]
+                            })),
+                            body_bytes_b64: None,
+                        }),
+                        telemetry: None,
+                        error: None,
+                    },
+                    other => panic!("unexpected provider api format {other}"),
+                };
+                (StatusCode::OK, Json(result))
+            }
+        }),
+    );
+
+    let codex_provider = StoredProviderCatalogProvider::new(
+        "provider-probe-codex".to_string(),
+        "codex".to_string(),
+        Some("https://example.com".to_string()),
+        "codex".to_string(),
+    )
+    .expect("provider should build");
+    let kiro_provider = StoredProviderCatalogProvider::new(
+        "provider-probe-kiro".to_string(),
+        "kiro".to_string(),
+        Some("https://example.com".to_string()),
+        "kiro".to_string(),
+    )
+    .expect("provider should build");
+    let antigravity_provider = StoredProviderCatalogProvider::new(
+        "provider-probe-antigravity".to_string(),
+        "antigravity".to_string(),
+        Some("https://example.com".to_string()),
+        "antigravity".to_string(),
+    )
+    .expect("provider should build");
+    let chatgpt_web_provider = StoredProviderCatalogProvider::new(
+        "provider-probe-chatgpt-web".to_string(),
+        "chatgpt_web".to_string(),
+        Some("https://example.com".to_string()),
+        "chatgpt_web".to_string(),
+    )
+    .expect("provider should build");
+
+    let codex_endpoint = sample_endpoint(
+        "endpoint-probe-codex",
+        "provider-probe-codex",
+        "openai:responses",
+        "https://chatgpt.com/backend-api",
+    );
+    let kiro_endpoint = sample_endpoint(
+        "endpoint-probe-kiro",
+        "provider-probe-kiro",
+        "claude:messages",
+        "https://q.us-west-2.amazonaws.com",
+    );
+    let antigravity_endpoint = sample_endpoint(
+        "endpoint-probe-antigravity",
+        "provider-probe-antigravity",
+        "gemini:generate_content",
+        "https://daily-cloudcode-pa.googleapis.com",
+    );
+    let chatgpt_web_endpoint = sample_endpoint(
+        "endpoint-probe-chatgpt-web",
+        "provider-probe-chatgpt-web",
+        "openai:image",
+        "https://chatgpt.com",
+    );
+
+    let codex_key = sample_key(
+        "key-probe-codex",
+        "provider-probe-codex",
+        "openai:responses",
+        "sk-codex-probe",
+    );
+    let encrypted_kiro_auth_config = encrypt_python_fernet_plaintext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        r#"{
+            "access_token":"kiro-access-token",
+            "api_region":"us-west-2",
+            "machine_id":"123e4567-e89b-12d3-a456-426614174000",
+            "kiro_version":"1.2.3"
+        }"#,
+    )
+    .expect("auth config ciphertext should build");
+    let kiro_key = StoredProviderCatalogKey::new(
+        "key-probe-kiro".to_string(),
+        "provider-probe-kiro".to_string(),
+        "default".to_string(),
+        "bearer".to_string(),
+        None,
+        true,
+    )
+    .expect("key should build")
+    .with_transport_fields(
+        Some(json!(["claude:messages"])),
+        encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
+            .expect("api key ciphertext should build"),
+        Some(encrypted_kiro_auth_config),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("key transport should build");
+    let encrypted_antigravity_auth_config = encrypt_python_fernet_plaintext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        r#"{
+            "project_id":"project-ant-123",
+            "client_version":"1.18.4",
+            "session_id":"session-ant-1"
+        }"#,
+    )
+    .expect("auth config ciphertext should build");
+    let antigravity_key = StoredProviderCatalogKey::new(
+        "key-probe-antigravity".to_string(),
+        "provider-probe-antigravity".to_string(),
+        "default".to_string(),
+        "oauth".to_string(),
+        None,
+        true,
+    )
+    .expect("key should build")
+    .with_transport_fields(
+        Some(json!(["gemini:generate_content"])),
+        encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "ya29.ant-token")
+            .expect("api key ciphertext should build"),
+        Some(encrypted_antigravity_auth_config),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("key transport should build");
+    let chatgpt_web_key = sample_key(
+        "key-probe-chatgpt-web",
+        "provider-probe-chatgpt-web",
+        "openai:image",
+        "chatgpt-web-access-token",
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![
+            codex_provider.clone(),
+            kiro_provider.clone(),
+            antigravity_provider.clone(),
+            chatgpt_web_provider.clone(),
+        ],
+        vec![
+            codex_endpoint.clone(),
+            kiro_endpoint.clone(),
+            antigravity_endpoint.clone(),
+            chatgpt_web_endpoint.clone(),
+        ],
+        vec![
+            codex_key.clone(),
+            kiro_key.clone(),
+            antigravity_key.clone(),
+            chatgpt_web_key.clone(),
+        ],
+    ));
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let state = build_state_with_execution_runtime_override(execution_runtime_url.clone())
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog_repository.clone(),
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+    let admin_state = AdminAppState::new(&state);
+
+    let codex_outcome = probe_oauth_provider_key_with_classification(
+        &admin_state,
+        &codex_provider,
+        &codex_endpoint,
+        codex_key,
+        None,
+        Duration::from_secs(30),
+        false,
+    )
+    .await
+    .expect("codex probe should run");
+    let kiro_outcome = probe_oauth_provider_key_with_classification(
+        &admin_state,
+        &kiro_provider,
+        &kiro_endpoint,
+        kiro_key,
+        None,
+        Duration::from_secs(30),
+        false,
+    )
+    .await
+    .expect("kiro probe should run");
+    let antigravity_outcome = probe_oauth_provider_key_with_classification(
+        &admin_state,
+        &antigravity_provider,
+        &antigravity_endpoint,
+        antigravity_key,
+        None,
+        Duration::from_secs(30),
+        false,
+    )
+    .await
+    .expect("antigravity probe should run");
+    let chatgpt_web_outcome = probe_oauth_provider_key_with_classification(
+        &admin_state,
+        &chatgpt_web_provider,
+        &chatgpt_web_endpoint,
+        chatgpt_web_key,
+        None,
+        Duration::from_secs(30),
+        false,
+    )
+    .await
+    .expect("chatgpt web probe should run");
+
+    assert_eq!(
+        codex_outcome.classification(),
+        OauthKeyProbeClassification::Healthy
+    );
+    assert_eq!(
+        kiro_outcome.classification(),
+        OauthKeyProbeClassification::OAuthInvalid
+    );
+    assert_eq!(
+        antigravity_outcome.classification(),
+        OauthKeyProbeClassification::AccountBlocked
+    );
+    assert_eq!(
+        chatgpt_web_outcome.classification(),
+        OauthKeyProbeClassification::Healthy
+    );
+    assert_eq!(codex_outcome.payload()["status"], "success");
+    assert_eq!(kiro_outcome.payload()["status"], "error");
+    assert_eq!(antigravity_outcome.payload()["status"], "forbidden");
+    assert_eq!(chatgpt_web_outcome.payload()["status"], "success");
+    assert_eq!(
+        seen_provider_formats
+            .lock()
+            .expect("mutex should lock")
+            .clone(),
+        vec![
+            "openai:responses".to_string(),
+            "kiro:usage".to_string(),
+            "antigravity:fetch_available_models".to_string(),
+            "chatgpt_web:conversation_init".to_string(),
+        ]
+    );
+
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn probe_oauth_provider_key_aggregation_matches_refresh_payload_counts() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |request: Request| async move {
+            let plan: aether_contracts::ExecutionPlan = serde_json::from_slice(
+                &to_bytes(request.into_body(), usize::MAX)
+                    .await
+                    .expect("body should read"),
+            )
+            .expect("plan should parse");
+            let (status_code, body_json) = if plan
+                .headers
+                .get("authorization")
+                .is_some_and(|value| value.contains("sk-codex-good"))
+            {
+                (
+                    200,
+                    json!({
+                        "plan_type": "plus",
+                        "rate_limit": {
+                            "primary_window": {
+                                "used_percent": 10.0,
+                                "window_minutes": 300
+                            }
+                        }
+                    }),
+                )
+            } else {
+                (429, json!({ "message": "rate limited" }))
+            };
+            let result = aether_contracts::ExecutionResult {
+                request_id: plan.request_id,
+                candidate_id: None,
+                status_code,
+                headers: BTreeMap::new(),
+                body: Some(aether_contracts::ResponseBody {
+                    json_body: Some(body_json),
+                    body_bytes_b64: None,
+                }),
+                telemetry: None,
+                error: None,
+            };
+            (StatusCode::OK, Json(result))
+        }),
+    );
+
+    let provider = StoredProviderCatalogProvider::new(
+        "provider-probe-aggregation".to_string(),
+        "codex".to_string(),
+        Some("https://example.com".to_string()),
+        "codex".to_string(),
+    )
+    .expect("provider should build");
+    let endpoint = sample_endpoint(
+        "endpoint-probe-aggregation",
+        "provider-probe-aggregation",
+        "openai:responses",
+        "https://chatgpt.com/backend-api",
+    );
+    let good_key = sample_key(
+        "key-probe-aggregation-good",
+        "provider-probe-aggregation",
+        "openai:responses",
+        "sk-codex-good",
+    );
+    let limited_key = sample_key(
+        "key-probe-aggregation-limited",
+        "provider-probe-aggregation",
+        "openai:responses",
+        "sk-codex-limited",
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider.clone()],
+        vec![endpoint.clone()],
+        vec![good_key.clone(), limited_key.clone()],
+    ));
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let state = build_state_with_execution_runtime_override(execution_runtime_url.clone())
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog_repository.clone(),
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+    let admin_state = AdminAppState::new(&state);
+
+    let direct_good = probe_oauth_provider_key_with_classification(
+        &admin_state,
+        &provider,
+        &endpoint,
+        good_key,
+        None,
+        Duration::from_secs(30),
+        false,
+    )
+    .await
+    .expect("direct good probe should run");
+    let direct_limited = probe_oauth_provider_key_with_classification(
+        &admin_state,
+        &provider,
+        &endpoint,
+        limited_key,
+        None,
+        Duration::from_secs(30),
+        false,
+    )
+    .await
+    .expect("direct limited probe should run");
+    let direct_success = [direct_good.success(), direct_limited.success()]
+        .into_iter()
+        .filter(|success| *success)
+        .count();
+    let direct_failed = 2usize - direct_success;
+
+    let refreshed_keys = provider_catalog_repository
+        .list_keys_by_ids(&[
+            "key-probe-aggregation-good".to_string(),
+            "key-probe-aggregation-limited".to_string(),
+        ])
+        .await
+        .expect("keys should reload");
+    let payload = crate::admin_api::refresh_codex_provider_quota_locally(
+        &admin_state,
+        &provider,
+        &endpoint,
+        refreshed_keys,
+        None,
+    )
+    .await
+    .expect("refresh should run")
+    .expect("payload should exist");
+
+    assert_eq!(payload["success"], json!(direct_success));
+    assert_eq!(payload["failed"], json!(direct_failed));
+    assert_eq!(payload["total"], json!(2));
+    assert_eq!(payload["auto_removed"], json!(0));
+    assert_eq!(payload["results"].as_array().map(Vec::len), Some(2));
+
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn auto_remove_guard_allow_false_preserves_codex_account_blocked_key() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |request: Request| async move {
+            let plan: aether_contracts::ExecutionPlan = serde_json::from_slice(
+                &to_bytes(request.into_body(), usize::MAX)
+                    .await
+                    .expect("body should read"),
+            )
+            .expect("plan should parse");
+            let result = aether_contracts::ExecutionResult {
+                request_id: plan.request_id,
+                candidate_id: None,
+                status_code: 402,
+                headers: BTreeMap::new(),
+                body: Some(aether_contracts::ResponseBody {
+                    json_body: Some(json!({
+                        "error": { "message": "workspace has been deactivated" }
+                    })),
+                    body_bytes_b64: None,
+                }),
+                telemetry: None,
+                error: None,
+            };
+            (StatusCode::OK, Json(result))
+        }),
+    );
+
+    let mut provider = StoredProviderCatalogProvider::new(
+        "provider-auto-remove-guard".to_string(),
+        "codex".to_string(),
+        Some("https://example.com".to_string()),
+        "codex".to_string(),
+    )
+    .expect("provider should build");
+    provider.config = Some(json!({
+        "pool_advanced": {
+            "auto_remove_banned_keys": true
+        }
+    }));
+    let endpoint = sample_endpoint(
+        "endpoint-auto-remove-guard",
+        "provider-auto-remove-guard",
+        "openai:responses",
+        "https://chatgpt.com/backend-api",
+    );
+    let key = sample_key(
+        "key-auto-remove-guard",
+        "provider-auto-remove-guard",
+        "openai:responses",
+        "sk-codex-guard",
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider.clone()],
+        vec![endpoint.clone()],
+        vec![key.clone()],
+    ));
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let state = build_state_with_execution_runtime_override(execution_runtime_url.clone())
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog_repository.clone(),
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+    let admin_state = AdminAppState::new(&state);
+
+    let outcome = probe_oauth_provider_key_with_classification(
+        &admin_state,
+        &provider,
+        &endpoint,
+        key,
+        None,
+        Duration::from_secs(30),
+        false,
+    )
+    .await
+    .expect("probe should run");
+
+    assert_eq!(
+        outcome.classification(),
+        OauthKeyProbeClassification::AccountBlocked
+    );
+    assert!(!outcome.auto_removed());
+    assert_eq!(outcome.payload()["auto_removed"], serde_json::Value::Null);
+    assert_eq!(outcome.payload()["status"], "workspace_deactivated");
+
+    let reloaded = provider_catalog_repository
+        .list_keys_by_ids(&["key-auto-remove-guard".to_string()])
+        .await
+        .expect("keys should read");
+    assert_eq!(reloaded.len(), 1);
+    assert!(reloaded[0]
+        .oauth_invalid_reason
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with("[ACCOUNT_BLOCK]")));
+
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn probe_oauth_provider_key_timeout_returns_transport_error() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |request: Request| async move {
+            let plan: aether_contracts::ExecutionPlan = serde_json::from_slice(
+                &to_bytes(request.into_body(), usize::MAX)
+                    .await
+                    .expect("body should read"),
+            )
+            .expect("plan should parse");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let result = aether_contracts::ExecutionResult {
+                request_id: plan.request_id,
+                candidate_id: None,
+                status_code: 200,
+                headers: BTreeMap::new(),
+                body: Some(aether_contracts::ResponseBody {
+                    json_body: Some(json!({
+                        "plan_type": "plus",
+                        "rate_limit": {
+                            "primary_window": {
+                                "used_percent": 10.0,
+                                "window_minutes": 300
+                            }
+                        }
+                    })),
+                    body_bytes_b64: None,
+                }),
+                telemetry: None,
+                error: None,
+            };
+            (StatusCode::OK, Json(result))
+        }),
+    );
+
+    let provider = StoredProviderCatalogProvider::new(
+        "provider-probe-timeout".to_string(),
+        "codex".to_string(),
+        Some("https://example.com".to_string()),
+        "codex".to_string(),
+    )
+    .expect("provider should build");
+    let endpoint = sample_endpoint(
+        "endpoint-probe-timeout",
+        "provider-probe-timeout",
+        "openai:responses",
+        "https://chatgpt.com/backend-api",
+    );
+    let key = sample_key(
+        "key-probe-timeout",
+        "provider-probe-timeout",
+        "openai:responses",
+        "sk-codex-timeout",
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider.clone()],
+        vec![endpoint.clone()],
+        vec![key.clone()],
+    ));
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let state = build_state_with_execution_runtime_override(execution_runtime_url.clone())
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog_repository,
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+    let admin_state = AdminAppState::new(&state);
+
+    let outcome = probe_oauth_provider_key_with_classification(
+        &admin_state,
+        &provider,
+        &endpoint,
+        key,
+        None,
+        Duration::from_millis(1),
+        false,
+    )
+    .await
+    .expect("probe should classify timeout");
+
+    assert_eq!(
+        outcome.classification(),
+        OauthKeyProbeClassification::TransportError
+    );
+    assert_eq!(outcome.payload()["status"], "error");
+    assert!(outcome.payload()["message"]
+        .as_str()
+        .expect("message should be string")
+        .contains("timed out"));
+
+    execution_runtime_handle.abort();
 }

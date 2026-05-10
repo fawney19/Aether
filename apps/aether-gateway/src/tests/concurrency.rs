@@ -379,3 +379,43 @@ async fn gateway_exposes_fallback_metrics() {
 
     gateway_handle.abort();
 }
+
+#[tokio::test]
+async fn gateway_exposes_pool_preheat_metrics() {
+    let state = AppState::new().expect("gateway state should build");
+    let metrics = state.pool_preheat_metrics();
+    metrics.record_probe_run("candidate_loop", "completed");
+    metrics.record_probe_outcome("codex", "healthy");
+    metrics.record_dedup_skipped("codex", 2);
+    metrics.record_rate_limit_rejected("codex");
+    metrics.record_circuit_suspended("codex");
+    metrics.record_candidate_cache_operation("hit");
+    metrics.record_hedge_swap("fast_fail");
+
+    let gateway = build_router_with_state(state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{gateway_url}/_gateway/metrics"))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.expect("body should read");
+    assert!(body.contains(
+        "aether_pool_preheat_probe_runs_total{trigger=\"candidate_loop\",outcome=\"completed\"} 1"
+    ));
+    assert!(body.contains(
+        "aether_pool_preheat_probe_outcomes_total{provider_type=\"codex\",outcome_kind=\"healthy\"} 1"
+    ));
+    assert!(body.contains("aether_pool_preheat_dedup_skipped_total{provider_type=\"codex\"} 2"));
+    assert!(
+        body.contains("aether_pool_preheat_rate_limit_rejected_total{provider_type=\"codex\"} 1")
+    );
+    assert!(body.contains("aether_pool_preheat_circuit_suspended_total{provider_type=\"codex\"} 1"));
+    assert!(body.contains("aether_pool_candidate_cache_operations_total{operation=\"hit\"} 1"));
+    assert!(body.contains("aether_hedge_swap_total{trigger_error_kind=\"fast_fail\"} 1"));
+
+    gateway_handle.abort();
+}

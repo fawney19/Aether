@@ -1,4 +1,5 @@
 pub(crate) mod candidate_loop;
+mod hedge_fast_fail;
 mod orchestration;
 mod outcome;
 mod plan_fallback;
@@ -13,6 +14,13 @@ pub(crate) use crate::request_candidate_runtime::{
 pub(crate) use candidate_loop::{
     execute_stream_plan_and_reports, execute_sync_plan_and_reports,
     mark_unused_local_candidate_items,
+};
+pub(crate) use hedge_fast_fail::{
+    hedge_fast_failure_candidate_status_is_eligible, hedge_fast_failure_candidate_status_tag,
+    hedge_fast_failure_execution_error_is_eligible, hedge_fast_failure_execution_error_tag,
+    hedge_fast_failure_status_is_eligible, hedge_fast_failure_status_tag,
+    hedge_fast_failure_transport_error_is_eligible, hedge_fast_failure_transport_error_tag,
+    with_hedge_eligibility_report_context, HedgeEligibilityTag,
 };
 pub(crate) use orchestration::*;
 pub(crate) use outcome::{

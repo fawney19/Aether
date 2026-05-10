@@ -28,6 +28,8 @@ pub struct SchedulerRequestCandidateReportContext {
     pub upstream_response: Option<Value>,
     pub proxy: Option<Value>,
     pub error_flow: Option<Value>,
+    pub hedge_eligible: Option<bool>,
+    pub hedge_eligibility: Option<Value>,
     pub candidate_group_id: Option<String>,
     pub pool_key_index: Option<u32>,
     pub ranking_mode: Option<String>,
@@ -172,6 +174,11 @@ pub fn parse_request_candidate_report_context(
             .get("error_flow")
             .cloned()
             .filter(|value| !value.is_null()),
+        hedge_eligible: bool_field(report_context, "hedge_eligible"),
+        hedge_eligibility: report_context
+            .get("hedge_eligibility")
+            .cloned()
+            .filter(|value| !value.is_null()),
         candidate_group_id: string_field(report_context, "candidate_group_id"),
         pool_key_index: u32_field(report_context, "pool_key_index"),
         ranking_mode: string_field(report_context, "ranking_mode"),
@@ -221,6 +228,7 @@ pub fn resolve_report_request_candidate_slot(
         priority_slot,
         promoted_by,
         demoted_by,
+        ..
     } = metadata;
     let request_id = request_id?;
     let synthesized_extra_data = build_report_candidate_extra_data(ReportCandidateExtraDataInput {
@@ -626,6 +634,13 @@ fn string_field_from_object(object: &Map<String, Value>, key: &str) -> Option<St
         .map(ToOwned::to_owned)
 }
 
+fn bool_field(value: &Value, key: &str) -> Option<bool> {
+    value
+        .as_object()
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_bool)
+}
+
 fn u32_field(value: &Value, key: &str) -> Option<u32> {
     value
         .as_object()
@@ -812,7 +827,39 @@ fn build_report_candidate_extra_data(input: ReportCandidateExtraDataInput) -> Op
     if let Some(demoted_by) = demoted_by {
         extra_data.insert("demoted_by".to_string(), Value::String(demoted_by));
     }
+    let extra_data = sanitize_request_candidate_extra_data(extra_data);
     (!extra_data.is_empty()).then_some(Value::Object(extra_data))
+}
+
+fn sanitize_request_candidate_extra_data(mut extra_data: Map<String, Value>) -> Map<String, Value> {
+    extra_data.remove("hedge_eligible");
+    extra_data.remove("hedge_eligibility");
+    if let Some(error_flow) = extra_data
+        .get_mut("error_flow")
+        .and_then(Value::as_object_mut)
+    {
+        error_flow.remove("hedge_eligible");
+        error_flow.remove("hedge_eligibility");
+    }
+    if extra_data
+        .get("error_flow")
+        .and_then(Value::as_object)
+        .is_some_and(Map::is_empty)
+    {
+        extra_data.remove("error_flow");
+    }
+    extra_data
+}
+
+fn sanitize_request_candidate_extra_data_value(value: Value) -> Option<Value> {
+    match value {
+        Value::Object(object) => {
+            let object = sanitize_request_candidate_extra_data(object);
+            (!object.is_empty()).then_some(Value::Object(object))
+        }
+        Value::Null => None,
+        other => Some(other),
+    }
 }
 
 fn merge_request_candidate_extra_data(
@@ -822,11 +869,11 @@ fn merge_request_candidate_extra_data(
     match (existing, overlay) {
         (Some(Value::Object(mut existing_object)), Some(Value::Object(overlay_object))) => {
             existing_object.extend(overlay_object);
-            Some(Value::Object(existing_object))
+            sanitize_request_candidate_extra_data_value(Value::Object(existing_object))
         }
-        (Some(existing), None) => Some(existing),
-        (None, Some(overlay)) => Some(overlay),
-        (Some(existing), Some(_overlay)) => Some(existing),
+        (Some(existing), None) => sanitize_request_candidate_extra_data_value(existing),
+        (None, Some(overlay)) => sanitize_request_candidate_extra_data_value(overlay),
+        (Some(existing), Some(_overlay)) => sanitize_request_candidate_extra_data_value(existing),
         (None, None) => None,
     }
 }
@@ -1138,7 +1185,13 @@ mod tests {
                     "ranking_index": 2,
                     "priority_slot": 7,
                     "promoted_by": "cached_affinity",
-                    "demoted_by": "cross_format"
+                    "demoted_by": "cross_format",
+                    "hedge_eligible": true,
+                    "hedge_eligibility": {
+                        "tag": "hedge_fast_fail_eligible",
+                        "source": "upstream_status",
+                        "reason": "http_429_rate_limited"
+                    }
                 })),
                 status_update: SchedulerRequestCandidateStatusUpdate {
                     status: RequestCandidateStatus::Failed,
@@ -1228,6 +1281,75 @@ mod tests {
                 .and_then(|value| value.get("demoted_by")),
             Some(&json!("cross_format"))
         );
+        assert!(record
+            .extra_data
+            .as_ref()
+            .and_then(|value| value.get("hedge_eligible"))
+            .is_none());
+        assert!(record
+            .extra_data
+            .as_ref()
+            .and_then(|value| value.get("hedge_eligibility"))
+            .is_none());
+    }
+
+    #[test]
+    fn local_request_candidate_status_record_strips_generic_hedge_metadata() {
+        let mut plan = sample_plan();
+        plan.candidate_id = Some("cand-hedge".to_string());
+
+        let record =
+            build_local_request_candidate_status_record(LocalRequestCandidateStatusRecordInput {
+                plan: &plan,
+                report_context: Some(&json!({
+                    "candidate_index": 1,
+                    "retry_index": 0,
+                    "hedge_eligible": true,
+                    "hedge_eligibility": {
+                        "tag": "hedge_fast_fail_eligible",
+                        "source": "upstream_status",
+                        "reason": "http_401_unauthorized"
+                    },
+                    "error_flow": {
+                        "classification": "retry_upstream_failure",
+                        "decision": "retry_next_candidate",
+                        "hedge_eligible": true,
+                        "hedge_eligibility": {
+                            "tag": "hedge_fast_fail_eligible",
+                            "source": "upstream_status",
+                            "reason": "http_401_unauthorized"
+                        }
+                    }
+                })),
+                status_update: SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Failed,
+                    status_code: Some(401),
+                    error_type: Some("Upstream4xx".to_string()),
+                    error_message: Some("unauthorized".to_string()),
+                    latency_ms: Some(7),
+                    started_at_unix_ms: Some(100),
+                    finished_at_unix_ms: Some(107),
+                },
+            })
+            .expect("record should build");
+        let extra_data = record.extra_data.as_ref().expect("extra data should exist");
+
+        assert!(extra_data.get("hedge_eligible").is_none());
+        assert!(extra_data.get("hedge_eligibility").is_none());
+        assert_eq!(
+            extra_data
+                .get("error_flow")
+                .and_then(|value| value.get("decision")),
+            Some(&json!("retry_next_candidate"))
+        );
+        assert!(extra_data
+            .get("error_flow")
+            .and_then(|value| value.get("hedge_eligible"))
+            .is_none());
+        assert!(extra_data
+            .get("error_flow")
+            .and_then(|value| value.get("hedge_eligibility"))
+            .is_none());
     }
 
     #[test]

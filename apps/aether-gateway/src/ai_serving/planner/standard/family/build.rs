@@ -166,6 +166,17 @@ pub(crate) async fn build_local_stream_attempt_source<'a>(
 
 #[async_trait]
 impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalStandardSyncAttemptSource<'_> {
+    async fn promote_hedge_preheated_pool_candidates(
+        &mut self,
+        provider_id: &str,
+        pool_group_id: &str,
+        attempted_key_ids: &std::collections::BTreeSet<String>,
+    ) -> Result<Option<(Option<String>, String, Vec<String>)>, GatewayError> {
+        self.candidates
+            .promote_hedge_preheated_pool_candidates(provider_id, pool_group_id, attempted_key_ids)
+            .await
+    }
+
     async fn next_execution_attempt(&mut self) -> Result<Option<AiSyncAttempt>, GatewayError> {
         while let Some(attempt) = self.candidates.next_attempt().await {
             match self.build_sync_attempt(attempt).await? {
@@ -194,6 +205,17 @@ impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalStandardSyncAttemptSour
 
 #[async_trait]
 impl LocalExecutionAttemptSource<AiStreamAttempt> for LocalStandardStreamAttemptSource<'_> {
+    async fn promote_hedge_preheated_pool_candidates(
+        &mut self,
+        provider_id: &str,
+        pool_group_id: &str,
+        attempted_key_ids: &std::collections::BTreeSet<String>,
+    ) -> Result<Option<(Option<String>, String, Vec<String>)>, GatewayError> {
+        self.candidates
+            .promote_hedge_preheated_pool_candidates(provider_id, pool_group_id, attempted_key_ids)
+            .await
+    }
+
     async fn next_execution_attempt(&mut self) -> Result<Option<AiStreamAttempt>, GatewayError> {
         while let Some(attempt) = self.candidates.next_attempt().await {
             match self.build_stream_attempt(attempt).await? {

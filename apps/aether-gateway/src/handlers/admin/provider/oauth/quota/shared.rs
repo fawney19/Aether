@@ -8,8 +8,10 @@ use crate::handlers::shared::{
 use crate::GatewayError;
 use aether_admin::provider::quota as admin_provider_quota_pure;
 use aether_contracts::{ExecutionPlan, ExecutionResult, ExecutionTimeouts, ProxySnapshot};
-use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
-use std::time::{SystemTime, UNIX_EPOCH};
+use aether_data_contracts::repository::provider_catalog::{
+    StoredProviderCatalogKey, StoredProviderCatalogProvider,
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
 const PROVIDER_QUOTA_DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -36,6 +38,18 @@ pub(super) fn default_provider_quota_execution_timeouts(
         total_ms: Some(timeout_ms),
         ..ExecutionTimeouts::default()
     }
+}
+
+pub(super) fn public_refresh_quota_probe_timeout(
+    provider: &StoredProviderCatalogProvider,
+    proxy_override: Option<&ProxySnapshot>,
+) -> Duration {
+    let timeout_ms = if proxy_override.is_some() || provider.proxy.is_some() {
+        PROVIDER_QUOTA_PROXY_TIMEOUT_MS
+    } else {
+        PROVIDER_QUOTA_DEFAULT_TIMEOUT_MS
+    };
+    Duration::from_millis(timeout_ms)
 }
 
 pub(super) fn provider_auto_remove_banned_keys(config: Option<&serde_json::Value>) -> bool {
@@ -165,10 +179,16 @@ pub(super) async fn execute_provider_quota_plan(
     transport: &AdminGatewayProviderTransportSnapshot,
     plan: ExecutionPlan,
     quota_kind: &str,
+    probe_timeout: Duration,
 ) -> Result<ProviderQuotaExecutionOutcome, GatewayError> {
-    match state.execute_execution_runtime_sync_plan(None, &plan).await {
-        Ok(result) => Ok(ProviderQuotaExecutionOutcome::Response(result)),
-        Err(err) => {
+    match tokio::time::timeout(
+        probe_timeout,
+        state.execute_execution_runtime_sync_plan(None, &plan),
+    )
+    .await
+    {
+        Ok(Ok(result)) => Ok(ProviderQuotaExecutionOutcome::Response(result)),
+        Ok(Err(err)) => {
             let error = match err {
                 GatewayError::UpstreamUnavailable { message, .. }
                 | GatewayError::ControlUnavailable { message, .. }
@@ -200,6 +220,38 @@ pub(super) async fn execute_provider_quota_plan(
                 error = %error,
                 quota_kind = %quota_kind,
                 "gateway provider quota execution runtime request failed"
+            );
+            Ok(ProviderQuotaExecutionOutcome::Failure(error))
+        }
+        Err(_) => {
+            let timeout_ms = probe_timeout.as_millis();
+            let error = format!("quota probe timed out after {timeout_ms} ms");
+            let proxy_node_id = plan
+                .proxy
+                .as_ref()
+                .and_then(|proxy| proxy.node_id.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            let proxy_source = state
+                .resolve_transport_proxy_source_with_tunnel_affinity(transport)
+                .await;
+            let proxy_url_present = plan
+                .proxy
+                .as_ref()
+                .and_then(|proxy| proxy.url.as_deref())
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+            warn!(
+                key_id = %transport.key.id,
+                endpoint_id = %transport.endpoint.id,
+                url = %plan.url,
+                proxy_source = ?proxy_source,
+                proxy_node_id = ?proxy_node_id,
+                proxy_url_present,
+                timeout_ms,
+                quota_kind = %quota_kind,
+                "gateway provider quota execution runtime request timed out"
             );
             Ok(ProviderQuotaExecutionOutcome::Failure(error))
         }

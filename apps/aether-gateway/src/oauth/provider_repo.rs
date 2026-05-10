@@ -1,6 +1,8 @@
 use crate::admin_api::{
-    create_provider_oauth_catalog_key, find_duplicate_provider_oauth_key,
-    refresh_provider_oauth_account_state_after_update, update_existing_provider_oauth_catalog_key,
+    create_provider_oauth_catalog_key as create_provider_oauth_catalog_key_impl,
+    find_duplicate_provider_oauth_key as find_duplicate_provider_oauth_key_impl,
+    refresh_provider_oauth_account_state_after_update as refresh_provider_oauth_account_state_after_update_impl,
+    update_existing_provider_oauth_catalog_key as update_existing_provider_oauth_catalog_key_impl,
     AdminAppState, AdminGatewayProviderTransportSnapshot, AdminLocalOAuthRefreshError,
 };
 use crate::GatewayError;
@@ -55,7 +57,8 @@ impl ProviderOAuthRepository {
         auth_config: &serde_json::Map<String, serde_json::Value>,
         exclude_key_id: Option<&str>,
     ) -> Result<Option<StoredProviderCatalogKey>, String> {
-        find_duplicate_provider_oauth_key(state, provider_id, auth_config, exclude_key_id).await
+        find_duplicate_provider_oauth_key_impl(state, provider_id, auth_config, exclude_key_id)
+            .await
     }
 
     pub(crate) async fn create_provider_oauth_catalog_key(
@@ -69,7 +72,7 @@ impl ProviderOAuthRepository {
         proxy: Option<serde_json::Value>,
         expires_at_unix_secs: Option<u64>,
     ) -> Result<Option<StoredProviderCatalogKey>, GatewayError> {
-        create_provider_oauth_catalog_key(
+        create_provider_oauth_catalog_key_impl(
             state,
             provider_id,
             provider_type,
@@ -93,7 +96,7 @@ impl ProviderOAuthRepository {
         proxy: Option<serde_json::Value>,
         expires_at_unix_secs: Option<u64>,
     ) -> Result<Option<StoredProviderCatalogKey>, GatewayError> {
-        update_existing_provider_oauth_catalog_key(
+        update_existing_provider_oauth_catalog_key_impl(
             state,
             existing_key,
             provider_type,
@@ -112,8 +115,13 @@ impl ProviderOAuthRepository {
         key_id: &str,
         proxy_override: Option<&ProxySnapshot>,
     ) -> Result<(bool, Option<String>), GatewayError> {
-        refresh_provider_oauth_account_state_after_update(state, provider, key_id, proxy_override)
-            .await
+        refresh_provider_oauth_account_state_after_update_impl(
+            state,
+            provider,
+            key_id,
+            proxy_override,
+        )
+        .await
     }
 
     pub(crate) fn clear_transport_cache_after_write(state: &AdminAppState<'_>) {

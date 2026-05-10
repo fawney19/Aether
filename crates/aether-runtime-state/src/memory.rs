@@ -36,6 +36,7 @@ impl MemoryKvEntry {
 pub(crate) struct MemoryRuntimeBackend {
     config: MemoryRuntimeStateConfig,
     kv: Mutex<HashMap<String, MemoryKvEntry>>,
+    atomic_counters: Mutex<HashMap<String, u64>>,
     counters: Mutex<HashMap<String, MemoryCounterEntry>>,
     sets: Mutex<HashMap<String, BTreeSet<String>>>,
     scores: Mutex<HashMap<String, BTreeMap<String, f64>>>,
@@ -153,6 +154,26 @@ impl MemoryRuntimeBackend {
 
     pub(crate) async fn kv_exists(&self, key: &str) -> bool {
         self.kv_get(key).await.is_some()
+    }
+
+    pub(crate) async fn counter_increment(&self, key: &str) -> u64 {
+        let mut counters = self.atomic_counters.lock().await;
+        let next = counters
+            .get(key)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(1);
+        counters.insert(key.to_string(), next);
+        next
+    }
+
+    pub(crate) async fn counter_get(&self, key: &str) -> u64 {
+        self.atomic_counters
+            .lock()
+            .await
+            .get(key)
+            .copied()
+            .unwrap_or_default()
     }
 
     pub(crate) async fn kv_ttl_seconds(&self, key: &str) -> Option<i64> {

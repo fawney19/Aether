@@ -154,9 +154,22 @@ pub(super) async fn execute_admin_provider_oauth_refresh(
                 .get("expires_at")
                 .and_then(serde_json::Value::as_u64)
         });
-    let (account_state_recheck_attempted, account_state_recheck_error) = state
-        .refresh_provider_oauth_account_state_after_update(&provider, &key_id, None)
-        .await?;
+    let recheck_app = state.cloned_app();
+    let recheck_provider = provider.clone();
+    let recheck_key_id = key_id.clone();
+    let (account_state_recheck_attempted, account_state_recheck_error) = tokio::spawn(async move {
+        refresh_provider_oauth_account_state_after_update(
+            &AdminAppState::new(&recheck_app),
+            &recheck_provider,
+            &recheck_key_id,
+            None,
+        )
+        .await
+    })
+    .await
+    .map_err(|err| {
+        GatewayError::Internal(format!("OAuth account-state recheck failed: {err}"))
+    })??;
 
     Ok(RefreshDispatch::Continue(RefreshSuccessContext {
         provider_type,

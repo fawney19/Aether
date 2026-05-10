@@ -9,7 +9,7 @@ use aether_ai_serving::{
 use aether_scheduler_core::{ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate};
 use async_trait::async_trait;
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tracing::warn;
@@ -58,6 +58,16 @@ pub(crate) trait LocalExecutionAttemptSource<T>: Send {
     async fn next_execution_attempt(&mut self) -> Result<Option<T>, GatewayError>;
 
     async fn drain_execution_attempts(&mut self) -> Result<Vec<T>, GatewayError>;
+
+    async fn promote_hedge_preheated_pool_candidates(
+        &mut self,
+        provider_id: &str,
+        pool_group_id: &str,
+        attempted_key_ids: &BTreeSet<String>,
+    ) -> Result<Option<(Option<String>, String, Vec<String>)>, GatewayError> {
+        let _ = (provider_id, pool_group_id, attempted_key_ids);
+        Ok(None)
+    }
 }
 
 enum LocalExecutionCandidateAttemptSourceItem<'a> {
@@ -134,6 +144,165 @@ impl<'a> LocalExecutionCandidateAttemptSource<'a> {
         self.items.clear();
         Vec::new()
     }
+
+    pub(crate) async fn promote_hedge_preheated_pool_candidates(
+        &mut self,
+        provider_id: &str,
+        pool_group_id: &str,
+        attempted_key_ids: &BTreeSet<String>,
+    ) -> Result<Option<(Option<String>, String, Vec<String>)>, GatewayError> {
+        let previous_next_key_id = peek_next_key_id_from_items(&self.items);
+        let promoted_key_ids = promote_hedge_preheated_pool_candidates_in_items(
+            &mut self.items,
+            provider_id,
+            pool_group_id,
+            attempted_key_ids,
+        )
+        .await?;
+        if promoted_key_ids.is_empty() {
+            return Ok(None);
+        }
+
+        let next_key_id = peek_next_key_id_from_items(&self.items);
+        if previous_next_key_id == next_key_id {
+            return Ok(None);
+        }
+        let Some(next_key_id) = next_key_id else {
+            return Ok(None);
+        };
+
+        Ok(Some((previous_next_key_id, next_key_id, promoted_key_ids)))
+    }
+}
+
+async fn promote_hedge_preheated_pool_candidates_in_items(
+    items: &mut VecDeque<LocalExecutionCandidateAttemptSourceItem<'_>>,
+    provider_id: &str,
+    pool_group_id: &str,
+    attempted_key_ids: &BTreeSet<String>,
+) -> Result<Vec<String>, GatewayError> {
+    for item in items {
+        match item {
+            LocalExecutionCandidateAttemptSourceItem::Static { .. } => {}
+            LocalExecutionCandidateAttemptSourceItem::Pool {
+                cursor,
+                candidate_index,
+                pending_attempts,
+            } => {
+                let promoted_candidates = cursor
+                    .promote_preheated_candidates_after_fast_fail(
+                        provider_id,
+                        pool_group_id,
+                        attempted_key_ids,
+                    )
+                    .await;
+                if !promoted_candidates.is_empty() {
+                    return Ok(prepend_promoted_pool_attempts(
+                        pending_attempts,
+                        *candidate_index,
+                        promoted_candidates,
+                    ));
+                }
+            }
+            LocalExecutionCandidateAttemptSourceItem::RequestedModelPage { cursor } => {
+                let promoted_key_ids = promote_hedge_preheated_pool_candidates_in_loaded_items(
+                    &mut cursor.pending_items,
+                    provider_id,
+                    pool_group_id,
+                    attempted_key_ids,
+                )
+                .await?;
+                if !promoted_key_ids.is_empty() {
+                    return Ok(promoted_key_ids);
+                }
+            }
+        }
+    }
+    Ok(Vec::new())
+}
+
+async fn promote_hedge_preheated_pool_candidates_in_loaded_items(
+    items: &mut VecDeque<LocalExecutionCandidateAttemptSourceItem<'_>>,
+    provider_id: &str,
+    pool_group_id: &str,
+    attempted_key_ids: &BTreeSet<String>,
+) -> Result<Vec<String>, GatewayError> {
+    for item in items {
+        if let LocalExecutionCandidateAttemptSourceItem::Pool {
+            cursor,
+            candidate_index,
+            pending_attempts,
+        } = item
+        {
+            let promoted_candidates = cursor
+                .promote_preheated_candidates_after_fast_fail(
+                    provider_id,
+                    pool_group_id,
+                    attempted_key_ids,
+                )
+                .await;
+            if !promoted_candidates.is_empty() {
+                return Ok(prepend_promoted_pool_attempts(
+                    pending_attempts,
+                    *candidate_index,
+                    promoted_candidates,
+                ));
+            }
+        }
+    }
+    Ok(Vec::new())
+}
+
+fn prepend_promoted_pool_attempts(
+    pending_attempts: &mut VecDeque<LocalExecutionCandidateAttempt>,
+    candidate_index: u32,
+    promoted_candidates: Vec<EligibleLocalExecutionCandidate>,
+) -> Vec<String> {
+    let mut promoted_key_ids = Vec::with_capacity(promoted_candidates.len());
+    let mut reordered_attempts = VecDeque::new();
+    for candidate in promoted_candidates {
+        promoted_key_ids.push(candidate.candidate.key_id.clone());
+        reordered_attempts.extend(build_unpersisted_local_execution_candidate_attempts(
+            candidate,
+            candidate_index,
+        ));
+    }
+    let mut previous_pending = std::mem::take(pending_attempts);
+    reordered_attempts.append(&mut previous_pending);
+    *pending_attempts = reordered_attempts;
+    promoted_key_ids
+}
+
+fn peek_next_key_id_from_items(
+    items: &VecDeque<LocalExecutionCandidateAttemptSourceItem<'_>>,
+) -> Option<String> {
+    for item in items {
+        match item {
+            LocalExecutionCandidateAttemptSourceItem::Static { attempts } => {
+                if let Some(attempt) = attempts.front() {
+                    return Some(attempt.eligible.candidate.key_id.clone());
+                }
+            }
+            LocalExecutionCandidateAttemptSourceItem::Pool {
+                cursor,
+                pending_attempts,
+                ..
+            } => {
+                if let Some(attempt) = pending_attempts.front() {
+                    return Some(attempt.eligible.candidate.key_id.clone());
+                }
+                if let Some(key_id) = cursor.peek_queued_key_id() {
+                    return Some(key_id.to_string());
+                }
+            }
+            LocalExecutionCandidateAttemptSourceItem::RequestedModelPage { cursor } => {
+                if let Some(key_id) = peek_next_key_id_from_items(&cursor.pending_items) {
+                    return Some(key_id);
+                }
+            }
+        }
+    }
+    None
 }
 
 impl LocalExecutionCandidateAttempt {

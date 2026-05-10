@@ -388,7 +388,7 @@ fn first_non_empty_error_text(
     None
 }
 
-fn classify_local_sync_error_kind(
+pub(crate) fn classify_local_sync_error_kind(
     status_code: u16,
     raw_type: Option<&str>,
     raw_status: Option<&str>,

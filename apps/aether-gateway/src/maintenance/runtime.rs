@@ -18,6 +18,8 @@ mod db_maintenance;
 mod oauth_token_refresh;
 #[path = "runtime/pending_cleanup.rs"]
 mod pending_cleanup;
+#[path = "runtime/pool_preheat_probe.rs"]
+mod pool_preheat_probe;
 #[path = "runtime/pool_quota_probe.rs"]
 mod pool_quota_probe;
 #[path = "runtime/provider_checkin.rs"]
@@ -62,6 +64,10 @@ pub(crate) use oauth_token_refresh::{
     perform_oauth_token_refresh_once, OAuthTokenRefreshRunSummary,
 };
 use pending_cleanup::*;
+pub(crate) use pool_preheat_probe::{
+    perform_pool_preheat_probe, pool_preheat_probe_provider_is_supported,
+    PoolPreheatProbeRunSummary, PoolPreheatProbeTaskRequest,
+};
 pub(crate) use pool_quota_probe::{
     perform_pool_quota_probe_once, perform_pool_quota_probe_once_with_config,
     select_pool_quota_probe_key_ids, spawn_pool_quota_probe_worker, PoolQuotaProbeRunSummary,

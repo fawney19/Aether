@@ -521,6 +521,22 @@ export interface SchedulingPresetItem {
   mode?: string | null
 }
 
+export interface PoolPreProbeConfig {
+  enabled?: boolean | null
+  top_n?: number | null
+  required_healthy?: number | null
+  dedup_window_secs?: number | null
+  cache_ttl_seconds?: number | null
+  cache_max_entries?: number | null
+  probe_timeout_seconds?: number | null
+  per_provider_rate_limit_per_minute?: number | null
+  group_lock_ttl_seconds?: number | null
+  circuit_failure_rate_threshold?: number | null
+  circuit_sample_window_seconds?: number | null
+  circuit_suspend_seconds?: number | null
+  '5xx_streak_threshold'?: number | null
+}
+
 export interface PoolAdvancedConfig {
   global_priority?: number | null
   sticky_session_ttl_seconds?: number | null
@@ -546,6 +562,7 @@ export interface PoolAdvancedConfig {
   overload_cooldown_seconds?: number | null
   proactive_refresh_seconds?: number | null
   health_policy_enabled?: boolean
+  pre_probe?: PoolPreProbeConfig | null
   unschedulable_rules?: Array<Record<string, unknown>> | null
   batch_concurrency?: number | null
   probing_enabled?: boolean

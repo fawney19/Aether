@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
@@ -8,10 +9,11 @@ use aether_runtime_state::{RuntimeSemaphore, RuntimeState};
 use super::super::async_task::{VideoTaskPollerConfig, VideoTaskService};
 use super::super::cache::{
     AuthApiKeyLastUsedCache, AuthContextCache, DashboardResponseCache, DirectPlanBypassCache,
-    SchedulerAffinityCache, SystemConfigCache,
+    PoolCandidateCache, SchedulerAffinityCache, SystemConfigCache,
 };
 use super::super::data::GatewayDataState;
 use super::super::fallback_metrics;
+use super::super::pool_preheat_metrics;
 use super::super::rate_limit::FrontdoorUserRpmLimiter;
 use super::super::{provider_transport, usage};
 use super::{
@@ -60,9 +62,12 @@ pub struct AppState {
     pub(crate) oauth_refresh: Arc<provider_transport::LocalOAuthRefreshCoordinator>,
     pub(crate) direct_plan_bypass_cache: Arc<DirectPlanBypassCache>,
     pub(crate) scheduler_affinity_cache: Arc<SchedulerAffinityCache>,
+    pub(crate) pool_candidate_cache: Arc<PoolCandidateCache>,
+    pub(crate) pool_candidate_config_version: Arc<AtomicU64>,
     pub(crate) dashboard_response_cache: Arc<DashboardResponseCache>,
     pub(crate) system_config_cache: Arc<SystemConfigCache>,
     pub(crate) fallback_metrics: Arc<fallback_metrics::GatewayFallbackMetrics>,
+    pub(crate) pool_preheat_metrics: Arc<pool_preheat_metrics::PoolPreheatMetrics>,
     pub(crate) frontdoor_cors: Option<Arc<FrontdoorCorsConfig>>,
     pub(crate) frontdoor_user_rpm: Arc<FrontdoorUserRpmLimiter>,
     pub(crate) tunnel: crate::tunnel::EmbeddedTunnelState,

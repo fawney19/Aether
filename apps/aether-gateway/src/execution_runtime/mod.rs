@@ -8,7 +8,7 @@ mod constants;
 mod fallback;
 mod kiro_web_search;
 pub(crate) mod ndjson;
-mod oauth_retry;
+pub(crate) mod oauth_retry;
 #[cfg(test)]
 pub(crate) mod remote_compat;
 mod response_header_rules;
@@ -23,8 +23,8 @@ pub(crate) use self::constants::{
     MAX_ERROR_BODY_BYTES, MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES,
 };
 pub(crate) use self::fallback::{
-    analyze_local_candidate_failover_sync, local_failover_response_text,
-    resolve_core_stream_direct_finalize_report_kind,
+    analyze_local_candidate_failover_sync, hedge_fast_failure_retry_next_candidate_tag,
+    local_failover_response_text, resolve_core_stream_direct_finalize_report_kind,
     resolve_core_stream_error_finalize_report_kind, resolve_core_sync_error_finalize_report_kind,
     resolve_local_candidate_failover_analysis_stream,
     resolve_local_candidate_failover_decision_stream, should_fallback_to_control_stream,

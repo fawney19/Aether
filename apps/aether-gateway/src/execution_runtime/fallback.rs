@@ -1,6 +1,10 @@
-use aether_contracts::{ExecutionPlan, ExecutionResult};
+use aether_contracts::{ExecutionError, ExecutionPlan, ExecutionResult};
 use serde_json::Value;
 
+use crate::executor::{
+    hedge_fast_failure_candidate_status_tag, hedge_fast_failure_execution_error_tag,
+    hedge_fast_failure_status_tag, HedgeEligibilityTag,
+};
 use crate::orchestration::{
     resolve_local_failover_analysis_for_attempt, LocalFailoverAnalysis, LocalFailoverDecision,
 };
@@ -11,6 +15,32 @@ fn sync_plan_kind_disables_local_candidate_failover(plan_kind: &str) -> bool {
         plan_kind,
         "openai_video_delete_sync" | "openai_video_cancel_sync" | "gemini_video_cancel_sync"
     )
+}
+
+pub(crate) fn hedge_fast_failure_retry_next_candidate_tag(
+    analysis: LocalFailoverAnalysis,
+    status_code: Option<u16>,
+    error_type: Option<&str>,
+    error_message: Option<&str>,
+    execution_error: Option<&ExecutionError>,
+) -> Option<HedgeEligibilityTag> {
+    if !matches!(analysis.decision, LocalFailoverDecision::RetryNextCandidate) {
+        return None;
+    }
+
+    if let Some(error) = execution_error {
+        if let Some(upstream_status) = error.upstream_status {
+            return hedge_fast_failure_status_tag(upstream_status);
+        }
+        if let Some(tag) = hedge_fast_failure_execution_error_tag(error) {
+            return Some(tag);
+        }
+    }
+    if let Some(status_code) = status_code {
+        return hedge_fast_failure_status_tag(status_code);
+    }
+
+    hedge_fast_failure_candidate_status_tag(None, error_type, error_message)
 }
 
 pub(crate) async fn should_retry_next_local_candidate_sync(
@@ -326,13 +356,14 @@ pub(crate) fn resolve_core_stream_direct_finalize_report_kind(plan_kind: &str) -
 mod tests {
     use std::collections::BTreeSet;
 
-    use aether_contracts::ExecutionResult;
+    use aether_contracts::{ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionResult};
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data_contracts::repository::provider_catalog::{
         StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
 
     use super::{
+        analyze_local_candidate_failover_sync, hedge_fast_failure_retry_next_candidate_tag,
         resolve_core_stream_error_finalize_report_kind,
         resolve_core_sync_error_finalize_report_kind, should_fallback_to_control_stream,
         should_fallback_to_control_sync, should_retry_next_local_candidate_stream,
@@ -341,7 +372,8 @@ mod tests {
     };
     use crate::data::GatewayDataState;
     use crate::orchestration::{
-        resolve_local_failover_policy, LocalFailoverPolicy, LocalFailoverRegexRule,
+        resolve_local_failover_policy, LocalFailoverAnalysis, LocalFailoverClassification,
+        LocalFailoverDecision, LocalFailoverPolicy, LocalFailoverRegexRule,
     };
     use crate::AppState;
 
@@ -574,6 +606,169 @@ mod tests {
             )
             .await
         );
+    }
+
+    #[tokio::test]
+    async fn sync_retry_next_candidate_marks_fast_statuses_hedge_eligible() {
+        let local_report_context = serde_json::json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
+        let state = build_state_with_provider_config(None);
+        let plan = sample_plan();
+
+        for status_code in [401, 403, 429] {
+            let result = ExecutionResult {
+                request_id: "req-1".to_string(),
+                candidate_id: None,
+                status_code,
+                headers: Default::default(),
+                body: None,
+                telemetry: None,
+                error: None,
+            };
+            let analysis = analyze_local_candidate_failover_sync(
+                &state,
+                &plan,
+                "openai_chat_sync",
+                Some(&local_report_context),
+                &result,
+                None,
+            )
+            .await;
+
+            assert!(matches!(
+                analysis.decision,
+                crate::orchestration::LocalFailoverDecision::RetryNextCandidate
+            ));
+            assert!(hedge_fast_failure_retry_next_candidate_tag(
+                analysis,
+                Some(status_code),
+                None,
+                None,
+                result.error.as_ref(),
+            )
+            .is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_retry_next_candidate_does_not_mark_5xx_hedge_eligible() {
+        let result = ExecutionResult {
+            request_id: "req-1".to_string(),
+            candidate_id: None,
+            status_code: 500,
+            headers: Default::default(),
+            body: None,
+            telemetry: None,
+            error: None,
+        };
+        let local_report_context = serde_json::json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
+        let state = build_state_with_provider_config(None);
+        let plan = sample_plan();
+        let analysis = analyze_local_candidate_failover_sync(
+            &state,
+            &plan,
+            "openai_chat_sync",
+            Some(&local_report_context),
+            &result,
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            analysis.decision,
+            crate::orchestration::LocalFailoverDecision::RetryNextCandidate
+        ));
+        assert!(hedge_fast_failure_retry_next_candidate_tag(
+            analysis,
+            Some(result.status_code),
+            Some("retryable_upstream_status"),
+            Some("upstream failed"),
+            result.error.as_ref(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn retry_next_candidate_marks_tls_execution_error_hedge_eligible() {
+        let result_error = ExecutionError {
+            kind: ExecutionErrorKind::TlsError,
+            phase: ExecutionPhase::Connect,
+            message: "TLS handshake failed".to_string(),
+            upstream_status: None,
+            retryable: true,
+            failover_recommended: true,
+        };
+        let analysis = LocalFailoverAnalysis {
+            classification: LocalFailoverClassification::RetryUpstreamFailure,
+            decision: LocalFailoverDecision::RetryNextCandidate,
+        };
+
+        let tag = hedge_fast_failure_retry_next_candidate_tag(
+            analysis,
+            None,
+            None,
+            None,
+            Some(&result_error),
+        )
+        .expect("TLS retry-next failure should be hedge eligible");
+
+        assert_eq!(tag.source, "execution_error");
+        assert_eq!(tag.reason, "tls_or_handshake");
+    }
+
+    #[tokio::test]
+    async fn sync_retry_next_candidate_marks_tls_execution_error_with_synthetic_status() {
+        let result_error = ExecutionError {
+            kind: ExecutionErrorKind::TlsError,
+            phase: ExecutionPhase::Connect,
+            message: "TLS handshake failed".to_string(),
+            upstream_status: None,
+            retryable: true,
+            failover_recommended: true,
+        };
+        let result = ExecutionResult {
+            request_id: "req-1".to_string(),
+            candidate_id: None,
+            status_code: 500,
+            headers: Default::default(),
+            body: None,
+            telemetry: None,
+            error: Some(result_error),
+        };
+        let local_report_context = serde_json::json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
+        let state = build_state_with_provider_config(None);
+        let plan = sample_plan();
+        let analysis = analyze_local_candidate_failover_sync(
+            &state,
+            &plan,
+            "openai_chat_sync",
+            Some(&local_report_context),
+            &result,
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            analysis.decision,
+            crate::orchestration::LocalFailoverDecision::RetryNextCandidate
+        ));
+        let tag = hedge_fast_failure_retry_next_candidate_tag(
+            analysis,
+            Some(result.status_code),
+            Some("retryable_upstream_status"),
+            Some("TLS handshake failed"),
+            result.error.as_ref(),
+        )
+        .expect("structured TLS execution error should be hedge eligible");
+        assert_eq!(tag.reason, "tls_or_handshake");
     }
 
     #[tokio::test]

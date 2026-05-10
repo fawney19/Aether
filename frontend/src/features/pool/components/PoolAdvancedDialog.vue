@@ -27,6 +27,7 @@
             v-for="item in healthToggleCards"
             :key="item.key"
             class="flex flex-col gap-3 rounded-xl border border-border/60 bg-muted/30 p-4 sm:flex-row sm:items-start sm:justify-between lg:items-center"
+            :class="isHealthToggleDisabled(item.key) ? 'opacity-70' : ''"
           >
             <div class="min-w-0 flex-1 space-y-1">
               <div class="flex items-center gap-1.5">
@@ -59,11 +60,19 @@
                 {{ item.description }}
               </p>
             </div>
-            <Switch
-              :model-value="getHealthToggleValue(item.key)"
+            <span
               class="shrink-0"
-              @update:model-value="(v: boolean) => updateHealthToggleValue(item.key, v)"
-            />
+              :title="getHealthToggleDisabledTitle(item.key)"
+              :data-testid="item.key === 'pre_probe_enabled' ? 'pre-probe-switch-wrapper' : undefined"
+            >
+              <Switch
+                :model-value="getHealthToggleValue(item.key)"
+                :disabled="isHealthToggleDisabled(item.key)"
+                :aria-label="item.label"
+                class="shrink-0"
+                @update:model-value="(v: boolean) => updateHealthToggleValue(item.key, v)"
+              />
+            </span>
           </div>
         </div>
 
@@ -85,6 +94,47 @@
                 placeholder="10"
                 @update:model-value="(v) => form.probing_interval_minutes = parseNum(v)"
               />
+            </div>
+          </div>
+        </div>
+
+        <div
+          v-if="showPreProbePanel"
+          class="rounded-xl border border-dashed border-primary/25 bg-primary/5 p-4"
+        >
+          <div class="space-y-3">
+            <p class="text-xs leading-5 text-muted-foreground">
+              {{ preProbeHelpText }}
+            </p>
+            <div
+              class="grid gap-3 sm:grid-cols-2"
+              :class="preProbeFieldLayout.desktopColumnsClass"
+            >
+              <div
+                v-for="field in preProbeFieldLayout.fields"
+                :key="field.key"
+                class="space-y-1.5"
+              >
+                <Label>
+                  {{ field.label }}
+                  <span
+                    v-if="field.unit"
+                    class="text-xs text-muted-foreground"
+                  >({{ field.unit }})</span>
+                </Label>
+                <Input
+                  :model-value="preProbeForm[field.key] ?? ''"
+                  :aria-label="field.label"
+                  type="number"
+                  :min="field.min"
+                  :max="field.max"
+                  :placeholder="field.placeholder"
+                  @update:model-value="(v) => updatePreProbeNumber(field.key, v)"
+                />
+                <p class="text-[11px] leading-5 text-muted-foreground">
+                  {{ field.description }}
+                </p>
+              </div>
             </div>
           </div>
         </div>
@@ -420,11 +470,20 @@ import {
   buildPoolCooldownFieldLayout,
   buildPoolCostFieldLayout,
   buildPoolHealthToggleCards,
+  buildPoolPreProbeFieldLayout,
+  buildPoolPreProbeForm,
+  buildPoolPreProbePayload,
   buildPoolSecondarySectionLayout,
+  isOAuthPoolProviderType,
+  POOL_PRE_PROBE_DISABLED_TOOLTIP,
+  POOL_PRE_PROBE_HELP_TEXT,
+  type PoolPreProbeFormState,
+  type PoolPreProbeNumberKey,
   type PoolHealthToggleKey,
 } from '@/features/pool/utils/poolAdvancedDialog'
 import type {
   PoolAdvancedConfig,
+  PoolPreProbeConfig,
   ClaudeCodeAdvancedConfig,
   ProviderWithEndpointsSummary,
 } from '@/api/endpoints/types/provider'
@@ -452,7 +511,11 @@ const isClaudeCode = computed(() => {
 const healthToggleCards = buildPoolHealthToggleCards()
 const cooldownFieldLayout = buildPoolCooldownFieldLayout()
 const costFieldLayout = buildPoolCostFieldLayout()
+const preProbeFieldLayout = buildPoolPreProbeFieldLayout()
 const secondarySectionLayout = buildPoolSecondarySectionLayout()
+const preProbeHelpText = POOL_PRE_PROBE_HELP_TEXT
+
+const isOAuthPoolProvider = computed(() => isOAuthPoolProviderType(props.providerType))
 
 const form = ref({
   global_priority: null as number | null | undefined,
@@ -468,7 +531,12 @@ const form = ref({
   probing_interval_minutes: null as number | null | undefined,
   auto_remove_banned_keys: false,
   skip_exhausted_accounts: false,
+  pre_probe_enabled: false,
 })
+
+const preProbeForm = ref<PoolPreProbeFormState>(buildPoolPreProbeForm())
+const preProbeTouched = ref(false)
+const showPreProbePanel = computed(() => isOAuthPoolProvider.value && form.value.pre_probe_enabled)
 
 interface ClaudeFormState {
   session_control_enabled: boolean
@@ -506,6 +574,8 @@ function getHealthToggleValue(key: PoolHealthToggleKey): boolean {
       return form.value.auto_remove_banned_keys
     case 'skip_exhausted_accounts':
       return form.value.skip_exhausted_accounts
+    case 'pre_probe_enabled':
+      return isOAuthPoolProvider.value && form.value.pre_probe_enabled
   }
 }
 
@@ -522,7 +592,25 @@ function updateHealthToggleValue(key: PoolHealthToggleKey, value: boolean): void
       return
     case 'skip_exhausted_accounts':
       form.value.skip_exhausted_accounts = value
+      return
+    case 'pre_probe_enabled':
+      if (!isOAuthPoolProvider.value) return
+      form.value.pre_probe_enabled = value
+      preProbeTouched.value = true
   }
+}
+
+function isHealthToggleDisabled(key: PoolHealthToggleKey): boolean {
+  return key === 'pre_probe_enabled' && !isOAuthPoolProvider.value
+}
+
+function getHealthToggleDisabledTitle(key: PoolHealthToggleKey): string | undefined {
+  return isHealthToggleDisabled(key) ? POOL_PRE_PROBE_DISABLED_TOOLTIP : undefined
+}
+
+function updatePreProbeNumber(key: PoolPreProbeNumberKey, value: string | number): void {
+  preProbeForm.value[key] = parseNum(value)
+  preProbeTouched.value = true
 }
 
 watch(() => props.modelValue, (open) => {
@@ -543,7 +631,10 @@ watch(() => props.modelValue, (open) => {
     probing_interval_minutes: cfg?.probing_interval_minutes ?? null,
     auto_remove_banned_keys: cfg?.auto_remove_banned_keys ?? false,
     skip_exhausted_accounts: cfg?.skip_exhausted_accounts ?? false,
+    pre_probe_enabled: isOAuthPoolProvider.value && cfg?.pre_probe?.enabled === true,
   }
+  preProbeForm.value = buildPoolPreProbeForm(cfg?.pre_probe)
+  preProbeTouched.value = false
 
   const cc = props.currentClaudeConfig
   claudeForm.value = {
@@ -578,6 +669,21 @@ async function handleSave() {
         : undefined,
       auto_remove_banned_keys: form.value.auto_remove_banned_keys,
       skip_exhausted_accounts: form.value.skip_exhausted_accounts,
+    }
+
+    const currentPreProbe = props.currentConfig?.pre_probe ?? null
+    if (isOAuthPoolProvider.value) {
+      if (preProbeTouched.value || currentPreProbe) {
+        poolAdvanced.pre_probe = buildPoolPreProbePayload(
+          form.value.pre_probe_enabled,
+          preProbeForm.value,
+        )
+      }
+    } else if (currentPreProbe) {
+      poolAdvanced.pre_probe = {
+        ...(currentPreProbe as PoolPreProbeConfig),
+        enabled: false,
+      }
     }
 
     const payload: Parameters<typeof updateProvider>[1] = {

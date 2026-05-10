@@ -283,20 +283,30 @@ impl AppState {
         &self,
         record: &global_models::UpsertAdminProviderModelRecord,
     ) -> Result<Option<global_models::StoredAdminProviderModel>, GatewayError> {
-        self.data
+        let created = self
+            .data
             .create_admin_provider_model(record)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if created.is_some() {
+            self.bump_pool_candidate_config_version().await;
+        }
+        Ok(created)
     }
 
     pub(crate) async fn update_admin_provider_model(
         &self,
         record: &global_models::UpsertAdminProviderModelRecord,
     ) -> Result<Option<global_models::StoredAdminProviderModel>, GatewayError> {
-        self.data
+        let updated = self
+            .data
             .update_admin_provider_model(record)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if updated.is_some() {
+            self.bump_pool_candidate_config_version().await;
+        }
+        Ok(updated)
     }
 
     pub(crate) async fn delete_admin_provider_model(
@@ -304,40 +314,60 @@ impl AppState {
         provider_id: &str,
         model_id: &str,
     ) -> Result<bool, GatewayError> {
-        self.data
+        let deleted = self
+            .data
             .delete_admin_provider_model(provider_id, model_id)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if deleted {
+            self.bump_pool_candidate_config_version().await;
+        }
+        Ok(deleted)
     }
 
     pub(crate) async fn create_admin_global_model(
         &self,
         record: &global_models::CreateAdminGlobalModelRecord,
     ) -> Result<Option<global_models::StoredAdminGlobalModel>, GatewayError> {
-        self.data
+        let created = self
+            .data
             .create_admin_global_model(record)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if created.is_some() {
+            self.bump_pool_candidate_config_version().await;
+        }
+        Ok(created)
     }
 
     pub(crate) async fn update_admin_global_model(
         &self,
         record: &global_models::UpdateAdminGlobalModelRecord,
     ) -> Result<Option<global_models::StoredAdminGlobalModel>, GatewayError> {
-        self.data
+        let updated = self
+            .data
             .update_admin_global_model(record)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if updated.is_some() {
+            self.bump_pool_candidate_config_version().await;
+        }
+        Ok(updated)
     }
 
     pub(crate) async fn delete_admin_global_model(
         &self,
         global_model_id: &str,
     ) -> Result<bool, GatewayError> {
-        self.data
+        let deleted = self
+            .data
             .delete_admin_global_model(global_model_id)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if deleted {
+            self.bump_pool_candidate_config_version().await;
+        }
+        Ok(deleted)
     }
 
     pub(crate) async fn list_provider_model_stats(
@@ -469,6 +499,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if created.is_some() {
             self.clear_provider_transport_snapshot_cache();
+            self.bump_pool_candidate_config_version().await;
         }
         Ok(created)
     }
@@ -485,6 +516,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if created.is_some() {
             self.clear_provider_transport_snapshot_cache();
+            self.bump_pool_candidate_config_version().await;
         }
         Ok(created)
     }
@@ -500,6 +532,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.is_some() {
             self.clear_provider_transport_snapshot_cache();
+            self.bump_pool_candidate_config_version().await;
         }
         Ok(updated)
     }
@@ -515,6 +548,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if deleted {
             self.clear_provider_transport_snapshot_cache();
+            self.bump_pool_candidate_config_version().await;
         }
         Ok(deleted)
     }
@@ -531,6 +565,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if !endpoint_ids.is_empty() || !key_ids.is_empty() {
             self.clear_provider_transport_snapshot_cache();
+            self.bump_pool_candidate_config_version().await;
         }
         Ok(())
     }
@@ -546,6 +581,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if created.is_some() {
             self.clear_provider_transport_snapshot_cache();
+            self.bump_pool_candidate_config_version().await;
         }
         Ok(created)
     }
@@ -561,6 +597,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.is_some() {
             self.clear_provider_transport_snapshot_cache();
+            self.bump_pool_candidate_config_version().await;
         }
         Ok(updated)
     }
@@ -576,6 +613,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if deleted {
             self.clear_provider_transport_snapshot_cache();
+            self.bump_pool_candidate_config_version().await;
         }
         Ok(deleted)
     }
@@ -591,6 +629,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.is_some() {
             self.clear_provider_transport_snapshot_cache();
+            self.bump_pool_candidate_config_version().await;
         }
         Ok(updated)
     }
@@ -612,6 +651,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated {
             self.clear_provider_transport_snapshot_cache();
+            self.bump_pool_candidate_config_version().await;
         }
         Ok(updated)
     }
@@ -627,6 +667,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if deleted {
             self.clear_provider_transport_snapshot_cache();
+            self.bump_pool_candidate_config_version().await;
         }
         Ok(deleted)
     }
@@ -761,6 +802,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated {
             self.clear_provider_transport_snapshot_cache();
+            self.bump_pool_candidate_config_version().await;
         }
         Ok(updated)
     }

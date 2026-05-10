@@ -32,9 +32,13 @@ use crate::execution_runtime::submission::submit_local_core_error_or_sync_finali
 use crate::execution_runtime::transport::DirectSyncExecutionRuntime;
 use crate::execution_runtime::{
     analyze_local_candidate_failover_sync, apply_endpoint_response_header_rules,
-    attach_provider_response_headers_to_report_context, local_failover_response_text,
+    attach_provider_response_headers_to_report_context,
+    hedge_fast_failure_retry_next_candidate_tag, local_failover_response_text,
     resolve_core_sync_error_finalize_report_kind, should_fallback_to_control_sync,
     should_finalize_sync_response, LocalFailoverDecision,
+};
+use crate::executor::{
+    hedge_fast_failure_transport_error_tag, with_hedge_eligibility_report_context,
 };
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
@@ -236,10 +240,14 @@ pub(crate) async fn execute_execution_runtime_sync(
                         "gateway in-process sync execution unavailable"
                     );
                     let terminal_unix_secs = current_request_candidate_unix_ms();
+                    let hedge_report_context = hedge_fast_failure_transport_error_tag(&err)
+                        .and_then(|tag| {
+                            with_hedge_eligibility_report_context(report_context.as_ref(), tag)
+                        });
                     record_local_request_candidate_status(
                         state,
                         &plan,
-                        report_context.as_ref(),
+                        hedge_report_context.as_ref().or(report_context.as_ref()),
                         SchedulerRequestCandidateStatusUpdate {
                             status: RequestCandidateStatus::Failed,
                             status_code: None,
@@ -270,10 +278,14 @@ pub(crate) async fn execute_execution_runtime_sync(
                     "gateway ChatGPT-Web image execution unavailable"
                 );
                 let terminal_unix_secs = current_request_candidate_unix_ms();
+                let hedge_report_context =
+                    hedge_fast_failure_transport_error_tag(&err).and_then(|tag| {
+                        with_hedge_eligibility_report_context(report_context.as_ref(), tag)
+                    });
                 record_local_request_candidate_status(
                     state,
                     &plan,
-                    report_context.as_ref(),
+                    hedge_report_context.as_ref().or(report_context.as_ref()),
                     SchedulerRequestCandidateStatusUpdate {
                         status: RequestCandidateStatus::Failed,
                         status_code: None,
@@ -355,10 +367,14 @@ pub(crate) async fn execute_execution_runtime_sync(
                             "gateway in-process sync execution unavailable"
                         );
                         let terminal_unix_secs = current_request_candidate_unix_ms();
+                        let hedge_report_context = hedge_fast_failure_transport_error_tag(&err)
+                            .and_then(|tag| {
+                                with_hedge_eligibility_report_context(report_context.as_ref(), tag)
+                            });
                         record_local_request_candidate_status(
                             state,
                             &plan,
-                            report_context.as_ref(),
+                            hedge_report_context.as_ref().or(report_context.as_ref()),
                             SchedulerRequestCandidateStatusUpdate {
                                 status: RequestCandidateStatus::Failed,
                                 status_code: None,
@@ -389,10 +405,14 @@ pub(crate) async fn execute_execution_runtime_sync(
                         "gateway ChatGPT-Web image execution unavailable"
                     );
                     let terminal_unix_secs = current_request_candidate_unix_ms();
+                    let hedge_report_context = hedge_fast_failure_transport_error_tag(&err)
+                        .and_then(|tag| {
+                            with_hedge_eligibility_report_context(report_context.as_ref(), tag)
+                        });
                     record_local_request_candidate_status(
                         state,
                         &plan,
-                        report_context.as_ref(),
+                        hedge_report_context.as_ref().or(report_context.as_ref()),
                         SchedulerRequestCandidateStatusUpdate {
                             status: RequestCandidateStatus::Failed,
                             status_code: None,
@@ -601,12 +621,27 @@ pub(crate) async fn execute_execution_runtime_sync(
             local_failover_response_text.as_deref(),
             local_failover_analysis,
         );
+        let hedge_report_context = hedge_fast_failure_retry_next_candidate_tag(
+            local_failover_analysis,
+            Some(result.status_code),
+            result_error_type.as_deref(),
+            result_error_message.as_deref(),
+            result.error.as_ref(),
+        )
+        .and_then(|tag| {
+            with_hedge_eligibility_report_context(
+                error_trace_report_context
+                    .as_ref()
+                    .or(report_context.as_ref()),
+                tag,
+            )
+        });
         record_local_request_candidate_status(
             state,
             &plan,
-            error_trace_report_context
+            hedge_report_context.as_ref().or(error_trace_report_context
                 .as_ref()
-                .or(report_context.as_ref()),
+                .or(report_context.as_ref())),
             SchedulerRequestCandidateStatusUpdate {
                 status: RequestCandidateStatus::Failed,
                 status_code: Some(result.status_code),

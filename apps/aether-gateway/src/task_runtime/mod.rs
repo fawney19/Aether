@@ -21,6 +21,7 @@ pub(crate) const TASK_KEY_USAGE_QUEUE_WORKER: &str = "usage.queue.worker";
 pub(crate) const TASK_KEY_VIDEO_TASK_POLLER: &str = "video.task.poller";
 pub(crate) const TASK_KEY_MODEL_FETCH_WORKER: &str = "model.fetch.worker";
 pub(crate) const TASK_KEY_PROVIDER_QUOTA_RESET: &str = "provider.quota.reset.worker";
+pub(crate) const TASK_KEY_POOL_PREHEAT_PROBE: &str = "pool.preheat.probe.worker";
 pub(crate) const TASK_KEY_POOL_QUOTA_PROBE: &str = "pool.quota.probe.worker";
 pub(crate) const TASK_KEY_POOL_MONITOR: &str = "pool.monitor.worker";
 pub(crate) const TASK_KEY_AUDIT_CLEANUP: &str = "maintenance.audit.cleanup";
@@ -90,6 +91,14 @@ const TASK_DEFINITIONS: &[TaskDefinition] = &[
         TaskKind::Scheduled,
         "daily",
         true,
+        true,
+        RETRY_ONCE,
+    ),
+    TaskDefinition::new(
+        TASK_KEY_POOL_PREHEAT_PROBE,
+        TaskKind::OnDemand,
+        "request",
+        false,
         true,
         RETRY_ONCE,
     ),
@@ -644,4 +653,359 @@ pub(crate) async fn submit_provider_delete_task(
     });
 
     Ok(Some(task_id))
+}
+
+pub(crate) async fn submit_pool_preheat_probe_task(
+    app: &AppState,
+    provider_id: &str,
+    pool_group_id: &str,
+    top_n_key_ids: Vec<String>,
+) -> Result<Option<String>, GatewayError> {
+    let request = crate::maintenance::PoolPreheatProbeTaskRequest::new(
+        provider_id,
+        pool_group_id,
+        top_n_key_ids,
+    );
+    if request.provider_id.is_empty() || request.pool_group_id.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(provider) = app
+        .read_provider_catalog_providers_by_ids(std::slice::from_ref(&request.provider_id))
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(None);
+    };
+    if !crate::maintenance::pool_preheat_probe_provider_is_supported(&provider.provider_type) {
+        return Ok(None);
+    }
+
+    let run_id = build_task_run_id();
+    let created_at = now_unix_secs();
+    let max_attempts = task_definition(TASK_KEY_POOL_PREHEAT_PROBE)
+        .map(|item| item.retry_policy.max_attempts)
+        .unwrap_or(1);
+    if app.has_background_task_data_writer() {
+        let run = UpsertBackgroundTaskRun {
+            id: run_id.clone(),
+            task_key: TASK_KEY_POOL_PREHEAT_PROBE.to_string(),
+            kind: BackgroundTaskKind::OnDemand,
+            trigger: "request".to_string(),
+            status: BackgroundTaskStatus::Queued,
+            attempt: 1,
+            max_attempts,
+            owner_instance: Some(app.tunnel.local_instance_id().to_string()),
+            progress_percent: 0,
+            progress_message: Some("pool preheat probe queued".to_string()),
+            payload_json: Some(serde_json::json!({
+                "provider_id": request.provider_id.clone(),
+                "pool_group_id": request.pool_group_id.clone(),
+                "top_n_key_ids": request.top_n_key_ids.clone(),
+            })),
+            result_json: None,
+            error_message: None,
+            cancel_requested: false,
+            created_by: Some("request".to_string()),
+            created_at_unix_secs: created_at,
+            started_at_unix_secs: None,
+            finished_at_unix_secs: None,
+            updated_at_unix_secs: created_at,
+        };
+        let _ = upsert_run_with_logging(app, run).await;
+        append_event_with_logging(
+            app,
+            &run_id,
+            "queued",
+            "pool preheat probe queued",
+            Some(serde_json::json!({
+                "provider_id": request.provider_id.clone(),
+                "pool_group_id": request.pool_group_id.clone(),
+                "top_n_key_ids": request.top_n_key_ids.clone(),
+            })),
+        )
+        .await;
+    }
+
+    let task_app = app.clone();
+    let task_request = request.clone();
+    let task_run_id = run_id.clone();
+    spawn_named("task-runtime-pool-preheat-probe", async move {
+        let lock_key = format!(
+            "task_runtime:lock:{TASK_KEY_POOL_PREHEAT_PROBE}:{}:{}",
+            task_request.provider_id, task_request.pool_group_id
+        );
+        let lock_ttl = std::time::Duration::from_secs(60 * 2);
+        let lock = task_app
+            .runtime_state
+            .lock_try_acquire(&lock_key, task_app.tunnel.local_instance_id(), lock_ttl)
+            .await
+            .ok()
+            .flatten();
+        if lock.is_none() {
+            let _ = update_run_status(
+                &task_app,
+                &task_run_id,
+                BackgroundTaskStatus::Skipped,
+                Some(0),
+                Some("pool preheat probe skipped: another node is running this group".to_string()),
+                None,
+                None,
+                None,
+                Some(now_unix_secs()),
+            )
+            .await;
+            append_event_with_logging(
+                &task_app,
+                &task_run_id,
+                "skipped",
+                "pool preheat probe skipped by group lock",
+                None,
+            )
+            .await;
+            return;
+        }
+
+        let started_at = now_unix_secs();
+        let _ = update_run_status(
+            &task_app,
+            &task_run_id,
+            BackgroundTaskStatus::Running,
+            Some(5),
+            Some("pool preheat probe started".to_string()),
+            None,
+            None,
+            Some(started_at),
+            None,
+        )
+        .await;
+        append_event_with_logging(
+            &task_app,
+            &task_run_id,
+            "running",
+            "pool preheat probe started",
+            None,
+        )
+        .await;
+
+        match crate::maintenance::perform_pool_preheat_probe(&task_app, task_request.clone()).await
+        {
+            Ok(summary) => {
+                let status = if summary.task_status_is_skipped() {
+                    BackgroundTaskStatus::Skipped
+                } else {
+                    BackgroundTaskStatus::Succeeded
+                };
+                let progress_message = if summary.task_status_is_skipped() {
+                    summary
+                        .skipped_reason
+                        .clone()
+                        .unwrap_or_else(|| "pool preheat probe skipped".to_string())
+                } else {
+                    format!(
+                        "pool preheat probe completed: {} probed, {} healthy",
+                        summary.probed_keys, summary.healthy
+                    )
+                };
+                let _ = update_run_status(
+                    &task_app,
+                    &task_run_id,
+                    status,
+                    Some(100),
+                    Some(progress_message),
+                    Some(serde_json::to_value(&summary).unwrap_or_else(|_| serde_json::json!({}))),
+                    None,
+                    None,
+                    Some(now_unix_secs()),
+                )
+                .await;
+                append_event_with_logging(
+                    &task_app,
+                    &task_run_id,
+                    if status == BackgroundTaskStatus::Skipped {
+                        "skipped"
+                    } else {
+                        "succeeded"
+                    },
+                    if status == BackgroundTaskStatus::Skipped {
+                        "pool preheat probe skipped"
+                    } else {
+                        "pool preheat probe completed"
+                    },
+                    None,
+                )
+                .await;
+            }
+            Err(err) => {
+                warn!(
+                    run_id = %task_run_id,
+                    provider_id = %task_request.provider_id,
+                    error = ?err,
+                    "pool preheat probe task failed"
+                );
+                let _ = update_run_status(
+                    &task_app,
+                    &task_run_id,
+                    BackgroundTaskStatus::Failed,
+                    Some(100),
+                    Some("pool preheat probe failed".to_string()),
+                    None,
+                    Some(format!("{err:?}")),
+                    None,
+                    Some(now_unix_secs()),
+                )
+                .await;
+                append_event_with_logging(
+                    &task_app,
+                    &task_run_id,
+                    "failed",
+                    "pool preheat probe failed",
+                    Some(serde_json::json!({ "error": format!("{err:?}") })),
+                )
+                .await;
+            }
+        }
+
+        if let Some(lock) = lock {
+            let _ = task_app.runtime_state.lock_release(&lock).await;
+        }
+    });
+
+    Ok(Some(run_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use aether_data::repository::background_tasks::InMemoryBackgroundTaskRepository;
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+    use aether_data_contracts::repository::background_tasks::BackgroundTaskStatus;
+    use aether_data_contracts::repository::provider_catalog::{
+        StoredProviderCatalogEndpoint, StoredProviderCatalogProvider,
+    };
+    use aether_task_runtime::TaskKind;
+
+    fn provider(provider_type: &str) -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            "provider-preheat".to_string(),
+            "preheat".to_string(),
+            Some("https://example.com".to_string()),
+            provider_type.to_string(),
+        )
+        .expect("provider should build")
+    }
+
+    fn endpoint() -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            "endpoint-preheat".to_string(),
+            "provider-preheat".to_string(),
+            "openai:responses".to_string(),
+            None,
+            None,
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://example.com".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")
+    }
+
+    fn state_with_task_repository(
+        provider_catalog_repository: Arc<InMemoryProviderCatalogReadRepository>,
+        background_task_repository: Arc<InMemoryBackgroundTaskRepository>,
+    ) -> AppState {
+        AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository,
+                )
+                .attach_background_task_repository_for_tests(background_task_repository),
+            )
+    }
+
+    #[test]
+    fn pool_preheat_probe_task_definition_is_registered() {
+        let definition = task_definition(TASK_KEY_POOL_PREHEAT_PROBE)
+            .expect("pool preheat task definition should exist");
+
+        assert_eq!(definition.kind, TaskKind::OnDemand);
+        assert_eq!(definition.trigger, "request");
+        assert!(!definition.singleton);
+        assert!(definition.persist_history);
+        assert_eq!(definition.retry_policy.max_attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn submit_pool_preheat_probe_task_returns_queued_run_id() {
+        let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider("codex")],
+            vec![endpoint()],
+            vec![],
+        ));
+        let background_task_repository = Arc::new(InMemoryBackgroundTaskRepository::default());
+        let state =
+            state_with_task_repository(provider_catalog_repository, background_task_repository);
+
+        let run_id = submit_pool_preheat_probe_task(
+            &state,
+            "provider-preheat",
+            "provider=provider-preheat|endpoint=endpoint-preheat|model=model-1|selected_model=gpt-5|api_format=openai:responses|singleton_key=*",
+            vec!["key-preheat".to_string()],
+        )
+        .await
+        .expect("submit should succeed")
+        .expect("run id should be returned");
+        let run = state
+            .find_background_task_run(&run_id)
+            .await
+            .expect("run lookup should succeed")
+            .expect("queued run should exist");
+
+        assert_eq!(run.id, run_id);
+        assert_eq!(run.task_key, TASK_KEY_POOL_PREHEAT_PROBE);
+        assert_eq!(run.kind, BackgroundTaskKind::OnDemand);
+        assert_eq!(run.trigger, "request");
+        assert_eq!(run.status, BackgroundTaskStatus::Queued);
+        assert_eq!(
+            run.payload_json
+                .as_ref()
+                .and_then(|value| value.get("provider_id")),
+            Some(&serde_json::json!("provider-preheat"))
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_pool_preheat_probe_task_skips_unsupported_provider_without_run() {
+        let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider("openai")],
+            vec![endpoint()],
+            vec![],
+        ));
+        let background_task_repository = Arc::new(InMemoryBackgroundTaskRepository::default());
+        let state =
+            state_with_task_repository(provider_catalog_repository, background_task_repository);
+
+        let run_id = submit_pool_preheat_probe_task(
+            &state,
+            "provider-preheat",
+            "pool-group",
+            vec!["key-preheat".to_string()],
+        )
+        .await
+        .expect("submit should succeed");
+
+        assert!(run_id.is_none());
+    }
 }

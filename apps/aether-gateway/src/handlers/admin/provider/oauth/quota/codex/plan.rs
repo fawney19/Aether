@@ -8,6 +8,7 @@ use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTranspo
 use crate::GatewayError;
 use aether_contracts::{ExecutionPlan, ProxySnapshot, RequestBody};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 pub(super) fn build_codex_refresh_headers(
     transport: &AdminGatewayProviderTransportSnapshot,
@@ -61,6 +62,7 @@ pub(super) async fn execute_codex_quota_plan(
     transport: &AdminGatewayProviderTransportSnapshot,
     headers: BTreeMap<String, String>,
     proxy_override: Option<&ProxySnapshot>,
+    probe_timeout: Duration,
 ) -> Result<ProviderQuotaExecutionOutcome, GatewayError> {
     let proxy = match proxy_override {
         Some(proxy) => Some(proxy.clone()),
@@ -100,5 +102,5 @@ pub(super) async fn execute_codex_quota_plan(
         transport_profile: state.resolve_transport_profile(transport),
         timeouts,
     };
-    execute_provider_quota_plan(state, transport, plan, "codex").await
+    execute_provider_quota_plan(state, transport, plan, "codex", probe_timeout).await
 }

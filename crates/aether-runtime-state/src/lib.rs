@@ -492,6 +492,59 @@ impl RuntimeState {
         }
     }
 
+    pub async fn counter_increment(&self, key: &str) -> Result<u64, DataLayerError> {
+        validate_counter_key(key)?;
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => Ok(memory.counter_increment(key).await),
+            RuntimeStateBackend::Redis(redis) => {
+                let key = redis.keyspace.key(key);
+                let next = redis_query_i64(redis, "runtime counter increment", {
+                    let mut command = redis_cmd("INCR");
+                    command.arg(&key);
+                    command
+                })
+                .await?;
+                u64::try_from(next).map_err(|_| {
+                    DataLayerError::UnexpectedValue(format!(
+                        "runtime counter increment returned negative value {next}"
+                    ))
+                })
+            }
+        }
+    }
+
+    pub async fn counter_get(&self, key: &str) -> Result<u64, DataLayerError> {
+        validate_counter_key(key)?;
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => Ok(memory.counter_get(key).await),
+            RuntimeStateBackend::Redis(redis) => {
+                let namespaced_key = redis.keyspace.key(key);
+                let raw = run_redis_with_timeout(
+                    redis.command_timeout_ms,
+                    "runtime counter get",
+                    async {
+                        let mut connection = redis
+                            .client
+                            .get_multiplexed_async_connection()
+                            .await
+                            .map_redis_err()?;
+                        redis_cmd("GET")
+                            .arg(&namespaced_key)
+                            .query_async::<Option<String>>(&mut connection)
+                            .await
+                            .map_redis_err()
+                    },
+                )
+                .await?;
+                raw.as_deref().unwrap_or("0").parse::<u64>().map_err(|err| {
+                    DataLayerError::UnexpectedValue(format!(
+                        "runtime counter {key} contains non-u64 value: {err}"
+                    ))
+                })
+            }
+        }
+    }
+
     pub async fn kv_ttl_seconds(&self, key: &str) -> Result<Option<i64>, DataLayerError> {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.kv_ttl_seconds(key).await),
@@ -1765,6 +1818,15 @@ fn env_value(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn validate_counter_key(key: &str) -> Result<(), DataLayerError> {
+    if key.trim().is_empty() {
+        return Err(DataLayerError::InvalidInput(
+            "runtime counter key cannot be empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn unix_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1813,6 +1875,28 @@ mod tests {
             Some("payload")
         );
         assert_eq!(runtime.kv_take("nonce").await.expect("take"), None);
+    }
+
+    #[tokio::test]
+    async fn memory_counter_increment_is_monotonic_and_readable() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+
+        assert_eq!(runtime.counter_get("counter:test").await.expect("get"), 0);
+        assert_eq!(
+            runtime
+                .counter_increment("counter:test")
+                .await
+                .expect("first increment"),
+            1
+        );
+        assert_eq!(
+            runtime
+                .counter_increment("counter:test")
+                .await
+                .expect("second increment"),
+            2
+        );
+        assert_eq!(runtime.counter_get("counter:test").await.expect("get"), 2);
     }
 
     #[tokio::test]

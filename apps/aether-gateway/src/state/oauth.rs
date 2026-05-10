@@ -825,6 +825,7 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated {
             self.clear_provider_transport_snapshot_cache();
+            self.bump_pool_candidate_config_version().await;
         }
         Ok(updated)
     }

@@ -69,7 +69,7 @@ pub(crate) async fn refresh_oauth_plan_auth_for_retry(
     }
 }
 
-fn status_may_be_oauth_invalid(status_code: u16, response_text: Option<&str>) -> bool {
+pub(crate) fn status_may_be_oauth_invalid(status_code: u16, response_text: Option<&str>) -> bool {
     if status_code == 401 {
         return true;
     }

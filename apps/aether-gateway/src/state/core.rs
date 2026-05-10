@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
@@ -27,13 +28,14 @@ use super::super::async_task::{
 };
 use super::super::cache::{
     AuthApiKeyLastUsedCache, AuthContextCache, DashboardResponseCache, DirectPlanBypassCache,
-    SchedulerAffinityCache, SchedulerAffinitySnapshotEntry, SchedulerAffinityTarget,
-    SystemConfigCache,
+    PoolCandidateCache, SchedulerAffinityCache, SchedulerAffinitySnapshotEntry,
+    SchedulerAffinityTarget, SystemConfigCache,
 };
 use super::super::data::{GatewayDataConfig, GatewayDataState};
 use super::super::fallback_metrics;
 use super::super::fallback_metrics::{GatewayFallbackMetricKind, GatewayFallbackReason};
 use super::super::model_fetch::spawn_model_fetch_worker;
+use super::super::pool_preheat_metrics;
 use super::super::rate_limit::{FrontdoorUserRpmConfig, FrontdoorUserRpmLimiter};
 use super::super::router::RequestAdmissionError;
 use super::super::{control::GatewayControlDecision, error::GatewayError};
@@ -57,6 +59,7 @@ use crate::maintenance::spawn_usage_cleanup_worker;
 use crate::maintenance::spawn_wallet_daily_usage_aggregation_worker;
 
 const SYSTEM_CONFIG_CACHE_TTL: Duration = Duration::from_secs(3);
+const POOL_CANDIDATE_CONFIG_VERSION_KEY: &str = "pool_candidate_config_version";
 
 impl AppState {
     fn usage_worker_queue_for(
@@ -202,9 +205,12 @@ impl AppState {
             oauth_refresh: Arc::new(provider_transport::LocalOAuthRefreshCoordinator::new()),
             direct_plan_bypass_cache: Arc::new(DirectPlanBypassCache::default()),
             scheduler_affinity_cache: Arc::new(SchedulerAffinityCache::default()),
+            pool_candidate_cache: Arc::new(PoolCandidateCache::default()),
+            pool_candidate_config_version: Arc::new(AtomicU64::new(0)),
             dashboard_response_cache: Arc::new(DashboardResponseCache::default()),
             system_config_cache: Arc::new(SystemConfigCache::default()),
             fallback_metrics: Arc::new(fallback_metrics::GatewayFallbackMetrics::default()),
+            pool_preheat_metrics: Arc::new(pool_preheat_metrics::PoolPreheatMetrics::default()),
             frontdoor_cors: None,
             frontdoor_user_rpm: Arc::new(FrontdoorUserRpmLimiter::new(
                 FrontdoorUserRpmConfig::default(),
@@ -410,6 +416,65 @@ impl AppState {
 
     pub(crate) fn frontdoor_user_rpm(&self) -> Arc<FrontdoorUserRpmLimiter> {
         Arc::clone(&self.frontdoor_user_rpm)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn pool_candidate_cache(&self) -> Arc<PoolCandidateCache> {
+        Arc::clone(&self.pool_candidate_cache)
+    }
+
+    pub(crate) fn pool_preheat_metrics(&self) -> Arc<pool_preheat_metrics::PoolPreheatMetrics> {
+        Arc::clone(&self.pool_preheat_metrics)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn pool_candidate_config_version(&self) -> u64 {
+        self.pool_candidate_config_version.load(Ordering::SeqCst)
+    }
+
+    pub(crate) async fn bump_pool_candidate_config_version(&self) -> u64 {
+        let local_version = self
+            .pool_candidate_config_version
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        self.pool_preheat_metrics
+            .record_candidate_cache_operation("invalidate");
+        match self
+            .runtime_state
+            .counter_increment(POOL_CANDIDATE_CONFIG_VERSION_KEY)
+            .await
+        {
+            Ok(shared_version) => local_version.max(shared_version),
+            Err(err) => {
+                tracing::debug!(
+                    event_name = "pool_candidate_config_shared_version_bump_failed",
+                    log_type = "event",
+                    error = %err,
+                    "gateway pool candidate config shared version bump failed"
+                );
+                local_version
+            }
+        }
+    }
+
+    pub(crate) async fn effective_pool_candidate_config_version(&self) -> u64 {
+        let local_version = self.pool_candidate_config_version();
+        match self
+            .runtime_state
+            .counter_get(POOL_CANDIDATE_CONFIG_VERSION_KEY)
+            .await
+        {
+            Ok(shared_version) => local_version.max(shared_version),
+            Err(err) => {
+                tracing::debug!(
+                    event_name = "pool_candidate_config_shared_version_read_failed",
+                    log_type = "event",
+                    error = %err,
+                    "gateway pool candidate config shared version read failed"
+                );
+                local_version
+            }
+        }
     }
 
     pub(crate) fn mark_provider_key_rpm_reset(&self, key_id: &str, now_unix_secs: u64) {
@@ -786,6 +851,7 @@ impl AppState {
         }
         samples.extend(self.tunnel.metric_samples());
         samples.extend(self.fallback_metrics.metric_samples());
+        samples.extend(self.pool_preheat_metrics.metric_samples());
         samples
     }
 

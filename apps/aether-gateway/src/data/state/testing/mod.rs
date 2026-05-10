@@ -8,7 +8,8 @@ use aether_data_contracts::repository::usage::UsageRepository;
 use super::{
     AnnouncementReadRepository, AnnouncementWriteRepository, AuthApiKeyReadRepository,
     AuthApiKeyWriteRepository, AuthModuleReadRepository, AuthModuleWriteRepository,
-    BillingReadRepository, GatewayDataConfig, GatewayDataState, GeminiFileMappingReadRepository,
+    BackgroundTaskReadRepository, BackgroundTaskWriteRepository, BillingReadRepository,
+    GatewayDataConfig, GatewayDataState, GeminiFileMappingReadRepository,
     GeminiFileMappingWriteRepository, GlobalModelReadRepository, GlobalModelWriteRepository,
     ManagementTokenReadRepository, ManagementTokenWriteRepository,
     MinimalCandidateSelectionReadRepository, OAuthProviderReadRepository,
@@ -330,6 +331,30 @@ impl GatewayDataState {
         let provider_catalog_writer: Arc<dyn ProviderCatalogWriteRepository> = repository;
         self.provider_catalog_reader = Some(provider_catalog_reader);
         self.provider_catalog_writer = Some(provider_catalog_writer);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attach_minimal_candidate_selection_reader_for_tests(
+        mut self,
+        repository: Arc<dyn MinimalCandidateSelectionReadRepository>,
+    ) -> Self {
+        self.minimal_candidate_selection_reader = Some(repository);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attach_background_task_repository_for_tests<T>(
+        mut self,
+        repository: Arc<T>,
+    ) -> Self
+    where
+        T: BackgroundTaskReadRepository + BackgroundTaskWriteRepository + 'static,
+    {
+        let background_task_reader: Arc<dyn BackgroundTaskReadRepository> = repository.clone();
+        let background_task_writer: Arc<dyn BackgroundTaskWriteRepository> = repository;
+        self.background_task_reader = Some(background_task_reader);
+        self.background_task_writer = Some(background_task_writer);
         self
     }
 

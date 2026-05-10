@@ -1,3 +1,9 @@
+mod oauth_probe;
+
+pub(crate) use self::oauth_probe::{
+    classify_oauth_key_probe_status, probe_oauth_provider_key_with_classification,
+    OauthKeyProbeClassification, OauthKeyProbeOutcome, OauthKeyProbeResult,
+};
 pub(crate) use crate::handlers::admin::{
     admin_provider_ops_local_action_response, admin_provider_pool_config,
     build_internal_control_error_response, create_provider_oauth_catalog_key,
@@ -9,6 +15,12 @@ pub(crate) use crate::handlers::admin::{
     AdminAppState, AdminGatewayProviderTransportSnapshot, AdminLocalOAuthRefreshError,
     AdminRequestContext, AdminRouteRequest, AdminRouteResponse, AdminRouteResult,
     AdminStatsTimeRange, AdminStatsUsageFilter,
+};
+
+use crate::handlers::admin::{
+    probe_antigravity_provider_key_with_classification,
+    probe_chatgpt_web_provider_key_with_classification,
+    probe_codex_provider_key_with_classification, probe_kiro_provider_key_with_classification,
 };
 
 use crate::handlers::admin::{
