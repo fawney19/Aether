@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use url::form_urlencoded;
 use uuid::Uuid;
 
-fn build_kiro_usage_headers(auth: &AdminKiroRequestAuth) -> BTreeMap<String, String> {
+pub(super) fn build_kiro_usage_headers(auth: &AdminKiroRequestAuth) -> BTreeMap<String, String> {
     let kiro_version = auth.auth_config.effective_kiro_version();
     let machine_id = auth.machine_id.trim();
     let ide_tag = if machine_id.is_empty() {

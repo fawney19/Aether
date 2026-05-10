@@ -191,6 +191,17 @@ pub(super) fn classify_oauth_route(
         ))
     } else if method == http::Method::POST
         && normalized_path.starts_with("/api/admin/provider-oauth/keys/")
+        && normalized_path.ends_with("/kiro/overage")
+    {
+        Some(classified(
+            "admin_proxy",
+            "provider_oauth_manage",
+            "set_kiro_overage",
+            "admin:provider_oauth",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && normalized_path.starts_with("/api/admin/provider-oauth/keys/")
         && normalized_path.ends_with("/refresh")
     {
         Some(classified(

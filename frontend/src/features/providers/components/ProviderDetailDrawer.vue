@@ -658,7 +658,9 @@
                         v-if="hasCodexSparkQuotaDisplayData(key)"
                         class="mt-3 border-t border-border/60 pt-2"
                       >
-                        <div class="mb-1 text-[10px] text-muted-foreground">GPT-5.3 Codex Spark</div>
+                        <div class="mb-1 text-[10px] text-muted-foreground">
+                          GPT-5.3 Codex Spark
+                        </div>
                         <div class="grid gap-3 grid-cols-2">
                           <div v-if="getCodexQuotaDisplay(key)?.spark_secondary_used_percent !== undefined">
                             <div class="flex items-center justify-between text-[10px] mb-0.5">
@@ -858,7 +860,21 @@
                       <template v-else>
                         <div class="flex items-center justify-between mb-1">
                           <span class="text-[10px] text-muted-foreground">账号配额</span>
-                          <div class="flex items-center gap-1">
+                          <div class="flex items-center gap-2">
+                            <!-- 超额开关（仅 overage_capable 时渲染） -->
+                            <div
+                              v-if="key.upstream_metadata?.kiro?.overage_capable === true"
+                              class="flex items-center gap-1.5"
+                              :title="(key.upstream_metadata?.kiro?.overage_enabled ?? false) ? '已开启超额使用' : '开启超额使用'"
+                            >
+                              <span class="text-[10px] text-muted-foreground">超额</span>
+                              <Switch
+                                :model-value="key.upstream_metadata?.kiro?.overage_enabled ?? false"
+                                :disabled="togglingOverageKeyId === key.id"
+                                class="scale-75 origin-right"
+                                @update:model-value="(v: boolean) => handleToggleKiroOverage(key, v)"
+                              />
+                            </div>
                             <RefreshCw
                               v-if="refreshingQuota"
                               class="w-3 h-3 text-muted-foreground/70 animate-spin"
@@ -871,9 +887,12 @@
                             </span>
                           </div>
                         </div>
-                        <!-- Kiro 额度显示：使用进度 -->
-                        <div>
-                          <!-- 使用额度进度条 -->
+                        <!-- 双列进度条：使用额度 + 超额用量（超额开启且有容量时切到两列） -->
+                        <div
+                          class="grid gap-3"
+                          :class="showKiroOverageBar(key) ? 'grid-cols-2' : 'grid-cols-1'"
+                        >
+                          <!-- 使用额度 -->
                           <div>
                             <div class="flex items-center justify-between text-[10px] mb-0.5">
                               <span class="text-muted-foreground">使用额度</span>
@@ -896,6 +915,26 @@
                               <span v-if="getKiroQuotaDisplay(key)?.next_reset_at">
                                 {{ formatKiroResetTime(getKiroQuotaDisplay(key)?.next_reset_at) }}重置
                               </span>
+                            </div>
+                          </div>
+                          <!-- 超额用量（仅开启且有额度时渲染） -->
+                          <div v-if="showKiroOverageBar(key)">
+                            <div class="flex items-center justify-between text-[10px] mb-0.5">
+                              <span class="text-muted-foreground">超额用量</span>
+                              <span :class="getQuotaRemainingClass(getKiroOverageUsedPercent(key))">
+                                {{ (100 - getKiroOverageUsedPercent(key)).toFixed(1) }}%
+                              </span>
+                            </div>
+                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
+                              <div
+                                class="absolute left-0 top-0 h-full transition-all duration-300"
+                                :class="getQuotaRemainingBarColor(getKiroOverageUsedPercent(key))"
+                                :style="{ width: `${Math.max(100 - getKiroOverageUsedPercent(key), 0)}%` }"
+                              />
+                            </div>
+                            <div class="text-[9px] text-muted-foreground/70 mt-0.5">
+                              {{ formatKiroUsage(key.upstream_metadata?.kiro?.current_overages) }} /
+                              {{ formatKiroUsage(key.upstream_metadata?.kiro?.overage_cap) }}
                             </div>
                           </div>
                         </div>
@@ -1241,6 +1280,7 @@ import { useEscapeKey } from '@/composables/useEscapeKey'
 import Button from '@/components/ui/button.vue'
 import Badge from '@/components/ui/badge.vue'
 import Card from '@/components/ui/card.vue'
+import Switch from '@/components/ui/switch.vue'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
@@ -1281,6 +1321,7 @@ import {
   exportKey,
   refreshProviderOAuth,
   refreshProviderQuota,
+  setKiroOverage,
   clearOAuthInvalid,
   type ProviderEndpoint,
   type EndpointAPIKey,
@@ -1403,6 +1444,7 @@ const prioritySaving = ref(false)
 
 // OAuth 刷新状态
 const refreshingOAuthKeyId = ref<string | null>(null)
+const togglingOverageKeyId = ref<string | null>(null)
 
 // OAuth 失效清除状态
 const clearingOAuthInvalidKeyId = ref<string | null>(null)
@@ -1886,6 +1928,27 @@ async function handleRefreshOAuth(key: EndpointAPIKey) {
   }
 }
 
+async function handleToggleKiroOverage(key: EndpointAPIKey, enabled: boolean) {
+  if (togglingOverageKeyId.value) return
+  togglingOverageKeyId.value = key.id
+  try {
+    const metadata = await setKiroOverage(key.id, enabled)
+    const keyInList = providerKeys.value.find(k => k.id === key.id)
+    if (keyInList) {
+      const existing = (keyInList.upstream_metadata ?? {}) as UpstreamMetadata
+      keyInList.upstream_metadata = {
+        ...existing,
+        kiro: metadata,
+      }
+    }
+    showSuccess(enabled ? '已开启超额使用' : '已关闭超额使用')
+  } catch (err: unknown) {
+    showError(parseApiError(err, enabled ? '开启超额失败' : '关闭超额失败'), '错误')
+  } finally {
+    togglingOverageKeyId.value = null
+  }
+}
+
 // 判断是否为账号级别的封禁（刷新 token 无法修复）
 function isAccountLevelBlock(key: EndpointAPIKey): boolean {
   const account = getAccountStatusDisplay(key)
@@ -2295,6 +2358,24 @@ function formatKiroUsage(value: number | undefined): string {
     return `${(value / 1000).toFixed(1)}K`
   }
   return value.toFixed(1)
+}
+
+// 计算 Kiro 超额已用百分比 (0-100)，cap <= 0 时返回 0
+function getKiroOverageUsedPercent(key: EndpointAPIKey): number {
+  const kiro = key.upstream_metadata?.kiro
+  const cap = kiro?.overage_cap ?? 0
+  if (cap <= 0) return 0
+  const used = kiro?.current_overages ?? 0
+  return Math.max(0, Math.min(100, (used / cap) * 100))
+}
+
+// 是否渲染 Kiro 超额用量进度条：订阅支持 + 已开启 + 有容量
+function showKiroOverageBar(key: EndpointAPIKey): boolean {
+  const kiro = key.upstream_metadata?.kiro
+  if (!kiro) return false
+  if (kiro.overage_capable !== true) return false
+  if (!kiro.overage_enabled) return false
+  return (kiro.overage_cap ?? 0) > 0
 }
 
 // 格式化 Kiro 重置时间

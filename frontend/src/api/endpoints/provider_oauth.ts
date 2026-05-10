@@ -1,4 +1,5 @@
 import client from '../client'
+import type { KiroUpstreamMetadata } from './types/provider'
 
 export interface ProviderOAuthStartResponse {
   authorization_url: string
@@ -81,6 +82,17 @@ export interface OAuthBatchImportTaskStatusResponse {
 
 export async function refreshProviderOAuth(keyId: string): Promise<ProviderOAuthCompleteResponse> {
   const resp = await client.post(`/api/admin/provider-oauth/keys/${keyId}/refresh`)
+  return resp.data
+}
+
+export async function setKiroOverage(
+  keyId: string,
+  enabled: boolean,
+): Promise<KiroUpstreamMetadata> {
+  const resp = await client.post(
+    `/api/admin/provider-oauth/keys/${keyId}/kiro/overage`,
+    { enabled },
+  )
   return resp.data
 }
 

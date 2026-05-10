@@ -120,6 +120,11 @@ fn classifies_admin_provider_oauth_maintenance_routes_as_admin_proxy_route() {
             "/api/admin/provider-oauth/providers/provider-123/device-poll",
             "device_poll",
         ),
+        (
+            http::Method::POST,
+            "/api/admin/provider-oauth/keys/key-123/kiro/overage",
+            "set_kiro_overage",
+        ),
     ] {
         let uri: Uri = path.parse().expect("uri should parse");
         let decision =
