@@ -6,7 +6,7 @@ use super::compare_candidate_identity_for_ranking;
 use super::format::{
     compare_cross_format_demotion, compare_demoted_format_preference, compare_format_preference,
 };
-use super::priority::compare_candidate_priority_slot;
+use super::priority::{candidate_priority_slot, compare_candidate_priority_slot};
 use super::types::{SchedulerRankableCandidate, SchedulerRankingContext, SchedulerRankingMode};
 
 pub(super) fn compare_rankable_candidates(
@@ -65,10 +65,20 @@ fn compare_load_balance_base(
         .cmp(&right.capability_priority)
         .then_with(|| compare_cross_format_demotion(left, right))
         .then_with(|| compare_demoted_format_preference(left, right))
+        .then_with(|| compare_load_balance_priority_slot(left, right, context))
         .then_with(|| compare_format_preference(left, right))
         .then_with(|| compare_load_balance_distribution(left, right, context))
         .then_with(|| compare_candidate_identity_for_ranking(left, right))
         .then(left.original_index.cmp(&right.original_index))
+}
+
+fn compare_load_balance_priority_slot(
+    left: &SchedulerRankableCandidate,
+    right: &SchedulerRankableCandidate,
+    context: SchedulerRankingContext,
+) -> Ordering {
+    candidate_priority_slot(left, context.priority_mode)
+        .cmp(&candidate_priority_slot(right, context.priority_mode))
 }
 
 fn compare_load_balance_distribution(

@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn load_balance_provider_mode_randomizes_providers_then_uses_internal_key_priority() {
+    fn load_balance_provider_mode_keeps_provider_priority_slots_and_uses_internal_key_priority() {
         let mut provider_a_primary = candidate("a-primary", 0, 0, Some(0));
         provider_a_primary.provider_id = "provider-a".to_string();
         provider_a_primary.key_id = "key-a-primary".to_string();
@@ -411,33 +411,17 @@ mod tests {
         provider_b.key_id = "key-b".to_string();
         let candidates = vec![provider_a_secondary, provider_b, provider_a_primary];
 
-        let seed = (0..512)
-            .find(|seed| {
-                ranked_keys(
-                    &candidates,
-                    SchedulerRankingContext {
-                        priority_mode: SchedulerPriorityMode::Provider,
-                        ranking_mode: SchedulerRankingMode::LoadBalance,
-                        include_health: false,
-                        load_balance_seed: *seed,
-                    },
-                )
-                .first()
-                .is_some_and(|key| key == "key-b")
-            })
-            .expect("test seed should put provider-b first");
-
         let order = ranked_keys(
             &candidates,
             SchedulerRankingContext {
                 priority_mode: SchedulerPriorityMode::Provider,
                 ranking_mode: SchedulerRankingMode::LoadBalance,
                 include_health: false,
-                load_balance_seed: seed,
+                load_balance_seed: 0,
             },
         );
 
-        assert_eq!(order[0], "key-b");
+        assert_eq!(order[2], "key-b");
         let primary_index = order
             .iter()
             .position(|key| key == "key-a-primary")
@@ -450,26 +434,10 @@ mod tests {
     }
 
     #[test]
-    fn load_balance_global_key_mode_randomizes_keys_ignoring_global_priority() {
+    fn load_balance_global_key_mode_keeps_global_priority_slots() {
         let high_priority = candidate("high", 100, 0, Some(0));
         let low_priority = candidate("low", 0, 0, Some(100));
         let candidates = vec![high_priority, low_priority];
-
-        let seed = (0..512)
-            .find(|seed| {
-                ranked_ids(
-                    &candidates,
-                    SchedulerRankingContext {
-                        priority_mode: SchedulerPriorityMode::GlobalKey,
-                        ranking_mode: SchedulerRankingMode::LoadBalance,
-                        include_health: false,
-                        load_balance_seed: *seed,
-                    },
-                )
-                .first()
-                .is_some_and(|provider| provider == "provider-low")
-            })
-            .expect("test seed should put lower global-priority key first");
 
         assert_eq!(
             ranked_ids(
@@ -478,10 +446,10 @@ mod tests {
                     priority_mode: SchedulerPriorityMode::GlobalKey,
                     ranking_mode: SchedulerRankingMode::LoadBalance,
                     include_health: false,
-                    load_balance_seed: seed,
+                    load_balance_seed: 0,
                 },
             ),
-            vec!["provider-low", "provider-high"]
+            vec!["provider-high", "provider-low"]
         );
     }
 }
