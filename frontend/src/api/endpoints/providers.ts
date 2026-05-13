@@ -4,10 +4,14 @@ import type {
   ClaudeCodeAdvancedConfig,
   FailoverRulesConfig,
   PoolAdvancedConfig,
+  ProviderConfig,
   ProviderWithEndpointsSummary,
   ProxyConfig,
 } from './types'
-import { normalizePoolAdvancedConfig as normalizePoolAdvanced } from './types'
+import {
+  normalizeChatPiiRedactionProviderConfig as normalizeChatPiiRedactionProvider,
+  normalizePoolAdvancedConfig as normalizePoolAdvanced,
+} from './types'
 
 interface ProviderRequestOptions {
   timeout?: number
@@ -42,6 +46,7 @@ function normalizeProviderSummary(
 ): ProviderWithEndpointsSummary {
   return {
     ...provider,
+    chat_pii_redaction: normalizeChatPiiRedactionProvider(provider.chat_pii_redaction),
     pool_advanced: normalizePoolAdvanced(provider.pool_advanced),
   }
 }
@@ -107,6 +112,7 @@ export async function updateProvider(
     claude_code_advanced: ClaudeCodeAdvancedConfig | null
     pool_advanced: PoolAdvancedConfig | null
     failover_rules: FailoverRulesConfig | null
+    config: ProviderConfig | null
   }>,
   requestOptions?: ProviderRequestOptions,
 ): Promise<ProviderWithEndpointsSummary> {
@@ -138,6 +144,7 @@ export async function createProvider(
     claude_code_advanced?: ClaudeCodeAdvancedConfig | null
     pool_advanced?: PoolAdvancedConfig | null
     failover_rules?: FailoverRulesConfig | null
+    config?: ProviderConfig | null
   }
 ): Promise<{ id: string; name: string; message?: string }> {
   const response = await client.post('/api/admin/providers/', data)

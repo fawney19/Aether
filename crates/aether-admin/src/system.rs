@@ -62,6 +62,25 @@ fn default_true() -> bool {
     true
 }
 
+const CHAT_PII_REDACTION_ENTITY_KEYS: &[&str] = &[
+    "email",
+    "cn_phone",
+    "global_phone",
+    "cn_id",
+    "payment_card",
+    "ipv4",
+    "ipv6",
+    "api_key",
+    "access_token",
+    "secret_key",
+    "bearer_token",
+    "jwt",
+];
+
+fn chat_pii_redaction_default_entities() -> serde_json::Value {
+    json!(CHAT_PII_REDACTION_ENTITY_KEYS)
+}
+
 fn invalid_request(detail: impl Into<String>) -> (http::StatusCode, serde_json::Value) {
     (
         http::StatusCode::BAD_REQUEST,
@@ -1341,6 +1360,11 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "smtp_from_email" => Some(serde_json::Value::Null),
         "smtp_from_name" => Some(json!("Aether")),
         "enable_oauth_token_refresh" => Some(json!(true)),
+        "module.chat_pii_redaction.enabled" => Some(json!(false)),
+        "module.chat_pii_redaction.provider_scope" => Some(json!("selected_providers")),
+        "module.chat_pii_redaction.entities" => Some(chat_pii_redaction_default_entities()),
+        "module.chat_pii_redaction.cache_ttl_seconds" => Some(json!(300)),
+        "module.chat_pii_redaction.inject_model_instruction" => Some(json!(true)),
         _ => None,
     }
 }
@@ -1447,6 +1471,93 @@ pub fn parse_admin_system_config_update(
                 ));
             }
         }
+    }
+
+    match normalized_key.as_str() {
+        "module.chat_pii_redaction.enabled"
+        | "module.chat_pii_redaction.inject_model_instruction" => match value.as_bool() {
+            Some(enabled) => value = json!(enabled),
+            None if value.is_null() => {
+                value = admin_system_config_default_value(&normalized_key).unwrap();
+            }
+            None => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+        },
+        "module.chat_pii_redaction.provider_scope" => match value.as_str().map(str::trim) {
+            Some("all_providers" | "selected_providers") => {
+                value = json!(value.as_str().unwrap().trim());
+            }
+            Some(_) => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+            None if value.is_null() => value = json!("selected_providers"),
+            None => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+        },
+        "module.chat_pii_redaction.entities" => match value.as_array() {
+            Some(raw_entities) => {
+                let requested = raw_entities
+                    .iter()
+                    .map(|entity| entity.as_str().map(str::trim))
+                    .collect::<Option<BTreeSet<_>>>()
+                    .ok_or_else(|| {
+                        (
+                            http::StatusCode::BAD_REQUEST,
+                            json!({ "detail": "请求数据验证失败" }),
+                        )
+                    })?;
+                let allowed = CHAT_PII_REDACTION_ENTITY_KEYS
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                if !requested.is_subset(&allowed) {
+                    return Err((
+                        http::StatusCode::BAD_REQUEST,
+                        json!({ "detail": "请求数据验证失败" }),
+                    ));
+                }
+                value = json!(CHAT_PII_REDACTION_ENTITY_KEYS
+                    .iter()
+                    .copied()
+                    .filter(|entity| requested.contains(entity))
+                    .collect::<Vec<_>>());
+            }
+            None if value.is_null() => value = chat_pii_redaction_default_entities(),
+            None => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+        },
+        "module.chat_pii_redaction.cache_ttl_seconds" => match value.as_u64() {
+            Some(300 | 3600) => value = json!(value.as_u64().unwrap()),
+            Some(_) => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+            None if value.is_null() => value = json!(300),
+            None => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+        },
+        _ => {}
     }
 
     Ok(AdminSystemConfigUpdate {

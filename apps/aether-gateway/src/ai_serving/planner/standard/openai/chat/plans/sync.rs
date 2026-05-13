@@ -134,7 +134,7 @@ impl LocalOpenAiChatSyncAttemptSource<'_> {
             "openai_chat_sync_success",
             upstream_is_stream,
         )
-        .await
+        .await?
         else {
             return Ok(None);
         };

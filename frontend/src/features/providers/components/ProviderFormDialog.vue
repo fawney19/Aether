@@ -268,6 +268,34 @@
             @update:model-value="(v: boolean) => form.pool_mode_enabled = v"
           />
         </div>
+
+        <div
+          class="flex items-center justify-between gap-4 p-3 border rounded-lg bg-muted/50"
+          :class="redactionModuleScope === 'all_providers' ? 'border-primary/30 bg-primary/5' : ''"
+        >
+          <div class="space-y-0.5">
+            <span class="text-sm font-medium">敏感信息替换保护</span>
+            <p class="text-xs text-muted-foreground leading-relaxed">
+              {{ redactionHelperText }}
+            </p>
+            <p
+              v-if="!redactionModuleEnabled"
+              class="text-xs text-muted-foreground"
+            >
+              模块总开关未开启，保存此供应商不会立即生效。
+            </p>
+          </div>
+          <div class="flex shrink-0 items-center gap-3">
+            <span class="text-xs text-muted-foreground">
+              {{ redactionSwitchLabel }}
+            </span>
+            <Switch
+              :model-value="redactionSwitchValue"
+              :disabled="redactionModuleScope === 'all_providers' || redactionModuleLoading"
+              @update:model-value="(v: boolean) => form.chat_pii_redaction_enabled = v"
+            />
+          </div>
+        </div>
       </div>
     </form>
 
@@ -313,9 +341,12 @@ import {
   updateProvider,
   type ProviderWithEndpointsSummary,
 } from '@/api/endpoints'
+import { modulesApi, type ChatPiiRedactionProviderScope } from '@/api/modules'
 import { parseApiError } from '@/utils/errorParser'
 import { parseNumberInput } from '@/utils/form'
 import { dateTimeLocalToRfc3339, formatDateTimeLocalInput } from '@/utils/date'
+import { getProviderRedactionConfig, withProviderRedactionConfig } from '@/features/providers/utils/providerRedactionPayload'
+import { log } from '@/utils/logger'
 
 const props = defineProps<{
   modelValue: boolean
@@ -331,6 +362,9 @@ const emit = defineEmits<{
 
 const { success, error: showError } = useToast()
 const loading = ref(false)
+const redactionModuleLoading = ref(false)
+const redactionModuleEnabled = ref(false)
+const redactionModuleScope = ref<ChatPiiRedactionProviderScope>('selected_providers')
 
 // 内部状态
 const internalOpen = computed(() => props.modelValue)
@@ -368,7 +402,42 @@ const form = ref({
   request_timeout: undefined as number | undefined,
   // 号池模式
   pool_mode_enabled: false,
+  chat_pii_redaction_enabled: false,
 })
+
+const redactionSwitchValue = computed(() => {
+  if (redactionModuleScope.value === 'all_providers') {
+    return redactionModuleEnabled.value
+  }
+  return form.value.chat_pii_redaction_enabled
+})
+
+const redactionSwitchLabel = computed(() => {
+  if (redactionModuleScope.value === 'all_providers') {
+    return redactionModuleEnabled.value ? '继承开启' : '未生效'
+  }
+  return form.value.chat_pii_redaction_enabled ? '已开启' : '未开启'
+})
+
+const redactionHelperText = computed(() => {
+  if (redactionModuleScope.value === 'all_providers') {
+    return '模块管理已设置为“全部供应商”，此供应商会自动执行替换保护。替换类型由模块管理中的“替换类型配置”决定。'
+  }
+  return '仅当“开启敏感信息替换保护”和此供应商开关都开启时生效。替换类型在模块管理的“替换类型配置”中统一选择，适用于所有已开启该功能的供应商。供应商只会看到占位符，客户端响应会自动还原。'
+})
+
+async function loadRedactionModuleState() {
+  redactionModuleLoading.value = true
+  try {
+    const config = await modulesApi.getChatPiiRedactionConfig()
+    redactionModuleEnabled.value = config.enabled
+    redactionModuleScope.value = config.provider_scope
+  } catch (err) {
+    log.warn('加载敏感信息替换保护模块配置失败', err)
+  } finally {
+    redactionModuleLoading.value = false
+  }
+}
 
 // 重置表单
 function resetForm() {
@@ -394,6 +463,7 @@ function resetForm() {
     request_timeout: undefined,
     // 号池模式
     pool_mode_enabled: false,
+    chat_pii_redaction_enabled: false,
   }
 }
 
@@ -424,6 +494,7 @@ function loadProviderData() {
     request_timeout: props.provider.request_timeout ?? undefined,
     // 号池模式
     pool_mode_enabled: poolAdvanced !== null,
+    chat_pii_redaction_enabled: getProviderRedactionConfig(props.provider).enabled,
   }
 }
 
@@ -435,6 +506,12 @@ const { isEditMode, handleDialogUpdate, handleCancel } = useFormDialog({
   onClose: () => emit('update:modelValue', false),
   loadData: loadProviderData,
   resetForm,
+})
+
+watch(() => props.modelValue, (open) => {
+  if (open) {
+    loadRedactionModuleState()
+  }
 })
 
 // 新建模式下切换 provider_type 时不自动开启号池模式
@@ -471,7 +548,7 @@ const handleSubmit = async () => {
   loading.value = true
   try {
     const currentPoolAdvanced = normalizePoolAdvancedConfig(props.provider?.pool_advanced)
-    const basePayload = {
+    const basePayload = withProviderRedactionConfig({
       name: form.value.name,
       provider_type: form.value.provider_type,
       description: form.value.description || undefined,
@@ -491,7 +568,7 @@ const handleSubmit = async () => {
       pool_advanced: form.value.pool_mode_enabled
         ? (currentPoolAdvanced ?? {})
         : null,
-    }
+    }, form.value.chat_pii_redaction_enabled)
 
     if (isEditMode.value && props.provider) {
       // 更新提供商
