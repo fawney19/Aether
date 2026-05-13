@@ -72,6 +72,14 @@ pub(crate) fn admin_provider_oauth_device_poll_provider_id(request_path: &str) -
     provider_oauth_provider_id_for_suffix(request_path, "/device-poll")
 }
 
+pub(crate) fn admin_provider_oauth_kiro_overage_key_id(request_path: &str) -> Option<String> {
+    request_path
+        .strip_prefix("/api/admin/provider-oauth/keys/")?
+        .strip_suffix("/kiro/overage")
+        .filter(|key_id| !key_id.is_empty() && !key_id.contains('/'))
+        .map(ToOwned::to_owned)
+}
+
 fn provider_oauth_provider_id_for_suffix(request_path: &str, suffix: &str) -> Option<String> {
     request_path
         .strip_prefix("/api/admin/provider-oauth/providers/")?

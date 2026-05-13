@@ -1,6 +1,8 @@
+mod overage;
 mod parse;
 mod plan;
 
+pub(crate) use self::overage::handle_admin_kiro_overage;
 use self::parse::parse_kiro_usage_response;
 use self::plan::execute_kiro_quota_plan;
 use super::shared::{

@@ -6,8 +6,9 @@ use crate::handlers::admin::provider::shared::paths::{
     admin_provider_oauth_batch_import_provider_id,
     admin_provider_oauth_batch_import_task_provider_id, admin_provider_oauth_complete_key_id,
     admin_provider_oauth_complete_provider_id, admin_provider_oauth_device_authorize_provider_id,
-    admin_provider_oauth_import_provider_id, admin_provider_oauth_refresh_key_id,
-    admin_provider_oauth_start_key_id, admin_provider_oauth_start_provider_id,
+    admin_provider_oauth_import_provider_id, admin_provider_oauth_kiro_overage_key_id,
+    admin_provider_oauth_refresh_key_id, admin_provider_oauth_start_key_id,
+    admin_provider_oauth_start_provider_id,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::GatewayError;
@@ -108,6 +109,19 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             "refresh_provider_oauth_for_key",
             "provider_key",
             admin_provider_oauth_refresh_key_id(request_context.path()),
+        )));
+    }
+
+    if route_kind == Some("set_kiro_overage") && *method == http::Method::POST {
+        let response =
+            super::quota::kiro::handle_admin_kiro_overage(state, request_context, request_body)
+                .await?;
+        return Ok(Some(helpers::attach_admin_provider_oauth_audit_response(
+            response,
+            "admin_provider_oauth_kiro_overage_updated",
+            "update_kiro_overage_preference",
+            "provider_key",
+            admin_provider_oauth_kiro_overage_key_id(request_context.path()),
         )));
     }
 

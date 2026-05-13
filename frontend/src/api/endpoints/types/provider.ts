@@ -356,6 +356,13 @@ export interface KiroUpstreamMetadata {
   is_banned?: boolean  // 账户是否被封禁
   ban_reason?: string  // 封禁原因
   banned_at?: number  // 封禁时间（Unix 时间戳，秒）
+  // 超额配置（来自 Kiro getUsageLimits 响应）
+  overage_enabled?: boolean  // 当前是否已开启超额
+  overage_capable?: boolean  // 订阅是否支持超额（Pro 及以上为 true）
+  overage_cap?: number  // 超额上限（最多可超出的 invocations）
+  overage_rate?: number  // 超额单价（USD / invocation）
+  current_overages?: number  // 本期已超出使用量
+  overage_charges?: number  // 本期已产生的超额费用（USD）
 }
 
 export interface ChatGPTWebUpstreamMetadata {

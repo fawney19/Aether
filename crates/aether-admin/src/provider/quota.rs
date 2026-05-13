@@ -692,6 +692,57 @@ pub fn parse_kiro_usage_response(
         result.insert("email".to_string(), json!(email));
     }
 
+    // Overage configuration / subscription capability / breakdown charges.
+    // Values mirror the raw Kiro `getUsageLimits` response — do not insert
+    // defaults or nulls when upstream fields are missing.
+    let overage_configuration = root
+        .get("overageConfiguration")
+        .and_then(serde_json::Value::as_object);
+    if let Some(overage_status) = overage_configuration
+        .and_then(|object| object.get("overageStatus"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let enabled = overage_status.eq_ignore_ascii_case("ENABLED");
+        result.insert("overage_enabled".to_string(), json!(enabled));
+    }
+
+    if let Some(overage_capability) = root
+        .get("subscriptionInfo")
+        .and_then(|value| value.get("overageCapability"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let capable = overage_capability.eq_ignore_ascii_case("OVERAGE_CAPABLE");
+        result.insert("overage_capable".to_string(), json!(capable));
+    }
+
+    if let Some(overage_cap) = breakdown
+        .get("overageCapWithPrecision")
+        .and_then(coerce_json_f64)
+        .or_else(|| breakdown.get("overageCap").and_then(coerce_json_f64))
+    {
+        result.insert("overage_cap".to_string(), json!(overage_cap));
+    }
+
+    if let Some(overage_rate) = breakdown.get("overageRate").and_then(coerce_json_f64) {
+        result.insert("overage_rate".to_string(), json!(overage_rate));
+    }
+
+    if let Some(current_overages) = breakdown
+        .get("currentOveragesWithPrecision")
+        .and_then(coerce_json_f64)
+        .or_else(|| breakdown.get("currentOverages").and_then(coerce_json_f64))
+    {
+        result.insert("current_overages".to_string(), json!(current_overages));
+    }
+
+    if let Some(overage_charges) = breakdown.get("overageCharges").and_then(coerce_json_f64) {
+        result.insert("overage_charges".to_string(), json!(overage_charges));
+    }
+
     Some(serde_json::Value::Object(result))
 }
 
@@ -914,8 +965,8 @@ mod tests {
     use super::{
         codex_build_invalid_state, codex_runtime_invalid_reason,
         parse_chatgpt_web_conversation_init_response, parse_codex_wham_usage_response,
-        OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
-        OAUTH_REQUEST_FAILED_PREFIX,
+        parse_kiro_usage_response, OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX,
+        OAUTH_REFRESH_FAILED_PREFIX, OAUTH_REQUEST_FAILED_PREFIX,
     };
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use serde_json::json;
@@ -1106,5 +1157,94 @@ mod tests {
 
         assert_eq!(parsed.get("image_quota_blocked"), Some(&json!(true)));
         assert_eq!(parsed.get("image_quota_remaining"), Some(&json!(0.0)));
+    }
+
+    #[test]
+    fn parses_kiro_overage_fields_from_har_shaped_response() {
+        // Shape taken from `kiro超额开关.har` entry 3 (GET /getUsageLimits after
+        // toggling overageStatus=DISABLED). Fields asserted below match the
+        // six new outputs added for the overage switch feature.
+        let parsed = parse_kiro_usage_response(
+            &json!({
+                "daysUntilReset": 0,
+                "limits": [],
+                "nextDateReset": 1_780_272_000u64,
+                "overageConfiguration": {
+                    "overageLimit": null,
+                    "overageStatus": "DISABLED"
+                },
+                "subscriptionInfo": {
+                    "overageCapability": "OVERAGE_CAPABLE",
+                    "subscriptionManagementTarget": "MANAGE",
+                    "subscriptionTitle": "KIRO PRO",
+                    "type": "Q_DEVELOPER_STANDALONE_PRO",
+                    "upgradeCapability": "UPGRADE_CAPABLE"
+                },
+                "usageBreakdownList": [{
+                    "bonuses": [],
+                    "currency": "USD",
+                    "currentOverages": 0,
+                    "currentOveragesWithPrecision": 0.0,
+                    "currentUsage": 7,
+                    "currentUsageWithPrecision": 7.13,
+                    "displayName": "Credit",
+                    "displayNamePlural": "Credits",
+                    "freeTrialInfo": null,
+                    "nextDateReset": 1_780_272_000u64,
+                    "overageCap": 10000,
+                    "overageCapWithPrecision": 10000.0,
+                    "overageCharges": 0.0,
+                    "overageRate": 0.04,
+                    "resourceType": "CREDIT",
+                    "unit": "INVOCATIONS",
+                    "usageLimit": 1000,
+                    "usageLimitWithPrecision": 1000.0
+                }],
+                "userInfo": {"email": "sample@example.com", "userId": "d-abc"}
+            }),
+            1_778_067_246,
+        )
+        .expect("kiro usage response should parse");
+
+        assert_eq!(parsed.get("overage_enabled"), Some(&json!(false)));
+        assert_eq!(parsed.get("overage_capable"), Some(&json!(true)));
+        assert_eq!(parsed.get("overage_cap"), Some(&json!(10000.0)));
+        assert_eq!(parsed.get("overage_rate"), Some(&json!(0.04)));
+        assert_eq!(parsed.get("current_overages"), Some(&json!(0.0)));
+        assert_eq!(parsed.get("overage_charges"), Some(&json!(0.0)));
+        assert_eq!(parsed.get("subscription_title"), Some(&json!("KIRO PRO")));
+    }
+
+    #[test]
+    fn parses_kiro_response_without_overage_fields_skips_them() {
+        // Minimal response: no overageConfiguration, no subscription-level
+        // overageCapability, no overage-related breakdown fields. The six
+        // overage keys MUST NOT appear in the output (no null stubs).
+        let parsed = parse_kiro_usage_response(
+            &json!({
+                "usageBreakdownList": [{
+                    "currentUsage": 1,
+                    "currentUsageWithPrecision": 1.5,
+                    "usageLimit": 100,
+                    "usageLimitWithPrecision": 100.0
+                }]
+            }),
+            1_778_000_000,
+        )
+        .expect("minimal kiro response should parse");
+
+        for key in [
+            "overage_enabled",
+            "overage_capable",
+            "overage_cap",
+            "overage_rate",
+            "current_overages",
+            "overage_charges",
+        ] {
+            assert!(
+                parsed.get(key).is_none(),
+                "key `{key}` should be absent when upstream omits overage fields"
+            );
+        }
     }
 }

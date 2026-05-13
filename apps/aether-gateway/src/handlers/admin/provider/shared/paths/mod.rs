@@ -24,8 +24,8 @@ pub(crate) use self::oauth::{
     admin_provider_oauth_batch_import_task_provider_id, admin_provider_oauth_complete_key_id,
     admin_provider_oauth_complete_provider_id, admin_provider_oauth_device_authorize_provider_id,
     admin_provider_oauth_device_poll_provider_id, admin_provider_oauth_import_provider_id,
-    admin_provider_oauth_refresh_key_id, admin_provider_oauth_start_key_id,
-    admin_provider_oauth_start_provider_id,
+    admin_provider_oauth_kiro_overage_key_id, admin_provider_oauth_refresh_key_id,
+    admin_provider_oauth_start_key_id, admin_provider_oauth_start_provider_id,
 };
 pub(crate) use self::ops::{
     admin_provider_id_for_provider_ops_balance, admin_provider_id_for_provider_ops_checkin,
