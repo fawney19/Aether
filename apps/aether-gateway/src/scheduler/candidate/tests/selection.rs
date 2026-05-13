@@ -647,7 +647,7 @@ async fn load_balance_selection_does_not_remember_scheduler_affinity() {
 }
 
 #[tokio::test]
-async fn load_balance_ignores_provider_priority_and_cached_affinity() {
+async fn load_balance_keeps_provider_priority_before_distribution_and_cached_affinity() {
     let mut first = sample_row();
     first.provider_id = "provider-a".to_string();
     first.provider_name = "provider-a".to_string();
@@ -705,7 +705,11 @@ async fn load_balance_ignores_provider_priority_and_cached_affinity() {
     )
     .await
     .expect("first pass should succeed");
-    let mut provider_b_first_seed = None;
+
+    assert_eq!(first_pass.len(), 2);
+    assert_eq!(first_pass[0].provider_id, "provider-a");
+    assert_eq!(first_pass[1].provider_id, "provider-b");
+
     for seed in 101..600 {
         let pass = collect_selectable_candidates(
             state.data.as_ref(),
@@ -718,31 +722,11 @@ async fn load_balance_ignores_provider_priority_and_cached_affinity() {
         )
         .await
         .expect("seeded pass should succeed");
-        if pass
-            .first()
-            .is_some_and(|candidate| candidate.provider_id == "provider-b")
-        {
-            provider_b_first_seed = Some(seed);
-            break;
-        }
-    }
-    let provider_b_first_seed = provider_b_first_seed
-        .expect("test seed should allow provider-b to win despite lower priority");
-    let second_pass = collect_selectable_candidates(
-        state.data.as_ref(),
-        &state,
-        "openai:chat",
-        "gpt-4.1",
-        false,
-        Some(&auth_snapshot),
-        provider_b_first_seed,
-    )
-    .await
-    .expect("second pass should succeed");
 
-    assert_eq!(first_pass.len(), 2);
-    assert_eq!(second_pass.len(), 2);
-    assert_eq!(second_pass[0].provider_id, "provider-b");
+        assert_eq!(pass.len(), 2);
+        assert_eq!(pass[0].provider_id, "provider-a");
+        assert_eq!(pass[1].provider_id, "provider-b");
+    }
 }
 
 #[tokio::test]
