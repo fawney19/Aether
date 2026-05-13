@@ -129,6 +129,28 @@ pub(crate) fn normalize_pool_advanced_config(
     }
 }
 
+pub(crate) fn normalize_chat_pii_redaction_config(
+    value: Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Object(mut map) => {
+            if map.len() != 1 || !map.contains_key("enabled") {
+                return Err("chat_pii_redaction 仅支持 enabled 布尔配置".to_string());
+            }
+            let enabled = map
+                .remove("enabled")
+                .and_then(|value| value.as_bool())
+                .ok_or_else(|| "chat_pii_redaction.enabled 必须是布尔值".to_string())?;
+            Ok(Some(serde_json::json!({ "enabled": enabled })))
+        }
+        _ => Err("chat_pii_redaction 必须是 JSON 对象".to_string()),
+    }
+}
+
 pub(crate) fn validate_vertex_api_formats(
     provider_type: &str,
     auth_type: &str,
@@ -177,7 +199,8 @@ mod tests {
     use super::{
         normalize_allow_auth_channel_mismatch_formats, normalize_api_format_json_object_keys,
         normalize_api_format_list, normalize_auth_type, normalize_auth_type_by_format,
-        normalize_pool_advanced_config, normalize_provider_type_input, validate_vertex_api_formats,
+        normalize_chat_pii_redaction_config, normalize_pool_advanced_config,
+        normalize_provider_type_input, validate_vertex_api_formats,
     };
     use serde_json::json;
 
@@ -198,6 +221,26 @@ mod tests {
         assert_eq!(
             normalize_pool_advanced_config(Some(json!(false))).unwrap_err(),
             "pool_advanced 必须是 JSON 对象"
+        );
+    }
+
+    #[test]
+    fn normalize_chat_pii_redaction_requires_enabled_boolean_only() {
+        assert_eq!(
+            normalize_chat_pii_redaction_config(Some(json!({ "enabled": true })))
+                .expect("chat pii redaction should normalize"),
+            Some(json!({ "enabled": true }))
+        );
+        assert_eq!(
+            normalize_chat_pii_redaction_config(Some(
+                json!({ "enabled": true, "entities": ["email"] })
+            ))
+            .unwrap_err(),
+            "chat_pii_redaction 仅支持 enabled 布尔配置"
+        );
+        assert_eq!(
+            normalize_chat_pii_redaction_config(Some(json!({ "enabled": "yes" }))).unwrap_err(),
+            "chat_pii_redaction.enabled 必须是布尔值"
         );
     }
 

@@ -191,6 +191,7 @@ pub(super) async fn execute_provider_quota_plan(
             let error = match err {
                 GatewayError::UpstreamUnavailable { message, .. }
                 | GatewayError::ControlUnavailable { message, .. }
+                | GatewayError::Client { message, .. }
                 | GatewayError::Internal(message) => message,
             };
             let proxy_node_id = plan

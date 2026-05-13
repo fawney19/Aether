@@ -19,12 +19,24 @@ use crate::executor::{build_local_execution_exhaustion, LocalExecutionRequestOut
 use crate::handlers::shared::provider_pool::release_admin_provider_pool_key_lease;
 use crate::log_ids::short_request_id;
 use crate::orchestration::local_execution_candidate_metadata_from_report_context;
+use crate::privacy::RedactionExecutionCandidateId;
 use crate::request_candidate_runtime::{
     record_local_request_candidate_status, RequestCandidateRuntimeWriter,
 };
 use crate::{AppState, GatewayError};
 
 const DEFAULT_STREAM_CANDIDATE_WATCHDOG_TIMEOUT_MS: u64 = 300_000;
+
+fn attach_redaction_execution_candidate(response: &mut Response<Body>, candidate_id: Option<&str>) {
+    if let Some(candidate_id) = candidate_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        response
+            .extensions_mut()
+            .insert(RedactionExecutionCandidateId::new(candidate_id));
+    }
+}
 
 pub(crate) async fn execute_sync_plan_and_reports<T>(
     state: &AppState,
@@ -136,7 +148,7 @@ where
     type Error = GatewayError;
 
     async fn execute_attempt(&self, attempt: &T) -> Result<Option<Self::Response>, Self::Error> {
-        execute_execution_runtime_sync(
+        let mut response = execute_execution_runtime_sync(
             self.state,
             self.parts.uri.path(),
             attempt.execution_plan().clone(),
@@ -146,7 +158,14 @@ where
             attempt.report_kind(),
             attempt.report_context(),
         )
-        .await
+        .await?;
+        if let Some(response) = response.as_mut() {
+            attach_redaction_execution_candidate(
+                response,
+                attempt.execution_plan().candidate_id.as_deref(),
+            );
+        }
+        Ok(response)
     }
 
     async fn mark_unused_attempts(&self, attempts: Vec<T>) -> Result<(), Self::Error> {
@@ -346,7 +365,7 @@ where
         let execution_plan_kind = self.plan_kind.to_string();
         let execution_decision = self.decision.clone();
         let execution_report_kind = attempt.report_kind();
-        execute_stream_candidate_with_watchdog(
+        let mut response = execute_stream_candidate_with_watchdog(
             self.state,
             self.trace_id,
             self.plan_kind,
@@ -365,7 +384,11 @@ where
                 .await
             },
         )
-        .await
+        .await?;
+        if let Some(response) = response.as_mut() {
+            attach_redaction_execution_candidate(response, watchdog_plan.candidate_id.as_deref());
+        }
+        Ok(response)
     }
 
     async fn mark_unused_attempts(&self, attempts: Vec<T>) -> Result<(), Self::Error> {

@@ -163,7 +163,7 @@ pub(crate) async fn maybe_build_sync_local_decision_payload(
             "openai_chat_sync_success",
             upstream_is_stream,
         )
-        .await
+        .await?
         {
             return Ok(Some(payload));
         }
@@ -214,7 +214,7 @@ pub(crate) async fn maybe_build_stream_local_decision_payload(
             "openai_chat_stream_success",
             upstream_is_stream,
         )
-        .await
+        .await?
         {
             return Ok(Some(payload));
         }

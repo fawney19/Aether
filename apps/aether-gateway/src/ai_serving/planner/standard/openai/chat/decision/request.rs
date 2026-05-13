@@ -1,5 +1,7 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -34,7 +36,13 @@ use crate::ai_serving::{
     LocalResolvedOAuthRequestAuth,
 };
 use crate::ai_serving::{ConversionMode, ExecutionStrategy};
-use crate::AppState;
+use crate::privacy::{
+    build_redaction_session_config, provider_chat_pii_redaction_enabled,
+    read_chat_pii_redaction_runtime_config, try_mask_chat_request_json_with_cache_options,
+    MaskChatRequestOptions, RedactionMaskError, RedactionSessionSlot, RedisRedactionMappingCache,
+};
+use crate::{AppState, GatewayError};
+use tracing::warn;
 
 use super::support::{
     mark_skipped_local_openai_chat_candidate,
@@ -55,6 +63,30 @@ pub(crate) struct LocalOpenAiChatCandidatePayloadParts {
     pub(super) report_kind: String,
     pub(super) envelope_name: Option<&'static str>,
     pub(super) transport: Arc<GatewayProviderTransportSnapshot>,
+    pub(super) request_redacted: bool,
+}
+
+fn request_identity_response_encoding_when_redacted(
+    headers: &mut BTreeMap<String, String>,
+    redacted: bool,
+) {
+    if redacted {
+        headers.insert("accept-encoding".to_string(), "identity".to_string());
+    }
+}
+
+struct ProviderChatRequestRedaction<'a> {
+    body_json: Cow<'a, Value>,
+    redacted: bool,
+}
+
+impl<'a> ProviderChatRequestRedaction<'a> {
+    fn disabled(body_json: &'a Value, _parts: &http::request::Parts) -> Self {
+        Self {
+            body_json: Cow::Borrowed(body_json),
+            redacted: false,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -70,7 +102,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
     decision_kind: &str,
     report_kind: &str,
     upstream_is_stream: bool,
-) -> Option<LocalOpenAiChatCandidatePayloadParts> {
+) -> Result<Option<LocalOpenAiChatCandidatePayloadParts>, GatewayError> {
     let planner_state = crate::ai_serving::PlannerAppState::new(state);
     let candidate = &eligible.candidate;
     let provider_api_format = eligible.provider_api_format.as_str();
@@ -84,6 +116,10 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             Some(&input.requested_model),
         )
         .await;
+    let redaction =
+        resolve_provider_chat_request_redaction(state, parts, body_json, transport, candidate_id)
+            .await?;
+    let body_json = redaction.body_json.as_ref();
 
     if provider_api_format == "openai:chat" {
         if let Some(skip_reason) = local_openai_chat_transport_unsupported_reason(transport) {
@@ -97,8 +133,8 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
                 skip_reason,
             )
             .await;
-            return None;
-        }
+            return Ok(None);
+        };
 
         let prepared_candidate = match prepare_header_authenticated_candidate(
             planner_state,
@@ -125,7 +161,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
                     skip_reason,
                 )
                 .await;
-                return None;
+                return Ok(None);
             }
         };
 
@@ -153,7 +189,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
                 ),
             )
             .await;
-            return None;
+            return Ok(None);
         };
 
         let Some(upstream_url) = build_local_openai_chat_upstream_url(parts, transport) else {
@@ -172,7 +208,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
                 ),
             )
             .await;
-            return None;
+            return Ok(None);
         };
 
         let Some(resolved_headers) =
@@ -205,7 +241,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
                 ),
             )
             .await;
-            return None;
+            return Ok(None);
         };
         let mut provider_request_headers = resolved_headers.headers;
         apply_codex_openai_responses_special_headers(
@@ -217,7 +253,6 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             Some(trace_id),
             transport.key.decrypted_auth_config.as_deref(),
         );
-
         let (execution_strategy, conversion_mode) =
             ai_local_execution_contract_for_formats("openai:chat", "openai:chat");
         let resolved_report_kind =
@@ -227,7 +262,12 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
                 "openai_chat_sync_finalize".to_string()
             };
 
-        return Some(LocalOpenAiChatCandidatePayloadParts {
+        request_identity_response_encoding_when_redacted(
+            &mut provider_request_headers,
+            redaction.redacted,
+        );
+
+        return Ok(Some(LocalOpenAiChatCandidatePayloadParts {
             auth_header: resolved_headers.auth_header,
             auth_value: resolved_headers.auth_value,
             mapped_model: prepared_candidate.mapped_model,
@@ -240,8 +280,9 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             report_kind: resolved_report_kind,
             envelope_name: None,
             transport: Arc::clone(transport),
-        });
-    }
+            request_redacted: redaction.redacted,
+        }));
+    };
 
     let provider_api_format = provider_api_format.trim().to_ascii_lowercase();
     let Some(conversion_kind) =
@@ -257,7 +298,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             "transport_api_format_unsupported",
         )
         .await;
-        return None;
+        return Ok(None);
     };
     if let Some(skip_reason) = crate::ai_serving::request_conversion_transport_unsupported_reason(
         transport,
@@ -273,7 +314,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             skip_reason,
         )
         .await;
-        return None;
+        return Ok(None);
     }
     let is_kiro_claude_cli =
         is_kiro_claude_messages_transport(transport, provider_api_format.as_str());
@@ -302,7 +343,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
                     "transport_auth_unavailable",
                 )
                 .await;
-                return None;
+                return Ok(None);
             }
         }
     } else {
@@ -326,7 +367,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
                     skip_reason,
                 )
                 .await;
-                return None;
+                return Ok(None);
             }
         }
     } else {
@@ -351,7 +392,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
                     skip_reason,
                 )
                 .await;
-                return None;
+                return Ok(None);
             }
         }
     };
@@ -387,7 +428,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             ),
         )
         .await;
-        return None;
+        return Ok(None);
     };
     if let Some(mapping) =
         crate::system_features::reasoning_model_directive_mapping_for_api_format_and_model(
@@ -412,7 +453,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
     }
 
     if let Some(kiro_auth) = kiro_auth.as_ref() {
-        return build_kiro_openai_chat_cross_format_payload_parts(
+        return Ok(build_kiro_openai_chat_cross_format_payload_parts(
             state,
             parts,
             trace_id,
@@ -430,8 +471,9 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             provider_request_body,
             upstream_is_stream,
             kiro_auth,
+            redaction.redacted,
         )
-        .await;
+        .await);
     }
 
     let Some(upstream_url) = build_cross_format_openai_chat_upstream_url(
@@ -456,7 +498,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             ),
         )
         .await;
-        return None;
+        return Ok(None);
     };
     let Some(resolved_headers) =
         build_standard_provider_request_headers(StandardProviderRequestHeadersInput {
@@ -488,7 +530,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             ),
         )
         .await;
-        return None;
+        return Ok(None);
     };
     let mut provider_request_headers = resolved_headers.headers;
     apply_codex_openai_responses_special_headers(
@@ -500,6 +542,10 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         Some(trace_id),
         transport.key.decrypted_auth_config.as_deref(),
     );
+    request_identity_response_encoding_when_redacted(
+        &mut provider_request_headers,
+        redaction.redacted,
+    );
 
     let resolved_report_kind = if decision_kind == OPENAI_CHAT_STREAM_PLAN_KIND {
         "openai_chat_stream_success".to_string()
@@ -509,7 +555,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
     let (execution_strategy, conversion_mode) =
         ai_local_execution_contract_for_formats("openai:chat", provider_api_format.as_str());
 
-    Some(LocalOpenAiChatCandidatePayloadParts {
+    Ok(Some(LocalOpenAiChatCandidatePayloadParts {
         auth_header: resolved_headers.auth_header,
         auth_value: resolved_headers.auth_value,
         mapped_model: prepared_candidate.mapped_model,
@@ -522,7 +568,8 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         report_kind: resolved_report_kind,
         envelope_name: None,
         transport: Arc::clone(transport),
-    })
+        request_redacted: redaction.redacted,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -544,6 +591,7 @@ async fn build_kiro_openai_chat_cross_format_payload_parts(
     claude_request_body: Value,
     upstream_is_stream: bool,
     kiro_auth: &KiroRequestAuth,
+    request_redacted: bool,
 ) -> Option<LocalOpenAiChatCandidatePayloadParts> {
     let candidate = &eligible.candidate;
     let provider_request_body = match build_kiro_provider_request_body(
@@ -601,7 +649,7 @@ async fn build_kiro_openai_chat_cross_format_payload_parts(
             return None;
         }
     };
-    let provider_request_headers = match build_kiro_provider_headers(KiroProviderHeadersInput {
+    let mut provider_request_headers = match build_kiro_provider_headers(KiroProviderHeadersInput {
         headers: &parts.headers,
         provider_request_body: &provider_request_body,
         original_request_body: original_body_json,
@@ -631,6 +679,10 @@ async fn build_kiro_openai_chat_cross_format_payload_parts(
             return None;
         }
     };
+    request_identity_response_encoding_when_redacted(
+        &mut provider_request_headers,
+        request_redacted,
+    );
     let resolved_report_kind = if decision_kind == OPENAI_CHAT_STREAM_PLAN_KIND {
         "openai_chat_stream_success".to_string()
     } else {
@@ -652,5 +704,86 @@ async fn build_kiro_openai_chat_cross_format_payload_parts(
         report_kind: resolved_report_kind,
         envelope_name: Some(KIRO_ENVELOPE_NAME),
         transport: Arc::clone(transport),
+        request_redacted,
     })
+}
+
+async fn resolve_provider_chat_request_redaction<'a>(
+    state: &AppState,
+    parts: &http::request::Parts,
+    body_json: &'a Value,
+    transport: &GatewayProviderTransportSnapshot,
+    candidate_id: &str,
+) -> Result<ProviderChatRequestRedaction<'a>, GatewayError> {
+    if parts.uri.path() != "/v1/chat/completions" {
+        return Ok(ProviderChatRequestRedaction::disabled(body_json, parts));
+    }
+    let Some(slot) = parts.extensions.get::<RedactionSessionSlot>() else {
+        return Ok(ProviderChatRequestRedaction::disabled(body_json, parts));
+    };
+    let runtime_config = read_chat_pii_redaction_runtime_config(state)
+        .await
+        .map_err(|err| {
+            warn!(
+                error = ?err,
+                "gateway failed to read chat pii redaction runtime config"
+            );
+            GatewayError::Internal("chat pii redaction setup failed".to_string())
+        })?;
+    if !provider_chat_pii_redaction_enabled(transport.provider.config.as_ref(), &runtime_config) {
+        return Ok(ProviderChatRequestRedaction::disabled(body_json, parts));
+    }
+    let Some(hmac_key) = state.encryption_key().map(str::as_bytes).map(Vec::from) else {
+        warn!("gateway chat pii redaction is enabled but encryption key is unavailable");
+        return Err(GatewayError::Internal(
+            "chat pii redaction setup failed".to_string(),
+        ));
+    };
+    let body_bytes = serde_json::to_vec(body_json).map_err(|err| {
+        warn!(
+            error = ?err,
+            "gateway failed to serialize provider chat pii redaction body"
+        );
+        GatewayError::Internal("chat pii redaction setup failed".to_string())
+    })?;
+    let now_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let cache = RedisRedactionMappingCache::new(state.runtime_state.as_ref());
+    let masked = try_mask_chat_request_json_with_cache_options(
+        &body_bytes,
+        build_redaction_session_config(hmac_key, &runtime_config, now_unix_secs),
+        MaskChatRequestOptions::runtime(runtime_config.inject_model_instruction),
+        Some(&cache),
+    )
+    .await
+    .map_err(redaction_mask_error_to_gateway_error)?;
+    if !masked.redacted {
+        return Ok(ProviderChatRequestRedaction {
+            body_json: Cow::Borrowed(body_json),
+            redacted: false,
+        });
+    }
+    let masked_body_json = serde_json::from_slice::<Value>(&masked.body).map_err(|err| {
+        warn!(
+            error = ?err,
+            "gateway failed to decode redacted provider chat pii body"
+        );
+        GatewayError::Internal("chat pii redaction setup failed".to_string())
+    })?;
+    slot.put_for_candidate(candidate_id, masked.session);
+    Ok(ProviderChatRequestRedaction {
+        body_json: Cow::Owned(masked_body_json),
+        redacted: true,
+    })
+}
+
+fn redaction_mask_error_to_gateway_error(error: RedactionMaskError) -> GatewayError {
+    match error {
+        RedactionMaskError::Limit(limit) => GatewayError::Client {
+            status: limit.client_status(),
+            message: limit.safe_message().to_string(),
+        },
+    }
 }

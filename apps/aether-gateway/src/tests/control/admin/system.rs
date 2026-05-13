@@ -1325,6 +1325,260 @@ async fn gateway_handles_admin_system_model_directives_default_as_disabled() {
 }
 
 #[tokio::test]
+async fn gateway_validates_chat_pii_redaction_system_config_locally_with_trusted_admin_principal() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/api/admin/system/configs/module.chat_pii_redaction.cache_ttl_seconds",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }
+        }),
+    );
+
+    let data_state =
+        GatewayDataState::disabled()
+            .with_system_config_values_for_tests(Vec::<(String, serde_json::Value)>::new());
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data_state),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    let get_config = |key: &'static str| {
+        let client = client.clone();
+        let gateway_url = gateway_url.clone();
+        async move {
+            let response = client
+                .get(format!("{gateway_url}/api/admin/system/configs/{key}"))
+                .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+                .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+                .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+                .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+                .send()
+                .await
+                .expect("request should succeed");
+            assert_eq!(response.status(), StatusCode::OK, "key={key}");
+            response
+                .json::<serde_json::Value>()
+                .await
+                .expect("json body should parse")
+        }
+    };
+    let put_config = |key: &'static str, value: serde_json::Value| {
+        let client = client.clone();
+        let gateway_url = gateway_url.clone();
+        async move {
+            client
+                .put(format!("{gateway_url}/api/admin/system/configs/{key}"))
+                .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+                .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+                .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+                .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+                .json(&json!({ "value": value }))
+                .send()
+                .await
+                .expect("request should succeed")
+        }
+    };
+
+    assert_eq!(
+        get_config("module.chat_pii_redaction.enabled").await["value"],
+        json!(false)
+    );
+    assert_eq!(
+        get_config("module.chat_pii_redaction.provider_scope").await["value"],
+        json!("selected_providers")
+    );
+    assert_eq!(
+        get_config("module.chat_pii_redaction.inject_model_instruction").await["value"],
+        json!(true)
+    );
+    assert_eq!(
+        get_config("module.chat_pii_redaction.cache_ttl_seconds").await["value"],
+        json!(300)
+    );
+    assert_eq!(
+        get_config("module.chat_pii_redaction.entities").await["value"],
+        json!([
+            "email",
+            "cn_phone",
+            "global_phone",
+            "cn_id",
+            "payment_card",
+            "ipv4",
+            "ipv6",
+            "api_key",
+            "access_token",
+            "secret_key",
+            "bearer_token",
+            "jwt"
+        ])
+    );
+
+    let enabled_response = put_config("module.chat_pii_redaction.enabled", json!(true)).await;
+    assert_eq!(enabled_response.status(), StatusCode::OK);
+    let enabled_payload: serde_json::Value = enabled_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(enabled_payload["value"], json!(true));
+
+    let scope_response = put_config(
+        "module.chat_pii_redaction.provider_scope",
+        json!("all_providers"),
+    )
+    .await;
+    assert_eq!(scope_response.status(), StatusCode::OK);
+    let scope_payload: serde_json::Value =
+        scope_response.json().await.expect("json body should parse");
+    assert_eq!(scope_payload["value"], json!("all_providers"));
+
+    let selected_entities_response = put_config(
+        "module.chat_pii_redaction.entities",
+        json!(["email", "jwt", "cn_phone"]),
+    )
+    .await;
+    assert_eq!(selected_entities_response.status(), StatusCode::OK);
+    let selected_entities_payload: serde_json::Value = selected_entities_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(
+        selected_entities_payload["value"],
+        json!(["email", "cn_phone", "jwt"])
+    );
+
+    let ttl_response = put_config("module.chat_pii_redaction.cache_ttl_seconds", json!(3600)).await;
+    assert_eq!(ttl_response.status(), StatusCode::OK);
+    let ttl_payload: serde_json::Value = ttl_response.json().await.expect("json body should parse");
+    assert_eq!(ttl_payload["value"], json!(3600));
+
+    let instruction_response = put_config(
+        "module.chat_pii_redaction.inject_model_instruction",
+        json!(false),
+    )
+    .await;
+    assert_eq!(instruction_response.status(), StatusCode::OK);
+    let instruction_payload: serde_json::Value = instruction_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(instruction_payload["value"], json!(false));
+
+    let invalid_scope_response = put_config(
+        "module.chat_pii_redaction.provider_scope",
+        json!("enabled_providers"),
+    )
+    .await;
+    assert_eq!(invalid_scope_response.status(), StatusCode::BAD_REQUEST);
+
+    let invalid_entities_response = put_config(
+        "module.chat_pii_redaction.entities",
+        json!(["email", "name"]),
+    )
+    .await;
+    assert_eq!(invalid_entities_response.status(), StatusCode::BAD_REQUEST);
+
+    let invalid_ttl_response =
+        put_config("module.chat_pii_redaction.cache_ttl_seconds", json!(600)).await;
+    assert_eq!(invalid_ttl_response.status(), StatusCode::BAD_REQUEST);
+
+    let invalid_instruction_response = put_config(
+        "module.chat_pii_redaction.inject_model_instruction",
+        json!("yes"),
+    )
+    .await;
+    assert_eq!(
+        invalid_instruction_response.status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    let enabled_default_response =
+        put_config("module.chat_pii_redaction.enabled", serde_json::Value::Null).await;
+    assert_eq!(enabled_default_response.status(), StatusCode::OK);
+    let enabled_default_payload: serde_json::Value = enabled_default_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(enabled_default_payload["value"], json!(false));
+
+    let scope_default_response = put_config(
+        "module.chat_pii_redaction.provider_scope",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(scope_default_response.status(), StatusCode::OK);
+    let scope_default_payload: serde_json::Value = scope_default_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(scope_default_payload["value"], json!("selected_providers"));
+
+    let entities_default_response = put_config(
+        "module.chat_pii_redaction.entities",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(entities_default_response.status(), StatusCode::OK);
+    let entities_default_payload: serde_json::Value = entities_default_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(
+        entities_default_payload["value"],
+        json!([
+            "email",
+            "cn_phone",
+            "global_phone",
+            "cn_id",
+            "payment_card",
+            "ipv4",
+            "ipv6",
+            "api_key",
+            "access_token",
+            "secret_key",
+            "bearer_token",
+            "jwt"
+        ])
+    );
+
+    let ttl_default_response = put_config(
+        "module.chat_pii_redaction.cache_ttl_seconds",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(ttl_default_response.status(), StatusCode::OK);
+    let ttl_default_payload: serde_json::Value = ttl_default_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(ttl_default_payload["value"], json!(300));
+
+    let instruction_default_response = put_config(
+        "module.chat_pii_redaction.inject_model_instruction",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(instruction_default_response.status(), StatusCode::OK);
+    let instruction_default_payload: serde_json::Value = instruction_default_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(instruction_default_payload["value"], json!(true));
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_system_provider_priority_mode_locally_with_bearer_admin_session() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);

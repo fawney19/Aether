@@ -176,6 +176,18 @@ export interface FormatAcceptanceConfig {
   reject_formats?: string[]       // 黑名单：拒绝哪些格式（优先级高于白名单）
 }
 
+export interface ChatPiiRedactionProviderConfig {
+  enabled: boolean
+}
+
+export interface ProviderConfig {
+  chat_pii_redaction?: ChatPiiRedactionProviderConfig
+  pool_advanced?: PoolAdvancedConfig
+  failover_rules?: FailoverRulesConfig
+  claude_code_advanced?: ClaudeCodeAdvancedConfig
+  [key: string]: unknown
+}
+
 export interface ProviderEndpoint {
   id: string
   provider_id: string
@@ -579,6 +591,13 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+export function normalizeChatPiiRedactionProviderConfig(value: unknown): ChatPiiRedactionProviderConfig {
+  if (!isPlainObject(value) || typeof value.enabled !== 'boolean') {
+    return { enabled: false }
+  }
+  return { enabled: value.enabled }
+}
+
 export function normalizePoolAdvancedConfig(value: unknown): PoolAdvancedConfig | null {
   if (value == null || value === false) return null
   if (value === true) return {}
@@ -631,6 +650,7 @@ export interface ProviderWithEndpointsSummary {
   api_formats: string[]
   endpoint_health_details: EndpointHealthDetail[]
   claude_code_advanced?: ClaudeCodeAdvancedConfig | null
+  chat_pii_redaction?: ChatPiiRedactionProviderConfig | null
   pool_advanced?: PoolAdvancedConfig | null
   failover_rules?: FailoverRulesConfig | null
   ops_configured: boolean  // 是否配置了扩展操作（余额监控等）
