@@ -155,6 +155,7 @@ pub async fn serve_execution_runtime_tcp(
     Ok(())
 }
 
+#[cfg(unix)]
 pub async fn serve_execution_runtime_unix(
     socket_path: &Path,
     max_in_flight_requests: Option<usize>,
@@ -177,6 +178,19 @@ pub async fn serve_execution_runtime_unix(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(not(unix))]
+pub async fn serve_execution_runtime_unix(
+    _socket_path: &Path,
+    _max_in_flight_requests: Option<usize>,
+    _distributed_request_gate: Option<RuntimeSemaphore>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Unix sockets are not supported on this platform",
+    )
+    .into())
 }
 
 async fn health(State(state): State<ExecutionRuntimeAppState>) -> impl IntoResponse {

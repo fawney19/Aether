@@ -149,7 +149,8 @@ fn local_openai_responses_wrapper_preserves_body_order_after_edits() {
             "prompt_cache_key",
         ]
     );
-    assert_eq!(provider_request_body["parallel_tool_calls"], true);
+    assert_eq!(provider_request_body["parallel_tool_calls"], json!(true));
+    assert_eq!(provider_request_body["instructions"], json!(""));
 }
 
 #[test]

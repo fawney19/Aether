@@ -3094,7 +3094,7 @@ async fn gateway_handles_openai_responses_test_model_locally() {
                     .json_body
                     .as_ref()
                     .and_then(|body| body.get("instructions")),
-                Some(&json!("You are ChatGPT."))
+                Some(&json!(""))
             );
             assert_eq!(
                 plan.body

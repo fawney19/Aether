@@ -14,6 +14,7 @@ use serde_json::Value;
 use crate::formats::shared::model_directives::apply_model_directive_overrides_from_request;
 
 use crate::formats::openai::responses::codex::{
+    apply_codex_openai_responses_chat_body_edits,
     apply_codex_openai_responses_special_body_edits,
     apply_openai_responses_compact_special_body_edits,
 };
@@ -117,13 +118,27 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers(
     ) {
         return None;
     }
-    apply_codex_openai_responses_special_body_edits(
-        &mut provider_request_body,
-        provider_type,
-        provider_api_format,
-        body_rules,
-        user_api_key_id,
+    let client_is_openai_responses_family = matches!(
+        aether_ai_formats::normalize_api_format_alias(client_api_format).as_str(),
+        "openai:responses" | "openai:responses:compact"
     );
+    if client_is_openai_responses_family {
+        apply_codex_openai_responses_special_body_edits(
+            &mut provider_request_body,
+            provider_type,
+            provider_api_format,
+            body_rules,
+            user_api_key_id,
+        );
+    } else {
+        apply_codex_openai_responses_chat_body_edits(
+            &mut provider_request_body,
+            provider_type,
+            provider_api_format,
+            body_rules,
+            user_api_key_id,
+        );
+    }
     apply_openai_responses_compact_special_body_edits(
         &mut provider_request_body,
         provider_api_format,

@@ -30,7 +30,10 @@ fn applies_codex_defaults_when_body_rules_do_not_handle_fields() {
     assert!(body.get("top_p").is_none());
     assert!(body.get("metadata").is_none());
     assert_eq!(body["store"], false);
-    assert_eq!(body["instructions"], "You are ChatGPT.");
+    assert_eq!(body["instructions"], "");
+    assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+    assert_eq!(body["parallel_tool_calls"], true);
+    assert!(body.get("reasoning").is_none());
 }
 
 #[test]

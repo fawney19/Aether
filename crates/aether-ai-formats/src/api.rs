@@ -141,6 +141,7 @@ pub use crate::formats::{
     },
     openai::responses::{
         codex::{
+            apply_codex_openai_responses_chat_body_edits,
             apply_codex_openai_responses_special_body_edits,
             apply_codex_openai_responses_special_headers,
             apply_openai_responses_compact_special_body_edits, CODEX_OPENAI_IMAGE_DEFAULT_MODEL,

@@ -3,6 +3,7 @@ pub(crate) use aether_ai_formats::api::{
     aggregate_openai_chat_stream_sync_response, aggregate_openai_responses_stream_sync_response,
     aggregate_standard_chat_stream_sync_response, aggregate_standard_cli_stream_sync_response,
     api_format_alias_matches, api_format_storage_aliases,
+    apply_codex_openai_responses_chat_body_edits,
     apply_codex_openai_responses_special_body_edits, apply_codex_openai_responses_special_headers,
     apply_model_directive_mapping_patch, apply_model_directive_overrides_from_model,
     apply_model_directive_overrides_from_request,

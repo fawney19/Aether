@@ -8,7 +8,10 @@ use sha2::Sha256;
 use uuid::Uuid;
 
 const CODEX_PROMPT_CACHE_NAMESPACE_VERSION: &str = "v3";
-const CODEX_DEFAULT_INSTRUCTIONS: &str = "You are ChatGPT.";
+const CODEX_DEFAULT_INSTRUCTIONS: &str = "";
+const CODEX_DEFAULT_REASONING_EFFORT: &str = "medium";
+const CODEX_DEFAULT_REASONING_SUMMARY: &str = "auto";
+const CODEX_REASONING_ENCRYPTED_CONTENT_INCLUDE: &str = "reasoning.encrypted_content";
 const CODEX_DEFAULT_USER_AGENT: &str =
     "codex-tui/0.122.0 (Mac OS 15.2.0; arm64) vscode/2.6.11 (codex-tui; 0.122.0)";
 const CODEX_DEFAULT_ORIGINATOR: &str = "codex-tui";
@@ -137,50 +140,6 @@ fn inject_codex_default_variation_prompt(body_object: &mut serde_json::Map<Strin
             "text": CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_PROMPT,
         }),
     );
-}
-
-fn ensure_codex_reasoning_summary(body_object: &mut serde_json::Map<String, Value>) {
-    let reasoning = body_object
-        .entry("reasoning".to_string())
-        .or_insert_with(|| json!({}));
-    if !reasoning.is_object() {
-        *reasoning = json!({});
-    }
-    let Some(reasoning_object) = reasoning.as_object_mut() else {
-        return;
-    };
-    reasoning_object
-        .entry("effort".to_string())
-        .or_insert_with(|| json!("medium"));
-    reasoning_object
-        .entry("summary".to_string())
-        .or_insert_with(|| json!("auto"));
-}
-
-fn ensure_codex_reasoning_include(body_object: &mut serde_json::Map<String, Value>) {
-    const REASONING_ENCRYPTED_CONTENT: &str = "reasoning.encrypted_content";
-
-    match body_object.get_mut("include") {
-        Some(Value::Array(include)) => {
-            let has_reasoning_encrypted_content = include
-                .iter()
-                .any(|value| value.as_str() == Some(REASONING_ENCRYPTED_CONTENT));
-            if !has_reasoning_encrypted_content {
-                include.push(json!(REASONING_ENCRYPTED_CONTENT));
-            }
-        }
-        Some(_) | None => {
-            body_object.insert("include".to_string(), json!([REASONING_ENCRYPTED_CONTENT]));
-        }
-    }
-}
-
-fn ensure_codex_responses_defaults(body_object: &mut serde_json::Map<String, Value>) {
-    ensure_codex_reasoning_summary(body_object);
-    ensure_codex_reasoning_include(body_object);
-    body_object
-        .entry("parallel_tool_calls".to_string())
-        .or_insert_with(|| json!(true));
 }
 
 fn build_stable_codex_prompt_cache_key(user_api_key_id: &str) -> Option<String> {
@@ -330,6 +289,54 @@ pub fn apply_openai_responses_compact_special_body_edits(
     body_object.remove("stream");
 }
 
+fn ensure_codex_responses_passthrough_fields(
+    body_object: &mut serde_json::Map<String, Value>,
+    provider_api_format: &str,
+    body_rules: Option<&Value>,
+) {
+    if is_openai_responses_compact_request(provider_api_format)
+        || is_openai_image_request(provider_api_format)
+    {
+        return;
+    }
+    if !body_rules_handle_path(body_rules, "parallel_tool_calls") {
+        body_object.insert("parallel_tool_calls".to_string(), json!(true));
+    }
+    if !body_rules_handle_path(body_rules, "include") {
+        body_object.insert(
+            "include".to_string(),
+            json!([CODEX_REASONING_ENCRYPTED_CONTENT_INCLUDE]),
+        );
+    }
+}
+
+fn ensure_codex_chat_reasoning_defaults(
+    body_object: &mut serde_json::Map<String, Value>,
+    provider_api_format: &str,
+    body_rules: Option<&Value>,
+) {
+    if is_openai_responses_compact_request(provider_api_format)
+        || is_openai_image_request(provider_api_format)
+    {
+        return;
+    }
+    if body_rules_handle_path(body_rules, "reasoning") {
+        return;
+    }
+    let reasoning = body_object
+        .entry("reasoning".to_string())
+        .or_insert_with(|| json!({}));
+    let Some(reasoning_object) = reasoning.as_object_mut() else {
+        return;
+    };
+    reasoning_object
+        .entry("effort".to_string())
+        .or_insert_with(|| json!(CODEX_DEFAULT_REASONING_EFFORT));
+    reasoning_object
+        .entry("summary".to_string())
+        .or_insert_with(|| json!(CODEX_DEFAULT_REASONING_SUMMARY));
+}
+
 pub fn apply_codex_openai_responses_special_body_edits(
     provider_request_body: &mut Value,
     provider_type: &str,
@@ -362,7 +369,7 @@ pub fn apply_codex_openai_responses_special_body_edits(
     } else if !body_rules_handle_path(body_rules, "store") {
         body_object.insert("store".to_string(), json!(false));
     }
-    ensure_codex_responses_defaults(body_object);
+    ensure_codex_responses_passthrough_fields(body_object, provider_api_format, body_rules);
     if !body_rules_handle_path(body_rules, "instructions")
         && !body_object.contains_key("instructions")
     {
@@ -370,6 +377,10 @@ pub fn apply_codex_openai_responses_special_body_edits(
             "instructions".to_string(),
             json!(CODEX_DEFAULT_INSTRUCTIONS),
         );
+    } else if body_object.contains_key("instructions")
+        && body_object.get("instructions").map_or(false, |v| v.is_null())
+    {
+        body_object.insert("instructions".to_string(), json!(""));
     }
     if is_openai_image_request(provider_api_format) {
         body_object.insert(
@@ -387,6 +398,30 @@ pub fn apply_codex_openai_responses_special_body_edits(
         provider_api_format,
         user_api_key_id,
     );
+}
+
+pub fn apply_codex_openai_responses_chat_body_edits(
+    provider_request_body: &mut Value,
+    provider_type: &str,
+    provider_api_format: &str,
+    body_rules: Option<&Value>,
+    user_api_key_id: Option<&str>,
+) {
+    apply_codex_openai_responses_special_body_edits(
+        provider_request_body,
+        provider_type,
+        provider_api_format,
+        body_rules,
+        user_api_key_id,
+    );
+
+    if !is_codex_openai_responses_request(provider_type, provider_api_format) {
+        return;
+    }
+    let Some(body_object) = provider_request_body.as_object_mut() else {
+        return;
+    };
+    ensure_codex_chat_reasoning_defaults(body_object, provider_api_format, body_rules);
 }
 
 pub fn apply_codex_openai_responses_special_headers(
@@ -464,13 +499,14 @@ pub fn apply_codex_openai_responses_special_headers(
 #[cfg(test)]
 mod tests {
     use super::{
+        apply_codex_openai_responses_chat_body_edits,
         apply_codex_openai_responses_special_body_edits, CODEX_OPENAI_IMAGE_INTERNAL_MODEL,
     };
     use serde_json::json;
 
     #[test]
-    fn codex_responses_body_edits_request_reasoning_summary_stream() {
-        let mut provider_request_body = json!({
+    fn codex_responses_body_edits_inject_passthrough_fields_without_reasoning_summary() {
+        let mut provider_request_body = json!( {
             "input": [{
                 "role": "user",
                 "content": "hello"
@@ -487,21 +523,18 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            provider_request_body["reasoning"]["effort"],
-            json!("medium")
-        );
-        assert_eq!(provider_request_body["reasoning"]["summary"], json!("auto"));
+        assert!(provider_request_body.get("reasoning").is_none());
         assert_eq!(
             provider_request_body["include"],
             json!(["reasoning.encrypted_content"])
         );
         assert_eq!(provider_request_body["parallel_tool_calls"], json!(true));
+        assert_eq!(provider_request_body["instructions"], json!(""));
     }
 
     #[test]
-    fn codex_responses_body_edits_preserve_existing_reasoning_and_include() {
-        let mut provider_request_body = json!({
+    fn codex_responses_body_edits_preserve_existing_reasoning_but_use_codex_include() {
+        let mut provider_request_body = json!( {
             "input": [],
             "model": "gpt-5.4",
             "include": ["file_search_call.results"],
@@ -524,9 +557,53 @@ mod tests {
         );
         assert_eq!(
             provider_request_body["include"],
-            json!(["file_search_call.results", "reasoning.encrypted_content"])
+            json!(["reasoning.encrypted_content"])
         );
-        assert_eq!(provider_request_body["parallel_tool_calls"], json!(false));
+        assert_eq!(provider_request_body["parallel_tool_calls"], json!(true));
+    }
+
+    #[test]
+    fn codex_chat_body_edits_inject_reasoning_summary_defaults() {
+        let mut provider_request_body = json!({
+            "input": [],
+            "model": "gpt-5.4"
+        });
+
+        apply_codex_openai_responses_chat_body_edits(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            None,
+            None,
+        );
+
+        assert_eq!(provider_request_body["reasoning"]["effort"], json!("medium"));
+        assert_eq!(provider_request_body["reasoning"]["summary"], json!("auto"));
+        assert_eq!(
+            provider_request_body["include"],
+            json!(["reasoning.encrypted_content"])
+        );
+        assert_eq!(provider_request_body["parallel_tool_calls"], json!(true));
+    }
+
+    #[test]
+    fn codex_chat_body_edits_preserve_existing_reasoning_effort() {
+        let mut provider_request_body = json!({
+            "input": [],
+            "model": "gpt-5.4",
+            "reasoning": {"effort": "low"}
+        });
+
+        apply_codex_openai_responses_chat_body_edits(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            None,
+            None,
+        );
+
+        assert_eq!(provider_request_body["reasoning"]["effort"], json!("low"));
+        assert_eq!(provider_request_body["reasoning"]["summary"], json!("auto"));
     }
 
     #[test]

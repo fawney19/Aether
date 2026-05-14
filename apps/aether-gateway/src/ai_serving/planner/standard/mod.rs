@@ -293,7 +293,11 @@ mod tests {
 
         assert!(converted.get("metadata").is_none());
         assert_eq!(converted["store"], false);
-        assert_eq!(converted["instructions"], "You are ChatGPT.");
+        assert_eq!(converted["instructions"], "");
+        assert_eq!(converted["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(converted["parallel_tool_calls"], true);
+        assert_eq!(converted["reasoning"]["effort"], "medium");
+        assert_eq!(converted["reasoning"]["summary"], "auto");
     }
 
     #[test]
