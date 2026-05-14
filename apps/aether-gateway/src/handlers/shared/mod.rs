@@ -34,7 +34,8 @@ pub(crate) use self::email_templates::{
 };
 pub(crate) use self::external_models::OFFICIAL_EXTERNAL_MODEL_PROVIDERS;
 pub(crate) use self::normalize::{
-    normalize_json_array, normalize_json_object, normalize_string_list,
+    deserialize_optional_json_patch, normalize_feature_settings, normalize_json_array,
+    normalize_json_object, normalize_string_list,
 };
 pub(crate) use self::payloads::{
     InternalGatewayAuthContextRequest, InternalGatewayExecuteRequest,

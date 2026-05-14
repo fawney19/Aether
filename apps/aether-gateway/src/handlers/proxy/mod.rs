@@ -16,7 +16,7 @@ use crate::api::response::{
     build_local_user_rpm_limited_response,
 };
 use crate::constants::{
-    DEPENDENCY_REASON_HEADER, EXECUTION_PATH_CONTROL_EXECUTE_STREAM,
+    CONTROL_CANDIDATE_ID_HEADER, DEPENDENCY_REASON_HEADER, EXECUTION_PATH_CONTROL_EXECUTE_STREAM,
     EXECUTION_PATH_CONTROL_EXECUTE_SYNC, EXECUTION_PATH_DISTRIBUTED_OVERLOADED,
     EXECUTION_PATH_EXECUTION_RUNTIME_STREAM, EXECUTION_PATH_EXECUTION_RUNTIME_SYNC,
     EXECUTION_PATH_LOCAL_AI_PUBLIC, EXECUTION_PATH_LOCAL_API_KEY_CONCURRENCY_LIMITED,
@@ -62,6 +62,7 @@ use crate::{
 use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{self, header::HeaderName, header::HeaderValue, Response};
+use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, time::Instant};
 use tracing::{debug, info, warn};
@@ -494,6 +495,109 @@ fn collect_upstream_response_headers(
         .collect()
 }
 
+fn collect_response_headers(headers: &http::HeaderMap) -> BTreeMap<String, String> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_string(),
+                value.to_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn replace_response_headers(
+    headers: &mut http::HeaderMap,
+    values: &BTreeMap<String, String>,
+) -> Result<(), GatewayError> {
+    headers.clear();
+    for (name, value) in values {
+        headers.insert(
+            HeaderName::from_bytes(name.as_bytes())
+                .map_err(|err| GatewayError::Internal(err.to_string()))?,
+            HeaderValue::from_str(value).map_err(|err| GatewayError::Internal(err.to_string()))?,
+        );
+    }
+    Ok(())
+}
+
+fn take_redaction_session_for_response(
+    headers: &http::HeaderMap,
+    redaction_slot: &crate::privacy::RedactionSessionSlot,
+) -> Option<crate::privacy::RedactionSession> {
+    let candidate_id = headers
+        .get(CONTROL_CANDIDATE_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    redaction_slot.take_for_candidate(candidate_id)
+}
+
+async fn restore_redacted_sync_execution_response(
+    response: Response<Body>,
+    redaction_slot: &crate::privacy::RedactionSessionSlot,
+) -> Result<Response<Body>, GatewayError> {
+    let (mut parts, body) = response.into_parts();
+    let Some(session) = take_redaction_session_for_response(&parts.headers, redaction_slot) else {
+        return Ok(Response::from_parts(parts, body));
+    };
+    let mut headers = collect_response_headers(&parts.headers);
+    let body_bytes = to_bytes(body, usize::MAX)
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let restored =
+        crate::privacy::restore_sync_response_body(&mut headers, body_bytes.as_ref(), &session)?;
+    replace_response_headers(&mut parts.headers, &headers)?;
+    Ok(Response::from_parts(parts, Body::from(restored.body)))
+}
+
+fn restore_redacted_stream_execution_response(
+    response: Response<Body>,
+    redaction_slot: &crate::privacy::RedactionSessionSlot,
+) -> Result<Response<Body>, GatewayError> {
+    let (mut parts, body) = response.into_parts();
+    let Some(session) = take_redaction_session_for_response(&parts.headers, redaction_slot) else {
+        return Ok(Response::from_parts(parts, body));
+    };
+    let headers = collect_response_headers(&parts.headers);
+    let _ = crate::privacy::StreamingResponseRestorer::new(&headers, &session)?;
+    parts.headers.remove(http::header::CONTENT_LENGTH);
+    let stream_headers = headers;
+    let stream = async_stream::stream! {
+        let mut restorer = match crate::privacy::StreamingResponseRestorer::new(&stream_headers, &session) {
+            Ok(restorer) => restorer,
+            Err(err) => {
+                yield Err(std::io::Error::other(format!("{err:?}")));
+                return;
+            }
+        };
+        let mut body_stream = body.into_data_stream();
+        while let Some(chunk) = body_stream.next().await {
+            match chunk {
+                Ok(chunk) => match restorer.push_chunk(chunk.as_ref()) {
+                    Ok(restored) if restored.is_empty() => {}
+                    Ok(restored) => yield Ok(Bytes::from(restored)),
+                    Err(err) => {
+                        yield Err(std::io::Error::other(format!("{err:?}")));
+                        return;
+                    }
+                },
+                Err(err) => {
+                    yield Err(std::io::Error::other(err.to_string()));
+                    return;
+                }
+            }
+        }
+        match restorer.finish() {
+            Ok(restored) if restored.is_empty() => {}
+            Ok(restored) => yield Ok(Bytes::from(restored)),
+            Err(err) => yield Err(std::io::Error::other(format!("{err:?}"))),
+        }
+    };
+    Ok(Response::from_parts(parts, Body::from_stream(stream)))
+}
+
 fn aggregate_sync_sse_response_for_client(
     decision: &GatewayControlDecision,
     public_path: &str,
@@ -749,6 +853,8 @@ pub(crate) async fn proxy_request(
     };
     let request_admission_ms = started_at.elapsed().as_millis() as u64;
     let (mut parts, body) = request.into_parts();
+    let redaction_slot = crate::privacy::RedactionSessionSlot::default();
+    parts.extensions.insert(redaction_slot.clone());
     parts
         .extensions
         .insert(request_origin_from_headers_and_remote_addr(
@@ -1181,6 +1287,10 @@ pub(crate) async fn proxy_request(
             );
             match stream_outcome {
                 LocalExecutionRequestOutcome::Responded(execution_runtime_response) => {
+                    let execution_runtime_response = restore_redacted_stream_execution_response(
+                        execution_runtime_response,
+                        &redaction_slot,
+                    )?;
                     state.clear_local_execution_runtime_miss_diagnostic(&trace_id);
                     return Ok(finalize_gateway_response_with_context(
                         &state,
@@ -1202,6 +1312,11 @@ pub(crate) async fn proxy_request(
             .await?
         {
             LocalExecutionRequestOutcome::Responded(execution_runtime_response) => {
+                let execution_runtime_response = restore_redacted_sync_execution_response(
+                    execution_runtime_response,
+                    &redaction_slot,
+                )
+                .await?;
                 state.clear_local_execution_runtime_miss_diagnostic(&trace_id);
                 return Ok(finalize_gateway_response_with_context(
                     &state,
@@ -1229,6 +1344,10 @@ pub(crate) async fn proxy_request(
             .await?
             {
                 LocalExecutionRequestOutcome::Responded(execution_runtime_response) => {
+                    let execution_runtime_response = restore_redacted_stream_execution_response(
+                        execution_runtime_response,
+                        &redaction_slot,
+                    )?;
                     state.clear_local_execution_runtime_miss_diagnostic(&trace_id);
                     return Ok(finalize_gateway_response_with_context(
                         &state,
@@ -1278,6 +1397,15 @@ pub(crate) async fn proxy_request(
                         Some(control_execution_path),
                         reason,
                     );
+                    let control_response = if stream_request {
+                        restore_redacted_stream_execution_response(
+                            control_response,
+                            &redaction_slot,
+                        )?
+                    } else {
+                        restore_redacted_sync_execution_response(control_response, &redaction_slot)
+                            .await?
+                    };
                     let mut control_response = control_response;
                     state.clear_local_execution_runtime_miss_diagnostic(&trace_id);
                     control_response.headers_mut().insert(
@@ -1778,8 +1906,109 @@ fn local_execution_runtime_miss_route_detail(
 mod tests {
     use super::{
         diagnostic_is_auth_api_key_concurrency_limited, local_execution_runtime_miss_detail,
+        restore_redacted_stream_execution_response, restore_redacted_sync_execution_response,
         GatewayControlDecision, LocalExecutionRuntimeMissDiagnostic,
     };
+    use axum::body::{to_bytes, Body};
+    use axum::http::{header, Response};
+    use serde_json::json;
+
+    fn redaction_slot_for_email() -> (crate::privacy::RedactionSessionSlot, String) {
+        let masked = crate::privacy::mask_chat_request_json(
+            br#"{"messages":[{"role":"user","content":"Email alice@example.com"}]}"#,
+            crate::privacy::RedactionSessionConfig::new(
+                b"proxy-wrapper-test-key".to_vec(),
+                300,
+                600,
+            ),
+        );
+        let sentinel = masked
+            .session
+            .sentinel_for_original("alice@example.com")
+            .expect("email sentinel should exist")
+            .to_string();
+        let slot = crate::privacy::RedactionSessionSlot::default();
+        slot.put(masked.session);
+        (slot, sentinel)
+    }
+
+    #[tokio::test]
+    async fn proxy_pii_redaction_sync_response_wrapper_restores_current_request_sentinel() {
+        let (slot, sentinel) = redaction_slot_for_email();
+        let body = serde_json::to_vec(&json!({
+            "choices": [{"message": {"role": "assistant", "content": format!("hello {sentinel}")}}]
+        }))
+        .expect("response should serialize");
+        let response = Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, body.len().to_string())
+            .body(Body::from(body))
+            .expect("response should build");
+
+        let restored = restore_redacted_sync_execution_response(response, &slot)
+            .await
+            .expect("sync wrapper should restore");
+        let restored_content_length = restored
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let body = to_bytes(restored.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("body should parse");
+
+        assert_eq!(restored_content_length, Some(body.len().to_string()));
+        assert_eq!(
+            value["choices"][0]["message"]["content"],
+            "hello alice@example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_pii_redaction_stream_response_wrapper_restores_current_request_sentinel() {
+        let (slot, sentinel) = redaction_slot_for_email();
+        let response = Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header(header::CONTENT_LENGTH, "999")
+            .body(Body::from(format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"hello {sentinel}\"}}}}]}}\n\n"
+            )))
+            .expect("response should build");
+
+        let restored = restore_redacted_stream_execution_response(response, &slot)
+            .expect("stream wrapper should restore");
+        assert!(restored.headers().get(header::CONTENT_LENGTH).is_none());
+        let body = to_bytes(restored.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let text = String::from_utf8(body.to_vec()).expect("body should be utf8");
+
+        assert!(text.contains("hello alice@example.com"));
+        assert!(!text.contains(&sentinel));
+    }
+
+    #[tokio::test]
+    async fn proxy_pii_redaction_compressed_response_safe_error() {
+        let (slot, sentinel) = redaction_slot_for_email();
+        let response = Response::builder()
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_ENCODING, "gzip")
+            .header(header::CONTENT_LENGTH, "999")
+            .body(Body::from(format!(
+                "{{\"choices\":[{{\"message\":{{\"content\":\"hello {sentinel}\"}}}}]}}"
+            )))
+            .expect("response should build");
+
+        let err = restore_redacted_sync_execution_response(response, &slot)
+            .await
+            .expect_err("compressed active redaction should fail safely");
+        let message = format!("{err:?}");
+
+        assert!(message.contains("encoded response bodies"));
+        assert!(!message.contains("alice@example.com"));
+        assert!(!message.contains(&sentinel));
+    }
 
     #[test]
     fn runtime_miss_detail_returns_model_specific_stream_message_when_candidates_are_unavailable() {

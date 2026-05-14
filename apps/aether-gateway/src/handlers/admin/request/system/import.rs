@@ -10,7 +10,7 @@ use crate::handlers::admin::shared::{
 };
 use crate::handlers::admin::system::shared::configs::apply_admin_system_config_update;
 use crate::handlers::admin::users::{
-    hash_admin_user_api_key, normalize_admin_list_policy_mode,
+    hash_admin_user_api_key, normalize_admin_feature_settings, normalize_admin_list_policy_mode,
     normalize_admin_rate_limit_policy_mode, normalize_admin_user_api_formats,
     normalize_admin_user_string_list,
 };
@@ -2104,6 +2104,11 @@ impl<'a> AdminAppState<'a> {
                 user.get("model_capability_settings"),
                 "model_capability_settings"
             ));
+            let feature_settings = invalid_value!(imported_optional_json_object(
+                user.get("feature_settings"),
+                "feature_settings"
+            )
+            .and_then(normalize_admin_feature_settings));
             let wallet_payload = match user.get("wallet") {
                 Some(Value::Object(map)) => Some(map),
                 Some(Value::Null) | None => None,
@@ -2221,6 +2226,14 @@ impl<'a> AdminAppState<'a> {
                                 )
                                 .await?;
                         }
+                        if user.contains_key("feature_settings") {
+                            let _ = self
+                                .update_user_feature_settings(
+                                    &existing.id,
+                                    feature_settings.clone(),
+                                )
+                                .await?;
+                        }
                         if allowed_providers_mode.is_some()
                             || allowed_api_formats_mode.is_some()
                             || allowed_models_mode.is_some()
@@ -2282,6 +2295,11 @@ impl<'a> AdminAppState<'a> {
                             &created.id,
                             model_capability_settings.clone(),
                         )
+                        .await?;
+                }
+                if user.contains_key("feature_settings") {
+                    let _ = self
+                        .update_user_feature_settings(&created.id, feature_settings.clone())
                         .await?;
                 }
                 let created = if allowed_providers_mode.is_some()
@@ -2402,6 +2420,11 @@ impl<'a> AdminAppState<'a> {
                     "total_cost_usd"
                 ))
                 .unwrap_or(0.0);
+                let feature_settings = invalid_value!(imported_optional_json_object(
+                    key.get("feature_settings"),
+                    "feature_settings"
+                )
+                .and_then(normalize_admin_feature_settings));
 
                 if let Some(existing_key) = existing_api_keys_by_hash.get(&key_hash).cloned() {
                     match merge_mode {
@@ -2450,6 +2473,15 @@ impl<'a> AdminAppState<'a> {
                                     force_capabilities.clone(),
                                 )
                                 .await?;
+                            if key.contains_key("feature_settings") {
+                                let _ = self
+                                    .set_user_api_key_feature_settings(
+                                        &user_id,
+                                        &existing_key.api_key_id,
+                                        feature_settings.clone(),
+                                    )
+                                    .await?;
+                            }
                             let _ = self
                                 .set_user_api_key_active(
                                     &user_id,
@@ -2503,6 +2535,15 @@ impl<'a> AdminAppState<'a> {
                         json!({ "detail": "Admin system data unavailable" }),
                     )));
                 };
+                if key.contains_key("feature_settings") {
+                    let _ = self
+                        .set_user_api_key_feature_settings(
+                            &user_id,
+                            &created.api_key_id,
+                            feature_settings.clone(),
+                        )
+                        .await?;
+                }
                 existing_api_keys_by_hash.insert(key_hash, created);
                 stats.api_keys.created += 1;
             }
@@ -2596,6 +2637,11 @@ impl<'a> AdminAppState<'a> {
                 "total_cost_usd"
             ))
             .unwrap_or(0.0);
+            let feature_settings = invalid_value!(imported_optional_json_object(
+                key.get("feature_settings"),
+                "feature_settings"
+            )
+            .and_then(normalize_admin_feature_settings));
             let wallet_payload = match key.get("wallet") {
                 Some(Value::Object(map)) => Some(map),
                 Some(Value::Null) | None => None,
@@ -2643,6 +2689,14 @@ impl<'a> AdminAppState<'a> {
                         let _ = self
                             .set_standalone_api_key_active(&existing_key.api_key_id, is_active)
                             .await?;
+                        if key.contains_key("feature_settings") {
+                            let _ = self
+                                .set_standalone_api_key_feature_settings(
+                                    &existing_key.api_key_id,
+                                    feature_settings.clone(),
+                                )
+                                .await?;
+                        }
                         if key.contains_key("expires_at")
                             || key.contains_key("auto_delete_on_expiry")
                             || key.contains_key("force_capabilities")
@@ -2697,6 +2751,14 @@ impl<'a> AdminAppState<'a> {
                     json!({ "detail": "Admin system data unavailable" }),
                 )));
             };
+            if key.contains_key("feature_settings") {
+                let _ = self
+                    .set_standalone_api_key_feature_settings(
+                        &created.api_key_id,
+                        feature_settings.clone(),
+                    )
+                    .await?;
+            }
             self.sync_imported_api_key_wallet(
                 &created.api_key_id,
                 &wallet_target,

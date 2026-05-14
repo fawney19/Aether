@@ -15,7 +15,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_pages: ${{ steps.classify.outputs.deploy_pages }}
+    steps:
+      - name: Ensure stable Pages release tag
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "deploy_pages=false" >> "${GITHUB_OUTPUT}"
+
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+            echo "Manual Pages deployment."
+            echo "deploy_pages=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Skipping Pages deploy for non-stable release tag: ${tag}"
+            exit 0
+          fi
+
+          echo "deploy_pages=true" >> "${GITHUB_OUTPUT}"
+
   build:
+    needs: preflight
+    if: needs.preflight.outputs.deploy_pages == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

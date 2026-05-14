@@ -7,7 +7,7 @@ use axum::{
     Json,
 };
 use regex::Regex;
-use serde_json::json;
+use serde_json::{json, Value};
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct AdminCreateUserApiKeyRequest {
@@ -35,6 +35,8 @@ pub(super) struct AdminCreateUserApiKeyRequest {
     pub(super) is_standalone: Option<bool>,
     #[serde(default)]
     pub(super) auto_delete_on_expiry: Option<bool>,
+    #[serde(default)]
+    pub(super) feature_settings: Option<Value>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -45,6 +47,8 @@ pub(super) struct AdminUpdateUserApiKeyRequest {
     pub(super) rate_limit: Option<i32>,
     #[serde(default)]
     pub(super) concurrent_limit: Option<i32>,
+    #[serde(default)]
+    pub(super) feature_settings: Option<Option<Value>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -67,6 +71,8 @@ pub(super) struct AdminCreateUserRequest {
     pub(super) unlimited: bool,
     #[serde(default)]
     pub(super) group_ids: Vec<String>,
+    #[serde(default)]
+    pub(super) feature_settings: Option<Value>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -85,6 +91,8 @@ pub(super) struct AdminUpdateUserRequest {
     pub(super) group_ids: Vec<String>,
     #[serde(default)]
     pub(super) is_active: Option<bool>,
+    #[serde(default)]
+    pub(super) feature_settings: Option<Option<Value>>,
 }
 
 pub(super) type AdminUpdateUserPatch = AdminTypedObjectPatch<AdminUpdateUserRequest>;

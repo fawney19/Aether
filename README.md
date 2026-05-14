@@ -104,7 +104,7 @@ cp -a data/aether.db backup_$(date +%Y%m%d_%H%M%S).db
 curl -fsSL https://raw.githubusercontent.com/fawney19/Aether/aether-rust-pioneer/install.sh | sudo bash
 ```
 
-运行后按提示输入语言、版本和部署方式。固定安装某个 tag 时，版本选择选 `2`，再输入类似 `v0.7.0-rc23` 的 tag。默认会安装最新预发布版本；Docker Compose 模式默认使用 `pre` 镜像通道。
+运行后按提示输入语言、版本和部署方式。默认会安装最新正式版。需要提前测试时可用 `AETHER_CHANNEL=rc` 或 `AETHER_CHANNEL=beta`；Docker Compose 模式默认使用 `latest` 镜像通道。固定安装某个 tag 时，版本选择选 `4`，再输入类似 `v0.7.0-rc.1` 的 tag。
 二进制安装在下载 Release 压缩包前会询问是否使用下载加速源；选择使用时会先打印原始 GitHub URL，再要求输入新的压缩包下载 URL。非交互式安装可用 `AETHER_RELEASE_ARCHIVE_URL` 指定压缩包 URL。
 如果安装目录里已经有配置，脚本会优先复用：Docker Compose 保留已有 `.env`，二进制服务模式保留已有 `/etc/aether/aether-gateway.env`。只有首次生成新配置时才会提示输入管理员密码。
 
@@ -116,8 +116,10 @@ curl -fsSL https://raw.githubusercontent.com/fawney19/Aether/aether-rust-pioneer
 请输入选项 / Enter choice [1]:
 
 请选择 Aether 版本:
-  1) 最新预发布版本
-  2) 指定 tag，例如 v0.7.0-rc23
+  1) 最新正式版
+  2) 最新 RC 预发布版
+  3) 最新 Beta 预发布版
+  4) 指定 tag，例如 v0.7.0-rc.1
 
 请输入选项 [1]:
 

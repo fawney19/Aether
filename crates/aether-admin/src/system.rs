@@ -16,6 +16,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use regex::Regex;
 use semver::Version;
 use serde::{de, de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -70,6 +71,121 @@ pub struct AdminSystemUpdateRelease {
 
 fn default_true() -> bool {
     true
+}
+
+fn chat_pii_redaction_default_rules() -> serde_json::Value {
+    json!([
+        {
+            "id": "email",
+            "name": "邮箱",
+            "pattern": "(?i)[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,253}\\.[A-Z]{2,63}",
+            "enabled": true,
+            "features": {"validator": "email"},
+            "system": true
+        },
+        {
+            "id": "cn_phone",
+            "name": "手机号",
+            "pattern": "(?:\\+?86[- ]?)?(?:1[3-9]\\d[- ]?\\d{4}[- ]?\\d{4}|0\\d{2,3}[- ]\\d{7,8}(?:-\\d{1,6})?)",
+            "enabled": true,
+            "features": {"validator": "cn_phone"},
+            "system": true
+        },
+        {
+            "id": "global_phone",
+            "name": "国际号码",
+            "pattern": "\\+[1-9]\\d(?:[ -]?\\d){6,13}\\d",
+            "enabled": true,
+            "features": {"validator": "global_phone"},
+            "system": true
+        },
+        {
+            "id": "cn_id",
+            "name": "身份证号",
+            "pattern": "(?i)\\b\\d{17}[\\dX]\\b",
+            "enabled": true,
+            "features": {"validator": "cn_id"},
+            "system": true
+        },
+        {
+            "id": "payment_card",
+            "name": "银行卡号",
+            "pattern": "\\b(?:\\d[ -]?){12,18}\\d\\b",
+            "enabled": true,
+            "features": {"validator": "payment_card"},
+            "system": true
+        },
+        {
+            "id": "ipv4",
+            "name": "IPv4",
+            "pattern": "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b",
+            "enabled": true,
+            "features": {"validator": "ipv4"},
+            "system": true
+        },
+        {
+            "id": "ipv6",
+            "name": "IPv6",
+            "pattern": "\\b(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f:.]{1,39}\\b",
+            "enabled": true,
+            "features": {"validator": "ipv6"},
+            "system": true
+        },
+        {
+            "id": "api_key",
+            "name": "API Key",
+            "pattern": "\\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{20,}|sk-ant-[A-Za-z0-9_-]{20,}|(?:gh[pousr]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{30,})|xox[baprs]-[A-Za-z0-9-]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16}|[A-Za-z0-9_-]{32,})\\b",
+            "enabled": true,
+            "features": {"validator": "api_key"},
+            "system": true
+        },
+        {
+            "id": "access_token",
+            "name": "Access Token",
+            "pattern": "(?i)\\baccess[_-]?token\\s*[:=]\\s*[\"']?[A-Za-z0-9._~+/=-]{20,}",
+            "enabled": true,
+            "features": {"validator": "access_token"},
+            "system": true
+        },
+        {
+            "id": "secret_key",
+            "name": "Secret Key",
+            "pattern": "(?i)\\bsecret[_-]?key\\s*[:=]\\s*[\"']?[A-Za-z0-9._~+/=-]{20,}",
+            "enabled": true,
+            "features": {"validator": "secret_key"},
+            "system": true
+        },
+        {
+            "id": "bearer_token",
+            "name": "Bearer Token",
+            "pattern": "(?i)\\bBearer\\s+[A-Za-z0-9._~+/=-]{20,}",
+            "enabled": true,
+            "features": {"validator": "bearer_token"},
+            "system": true
+        },
+        {
+            "id": "jwt",
+            "name": "JWT",
+            "pattern": "\\b[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\b",
+            "enabled": true,
+            "features": {"validator": "jwt"},
+            "system": true
+        },
+    ])
+}
+
+fn normalize_chat_pii_redaction_placeholder_prefix(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    if value.is_empty() || value.len() > 32 {
+        return None;
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+    Some(value.to_ascii_uppercase())
 }
 
 fn invalid_request(detail: impl Into<String>) -> (http::StatusCode, serde_json::Value) {
@@ -1448,6 +1564,10 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "smtp_from_email" => Some(serde_json::Value::Null),
         "smtp_from_name" => Some(json!("Aether")),
         "enable_oauth_token_refresh" => Some(json!(true)),
+        "module.chat_pii_redaction.enabled" => Some(json!(false)),
+        "module.chat_pii_redaction.rules" => Some(chat_pii_redaction_default_rules()),
+        "module.chat_pii_redaction.cache_ttl_seconds" => Some(json!(300)),
+        "module.chat_pii_redaction.placeholder_prefix" => Some(json!("AETHER")),
         _ => None,
     }
 }
@@ -1504,6 +1624,96 @@ pub fn build_admin_system_config_detail_payload(
     }))
 }
 
+fn normalize_chat_pii_redaction_rules_value(
+    value: serde_json::Value,
+) -> Result<serde_json::Value, ()> {
+    let Some(raw_rules) = value.as_array() else {
+        return Err(());
+    };
+    let mut rules = Vec::with_capacity(raw_rules.len());
+    for raw_rule in raw_rules {
+        let Some(raw_rule) = raw_rule.as_object() else {
+            return Err(());
+        };
+        let id = raw_rule
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(())?;
+        let name = raw_rule
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(())?;
+        let pattern = raw_rule
+            .get("pattern")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(())?;
+        Regex::new(pattern).map_err(|_| ())?;
+        let enabled = raw_rule
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let system = raw_rule
+            .get("system")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let features = normalize_chat_pii_redaction_rule_features(raw_rule)?;
+        rules.push(json!({
+            "id": id,
+            "name": name,
+            "pattern": pattern,
+            "enabled": enabled,
+            "system": system,
+            "features": features,
+        }));
+    }
+    Ok(serde_json::Value::Array(rules))
+}
+
+fn normalize_chat_pii_redaction_rule_features(
+    raw_rule: &Map<String, Value>,
+) -> Result<serde_json::Value, ()> {
+    let mut features = match raw_rule.get("features") {
+        Some(Value::Object(features)) => features.clone(),
+        Some(Value::Null) | None => Map::new(),
+        Some(_) => return Err(()),
+    };
+
+    if !features.contains_key("validator") {
+        if let Some(Value::String(value)) = raw_rule.get("kind") {
+            let value = value.trim();
+            if !value.is_empty() {
+                features.insert("validator".to_string(), json!(value));
+            }
+        } else if raw_rule.get("kind").is_some_and(|value| !value.is_null()) {
+            return Err(());
+        }
+    }
+
+    match features.get("validator") {
+        Some(Value::String(value)) => {
+            let value = value.trim();
+            if value.is_empty() {
+                features.remove("validator");
+            } else {
+                features.insert("validator".to_string(), json!(value));
+            }
+        }
+        Some(Value::Null) => {
+            features.remove("validator");
+        }
+        Some(_) => return Err(()),
+        None => {}
+    }
+
+    Ok(Value::Object(features))
+}
+
 pub fn parse_admin_system_config_update(
     requested_key: &str,
     request_body: &[u8],
@@ -1554,6 +1764,68 @@ pub fn parse_admin_system_config_update(
                 ));
             }
         }
+    }
+
+    match normalized_key.as_str() {
+        "module.chat_pii_redaction.enabled" => match value.as_bool() {
+            Some(enabled) => value = json!(enabled),
+            None if value.is_null() => {
+                value = admin_system_config_default_value(&normalized_key).unwrap();
+            }
+            None => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+        },
+        "module.chat_pii_redaction.rules" => {
+            if value.is_null() {
+                value = chat_pii_redaction_default_rules();
+            } else {
+                value = normalize_chat_pii_redaction_rules_value(value).map_err(|_| {
+                    (
+                        http::StatusCode::BAD_REQUEST,
+                        json!({ "detail": "请求数据验证失败" }),
+                    )
+                })?;
+            }
+        }
+        "module.chat_pii_redaction.cache_ttl_seconds" => match value.as_u64() {
+            Some(300 | 3600) => value = json!(value.as_u64().unwrap()),
+            Some(_) => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+            None if value.is_null() => value = json!(300),
+            None => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+        },
+        "module.chat_pii_redaction.placeholder_prefix" => match value.as_str() {
+            Some(raw) => {
+                let Some(normalized) = normalize_chat_pii_redaction_placeholder_prefix(raw) else {
+                    return Err((
+                        http::StatusCode::BAD_REQUEST,
+                        json!({ "detail": "请求数据验证失败" }),
+                    ));
+                };
+                value = json!(normalized);
+            }
+            None if value.is_null() => value = json!("AETHER"),
+            None => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+        },
+        _ => {}
     }
 
     Ok(AdminSystemConfigUpdate {

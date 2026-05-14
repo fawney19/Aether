@@ -335,6 +335,7 @@ fn configure_tcp_socket(stream: &TcpStream, state: &Arc<AppState>) {
 
 /// Build rustls ClientConfig with system root certificates.
 pub fn build_tls_config() -> rustls::ClientConfig {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let root_store =
         rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     rustls::ClientConfig::builder()

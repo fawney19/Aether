@@ -421,6 +421,16 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn update_user_feature_settings(
+        &self,
+        user_id: &str,
+        settings: Option<serde_json::Value>,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        self.app
+            .update_user_feature_settings(user_id, settings)
+            .await
+    }
+
     pub(crate) async fn count_user_pending_refunds(
         &self,
         user_id: &str,
@@ -619,6 +629,17 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn set_standalone_api_key_feature_settings(
+        &self,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
+    {
+        self.app
+            .set_standalone_api_key_feature_settings(api_key_id, feature_settings)
+            .await
+    }
+
     pub(crate) async fn set_user_api_key_active(
         &self,
         user_id: &str,
@@ -663,6 +684,18 @@ impl<'a> AdminAppState<'a> {
     {
         self.app
             .set_user_api_key_force_capabilities(user_id, api_key_id, force_capabilities)
+            .await
+    }
+
+    pub(crate) async fn set_user_api_key_feature_settings(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
+    {
+        self.app
+            .set_user_api_key_feature_settings(user_id, api_key_id, feature_settings)
             .await
     }
 

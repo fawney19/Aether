@@ -1459,6 +1459,21 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn read_user_feature_settings(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<serde_json::Value>, DataLayerError> {
+        if let Some(user) = self.find_export_user_by_id(user_id).await? {
+            return Ok(user.feature_settings);
+        }
+        Ok(self
+            .list_non_admin_export_users()
+            .await?
+            .into_iter()
+            .find(|user| user.id == user_id)
+            .and_then(|user| user.feature_settings))
+    }
+
     pub(crate) async fn list_non_admin_export_users(
         &self,
     ) -> Result<Vec<StoredUserExportRow>, DataLayerError> {

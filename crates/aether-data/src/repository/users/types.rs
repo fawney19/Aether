@@ -236,6 +236,7 @@ pub struct StoredUserExportRow {
     pub rate_limit: Option<i32>,
     pub rate_limit_mode: String,
     pub model_capability_settings: Option<Value>,
+    pub feature_settings: Option<Value>,
     pub is_active: bool,
 }
 
@@ -297,6 +298,7 @@ impl StoredUserExportRow {
             rate_limit,
             rate_limit_mode: "system".to_string(),
             model_capability_settings: normalize_optional_json(model_capability_settings),
+            feature_settings: None,
             is_active,
         })
         .map(|record| record.with_legacy_policy_modes())
@@ -320,6 +322,11 @@ impl StoredUserExportRow {
         self.rate_limit_mode =
             normalize_rate_limit_policy_mode(&rate_limit_mode, "users.rate_limit_mode")?;
         Ok(self)
+    }
+
+    pub fn with_feature_settings(mut self, feature_settings: Option<Value>) -> Self {
+        self.feature_settings = normalize_optional_json(feature_settings);
+        self
     }
 
     fn with_legacy_policy_modes(mut self) -> Self {
@@ -876,6 +883,12 @@ pub trait UserReadRepository: Send + Sync {
     ) -> Result<Option<StoredUserAuthRecord>, crate::DataLayerError>;
 
     async fn update_user_model_capability_settings(
+        &self,
+        user_id: &str,
+        settings: Option<Value>,
+    ) -> Result<Option<Value>, crate::DataLayerError>;
+
+    async fn update_user_feature_settings(
         &self,
         user_id: &str,
         settings: Option<Value>,

@@ -65,7 +65,7 @@ const localBuildSteps = [
   {
     title: '更新',
     note: '需要拉取最新代码',
-    code: 'git pull origin master',
+    code: 'git pull origin main',
     icon: Code,
     optional: true
   }
@@ -474,7 +474,7 @@ function copyStep(stepId: string, code: string) {
           <h3>1. Aether-Proxy</h3>
           <p>Rust实现, 超小资源占有, 适合性能低的VPS直接使用。</p>
           <a
-            href="https://github.com/fawney19/Aether/tree/master/aether-proxy"
+            href="https://github.com/fawney19/Aether/tree/main/aether-proxy"
             target="_blank"
             rel="noopener noreferrer"
             class="text-[#cc785c] dark:text-[#d4a27f] hover:underline mt-2 inline-block"

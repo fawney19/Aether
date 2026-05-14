@@ -1206,7 +1206,8 @@ function editApiKey(apiKey: AdminApiKey) {
     auto_delete_on_expiry: apiKey.auto_delete_on_expiry || false,
     allowed_providers: apiKey.allowed_providers == null ? null : [...apiKey.allowed_providers],
     allowed_api_formats: apiKey.allowed_api_formats == null ? null : [...apiKey.allowed_api_formats],
-    allowed_models: apiKey.allowed_models == null ? null : [...apiKey.allowed_models]
+    allowed_models: apiKey.allowed_models == null ? null : [...apiKey.allowed_models],
+    feature_settings: apiKey.feature_settings ?? null
   }
 
   showKeyFormDialog.value = true
@@ -1418,7 +1419,8 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
         // 空数组表示清除限制（允许全部），后端会将空数组存为 NULL
         allowed_providers: data.allowed_providers,
         allowed_api_formats: data.allowed_api_formats,
-        allowed_models: data.allowed_models
+        allowed_models: data.allowed_models,
+        feature_settings: data.feature_settings ?? null
       }
       const { message: _, ...updated } = await adminApi.updateApiKey(data.id, updateData)
       // 局部更新：合并字段，避免覆盖丢失列表已有信息
@@ -1448,7 +1450,8 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
         // 空数组表示不设置限制（允许全部），后端会将空数组存为 NULL
         allowed_providers: data.allowed_providers,
         allowed_api_formats: data.allowed_api_formats,
-        allowed_models: data.allowed_models
+        allowed_models: data.allowed_models,
+        feature_settings: data.feature_settings ?? null
       }
       const response = await adminApi.createStandaloneApiKey(createData)
       newKeyValue.value = response.key

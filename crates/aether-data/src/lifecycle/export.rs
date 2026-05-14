@@ -1859,7 +1859,10 @@ fn domain_payload_table(
 fn sqlite_row_payload(row: &sqlx::sqlite::SqliteRow) -> Result<Value, DataLayerError> {
     let mut object = serde_json::Map::new();
     for (index, column) in row.columns().iter().enumerate() {
-        object.insert(column.name().to_string(), sqlite_value_to_json(row, index)?);
+        object.insert(
+            column.name().to_string(),
+            sqlite_value_to_json(row, index, column.name())?,
+        );
     }
     Ok(Value::Object(object))
 }
@@ -1867,6 +1870,7 @@ fn sqlite_row_payload(row: &sqlx::sqlite::SqliteRow) -> Result<Value, DataLayerE
 fn sqlite_value_to_json(
     row: &sqlx::sqlite::SqliteRow,
     index: usize,
+    column_name: &str,
 ) -> Result<Value, DataLayerError> {
     let raw = row.try_get_raw(index).map_sql_err()?;
     if raw.is_null() {
@@ -1874,7 +1878,17 @@ fn sqlite_value_to_json(
     }
 
     match raw.type_info().name().to_ascii_uppercase().as_str() {
-        "INTEGER" => Ok(Value::from(row.try_get::<i64, _>(index).map_sql_err()?)),
+        "INTEGER" => {
+            let value = row.try_get::<i64, _>(index).map_sql_err()?;
+            if sqlite_integer_column_is_boolean(column_name) {
+                match value {
+                    0 => return Ok(Value::Bool(false)),
+                    1 => return Ok(Value::Bool(true)),
+                    _ => {}
+                }
+            }
+            Ok(Value::from(value))
+        }
         "REAL" | "FLOAT" | "DOUBLE" => {
             let value = row.try_get::<f64, _>(index).map_sql_err()?;
             serde_json::Number::from_f64(value)
@@ -1897,6 +1911,29 @@ fn sqlite_value_to_json(
             "unsupported sqlite export column type '{other}' at index {index}"
         ))),
     }
+}
+
+fn sqlite_integer_column_is_boolean(column_name: &str) -> bool {
+    column_name.starts_with("is_")
+        || column_name.starts_with("has_")
+        || column_name.starts_with("supports_")
+        || column_name.starts_with("enable_")
+        || column_name.starts_with("use_")
+        || matches!(
+            column_name,
+            "announcement_notifications"
+                | "auto_delete_on_expiry"
+                | "auto_fetch_models"
+                | "email_notifications"
+                | "email_verified"
+                | "format_converted"
+                | "keep_priority_on_conversion"
+                | "signature_valid"
+                | "tunnel_connected"
+                | "tunnel_mode"
+                | "usage_alerts"
+                | "webhook_sent"
+        )
 }
 
 fn mysql_row_payload(row: &sqlx::mysql::MySqlRow) -> Result<Value, DataLayerError> {
@@ -2181,31 +2218,31 @@ not-json"#,
         sqlx::query(
             r#"
 INSERT INTO users (id, email, username, auth_source, created_at, updated_at)
-VALUES ('user-1', 'owner@example.com', 'owner', 'local', 1, 2);
+VALUES ('user-1', 'owner@example.com', 'owner', 'local', '1970-01-01T00:00:01Z', '1970-01-01T00:00:02Z');
 INSERT INTO user_groups (id, name, normalized_name, description, priority, allowed_models, allowed_models_mode, created_at, updated_at)
-VALUES ('group-1', 'Export Group', 'export group', 'Exported group', 10, '["gpt-test"]', 'specific', 1, 2);
+VALUES ('group-1', 'Export Group', 'export group', 'Exported group', 10, '["gpt-test"]', 'specific', '1970-01-01T00:00:01Z', '1970-01-01T00:00:02Z');
 INSERT INTO user_group_members (group_id, user_id, created_at)
-VALUES ('group-1', 'user-1', 1);
+VALUES ('group-1', 'user-1', '1970-01-01T00:00:01Z');
 INSERT INTO api_keys (id, user_id, key_hash, key_encrypted, name, created_at, updated_at)
-VALUES ('api-key-1', 'user-1', 'hash-1', 'ciphertext-1', 'Default', 1, 2);
+VALUES ('api-key-1', 'user-1', 'hash-1', 'ciphertext-1', 'Default', '1970-01-01T00:00:01Z', '1970-01-01T00:00:02Z');
 INSERT INTO providers (id, name, provider_type, created_at, updated_at)
-VALUES ('provider-1', 'Provider One', 'openai', 1, 2);
+VALUES ('provider-1', 'Provider One', 'openai', '1970-01-01T00:00:01Z', '1970-01-01T00:00:02Z');
 INSERT INTO provider_api_keys (id, provider_id, name, encrypted_key, created_at, updated_at)
-VALUES ('provider-key-1', 'provider-1', 'Provider Key', 'ciphertext-provider', 1, 2);
+VALUES ('provider-key-1', 'provider-1', 'Provider Key', 'ciphertext-provider', '1970-01-01T00:00:01Z', '1970-01-01T00:00:02Z');
 INSERT INTO provider_endpoints (id, provider_id, name, base_url, created_at, updated_at)
-VALUES ('endpoint-1', 'provider-1', 'Primary', 'https://example.test', 1, 2);
+VALUES ('endpoint-1', 'provider-1', 'Primary', 'https://example.test', '1970-01-01T00:00:01Z', '1970-01-01T00:00:02Z');
 INSERT INTO global_models (id, name, created_at, updated_at)
-VALUES ('global-model-1', 'gpt-test', 1, 2);
+VALUES ('global-model-1', 'gpt-test', '1970-01-01T00:00:01Z', '1970-01-01T00:00:02Z');
 INSERT INTO models (id, provider_id, global_model_id, provider_model_name, created_at, updated_at)
-VALUES ('model-1', 'provider-1', 'global-model-1', 'gpt-test', 1, 2);
+VALUES ('model-1', 'provider-1', 'global-model-1', 'gpt-test', '1970-01-01T00:00:01Z', '1970-01-01T00:00:02Z');
 INSERT INTO billing_rules (id, global_model_id, name, task_type, expression, variables, dimension_mappings, is_enabled, created_at, updated_at)
-VALUES ('billing-rule-1', 'global-model-1', 'Rule One', 'chat', 'input_tokens * 0.01', '{}', '{"input":"input_tokens"}', 1, 1, 2);
+VALUES ('billing-rule-1', 'global-model-1', 'Rule One', 'chat', 'input_tokens * 0.01', '{}', '{"input":"input_tokens"}', 1, '1970-01-01T00:00:01Z', '1970-01-01T00:00:02Z');
 INSERT INTO dimension_collectors (id, api_format, task_type, dimension_name, source_type, value_type, transform_expression, priority, is_enabled, created_at, updated_at)
-VALUES ('collector-1', 'openai', 'chat', 'input_tokens', 'computed', 'float', 'usage.input_tokens', 10, 1, 1, 2);
+VALUES ('collector-1', 'openai', 'chat', 'input_tokens', 'computed', 'float', 'usage.input_tokens', 10, 1, '1970-01-01T00:00:01Z', '1970-01-01T00:00:02Z');
 INSERT INTO system_configs (id, key, value, created_at, updated_at)
-VALUES ('config-1', 'billing.enabled', 'true', 1, 2);
+VALUES ('config-1', 'billing.enabled', 'true', '1970-01-01T00:00:01Z', '1970-01-01T00:00:02Z');
 INSERT INTO wallets (id, user_id, created_at, updated_at)
-VALUES ('wallet-1', 'user-1', 1, 2);
+VALUES ('wallet-1', 'user-1', '1970-01-01T00:00:01Z', '1970-01-01T00:00:02Z');
 INSERT INTO "usage" (request_id, id, user_id, provider_name, model, status, billing_status, created_at_unix_ms, updated_at_unix_secs)
 VALUES ('request-1', 'request-1', 'user-1', 'Provider One', 'gpt-test', 'completed', 'settled', 1, 2);
 "#,

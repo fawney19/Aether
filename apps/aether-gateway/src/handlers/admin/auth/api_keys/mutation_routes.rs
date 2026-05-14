@@ -9,8 +9,8 @@ use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::handlers::admin::users::{
     default_admin_user_api_key_name, format_optional_unix_secs_iso8601,
     generate_admin_user_api_key_plaintext, hash_admin_user_api_key, masked_user_api_key_display,
-    normalize_admin_optional_api_key_name, normalize_admin_user_api_formats,
-    normalize_admin_user_string_list,
+    normalize_admin_feature_settings, normalize_admin_optional_api_key_name,
+    normalize_admin_user_api_formats, normalize_admin_user_string_list,
 };
 use crate::handlers::shared::normalize_optional_api_key_concurrent_limit;
 use crate::GatewayError;
@@ -137,6 +137,10 @@ pub(super) async fn build_admin_create_api_key_response(
             "设置 auto_delete_on_expiry 前必须提供 expires_at",
         ));
     }
+    let feature_settings = match normalize_admin_feature_settings(payload.feature_settings) {
+        Ok(value) => value,
+        Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+    };
 
     let plaintext_key = generate_admin_user_api_key_plaintext();
     let Some(key_encrypted) = state.encrypt_catalog_secret_with_fallbacks(&plaintext_key) else {
@@ -180,6 +184,14 @@ pub(super) async fn build_admin_create_api_key_response(
         Some(wallet) => wallet,
         None => return Ok(build_admin_api_keys_data_unavailable_response()),
     };
+    let created = if feature_settings.is_some() {
+        state
+            .set_standalone_api_key_feature_settings(&created.api_key_id, feature_settings.clone())
+            .await?
+            .unwrap_or(created)
+    } else {
+        created
+    };
 
     Ok(attach_admin_audit_response(
         Json(json!({
@@ -196,6 +208,7 @@ pub(super) async fn build_admin_create_api_key_response(
             "allowed_models": created.allowed_models,
             "expires_at": format_optional_unix_secs_iso8601(created.expires_at_unix_secs),
             "auto_delete_on_expiry": created.auto_delete_on_expiry,
+            "feature_settings": created.feature_settings,
             "wallet": serialize_admin_system_users_export_wallet(Some(&wallet)),
             "message": "独立余额Key创建成功，请妥善保存完整密钥，后续将无法查看",
         }))
@@ -245,6 +258,14 @@ pub(super) async fn build_admin_update_api_key_response(
     let null_auto_delete_on_expiry =
         patch.contains("auto_delete_on_expiry") && patch.is_null("auto_delete_on_expiry");
     let (field_presence, payload) = patch.into_parts();
+    let feature_settings = if field_presence.contains("feature_settings") {
+        match normalize_admin_feature_settings(payload.feature_settings.flatten()) {
+            Ok(value) => Some(value),
+            Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+        }
+    } else {
+        None
+    };
     if null_unlimited_balance {
         return Ok(build_admin_api_keys_bad_request_response(
             "unlimited_balance 必须是布尔值",
@@ -386,6 +407,14 @@ pub(super) async fn build_admin_update_api_key_response(
         .await?
     else {
         return Ok(build_admin_api_keys_data_unavailable_response());
+    };
+    let updated = if let Some(feature_settings) = feature_settings {
+        state
+            .set_standalone_api_key_feature_settings(&api_key_id, feature_settings)
+            .await?
+            .unwrap_or(updated)
+    } else {
+        updated
     };
 
     if wallet.is_none() {

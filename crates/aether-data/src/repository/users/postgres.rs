@@ -56,6 +56,7 @@ SELECT
   rate_limit,
   rate_limit_mode,
   model_capability_settings,
+  feature_settings,
   is_active
 FROM users
 WHERE is_deleted IS FALSE
@@ -81,6 +82,7 @@ SELECT
   rate_limit,
   rate_limit_mode,
   model_capability_settings,
+  feature_settings,
   is_active
 FROM users
 WHERE is_deleted IS FALSE
@@ -105,6 +107,7 @@ SELECT
   rate_limit,
   rate_limit_mode,
   model_capability_settings,
+  feature_settings,
   is_active
 FROM users
 WHERE is_deleted IS FALSE
@@ -154,6 +157,7 @@ SELECT
   rate_limit,
   rate_limit_mode,
   model_capability_settings,
+  feature_settings,
   is_active
 FROM users
 WHERE is_deleted IS FALSE
@@ -1658,6 +1662,31 @@ WHERE id = $1
         Ok(normalized)
     }
 
+    pub async fn update_user_feature_settings(
+        &self,
+        user_id: &str,
+        settings: Option<serde_json::Value>,
+    ) -> Result<Option<serde_json::Value>, DataLayerError> {
+        let normalized = normalize_optional_json_value(settings);
+        let result = sqlx::query(
+            r#"
+UPDATE users
+SET feature_settings = $2,
+    updated_at = NOW()
+WHERE id = $1
+"#,
+        )
+        .bind(user_id)
+        .bind(normalized.clone())
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        Ok(normalized)
+    }
+
     pub async fn create_local_auth_user(
         &self,
         email: Option<String>,
@@ -2112,6 +2141,7 @@ fn map_user_row(row: &sqlx::postgres::PgRow) -> Result<StoredUserSummary, DataLa
 }
 
 fn map_user_export_row(row: &sqlx::postgres::PgRow) -> Result<StoredUserExportRow, DataLayerError> {
+    let feature_settings = row.try_get("feature_settings").map_postgres_err()?;
     StoredUserExportRow::new(
         row.try_get("id").map_postgres_err()?,
         row.try_get("email").map_postgres_err()?,
@@ -2128,6 +2158,7 @@ fn map_user_export_row(row: &sqlx::postgres::PgRow) -> Result<StoredUserExportRo
             .map_postgres_err()?,
         row.try_get("is_active").map_postgres_err()?,
     )
+    .map(|record| record.with_feature_settings(feature_settings))
     .and_then(|record| {
         record.with_policy_modes(
             row.try_get("allowed_providers_mode").map_postgres_err()?,
@@ -2600,6 +2631,14 @@ impl UserReadRepository for SqlxUserReadRepository {
     ) -> Result<Option<serde_json::Value>, DataLayerError> {
         self.update_user_model_capability_settings(user_id, settings)
             .await
+    }
+
+    async fn update_user_feature_settings(
+        &self,
+        user_id: &str,
+        settings: Option<serde_json::Value>,
+    ) -> Result<Option<serde_json::Value>, DataLayerError> {
+        self.update_user_feature_settings(user_id, settings).await
     }
 
     async fn create_local_auth_user(

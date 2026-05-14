@@ -236,6 +236,20 @@
             </p>
           </div>
 
+          <div class="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
+            <div class="flex items-center justify-between gap-3">
+              <Label class="text-sm font-medium">敏感信息保护</Label>
+              <Switch v-model="form.chat_pii_redaction_enabled" />
+            </div>
+            <div class="flex items-center justify-between gap-3">
+              <Label class="text-sm font-medium">占位符说明</Label>
+              <Switch
+                v-model="form.chat_pii_redaction_placeholder_notice"
+                :disabled="!form.chat_pii_redaction_enabled"
+              />
+            </div>
+          </div>
+
           <!-- 额度 -->
           <div class="space-y-2">
             <Label class="text-sm font-medium">额度</Label>
@@ -311,6 +325,10 @@ import { getGlobalModels } from '@/api/global-models'
 import { adminApi } from '@/api/admin'
 import { log } from '@/utils/logger'
 import { parseNumberInput } from '@/utils/form'
+import {
+  mergeChatPiiRedactionFeatureSettings,
+  readChatPiiRedactionFeatureSettings,
+} from '@/utils/featureSettings'
 import type { ProviderWithEndpointsSummary, GlobalModelResponse } from '@/api/endpoints/types'
 
 export interface StandaloneKeyFormData {
@@ -326,6 +344,7 @@ export interface StandaloneKeyFormData {
   allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
   allowed_models?: string[] | null
+  feature_settings?: Record<string, unknown> | null
 }
 
 interface StandaloneKeyFormState {
@@ -346,6 +365,8 @@ interface StandaloneKeyFormState {
   allowed_providers: string[]
   allowed_api_formats: string[]
   allowed_models: string[]
+  chat_pii_redaction_enabled: boolean
+  chat_pii_redaction_placeholder_notice: boolean
 }
 
 const props = defineProps<{
@@ -403,6 +424,8 @@ const form = ref<StandaloneKeyFormState>({
   allowed_providers: [],
   allowed_api_formats: [],
   allowed_models: [],
+  chat_pii_redaction_enabled: false,
+  chat_pii_redaction_placeholder_notice: true,
 })
 
 function formatDateInputValue(date: Date): string {
@@ -449,11 +472,14 @@ function resetForm() {
     allowed_providers: [],
     allowed_api_formats: [],
     allowed_models: [],
+    chat_pii_redaction_enabled: false,
+    chat_pii_redaction_placeholder_notice: true,
   } as typeof form.value
 }
 
 function loadKeyData() {
   if (!props.apiKey) return
+  const redactionFeature = readChatPiiRedactionFeatureSettings(props.apiKey.feature_settings)
   form.value = {
     id: props.apiKey.id,
     name: props.apiKey.name || '',
@@ -472,6 +498,8 @@ function loadKeyData() {
     allowed_providers: props.apiKey.allowed_providers ? [...props.apiKey.allowed_providers] : [],
     allowed_api_formats: props.apiKey.allowed_api_formats ? [...props.apiKey.allowed_api_formats] : [],
     allowed_models: props.apiKey.allowed_models ? [...props.apiKey.allowed_models] : [],
+    chat_pii_redaction_enabled: redactionFeature.enabled,
+    chat_pii_redaction_placeholder_notice: redactionFeature.inject_model_instruction,
   } as typeof form.value
 }
 
@@ -520,6 +548,10 @@ function handleSubmit() {
     allowed_providers: form.value.provider_unrestricted ? null : [...form.value.allowed_providers],
     allowed_api_formats: form.value.api_format_unrestricted ? null : [...form.value.allowed_api_formats],
     allowed_models: form.value.model_unrestricted ? null : [...form.value.allowed_models],
+    feature_settings: mergeChatPiiRedactionFeatureSettings(props.apiKey?.feature_settings, {
+      enabled: form.value.chat_pii_redaction_enabled,
+      inject_model_instruction: form.value.chat_pii_redaction_placeholder_notice,
+    }),
   })
 }
 

@@ -14,6 +14,18 @@ impl AppState {
             .and_then(|record| record.force_capabilities))
     }
 
+    pub(crate) async fn read_auth_api_key_feature_settings(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        is_standalone: bool,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        self.data
+            .read_auth_api_key_feature_settings(user_id, api_key_id, is_standalone)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn list_auth_api_key_export_records_by_user_ids(
         &self,
         user_ids: &[String],
@@ -321,6 +333,41 @@ impl AppState {
         let api_key = self
             .data
             .set_user_api_key_force_capabilities(user_id, api_key_id, force_capabilities)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if api_key.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(api_key)
+    }
+
+    pub(crate) async fn set_user_api_key_feature_settings(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
+    {
+        let api_key = self
+            .data
+            .set_user_api_key_feature_settings(user_id, api_key_id, feature_settings)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if api_key.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(api_key)
+    }
+
+    pub(crate) async fn set_standalone_api_key_feature_settings(
+        &self,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
+    {
+        let api_key = self
+            .data
+            .set_standalone_api_key_feature_settings(api_key_id, feature_settings)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if api_key.is_some() {

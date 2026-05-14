@@ -4,6 +4,7 @@ import type { TieredPricingConfig } from './endpoints/types'
 import { cachedRequest, buildCacheKey } from '@/utils/cache'
 import type { BillingSummary } from './auth'
 import type { UserSession } from '@/types/session'
+import type { FeatureSettingsMap } from '@/utils/featureSettings'
 
 const ACTIVITY_HEATMAP_CACHE_TTL_MS = 30 * 60 * 1000
 
@@ -22,6 +23,7 @@ export interface Profile {
   auth_source: 'local' | 'ldap' | 'oauth'
   has_password: boolean
   preferences?: UserPreferences
+  feature_settings?: FeatureSettingsMap | null
 }
 
 export interface UserPreferences {
@@ -169,6 +171,7 @@ export interface ApiKey {
   concurrent_limit?: number | null
   allowed_providers?: ProviderConfig[]
   force_capabilities?: Record<string, boolean> | null  // 强制能力配置
+  feature_settings?: FeatureSettingsMap | null
 }
 
 export type InstallTargetCli = 'claude_code' | 'codex_cli' | 'gemini_cli'
@@ -205,6 +208,7 @@ export const meApi = {
   async updateProfile(data: {
     email?: string
     username?: string
+    feature_settings?: FeatureSettingsMap | null
   }): Promise<{ message: string }> {
     const response = await apiClient.put('/api/users/me', data)
     return response.data
@@ -244,7 +248,7 @@ export const meApi = {
     return response.data
   },
 
-  async createApiKey(data: { name: string; rate_limit?: number | null; concurrent_limit?: number | null }): Promise<ApiKey> {
+  async createApiKey(data: { name: string; rate_limit?: number | null; concurrent_limit?: number | null; feature_settings?: FeatureSettingsMap | null }): Promise<ApiKey> {
     const response = await apiClient.post<ApiKey>('/api/users/me/api-keys', data)
     return response.data
   },
@@ -277,7 +281,7 @@ export const meApi = {
 
   async updateApiKey(
     keyId: string,
-    data: { name?: string; rate_limit?: number | null; concurrent_limit?: number | null }
+    data: { name?: string; rate_limit?: number | null; concurrent_limit?: number | null; feature_settings?: FeatureSettingsMap | null | undefined }
   ): Promise<ApiKey & { message: string }> {
     const response = await apiClient.put<ApiKey & { message: string }>(
       `/api/users/me/api-keys/${keyId}`,

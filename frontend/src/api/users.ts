@@ -5,6 +5,7 @@ import type { UserSession as SessionRecord } from '@/types/session'
 export type UserRole = 'admin' | 'user'
 export type ListPolicyMode = 'inherit' | 'unrestricted' | 'specific' | 'deny_all'
 export type RateLimitPolicyMode = 'inherit' | 'system' | 'custom'
+export type FeatureSettings = Record<string, unknown>
 
 export interface UserGroupSummary {
   id: string
@@ -35,6 +36,7 @@ export interface User {
   role: UserRole
   is_active: boolean
   unlimited: boolean
+  feature_settings?: FeatureSettings | null
   allowed_providers: string[] | null  // 允许使用的提供商 ID 列表
   allowed_providers_mode?: ListPolicyMode
   allowed_api_formats: string[] | null  // 允许使用的 API 格式列表
@@ -60,6 +62,7 @@ export interface CreateUserRequest {
   initial_gift_usd?: number | null
   unlimited?: boolean
   group_ids?: string[]
+  feature_settings?: FeatureSettings | null
 }
 
 export interface UpdateUserRequest {
@@ -69,6 +72,7 @@ export interface UpdateUserRequest {
   unlimited?: boolean
   password?: string
   group_ids?: string[]
+  feature_settings?: FeatureSettings | null
 }
 
 export interface UserBatchSelectionFilters {
@@ -213,6 +217,7 @@ export interface ApiKey {
   is_active: boolean
   is_locked: boolean  // 管理员锁定标志
   is_standalone: boolean  // 是否为独立余额Key
+  feature_settings?: FeatureSettings | null
   rate_limit?: number | null  // 普通Key: 0 = 不限制，历史 null 视为跟随系统默认
   concurrent_limit?: number | null  // 普通Key: 0 = 不限制并发，历史 null 兼容
   total_requests?: number  // 总请求数
@@ -223,6 +228,7 @@ export interface UpsertUserApiKeyRequest {
   name?: string
   rate_limit?: number | null
   concurrent_limit?: number | null
+  feature_settings?: FeatureSettings | null
 }
 
 export type UserSession = SessionRecord

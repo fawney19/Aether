@@ -144,12 +144,16 @@ pub(in super::super) async fn build_admin_get_user_response(
     let unlimited = wallet
         .as_ref()
         .is_some_and(|wallet| wallet.limit_mode.eq_ignore_ascii_case("unlimited"));
-    Ok(Json(build_admin_user_payload_with_groups(
+    let mut payload = build_admin_user_payload_with_groups(
         &user,
         export_row.as_ref().and_then(|row| row.rate_limit),
         export_row.as_ref().map(|row| row.rate_limit_mode.as_str()),
         unlimited,
         &groups,
-    ))
-    .into_response())
+    );
+    payload["feature_settings"] = export_row
+        .as_ref()
+        .and_then(|row| row.feature_settings.clone())
+        .unwrap_or(serde_json::Value::Null);
+    Ok(Json(payload).into_response())
 }

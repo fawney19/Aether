@@ -42,6 +42,7 @@ SELECT
   rate_limit,
   rate_limit_mode,
   model_capability_settings,
+  feature_settings,
   is_active
 FROM users
 "#;
@@ -1177,6 +1178,29 @@ WHERE id = ?
         Ok(normalized)
     }
 
+    async fn update_user_feature_settings(
+        &self,
+        user_id: &str,
+        settings: Option<serde_json::Value>,
+    ) -> Result<Option<serde_json::Value>, DataLayerError> {
+        let normalized = normalize_optional_json_value(settings);
+        let result =
+            sqlx::query("UPDATE users SET feature_settings = ?, updated_at = ? WHERE id = ?")
+                .bind(optional_json_string(
+                    normalized.clone(),
+                    "users.feature_settings",
+                )?)
+                .bind(chrono::Utc::now().timestamp())
+                .bind(user_id)
+                .execute(&self.pool)
+                .await
+                .map_sql_err()?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        Ok(normalized)
+    }
+
     async fn create_local_auth_user(
         &self,
         email: Option<String>,
@@ -1849,6 +1873,10 @@ fn map_user_row(row: &MySqlRow) -> Result<StoredUserSummary, DataLayerError> {
 }
 
 fn map_user_export_row(row: &MySqlRow) -> Result<StoredUserExportRow, DataLayerError> {
+    let feature_settings = optional_json_from_string(
+        row.try_get("feature_settings").map_sql_err()?,
+        "users.feature_settings",
+    )?;
     StoredUserExportRow::new(
         row.try_get("id").map_sql_err()?,
         row.try_get("email").map_sql_err()?,
@@ -1876,6 +1904,7 @@ fn map_user_export_row(row: &MySqlRow) -> Result<StoredUserExportRow, DataLayerE
         )?,
         row.try_get("is_active").map_sql_err()?,
     )
+    .map(|record| record.with_feature_settings(feature_settings))
     .and_then(|record| {
         record.with_policy_modes(
             row.try_get("allowed_providers_mode").map_sql_err()?,

@@ -8,6 +8,7 @@
 .serena/
 .gemini*/
 .plans
+.playwright-mcp/
 
 ### Python ###
 *.db

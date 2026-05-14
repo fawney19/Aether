@@ -103,6 +103,7 @@ pub(super) fn build_admin_user_export_payload(
         "allowed_models_mode": row.allowed_models_mode,
         "rate_limit": row.rate_limit,
         "rate_limit_mode": row.rate_limit_mode,
+        "feature_settings": row.feature_settings,
         "unlimited": unlimited,
         "is_active": row.is_active,
         "created_at": format_optional_datetime_iso8601(created_at),

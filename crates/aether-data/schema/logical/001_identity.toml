@@ -98,6 +98,11 @@ type = "json"
 nullable = true
 
 [[table.users.columns]]
+name = "feature_settings"
+type = "json"
+nullable = true
+
+[[table.users.columns]]
 name = "rate_limit"
 type = "int32"
 nullable = true
@@ -330,6 +335,11 @@ nullable = true
 
 [[table.api_keys.columns]]
 name = "force_capabilities"
+type = "json"
+nullable = true
+
+[[table.api_keys.columns]]
+name = "feature_settings"
 type = "json"
 nullable = true
 

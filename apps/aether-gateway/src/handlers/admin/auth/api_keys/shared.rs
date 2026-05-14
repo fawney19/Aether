@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 
 const ADMIN_API_KEYS_DATA_UNAVAILABLE_DETAIL: &str = "Admin standalone API key data unavailable";
 
@@ -27,6 +27,7 @@ pub(super) struct AdminStandaloneApiKeyCreateRequest {
     pub(super) expire_days: Option<i32>,
     pub(super) expires_at: Option<String>,
     pub(super) auto_delete_on_expiry: Option<bool>,
+    pub(super) feature_settings: Option<Value>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -42,6 +43,7 @@ pub(super) struct AdminStandaloneApiKeyUpdateRequest {
     pub(super) expire_days: Option<i32>,
     pub(super) expires_at: Option<String>,
     pub(super) auto_delete_on_expiry: Option<bool>,
+    pub(super) feature_settings: Option<Option<Value>>,
 }
 
 pub(super) type AdminStandaloneApiKeyUpdatePatch =
@@ -164,6 +166,7 @@ pub(super) fn build_admin_api_key_list_item_payload(
         "created_at": format_optional_unix_secs_iso8601(record.created_at_unix_secs),
         "updated_at": format_optional_unix_secs_iso8601(record.updated_at_unix_secs),
         "auto_delete_on_expiry": record.auto_delete_on_expiry,
+        "feature_settings": record.feature_settings,
         "wallet": serialize_admin_system_users_export_wallet(wallet),
     })
 }
@@ -193,6 +196,7 @@ pub(super) fn build_admin_api_key_detail_payload(
         "created_at": format_optional_unix_secs_iso8601(record.created_at_unix_secs),
         "updated_at": format_optional_unix_secs_iso8601(record.updated_at_unix_secs),
         "auto_delete_on_expiry": record.auto_delete_on_expiry,
+        "feature_settings": record.feature_settings,
         "wallet": serialize_admin_system_users_export_wallet(wallet),
     })
 }

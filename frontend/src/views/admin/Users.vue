@@ -1043,6 +1043,20 @@
             {{ editingUserApiKey ? '留空表示保持当前值，填 0 表示不限并发' : '留空表示不限并发，填 0 也表示不限并发' }}
           </p>
         </div>
+
+        <div class="rounded-lg border border-border bg-muted/30 p-3 space-y-3">
+          <div class="flex items-center justify-between gap-3">
+            <Label class="text-sm font-medium">敏感信息保护</Label>
+            <Switch v-model="userApiKeyForm.chat_pii_redaction_enabled" />
+          </div>
+          <div class="flex items-center justify-between gap-3">
+            <Label class="text-sm font-medium">占位符说明</Label>
+            <Switch
+              v-model="userApiKeyForm.chat_pii_redaction_placeholder_notice"
+              :disabled="!userApiKeyForm.chat_pii_redaction_enabled"
+            />
+          </div>
+        </div>
       </div>
 
       <template #footer>
@@ -1256,7 +1270,8 @@ import {
   AvatarFallback,
   Pagination,
   RefreshButton,
-  Checkbox
+  Checkbox,
+  Switch
 } from '@/components/ui'
 
 import {
@@ -1284,6 +1299,10 @@ import WalletOpsDrawer from '@/features/wallet/components/WalletOpsDrawer.vue'
 import { parseApiError } from '@/utils/errorParser'
 import { formatTokens, formatRateLimitInheritable, formatRateLimitSimple, isRateLimitInherited, isRateLimitUnlimited } from '@/utils/format'
 import { parseNumberInput } from '@/utils/form'
+import {
+  mergeChatPiiRedactionFeatureSettings,
+  readChatPiiRedactionFeatureSettings,
+} from '@/utils/featureSettings'
 import { log } from '@/utils/logger'
 import { useBatchSelection } from '@/composables/useBatchSelection'
 
@@ -1315,6 +1334,8 @@ const userApiKeyForm = ref({
   name: '',
   rate_limit: undefined as number | undefined,
   concurrent_limit: undefined as number | undefined,
+  chat_pii_redaction_enabled: false,
+  chat_pii_redaction_placeholder_notice: true,
 })
 
 // 用户统计
@@ -1601,6 +1622,7 @@ function editUser(user: User) {
     role: user.role,
     is_active: user.is_active,
     group_ids: (user.groups || []).map(group => group.id),
+    feature_settings: user.feature_settings ?? null,
   }
   showUserFormDialog.value = true
 }
@@ -1621,6 +1643,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
         unlimited: data.unlimited,
         role: data.role,
         group_ids: data.group_ids ?? [],
+        feature_settings: data.feature_settings ?? null,
       }
       if (data.password) {
         updateData.password = data.password
@@ -1638,6 +1661,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
         unlimited: data.unlimited,
         role: data.role,
         group_ids: data.group_ids ?? [],
+        feature_settings: data.feature_settings ?? null,
       })
       // 如果创建时指定为禁用，则更新状态
       if (data.is_active === false && newUser) {
@@ -1684,21 +1708,27 @@ async function loadUserApiKeys(userId: string) {
 }
 
 function openCreateUserApiKeyDialog() {
+  const redactionFeature = readChatPiiRedactionFeatureSettings(null)
   userApiKeyForm.value = {
     name: `Key-${new Date().toISOString().split('T')[0]}`,
     rate_limit: undefined,
     concurrent_limit: undefined,
+    chat_pii_redaction_enabled: redactionFeature.enabled,
+    chat_pii_redaction_placeholder_notice: redactionFeature.inject_model_instruction,
   }
   editingUserApiKey.value = null
   showUserApiKeyFormDialog.value = true
 }
 
 function openEditUserApiKeyDialog(apiKey: ApiKey) {
+  const redactionFeature = readChatPiiRedactionFeatureSettings(apiKey.feature_settings)
   editingUserApiKey.value = apiKey
   userApiKeyForm.value = {
     name: apiKey.name || '',
     rate_limit: apiKey.rate_limit ?? undefined,
     concurrent_limit: apiKey.concurrent_limit ?? undefined,
+    chat_pii_redaction_enabled: redactionFeature.enabled,
+    chat_pii_redaction_placeholder_notice: redactionFeature.inject_model_instruction,
   }
   showUserApiKeyFormDialog.value = true
 }
@@ -1710,6 +1740,8 @@ function closeUserApiKeyFormDialog() {
     name: '',
     rate_limit: undefined,
     concurrent_limit: undefined,
+    chat_pii_redaction_enabled: false,
+    chat_pii_redaction_placeholder_notice: true,
   }
 }
 
@@ -1727,6 +1759,10 @@ async function submitUserApiKeyForm() {
         name: userApiKeyForm.value.name,
         rate_limit: userApiKeyForm.value.rate_limit ?? 0,
         concurrent_limit: userApiKeyForm.value.concurrent_limit,
+        feature_settings: mergeChatPiiRedactionFeatureSettings(editingUserApiKey.value.feature_settings, {
+          enabled: userApiKeyForm.value.chat_pii_redaction_enabled,
+          inject_model_instruction: userApiKeyForm.value.chat_pii_redaction_placeholder_notice,
+        }),
       })
       success('API Key已更新')
     } else {
@@ -1734,6 +1770,10 @@ async function submitUserApiKeyForm() {
         name: userApiKeyForm.value.name,
         rate_limit: userApiKeyForm.value.rate_limit ?? 0,
         concurrent_limit: userApiKeyForm.value.concurrent_limit,
+        feature_settings: mergeChatPiiRedactionFeatureSettings(null, {
+          enabled: userApiKeyForm.value.chat_pii_redaction_enabled,
+          inject_model_instruction: userApiKeyForm.value.chat_pii_redaction_placeholder_notice,
+        }),
       })
       newApiKey.value = response.key || ''
       showNewApiKeyDialog.value = true

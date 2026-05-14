@@ -52,6 +52,7 @@ SELECT
   api_keys.rate_limit,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
+  api_keys.feature_settings,
   api_keys.is_active,
   api_keys.expires_at AS expires_at_unix_secs,
   api_keys.auto_delete_on_expiry,
@@ -112,11 +113,11 @@ impl MysqlAuthApiKeyReadRepository {
 INSERT INTO api_keys (
   id, user_id, key_hash, key_encrypted, name, allowed_providers,
   allowed_api_formats, allowed_models, rate_limit, concurrent_limit,
-  force_capabilities, is_active, expires_at, auto_delete_on_expiry,
+  force_capabilities, feature_settings, is_active, expires_at, auto_delete_on_expiry,
   total_requests, total_tokens, total_cost_usd, is_standalone,
   created_at, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#,
         )
         .bind(&record.api_key_id)
@@ -642,6 +643,34 @@ WHERE id = ?
         self.reload_export_by_id(api_key_id).await
     }
 
+    async fn set_user_api_key_feature_settings(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        sqlx::query(
+            r#"
+UPDATE api_keys
+SET feature_settings = ?, updated_at = ?
+WHERE id = ?
+  AND user_id = ?
+  AND is_standalone = 0
+"#,
+        )
+        .bind(optional_json_to_string(
+            &feature_settings,
+            "api_keys.feature_settings",
+        )?)
+        .bind(current_unix_secs() as i64)
+        .bind(api_key_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map_sql_err()?;
+        self.reload_export_by_id(api_key_id).await
+    }
+
     async fn delete_user_api_key(
         &self,
         user_id: &str,
@@ -652,6 +681,31 @@ WHERE id = ?
 
     async fn delete_standalone_api_key(&self, api_key_id: &str) -> Result<bool, DataLayerError> {
         self.delete_api_key(api_key_id, None, true).await
+    }
+
+    async fn set_standalone_api_key_feature_settings(
+        &self,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        sqlx::query(
+            r#"
+UPDATE api_keys
+SET feature_settings = ?, updated_at = ?
+WHERE id = ?
+  AND is_standalone = 1
+"#,
+        )
+        .bind(optional_json_to_string(
+            &feature_settings,
+            "api_keys.feature_settings",
+        )?)
+        .bind(current_unix_secs() as i64)
+        .bind(api_key_id)
+        .execute(&self.pool)
+        .await
+        .map_sql_err()?;
+        self.reload_export_by_id(api_key_id).await
     }
 }
 
@@ -875,6 +929,10 @@ fn map_auth_api_key_snapshot_row(
 fn map_auth_api_key_export_row(
     row: &MySqlRow,
 ) -> Result<StoredAuthApiKeyExportRecord, DataLayerError> {
+    let feature_settings = optional_json_from_string(
+        row.try_get("feature_settings").map_sql_err()?,
+        "api_keys.feature_settings",
+    )?;
     StoredAuthApiKeyExportRecord::new(
         row.try_get("user_id").map_sql_err()?,
         row.try_get("api_key_id").map_sql_err()?,
@@ -907,6 +965,7 @@ fn map_auth_api_key_export_row(
         row.try_get("total_cost_usd").map_sql_err()?,
         row.try_get("is_standalone").map_sql_err()?,
     )
+    .map(|record| record.with_feature_settings(feature_settings))
     .and_then(|record| {
         record.with_activity_timestamps(
             row.try_get("last_used_at_unix_secs").map_sql_err()?,

@@ -11,7 +11,7 @@ cd Aether
 
 # 2. 配置环境变量
 cp .env.example .env
-python generate_keys.py  # 生成密钥, 并将生成的密钥填入 .env
+./generate_keys.sh # 生成密钥, 并将生成的密钥填入 .env
 
 # 3. 部署 / 更新（自动执行数据库迁移）
 docker compose pull && docker compose up -d
@@ -28,13 +28,13 @@ cd Aether
 
 # 2. 配置环境变量
 cp .env.example .env
-python generate_keys.py  # 生成密钥, 并将生成的密钥填入 .env
+./generate_keys.sh  # 生成密钥, 并将生成的密钥填入 .env
 
 # 3. 构建（自动构建、启动、迁移）
 ./deploy.sh
 
 # 4. 更新需要拉取最新代码
-git pull origin master
+git pull origin main
 ```
 
 ### 3. 本地开发
@@ -119,7 +119,7 @@ cd frontend && npm install && npm run dev
 
 1. **Aether-Proxy**
    Rust实现, 超小资源占有, 适合性能低的vps直接使用。
-   [https://github.com/fawney19/Aether/tree/master/aether-proxy](https://github.com/fawney19/Aether/tree/master/aether-proxy)
+   [https://github.com/fawney19/Aether/tree/main/aether-proxy](https://github.com/fawney19/Aether/tree/main/aether-proxy)
 
 2. **代理节点**
    在模块管理中, 开启代理模块后可以添加和使用代理功能, 包括手动添加和Aether-Proxy自动连接。

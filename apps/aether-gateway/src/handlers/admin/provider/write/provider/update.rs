@@ -2,6 +2,7 @@ use crate::handlers::admin::provider::shared::payloads::AdminProviderUpdatePatch
 use crate::handlers::admin::provider::shared::support::{
     normalize_provider_billing_type, parse_optional_rfc3339_unix_secs,
 };
+use crate::handlers::admin::provider::write::normalize::normalize_chat_pii_redaction_config;
 use crate::handlers::admin::provider::write::normalize::normalize_pool_advanced_config;
 use crate::handlers::admin::provider::write::normalize::normalize_provider_type_input;
 use crate::handlers::admin::request::AdminAppState;
@@ -225,14 +226,29 @@ pub(crate) async fn build_admin_update_provider_record(
         updated.enable_format_conversion = enable_format_conversion;
     }
 
-    let config_seed = if fields.contains("config") {
-        normalize_json_object(payload.config, "config")?
-    } else {
-        updated.config.clone()
-    };
-    let mut config_map = config_seed
+    let mut config_map = updated
+        .config
+        .clone()
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
+    if fields.contains("config") {
+        if fields.is_null("config") {
+            config_map.clear();
+        } else {
+            let value = normalize_json_object(payload.config, "config")?
+                .ok_or_else(|| "config 必须是 JSON 对象".to_string())?;
+            let serde_json::Value::Object(patch_map) = value else {
+                return Err("config 必须是 JSON 对象".to_string());
+            };
+            for (key, value) in patch_map {
+                if value.is_null() {
+                    config_map.remove(&key);
+                } else {
+                    config_map.insert(key, value);
+                }
+            }
+        }
+    }
 
     if fields.contains("claude_code_advanced") {
         if fields.is_null("claude_code_advanced") {
@@ -267,6 +283,13 @@ pub(crate) async fn build_admin_update_provider_record(
             let value = normalize_json_object(payload.failover_rules, "failover_rules")?
                 .ok_or_else(|| "failover_rules 必须是 JSON 对象".to_string())?;
             config_map.insert("failover_rules".to_string(), value);
+        }
+    }
+
+    if config_map.contains_key("chat_pii_redaction") {
+        let value = normalize_chat_pii_redaction_config(config_map.remove("chat_pii_redaction"))?;
+        if let Some(value) = value {
+            config_map.insert("chat_pii_redaction".to_string(), value);
         }
     }
 

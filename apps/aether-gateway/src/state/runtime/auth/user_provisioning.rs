@@ -52,6 +52,32 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn read_user_feature_settings(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        self.data
+            .read_user_feature_settings(user_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn update_user_feature_settings(
+        &self,
+        user_id: &str,
+        settings: Option<serde_json::Value>,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        let updated = self
+            .data
+            .update_user_feature_settings(user_id, settings)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if updated.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(updated)
+    }
+
     pub(crate) async fn find_active_provider_name(
         &self,
         provider_id: &str,

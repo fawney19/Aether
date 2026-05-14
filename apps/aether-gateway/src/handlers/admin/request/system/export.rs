@@ -275,6 +275,7 @@ impl<'a> AdminAppState<'a> {
                     "rate_limit": user.rate_limit,
                     "rate_limit_mode": user.rate_limit_mode.clone(),
                     "model_capability_settings": user.model_capability_settings.clone(),
+                    "feature_settings": user.feature_settings.clone(),
                     "group_ids": group_ids,
                     "group_names": group_names,
                     "unlimited": wallet
@@ -333,6 +334,10 @@ impl<'a> AdminAppState<'a> {
             (
                 "force_capabilities".to_string(),
                 json!(key.force_capabilities.clone()),
+            ),
+            (
+                "feature_settings".to_string(),
+                json!(key.feature_settings.clone()),
             ),
             ("is_active".to_string(), json!(key.is_active)),
             (

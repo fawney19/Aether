@@ -7,6 +7,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::handlers::shared::{deserialize_optional_json_patch, normalize_feature_settings};
+
 use super::{
     auth_password_policy_level, build_auth_error_response, resolve_authenticated_local_user,
     validate_auth_register_password, AppState, GatewayPublicRequestContext,
@@ -21,6 +23,8 @@ struct UsersMeUpdateProfileRequest {
     email: Option<String>,
     #[serde(default)]
     username: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_json_patch")]
+    feature_settings: Option<Option<serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +64,15 @@ pub(super) async fn handle_users_me_detail_put(
 
     let email = normalize_users_me_optional_non_empty_string(payload.email);
     let username = normalize_users_me_optional_non_empty_string(payload.username);
+    let feature_settings = match payload.feature_settings {
+        Some(value) => match normalize_feature_settings(value) {
+            Ok(value) => Some(value),
+            Err(detail) => {
+                return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
+            }
+        },
+        None => None,
+    };
 
     if let Some(email) = email.as_deref() {
         match state
@@ -111,7 +124,24 @@ pub(super) async fn handle_users_me_detail_put(
         .update_local_auth_user_profile(&auth.user.id, email, username)
         .await
     {
-        Ok(Some(_)) => Json(json!({ "message": "个人信息更新成功" })).into_response(),
+        Ok(Some(_)) => {
+            if let Some(feature_settings) = feature_settings {
+                match state
+                    .update_user_feature_settings(&auth.user.id, feature_settings)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(err) => {
+                        return build_auth_error_response(
+                            http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("user feature settings update failed: {err:?}"),
+                            false,
+                        )
+                    }
+                }
+            }
+            Json(json!({ "message": "个人信息更新成功" })).into_response()
+        }
         Ok(None) => build_auth_error_response(
             http::StatusCode::SERVICE_UNAVAILABLE,
             USERS_ME_PROFILE_STORAGE_UNAVAILABLE_DETAIL,

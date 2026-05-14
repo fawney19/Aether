@@ -36,6 +36,7 @@ pub struct InMemoryUserReadRepository {
     preferences_by_user_id: RwLock<BTreeMap<String, StoredUserPreferenceRecord>>,
     sessions_by_id: RwLock<BTreeMap<String, StoredUserSessionRecord>>,
     model_settings_by_user_id: RwLock<BTreeMap<String, serde_json::Value>>,
+    feature_settings_by_user_id: RwLock<BTreeMap<String, serde_json::Value>>,
     groups_by_id: RwLock<BTreeMap<String, StoredUserGroup>>,
     group_members: RwLock<BTreeMap<(String, String), chrono::DateTime<chrono::Utc>>>,
     export_rows: RwLock<Vec<StoredUserExportRow>>,
@@ -61,6 +62,7 @@ impl InMemoryUserReadRepository {
             preferences_by_user_id: RwLock::new(BTreeMap::new()),
             sessions_by_id: RwLock::new(BTreeMap::new()),
             model_settings_by_user_id: RwLock::new(BTreeMap::new()),
+            feature_settings_by_user_id: RwLock::new(BTreeMap::new()),
             groups_by_id: RwLock::new(BTreeMap::new()),
             group_members: RwLock::new(BTreeMap::new()),
             export_rows: RwLock::new(Vec::new()),
@@ -96,6 +98,7 @@ impl InMemoryUserReadRepository {
             preferences_by_user_id: RwLock::new(BTreeMap::new()),
             sessions_by_id: RwLock::new(BTreeMap::new()),
             model_settings_by_user_id: RwLock::new(BTreeMap::new()),
+            feature_settings_by_user_id: RwLock::new(BTreeMap::new()),
             groups_by_id: RwLock::new(BTreeMap::new()),
             group_members: RwLock::new(BTreeMap::new()),
             export_rows: RwLock::new(Vec::new()),
@@ -117,6 +120,7 @@ impl InMemoryUserReadRepository {
             preferences_by_user_id: RwLock::new(BTreeMap::new()),
             sessions_by_id: RwLock::new(BTreeMap::new()),
             model_settings_by_user_id: RwLock::new(BTreeMap::new()),
+            feature_settings_by_user_id: RwLock::new(BTreeMap::new()),
             groups_by_id: RwLock::new(BTreeMap::new()),
             group_members: RwLock::new(BTreeMap::new()),
             export_rows: RwLock::new(items.into_iter().collect()),
@@ -366,6 +370,12 @@ fn memory_export_row_from_auth_user(
         .expect("user repository lock")
         .get(&user.id)
         .cloned();
+    let feature_settings = repository
+        .feature_settings_by_user_id
+        .read()
+        .expect("user repository lock")
+        .get(&user.id)
+        .cloned();
     StoredUserExportRow::new(
         user.id.clone(),
         user.email.clone(),
@@ -383,6 +393,7 @@ fn memory_export_row_from_auth_user(
         model_capability_settings,
         user.is_active,
     )?
+    .with_feature_settings(feature_settings)
     .with_policy_modes(
         user.allowed_providers_mode.clone(),
         user.allowed_api_formats_mode.clone(),
@@ -1525,6 +1536,58 @@ impl UserReadRepository for InMemoryUserReadRepository {
             .find(|row| row.id == user_id)
         {
             row.model_capability_settings = normalized.clone();
+        }
+
+        Ok(normalized)
+    }
+
+    async fn update_user_feature_settings(
+        &self,
+        user_id: &str,
+        settings: Option<serde_json::Value>,
+    ) -> Result<Option<serde_json::Value>, DataLayerError> {
+        if self.read_only {
+            return Ok(None);
+        }
+
+        let user_exists = self
+            .auth_by_id
+            .read()
+            .expect("user repository lock")
+            .contains_key(user_id)
+            || self
+                .export_rows
+                .read()
+                .expect("user repository lock")
+                .iter()
+                .any(|row| row.id == user_id);
+        if !user_exists {
+            return Ok(None);
+        }
+
+        let normalized = normalize_optional_json_value(settings);
+        let mut feature_settings_by_user = self
+            .feature_settings_by_user_id
+            .write()
+            .expect("user repository lock");
+        match normalized.clone() {
+            Some(value) => {
+                feature_settings_by_user.insert(user_id.to_string(), value);
+            }
+            None => {
+                feature_settings_by_user.remove(user_id);
+            }
+        }
+        drop(feature_settings_by_user);
+
+        if let Some(row) = self
+            .export_rows
+            .write()
+            .expect("user repository lock")
+            .iter_mut()
+            .find(|row| row.id == user_id)
+        {
+            row.feature_settings = normalized.clone();
         }
 
         Ok(normalized)

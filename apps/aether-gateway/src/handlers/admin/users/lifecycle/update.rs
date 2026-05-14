@@ -1,8 +1,9 @@
 use super::super::{
     build_admin_users_bad_request_response, build_admin_users_data_unavailable_response,
     build_admin_users_read_only_response, disabled_user_policy_detail, disabled_user_policy_field,
-    normalize_admin_optional_user_email, normalize_admin_user_group_ids, normalize_admin_user_role,
-    normalize_admin_username, validate_admin_user_password, AdminUpdateUserPatch,
+    normalize_admin_feature_settings, normalize_admin_optional_user_email,
+    normalize_admin_user_group_ids, normalize_admin_user_role, normalize_admin_username,
+    validate_admin_user_password, AdminUpdateUserPatch,
 };
 use super::support::{
     admin_user_id_from_detail_path, admin_user_password_policy,
@@ -17,7 +18,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 
 pub(in super::super) async fn build_admin_update_user_response(
     state: &AdminAppState<'_>,
@@ -69,6 +70,20 @@ pub(in super::super) async fn build_admin_update_user_response(
         }
     };
     let (field_presence, payload) = patch.into_parts();
+    let feature_settings = if field_presence.contains("feature_settings") {
+        match normalize_admin_feature_settings(payload.feature_settings.flatten()) {
+            Ok(value) => Some(value),
+            Err(detail) => {
+                return Ok((
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": detail })),
+                )
+                    .into_response())
+            }
+        }
+    } else {
+        None
+    };
 
     let email = match payload.email.as_deref() {
         Some(value) => match normalize_admin_optional_user_email(Some(value)) {
@@ -175,7 +190,8 @@ pub(in super::super) async fn build_admin_update_user_response(
         || payload.password.is_some()
         || role.is_some()
         || payload.is_active.is_some()
-        || group_ids.is_some();
+        || group_ids.is_some()
+        || feature_settings.is_some();
     if needs_auth_user_write && !state.has_auth_user_write_capability() {
         return Ok(build_admin_users_read_only_response(
             "当前为只读模式，无法更新用户",
@@ -293,6 +309,11 @@ pub(in super::super) async fn build_admin_update_user_response(
             }
         }
     }
+    if let Some(feature_settings) = feature_settings {
+        state
+            .update_user_feature_settings(&user_id, feature_settings)
+            .await?;
+    }
 
     let Some(user) = state.find_user_auth_by_id(&user_id).await? else {
         return Ok((
@@ -313,15 +334,20 @@ pub(in super::super) async fn build_admin_update_user_response(
     let groups = state.list_user_groups_for_user(&user_id).await?;
     let rate_limit = export_row.as_ref().and_then(|row| row.rate_limit);
 
+    let mut payload = build_admin_user_payload_with_groups(
+        &user,
+        rate_limit,
+        export_row.as_ref().map(|row| row.rate_limit_mode.as_str()),
+        unlimited,
+        &groups,
+    );
+    payload["feature_settings"] = export_row
+        .as_ref()
+        .and_then(|row| row.feature_settings.clone())
+        .unwrap_or(Value::Null);
+
     Ok(attach_admin_audit_response(
-        Json(build_admin_user_payload_with_groups(
-            &user,
-            rate_limit,
-            export_row.as_ref().map(|row| row.rate_limit_mode.as_str()),
-            unlimited,
-            &groups,
-        ))
-        .into_response(),
+        Json(payload).into_response(),
         "admin_user_updated",
         "update_user",
         "user",

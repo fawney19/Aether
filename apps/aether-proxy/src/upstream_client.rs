@@ -503,6 +503,7 @@ pub fn resolve_request_timing<B>(
 }
 
 fn build_tls_config(http1_only: bool) -> Arc<ClientConfig> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let root_store =
         rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut config = ClientConfig::builder()

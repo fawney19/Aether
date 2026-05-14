@@ -81,6 +81,49 @@
           </form>
         </Card>
 
+        <Card class="p-6">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <h3 class="text-lg font-medium text-foreground">
+                敏感信息保护
+              </h3>
+              <p class="text-sm text-muted-foreground mt-1">
+                管理员开启功能后，可默认应用到你的账户和 API Key
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              :disabled="savingFeatureSettings || !hasFeatureSettingsChanges"
+              @click="updateFeatureSettings"
+            >
+              {{ savingFeatureSettings ? '保存中...' : '保存' }}
+            </Button>
+          </div>
+          <div class="space-y-4">
+            <div class="flex items-center justify-between gap-4 rounded-lg border border-border/60 bg-muted/30 px-4 py-3">
+              <div>
+                <Label class="text-sm font-medium">默认启用</Label>
+                <p class="mt-1 text-xs text-muted-foreground">
+                  未单独配置的 API Key 会跟随此设置
+                </p>
+              </div>
+              <Switch v-model="featureSettingsForm.chatPiiRedactionEnabled" />
+            </div>
+            <div class="flex items-center justify-between gap-4 rounded-lg border border-border/60 bg-muted/30 px-4 py-3">
+              <div>
+                <Label class="text-sm font-medium">占位符说明</Label>
+                <p class="mt-1 text-xs text-muted-foreground">
+                  向模型说明占位符含义
+                </p>
+              </div>
+              <Switch
+                v-model="featureSettingsForm.chatPiiRedactionInjectNotice"
+                :disabled="!featureSettingsForm.chatPiiRedactionEnabled"
+              />
+            </div>
+          </div>
+        </Card>
+
         <!-- 密码设置（LDAP 用户不显示） -->
         <Card
           v-if="profile?.auth_source !== 'ldap'"
@@ -626,6 +669,10 @@ import { formatCurrency } from '@/utils/format'
 import { getApiUrl } from '@/utils/url'
 import { log } from '@/utils/logger'
 import { getErrorMessage, getErrorStatus } from '@/types/api-error'
+import {
+  mergeChatPiiRedactionFeatureSettings,
+  readChatPiiRedactionFeatureSettings,
+} from '@/utils/featureSettings'
 
 const authStore = useAuthStore()
 const route = useRoute()
@@ -660,7 +707,13 @@ const preferencesForm = ref({
   }
 })
 
+const featureSettingsForm = ref({
+  chatPiiRedactionEnabled: false,
+  chatPiiRedactionInjectNotice: true,
+})
+
 const savingProfile = ref(false)
+const savingFeatureSettings = ref(false)
 const changingPassword = ref(false)
 const sessionsLoading = ref(false)
 const sessionActionLoading = ref<string | null>(null)
@@ -679,6 +732,7 @@ const emailConfigured = ref(false) // 系统是否配置了邮箱服务
 // 原始值，用于检测是否有修改
 const originalProfileForm = ref({ email: '', username: '' })
 const originalPreferencesForm = ref({ avatar_url: '', bio: '' })
+const originalFeatureSettingsForm = ref({ ...featureSettingsForm.value })
 
 // 检测基本信息是否有修改
 const hasProfileChanges = computed(() => {
@@ -687,6 +741,13 @@ const hasProfileChanges = computed(() => {
     profileForm.value.email !== originalProfileForm.value.email ||
     preferencesForm.value.avatar_url !== originalPreferencesForm.value.avatar_url ||
     preferencesForm.value.bio !== originalPreferencesForm.value.bio
+  )
+})
+
+const hasFeatureSettingsChanges = computed(() => {
+  return (
+    featureSettingsForm.value.chatPiiRedactionEnabled !== originalFeatureSettingsForm.value.chatPiiRedactionEnabled ||
+    featureSettingsForm.value.chatPiiRedactionInjectNotice !== originalFeatureSettingsForm.value.chatPiiRedactionInjectNotice
   )
 })
 
@@ -752,11 +813,42 @@ async function loadProfile() {
       email: profile.value.email || '',
       username: profile.value.username
     }
+    const redactionFeature = readChatPiiRedactionFeatureSettings(profile.value.feature_settings)
+    featureSettingsForm.value = {
+      chatPiiRedactionEnabled: redactionFeature.enabled,
+      chatPiiRedactionInjectNotice: redactionFeature.inject_model_instruction,
+    }
     // 保存原始值
     originalProfileForm.value = { ...profileForm.value }
+    originalFeatureSettingsForm.value = { ...featureSettingsForm.value }
   } catch (error) {
     log.error('加载个人信息失败:', error)
     showError('加载个人信息失败')
+  }
+}
+
+async function updateFeatureSettings() {
+  savingFeatureSettings.value = true
+  try {
+    await meApi.updateProfile({
+      feature_settings: mergeChatPiiRedactionFeatureSettings(profile.value?.feature_settings, {
+        enabled: featureSettingsForm.value.chatPiiRedactionEnabled,
+        inject_model_instruction: featureSettingsForm.value.chatPiiRedactionInjectNotice,
+      }),
+    })
+    if (profile.value) {
+      profile.value.feature_settings = mergeChatPiiRedactionFeatureSettings(profile.value.feature_settings, {
+        enabled: featureSettingsForm.value.chatPiiRedactionEnabled,
+        inject_model_instruction: featureSettingsForm.value.chatPiiRedactionInjectNotice,
+      })
+    }
+    originalFeatureSettingsForm.value = { ...featureSettingsForm.value }
+    success('敏感信息保护设置已保存')
+  } catch (err) {
+    log.error('更新敏感信息保护设置失败:', err)
+    showError(getErrorMessage(err), '更新敏感信息保护设置失败')
+  } finally {
+    savingFeatureSettings.value = false
   }
 }
 

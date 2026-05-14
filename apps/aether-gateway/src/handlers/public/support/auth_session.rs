@@ -174,6 +174,7 @@ pub(crate) fn build_auth_wallet_summary_payload(
 fn build_auth_me_payload(
     user: &aether_data::repository::users::StoredUserAuthRecord,
     wallet: Option<&aether_data::repository::wallet::StoredWalletSnapshot>,
+    feature_settings: Option<serde_json::Value>,
 ) -> serde_json::Value {
     let billing = build_auth_wallet_summary_payload(wallet);
     let has_password = user
@@ -194,6 +195,7 @@ fn build_auth_me_payload(
         "last_login_at": user.last_login_at.map(|value| value.to_rfc3339()),
         "auth_source": user.auth_source,
         "has_password": has_password,
+        "feature_settings": feature_settings,
     })
 }
 
@@ -336,9 +338,19 @@ pub(crate) async fn handle_auth_me(
         .await
         .ok()
         .flatten();
+    let feature_settings = match state.read_user_feature_settings(&auth.user.id).await {
+        Ok(value) => value,
+        Err(err) => {
+            return build_auth_error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("user feature settings lookup failed: {err:?}"),
+                false,
+            )
+        }
+    };
     build_auth_json_response(
         http::StatusCode::OK,
-        build_auth_me_payload(&auth.user, wallet.as_ref()),
+        build_auth_me_payload(&auth.user, wallet.as_ref(), feature_settings),
         None,
     )
 }

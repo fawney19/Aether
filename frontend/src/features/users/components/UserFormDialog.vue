@@ -209,6 +209,20 @@
             />
           </div>
         </div>
+
+        <div class="rounded-lg border border-border bg-muted/30 p-3">
+          <div class="flex items-center justify-between gap-3">
+            <Label class="text-sm font-medium">敏感信息保护</Label>
+            <Switch v-model="form.chat_pii_redaction_enabled" />
+          </div>
+          <div class="mt-3 flex items-center justify-between gap-3">
+            <Label class="text-sm font-medium">占位符说明</Label>
+            <Switch
+              v-model="form.chat_pii_redaction_placeholder_notice"
+              :disabled="!form.chat_pii_redaction_enabled"
+            />
+          </div>
+        </div>
       </div>
     </form>
 
@@ -253,6 +267,10 @@ import { adminApi } from '@/api/admin'
 import { log } from '@/utils/logger'
 import { parseNumberInput } from '@/utils/form'
 import {
+  mergeChatPiiRedactionFeatureSettings,
+  readChatPiiRedactionFeatureSettings,
+} from '@/utils/featureSettings'
+import {
   getPasswordPolicyHint,
   getPasswordPolicyPlaceholder,
   normalizePasswordPolicyLevel,
@@ -270,6 +288,7 @@ export interface UserFormData {
   role: 'admin' | 'user'
   is_active?: boolean
   group_ids?: string[]
+  feature_settings?: Record<string, unknown> | null
 }
 
 const props = defineProps<{
@@ -299,6 +318,8 @@ const form = ref({
   unlimited: false,
   is_active: true,
   group_ids: [] as string[],
+  chat_pii_redaction_enabled: false,
+  chat_pii_redaction_placeholder_notice: true,
 })
 
 const groupOptions = computed(() => (props.groups || []).map((group) => ({
@@ -322,12 +343,15 @@ function resetForm() {
     unlimited: false,
     is_active: true,
     group_ids: [],
+    chat_pii_redaction_enabled: false,
+    chat_pii_redaction_placeholder_notice: true,
   }
 }
 
 function loadUserData() {
   if (!props.user) return
   formNonce.value = createFieldNonce()
+  const redactionFeature = readChatPiiRedactionFeatureSettings(props.user.feature_settings)
   // 创建数组副本，避免与 props 数据共享引用
   form.value = {
     username: props.user.username,
@@ -339,6 +363,8 @@ function loadUserData() {
     unlimited: props.user.unlimited ?? false,
     is_active: props.user.is_active ?? true,
     group_ids: props.user.group_ids ? [...props.user.group_ids] : [],
+    chat_pii_redaction_enabled: redactionFeature.enabled,
+    chat_pii_redaction_placeholder_notice: redactionFeature.inject_model_instruction,
   }
 }
 
@@ -413,6 +439,10 @@ async function handleSubmit() {
       unlimited: form.value.unlimited,
       role: form.value.role,
       group_ids: [...form.value.group_ids],
+      feature_settings: mergeChatPiiRedactionFeatureSettings(props.user?.feature_settings, {
+        enabled: form.value.chat_pii_redaction_enabled,
+        inject_model_instruction: form.value.chat_pii_redaction_placeholder_notice,
+      }),
     }
 
     if (isEditMode.value && props.user?.id) {

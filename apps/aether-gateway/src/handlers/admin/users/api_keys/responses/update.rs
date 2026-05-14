@@ -1,6 +1,6 @@
 use super::super::super::{
     build_admin_users_bad_request_response, build_admin_users_read_only_response,
-    AdminUpdateUserApiKeyRequest,
+    normalize_admin_feature_settings, AdminUpdateUserApiKeyRequest,
 };
 use super::super::helpers::{
     attach_audit_response, build_admin_user_api_key_detail_payload,
@@ -52,6 +52,20 @@ pub(crate) async fn build_admin_update_user_api_key_response(
                 .into_response());
         }
     };
+    let feature_settings = if let Some(feature_settings) = payload.feature_settings {
+        match normalize_admin_feature_settings(feature_settings) {
+            Ok(value) => Some(value),
+            Err(detail) => {
+                return Ok((
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": detail })),
+                )
+                    .into_response());
+            }
+        }
+    } else {
+        None
+    };
     let name = match normalize_admin_optional_api_key_name(payload.name) {
         Ok(value) => value,
         Err(detail) => {
@@ -83,7 +97,7 @@ pub(crate) async fn build_admin_update_user_api_key_response(
 
     let Some(updated) = state
         .update_user_api_key_basic(aether_data::repository::auth::UpdateUserApiKeyBasicRecord {
-            user_id,
+            user_id: user_id.clone(),
             api_key_id: api_key_id.clone(),
             name,
             rate_limit: payload.rate_limit,
@@ -96,6 +110,14 @@ pub(crate) async fn build_admin_update_user_api_key_response(
             Json(json!({ "detail": "API Key不存在或不属于该用户" })),
         )
             .into_response());
+    };
+    let updated = if let Some(feature_settings) = feature_settings {
+        state
+            .set_user_api_key_feature_settings(&user_id, &api_key_id, feature_settings)
+            .await?
+            .unwrap_or(updated)
+    } else {
+        updated
     };
 
     let is_locked = state

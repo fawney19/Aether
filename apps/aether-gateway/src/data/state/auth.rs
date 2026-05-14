@@ -447,6 +447,19 @@ impl GatewayDataState {
             .await
     }
 
+    pub(crate) async fn update_user_feature_settings(
+        &self,
+        user_id: &str,
+        settings: Option<serde_json::Value>,
+    ) -> Result<Option<serde_json::Value>, DataLayerError> {
+        let Some(repository) = self.user_reader.as_ref() else {
+            return Ok(None);
+        };
+        repository
+            .update_user_feature_settings(user_id, settings)
+            .await
+    }
+
     pub(crate) async fn update_local_auth_user_profile(
         &self,
         user_id: &str,
@@ -1379,6 +1392,27 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn read_auth_api_key_feature_settings(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        is_standalone: bool,
+    ) -> Result<Option<serde_json::Value>, DataLayerError> {
+        if is_standalone {
+            return Ok(self
+                .find_auth_api_key_export_standalone_record_by_id(api_key_id)
+                .await?
+                .and_then(|record| record.feature_settings));
+        }
+
+        Ok(self
+            .list_auth_api_key_export_records_by_ids(&[api_key_id.to_string()])
+            .await?
+            .into_iter()
+            .find(|record| record.user_id == user_id && !record.is_standalone)
+            .and_then(|record| record.feature_settings))
+    }
+
     pub(crate) async fn list_auth_api_key_export_records_by_name_search(
         &self,
         name_search: &str,
@@ -1592,6 +1626,37 @@ impl GatewayDataState {
             Some(repository) => {
                 repository
                     .set_user_api_key_force_capabilities(user_id, api_key_id, force_capabilities)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn set_user_api_key_feature_settings(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .set_user_api_key_feature_settings(user_id, api_key_id, feature_settings)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn set_standalone_api_key_feature_settings(
+        &self,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .set_standalone_api_key_feature_settings(api_key_id, feature_settings)
                     .await
             }
             None => Ok(None),

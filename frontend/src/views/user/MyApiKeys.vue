@@ -450,6 +450,57 @@
             {{ editingApiKey ? '留空表示保持当前值，填 0 表示不限并发' : '留空表示不限并发，填 0 也表示不限并发' }}
           </p>
         </div>
+
+        <div class="rounded-lg border border-border/60 bg-muted/30 p-4">
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <Label class="text-sm font-semibold">敏感信息保护</Label>
+              <p class="mt-1 text-xs text-muted-foreground">
+                {{ keyRedactionMode === 'inherit' ? '默认跟随账户设置' : '管理员开启功能后生效' }}
+              </p>
+            </div>
+            <div class="flex items-center gap-2">
+              <Button
+                size="sm"
+                :variant="keyRedactionMode === 'inherit' ? 'default' : 'outline'"
+                @click="keyRedactionMode = 'inherit'"
+              >
+                跟随账户
+              </Button>
+              <Button
+                size="sm"
+                :variant="keyRedactionMode === 'custom' ? 'default' : 'outline'"
+                @click="keyRedactionMode = 'custom'"
+              >
+                单独配置
+              </Button>
+            </div>
+          </div>
+          <div
+            v-if="keyRedactionMode === 'custom'"
+            class="mt-4 flex items-center justify-between gap-4 border-t border-border/50 pt-4"
+          >
+            <div>
+              <Label class="text-sm font-medium">启用保护</Label>
+              <p class="mt-1 text-xs text-muted-foreground">
+                只影响此 API Key
+              </p>
+            </div>
+            <Switch v-model="newKeyRedactionEnabled" />
+          </div>
+          <div
+            v-if="keyRedactionMode === 'custom' && newKeyRedactionEnabled"
+            class="mt-4 flex items-center justify-between gap-4 border-t border-border/50 pt-4"
+          >
+            <div>
+              <Label class="text-sm font-medium">占位符说明</Label>
+              <p class="mt-1 text-xs text-muted-foreground">
+                向模型说明占位符含义
+              </p>
+            </div>
+            <Switch v-model="newKeyRedactionInjectNotice" />
+          </div>
+        </div>
       </div>
 
       <template #footer>
@@ -667,6 +718,7 @@ import Button from '@/components/ui/button.vue'
 import Input from '@/components/ui/input.vue'
 import Label from '@/components/ui/label.vue'
 import Badge from '@/components/ui/badge.vue'
+import Switch from '@/components/ui/switch.vue'
 import { Dialog, Pagination } from '@/components/ui'
 import { LoadingState, AlertDialog, EmptyState } from '@/components/common'
 import {
@@ -685,6 +737,11 @@ import { parseApiError } from '@/utils/errorParser'
 import { formatRateLimitSimple } from '@/utils/format'
 import { parseNumberInput } from '@/utils/form'
 import { getErrorStatus } from '@/types/api-error'
+import {
+  hasChatPiiRedactionFeatureSettings,
+  mergeChatPiiRedactionFeatureSettings,
+  readChatPiiRedactionFeatureSettings,
+} from '@/utils/featureSettings'
 
 const { success, error: showError } = useToast()
 
@@ -722,6 +779,9 @@ const showInstallDialog = ref(false)
 const newKeyName = ref('')
 const newKeyRateLimit = ref<number | undefined>(undefined)
 const newKeyConcurrentLimit = ref<number | undefined>(undefined)
+const keyRedactionMode = ref<'inherit' | 'custom'>('inherit')
+const newKeyRedactionEnabled = ref(false)
+const newKeyRedactionInjectNotice = ref(true)
 const newKeyValue = ref('')
 const keyToDelete = ref<ApiKey | null>(null)
 const editingApiKey = ref<ApiKey | null>(null)
@@ -801,10 +861,15 @@ function resetInstallCopiedState() {
 }
 
 function openEditApiKeyDialog(apiKey: ApiKey) {
+  const hasRedactionFeature = hasChatPiiRedactionFeatureSettings(apiKey.feature_settings)
+  const redactionFeature = readChatPiiRedactionFeatureSettings(apiKey.feature_settings)
   editingApiKey.value = apiKey
   newKeyName.value = apiKey.name || ''
   newKeyRateLimit.value = apiKey.rate_limit ?? undefined
   newKeyConcurrentLimit.value = apiKey.concurrent_limit ?? undefined
+  keyRedactionMode.value = hasRedactionFeature ? 'custom' : 'inherit'
+  newKeyRedactionEnabled.value = redactionFeature.enabled
+  newKeyRedactionInjectNotice.value = redactionFeature.inject_model_instruction
   showCreateDialog.value = true
 }
 
@@ -813,6 +878,9 @@ function openCreateApiKeyDialog() {
   newKeyName.value = ''
   newKeyRateLimit.value = undefined
   newKeyConcurrentLimit.value = undefined
+  keyRedactionMode.value = 'inherit'
+  newKeyRedactionEnabled.value = false
+  newKeyRedactionInjectNotice.value = true
   showCreateDialog.value = true
 }
 
@@ -889,6 +957,9 @@ function closeApiKeyDialog() {
   newKeyName.value = ''
   newKeyRateLimit.value = undefined
   newKeyConcurrentLimit.value = undefined
+  keyRedactionMode.value = 'inherit'
+  newKeyRedactionEnabled.value = false
+  newKeyRedactionInjectNotice.value = true
 }
 
 async function saveApiKey() {
@@ -905,6 +976,12 @@ async function saveApiKey() {
         name: newKeyName.value,
         rate_limit: newKeyRateLimit.value ?? 0,
         concurrent_limit: newKeyConcurrentLimit.value,
+        feature_settings: keyRedactionMode.value === 'custom'
+          ? mergeChatPiiRedactionFeatureSettings(editingApiKey.value.feature_settings, {
+                enabled: newKeyRedactionEnabled.value,
+                inject_model_instruction: newKeyRedactionInjectNotice.value,
+            })
+          : null,
       })
       success('API 密钥更新成功')
     } else {
@@ -912,6 +989,14 @@ async function saveApiKey() {
         name: newKeyName.value,
         rate_limit: newKeyRateLimit.value ?? 0,
         concurrent_limit: newKeyConcurrentLimit.value,
+        ...(keyRedactionMode.value === 'custom'
+          ? {
+              feature_settings: mergeChatPiiRedactionFeatureSettings(null, {
+                enabled: newKeyRedactionEnabled.value,
+                inject_model_instruction: newKeyRedactionInjectNotice.value,
+              }),
+            }
+          : {}),
       })
       newKeyValue.value = newKey.key || ''
       if (isCreatingFirstApiKey) {

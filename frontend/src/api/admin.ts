@@ -120,6 +120,7 @@ export interface UserExport {
   rate_limit?: number | null  // null = 跟随系统默认，0 = 不限制
   rate_limit_mode?: 'inherit' | 'system' | 'custom'
   model_capability_settings?: Record<string, Record<string, boolean>>
+  feature_settings?: Record<string, unknown> | null
   group_ids?: string[]
   group_names?: string[]
   unlimited?: boolean
@@ -140,6 +141,7 @@ export interface UserApiKeyExport {
   rate_limit?: number | null  // legacy/null 兼容；1.3+ standalone null = 跟随系统默认
   concurrent_limit?: number | null
   force_capabilities?: Record<string, boolean>
+  feature_settings?: Record<string, unknown> | null
   is_active: boolean
   expires_at?: string | null
   auto_delete_on_expiry?: boolean
@@ -453,6 +455,7 @@ export interface AdminApiKey {
   allowed_providers?: string[] | null  // 允许的提供商列表
   allowed_api_formats?: string[] | null  // 允许的 API 格式列表
   allowed_models?: string[] | null  // 允许的模型列表
+  feature_settings?: Record<string, unknown> | null
   auto_delete_on_expiry?: boolean  // 过期后是否自动删除
   last_used_at?: string
   expires_at?: string
@@ -472,6 +475,7 @@ export interface CreateStandaloneApiKeyRequest {
   initial_balance_usd: number | null  // 初始余额，null = 无限制
   unlimited_balance?: boolean | null  // 编辑时仅切换额度模式，不调整余额数值
   auto_delete_on_expiry?: boolean  // 过期后是否自动删除
+  feature_settings?: Record<string, unknown> | null
 }
 
 export interface AdminApiKeysResponse {

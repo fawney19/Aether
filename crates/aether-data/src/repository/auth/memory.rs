@@ -941,6 +941,32 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
         Ok(Some(export.clone()))
     }
 
+    async fn set_user_api_key_feature_settings(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        let mut index = self
+            .index
+            .write()
+            .expect("auth api key snapshot repository lock");
+        let Some(snapshot) = index.by_api_key_id.get(api_key_id) else {
+            return Ok(None);
+        };
+        if snapshot.user_id != user_id || snapshot.api_key_is_standalone {
+            return Ok(None);
+        }
+        let Some(export) = index.export_by_api_key_id.get_mut(api_key_id) else {
+            return Ok(None);
+        };
+        export.feature_settings = match feature_settings {
+            Some(serde_json::Value::Null) | None => None,
+            Some(value) => Some(value),
+        };
+        Ok(Some(export.clone()))
+    }
+
     async fn delete_user_api_key(
         &self,
         user_id: &str,
@@ -979,6 +1005,31 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
         index.by_key_hash.retain(|_, value| value != api_key_id);
         index.touch_counts.remove(api_key_id);
         Ok(true)
+    }
+
+    async fn set_standalone_api_key_feature_settings(
+        &self,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        let mut index = self
+            .index
+            .write()
+            .expect("auth api key snapshot repository lock");
+        let Some(snapshot) = index.by_api_key_id.get(api_key_id) else {
+            return Ok(None);
+        };
+        if !snapshot.api_key_is_standalone {
+            return Ok(None);
+        }
+        let Some(export) = index.export_by_api_key_id.get_mut(api_key_id) else {
+            return Ok(None);
+        };
+        export.feature_settings = match feature_settings {
+            Some(serde_json::Value::Null) | None => None,
+            Some(value) => Some(value),
+        };
+        Ok(Some(export.clone()))
     }
 }
 

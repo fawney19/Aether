@@ -146,6 +146,7 @@ SELECT
   api_keys.rate_limit,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
+  api_keys.feature_settings,
   api_keys.is_active,
   CAST(EXTRACT(EPOCH FROM api_keys.expires_at) AS BIGINT) AS expires_at_unix_secs,
   api_keys.auto_delete_on_expiry,
@@ -175,6 +176,7 @@ SELECT
   api_keys.rate_limit,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
+  api_keys.feature_settings,
   api_keys.is_active,
   CAST(EXTRACT(EPOCH FROM api_keys.expires_at) AS BIGINT) AS expires_at_unix_secs,
   api_keys.auto_delete_on_expiry,
@@ -203,6 +205,7 @@ SELECT
   api_keys.rate_limit,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
+  api_keys.feature_settings,
   api_keys.is_active,
   CAST(EXTRACT(EPOCH FROM api_keys.expires_at) AS BIGINT) AS expires_at_unix_secs,
   api_keys.auto_delete_on_expiry,
@@ -231,6 +234,7 @@ SELECT
   api_keys.rate_limit,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
+  api_keys.feature_settings,
   api_keys.is_active,
   CAST(EXTRACT(EPOCH FROM api_keys.expires_at) AS BIGINT) AS expires_at_unix_secs,
   api_keys.auto_delete_on_expiry,
@@ -259,6 +263,7 @@ SELECT
   api_keys.rate_limit,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
+  api_keys.feature_settings,
   api_keys.is_active,
   CAST(EXTRACT(EPOCH FROM api_keys.expires_at) AS BIGINT) AS expires_at_unix_secs,
   api_keys.auto_delete_on_expiry,
@@ -331,6 +336,7 @@ SELECT
   api_keys.rate_limit,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
+  api_keys.feature_settings,
   api_keys.is_active,
   CAST(EXTRACT(EPOCH FROM api_keys.expires_at) AS BIGINT) AS expires_at_unix_secs,
   api_keys.auto_delete_on_expiry,
@@ -366,6 +372,7 @@ INSERT INTO api_keys (
   rate_limit,
   concurrent_limit,
   force_capabilities,
+  feature_settings,
   is_active,
   expires_at,
   is_locked,
@@ -389,10 +396,11 @@ VALUES (
   $9,
   $10,
   $11,
+  NULL,
   $12,
+  FALSE,
+  FALSE,
   $13,
-  FALSE,
-  FALSE,
   $14,
   $15,
   $16,
@@ -412,6 +420,7 @@ RETURNING
   rate_limit,
   concurrent_limit,
   force_capabilities,
+  feature_settings,
   is_active,
   CAST(EXTRACT(EPOCH FROM expires_at) AS BIGINT) AS expires_at_unix_secs,
   auto_delete_on_expiry,
@@ -437,6 +446,7 @@ INSERT INTO api_keys (
   rate_limit,
   concurrent_limit,
   force_capabilities,
+  feature_settings,
   is_active,
   expires_at,
   is_locked,
@@ -460,10 +470,11 @@ VALUES (
   $9,
   $10,
   $11,
+  NULL,
   $12,
-  $13,
   FALSE,
   TRUE,
+  $13,
   $14,
   $15,
   $16,
@@ -483,6 +494,7 @@ RETURNING
   rate_limit,
   concurrent_limit,
   force_capabilities,
+  feature_settings,
   is_active,
   CAST(EXTRACT(EPOCH FROM expires_at) AS BIGINT) AS expires_at_unix_secs,
   auto_delete_on_expiry,
@@ -517,6 +529,7 @@ RETURNING
   rate_limit,
   concurrent_limit,
   force_capabilities,
+  feature_settings,
   is_active,
   CAST(EXTRACT(EPOCH FROM expires_at) AS BIGINT) AS expires_at_unix_secs,
   auto_delete_on_expiry,
@@ -555,6 +568,7 @@ RETURNING
   rate_limit,
   concurrent_limit,
   force_capabilities,
+  feature_settings,
   is_active,
   CAST(EXTRACT(EPOCH FROM expires_at) AS BIGINT) AS expires_at_unix_secs,
   auto_delete_on_expiry,
@@ -587,6 +601,7 @@ RETURNING
   rate_limit,
   concurrent_limit,
   force_capabilities,
+  feature_settings,
   is_active,
   CAST(EXTRACT(EPOCH FROM expires_at) AS BIGINT) AS expires_at_unix_secs,
   auto_delete_on_expiry,
@@ -618,6 +633,7 @@ RETURNING
   rate_limit,
   concurrent_limit,
   force_capabilities,
+  feature_settings,
   is_active,
   CAST(EXTRACT(EPOCH FROM expires_at) AS BIGINT) AS expires_at_unix_secs,
   auto_delete_on_expiry,
@@ -660,6 +676,7 @@ RETURNING
   rate_limit,
   concurrent_limit,
   force_capabilities,
+  feature_settings,
   is_active,
   CAST(EXTRACT(EPOCH FROM expires_at) AS BIGINT) AS expires_at_unix_secs,
   auto_delete_on_expiry,
@@ -692,6 +709,7 @@ RETURNING
   rate_limit,
   concurrent_limit,
   force_capabilities,
+  feature_settings,
   is_active,
   CAST(EXTRACT(EPOCH FROM expires_at) AS BIGINT) AS expires_at_unix_secs,
   auto_delete_on_expiry,
@@ -702,6 +720,25 @@ RETURNING
   CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
   is_standalone
+"#;
+
+const SET_USER_API_KEY_FEATURE_SETTINGS_SQL: &str = r#"
+UPDATE api_keys
+SET
+  feature_settings = $3,
+  updated_at = NOW()
+WHERE user_id = $1
+  AND id = $2
+  AND is_standalone = FALSE
+"#;
+
+const SET_STANDALONE_API_KEY_FEATURE_SETTINGS_SQL: &str = r#"
+UPDATE api_keys
+SET
+  feature_settings = $2,
+  updated_at = NOW()
+WHERE id = $1
+  AND is_standalone = TRUE
 "#;
 
 const NULL_USAGE_API_KEY_FK_SQL: &str = r#"
@@ -1322,6 +1359,30 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
         row.as_ref().map(map_auth_api_key_export_row).transpose()
     }
 
+    async fn set_user_api_key_feature_settings(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        let result = sqlx::query(SET_USER_API_KEY_FEATURE_SETTINGS_SQL)
+            .bind(user_id)
+            .bind(api_key_id)
+            .bind(feature_settings)
+            .execute(&self.pool)
+            .await
+            .map_postgres_err()?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        let api_key_ids = [api_key_id.to_string()];
+        Ok(self
+            .list_export_api_keys_by_ids(&api_key_ids)
+            .await?
+            .into_iter()
+            .find(|record| record.user_id == user_id && !record.is_standalone))
+    }
+
     async fn delete_user_api_key(
         &self,
         user_id: &str,
@@ -1351,6 +1412,28 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .map_postgres_err()?;
         tx.commit().await.map_err(postgres_error)?;
         Ok(result.rows_affected() > 0)
+    }
+
+    async fn set_standalone_api_key_feature_settings(
+        &self,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        let result = sqlx::query(SET_STANDALONE_API_KEY_FEATURE_SETTINGS_SQL)
+            .bind(api_key_id)
+            .bind(feature_settings)
+            .execute(&self.pool)
+            .await
+            .map_postgres_err()?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        let api_key_ids = [api_key_id.to_string()];
+        Ok(self
+            .list_export_api_keys_by_ids(&api_key_ids)
+            .await?
+            .into_iter()
+            .find(|record| record.is_standalone))
     }
 
     async fn delete_standalone_api_key(&self, api_key_id: &str) -> Result<bool, DataLayerError> {
@@ -1419,6 +1502,7 @@ fn map_auth_api_key_snapshot_row(
 fn map_auth_api_key_export_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<StoredAuthApiKeyExportRecord, DataLayerError> {
+    let feature_settings = row_get(row, "feature_settings")?;
     StoredAuthApiKeyExportRecord::new(
         row_get(row, "user_id")?,
         row_get(row, "api_key_id")?,
@@ -1439,6 +1523,7 @@ fn map_auth_api_key_export_row(
         row_get(row, "total_cost_usd")?,
         row_get(row, "is_standalone")?,
     )
+    .map(|record| record.with_feature_settings(feature_settings))
     .and_then(|record| {
         record.with_activity_timestamps(
             row_get(row, "last_used_at_unix_secs")?,

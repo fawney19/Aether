@@ -1,6 +1,7 @@
 use super::super::super::{
     build_admin_users_bad_request_response, build_admin_users_data_unavailable_response,
-    build_admin_users_read_only_response, AdminCreateUserApiKeyRequest,
+    build_admin_users_read_only_response, normalize_admin_feature_settings,
+    AdminCreateUserApiKeyRequest,
 };
 use super::super::helpers::{
     attach_audit_response, default_admin_user_api_key_name, format_optional_unix_secs_iso8601,
@@ -74,6 +75,16 @@ pub(crate) async fn build_admin_create_user_api_key_response(
         )
             .into_response());
     }
+    let feature_settings = match normalize_admin_feature_settings(payload.feature_settings) {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok((
+                http::StatusCode::BAD_REQUEST,
+                Json(json!({ "detail": detail })),
+            )
+                .into_response());
+        }
+    };
 
     let name = match normalize_admin_optional_api_key_name(payload.name) {
         Ok(Some(value)) => value,
@@ -161,6 +172,21 @@ pub(crate) async fn build_admin_create_user_api_key_response(
     } else {
         created
     };
+    let created = if feature_settings.is_some() {
+        match state
+            .set_user_api_key_feature_settings(
+                &user_id,
+                &created.api_key_id,
+                feature_settings.clone(),
+            )
+            .await?
+        {
+            Some(updated) => updated,
+            None => created,
+        }
+    } else {
+        created
+    };
 
     Ok(attach_audit_response(
         Json(json!({
@@ -173,6 +199,7 @@ pub(crate) async fn build_admin_create_user_api_key_response(
             "expires_at": format_optional_unix_secs_iso8601(created.expires_at_unix_secs),
             "last_used_at": format_optional_unix_secs_iso8601(created.last_used_at_unix_secs),
             "created_at": format_optional_unix_secs_iso8601(created.created_at_unix_secs),
+            "feature_settings": created.feature_settings,
             "message": "API Key创建成功，请妥善保存完整密钥",
         }))
         .into_response(),

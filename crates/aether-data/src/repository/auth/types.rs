@@ -335,6 +335,7 @@ pub struct StoredAuthApiKeyExportRecord {
     pub rate_limit: Option<i32>,
     pub concurrent_limit: Option<i32>,
     pub force_capabilities: Option<serde_json::Value>,
+    pub feature_settings: Option<serde_json::Value>,
     pub is_active: bool,
     pub expires_at_unix_secs: Option<u64>,
     pub auto_delete_on_expiry: bool,
@@ -405,6 +406,7 @@ impl StoredAuthApiKeyExportRecord {
             rate_limit,
             concurrent_limit,
             force_capabilities,
+            feature_settings: None,
             is_active,
             expires_at_unix_secs: expires_at_unix_secs
                 .map(|value| parse_u64_i64(value, "api_keys.expires_at_unix_secs"))
@@ -436,6 +438,11 @@ impl StoredAuthApiKeyExportRecord {
             .map(|value| parse_u64_i64(value, "api_keys.updated_at_unix_secs"))
             .transpose()?;
         Ok(self)
+    }
+
+    pub fn with_feature_settings(mut self, feature_settings: Option<serde_json::Value>) -> Self {
+        self.feature_settings = normalize_optional_json(feature_settings);
+        self
     }
 }
 
@@ -651,6 +658,13 @@ pub trait AuthApiKeyWriteRepository: Send + Sync {
         force_capabilities: Option<serde_json::Value>,
     ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError>;
 
+    async fn set_user_api_key_feature_settings(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError>;
+
     async fn delete_user_api_key(
         &self,
         user_id: &str,
@@ -661,6 +675,12 @@ pub trait AuthApiKeyWriteRepository: Send + Sync {
         &self,
         api_key_id: &str,
     ) -> Result<bool, crate::DataLayerError>;
+
+    async fn set_standalone_api_key_feature_settings(
+        &self,
+        api_key_id: &str,
+        feature_settings: Option<serde_json::Value>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError>;
 }
 
 pub trait AuthRepository:
@@ -736,6 +756,13 @@ fn parse_u64_i64(value: i64, field_name: &str) -> Result<u64, crate::DataLayerEr
     u64::try_from(value).map_err(|_| {
         crate::DataLayerError::UnexpectedValue(format!("invalid {field_name}: {value}"))
     })
+}
+
+fn normalize_optional_json(value: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    match value {
+        Some(serde_json::Value::Null) | None => None,
+        Some(value) => Some(value),
+    }
 }
 
 #[cfg(test)]

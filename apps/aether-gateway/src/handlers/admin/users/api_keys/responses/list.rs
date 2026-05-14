@@ -63,6 +63,7 @@ pub(crate) async fn build_admin_list_user_api_keys_response(
                 "total_cost_usd": record.total_cost_usd,
                 "rate_limit": record.rate_limit,
                 "concurrent_limit": record.concurrent_limit,
+                "feature_settings": record.feature_settings,
                 "expires_at": format_optional_unix_secs_iso8601(record.expires_at_unix_secs),
                 "last_used_at": format_optional_unix_secs_iso8601(record.last_used_at_unix_secs),
                 "created_at": format_optional_unix_secs_iso8601(record.created_at_unix_secs),

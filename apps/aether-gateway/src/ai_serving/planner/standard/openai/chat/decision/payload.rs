@@ -12,7 +12,7 @@ use crate::ai_serving::transport::{
 };
 use crate::{
     append_execution_contract_fields_to_value, append_local_failover_policy_to_value,
-    AiExecutionDecision, AppState,
+    AiExecutionDecision, AppState, GatewayError,
 };
 
 use super::request::resolve_local_openai_chat_candidate_payload_parts;
@@ -29,7 +29,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
     decision_kind: &str,
     report_kind: &str,
     upstream_is_stream: bool,
-) -> Option<AiExecutionDecision> {
+) -> Result<Option<AiExecutionDecision>, GatewayError> {
     let decision_is_stream = decision_kind == OPENAI_CHAT_STREAM_PLAN_KIND;
     let attempt_identity = attempt.attempt_identity();
     let LocalOpenAiChatCandidateAttempt {
@@ -38,7 +38,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         candidate_id,
         ..
     } = attempt;
-    let resolved = resolve_local_openai_chat_candidate_payload_parts(
+    let Some(resolved) = resolve_local_openai_chat_candidate_payload_parts(
         state,
         parts,
         trace_id,
@@ -51,7 +51,10 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         report_kind,
         upstream_is_stream,
     )
-    .await?;
+    .await?
+    else {
+        return Ok(None);
+    };
     let candidate = &eligible.candidate;
 
     let prompt_cache_key = resolved
@@ -82,60 +85,6 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         &mut extra_fields,
         resolved.transport.provider.provider_type.as_str(),
     );
-    let report_context = append_local_failover_policy_to_value(
-        append_execution_contract_fields_to_value(
-            build_local_execution_report_context(LocalExecutionReportContextParts {
-                auth_context: &input.auth_context,
-                request_id: trace_id,
-                candidate_id: &candidate_id,
-                attempt_identity,
-                model: &input.requested_model,
-                provider_name: &resolved.transport.provider.name,
-                provider_id: &candidate.provider_id,
-                endpoint_id: &candidate.endpoint_id,
-                key_id: &candidate.key_id,
-                key_name: Some(&candidate.key_name),
-                model_id: Some(&candidate.model_id),
-                global_model_id: Some(&candidate.global_model_id),
-                global_model_name: Some(&candidate.global_model_name),
-                provider_api_format: &resolved.provider_api_format,
-                client_api_format: "openai:chat",
-                mapped_model: Some(&resolved.mapped_model),
-                candidate_group_id: eligible.orchestration.candidate_group_id.as_deref(),
-                pool_key_lease: eligible.orchestration.pool_key_lease.as_ref(),
-                ranking: eligible.ranking.as_ref(),
-                upstream_url: Some(&resolved.upstream_url),
-                header_rules: resolved.transport.endpoint.header_rules.as_ref(),
-                body_rules: resolved.transport.endpoint.body_rules.as_ref(),
-                provider_request_method: Some(serde_json::Value::Null),
-                provider_request_headers: Some(&resolved.provider_request_headers),
-                original_headers: &parts.headers,
-                request_path: Some(parts.uri.path()),
-                request_query_string: parts.uri.query(),
-                request_origin: Some(crate::ai_serving::request_origin_from_parts(parts)),
-                original_request_body_json: Some(body_json),
-                original_request_body_base64: None,
-                client_session_affinity: input.client_session_affinity.as_ref(),
-                scheduler_affinity_epoch: eligible.orchestration.scheduler_affinity_epoch,
-                client_requested_stream: body_json
-                    .get("stream")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
-                upstream_is_stream,
-                has_envelope: resolved.envelope_name.is_some(),
-                needs_conversion: matches!(
-                    resolved.conversion_mode,
-                    crate::ai_serving::ConversionMode::Bidirectional
-                ),
-                extra_fields,
-            }),
-            resolved.execution_strategy,
-            resolved.conversion_mode,
-            "openai:chat",
-            candidate.endpoint_api_format.as_str(),
-        ),
-        &resolved.transport,
-    );
     let super::request::LocalOpenAiChatCandidatePayloadParts {
         auth_header,
         auth_value,
@@ -147,11 +96,71 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         execution_strategy,
         conversion_mode,
         report_kind,
-        envelope_name: _,
+        envelope_name,
         transport,
+        request_redacted,
     } = resolved;
+    let original_request_body_json = if request_redacted {
+        Some(&provider_request_body)
+    } else {
+        Some(body_json)
+    };
+    let report_context = append_local_failover_policy_to_value(
+        append_execution_contract_fields_to_value(
+            build_local_execution_report_context(LocalExecutionReportContextParts {
+                auth_context: &input.auth_context,
+                request_id: trace_id,
+                candidate_id: &candidate_id,
+                attempt_identity,
+                model: &input.requested_model,
+                provider_name: &transport.provider.name,
+                provider_id: &candidate.provider_id,
+                endpoint_id: &candidate.endpoint_id,
+                key_id: &candidate.key_id,
+                key_name: Some(&candidate.key_name),
+                model_id: Some(&candidate.model_id),
+                global_model_id: Some(&candidate.global_model_id),
+                global_model_name: Some(&candidate.global_model_name),
+                provider_api_format: &provider_api_format,
+                client_api_format: "openai:chat",
+                mapped_model: Some(&mapped_model),
+                candidate_group_id: eligible.orchestration.candidate_group_id.as_deref(),
+                pool_key_lease: eligible.orchestration.pool_key_lease.as_ref(),
+                ranking: eligible.ranking.as_ref(),
+                upstream_url: Some(&upstream_url),
+                header_rules: transport.endpoint.header_rules.as_ref(),
+                body_rules: transport.endpoint.body_rules.as_ref(),
+                provider_request_method: Some(serde_json::Value::Null),
+                provider_request_headers: Some(&provider_request_headers),
+                original_headers: &parts.headers,
+                request_path: Some(parts.uri.path()),
+                request_query_string: parts.uri.query(),
+                request_origin: Some(crate::ai_serving::request_origin_from_parts(parts)),
+                original_request_body_json,
+                original_request_body_base64: None,
+                client_session_affinity: input.client_session_affinity.as_ref(),
+                scheduler_affinity_epoch: eligible.orchestration.scheduler_affinity_epoch,
+                client_requested_stream: body_json
+                    .get("stream")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                upstream_is_stream,
+                has_envelope: envelope_name.is_some(),
+                needs_conversion: matches!(
+                    conversion_mode,
+                    crate::ai_serving::ConversionMode::Bidirectional
+                ),
+                extra_fields,
+            }),
+            execution_strategy,
+            conversion_mode,
+            "openai:chat",
+            candidate.endpoint_api_format.as_str(),
+        ),
+        &transport,
+    );
 
-    Some(build_ai_execution_decision_response(
+    Ok(Some(build_ai_execution_decision_response(
         AiExecutionDecisionResponseParts {
             decision_is_stream,
             decision_kind: decision_kind.to_string(),
@@ -185,5 +194,5 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
             report_context: Some(report_context),
             auth_context: input.auth_context.clone(),
         },
-    ))
+    )))
 }

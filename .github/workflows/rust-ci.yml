@@ -36,12 +36,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Show Rust toolchain
-        run: rustup show active-toolchain
-
-      - name: Install rustfmt component
-        run: rustup component add rustfmt
+        with:
+          components: rustfmt
 
       - name: Format
         run: cargo fmt --all --check
@@ -54,12 +50,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Show Rust toolchain
-        run: rustup show active-toolchain
-
-      - name: Install clippy component
-        run: rustup component add clippy
+        with:
+          components: clippy
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -91,12 +83,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Show Rust toolchain
-        run: rustup show active-toolchain
-
-      - name: Install clippy component
-        run: rustup component add clippy
+        with:
+          components: clippy
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -128,12 +116,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Show Rust toolchain
-        run: rustup show active-toolchain
-
-      - name: Install clippy component
-        run: rustup component add clippy
+        with:
+          components: clippy
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -196,11 +180,14 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Test
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
-        run: cargo test -p aether-gateway
+        run: cargo nextest run -p aether-gateway
 
       - name: Show sccache stats
         if: always()
@@ -230,11 +217,14 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Test
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
-        run: cargo test -p aether-data
+        run: cargo nextest run -p aether-data
 
       - name: Show sccache stats
         if: always()
@@ -264,11 +254,14 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
 
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Test
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
-        run: cargo test --workspace --exclude aether-gateway --exclude aether-data
+        run: cargo nextest run --workspace --exclude aether-gateway --exclude aether-data
 
       - name: Show sccache stats
         if: always()

@@ -19,8 +19,55 @@ env:
   DOCKERHUB_IMAGE: fawney19/aether
 
 jobs:
+  preflight:
+    name: Release preflight
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.classify.outputs.publish }}
+      version_tag: ${{ steps.classify.outputs.version_tag }}
+      prerelease: ${{ steps.classify.outputs.prerelease }}
+      make_latest: ${{ steps.classify.outputs.make_latest }}
+    steps:
+      - name: Classify release tag
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "publish=false" >> "${GITHUB_OUTPUT}"
+          echo "version_tag=" >> "${GITHUB_OUTPUT}"
+          echo "prerelease=false" >> "${GITHUB_OUTPUT}"
+          echo "make_latest=false" >> "${GITHUB_OUTPUT}"
+
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+            echo "Manual release build; publish jobs will be skipped."
+            exit 0
+          fi
+
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$ ]]; then
+            echo "Unsupported release tag: ${tag}" >&2
+            echo "Expected vX.Y.Z, vX.Y.Z-beta.N, or vX.Y.Z-rc.N." >&2
+            exit 1
+          fi
+
+          echo "version_tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+          if [[ "${tag}" == *-* ]]; then
+            echo "prerelease=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "make_latest=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            echo "publish=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Manual release build for ${tag}; publish jobs will be skipped."
+          fi
+
   frontend:
     name: Build frontend
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -48,6 +95,7 @@ jobs:
 
   build:
     name: Build ${{ matrix.name }}
+    needs: preflight
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
@@ -97,7 +145,7 @@ jobs:
 
       - name: Build
         env:
-          AETHER_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          AETHER_VERSION: ${{ needs.preflight.outputs.version_tag }}
           CARGO_TERM_COLOR: always
         shell: bash
         run: |
@@ -117,7 +165,8 @@ jobs:
 
   docker:
     name: Docker multi-arch
-    needs: [frontend, build]
+    needs: [preflight, frontend, build]
+    if: needs.preflight.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -163,12 +212,13 @@ jobs:
             docker.io/${{ env.DOCKERHUB_IMAGE }}
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=pre,enable=${{ contains(github.ref, '-') }}
-            type=raw,value=fix,enable=${{ contains(github.ref, '-fix') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.preflight.outputs.make_latest == 'true' }}
+            type=raw,value=latest,enable=${{ needs.preflight.outputs.make_latest == 'true' }}
+            type=raw,value=beta,enable=${{ contains(github.ref_name, '-beta.') }}
+            type=raw,value=rc,enable=${{ contains(github.ref_name, '-rc.') }}
             type=sha,prefix=
           flavor: |
-            latest=auto
+            latest=false
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -182,7 +232,7 @@ jobs:
 
   package:
     name: Release tarballs
-    needs: [frontend, build]
+    needs: [preflight, frontend, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -238,29 +288,10 @@ jobs:
 
   github-release:
     name: GitHub Release assets
-    needs: [docker, package]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [preflight, docker, package]
+    if: needs.preflight.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Classify release tag
-        id: release_tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
-            echo "Unsupported release tag: ${tag}" >&2
-            exit 1
-          fi
-
-          if [[ "${tag}" == *-* ]]; then
-            echo "prerelease=true" >> "${GITHUB_OUTPUT}"
-            echo "make_latest=false" >> "${GITHUB_OUTPUT}"
-          else
-            echo "prerelease=false" >> "${GITHUB_OUTPUT}"
-            echo "make_latest=true" >> "${GITHUB_OUTPUT}"
-          fi
-
       - name: Download release package artifact
         uses: actions/download-artifact@v5
         with:
@@ -292,8 +323,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          prerelease: ${{ steps.release_tag.outputs.prerelease }}
-          make_latest: ${{ steps.release_tag.outputs.make_latest }}
+          prerelease: ${{ needs.preflight.outputs.prerelease }}
+          make_latest: ${{ needs.preflight.outputs.make_latest }}
           files: |
             release-assets/*.tar.gz
             release-assets/SHA256SUMS
