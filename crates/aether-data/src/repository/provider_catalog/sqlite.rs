@@ -207,6 +207,9 @@ FROM provider_api_keys
 WHERE provider_id IN (
 "#;
 
+// Summary rows intentionally null priority/rate/usage/circuit details for
+// lightweight status views. Use the full key query when callers need real
+// `global_priority_by_format`, `internal_priority`, or related routing fields.
 const LIST_KEY_SUMMARIES_BY_PROVIDER_IDS_PREFIX: &str = r#"
 SELECT
   id,
