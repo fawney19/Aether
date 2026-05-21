@@ -58,7 +58,8 @@ docker compose -f docker-compose.single-node.yml pull && docker compose -f docke
 ### 一键安装（默认 Single Node：Linux systemd / macOS launchd + SQLite）
 
 ```bash
-cd Aether && cd Aether
+git clone https://github.com/fawney19/Aether.git
+cd Aether
 curl -fsSL https://raw.githubusercontent.com/fawney19/Aether/main/install.sh | sudo bash
 ```
 
