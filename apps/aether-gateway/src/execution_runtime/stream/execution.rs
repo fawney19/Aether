@@ -1407,14 +1407,23 @@ fn should_limit_direct_finalize_prefetch(plan_kind: &str, has_local_stream_rewri
     plan_kind == OPENAI_IMAGE_STREAM_PLAN_KIND || has_local_stream_rewriter
 }
 
+fn should_emit_synthetic_sse_keepalive(plan: &ExecutionPlan) -> bool {
+    !plan
+        .client_api_format
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("openai:")
+}
+
 fn build_sse_body_stream(
     prefetched_chunks_for_body: Vec<Bytes>,
     mut rx: mpsc::Receiver<Result<Bytes, IoError>>,
+    filter_control_blocks: bool,
     emit_keepalive: bool,
     keepalive_interval: Duration,
 ) -> impl futures_util::Stream<Item = Result<Bytes, IoError>> + Send + 'static {
     stream! {
-        let mut upstream_control_filter = emit_keepalive.then(SseControlBlockFilter::default);
+        let mut upstream_control_filter = filter_control_blocks.then(SseControlBlockFilter::default);
         let mut sent_prefetched_chunk = false;
         for chunk in prefetched_chunks_for_body {
             if let Some(chunk) = filter_upstream_sse_control_chunk(&mut upstream_control_filter, chunk) {
@@ -1456,7 +1465,17 @@ fn build_sse_body_stream(
             }
         } else {
             while let Some(item) = rx.recv().await {
-                yield item;
+                match item {
+                    Ok(chunk) => {
+                        if let Some(chunk) = filter_upstream_sse_control_chunk(&mut upstream_control_filter, chunk) {
+                            yield Ok(chunk);
+                        }
+                    }
+                    Err(err) => yield Err(err),
+                }
+            }
+            if let Some(chunk) = flush_upstream_sse_control_filter(&mut upstream_control_filter) {
+                yield Ok(chunk);
             }
         }
     }
@@ -2703,6 +2722,9 @@ async fn execute_stream_from_frame_stream(
     let is_openai_image_stream_for_report = plan_kind == OPENAI_IMAGE_STREAM_PLAN_KIND;
     let openai_image_stream_total_timeout_ms =
         resolve_openai_image_stream_total_timeout_ms(plan_kind, &plan);
+    let response_headers_are_sse = response_headers_indicate_sse(&headers);
+    let emit_sse_keepalive_for_body =
+        response_headers_are_sse && should_emit_synthetic_sse_keepalive(&plan);
     let plan_for_report = plan;
     let emit_passthrough_sse_terminal_error = skip_direct_finalize_prefetch
         && response_headers_indicate_sse(&upstream_headers)
@@ -3820,14 +3842,14 @@ async fn execute_stream_from_frame_stream(
         );
     }
 
-    let emit_sse_keepalive = response_headers_indicate_sse(&headers);
-    if emit_sse_keepalive {
+    if response_headers_are_sse {
         headers.remove("content-length");
     }
     let body_stream = build_sse_body_stream(
         prefetched_chunks_for_body,
         rx,
-        emit_sse_keepalive,
+        response_headers_are_sse,
+        emit_sse_keepalive_for_body,
         SSE_KEEPALIVE_INTERVAL,
     );
 
@@ -3882,9 +3904,10 @@ mod tests {
         build_sse_body_stream, ensure_stream_terminal_summary_for_missing_observed_finish,
         execute_execution_runtime_stream, execute_stream_from_frame_stream,
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary, merge_stream_terminal_summary,
-        should_limit_direct_finalize_prefetch, should_probe_success_failover_before_stream,
-        should_skip_direct_finalize_prefetch, stream_chunk_contains_sse_done,
-        stream_requires_observed_terminal_event, stream_terminal_summary_missing_observed_finish,
+        should_emit_synthetic_sse_keepalive, should_limit_direct_finalize_prefetch,
+        should_probe_success_failover_before_stream, should_skip_direct_finalize_prefetch,
+        stream_chunk_contains_sse_done, stream_requires_observed_terminal_event,
+        stream_terminal_summary_missing_observed_finish,
         stream_terminal_summary_missing_observed_finish_with_requirement,
         stream_terminal_summary_represents_failure_with_requirement,
         ClientVisibleStreamCompletionTracker,
@@ -4745,12 +4768,44 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn disables_synthetic_sse_keepalive_for_openai_client_formats() {
+        let mut plan = ExecutionPlan {
+            request_id: "req-openai-keepalive".into(),
+            candidate_id: Some("cand-openai-keepalive".into()),
+            provider_name: Some("openai".into()),
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://example.com/v1/chat/completions".into(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"stream": true})),
+            stream: true,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("gpt-5.4".into()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+
+        assert!(!should_emit_synthetic_sse_keepalive(&plan));
+        plan.client_api_format = "openai:responses".into();
+        assert!(!should_emit_synthetic_sse_keepalive(&plan));
+        plan.client_api_format = "claude:messages".into();
+        assert!(should_emit_synthetic_sse_keepalive(&plan));
+    }
+
     #[tokio::test]
     async fn sse_body_stream_emits_initial_and_periodic_keepalive_without_business_chunks() {
         let (_tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(1);
         let mut body_stream = Box::pin(build_sse_body_stream(
             Vec::new(),
             rx,
+            true,
             true,
             Duration::from_millis(10),
         ));
@@ -4771,6 +4826,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sse_body_stream_filters_control_blocks_without_synthetic_keepalive() {
+        let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+        let mut body_stream = Box::pin(build_sse_body_stream(
+            vec![Bytes::from_static(b": upstream-keepalive\n\n")],
+            rx,
+            true,
+            false,
+            Duration::from_millis(10),
+        ));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), body_stream.next())
+                .await
+                .is_err(),
+            "control-only prefetched blocks should not produce client-visible chunks"
+        );
+
+        tx.send(Ok(Bytes::from_static(
+            b"data: {\"id\":\"chatcmpl-no-keepalive\"}\n\n",
+        )))
+        .await
+        .expect("business chunk should send");
+        let chunk = tokio::time::timeout(Duration::from_millis(50), body_stream.next())
+            .await
+            .expect("business chunk should arrive")
+            .expect("stream should yield business chunk")
+            .expect("business chunk should be ok");
+        assert_eq!(
+            chunk.as_ref(),
+            b"data: {\"id\":\"chatcmpl-no-keepalive\"}\n\n"
+        );
+    }
+
+    #[tokio::test]
     async fn sse_body_stream_drops_upstream_control_only_blocks() {
         let (_tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(1);
         let mut body_stream = Box::pin(build_sse_body_stream(
@@ -4782,6 +4871,7 @@ mod tests {
                 ),
             ],
             rx,
+            true,
             true,
             Duration::from_secs(60),
         ));
@@ -4811,6 +4901,7 @@ mod tests {
             ],
             rx,
             true,
+            true,
             Duration::from_secs(60),
         ));
 
@@ -4832,6 +4923,7 @@ mod tests {
         let mut body_stream = Box::pin(build_sse_body_stream(
             Vec::new(),
             rx,
+            true,
             true,
             Duration::from_secs(60),
         ));
@@ -4887,6 +4979,7 @@ mod tests {
         let mut body_stream = Box::pin(build_sse_body_stream(
             vec![Bytes::from_static(b": upstream-keepalive\n\n")],
             rx,
+            true,
             true,
             Duration::from_secs(60),
         ));
