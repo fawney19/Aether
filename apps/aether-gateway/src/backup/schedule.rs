@@ -1,4 +1,7 @@
-use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Timelike, Utc};
+use chrono_tz::Tz;
+
+const BACKUP_SCHEDULE_DEFAULT_TIMEZONE: &str = "Asia/Shanghai";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackupScheduleUnit {
@@ -54,25 +57,29 @@ impl Default for BackupSchedule {
 
 impl BackupSchedule {
     pub(crate) fn due_slot(&self, now_utc: DateTime<Utc>) -> Option<String> {
+        let timezone = backup_schedule_timezone();
+        let local_now = now_utc.with_timezone(&timezone);
         let interval = self.interval.max(1);
-        if now_utc.minute() != self.minute {
+        if local_now.minute() != self.minute {
             return None;
         }
 
         let due = match self.unit {
-            BackupScheduleUnit::Hours => (now_utc.hour() + 8) % interval == self.hour % interval,
+            BackupScheduleUnit::Hours => local_now.hour() % interval == self.hour % interval,
             BackupScheduleUnit::Days => {
-                now_utc.hour() == self.hour && epoch_day(now_utc) % i64::from(interval) == 0
+                local_now.hour() == self.hour
+                    && local_epoch_day(local_now.date_naive()) % i64::from(interval) == 0
             }
             BackupScheduleUnit::Weeks => {
-                now_utc.hour() == self.hour
-                    && now_utc.weekday().number_from_monday() == self.weekday
-                    && epoch_week(now_utc) % i64::from(interval) == 0
+                local_now.hour() == self.hour
+                    && local_now.weekday().number_from_monday() == self.weekday
+                    && local_epoch_week(local_now.date_naive()) % i64::from(interval) == 0
             }
             BackupScheduleUnit::Months => {
-                now_utc.hour() == self.hour
-                    && now_utc.day() == self.month_day
-                    && month_ordinal(now_utc) % i64::from(interval) == 0
+                local_now.hour() == self.hour
+                    && local_now.day() == self.month_day
+                    && month_ordinal(local_now.year(), local_now.month0()) % i64::from(interval)
+                        == 0
             }
         };
         if !due {
@@ -92,24 +99,71 @@ impl BackupSchedule {
     }
 }
 
-fn epoch_day(now_utc: DateTime<Utc>) -> i64 {
-    now_utc.timestamp().div_euclid(86_400)
+pub(crate) fn backup_schedule_timezone() -> Tz {
+    std::env::var("APP_TIMEZONE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .as_deref()
+        .unwrap_or(BACKUP_SCHEDULE_DEFAULT_TIMEZONE)
+        .parse()
+        .unwrap_or(chrono_tz::Asia::Shanghai)
 }
 
-fn epoch_week(now_utc: DateTime<Utc>) -> i64 {
-    epoch_day(now_utc).div_euclid(7)
+fn local_epoch_day(date: NaiveDate) -> i64 {
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch date should be valid");
+    date.signed_duration_since(epoch).num_days()
 }
 
-fn month_ordinal(now_utc: DateTime<Utc>) -> i64 {
-    i64::from(now_utc.year()) * 12 + i64::from(now_utc.month0())
+fn local_epoch_week(date: NaiveDate) -> i64 {
+    local_epoch_day(date).div_euclid(7)
+}
+
+fn month_ordinal(year: i32, month0: u32) -> i64 {
+    i64::from(year) * 12 + i64::from(month0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{BackupSchedule, BackupScheduleUnit};
+    use std::ffi::OsString;
+    use std::sync::{Mutex, OnceLock};
+
+    struct TimezoneEnvGuard {
+        previous: Option<OsString>,
+    }
+
+    impl TimezoneEnvGuard {
+        fn set(value: Option<&str>) -> Self {
+            let previous = std::env::var_os("APP_TIMEZONE");
+            match value {
+                Some(value) => std::env::set_var("APP_TIMEZONE", value),
+                None => std::env::remove_var("APP_TIMEZONE"),
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for TimezoneEnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("APP_TIMEZONE", value),
+                None => std::env::remove_var("APP_TIMEZONE"),
+            }
+        }
+    }
+
+    fn timezone_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
 
     #[test]
     fn hourly_schedule_returns_stable_slot_once_per_due_hour() {
+        let _guard = timezone_env_lock();
+        let _env = TimezoneEnvGuard::set(None);
         let schedule = BackupSchedule {
             unit: BackupScheduleUnit::Hours,
             interval: 6,
@@ -129,7 +183,9 @@ mod tests {
     }
 
     #[test]
-    fn daily_schedule_respects_epoch_day_interval() {
+    fn daily_schedule_uses_maintenance_timezone_for_hour_and_interval() {
+        let _guard = timezone_env_lock();
+        let _env = TimezoneEnvGuard::set(None);
         let schedule = BackupSchedule {
             unit: BackupScheduleUnit::Days,
             interval: 2,
@@ -138,22 +194,24 @@ mod tests {
             weekday: 1,
             month_day: 1,
         };
-        let due = chrono::DateTime::parse_from_rfc3339("2026-05-23T03:15:45Z")
+        let due = chrono::DateTime::parse_from_rfc3339("2026-05-23T03:15:45+08:00")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        let not_due = chrono::DateTime::parse_from_rfc3339("2026-05-24T03:15:45Z")
+        let not_due = chrono::DateTime::parse_from_rfc3339("2026-05-24T03:15:45+08:00")
             .unwrap()
             .with_timezone(&chrono::Utc);
 
         assert_eq!(
             schedule.due_slot(due).as_deref(),
-            Some("days:2026-05-23T03:15:00Z")
+            Some("days:2026-05-22T19:15:00Z")
         );
         assert_eq!(schedule.due_slot(not_due), None);
     }
 
     #[test]
-    fn weekly_schedule_respects_weekday_and_interval() {
+    fn weekly_schedule_uses_maintenance_timezone_for_weekday_and_interval() {
+        let _guard = timezone_env_lock();
+        let _env = TimezoneEnvGuard::set(None);
         let schedule = BackupSchedule {
             unit: BackupScheduleUnit::Weeks,
             interval: 2,
@@ -162,22 +220,24 @@ mod tests {
             weekday: 1,
             month_day: 1,
         };
-        let due = chrono::DateTime::parse_from_rfc3339("2026-05-25T05:30:59Z")
+        let due = chrono::DateTime::parse_from_rfc3339("2026-05-25T05:30:59+08:00")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        let wrong_week = chrono::DateTime::parse_from_rfc3339("2026-05-18T05:30:59Z")
+        let wrong_week = chrono::DateTime::parse_from_rfc3339("2026-05-18T05:30:59+08:00")
             .unwrap()
             .with_timezone(&chrono::Utc);
 
         assert_eq!(
             schedule.due_slot(due).as_deref(),
-            Some("weeks:2026-05-25T05:30:00Z")
+            Some("weeks:2026-05-24T21:30:00Z")
         );
         assert_eq!(schedule.due_slot(wrong_week), None);
     }
 
     #[test]
-    fn monthly_schedule_respects_month_day_and_interval() {
+    fn monthly_schedule_uses_maintenance_timezone_for_month_day_and_interval() {
+        let _guard = timezone_env_lock();
+        let _env = TimezoneEnvGuard::set(None);
         let schedule = BackupSchedule {
             unit: BackupScheduleUnit::Months,
             interval: 3,
@@ -186,17 +246,39 @@ mod tests {
             weekday: 1,
             month_day: 1,
         };
-        let due = chrono::DateTime::parse_from_rfc3339("2026-04-01T02:45:01Z")
+        let due = chrono::DateTime::parse_from_rfc3339("2026-04-01T02:45:01+08:00")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        let wrong_month = chrono::DateTime::parse_from_rfc3339("2026-05-01T02:45:01Z")
+        let wrong_month = chrono::DateTime::parse_from_rfc3339("2026-05-01T02:45:01+08:00")
             .unwrap()
             .with_timezone(&chrono::Utc);
 
         assert_eq!(
             schedule.due_slot(due).as_deref(),
-            Some("months:2026-04-01T02:45:00Z")
+            Some("months:2026-03-31T18:45:00Z")
         );
         assert_eq!(schedule.due_slot(wrong_month), None);
+    }
+
+    #[test]
+    fn hourly_schedule_uses_utc_when_app_timezone_is_utc() {
+        let _guard = timezone_env_lock();
+        let _env = TimezoneEnvGuard::set(Some("UTC"));
+        let schedule = BackupSchedule {
+            unit: BackupScheduleUnit::Hours,
+            interval: 6,
+            minute: 10,
+            hour: 4,
+            weekday: 1,
+            month_day: 1,
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-24T04:10:30Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        assert_eq!(
+            schedule.due_slot(now).as_deref(),
+            Some("hours:2026-05-24T04:10:00Z")
+        );
     }
 }
