@@ -166,7 +166,7 @@
             for="backup-retention"
             class="block text-sm font-medium"
           >
-            最多保留
+            最多保留备份数
           </Label>
           <Input
             id="backup-retention"
