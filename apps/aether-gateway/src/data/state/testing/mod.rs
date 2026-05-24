@@ -9,7 +9,8 @@ use aether_data_contracts::repository::usage::UsageRepository;
 use super::{
     AnnouncementReadRepository, AnnouncementWriteRepository, AuthApiKeyReadRepository,
     AuthApiKeyWriteRepository, AuthModuleReadRepository, AuthModuleWriteRepository,
-    BillingReadRepository, GatewayDataConfig, GatewayDataState, GeminiFileMappingReadRepository,
+    BackgroundTaskReadRepository, BackgroundTaskWriteRepository, BillingReadRepository,
+    GatewayDataConfig, GatewayDataState, GeminiFileMappingReadRepository,
     GeminiFileMappingWriteRepository, GlobalModelReadRepository, GlobalModelWriteRepository,
     ManagementTokenReadRepository, ManagementTokenWriteRepository,
     MinimalCandidateSelectionReadRepository, OAuthProviderReadRepository,
@@ -258,6 +259,18 @@ impl GatewayDataState {
             })
             .collect();
         self.system_config_values = Some(Arc::new(RwLock::new(values)));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_background_task_repository_for_tests<T>(mut self, repository: Arc<T>) -> Self
+    where
+        T: BackgroundTaskReadRepository + BackgroundTaskWriteRepository + 'static,
+    {
+        let background_task_reader: Arc<dyn BackgroundTaskReadRepository> = repository.clone();
+        let background_task_writer: Arc<dyn BackgroundTaskWriteRepository> = repository;
+        self.background_task_reader = Some(background_task_reader);
+        self.background_task_writer = Some(background_task_writer);
         self
     }
 
