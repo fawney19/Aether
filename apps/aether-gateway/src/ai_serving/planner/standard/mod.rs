@@ -8,6 +8,7 @@ use crate::{AiExecutionDecision, AppState, GatewayError};
 
 mod claude;
 mod codex;
+mod deepseek;
 mod family;
 mod gemini;
 mod normalize;
@@ -16,6 +17,7 @@ mod openai;
 pub(crate) use self::codex::{
     apply_codex_openai_responses_special_body_edits, apply_codex_openai_responses_special_headers,
 };
+pub(crate) use self::deepseek::{apply_deepseek_tool_call_thinking_compat, is_deepseek_provider};
 pub(crate) use self::family::{
     build_local_stream_attempt_source, build_local_stream_plan_and_reports,
     build_local_sync_attempt_source, build_local_sync_plan_and_reports,

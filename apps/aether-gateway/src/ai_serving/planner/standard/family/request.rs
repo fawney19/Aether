@@ -14,7 +14,8 @@ use crate::ai_serving::planner::common::{
 };
 use crate::ai_serving::planner::spec_metadata::local_standard_spec_metadata;
 use crate::ai_serving::planner::standard::{
-    apply_codex_openai_responses_special_headers, request_body_build_failure_extra_data,
+    apply_codex_openai_responses_special_headers, apply_deepseek_tool_call_thinking_compat,
+    is_deepseek_provider, request_body_build_failure_extra_data,
 };
 use crate::ai_serving::transport::kiro::{
     build_kiro_provider_headers, build_kiro_provider_request_body,
@@ -77,6 +78,7 @@ fn provider_preserves_claude_thinking_signatures(provider_type: &str, base_url: 
         "anthropic" | "claude_code" | "bedrock" | "aws_bedrock" | "amazon_bedrock"
     ) || base_url.contains("api.anthropic.com")
         || is_bedrock_runtime_url
+        || is_deepseek_provider(provider_type.as_str(), base_url.as_str())
 }
 
 fn sanitize_claude_thinking_block(block: Value) -> (Option<Value>, bool) {
@@ -523,6 +525,13 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         provider_api_format,
         transport,
     );
+    apply_deepseek_tool_call_thinking_compat(
+        &mut provider_request_body,
+        transport.provider.provider_type.as_str(),
+        transport.endpoint.base_url.as_str(),
+        provider_api_format,
+        Some(body_json),
+    );
     if let Some(mapping) =
         crate::system_features::reasoning_model_directive_mapping_for_api_format_and_model(
             state,
@@ -570,6 +579,13 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             &mut provider_request_body,
             provider_api_format,
             transport,
+        );
+        apply_deepseek_tool_call_thinking_compat(
+            &mut provider_request_body,
+            transport.provider.provider_type.as_str(),
+            transport.endpoint.base_url.as_str(),
+            provider_api_format,
+            Some(body_json),
         );
     }
 
@@ -1166,6 +1182,14 @@ mod tests {
         assert!(provider_preserves_claude_thinking_signatures(
             "amazon_bedrock",
             "https://relay.example.com"
+        ));
+        assert!(provider_preserves_claude_thinking_signatures(
+            "deepseek",
+            "https://relay.example.com"
+        ));
+        assert!(provider_preserves_claude_thinking_signatures(
+            "custom",
+            "https://api.deepseek.com"
         ));
         assert!(!provider_preserves_claude_thinking_signatures(
             "openai",

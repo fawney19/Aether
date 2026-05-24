@@ -17,9 +17,9 @@ use crate::ai_serving::planner::common::{
 };
 use crate::ai_serving::planner::standard::{
     apply_codex_openai_responses_special_body_edits, apply_codex_openai_responses_special_headers,
-    build_cross_format_openai_chat_request_body, build_cross_format_openai_chat_upstream_url,
-    build_local_openai_chat_request_body, build_local_openai_chat_upstream_url,
-    request_body_build_failure_extra_data,
+    apply_deepseek_tool_call_thinking_compat, build_cross_format_openai_chat_request_body,
+    build_cross_format_openai_chat_upstream_url, build_local_openai_chat_request_body,
+    build_local_openai_chat_upstream_url, request_body_build_failure_extra_data,
 };
 use crate::ai_serving::transport::auth::resolve_local_openai_bearer_auth;
 use crate::ai_serving::transport::kiro::{
@@ -403,7 +403,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             }
         };
 
-        let Some(provider_request_body) = build_local_openai_chat_request_body(
+        let Some(mut provider_request_body) = build_local_openai_chat_request_body(
             body_json,
             &prepared_candidate.mapped_model,
             upstream_is_stream,
@@ -429,6 +429,13 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             .await;
             return Ok(None);
         };
+        apply_deepseek_tool_call_thinking_compat(
+            &mut provider_request_body,
+            transport.provider.provider_type.as_str(),
+            transport.endpoint.base_url.as_str(),
+            "openai:chat",
+            Some(body_json),
+        );
 
         let Some(upstream_url) = build_local_openai_chat_upstream_url(parts, transport) else {
             mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
@@ -707,6 +714,13 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             request_requires_body_stream_field(body_json, force_body_stream_field),
         );
     }
+    apply_deepseek_tool_call_thinking_compat(
+        &mut provider_request_body,
+        transport.provider.provider_type.as_str(),
+        transport.endpoint.base_url.as_str(),
+        provider_api_format.as_str(),
+        Some(body_json),
+    );
 
     if let Some(kiro_auth) = kiro_auth.as_ref() {
         return Ok(build_kiro_openai_chat_cross_format_payload_parts(
