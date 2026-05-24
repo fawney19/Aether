@@ -2,11 +2,13 @@ use std::fmt;
 
 use aether_admin::system::admin_system_config_default_value;
 use aether_data_contracts::repository::background_tasks::{
-    BackgroundTaskKind, BackgroundTaskListQuery, BackgroundTaskStatus, UpsertBackgroundTaskRun,
+    BackgroundTaskKind, BackgroundTaskListQuery, BackgroundTaskStatus, StoredBackgroundTaskRun,
+    UpsertBackgroundTaskRun,
 };
 use aether_runtime_state::RuntimeLockLease;
 use axum::http::StatusCode;
 use chrono::Utc;
+use futures_util::FutureExt;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tracing::warn;
@@ -45,6 +47,7 @@ const S3_BACKUP_CONFIG_KEYS: &[&str] = &[
 
 const S3_BACKUP_QUEUED_MESSAGE: &str = "S3 备份任务已提交";
 const S3_BACKUP_TASK_LOCK_KEY: &str = "task_runtime:lock:system.s3.backup";
+const S3_BACKUP_ACTIVE_TASK_STALE_AFTER_SECS: u64 = 60 * 60 * 6;
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct S3BackupTaskStart {
@@ -151,13 +154,7 @@ pub(crate) async fn start_s3_backup_task(
         owner_instance: Some(app.tunnel.local_instance_id().to_string()),
         progress_percent: 0,
         progress_message: Some(S3_BACKUP_QUEUED_MESSAGE.to_string()),
-        payload_json: Some(json!({
-            "scope": config.scope.as_config_value(),
-            "bucket": config.bucket.clone(),
-            "prefix": config.prefix.clone(),
-            "compression": config.compression.clone(),
-            "trigger": trigger,
-        })),
+        payload_json: Some(s3_backup_task_payload_json(&config, trigger)),
         result_json: None,
         error_message: None,
         cancel_requested: false,
@@ -192,6 +189,16 @@ pub(crate) async fn start_s3_backup_task(
     })
 }
 
+fn s3_backup_task_payload_json(config: &S3BackupConfig, trigger: &str) -> Value {
+    json!({
+        "scope": config.scope.as_config_value(),
+        "bucket": config.bucket.clone(),
+        "prefix": config.prefix.clone(),
+        "compression": config.compression.clone(),
+        "trigger": trigger,
+    })
+}
+
 fn spawn_s3_backup_worker(
     app: AppState,
     run_id: String,
@@ -199,72 +206,101 @@ fn spawn_s3_backup_worker(
     lock: RuntimeLockLease,
 ) {
     spawn_fire_and_forget("task-runtime-system-s3-backup", async move {
-        let started_at = now_unix_secs();
-        let _ = update_run_status(
-            &app,
-            &run_id,
-            BackgroundTaskStatus::Running,
-            Some(5),
-            Some("S3 备份任务开始执行".to_string()),
-            None,
-            None,
-            Some(started_at),
-            None,
-        )
+        let app_for_worker = app.clone();
+        let run_id_for_worker = run_id.clone();
+        let result = std::panic::AssertUnwindSafe(run_s3_backup_worker_inner(
+            app_for_worker,
+            run_id_for_worker,
+            config,
+        ))
+        .catch_unwind()
         .await;
-        append_event_with_logging(&app, &run_id, "running", "S3 backup task started", None).await;
-
-        match run_s3_backup_once(&app, &config).await {
-            Ok(result) => {
-                let result_json = backup_run_result_json(&result);
-                let _ = update_run_status(
-                    &app,
-                    &run_id,
-                    BackgroundTaskStatus::Succeeded,
-                    Some(100),
-                    Some("S3 备份任务完成".to_string()),
-                    Some(result_json.clone()),
-                    None,
-                    None,
-                    Some(now_unix_secs()),
-                )
+        if result.is_err() {
+            warn!(run_id = %run_id, "S3 backup task panicked");
+            let _ = update_run_status(
+                &app,
+                &run_id,
+                BackgroundTaskStatus::Failed,
+                Some(100),
+                Some("S3 备份任务异常退出".to_string()),
+                None,
+                Some("S3 backup task panicked".to_string()),
+                None,
+                Some(now_unix_secs()),
+            )
+            .await;
+            append_event_with_logging(&app, &run_id, "failed", "S3 backup task panicked", None)
                 .await;
-                append_event_with_logging(
-                    &app,
-                    &run_id,
-                    "succeeded",
-                    "S3 backup task completed",
-                    Some(result_json),
-                )
-                .await;
-            }
-            Err(error) => {
-                warn!(error = %error, run_id = %run_id, "S3 backup task failed");
-                let _ = update_run_status(
-                    &app,
-                    &run_id,
-                    BackgroundTaskStatus::Failed,
-                    Some(100),
-                    Some("S3 备份任务失败".to_string()),
-                    None,
-                    Some(error.to_string()),
-                    None,
-                    Some(now_unix_secs()),
-                )
-                .await;
-                append_event_with_logging(
-                    &app,
-                    &run_id,
-                    "failed",
-                    "S3 backup task failed",
-                    Some(json!({ "error": error.to_string() })),
-                )
-                .await;
-            }
         }
 
         release_s3_backup_task_lock(&app, lock).await;
     });
+}
+
+async fn run_s3_backup_worker_inner(app: AppState, run_id: String, config: S3BackupConfig) {
+    let started_at = now_unix_secs();
+    let _ = update_run_status(
+        &app,
+        &run_id,
+        BackgroundTaskStatus::Running,
+        Some(5),
+        Some("S3 备份任务开始执行".to_string()),
+        None,
+        None,
+        Some(started_at),
+        None,
+    )
+    .await;
+    append_event_with_logging(&app, &run_id, "running", "S3 backup task started", None).await;
+
+    match run_s3_backup_once(&app, &config).await {
+        Ok(result) => {
+            let result_json = backup_run_result_json(&result);
+            let _ = update_run_status(
+                &app,
+                &run_id,
+                BackgroundTaskStatus::Succeeded,
+                Some(100),
+                Some("S3 备份任务完成".to_string()),
+                Some(result_json.clone()),
+                None,
+                None,
+                Some(now_unix_secs()),
+            )
+            .await;
+            append_event_with_logging(
+                &app,
+                &run_id,
+                "succeeded",
+                "S3 backup task completed",
+                Some(result_json),
+            )
+            .await;
+        }
+        Err(error) => {
+            warn!(error = %error, run_id = %run_id, "S3 backup task failed");
+            let _ = update_run_status(
+                &app,
+                &run_id,
+                BackgroundTaskStatus::Failed,
+                Some(100),
+                Some("S3 备份任务失败".to_string()),
+                None,
+                Some(error.to_string()),
+                None,
+                Some(now_unix_secs()),
+            )
+            .await;
+            append_event_with_logging(
+                &app,
+                &run_id,
+                "failed",
+                "S3 backup task failed",
+                Some(json!({ "error": error.to_string() })),
+            )
+            .await;
+        }
+    }
 }
 
 fn ensure_background_task_storage(app: &AppState) -> Result<(), S3BackupTaskError> {
@@ -305,6 +341,7 @@ async fn release_s3_backup_task_lock(app: &AppState, lock: RuntimeLockLease) {
 }
 
 async fn has_active_s3_backup_task(app: &AppState) -> Result<bool, S3BackupTaskError> {
+    let now = now_unix_secs();
     for status in [BackgroundTaskStatus::Queued, BackgroundTaskStatus::Running] {
         let page = app
             .list_background_task_runs(&BackgroundTaskListQuery {
@@ -316,15 +353,28 @@ async fn has_active_s3_backup_task(app: &AppState) -> Result<bool, S3BackupTaskE
                 limit: 100,
             })
             .await?;
-        if page.items.iter().any(|run| {
-            run.task_key == TASK_KEY_SYSTEM_S3_BACKUP
-                && run.kind == BackgroundTaskKind::Scheduled
-                && run.status == status
-        }) {
+        if page
+            .items
+            .iter()
+            .any(|run| is_blocking_active_s3_backup_run(run, status, now))
+        {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn is_blocking_active_s3_backup_run(
+    run: &StoredBackgroundTaskRun,
+    status: BackgroundTaskStatus,
+    now_unix_secs: u64,
+) -> bool {
+    run.task_key == TASK_KEY_SYSTEM_S3_BACKUP
+        && run.kind == BackgroundTaskKind::Scheduled
+        && run.status == status
+        && !run.cancel_requested
+        && now_unix_secs.saturating_sub(run.updated_at_unix_secs)
+            < S3_BACKUP_ACTIVE_TASK_STALE_AFTER_SECS
 }
 
 async fn run_s3_backup_once(
@@ -361,7 +411,7 @@ async fn load_s3_backup_config_for_run(
         .map_err(|error| S3BackupTaskError::bad_request(format!("S3 备份配置无效：{error}")))
 }
 
-async fn load_s3_backup_config_values(
+pub(crate) async fn load_s3_backup_config_values(
     app: &AppState,
 ) -> Result<Map<String, Value>, S3BackupTaskError> {
     let mut values = Map::new();
@@ -426,7 +476,7 @@ mod tests {
 
     use crate::data::GatewayDataState;
     use crate::state::AppState;
-    use crate::task_runtime::TASK_KEY_SYSTEM_S3_BACKUP;
+    use crate::task_runtime::{now_unix_secs, TASK_KEY_SYSTEM_S3_BACKUP};
 
     fn valid_s3_backup_config_values() -> Vec<(String, serde_json::Value)> {
         vec![
@@ -455,6 +505,7 @@ mod tests {
     }
 
     fn stored_s3_backup_run(status: BackgroundTaskStatus) -> StoredBackgroundTaskRun {
+        let now = now_unix_secs();
         StoredBackgroundTaskRun {
             id: "existing-s3-backup-run".to_string(),
             task_key: TASK_KEY_SYSTEM_S3_BACKUP.to_string(),
@@ -471,10 +522,10 @@ mod tests {
             error_message: None,
             cancel_requested: false,
             created_by: Some("admin".to_string()),
-            created_at_unix_secs: 1,
-            started_at_unix_secs: Some(1),
+            created_at_unix_secs: now,
+            started_at_unix_secs: Some(now),
             finished_at_unix_secs: None,
-            updated_at_unix_secs: 1,
+            updated_at_unix_secs: now,
         }
     }
 
@@ -535,5 +586,68 @@ mod tests {
 
         assert_eq!(err.status(), axum::http::StatusCode::CONFLICT);
         assert!(err.to_string().contains("已有 S3 备份任务正在执行"));
+    }
+
+    #[tokio::test]
+    async fn active_s3_backup_detection_blocks_queued_runs() {
+        let repository = Arc::new(InMemoryBackgroundTaskRepository::seed_runs([
+            stored_s3_backup_run(BackgroundTaskStatus::Queued),
+        ]));
+        let app = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled().with_background_task_repository_for_tests(repository),
+            );
+
+        assert!(super::has_active_s3_backup_task(&app)
+            .await
+            .expect("active task lookup should succeed"));
+    }
+
+    #[tokio::test]
+    async fn active_s3_backup_detection_ignores_cancelled_and_stale_runs() {
+        let now = now_unix_secs();
+        let mut stale = stored_s3_backup_run(BackgroundTaskStatus::Running);
+        stale.id = "stale-s3-backup-run".to_string();
+        stale.updated_at_unix_secs = now
+            .saturating_sub(super::S3_BACKUP_ACTIVE_TASK_STALE_AFTER_SECS)
+            .saturating_sub(1);
+        let mut cancelled = stored_s3_backup_run(BackgroundTaskStatus::Queued);
+        cancelled.id = "cancelled-s3-backup-run".to_string();
+        cancelled.cancel_requested = true;
+        let repository = Arc::new(InMemoryBackgroundTaskRepository::seed_runs([
+            stale, cancelled,
+        ]));
+        let app = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled().with_background_task_repository_for_tests(repository),
+            );
+
+        assert!(!super::has_active_s3_backup_task(&app)
+            .await
+            .expect("active task lookup should succeed"));
+    }
+
+    #[tokio::test]
+    async fn queued_s3_backup_task_payload_does_not_include_secret() {
+        let app = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY)
+                    .with_system_config_values_for_tests(valid_s3_backup_config_values()),
+            );
+        let values = super::load_s3_backup_config_values(&app)
+            .await
+            .expect("config should load");
+        let config = super::S3BackupConfig::from_json_map(&values)
+            .expect("config should parse for payload test");
+
+        let payload = super::s3_backup_task_payload_json(&config, "manual");
+
+        assert!(payload["bucket"].is_string());
+        assert_eq!(payload["trigger"], serde_json::json!("manual"));
+        assert!(!payload.to_string().contains("secret"));
     }
 }
