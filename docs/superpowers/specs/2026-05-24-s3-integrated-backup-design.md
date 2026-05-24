@@ -1,77 +1,77 @@
-# S3 Integrated Backup Design
+# S3 一体化备份设计
 
-Date: 2026-05-24
+日期：2026-05-24
 
-This design adds S3-compatible backup support for Aether's existing integrated admin data export. The feature is meant to be operated from the admin system settings page, not by editing process environment variables. It covers configuration data and user data in one recoverable backup artifact, including users, user groups, API keys, wallet snapshots, and the S3 backup configuration itself.
+这个设计为 Aether 现有的后台一体化数据导出增加 S3-compatible 备份能力。这个功能应该从后台系统设置页面操作，而不是通过修改进程环境变量来操作。备份产物覆盖配置数据和用户数据，包含用户、用户组、API Keys、钱包快照，以及 S3 备份配置本身。
 
-### Current Context
+### 当前上下文
 
-Aether already has three admin data export surfaces. Configuration export is available at `GET /api/admin/system/config/export`, user export is available at `GET /api/admin/system/users/export`, and integrated export is available at `GET /api/admin/system/data/export`. The integrated export is the correct source of truth for this feature because it already combines `config_data` and `user_data` and matches the user's requirement for a configuration and user-data backup.
+Aether 现在已经有三组后台数据导出接口。配置导出是 `GET /api/admin/system/config/export`，用户导出是 `GET /api/admin/system/users/export`，一体化导出是 `GET /api/admin/system/data/export`。本功能应复用一体化导出作为备份内容来源，因为它已经把 `config_data` 和 `user_data` 组合在一起，正好对应“配置与用户数据一体化备份”的需求。
 
-The existing export behavior is recovery-oriented rather than redacted. Provider keys, OAuth secrets, LDAP passwords, sensitive system configs, and user API keys are exported in a form that can be imported later when the gateway can decrypt the stored values. S3 backup credentials will follow that same product model. A backup file is therefore a sensitive recovery artifact and must be treated like an admin secret.
+现有导出定位是“可恢复备份”，不是“脱敏报表”。Provider Key、OAuth Secret、LDAP 密码、敏感系统配置和用户 API Key，在网关能解密时都会以可恢复形式进入导出文件。S3 备份凭据也应遵循这个产品逻辑。换句话说，备份文件本身是敏感恢复材料，必须按管理员密钥材料来对待。
 
-System settings already use `system_configs` for editable admin configuration. Sensitive keys such as Turnstile secrets are encrypted on write, returned to the frontend as "is set" rather than plaintext, and exported by the admin export path for recoverability. The S3 backup settings should use the same storage and UI pattern.
+系统设置现在已经使用 `system_configs` 保存可编辑后台配置。Turnstile Secret 这类敏感配置会在写入时加密，前端读取时只返回“是否已配置”，不会回显明文；同时后台导出路径会为了恢复能力导出这些配置。S3 备份设置应使用同一套存储和 UI 模式。
 
-### Requirements
+### 需求
 
-The admin frontend must allow an operator to configure S3-compatible backup storage from the system settings page. The settings must include whether automatic backup is enabled, endpoint, region, bucket, prefix, access key ID, secret access key, path-style mode, compression format, schedule, and retention count.
+后台前端需要允许管理员在系统设置页面配置 S3-compatible 备份存储。配置项包含：是否启用自动备份、Endpoint、Region、Bucket、Prefix、Access Key ID、Secret Access Key、是否启用 Path Style、压缩格式、备份周期和最多保留份数。
 
-The backup schedule must be product-style configuration rather than a raw cron expression. It uses an interval value and an interval unit. The supported units are hours, days, weeks, and months. Hourly schedules anchor on a minute within the hour. Daily schedules anchor on a time of day. Weekly schedules anchor on weekday and time. Monthly schedules anchor on day-of-month and time. Retention is a positive number meaning the newest N Aether backup objects are kept.
+备份周期使用产品化配置，而不是裸 cron 表达式。周期由“间隔数值”和“周期单位”组成，单位支持小时、天、周、月。小时级周期配置每小时第几分钟执行；天级周期配置每天几点几分执行；周级周期配置周几几点几分执行；月级周期配置每月几号几点几分执行。最多保留份数是一个正整数，表示保留最新 N 个 Aether 备份对象。
 
-The frontend must keep `Secret Access Key` write-only after saving. The page should show whether it is configured but must not display the saved secret. Clearing or replacing it should use the same pattern as other sensitive admin configuration.
+前端必须把 `Secret Access Key` 当作写入后不可回显的敏感字段。保存后页面只显示它是否已配置，不能显示已保存的明文。清空或替换密钥时应复用现有敏感系统配置的交互模式。
 
-The backup content must reuse the integrated export payload. It should not introduce a second data extraction format for users, groups, API keys, or wallet snapshots. S3 backup settings are part of system configuration and will be included in the integrated backup file so a restored instance can continue using the same backup target without manual reconfiguration.
+备份内容必须复用现有一体化导出 payload，不应为用户、用户组、API Keys 或钱包快照重新设计第二套导出格式。S3 备份设置本身属于系统配置，因此也会进入一体化备份文件。这样恢复后的实例可以继续使用原备份目标，不需要管理员重新填写。
 
-The feature must support manual backup now and scheduled automatic backup. Manual backup validates the saved configuration by running the same backend task once. Scheduled backup uses the saved schedule configuration and runs in the gateway background task runtime.
+功能必须支持“立即备份一次”和“按周期自动备份”。手动备份使用同一套后端任务执行一次，用来验证配置是否可用。自动备份由后台 worker 根据已保存的周期配置触发。
 
-After a successful upload, the retention policy must delete only Aether-generated backup objects under the configured bucket and prefix. It must not scan or delete arbitrary bucket contents. Backup objects should use a predictable name such as `aether-data-backup-YYYYMMDD-HHMMSS.json.zst`, and cleanup should only consider names that match this pattern.
+上传成功后，保留策略只能删除同一个 Bucket 和 Prefix 下符合 Aether 命名规则的备份对象，不能扫描或删除任意 bucket 内容。备份对象命名使用可预测格式，例如 `aether-data-backup-YYYYMMDD-HHMMSS.json.zst`，清理时只处理匹配这个命名规则的对象。
 
-### Recommended Approach
+### 推荐方案
 
-Use `system_configs` for all backup configuration. This is the smallest change that matches the current system settings architecture, import/export behavior, and sensitive value handling. Add S3 backup keys to the admin config defaults and sensitive key list where appropriate. The secret access key should be encrypted at rest in the database and masked in normal config read responses.
+所有备份配置都存入 `system_configs`。这是最贴合当前系统设置架构、导入导出行为和敏感值处理逻辑的方案。需要为 S3 备份增加对应配置 key、默认值和敏感 key 识别。`Secret Access Key` 在数据库里加密保存，正常配置读取响应中只返回是否已配置。
 
-Add a backend backup module with three bounded responsibilities. One part reads and validates the backup configuration from `system_configs`. One part builds the backup payload by calling the existing integrated export builder and serializing it to JSON. One part uploads to S3-compatible storage, records result metadata, lists matching backup objects under the configured prefix, and deletes old matching objects beyond the retention count.
+后端新增一个备份模块，并保持职责边界清楚。第一部分从 `system_configs` 读取并校验备份配置；第二部分调用现有一体化导出构建备份 payload，并序列化为 JSON；第三部分负责上传到 S3-compatible 存储，记录结果元数据，列出 Prefix 下匹配命名规则的备份对象，并删除超过保留份数的旧对象。
 
-Use the background task system for backup execution. A manual admin endpoint starts a single run, returns the task/run information, and writes audit metadata. A scheduled worker checks the saved schedule and starts a run when due. The run result should include target type, bucket, object key, byte size, sha256, export version, exported-at timestamp, compression format, and retention cleanup count.
+备份执行使用现有后台任务系统。手动后台接口启动一次任务，返回 task/run 信息，并写审计信息。周期 worker 根据保存的计划判断是否到点，到点后启动同一类任务。任务结果应包含目标类型、Bucket、Object Key、文件大小、sha256、导出版本、导出时间、压缩格式和清理掉的旧备份数量。
 
-Add the frontend controls near the existing Data Management section. The operator should be able to save the backup configuration, see whether credentials are configured, trigger an immediate backup, and see a clear success or failure message. Existing task history can be used for detailed execution status if it already exposes the needed task events; otherwise the first version can return the created task/run payload and rely on toast feedback plus backend task records.
+前端控件放在现有数据管理区域附近。管理员应能保存备份配置、看到凭据是否已配置、触发立即备份，并看到清晰的成功或失败提示。如果现有任务历史已经能展示所需事件，就复用任务历史；否则第一版可以返回已创建的 task/run payload，并通过 toast 和后端任务记录提供反馈。
 
-### Alternatives Considered
+### 备选方案
 
-Environment-only configuration was rejected because the user wants backup settings editable from the admin UI. It would also make restore less convenient because the backup target would not travel with the exported configuration.
+纯环境变量配置已经被排除，因为用户希望从后台页面配置备份，并且希望恢复后不需要重新配置备份目标。
 
-A new `backup_configs` table would isolate backup settings from generic system configuration, but it would add migrations, repository methods, frontend API surfaces, and import/export handling that duplicate an existing pattern. The current feature does not need that extra persistence boundary.
+新建独立 `backup_configs` 表会让备份配置和通用系统配置隔离得更干净，但它会增加迁移、仓储方法、前端 API 和导入导出处理，和现有 `system_configs` 模式重复。当前功能不需要这个额外持久化边界。
 
-Raw cron expressions would be flexible but are not a good fit for this admin page. The interval unit model with hours, days, weeks, and months is easier to validate, easier to localize in the UI, and covers the intended backup schedules.
+裸 cron 表达式更灵活，但不适合这个后台设置页面。小时、天、周、月的周期模型更容易校验，也更容易做中文 UI，并且已经覆盖本功能的目标场景。
 
-Hand-written local filesystem backup files are not part of the design. The task should generate, compress, and upload in memory or through bounded streaming. Any temporary file introduced later for memory control must be automatically cleaned up by the task and must not leave backup artifacts on disk.
+本设计不引入本地文件备份。任务应在内存中或通过受控流式方式生成、压缩并上传备份。后续如果因为内存控制必须引入临时文件，任务也必须自动清理，不能在磁盘上留下备份中间产物。
 
-### Data Flow
+### 数据流
 
-When an operator saves backup settings, the frontend writes normal configuration values through the existing system config API. Non-sensitive values are stored directly. The secret access key is sent only when being set or replaced, and the backend encrypts it using the existing data encryption key.
+管理员保存备份设置时，前端通过现有系统配置 API 写入普通配置。非敏感值直接保存。`Secret Access Key` 只在设置或替换时发送到后端，后端使用现有数据加密密钥加密后保存。
 
-When a manual or scheduled backup starts, the backend reads the saved settings, validates required fields, builds the integrated export payload, serializes it, compresses it, computes sha256, and uploads it to the configured S3-compatible target. After upload succeeds, it lists objects under the configured prefix, filters to Aether backup object names, sorts them newest first, and deletes objects older than the configured retention count.
+手动或周期备份启动时，后端读取已保存配置，校验必要 S3 字段，构建一体化导出 payload，序列化、压缩、计算 sha256，并上传到配置的 S3-compatible 目标。上传成功后，后端列出配置 Prefix 下的对象，过滤出 Aether 备份命名，按时间从新到旧排序，删除超过保留份数的旧对象。
 
-When a restored instance imports a backup, the S3 backup configuration is imported as part of `system_configs`, consistent with current recoverable export behavior. The restored instance can continue using the backup target if its data encryption setup can handle the imported sensitive values in the same way as other sensitive Aether configuration.
+实例从备份恢复时，S3 备份配置作为 `system_configs` 的一部分被导入。这和当前可恢复导出行为一致。只要恢复后的实例能按现有机制处理这些敏感配置，它就可以继续使用原备份目标。
 
-### Error Handling
+### 错误处理
 
-Configuration validation should fail before starting upload when required S3 fields are missing, the retention count is invalid, or the schedule is invalid. Manual backup should return a clear admin-facing error if automatic backup is disabled only when the design explicitly requires enabled state; otherwise manual backup may run as long as storage settings are complete.
+配置缺少必要 S3 字段、保留份数无效、周期配置无效时，应在上传前失败，并给出清楚的后台错误。手动备份不应强制要求自动备份开关已开启；只要存储配置完整，就可以手动执行一次。
 
-Upload failures must leave the old backup set untouched. Retention deletion should only run after a successful upload. If upload succeeds but old-object cleanup partially fails, the backup task should still report the uploaded object and include the cleanup error in result metadata or task events so the operator can see that the backup exists but retention enforcement needs attention.
+上传失败时不能执行旧备份清理。保留清理只能在上传成功后运行。如果上传成功但旧对象清理部分失败，任务仍应报告已上传对象，同时在结果元数据或任务事件中记录清理错误，让管理员知道备份已存在，但保留策略执行不完整。
 
-Schedule evaluation should avoid duplicate runs for the same scheduled slot. The implementation should persist enough last-run or slot information in system config or task metadata to avoid starting repeated backups during the same due window after worker ticks or process restarts.
+周期判断必须避免同一个计划时间重复触发。实现时需要在系统配置或任务元数据中保存足够的上次执行槽位信息，避免 worker tick 或进程重启后在同一个到期窗口里重复启动备份。
 
-### Testing Plan
+### 测试计划
 
-Backend tests should cover schedule validation and due-time calculation for hourly, daily, weekly, and monthly schedules. They should cover config parsing, including masking and sensitive handling for the secret access key. Route classification and handler tests should cover the manual backup endpoint. Backup executor tests should use a fake object-store client to verify object key naming, result metadata, and retention filtering so no real network is required.
+后端测试需要覆盖小时、天、周、月四种周期的校验和到期时间计算。配置解析测试需要覆盖敏感 `Secret Access Key` 的保存、读取遮蔽和是否已配置判断。路由分类和 handler 测试需要覆盖手动备份接口。备份执行器测试使用 fake object-store client，验证对象命名、结果元数据、保留过滤和旧对象删除，不依赖真实网络。
 
-Export tests should confirm that S3 backup config participates in the integrated export consistently with other system config entries. Frontend tests should cover form state, save payloads, secret write-only behavior, interval-unit conditional fields, and the manual backup action.
+导出测试需要确认 S3 备份配置会按系统配置规则进入一体化导出。前端测试需要覆盖表单状态、保存 payload、Secret 写入后不可回显、周期单位对应字段切换，以及手动备份操作。
 
-### Dependency Decision
+### 依赖选择
 
-Use the `object_store` crate with S3 support for the first implementation. The workspace does not currently include an S3 client, and `object_store` gives Aether a maintained S3-compatible abstraction without hand-writing Signature V4. The implementation should wrap it behind a small local trait so executor and retention tests can use a fake object-store client without real network access.
+第一版使用带 S3 支持的 `object_store` crate。当前 workspace 没有现成 S3 客户端，`object_store` 能提供维护良好的 S3-compatible 抽象，避免手写 Signature V4。实现时应在本地包一层小 trait，让执行器和保留策略测试可以使用 fake object-store client，不需要真实网络。
 
-### Confidence Notes
+### 置信度说明
 
-The highest-confidence decision is reusing the existing integrated export as the backup payload because it already covers the requested data. The second high-confidence decision is storing backup settings in `system_configs` because that matches the current admin settings and import/export architecture. The S3 client choice has moderate dependency risk because it adds a new workspace dependency, but using `object_store` is still safer than building and maintaining a custom S3 signing implementation.
+最高置信度的决策是复用现有一体化导出作为备份 payload，因为它已经覆盖用户要求的数据。第二个高置信度决策是用 `system_configs` 保存备份配置，因为它符合当前后台设置和导入导出架构。S3 客户端选择有中等依赖风险，因为它会新增 workspace 依赖；但使用 `object_store` 仍然比自己维护 S3 签名逻辑更稳。
