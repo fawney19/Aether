@@ -5082,7 +5082,7 @@ mod tests {
         .expect("timeout failure should close the response body")
         .expect("response body should read");
         let text = String::from_utf8(body.to_vec()).expect("response body should be utf8");
-        assert!(text.contains(": aether-keepalive\n\n"));
+        assert!(!text.contains(": aether-keepalive\n\n"));
         assert!(text.contains("event: image_generation.failed"));
         assert!(text.contains("\"type\":\"image_stream_total_timeout\""));
     }
