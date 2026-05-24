@@ -65,7 +65,11 @@ impl BackupSchedule {
         }
 
         let due = match self.unit {
-            BackupScheduleUnit::Hours => local_now.hour() % interval == self.hour % interval,
+            BackupScheduleUnit::Hours => {
+                (local_epoch_hour(local_now.date_naive(), local_now.hour()) - i64::from(self.hour))
+                    .rem_euclid(i64::from(interval))
+                    == 0
+            }
             BackupScheduleUnit::Days => {
                 local_now.hour() == self.hour
                     && local_epoch_day(local_now.date_naive()) % i64::from(interval) == 0
@@ -117,6 +121,10 @@ fn local_epoch_day(date: NaiveDate) -> i64 {
 
 fn local_epoch_week(date: NaiveDate) -> i64 {
     local_epoch_day(date).div_euclid(7)
+}
+
+fn local_epoch_hour(date: NaiveDate, hour: u32) -> i64 {
+    local_epoch_day(date) * 24 + i64::from(hour)
 }
 
 fn month_ordinal(year: i32, month0: u32) -> i64 {
@@ -179,6 +187,58 @@ mod tests {
         assert_eq!(
             schedule.due_slot(now).as_deref(),
             Some("hours:2026-05-24T04:10:00Z")
+        );
+    }
+
+    #[test]
+    fn hourly_schedule_interval_does_not_reset_at_midnight() {
+        let _guard = timezone_env_lock();
+        let _env = TimezoneEnvGuard::set(None);
+        let schedule = BackupSchedule {
+            unit: BackupScheduleUnit::Hours,
+            interval: 5,
+            minute: 10,
+            hour: 0,
+            weekday: 1,
+            month_day: 1,
+        };
+        let midnight = chrono::DateTime::parse_from_rfc3339("2026-05-25T00:10:30+08:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let due_after_midnight = chrono::DateTime::parse_from_rfc3339("2026-05-25T03:10:30+08:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        assert_eq!(schedule.due_slot(midnight), None);
+        assert_eq!(
+            schedule.due_slot(due_after_midnight).as_deref(),
+            Some("hours:2026-05-24T19:10:00Z")
+        );
+    }
+
+    #[test]
+    fn hourly_schedule_supports_intervals_longer_than_one_day() {
+        let _guard = timezone_env_lock();
+        let _env = TimezoneEnvGuard::set(None);
+        let schedule = BackupSchedule {
+            unit: BackupScheduleUnit::Hours,
+            interval: 25,
+            minute: 10,
+            hour: 0,
+            weekday: 1,
+            month_day: 1,
+        };
+        let daily_midnight = chrono::DateTime::parse_from_rfc3339("2026-05-25T00:10:30+08:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let due_after_25_hours = chrono::DateTime::parse_from_rfc3339("2026-05-25T23:10:30+08:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        assert_eq!(schedule.due_slot(daily_midnight), None);
+        assert_eq!(
+            schedule.due_slot(due_after_25_hours).as_deref(),
+            Some("hours:2026-05-25T15:10:00Z")
         );
     }
 
