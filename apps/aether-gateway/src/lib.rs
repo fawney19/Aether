@@ -30,6 +30,7 @@ mod api;
 mod async_task;
 mod audit;
 mod auth;
+mod backup;
 mod cache;
 mod client_session_affinity;
 mod clock;
