@@ -73,4 +73,36 @@ describe('useS3BackupConfig', () => {
     expect(savedKeys).not.toContain('backup_s3_secret_access_key')
     expect(backup.config.value.secretAccessKeyIsSet).toBe(true)
   })
+
+  it('reloads server state when saving fails before writing a new secret', async () => {
+    let loadRound = 0
+    getSystemConfigMock.mockImplementation(async (key: string) => {
+      if (key === 'backup_s3_secret_access_key') {
+        return { key, value: null, is_set: false }
+      }
+      if (key === 'backup_s3_bucket') {
+        return { key, value: loadRound === 0 ? 'old-bucket' : 'server-bucket' }
+      }
+      return { key, value: null }
+    })
+    updateSystemConfigMock.mockImplementation(async (key: string) => {
+      if (key === 'backup_s3_bucket') {
+        loadRound += 1
+        throw new Error('save failed')
+      }
+      return {}
+    })
+
+    const backup = useS3BackupConfig()
+    await backup.loadS3BackupConfig()
+    backup.config.value.bucket = 'new-bucket'
+    backup.config.value.secretAccessKey = 'new-secret'
+    await backup.saveS3BackupConfig()
+
+    const savedKeys = updateSystemConfigMock.mock.calls.map(([key]) => key)
+    expect(savedKeys).toContain('backup_s3_bucket')
+    expect(savedKeys).not.toContain('backup_s3_secret_access_key')
+    expect(backup.config.value.bucket).toBe('server-bucket')
+    expect(backup.config.value.secretAccessKey).toBe('')
+  })
 })

@@ -214,9 +214,9 @@ export function useS3BackupConfig() {
           description: 'S3 Secret Access Key',
         })
       }
-      await Promise.all(entries.map((item) =>
-        adminApi.updateSystemConfig(item.key, item.value, item.description)
-      ))
+      for (const item of entries) {
+        await adminApi.updateSystemConfig(item.key, item.value, item.description)
+      }
       if (secret) {
         config.value.secretAccessKey = ''
         config.value.secretAccessKeyIsSet = true
@@ -226,6 +226,7 @@ export function useS3BackupConfig() {
     } catch (err) {
       error(parseApiError(err, '保存 S3 备份配置失败'))
       log.error('保存 S3 备份配置失败:', err)
+      await loadS3BackupConfig()
     } finally {
       saving.value = false
     }

@@ -123,6 +123,22 @@ pub(crate) async fn start_s3_backup_task(
     trigger: &str,
     created_by: Option<&str>,
 ) -> Result<S3BackupTaskStart, S3BackupTaskError> {
+    start_s3_backup_task_with_slot(app, trigger, created_by, None).await
+}
+
+pub(crate) async fn start_s3_backup_task_for_schedule(
+    app: AppState,
+    scheduled_slot: String,
+) -> Result<S3BackupTaskStart, S3BackupTaskError> {
+    start_s3_backup_task_with_slot(app, "scheduled", None, Some(scheduled_slot)).await
+}
+
+async fn start_s3_backup_task_with_slot(
+    app: AppState,
+    trigger: &str,
+    created_by: Option<&str>,
+    scheduled_slot: Option<String>,
+) -> Result<S3BackupTaskStart, S3BackupTaskError> {
     let config = load_s3_backup_config_for_run(&app).await?;
     ensure_background_task_storage(&app)?;
     let lock = acquire_s3_backup_task_lock(&app).await?;
@@ -157,7 +173,11 @@ pub(crate) async fn start_s3_backup_task(
         owner_instance: Some(app.tunnel.local_instance_id().to_string()),
         progress_percent: 0,
         progress_message: Some(S3_BACKUP_QUEUED_MESSAGE.to_string()),
-        payload_json: Some(s3_backup_task_payload_json(&config, trigger)),
+        payload_json: Some(s3_backup_task_payload_json(
+            &config,
+            trigger,
+            scheduled_slot.as_deref(),
+        )),
         result_json: None,
         error_message: None,
         cancel_requested: false,
@@ -182,7 +202,7 @@ pub(crate) async fn start_s3_backup_task(
     )
     .await;
 
-    spawn_s3_backup_worker(app, run_id.clone(), config, lock);
+    spawn_s3_backup_worker(app, run_id.clone(), config, lock, scheduled_slot);
 
     Ok(S3BackupTaskStart {
         id: run_id,
@@ -192,14 +212,22 @@ pub(crate) async fn start_s3_backup_task(
     })
 }
 
-fn s3_backup_task_payload_json(config: &S3BackupConfig, trigger: &str) -> Value {
-    json!({
+fn s3_backup_task_payload_json(
+    config: &S3BackupConfig,
+    trigger: &str,
+    scheduled_slot: Option<&str>,
+) -> Value {
+    let mut payload = json!({
         "scope": config.scope.as_config_value(),
         "bucket": config.bucket.clone(),
         "prefix": config.prefix.clone(),
         "compression": config.compression.clone(),
         "trigger": trigger,
-    })
+    });
+    if let Some(scheduled_slot) = scheduled_slot {
+        payload["scheduled_slot"] = Value::String(scheduled_slot.to_string());
+    }
+    payload
 }
 
 fn spawn_s3_backup_worker(
@@ -207,6 +235,7 @@ fn spawn_s3_backup_worker(
     run_id: String,
     config: S3BackupConfig,
     lock: RuntimeLockLease,
+    scheduled_slot: Option<String>,
 ) {
     spawn_fire_and_forget("task-runtime-system-s3-backup", async move {
         let app_for_worker = app.clone();
@@ -216,6 +245,7 @@ fn spawn_s3_backup_worker(
             run_id_for_worker,
             config,
             lock.clone(),
+            scheduled_slot,
         ))
         .catch_unwind()
         .await;
@@ -246,6 +276,7 @@ async fn run_s3_backup_worker_inner(
     run_id: String,
     config: S3BackupConfig,
     lock: RuntimeLockLease,
+    scheduled_slot: Option<String>,
 ) {
     let started_at = now_unix_secs();
     let _ = update_run_status(
@@ -269,6 +300,32 @@ async fn run_s3_backup_worker_inner(
 
     match result {
         Ok(result) => {
+            if let Some(slot) = scheduled_backup_slot_to_record(scheduled_slot.as_deref(), true) {
+                if let Err(error) = record_scheduled_backup_slot(&app, &slot).await {
+                    warn!(error = ?error, run_id = %run_id, "S3 backup slot record failed");
+                    let _ = update_run_status(
+                        &app,
+                        &run_id,
+                        BackgroundTaskStatus::Failed,
+                        Some(100),
+                        Some("S3 备份任务完成，但记录调度时间失败".to_string()),
+                        None,
+                        Some(format!("S3 backup slot record failed: {error:?}")),
+                        None,
+                        Some(now_unix_secs()),
+                    )
+                    .await;
+                    append_event_with_logging(
+                        &app,
+                        &run_id,
+                        "failed",
+                        "S3 backup slot record failed",
+                        Some(json!({ "error": format!("{error:?}") })),
+                    )
+                    .await;
+                    return;
+                }
+            }
             let result_json = backup_run_result_json(&result);
             let _ = update_run_status(
                 &app,
@@ -346,6 +403,32 @@ fn spawn_s3_backup_task_heartbeat(
             .await;
         }
     })
+}
+
+fn scheduled_backup_slot_to_record(
+    scheduled_slot: Option<&str>,
+    task_succeeded: bool,
+) -> Option<String> {
+    if !task_succeeded {
+        return None;
+    }
+    scheduled_slot
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+async fn record_scheduled_backup_slot(
+    app: &AppState,
+    scheduled_slot: &str,
+) -> Result<(), GatewayError> {
+    app.upsert_system_config_json_value(
+        super::S3_BACKUP_LAST_SLOT_KEY,
+        &Value::String(scheduled_slot.to_string()),
+        None,
+    )
+    .await?;
+    Ok(())
 }
 
 fn ensure_background_task_storage(app: &AppState) -> Result<(), S3BackupTaskError> {
@@ -688,10 +771,51 @@ mod tests {
         let config = super::S3BackupConfig::from_json_map(&values)
             .expect("config should parse for payload test");
 
-        let payload = super::s3_backup_task_payload_json(&config, "manual");
+        let payload = super::s3_backup_task_payload_json(&config, "manual", None);
 
         assert!(payload["bucket"].is_string());
         assert_eq!(payload["trigger"], serde_json::json!("manual"));
         assert!(!payload.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn scheduled_backup_slot_records_only_successful_scheduled_runs() {
+        assert_eq!(
+            super::scheduled_backup_slot_to_record(Some("days:2026-05-24T19:00:00Z"), true),
+            Some("days:2026-05-24T19:00:00Z".to_string())
+        );
+        assert_eq!(
+            super::scheduled_backup_slot_to_record(Some("days:2026-05-24T19:00:00Z"), false),
+            None
+        );
+        assert_eq!(super::scheduled_backup_slot_to_record(None, true), None);
+        assert_eq!(
+            super::scheduled_backup_slot_to_record(Some("  "), true),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn record_scheduled_backup_slot_updates_system_config() {
+        let app = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled().with_system_config_values_for_tests(Vec::<(
+                    String,
+                    serde_json::Value,
+                )>::new(
+                )),
+            );
+
+        super::record_scheduled_backup_slot(&app, "days:2026-05-24T19:00:00Z")
+            .await
+            .expect("slot record should write system config");
+
+        assert_eq!(
+            app.read_system_config_json_value(super::super::S3_BACKUP_LAST_SLOT_KEY)
+                .await
+                .expect("slot config should be readable"),
+            Some(serde_json::json!("days:2026-05-24T19:00:00Z"))
+        );
     }
 }
