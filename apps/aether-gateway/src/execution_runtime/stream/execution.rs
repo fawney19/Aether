@@ -1407,7 +1407,10 @@ fn should_limit_direct_finalize_prefetch(plan_kind: &str, has_local_stream_rewri
     plan_kind == OPENAI_IMAGE_STREAM_PLAN_KIND || has_local_stream_rewriter
 }
 
-fn should_emit_synthetic_sse_keepalive(plan: &ExecutionPlan) -> bool {
+fn client_format_allows_proxy_generated_sse_control_blocks(plan: &ExecutionPlan) -> bool {
+    // OpenAI-compatible clients commonly parse every client-visible SSE event as
+    // an OpenAI JSON payload or [DONE]. Keep the downstream wire format strict:
+    // do not inject proxy-generated comments, pings, or keepalives for openai:*.
     !plan
         .client_api_format
         .trim()
@@ -2723,8 +2726,8 @@ async fn execute_stream_from_frame_stream(
     let openai_image_stream_total_timeout_ms =
         resolve_openai_image_stream_total_timeout_ms(plan_kind, &plan);
     let response_headers_are_sse = response_headers_indicate_sse(&headers);
-    let emit_sse_keepalive_for_body =
-        response_headers_are_sse && should_emit_synthetic_sse_keepalive(&plan);
+    let emit_proxy_generated_sse_control_blocks =
+        response_headers_are_sse && client_format_allows_proxy_generated_sse_control_blocks(&plan);
     let plan_for_report = plan;
     let emit_passthrough_sse_terminal_error = skip_direct_finalize_prefetch
         && response_headers_indicate_sse(&upstream_headers)
@@ -3849,7 +3852,7 @@ async fn execute_stream_from_frame_stream(
         prefetched_chunks_for_body,
         rx,
         response_headers_are_sse,
-        emit_sse_keepalive_for_body,
+        emit_proxy_generated_sse_control_blocks,
         SSE_KEEPALIVE_INTERVAL,
     );
 
@@ -3901,13 +3904,13 @@ mod tests {
     use tokio::sync::{mpsc, watch, Notify};
 
     use super::{
-        build_sse_body_stream, ensure_stream_terminal_summary_for_missing_observed_finish,
+        build_sse_body_stream, client_format_allows_proxy_generated_sse_control_blocks,
+        ensure_stream_terminal_summary_for_missing_observed_finish,
         execute_execution_runtime_stream, execute_stream_from_frame_stream,
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary, merge_stream_terminal_summary,
-        should_emit_synthetic_sse_keepalive, should_limit_direct_finalize_prefetch,
-        should_probe_success_failover_before_stream, should_skip_direct_finalize_prefetch,
-        stream_chunk_contains_sse_done, stream_requires_observed_terminal_event,
-        stream_terminal_summary_missing_observed_finish,
+        should_limit_direct_finalize_prefetch, should_probe_success_failover_before_stream,
+        should_skip_direct_finalize_prefetch, stream_chunk_contains_sse_done,
+        stream_requires_observed_terminal_event, stream_terminal_summary_missing_observed_finish,
         stream_terminal_summary_missing_observed_finish_with_requirement,
         stream_terminal_summary_represents_failure_with_requirement,
         ClientVisibleStreamCompletionTracker,
@@ -4769,7 +4772,7 @@ mod tests {
     }
 
     #[test]
-    fn disables_synthetic_sse_keepalive_for_openai_client_formats() {
+    fn openai_client_formats_disallow_proxy_generated_sse_control_blocks() {
         let mut plan = ExecutionPlan {
             request_id: "req-openai-keepalive".into(),
             candidate_id: Some("cand-openai-keepalive".into()),
@@ -4792,11 +4795,17 @@ mod tests {
             timeouts: None,
         };
 
-        assert!(!should_emit_synthetic_sse_keepalive(&plan));
+        assert!(!client_format_allows_proxy_generated_sse_control_blocks(
+            &plan
+        ));
         plan.client_api_format = "openai:responses".into();
-        assert!(!should_emit_synthetic_sse_keepalive(&plan));
+        assert!(!client_format_allows_proxy_generated_sse_control_blocks(
+            &plan
+        ));
         plan.client_api_format = "claude:messages".into();
-        assert!(should_emit_synthetic_sse_keepalive(&plan));
+        assert!(client_format_allows_proxy_generated_sse_control_blocks(
+            &plan
+        ));
     }
 
     #[tokio::test]
