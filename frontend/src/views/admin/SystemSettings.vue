@@ -34,6 +34,9 @@
             @file-select="handleDataFileSelect"
           />
 
+          <!-- S3 备份 -->
+          <S3BackupSection id="section-s3-backup" />
+
           <!-- 网络代理 -->
           <ProxyConfigSection
             id="section-proxy"
@@ -252,6 +255,7 @@ import { useScheduledTasks } from './system-settings/composables/useScheduledTas
 // Section components
 import SiteInfoSection from './system-settings/SiteInfoSection.vue'
 import DataManagementSection from './system-settings/DataManagementSection.vue'
+import S3BackupSection from './system-settings/S3BackupSection.vue'
 import ProxyConfigSection from './system-settings/ProxyConfigSection.vue'
 import BasicConfigSection from './system-settings/BasicConfigSection.vue'
 import RequestLogSection from './system-settings/RequestLogSection.vue'
@@ -270,6 +274,7 @@ const proxyNodesStore = useProxyNodesStore()
 const tocItems = [
   { id: 'section-site-info', label: '站点信息' },
   { id: 'section-data-mgmt', label: '数据管理' },
+  { id: 'section-s3-backup', label: 'S3 备份' },
   { id: 'section-proxy', label: '网络代理' },
   { id: 'section-basic', label: '基础配置' },
   { id: 'section-request-log', label: '请求记录' },

@@ -101,6 +101,18 @@ export interface AggregateExportData {
   user_data: UsersExportData
 }
 
+export type S3BackupScope = 'config' | 'users' | 'data'
+
+export interface S3BackupRunResponse {
+  message: string
+  task: {
+    id: string
+    task_key: string
+    status: string
+    progress_message?: string
+  }
+}
+
 export interface UserGroupExport {
   id?: string
   name: string
@@ -893,6 +905,14 @@ export const adminApi = {
       '/api/admin/system/data/import',
       data,
       { timeout: SYSTEM_DATA_IMPORT_TIMEOUT_MS }
+    )
+    return response.data
+  },
+
+  // 立即执行 S3 备份
+  async runS3Backup(): Promise<S3BackupRunResponse> {
+    const response = await apiClient.post<S3BackupRunResponse>(
+      '/api/admin/system/backups/s3/run'
     )
     return response.data
   },
