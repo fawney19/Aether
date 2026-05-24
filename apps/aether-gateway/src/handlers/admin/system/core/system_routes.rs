@@ -232,6 +232,39 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
         ));
     }
 
+    if decision.route_kind.as_deref() == Some("s3_backup_run")
+        && request_method == http::Method::POST
+        && request_path == "/api/admin/system/backups/s3/run"
+    {
+        return Ok(Some(
+            match crate::backup::task::start_s3_backup_task(
+                state.cloned_app(),
+                "manual",
+                decision
+                    .admin_principal
+                    .as_ref()
+                    .map(|principal| principal.user_id.as_str()),
+            )
+            .await
+            {
+                Ok(task) => attach_admin_audit_response(
+                    Json(json!({
+                        "message": "S3 备份任务已提交",
+                        "task": task,
+                    }))
+                    .into_response(),
+                    "admin_system_s3_backup_task_started",
+                    "run_s3_backup",
+                    "s3_backup",
+                    "global",
+                ),
+                Err(error) => {
+                    (error.status(), Json(json!({ "detail": error.detail() }))).into_response()
+                }
+            },
+        ));
+    }
+
     if decision.route_kind.as_deref() == Some("smtp_test")
         && request_method == http::Method::POST
         && request_path == "/api/admin/system/smtp/test"
