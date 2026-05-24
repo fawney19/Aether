@@ -64,17 +64,24 @@ impl BackupScope {
             format!("{normalized_prefix}/")
         };
         let file_prefix = format!("{}-", self.file_stem());
+        let file_suffix = ".json.zst";
 
         keys.into_iter()
             .filter(|key| {
-                key.strip_prefix(&expected_prefix)
-                    .filter(|file_name| {
-                        !file_name.contains('/')
-                            && file_name.starts_with(&file_prefix)
-                            && file_name.len() > file_prefix.len() + ".json.zst".len()
-                            && file_name.ends_with(".json.zst")
-                    })
-                    .is_some()
+                let Some(file_name) = key.strip_prefix(&expected_prefix) else {
+                    return false;
+                };
+                if file_name.contains('/') {
+                    return false;
+                }
+                let Some(timestamp) = file_name
+                    .strip_prefix(&file_prefix)
+                    .and_then(|rest| rest.strip_suffix(file_suffix))
+                else {
+                    return false;
+                };
+
+                is_aether_backup_timestamp(timestamp)
             })
             .collect()
     }
@@ -92,6 +99,15 @@ impl fmt::Display for BackupScope {
 
 fn normalized_prefix(prefix: &str) -> &str {
     prefix.trim_end_matches('/')
+}
+
+fn is_aether_backup_timestamp(timestamp: &str) -> bool {
+    let bytes = timestamp.as_bytes();
+
+    bytes.len() == 15
+        && bytes[8] == b'-'
+        && bytes[..8].iter().all(|byte| byte.is_ascii_digit())
+        && bytes[9..].iter().all(|byte| byte.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -133,6 +149,28 @@ mod tests {
             "prod/aether-users-backup-20260524-010000.json.zst".to_string(),
             "prod/aether-data-backup-20260524-010000.json.zst".to_string(),
             "prod/random.json.zst".to_string(),
+        ];
+
+        let matched = BackupScope::Users.matching_backup_keys("prod/", keys);
+
+        assert_eq!(
+            matched,
+            vec!["prod/aether-users-backup-20260524-010000.json.zst"]
+        );
+    }
+
+    #[test]
+    fn retention_filter_requires_aether_timestamp_format() {
+        let keys = vec![
+            "prod/aether-users-backup-20260524-010000.json.zst".to_string(),
+            "prod/aether-users-backup-foo.json.zst".to_string(),
+            "prod/aether-users-backup-2026052-010000.json.zst".to_string(),
+            "prod/aether-users-backup-202605240-010000.json.zst".to_string(),
+            "prod/aether-users-backup-20260524-01000.json.zst".to_string(),
+            "prod/aether-users-backup-20260524-0100000.json.zst".to_string(),
+            "prod/aether-users-backup-20260524010000.json.zst".to_string(),
+            "prod/aether-users-backup-2026052a-010000.json.zst".to_string(),
+            "prod/aether-users-backup-20260524-01000x.json.zst".to_string(),
         ];
 
         let matched = BackupScope::Users.matching_backup_keys("prod/", keys);
