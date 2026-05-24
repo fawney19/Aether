@@ -18,6 +18,7 @@ use crate::{AppState, GatewayError};
 pub(crate) const TASK_KEY_PROVIDER_DELETE: &str = "admin.provider.delete";
 pub(crate) const TASK_KEY_PROVIDER_OAUTH_BATCH_IMPORT: &str = "admin.provider.oauth.batch_import";
 pub(crate) const TASK_KEY_SYSTEM_S3_BACKUP: &str = "system.s3.backup";
+pub(crate) const TASK_KEY_SYSTEM_S3_BACKUP_WORKER: &str = "system.s3.backup.worker";
 pub(crate) const TASK_KEY_USAGE_QUEUE_WORKER: &str = "usage.queue.worker";
 pub(crate) const TASK_KEY_USAGE_COUNTER_FLUSH: &str = "usage.counter.flush.worker";
 pub(crate) const TASK_KEY_VIDEO_TASK_POLLER: &str = "video.task.poller";
@@ -69,6 +70,14 @@ const TASK_DEFINITIONS: &[TaskDefinition] = &[
         TaskKind::Scheduled,
         "manual",
         false,
+        true,
+        RETRY_ONCE,
+    ),
+    TaskDefinition::new(
+        TASK_KEY_SYSTEM_S3_BACKUP_WORKER,
+        TaskKind::Daemon,
+        "daemon",
+        true,
         true,
         RETRY_ONCE,
     ),

@@ -1231,7 +1231,7 @@ impl AppState {
             spawn_video_task_poller(self.clone()),
         );
         supervise_worker(
-            crate::task_runtime::TASK_KEY_SYSTEM_S3_BACKUP,
+            crate::backup::worker::S3_BACKUP_WORKER_TASK_KEY,
             crate::backup::worker::spawn_s3_backup_worker(self.clone()),
         );
 

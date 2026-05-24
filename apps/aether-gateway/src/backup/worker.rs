@@ -8,11 +8,17 @@ use tracing::warn;
 use super::config::S3BackupConfig;
 use crate::{AppState, GatewayError};
 
+pub(crate) const S3_BACKUP_WORKER_TASK_KEY: &str =
+    crate::task_runtime::TASK_KEY_SYSTEM_S3_BACKUP_WORKER;
 const S3_BACKUP_WORKER_INTERVAL: Duration = Duration::from_secs(60);
 const S3_BACKUP_LAST_SLOT_KEY: &str = "backup_s3_last_slot";
 
 pub(crate) fn should_start_scheduled_backup(last_slot: Option<&str>, current_slot: &str) -> bool {
     last_slot != Some(current_slot)
+}
+
+pub(crate) fn should_record_scheduled_backup_slot(submission_succeeded: bool) -> bool {
+    submission_succeeded
 }
 
 pub(crate) fn spawn_s3_backup_worker(app: AppState) -> Option<JoinHandle<()>> {
@@ -62,10 +68,19 @@ async fn run_s3_backup_schedule_tick(
         return Ok(());
     }
 
-    app.upsert_system_config_json_value(S3_BACKUP_LAST_SLOT_KEY, &Value::String(slot), None)
-        .await?;
-    if let Err(error) = super::task::start_s3_backup_task(app.clone(), "scheduled", None).await {
-        warn!(error = %error, "S3 backup scheduled task submission failed");
+    match super::task::start_s3_backup_task(app.clone(), "scheduled", None).await {
+        Ok(_) if should_record_scheduled_backup_slot(true) => {
+            app.upsert_system_config_json_value(
+                S3_BACKUP_LAST_SLOT_KEY,
+                &Value::String(slot),
+                None,
+            )
+            .await?;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(error = %error, "S3 backup scheduled task submission failed");
+        }
     }
     Ok(())
 }
@@ -81,6 +96,7 @@ async fn read_last_backup_slot(app: &AppState) -> Result<Option<String>, Gateway
 #[cfg(test)]
 mod tests {
     use crate::backup::schedule::{BackupSchedule, BackupScheduleUnit};
+    use crate::task_runtime::{task_definition, TASK_KEY_SYSTEM_S3_BACKUP};
 
     #[test]
     fn backup_worker_skips_already_recorded_slot() {
@@ -102,5 +118,17 @@ mod tests {
             &slot
         ));
         assert!(!super::should_start_scheduled_backup(Some(&slot), &slot));
+    }
+
+    #[test]
+    fn backup_worker_has_distinct_supervisor_task_key() {
+        assert_ne!(super::S3_BACKUP_WORKER_TASK_KEY, TASK_KEY_SYSTEM_S3_BACKUP);
+        assert!(task_definition(super::S3_BACKUP_WORKER_TASK_KEY).is_some());
+    }
+
+    #[test]
+    fn backup_worker_records_slot_only_after_submission_succeeds() {
+        assert!(!super::should_record_scheduled_backup_slot(false));
+        assert!(super::should_record_scheduled_backup_slot(true));
     }
 }

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::time::Duration;
 
 use aether_admin::system::admin_system_config_default_value;
 use aether_data_contracts::repository::background_tasks::{
@@ -47,6 +48,8 @@ const S3_BACKUP_CONFIG_KEYS: &[&str] = &[
 
 const S3_BACKUP_QUEUED_MESSAGE: &str = "S3 备份任务已提交";
 const S3_BACKUP_TASK_LOCK_KEY: &str = "task_runtime:lock:system.s3.backup";
+const S3_BACKUP_TASK_LOCK_TTL: Duration = Duration::from_secs(60 * 60 * 6);
+const S3_BACKUP_TASK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60 * 5);
 const S3_BACKUP_ACTIVE_TASK_STALE_AFTER_SECS: u64 = 60 * 60 * 6;
 
 #[derive(Debug, Clone, Serialize)]
@@ -212,6 +215,7 @@ fn spawn_s3_backup_worker(
             app_for_worker,
             run_id_for_worker,
             config,
+            lock.clone(),
         ))
         .catch_unwind()
         .await;
@@ -237,7 +241,12 @@ fn spawn_s3_backup_worker(
     });
 }
 
-async fn run_s3_backup_worker_inner(app: AppState, run_id: String, config: S3BackupConfig) {
+async fn run_s3_backup_worker_inner(
+    app: AppState,
+    run_id: String,
+    config: S3BackupConfig,
+    lock: RuntimeLockLease,
+) {
     let started_at = now_unix_secs();
     let _ = update_run_status(
         &app,
@@ -253,7 +262,12 @@ async fn run_s3_backup_worker_inner(app: AppState, run_id: String, config: S3Bac
     .await;
     append_event_with_logging(&app, &run_id, "running", "S3 backup task started", None).await;
 
-    match run_s3_backup_once(&app, &config).await {
+    let heartbeat = spawn_s3_backup_task_heartbeat(app.clone(), run_id.clone(), lock);
+    let result = run_s3_backup_once(&app, &config).await;
+    heartbeat.abort();
+    let _ = heartbeat.await;
+
+    match result {
         Ok(result) => {
             let result_json = backup_run_result_json(&result);
             let _ = update_run_status(
@@ -303,6 +317,37 @@ async fn run_s3_backup_worker_inner(app: AppState, run_id: String, config: S3Bac
     }
 }
 
+fn spawn_s3_backup_task_heartbeat(
+    app: AppState,
+    run_id: String,
+    lock: RuntimeLockLease,
+) -> tokio::task::JoinHandle<()> {
+    spawn_fire_and_forget("task-runtime-system-s3-backup-heartbeat", async move {
+        let mut interval = tokio::time::interval(S3_BACKUP_TASK_HEARTBEAT_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let _ = app
+                .runtime_state
+                .lock_renew(&lock, S3_BACKUP_TASK_LOCK_TTL)
+                .await;
+            let _ = update_run_status(
+                &app,
+                &run_id,
+                BackgroundTaskStatus::Running,
+                Some(50),
+                Some("S3 备份任务执行中".to_string()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        }
+    })
+}
+
 fn ensure_background_task_storage(app: &AppState) -> Result<(), S3BackupTaskError> {
     if app.has_background_task_data_reader() && app.has_background_task_data_writer() {
         return Ok(());
@@ -316,13 +361,12 @@ fn ensure_background_task_storage(app: &AppState) -> Result<(), S3BackupTaskErro
 async fn acquire_s3_backup_task_lock(
     app: &AppState,
 ) -> Result<RuntimeLockLease, S3BackupTaskError> {
-    let lock_ttl = std::time::Duration::from_secs(60 * 60 * 6);
     match app
         .runtime_state
         .lock_try_acquire(
             S3_BACKUP_TASK_LOCK_KEY,
             app.tunnel.local_instance_id(),
-            lock_ttl,
+            S3_BACKUP_TASK_LOCK_TTL,
         )
         .await
     {
