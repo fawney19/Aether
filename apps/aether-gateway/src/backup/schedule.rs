@@ -88,7 +88,7 @@ impl BackupSchedule {
 
         let slot = Utc.from_utc_datetime(&now_utc.date_naive().and_hms_opt(
             now_utc.hour(),
-            self.minute,
+            now_utc.minute(),
             0,
         )?);
         Some(format!(
@@ -279,6 +279,28 @@ mod tests {
         assert_eq!(
             schedule.due_slot(now).as_deref(),
             Some("hours:2026-05-24T04:10:00Z")
+        );
+    }
+
+    #[test]
+    fn daily_schedule_slot_uses_actual_instant_for_non_whole_hour_timezone() {
+        let _guard = timezone_env_lock();
+        let _env = TimezoneEnvGuard::set(Some("Asia/Kolkata"));
+        let schedule = BackupSchedule {
+            unit: BackupScheduleUnit::Days,
+            interval: 1,
+            minute: 30,
+            hour: 3,
+            weekday: 1,
+            month_day: 1,
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-24T03:30:45+05:30")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        assert_eq!(
+            schedule.due_slot(now).as_deref(),
+            Some("days:2026-05-23T22:00:00Z")
         );
     }
 }
