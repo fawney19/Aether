@@ -1,7 +1,9 @@
 use crate::handlers::admin::provider::shared::payloads::{
     OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
 };
-use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
+use crate::handlers::admin::request::{
+    AdminAppState, AdminGatewayProviderTransportSnapshot, AdminLocalOAuthRefreshError,
+};
 use crate::handlers::shared::{
     sync_provider_key_oauth_status_snapshot, sync_provider_key_quota_status_snapshot,
 };
@@ -44,20 +46,73 @@ pub(super) fn default_provider_quota_execution_timeouts(
     }
 }
 
-pub(super) fn provider_auto_remove_banned_keys(config: Option<&serde_json::Value>) -> bool {
+pub(crate) fn provider_auto_remove_banned_keys(config: Option<&serde_json::Value>) -> bool {
     admin_provider_quota_pure::provider_auto_remove_banned_keys(config)
 }
 
-pub(super) fn should_auto_remove_oauth_invalid_key(
+pub(super) fn should_auto_remove_structured_reason(reason: Option<&str>) -> bool {
+    admin_provider_quota_pure::should_auto_remove_structured_reason(reason)
+}
+
+pub(crate) fn should_auto_remove_oauth_invalid_key(
     key: &StoredProviderCatalogKey,
     candidate_reason: Option<&str>,
+    access_token_invalid_proven: bool,
     now_unix_secs: u64,
 ) -> bool {
     admin_provider_quota_pure::should_auto_remove_oauth_invalid_key(
         key,
         candidate_reason,
+        access_token_invalid_proven,
         now_unix_secs,
     )
+}
+
+pub(crate) async fn persist_quota_oauth_refresh_failure_state(
+    state: &AdminAppState<'_>,
+    transport: &AdminGatewayProviderTransportSnapshot,
+    err: &AdminLocalOAuthRefreshError,
+) -> Result<bool, GatewayError> {
+    let AdminLocalOAuthRefreshError::HttpStatus {
+        status_code,
+        body_excerpt,
+        ..
+    } = err
+    else {
+        return Ok(false);
+    };
+    if !matches!(*status_code, 400 | 401 | 403) {
+        return Ok(false);
+    }
+    state
+        .app()
+        .persist_local_oauth_refresh_failure_state(transport, *status_code, body_excerpt, false)
+        .await
+}
+
+pub(crate) async fn quota_key_auto_removed(
+    state: &AdminAppState<'_>,
+    key_id: &str,
+) -> Result<bool, GatewayError> {
+    if key_id.trim().is_empty() {
+        return Ok(false);
+    }
+    Ok(state
+        .read_provider_catalog_keys_by_ids(&[key_id.to_string()])
+        .await?
+        .is_empty())
+}
+
+pub(crate) fn oauth_refresh_auto_removed_result(
+    key: &StoredProviderCatalogKey,
+) -> serde_json::Value {
+    serde_json::json!({
+        "key_id": key.id,
+        "key_name": key.name,
+        "status": "auto_removed",
+        "message": "OAuth refresh 失败且凭证已不可用，已自动删除",
+        "auto_removed": true,
+    })
 }
 
 pub(crate) fn normalize_string_id_list(values: Option<Vec<String>>) -> Option<Vec<String>> {
@@ -262,12 +317,7 @@ pub(super) async fn execute_provider_quota_plan(
     match state.execute_execution_runtime_sync_plan(None, &plan).await {
         Ok(result) => Ok(ProviderQuotaExecutionOutcome::Response(result)),
         Err(err) => {
-            let error = match err {
-                GatewayError::UpstreamUnavailable { message, .. }
-                | GatewayError::ControlUnavailable { message, .. }
-                | GatewayError::Client { message, .. }
-                | GatewayError::Internal(message) => message,
-            };
+            let error = err.into_message();
             let proxy_node_id = plan
                 .proxy
                 .as_ref()

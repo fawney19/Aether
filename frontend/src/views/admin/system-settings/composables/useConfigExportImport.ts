@@ -1,4 +1,5 @@
-import { ref } from 'vue'
+import { nextTick, ref } from 'vue'
+import type { AxiosProgressEvent } from 'axios'
 import { useToast } from '@/composables/useToast'
 import {
   adminApi,
@@ -21,6 +22,11 @@ const MAX_FILE_SIZE = MAX_FILE_SIZE_MB * BYTES_PER_MB
 const MAX_AGGREGATE_FILE_SIZE = MAX_AGGREGATE_FILE_SIZE_MB * BYTES_PER_MB
 
 type JsonObject = Record<string, unknown>
+
+export interface ImportProgressState {
+  percent: number
+  message: string
+}
 
 function asJsonObject(value: unknown): JsonObject | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -56,6 +62,47 @@ function fileSizeLimitMessage(limitMb: number): string {
   return `文件大小不能超过 ${limitMb}MB`
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes >= BYTES_PER_MB) {
+    return `${(bytes / BYTES_PER_MB).toFixed(1)}MB`
+  }
+  if (bytes >= 1024) {
+    return `${Math.round(bytes / 1024)}KB`
+  }
+  return `${bytes}B`
+}
+
+function setImportProgress(
+  target: { value: ImportProgressState | null },
+  percent: number,
+  message: string,
+) {
+  target.value = {
+    percent: Math.max(0, Math.min(100, Math.round(percent))),
+    message,
+  }
+}
+
+function buildUploadProgressHandler(
+  target: { value: ImportProgressState | null },
+  label: string,
+) {
+  return (event: AxiosProgressEvent) => {
+    if (!event.total) {
+      setImportProgress(target, 15, `${label}上传中：${formatBytes(event.loaded)}`)
+      return
+    }
+
+    const uploadPercent = Math.min(85, 10 + (event.loaded / event.total) * 75)
+    const loaded = formatBytes(event.loaded)
+    const total = formatBytes(event.total)
+    const message = event.loaded >= event.total
+      ? `${label}已上传，服务端正在校验并写入数据`
+      : `${label}上传中：${loaded} / ${total}`
+    setImportProgress(target, uploadPercent, message)
+  }
+}
+
 function downloadJson(data: unknown, filename: string) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
@@ -81,6 +128,7 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
   const importResult = ref<ConfigImportResponse | null>(null)
   const mergeMode = ref<'skip' | 'overwrite' | 'error'>('skip')
   const mergeModeSelectOpen = ref(false)
+  const importProgress = ref<ImportProgressState | null>(null)
 
   // 用户数据导出/导入相关
   const exportUsersLoading = ref(false)
@@ -92,8 +140,9 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
   const importUsersResult = ref<UsersImportResponse | null>(null)
   const usersMergeMode = ref<'skip' | 'overwrite' | 'error'>('skip')
   const usersMergeModeSelectOpen = ref(false)
+  const importUsersProgress = ref<ImportProgressState | null>(null)
 
-  // 聚合数据导出/导入相关
+  // 完整备份导出/导入相关
   const exportAggregateLoading = ref(false)
   const importAggregateLoading = ref(false)
   const aggregateImportDialogOpen = ref(false)
@@ -102,6 +151,7 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
   const aggregateImportResult = ref<AggregateImportResponse | null>(null)
   const aggregateMergeMode = ref<'skip' | 'overwrite' | 'error'>('skip')
   const aggregateMergeModeSelectOpen = ref(false)
+  const importAggregateProgress = ref<ImportProgressState | null>(null)
 
   // 导出配置
   async function handleExportConfig() {
@@ -182,11 +232,16 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
     if (!importPreview.value) return
 
     importLoading.value = true
+    setImportProgress(importProgress, 5, '准备提交配置数据')
+    await nextTick()
     try {
       const result = await adminApi.importConfig({
         ...importPreview.value,
         merge_mode: mergeMode.value,
+      }, {
+        onUploadProgress: buildUploadProgressHandler(importProgress, '配置数据'),
       })
+      setImportProgress(importProgress, 100, '配置数据导入完成')
       importResult.value = result
       importDialogOpen.value = false
       mergeModeSelectOpen.value = false
@@ -197,6 +252,7 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
       log.error('导入配置失败:', err)
     } finally {
       importLoading.value = false
+      importProgress.value = null
     }
   }
 
@@ -289,11 +345,16 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
     if (!importUsersPreview.value) return
 
     importUsersLoading.value = true
+    setImportProgress(importUsersProgress, 5, '准备提交用户数据')
+    await nextTick()
     try {
       const result = await adminApi.importUsers({
         ...importUsersPreview.value,
         merge_mode: usersMergeMode.value,
+      }, {
+        onUploadProgress: buildUploadProgressHandler(importUsersProgress, '用户数据'),
       })
+      setImportProgress(importUsersProgress, 100, '用户数据导入完成')
       importUsersResult.value = result
       importUsersDialogOpen.value = false
       usersMergeModeSelectOpen.value = false
@@ -304,10 +365,11 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
       log.error('导入用户数据失败:', err)
     } finally {
       importUsersLoading.value = false
+      importUsersProgress.value = null
     }
   }
 
-  // 导出聚合数据
+  // 导出完整备份
   async function handleExportAggregate() {
     exportAggregateLoading.value = true
     try {
@@ -316,16 +378,16 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
         data,
         `${systemConfig.value.site_name.toLowerCase()}-data-${new Date().toISOString().slice(0, 10)}.json`,
       )
-      success('聚合数据已导出')
+      success('完整备份已导出')
     } catch (err) {
-      error('导出聚合数据失败')
-      log.error('导出聚合数据失败:', err)
+      error('导出完整备份失败')
+      log.error('导出完整备份失败:', err)
     } finally {
       exportAggregateLoading.value = false
     }
   }
 
-  // 处理聚合数据文件选择
+  // 处理完整备份文件选择
   function handleAggregateFileSelect(event: Event) {
     const input = event.target as HTMLInputElement
     const file = input.files?.[0]
@@ -343,7 +405,7 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
         const content = e.target?.result as string
         const root = asJsonObject(JSON.parse(content))
         if (!root) {
-          error('无效的聚合数据文件：JSON 顶层必须是对象')
+          error('无效的完整备份文件：JSON 顶层必须是对象')
           return
         }
 
@@ -353,24 +415,24 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
           } else if (looksLikeUsersExport(root)) {
             error('这是用户数据导出文件，请使用“导入用户数据”')
           } else {
-            error('无效的聚合数据文件：未找到配置数据和用户数据')
+            error('无效的完整备份文件：未找到配置数据和用户数据')
           }
           return
         }
 
         if (!root.version) {
-          error('无效的聚合数据文件：缺少版本信息')
+          error('无效的完整备份文件：缺少版本信息')
           return
         }
 
         const configData = asJsonObject(root.config_data)
         const userData = asJsonObject(root.user_data)
         if (!configData || !looksLikeConfigExport(configData)) {
-          error('无效的聚合数据文件：config_data 格式不正确')
+          error('无效的完整备份文件：config_data 格式不正确')
           return
         }
         if (!userData || !looksLikeUsersExport(userData)) {
-          error('无效的聚合数据文件：user_data 格式不正确')
+          error('无效的完整备份文件：user_data 格式不正确')
           return
         }
 
@@ -379,8 +441,8 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
         aggregateMergeMode.value = 'skip'
         aggregateImportDialogOpen.value = true
       } catch (err) {
-        error('解析聚合数据文件失败，请确保是有效的 JSON 文件')
-        log.error('解析聚合数据文件失败:', err)
+        error('解析完整备份文件失败，请确保是有效的 JSON 文件')
+        log.error('解析完整备份文件失败:', err)
       }
     }
     reader.readAsText(file)
@@ -388,26 +450,32 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
     input.value = ''
   }
 
-  // 确认导入聚合数据
+  // 确认导入完整备份
   async function confirmImportAggregate() {
     if (!aggregateImportPreview.value) return
 
     importAggregateLoading.value = true
+    setImportProgress(importAggregateProgress, 5, '准备提交完整备份')
+    await nextTick()
     try {
       const result = await adminApi.importAggregateData({
         ...aggregateImportPreview.value,
         merge_mode: aggregateMergeMode.value,
+      }, {
+        onUploadProgress: buildUploadProgressHandler(importAggregateProgress, '完整备份'),
       })
+      setImportProgress(importAggregateProgress, 100, '完整备份导入完成')
       aggregateImportResult.value = result
       aggregateImportDialogOpen.value = false
       aggregateMergeModeSelectOpen.value = false
       aggregateImportResultDialogOpen.value = true
-      success('聚合数据导入成功')
+      success('完整备份导入成功')
     } catch (err: unknown) {
-      error(parseApiError(err, '导入聚合数据失败'))
-      log.error('导入聚合数据失败:', err)
+      error(parseApiError(err, '导入完整备份失败'))
+      log.error('导入完整备份失败:', err)
     } finally {
       importAggregateLoading.value = false
+      importAggregateProgress.value = null
     }
   }
 
@@ -422,6 +490,7 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
     importResult,
     mergeMode,
     mergeModeSelectOpen,
+    importProgress,
     handleExportConfig,
     triggerConfigFileSelect,
     handleConfigFileSelect,
@@ -436,11 +505,12 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
     importUsersResult,
     usersMergeMode,
     usersMergeModeSelectOpen,
+    importUsersProgress,
     handleExportUsers,
     triggerUsersFileSelect,
     handleUsersFileSelect,
     confirmImportUsers,
-    // 聚合数据导出/导入
+    // 完整备份导出/导入
     exportAggregateLoading,
     importAggregateLoading,
     aggregateImportDialogOpen,
@@ -449,6 +519,7 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
     aggregateImportResult,
     aggregateMergeMode,
     aggregateMergeModeSelectOpen,
+    importAggregateProgress,
     handleExportAggregate,
     handleAggregateFileSelect,
     confirmImportAggregate,

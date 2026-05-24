@@ -1,7 +1,10 @@
 use super::super::super::errors::{
     merge_provider_oauth_refresh_failure_reason, normalize_provider_oauth_refresh_error_message,
 };
-use super::super::super::quota::shared::persist_provider_quota_refresh_state;
+use super::super::super::quota::shared::{
+    persist_provider_quota_refresh_state, provider_auto_remove_banned_keys,
+    should_auto_remove_oauth_invalid_key,
+};
 use super::super::super::runtime::refresh_provider_oauth_account_state_after_update;
 use super::helpers::{self, RefreshDispatch, RefreshRequestContext, RefreshSuccessContext};
 use super::response;
@@ -76,6 +79,44 @@ pub(super) async fn execute_admin_provider_oauth_refresh(
                         None,
                     )
                     .await?;
+                    if provider_auto_remove_banned_keys(provider.config.as_ref()) {
+                        let now_unix_secs = helpers::unix_now_secs();
+                        let auto_removed = state
+                            .cleanup_provider_catalog_key_if_current(
+                                &provider,
+                                &key_id,
+                                |latest_key| {
+                                    should_auto_remove_oauth_invalid_key(
+                                        latest_key,
+                                        Some(&failure_reason),
+                                        false,
+                                        now_unix_secs,
+                                    )
+                                },
+                            )
+                            .await?;
+                        if auto_removed {
+                            tracing::info!(
+                                trace_id = %trace_id,
+                                key_id = %key_id,
+                                provider_id = %provider.id,
+                                provider_type = %provider_type,
+                                event_name = "auto_removed_oauth_refresh_failed",
+                                "gateway manual provider oauth refresh auto-removed unusable key"
+                            );
+                            return Ok(RefreshDispatch::Respond(
+                                response::oauth_refresh_auto_removed_response(&error_reason),
+                            ));
+                        }
+                    }
+                    tracing::info!(
+                        trace_id = %trace_id,
+                        key_id = %key_id,
+                        provider_id = %provider.id,
+                        provider_type = %provider_type,
+                        event_name = "refresh_failed_retained",
+                        "gateway manual provider oauth refresh failure retained key"
+                    );
                 }
             }
             return Ok(RefreshDispatch::Respond(
@@ -124,9 +165,25 @@ pub(super) async fn execute_admin_provider_oauth_refresh(
     };
 
     if !helpers::key_is_account_blocked(&key, OAUTH_ACCOUNT_BLOCK_PREFIX) {
-        let _ = state
+        let previous_oauth_refresh_issue =
+            key.oauth_invalid_reason.as_deref().is_some_and(|reason| {
+                reason.lines().map(str::trim).any(|line| {
+                    line.starts_with("[OAUTH_EXPIRED]") || line.starts_with("[REFRESH_FAILED]")
+                })
+            });
+        let cleared = state
             .clear_provider_catalog_key_oauth_invalid_marker(&key_id)
             .await?;
+        if cleared && previous_oauth_refresh_issue {
+            tracing::info!(
+                trace_id = %trace_id,
+                key_id = %key_id,
+                provider_id = %provider.id,
+                provider_type = %provider_type,
+                event_name = "refresh_fixed",
+                "gateway manual provider oauth refresh cleared oauth invalid marker"
+            );
+        }
     }
 
     let refreshed_key = state

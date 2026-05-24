@@ -1,8 +1,8 @@
 <template>
-  <!-- 聚合数据导入对话框 -->
+  <!-- 完整备份导入对话框 -->
   <Dialog
     :open="aggregateImportDialogOpen"
-    title="导入聚合数据"
+    title="导入完整备份"
     description="选择冲突处理模式并确认导入"
     @update:open="$emit('update:aggregateImportDialogOpen', $event)"
   >
@@ -12,7 +12,7 @@
         class="text-sm"
       >
         <p class="font-medium mb-2">
-          聚合数据预览
+          完整备份预览
         </p>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-muted-foreground">
           <div>
@@ -41,6 +41,9 @@
               </li>
               <li v-if="aggregateImportPreview.user_data.standalone_keys?.length">
                 独立余额 Keys: {{ aggregateImportPreview.user_data.standalone_keys.length }} 个
+              </li>
+              <li v-if="usageAggregatePreviewCounts.total > 0">
+                统计聚合: {{ usageAggregatePreviewCounts.total }} 行
               </li>
             </ul>
           </div>
@@ -84,8 +87,24 @@
       </div>
 
       <p class="text-xs text-muted-foreground">
-        注意：聚合数据会先导入配置数据，再导入用户数据；用户 API Keys 需要目标系统使用相同的 ENCRYPTION_KEY。
+        注意：完整备份会先导入配置数据，再导入用户数据；文件包含用户、用户组、API Keys、Key 用量、钱包快照与统计聚合。正常导出的 API Keys 会在导入时使用目标系统密钥重新加密；仅当备份中包含 key_encrypted 等未解密密文字段时，才需要目标系统使用兼容的 ENCRYPTION_KEY。
       </p>
+
+      <div
+        v-if="importAggregateProgress"
+        class="space-y-2 rounded-md border border-border p-3"
+      >
+        <div class="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+          <span>{{ importAggregateProgress.message }}</span>
+          <span>{{ importAggregateProgress.percent }}%</span>
+        </div>
+        <div class="h-1.5 overflow-hidden rounded-full bg-muted">
+          <div
+            class="h-full bg-primary transition-all"
+            :style="{ width: `${importAggregateProgress.percent}%` }"
+          />
+        </div>
+      </div>
     </div>
 
     <template #footer>
@@ -104,10 +123,10 @@
     </template>
   </Dialog>
 
-  <!-- 聚合数据导入结果对话框 -->
+  <!-- 完整备份导入结果对话框 -->
   <Dialog
     :open="aggregateImportResultDialogOpen"
-    title="聚合数据导入完成"
+    title="完整备份导入完成"
     @update:open="$emit('update:aggregateImportResultDialogOpen', $event)"
   >
     <div
@@ -133,6 +152,9 @@
             用户创建 {{ aggregateImportResult.users.stats.users.created }}，
             API Keys 创建 {{ aggregateImportResult.users.stats.api_keys.created }}，
             跳过 {{ aggregateImportResult.users.stats.users.skipped }} 个用户
+            <template v-if="usageAggregateResultText">
+              ，统计聚合 {{ usageAggregateResultText }}
+            </template>
           </p>
         </div>
       </div>
@@ -174,6 +196,7 @@ import SelectContent from '@/components/ui/select-content.vue'
 import SelectItem from '@/components/ui/select-item.vue'
 import { Dialog } from '@/components/ui'
 import type { AggregateExportData, AggregateImportResponse } from '@/api/admin'
+import type { ImportProgressState } from './composables/useConfigExportImport'
 
 const props = defineProps<{
   aggregateImportDialogOpen: boolean
@@ -183,6 +206,7 @@ const props = defineProps<{
   aggregateMergeMode: 'skip' | 'overwrite' | 'error'
   aggregateMergeModeSelectOpen: boolean
   importAggregateLoading: boolean
+  importAggregateProgress: ImportProgressState | null
 }>()
 
 defineEmits<{
@@ -198,5 +222,37 @@ const warningMessages = computed(() => {
   const configErrors = props.aggregateImportResult.config.stats.errors.map((message) => `配置数据: ${message}`)
   const userErrors = props.aggregateImportResult.users.stats.errors.map((message) => `用户数据: ${message}`)
   return [...configErrors, ...userErrors]
+})
+
+const usageAggregatePreviewCounts = computed(() => {
+  const aggregates = props.aggregateImportPreview?.user_data.usage_aggregates
+  const statsDaily = aggregates?.stats_daily?.length ?? 0
+  const statsUserDaily = aggregates?.stats_user_daily?.length ?? 0
+  const statsDailyApiKey = aggregates?.stats_daily_api_key?.length ?? 0
+
+  return {
+    statsDaily,
+    statsUserDaily,
+    statsDailyApiKey,
+    total: statsDaily + statsUserDaily + statsDailyApiKey,
+  }
+})
+
+const usageAggregateResultText = computed(() => {
+  const aggregates = props.aggregateImportResult?.users.stats.usage_aggregates
+  if (!aggregates) return ''
+
+  const counters = [
+    aggregates.stats_daily,
+    aggregates.stats_user_daily,
+    aggregates.stats_daily_api_key,
+  ]
+  const created = counters.reduce((sum, item) => sum + item.created, 0)
+  const updated = counters.reduce((sum, item) => sum + item.updated, 0)
+  const skipped = counters.reduce((sum, item) => sum + item.skipped, 0)
+  const total = created + updated + skipped
+  if (total === 0) return ''
+
+  return `创建 ${created}，更新 ${updated}，跳过 ${skipped}`
 })
 </script>

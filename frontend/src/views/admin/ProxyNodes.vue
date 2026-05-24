@@ -17,6 +17,14 @@
                 size="sm"
                 variant="outline"
                 class="h-7 text-xs"
+                @click="showPoolProxyDistributionDialog = true"
+              >
+                均分
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                class="h-7 text-xs"
                 @click="showBatchUpgradeDialog = true"
               >
                 升级
@@ -101,6 +109,15 @@
               </Select>
             </div>
             <div class="h-4 w-px bg-border" />
+            <Button
+              variant="outline"
+              size="sm"
+              class="h-8 text-xs"
+              @click="showPoolProxyDistributionDialog = true"
+            >
+              <Shuffle class="w-3.5 h-3.5 mr-1.5" />
+              号池均分
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -524,14 +541,14 @@
     <Dialog
       :model-value="showAddDialog"
       :title="editingNode ? '编辑代理节点' : '添加代理节点'"
-      :description="editingNode ? '修改手动代理节点的配置' : '推荐使用一键脚本部署 aether-tunnel，也可手动添加已有 HTTP/SOCKS 代理'"
+      :description="editingNode ? '修改手动代理节点的配置' : '推荐使用一键脚本部署 aether-tunnel，也可手动或批量添加已有 HTTP/SOCKS 代理'"
       :icon="editingNode ? SquarePen : Plus"
       size="lg"
       @update:model-value="handleDialogClose"
     >
       <div
         v-if="!editingNode"
-        class="mb-4 grid grid-cols-2 gap-2 rounded-lg border border-border/60 bg-muted/30 p-1"
+        class="mb-4 grid grid-cols-1 sm:grid-cols-3 gap-2 rounded-lg border border-border/60 bg-muted/30 p-1"
       >
         <Button
           type="button"
@@ -550,6 +567,15 @@
         >
           <Plus class="w-3.5 h-3.5 mr-1.5" />
           手动添加
+        </Button>
+        <Button
+          type="button"
+          :variant="addMode === 'batch' ? 'default' : 'ghost'"
+          class="h-9"
+          @click="addMode = 'batch'"
+        >
+          <ListPlus class="w-3.5 h-3.5 mr-1.5" />
+          批量添加
         </Button>
       </div>
 
@@ -632,6 +658,53 @@
         </div>
       </div>
 
+      <div
+        v-else-if="!editingNode && addMode === 'batch'"
+        class="space-y-4"
+      >
+        <div class="rounded-lg border border-border/60 bg-muted/30 p-3 text-xs text-muted-foreground">
+          支持一行一个，或使用英文逗号分隔。URL 中的用户名和密码会自动拆分到手动添加接口，节点名称自动使用主机和端口。
+        </div>
+
+        <div class="space-y-1.5">
+          <Label>代理地址 *</Label>
+          <Textarea
+            v-model="batchForm.content"
+            class="min-h-[180px] font-mono text-xs break-all !rounded-xl"
+            placeholder="socks5://username:password@1.2.3.4:1080&#10;http://username:password@5.6.7.8:8080"
+          />
+        </div>
+
+        <div
+          v-if="batchParseResult.errors.length"
+          class="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive"
+        >
+          <div class="font-medium">
+            有 {{ batchParseResult.errors.length }} 条格式错误
+          </div>
+          <ul class="mt-1 space-y-1">
+            <li
+              v-for="message in batchParseResult.errors.slice(0, 3)"
+              :key="message"
+            >
+              {{ message }}
+            </li>
+          </ul>
+          <div
+            v-if="batchParseResult.errors.length > 3"
+            class="mt-1 text-destructive/80"
+          >
+            还有 {{ batchParseResult.errors.length - 3 }} 条错误未显示
+          </div>
+        </div>
+        <p
+          v-else-if="batchForm.content.trim()"
+          class="text-xs text-muted-foreground"
+        >
+          已识别 {{ batchParseResult.nodes.length }} 个代理节点。
+        </p>
+      </div>
+
       <form
         v-else
         class="space-y-4"
@@ -703,6 +776,28 @@
           >
             {{ installCopied ? '已复制' : '复制命令' }}
           </Button>
+        </div>
+        <div
+          v-else-if="!editingNode && addMode === 'batch'"
+          class="flex items-center justify-between gap-3 w-full"
+        >
+          <span class="text-xs text-muted-foreground">
+            {{ batchForm.content.trim() ? `待添加 ${batchParseResult.nodes.length} 个` : '等待输入代理地址' }}
+          </span>
+          <div class="flex items-center gap-2">
+            <Button
+              variant="outline"
+              @click="handleDialogClose(false)"
+            >
+              取消
+            </Button>
+            <Button
+              :disabled="addingNode || !batchForm.content.trim() || batchParseResult.errors.length > 0 || batchParseResult.nodes.length === 0"
+              @click="handleBatchAddManualNodes"
+            >
+              {{ addingNode ? '添加中...' : '批量添加' }}
+            </Button>
+          </div>
         </div>
         <div
           v-else
@@ -883,6 +978,10 @@
       </template>
     </Dialog>
 
+    <PoolProxyDistributionDialog
+      v-model="showPoolProxyDistributionDialog"
+    />
+
     <!-- 连接事件对话框 -->
     <Dialog
       :open="showEventsDialog"
@@ -995,13 +1094,17 @@ import {
   Pagination,
   RefreshButton,
   Dialog,
+  Textarea,
 } from '@/components/ui'
 
-import { Search, Trash2, Plus, SquarePen, Activity, Loader2, Settings, History, ChevronDown, ChevronRight, Terminal, Copy, CheckCircle } from 'lucide-vue-next'
+import { Search, Trash2, Plus, SquarePen, Activity, Loader2, Settings, History, ChevronDown, ChevronRight, Terminal, Copy, CheckCircle, ListPlus, Shuffle } from 'lucide-vue-next'
 import { parseApiError } from '@/utils/errorParser'
+import { formatCompactNumber } from '@/utils/format'
 import { formatRegion } from '@/utils/region'
+import { parseBatchProxyNodeInput } from './proxy-node-batch'
 import HardwareTooltip from './components/HardwareTooltip.vue'
 import ProxyNodeDataPanel from './components/ProxyNodeDataPanel.vue'
+import PoolProxyDistributionDialog from '@/features/pool/components/PoolProxyDistributionDialog.vue'
 
 const { success, error: toastError } = useToast()
 const { confirmDanger } = useConfirm()
@@ -1020,15 +1123,19 @@ const pageSize = ref(20)
 
 // 手动添加/编辑对话框
 const showAddDialog = ref(false)
+const showPoolProxyDistributionDialog = ref(false)
 const addingNode = ref(false)
 const editingNode = ref<ProxyNode | null>(null)
-const addMode = ref<'script' | 'manual'>('script')
+const addMode = ref<'script' | 'manual' | 'batch'>('script')
 const addForm = ref({
   name: '',
   proxy_url: '',
   username: '',
   password: '',
   region: '',
+})
+const batchForm = ref({
+  content: '',
 })
 const installForm = ref({
   node_name: '',
@@ -1052,6 +1159,8 @@ const proxyInstallHint = computed(() => {
   }
   return `这条命令将在 ${Math.floor(proxyInstallSession.value.expires_in_seconds / 60)} 分钟内有效，成功使用后立即失效。`
 })
+
+const batchParseResult = computed(() => parseBatchProxyNodeInput(batchForm.value.content))
 
 // 远程配置对话框 (aether-tunnel 节点)
 const showConfigDialog = ref(false)
@@ -1195,6 +1304,7 @@ function openAddDialog() {
   editingNode.value = null
   addMode.value = 'script'
   addForm.value = { name: '', proxy_url: '', username: '', password: '', region: '' }
+  batchForm.value = { content: '' }
   installForm.value = { node_name: '' }
   resetProxyInstallState()
   showAddDialog.value = true
@@ -1253,6 +1363,7 @@ function handleDialogClose(open: boolean) {
     editingNode.value = null
     addMode.value = 'script'
     addForm.value = { name: '', proxy_url: '', username: '', password: '', region: '' }
+    batchForm.value = { content: '' }
     installForm.value = { node_name: '' }
     resetProxyInstallState()
   }
@@ -1297,6 +1408,54 @@ async function handleAddManualNode() {
     handleDialogClose(false)
   } catch (err: unknown) {
     toastError(parseApiError(err, '添加失败'))
+  } finally {
+    addingNode.value = false
+  }
+}
+
+async function handleBatchAddManualNodes() {
+  const { nodes, errors } = batchParseResult.value
+  if (!batchForm.value.content.trim() || addingNode.value) return
+  if (errors.length > 0) {
+    toastError(`批量输入存在 ${errors.length} 条格式错误，请先修正后再添加`)
+    return
+  }
+  if (nodes.length === 0) {
+    toastError('请先输入至少一条代理地址')
+    return
+  }
+
+  addingNode.value = true
+  const failures: string[] = []
+  let successCount = 0
+
+  try {
+    for (const node of nodes) {
+      try {
+        await proxyNodesApi.createManualNode(node)
+        successCount += 1
+      } catch (err: unknown) {
+        failures.push(`${node.name}: ${parseApiError(err, '添加失败')}`)
+      }
+    }
+
+    await store.fetchNodes()
+
+    if (successCount > 0 && failures.length === 0) {
+      success(`已添加 ${successCount} 个代理节点`)
+      handleDialogClose(false)
+      return
+    }
+
+    if (successCount > 0) {
+      success(`已添加 ${successCount} 个代理节点，${failures.length} 个失败`)
+    }
+
+    if (failures.length > 0) {
+      toastError(failures.slice(0, 3).join('；'))
+    }
+  } catch (err: unknown) {
+    toastError(parseApiError(err, '批量添加失败'))
   } finally {
     addingNode.value = false
   }
@@ -1567,9 +1726,7 @@ function statusTitle(node: ProxyNode) {
 }
 
 function formatNumber(n: number) {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return String(n)
+  return formatCompactNumber(n, { fractionDigits: 1 })
 }
 
 function formatTime(iso: string | null) {

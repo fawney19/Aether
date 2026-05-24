@@ -21,7 +21,9 @@ use aether_runtime_state::{
 };
 use aether_scheduler_core::PROVIDER_KEY_RPM_WINDOW_SECS;
 
-use super::{AppState, FrontdoorCorsConfig, LocalExecutionRuntimeMissDiagnostic};
+use super::{
+    AppState, FrontdoorCorsConfig, FrontdoorRuntimeGuardConfig, LocalExecutionRuntimeMissDiagnostic,
+};
 
 use super::super::async_task::{
     spawn_video_task_poller, VideoTaskPollerConfig, VideoTaskService, VideoTaskTruthSourceMode,
@@ -49,6 +51,7 @@ use crate::maintenance::spawn_pending_cleanup_worker;
 use crate::maintenance::spawn_pool_monitor_worker;
 use crate::maintenance::spawn_pool_score_rebuild_worker;
 use crate::maintenance::spawn_provider_checkin_worker;
+use crate::maintenance::spawn_provider_quota_alert_worker;
 use crate::maintenance::spawn_proxy_node_metrics_cleanup_worker;
 use crate::maintenance::spawn_proxy_node_stale_cleanup_worker;
 use crate::maintenance::spawn_proxy_upgrade_rollout_worker;
@@ -89,24 +92,17 @@ impl AppState {
     fn usage_worker_queue_for(
         runtime_state: &Arc<RuntimeState>,
     ) -> Option<Arc<dyn RuntimeQueueStore>> {
-        if runtime_state.is_redis() {
-            let queue: Arc<dyn RuntimeQueueStore> = runtime_state.clone();
-            Some(queue)
-        } else {
-            None
-        }
+        let queue: Arc<dyn RuntimeQueueStore> = runtime_state.clone();
+        Some(queue)
     }
 
-    fn spawn_scheduler_affinity_redis_write(
+    fn spawn_scheduler_affinity_runtime_write(
         &self,
         cache_key: &str,
         target: &SchedulerAffinityTarget,
         ttl: Duration,
         epoch: u64,
     ) {
-        if self.runtime_state.is_memory() {
-            return;
-        }
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
@@ -233,6 +229,7 @@ impl AppState {
                 VideoTaskTruthSourceMode::PythonSyncReport,
             )),
             video_task_poller: None,
+            frontdoor_runtime_guards: Arc::new(FrontdoorRuntimeGuardConfig::from_env()),
             request_gate: None,
             distributed_request_gate: None,
             client,
@@ -578,6 +575,11 @@ impl AppState {
         self.invalidate_scheduler_affinity_cache();
     }
 
+    pub(crate) fn invalidate_provider_health_routing_caches(&self) {
+        self.data.clear_minimal_candidate_selection_cache();
+        self.clear_provider_transport_snapshot_cache();
+    }
+
     pub(crate) fn invalidate_auth_context_cache(&self) {
         self.auth_context_cache.clear();
     }
@@ -625,6 +627,36 @@ impl AppState {
             self.invalidate_provider_routing_caches();
         }
         Ok(summary)
+    }
+
+    pub(crate) async fn export_admin_system_usage_aggregates(
+        &self,
+    ) -> Result<aether_data::repository::system::AdminSystemUsageAggregateSnapshot, GatewayError>
+    {
+        self.data
+            .export_admin_system_usage_aggregates()
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn import_admin_system_usage_aggregates(
+        &self,
+        snapshot: &aether_data::repository::system::AdminSystemUsageAggregateSnapshot,
+        user_id_map: &std::collections::BTreeMap<String, String>,
+        api_key_id_map: &std::collections::BTreeMap<String, String>,
+        mode: aether_data::repository::system::AdminSystemUsageAggregateImportMode,
+    ) -> Result<aether_data::repository::system::AdminSystemUsageAggregateImportSummary, GatewayError>
+    {
+        self.data
+            .import_admin_system_usage_aggregates(snapshot, user_id_map, api_key_id_map, mode)
+            .await
+            .map_err(|err| match err {
+                aether_data::DataLayerError::InvalidInput(detail) => GatewayError::Client {
+                    status: http::StatusCode::BAD_REQUEST,
+                    message: detail,
+                },
+                other => GatewayError::Internal(other.to_string()),
+            })
     }
 
     pub(crate) async fn run_admin_system_cleanup_once(
@@ -1088,7 +1120,7 @@ impl AppState {
         if self.scheduler_affinity_epoch() != epoch {
             return false;
         }
-        self.spawn_scheduler_affinity_redis_write(cache_key, &target, ttl, epoch);
+        self.spawn_scheduler_affinity_runtime_write(cache_key, &target, ttl, epoch);
         self.scheduler_affinity_cache.insert_for_epoch(
             cache_key.to_string(),
             target,
@@ -1209,6 +1241,10 @@ impl AppState {
         supervise_worker(
             crate::task_runtime::TASK_KEY_PROVIDER_CHECKIN,
             spawn_provider_checkin_worker(self.clone()),
+        );
+        supervise_worker(
+            crate::task_runtime::TASK_KEY_PROVIDER_QUOTA_ALERT,
+            spawn_provider_quota_alert_worker(self.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_OAUTH_TOKEN_REFRESH,

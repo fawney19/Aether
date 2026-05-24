@@ -426,21 +426,21 @@
         </div>
 
 
-        <!-- IP 白名单 -->
+        <!-- IP 限制 -->
         <div class="space-y-2">
           <Label
             for="token-ips"
             class="text-sm font-semibold"
-          >IP 白名单</Label>
+          >IP 限制</Label>
           <Input
             id="token-ips"
             v-model="formData.allowedIpsText"
-            placeholder="例如：192.168.1.0/24, 10.0.0.1（逗号分隔，留空不限制）"
+            placeholder="例如：192.168.*.*, 10.0.0.0/24, !10.0.0.13"
             class="h-11 border-border/60"
             autocomplete="off"
           />
           <p class="text-xs text-muted-foreground">
-            限制只能从指定 IP 地址使用此令牌，支持 CIDR 格式
+            留空表示不限制；支持 IP、CIDR、IPv4 通配符、*，用 ! 前缀拒绝，多个规则用英文逗号分隔
           </p>
         </div>
 

@@ -93,6 +93,22 @@ impl ServerTab {
                     required: true,
                     help: "Node name for identification in Aether dashboard",
                 },
+                Field {
+                    label: "Tunnel Security",
+                    key: "tunnel_security",
+                    value: String::new(),
+                    kind: FieldKind::Text,
+                    required: false,
+                    help: "off or non_tls_required; omit to auto-enable for http:// plus a key",
+                },
+                Field {
+                    label: "Tunnel Encryption Key",
+                    key: "tunnel_encryption_key",
+                    value: String::new(),
+                    kind: FieldKind::Secret,
+                    required: false,
+                    help: "Base64 32-byte PSK; required when Tunnel Security is non_tls_required",
+                },
             ],
         }
     }
@@ -103,6 +119,12 @@ impl ServerTab {
         tab.fields[1].value = entry.management_token.clone();
         if let Some(ref name) = entry.node_name {
             tab.fields[2].value = name.clone();
+        }
+        if let Some(security) = entry.tunnel_security {
+            tab.fields[3].value = security.to_string();
+        }
+        if let Some(ref key) = entry.tunnel_encryption_key {
+            tab.fields[4].value = key.clone();
         }
         tab
     }
@@ -416,12 +438,33 @@ impl App {
         cfg.servers = self
             .server_tabs
             .iter()
-            .map(|tab| ServerEntry {
-                aether_url: get_tab(tab, "aether_url").unwrap_or_default(),
-                management_token: get_tab(tab, "management_token").unwrap_or_default(),
-                node_name: get_tab(tab, "node_name"),
+            .map(|tab| {
+                let tunnel_security = get_tab(tab, "tunnel_security")
+                    .map(|value| value.parse().map_err(anyhow::Error::msg))
+                    .transpose()?;
+                Ok(ServerEntry {
+                    aether_url: get_tab(tab, "aether_url").unwrap_or_default(),
+                    management_token: get_tab(tab, "management_token").unwrap_or_default(),
+                    node_name: get_tab(tab, "node_name"),
+                    tunnel_security,
+                    tunnel_encryption_key: get_tab(tab, "tunnel_encryption_key"),
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        for server in &cfg.servers {
+            if server.tunnel_security == Some(crate::config::TunnelSecurity::NonTlsRequired)
+                && server
+                    .tunnel_encryption_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+            {
+                anyhow::bail!(
+                    "Tunnel Encryption Key is required when Tunnel Security is non_tls_required"
+                );
+            }
+        }
         Ok(cfg)
     }
 
@@ -1108,9 +1151,53 @@ mod tests {
 
         assert_eq!(
             server_keys,
-            vec!["aether_url", "management_token", "node_name"]
+            vec![
+                "aether_url",
+                "management_token",
+                "node_name",
+                "tunnel_security",
+                "tunnel_encryption_key"
+            ]
         );
         assert_eq!(global_keys.first().copied(), Some("upstream_proxy_url"));
+    }
+
+    #[test]
+    fn to_config_persists_tunnel_security_fields_per_server() {
+        let mut app = sample_app();
+        set_server_field(&mut app, "tunnel_security", "non_tls_required");
+        set_server_field(&mut app, "tunnel_encryption_key", "base64-32-bytes");
+
+        let cfg = app.to_config().expect("config should serialize");
+        assert_eq!(cfg.servers.len(), 1);
+        assert_eq!(
+            cfg.servers[0].tunnel_security,
+            Some(crate::config::TunnelSecurity::NonTlsRequired)
+        );
+        assert_eq!(
+            cfg.servers[0].tunnel_encryption_key.as_deref(),
+            Some("base64-32-bytes")
+        );
+    }
+
+    #[test]
+    fn to_config_omits_blank_tunnel_security_for_auto_inference() {
+        let app = sample_app();
+
+        let cfg = app.to_config().expect("config should serialize");
+        assert_eq!(cfg.servers.len(), 1);
+        assert_eq!(cfg.servers[0].tunnel_security, None);
+    }
+
+    #[test]
+    fn to_config_rejects_non_tls_security_without_key() {
+        let mut app = sample_app();
+        set_server_field(&mut app, "tunnel_security", "non_tls_required");
+
+        let error = app
+            .to_config()
+            .expect_err("secure non-TLS mode should require a key");
+        assert!(error.to_string().contains("Tunnel Encryption Key"));
     }
 
     #[test]
@@ -1226,6 +1313,8 @@ mod tests {
             aether_url: "https://aether-2.example.com".to_string(),
             management_token: "ae_test_2".to_string(),
             node_name: Some("jp-proxy-02".to_string()),
+            tunnel_security: None,
+            tunnel_encryption_key: None,
         }));
         app.active_tab = 1;
 
@@ -1245,6 +1334,8 @@ mod tests {
             aether_url: "https://aether-2.example.com".to_string(),
             management_token: "ae_test_2".to_string(),
             node_name: Some("jp-proxy-02".to_string()),
+            tunnel_security: None,
+            tunnel_encryption_key: None,
         }));
         app.active_tab = 0;
 

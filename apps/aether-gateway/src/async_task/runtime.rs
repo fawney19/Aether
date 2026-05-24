@@ -8,7 +8,7 @@ use aether_data_contracts::repository::video_tasks::{
 use aether_usage_runtime::{build_upsert_usage_record_from_event, settle_usage_if_needed};
 use serde_json::{Map, Value};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::log_ids::short_request_id;
 use crate::usage::{UsageEvent, UsageEventData, UsageEventType};
@@ -148,8 +148,20 @@ pub(crate) fn spawn_video_task_poller(state: AppState) -> Option<JoinHandle<()>>
         let mut interval = tokio::time::interval(config.interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
+        let mut deferred_since = None;
         loop {
             interval.tick().await;
+            if state
+                .data
+                .should_defer_maintenance_for_database_pool_pressure(&mut deferred_since)
+            {
+                debug!(
+                    event_name = "video_task_poller_deferred",
+                    log_type = "event",
+                    "gateway video task poller deferred because database pool has no idle reserve"
+                );
+                continue;
+            }
             if let Err(err) = poll_video_tasks_once(&state, config.batch_size).await {
                 warn!(
                     event_name = "video_task_poller_tick_failed",

@@ -2,6 +2,14 @@ use base64::Engine as _;
 
 use crate::formats::id::api_format_uses_body_stream_field;
 
+/// JSON key under which `upstream_is_stream` is written into the AI execution
+/// report context and propagated into usage metadata. Shared by the producer
+/// (`aether-ai-serving::report_context`) and every downstream consumer so that
+/// renames cannot silently desync them — a string-literal mismatch here would
+/// degrade to default values (e.g. assuming streaming) without any compile-time
+/// signal.
+pub const UPSTREAM_IS_STREAM_KEY: &str = "upstream_is_stream";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UpstreamStreamPolicy {
     Auto,

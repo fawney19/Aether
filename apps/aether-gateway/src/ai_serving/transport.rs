@@ -50,6 +50,10 @@ pub(crate) mod vertex {
     pub(crate) use aether_provider_transport::vertex::*;
 }
 
+pub(crate) mod windsurf {
+    pub(crate) use aether_provider_transport::windsurf::*;
+}
+
 pub(crate) use aether_provider_transport::{
     append_transport_diagnostics_to_value, apply_local_body_rules,
     apply_local_body_rules_with_request_headers, apply_local_header_rules,
@@ -69,12 +73,15 @@ pub(crate) use aether_provider_transport::{
     build_standard_plan_fallback_openai_responses_url, build_standard_provider_request_headers,
     build_transport_request_url, build_transport_request_url_for_request_body,
     build_video_create_headers, build_video_create_request_body, build_video_create_upstream_url,
-    candidate_common_transport_skip_reason, candidate_transport_pair_skip_reason,
-    classify_same_format_provider_request_behavior, ensure_upstream_auth_header,
-    gemini_files_transport_unsupported_reason, header_rules_are_locally_supported,
-    header_rules_have_enabled_rules, local_gemini_transport_unsupported_reason_with_network,
+    build_windsurf_cascade_headers, build_windsurf_cascade_request_body,
+    build_windsurf_cascade_upstream_url, candidate_common_transport_skip_reason,
+    candidate_transport_pair_skip_reason, classify_same_format_provider_request_behavior,
+    ensure_upstream_auth_header, gemini_files_transport_unsupported_reason,
+    header_rules_are_locally_supported, header_rules_have_enabled_rules,
+    is_windsurf_provider_transport, local_gemini_transport_unsupported_reason_with_network,
     local_openai_chat_transport_unsupported_reason,
     local_standard_transport_unsupported_reason_with_network,
+    local_windsurf_request_transport_unsupported_reason_with_network,
     openai_image_transport_unsupported_reason, request_conversion_direct_auth,
     request_conversion_enabled_for_transport, request_conversion_transport_supported,
     request_conversion_transport_unsupported_reason, request_pair_allowed_for_transport,
@@ -97,4 +104,5 @@ pub(crate) use aether_provider_transport::{
     StandardPlanFallbackHeadersInput, StandardProviderRequestHeaders,
     StandardProviderRequestHeadersInput, TransportRequestBodySemanticsError,
     TransportRequestUrlParams, GROK_CHAT_PATH, GROK_INTERNAL_HEADER, GROK_RATE_LIMITS_PATH,
+    WINDSURF_ENVELOPE_NAME,
 };

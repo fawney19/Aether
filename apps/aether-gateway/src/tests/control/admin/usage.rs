@@ -665,8 +665,14 @@ async fn gateway_handles_admin_usage_aggregation_stats_locally_with_trusted_admi
     let provider_items = provider_payload.as_array().expect("array response");
     assert_eq!(provider_items.len(), 2);
     assert_eq!(provider_items[0]["provider"], "OpenAI");
+    assert_eq!(provider_items[0]["provider_id"], "provider-openai");
+    assert_eq!(provider_items[0]["provider_key"], "provider-openai");
+    assert_eq!(provider_items[0]["provider_identity_source"], "provider_id");
     assert_eq!(provider_items[0]["output_tokens"], 40);
     assert_eq!(provider_items[1]["provider"], "Anthropic");
+    assert_eq!(provider_items[1]["provider_id"], "provider-anthropic");
+    assert_eq!(provider_items[1]["provider_key"], "provider-anthropic");
+    assert_eq!(provider_items[1]["provider_identity_source"], "provider_id");
     assert_eq!(provider_items[1]["output_tokens"], 20);
 
     let api_format_response = admin_request(reqwest::Client::new().get(format!(
@@ -691,6 +697,59 @@ async fn gateway_handles_admin_usage_aggregation_stats_locally_with_trusted_admi
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_usage_aggregation_stats_for_legacy_provider_name_rows() {
+    let legacy_usage = {
+        let mut usage = sample_usage_row(
+            "usage-legacy",
+            "req-legacy",
+            Some("user-1"),
+            Some("key-1"),
+            Some("primary"),
+            "Legacy Provider",
+            "gpt-5",
+            "completed",
+            120,
+            30,
+            0.3,
+            0.36,
+            DAY_1_UNIX_SECS,
+        );
+        usage.provider_id = None;
+        usage.total_tokens = usage.input_tokens;
+        usage
+    };
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![legacy_usage]));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_usage_reader_for_tests(
+                usage_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/aggregation/stats?group_by=provider&limit=10&start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    let items = payload.as_array().expect("array response");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["provider"], "Legacy Provider");
+    assert_eq!(items[0]["provider_id"], serde_json::Value::Null);
+    assert_eq!(items[0]["provider_key"], "Legacy Provider");
+    assert_eq!(items[0]["provider_identity_source"], "legacy_name");
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]

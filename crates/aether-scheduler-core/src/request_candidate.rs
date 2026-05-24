@@ -463,7 +463,7 @@ pub fn build_local_request_candidate_status_record(
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
     let metadata = parse_request_candidate_report_context(report_context)?;
-    let candidate_index = metadata.candidate_index?;
+    let candidate_index = metadata.candidate_index.unwrap_or(0);
     let extra_data = build_report_candidate_extra_data(ReportCandidateExtraDataInput {
         client_api_format: metadata.client_api_format.clone(),
         provider_api_format: metadata.provider_api_format.clone(),
@@ -488,6 +488,7 @@ pub fn build_local_request_candidate_status_record(
         demoted_by: metadata.demoted_by.clone(),
         routing_trace: metadata.routing_trace.clone(),
     });
+    let extra_data = mark_request_candidate_stream_completed_if_success(status, extra_data);
     let created_at_unix_ms = started_at_unix_ms.or(finished_at_unix_ms);
 
     Some(UpsertRequestCandidateRecord {
@@ -568,7 +569,7 @@ pub fn build_report_request_candidate_status_record(
         error_message,
         latency_ms,
         concurrent_requests: None,
-        extra_data: slot.extra_data,
+        extra_data: mark_request_candidate_stream_completed_if_success(status, slot.extra_data),
         required_capabilities: None,
         created_at_unix_ms: Some(created_at_unix_ms),
         started_at_unix_ms,
@@ -827,6 +828,23 @@ fn build_report_candidate_extra_data(input: ReportCandidateExtraDataInput) -> Op
         extra_data.insert("routing_trace".to_string(), routing_trace);
     }
     (!extra_data.is_empty()).then_some(Value::Object(extra_data))
+}
+
+fn mark_request_candidate_stream_completed_if_success(
+    status: RequestCandidateStatus,
+    extra_data: Option<Value>,
+) -> Option<Value> {
+    if status != RequestCandidateStatus::Success {
+        return extra_data;
+    }
+
+    let mut object = match extra_data {
+        Some(Value::Object(object)) => object,
+        Some(other) => return Some(other),
+        None => Map::new(),
+    };
+    object.insert("stream_completed".to_string(), Value::Bool(true));
+    Some(Value::Object(object))
 }
 
 fn merge_request_candidate_extra_data(
@@ -1295,6 +1313,53 @@ mod tests {
         assert_eq!(record.finished_at_unix_ms, Some(123));
         assert_eq!(record.created_at_unix_ms, Some(123));
         assert_eq!(record.status, RequestCandidateStatus::Success);
+        assert_eq!(
+            record
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("stream_completed")),
+            Some(&json!(true))
+        );
+    }
+
+    #[test]
+    fn local_success_status_marks_stream_completed_for_pending_cleanup_recovery() {
+        let mut plan = sample_plan();
+        plan.candidate_id = Some("cand-1".to_string());
+        let report_context = json!({
+            "request_id": "req-1",
+            "candidate_id": "cand-1",
+            "candidate_index": 0,
+            "retry_index": 0,
+            "user_id": "user-1",
+            "api_key_id": "api-key-1",
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses",
+        });
+
+        let record =
+            build_local_request_candidate_status_record(LocalRequestCandidateStatusRecordInput {
+                plan: &plan,
+                report_context: Some(&report_context),
+                status_update: SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Success,
+                    status_code: Some(200),
+                    error_type: None,
+                    error_message: None,
+                    latency_ms: Some(25),
+                    started_at_unix_ms: Some(1_000),
+                    finished_at_unix_ms: Some(1_025),
+                },
+            })
+            .expect("success status record should build");
+
+        assert_eq!(
+            record
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("stream_completed")),
+            Some(&json!(true))
+        );
     }
 
     #[test]

@@ -1,13 +1,18 @@
 use std::collections::{BTreeMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
 use async_trait::async_trait;
-use sqlx::{mysql::MySqlRow, Row};
+use sqlx::{mysql::MySqlRow, MySql, QueryBuilder, Row};
 
 use super::{
     provider_api_key_usage_is_error, provider_api_key_usage_is_success,
     strip_deprecated_usage_display_fields, usage_can_recover_terminal_failure,
     usage_request_metadata_client_family, InMemoryUsageReadRepository, PendingUsageCleanupSummary,
-    StoredRequestUsageAudit, UpsertUsageRecord, UsageWriteRepository,
+    StoredRequestUsageAudit, StoredUsageDailySummary, StoredUsageDashboardDailyBreakdownRow,
+    StoredUsageDashboardSummary, StoredUsageUserTotals, UpsertUsageRecord, UsageDailyHeatmapQuery,
+    UsageDashboardDailyBreakdownQuery, UsageDashboardSummaryQuery, UsageReadRepository,
+    UsageWriteRepository,
 };
 use crate::driver::mysql::MysqlPool;
 use crate::error::SqlResultExt;
@@ -228,6 +233,467 @@ impl MysqlUsageReadRepository {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(InMemoryUsageReadRepository::seed(items))
     }
+
+    async fn summarize_usage_daily_heatmap_raw_from_range(
+        &self,
+        created_from_unix_secs: u64,
+        created_until_unix_secs: u64,
+        user_id: Option<&str>,
+    ) -> Result<Vec<StoredUsageDailySummary>, DataLayerError> {
+        let mut sql = String::from(
+            r#"
+SELECT
+  DATE_FORMAT(FROM_UNIXTIME(created_at_unix_ms), '%Y-%m-%d') AS date,
+  COUNT(*) AS requests,
+  COALESCE(SUM(
+    GREATEST(COALESCE(input_tokens, 0), 0)
+    + GREATEST(COALESCE(output_tokens, 0), 0)
+    + CASE
+        WHEN COALESCE(cache_creation_input_tokens, 0) = 0
+             AND (COALESCE(cache_creation_ephemeral_5m_input_tokens, 0) + COALESCE(cache_creation_ephemeral_1h_input_tokens, 0)) > 0
+        THEN COALESCE(cache_creation_ephemeral_5m_input_tokens, 0) + COALESCE(cache_creation_ephemeral_1h_input_tokens, 0)
+        ELSE GREATEST(COALESCE(cache_creation_input_tokens, 0), 0)
+      END
+    + GREATEST(COALESCE(cache_read_input_tokens, 0), 0)
+  ), 0) AS total_tokens,
+  COALESCE(SUM(COALESCE(total_cost_usd, 0)), 0) AS total_cost_usd,
+  COALESCE(SUM(COALESCE(actual_total_cost_usd, 0)), 0) AS actual_total_cost_usd
+FROM `usage`
+WHERE created_at_unix_ms >= ?
+  AND created_at_unix_ms < ?
+  AND status NOT IN ('pending', 'streaming')
+  AND provider_name NOT IN ('unknown', 'pending')
+"#,
+        );
+        if user_id.is_some() {
+            sql.push_str("  AND user_id = ?\n");
+        }
+        sql.push_str("GROUP BY date ORDER BY date ASC");
+
+        let mut query = sqlx::query(&sql)
+            .bind(to_i64(created_from_unix_secs, "usage.created_at_unix_ms")?)
+            .bind(to_i64(created_until_unix_secs, "usage.created_at_unix_ms")?);
+        if let Some(user_id) = user_id {
+            query = query.bind(user_id.to_string());
+        }
+        let rows = query.fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter().map(map_mysql_usage_daily_summary).collect()
+    }
+
+    async fn summarize_usage_daily_heatmap_from_daily_aggregates(
+        &self,
+        created_from_unix_secs: u64,
+        created_until_unix_secs: u64,
+        user_id: Option<&str>,
+    ) -> Result<Vec<StoredUsageDailySummary>, DataLayerError> {
+        let rows = if let Some(user_id) = user_id {
+            sqlx::query(
+                r#"
+SELECT
+  DATE_FORMAT(FROM_UNIXTIME(`date`), '%Y-%m-%d') AS date,
+  total_requests AS requests,
+  input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens AS total_tokens,
+  total_cost AS total_cost_usd,
+  total_cost AS actual_total_cost_usd
+FROM stats_user_daily
+WHERE user_id = ?
+  AND `date` >= ?
+  AND `date` < ?
+  AND total_requests > 0
+ORDER BY `date` ASC
+"#,
+            )
+            .bind(user_id)
+            .bind(to_i64(created_from_unix_secs, "stats_user_daily.date")?)
+            .bind(to_i64(created_until_unix_secs, "stats_user_daily.date")?)
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?
+        } else {
+            sqlx::query(
+                r#"
+SELECT
+  DATE_FORMAT(FROM_UNIXTIME(`date`), '%Y-%m-%d') AS date,
+  total_requests AS requests,
+  input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens AS total_tokens,
+  total_cost AS total_cost_usd,
+  actual_total_cost AS actual_total_cost_usd
+FROM stats_daily
+WHERE `date` >= ?
+  AND `date` < ?
+  AND total_requests > 0
+ORDER BY `date` ASC
+"#,
+            )
+            .bind(to_i64(created_from_unix_secs, "stats_daily.date")?)
+            .bind(to_i64(created_until_unix_secs, "stats_daily.date")?)
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?
+        };
+
+        rows.iter().map(map_mysql_usage_daily_summary).collect()
+    }
+
+    async fn summarize_usage_daily_heatmap(
+        &self,
+        query: &UsageDailyHeatmapQuery,
+    ) -> Result<Vec<StoredUsageDailySummary>, DataLayerError> {
+        let created_until_unix_secs = usage_current_unix_secs().saturating_add(1);
+        let user_id = query.user_id.as_deref();
+        let mut summaries = BTreeMap::<String, StoredUsageDailySummary>::new();
+
+        for item in self
+            .summarize_usage_daily_heatmap_from_daily_aggregates(
+                query.created_from_unix_secs,
+                created_until_unix_secs,
+                user_id,
+            )
+            .await?
+        {
+            summaries.insert(item.date.clone(), item);
+        }
+        for item in self
+            .summarize_usage_daily_heatmap_raw_from_range(
+                query.created_from_unix_secs,
+                created_until_unix_secs,
+                user_id,
+            )
+            .await?
+        {
+            summaries.entry(item.date.clone()).or_insert(item);
+        }
+
+        Ok(summaries.into_values().collect())
+    }
+
+    async fn summarize_dashboard_usage_from_daily_aggregates(
+        &self,
+        query: &UsageDashboardSummaryQuery,
+    ) -> Result<Option<StoredUsageDashboardSummary>, DataLayerError> {
+        let row = if let Some(user_id) = query.user_id.as_deref() {
+            sqlx::query(
+                r#"
+SELECT
+  COALESCE(SUM(total_requests), 0) AS total_requests,
+  COALESCE(SUM(input_tokens), 0) AS input_tokens,
+  COALESCE(SUM(input_tokens), 0) AS effective_input_tokens,
+  COALESCE(SUM(output_tokens), 0) AS output_tokens,
+  COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS total_tokens,
+  COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+  COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+  COALESCE(SUM(input_tokens + cache_creation_tokens + cache_read_tokens), 0) AS total_input_context,
+  0.0 AS cache_creation_cost_usd,
+  0.0 AS cache_read_cost_usd,
+  COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS total_cost_usd,
+  COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS actual_total_cost_usd,
+  COALESCE(SUM(error_requests), 0) AS error_requests,
+  0.0 AS response_time_sum_ms,
+  0 AS response_time_samples
+FROM stats_user_daily
+WHERE user_id = ?
+  AND `date` >= ?
+  AND `date` < ?
+"#,
+            )
+            .bind(user_id)
+            .bind(to_i64(
+                query.created_from_unix_secs,
+                "stats_user_daily.date",
+            )?)
+            .bind(to_i64(
+                query.created_until_unix_secs,
+                "stats_user_daily.date",
+            )?)
+            .fetch_one(&self.pool)
+            .await
+            .map_sql_err()?
+        } else {
+            sqlx::query(
+                r#"
+SELECT
+  COALESCE(SUM(total_requests), 0) AS total_requests,
+  COALESCE(SUM(input_tokens), 0) AS input_tokens,
+  COALESCE(SUM(input_tokens), 0) AS effective_input_tokens,
+  COALESCE(SUM(output_tokens), 0) AS output_tokens,
+  COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS total_tokens,
+  COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+  COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+  COALESCE(SUM(input_tokens + cache_creation_tokens + cache_read_tokens), 0) AS total_input_context,
+  COALESCE(SUM(COALESCE(cache_creation_cost, 0)), 0) AS cache_creation_cost_usd,
+  COALESCE(SUM(COALESCE(cache_read_cost, 0)), 0) AS cache_read_cost_usd,
+  COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS total_cost_usd,
+  COALESCE(SUM(COALESCE(actual_total_cost, 0)), 0) AS actual_total_cost_usd,
+  COALESCE(SUM(error_requests), 0) AS error_requests,
+  0.0 AS response_time_sum_ms,
+  0 AS response_time_samples
+FROM stats_daily
+WHERE `date` >= ?
+  AND `date` < ?
+"#,
+            )
+            .bind(to_i64(query.created_from_unix_secs, "stats_daily.date")?)
+            .bind(to_i64(query.created_until_unix_secs, "stats_daily.date")?)
+            .fetch_one(&self.pool)
+            .await
+            .map_sql_err()?
+        };
+
+        let total_requests = row_u64(&row, "total_requests")?;
+        if total_requests == 0 {
+            return Ok(None);
+        }
+
+        Ok(Some(StoredUsageDashboardSummary {
+            total_requests,
+            input_tokens: row_u64(&row, "input_tokens")?,
+            effective_input_tokens: row_u64(&row, "effective_input_tokens")?,
+            output_tokens: row_u64(&row, "output_tokens")?,
+            total_tokens: row_u64(&row, "total_tokens")?,
+            cache_creation_tokens: row_u64(&row, "cache_creation_tokens")?,
+            cache_read_tokens: row_u64(&row, "cache_read_tokens")?,
+            total_input_context: row_u64(&row, "total_input_context")?,
+            cache_creation_cost_usd: row.try_get("cache_creation_cost_usd").map_sql_err()?,
+            cache_read_cost_usd: row.try_get("cache_read_cost_usd").map_sql_err()?,
+            total_cost_usd: row.try_get("total_cost_usd").map_sql_err()?,
+            actual_total_cost_usd: row.try_get("actual_total_cost_usd").map_sql_err()?,
+            error_requests: row_u64(&row, "error_requests")?,
+            response_time_sum_ms: row.try_get("response_time_sum_ms").map_sql_err()?,
+            response_time_samples: row_u64(&row, "response_time_samples")?,
+        }))
+    }
+
+    async fn list_dashboard_daily_breakdown_from_daily_aggregates(
+        &self,
+        query: &UsageDashboardDailyBreakdownQuery,
+    ) -> Result<Vec<StoredUsageDashboardDailyBreakdownRow>, DataLayerError> {
+        let rows = if let Some(user_id) = query.user_id.as_deref() {
+            sqlx::query(
+                r#"
+SELECT
+  DATE_FORMAT(FROM_UNIXTIME(`date`), '%Y-%m-%d') AS date,
+  'aggregate' AS model,
+  'aggregate' AS provider,
+  COALESCE(SUM(total_requests), 0) AS requests,
+  COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS total_tokens,
+  COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS total_cost_usd,
+  0.0 AS response_time_sum_ms,
+  0 AS response_time_samples
+FROM stats_user_daily
+WHERE user_id = ?
+  AND `date` >= ?
+  AND `date` < ?
+  AND total_requests > 0
+GROUP BY `date`
+ORDER BY `date` ASC
+"#,
+            )
+            .bind(user_id)
+            .bind(to_i64(
+                query.created_from_unix_secs,
+                "stats_user_daily.date",
+            )?)
+            .bind(to_i64(
+                query.created_until_unix_secs,
+                "stats_user_daily.date",
+            )?)
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?
+        } else {
+            sqlx::query(
+                r#"
+SELECT
+  DATE_FORMAT(FROM_UNIXTIME(`date`), '%Y-%m-%d') AS date,
+  'aggregate' AS model,
+  'aggregate' AS provider,
+  COALESCE(SUM(total_requests), 0) AS requests,
+  COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS total_tokens,
+  COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS total_cost_usd,
+  0.0 AS response_time_sum_ms,
+  0 AS response_time_samples
+FROM stats_daily
+WHERE `date` >= ?
+  AND `date` < ?
+  AND total_requests > 0
+GROUP BY `date`
+ORDER BY `date` ASC
+"#,
+            )
+            .bind(to_i64(query.created_from_unix_secs, "stats_daily.date")?)
+            .bind(to_i64(query.created_until_unix_secs, "stats_daily.date")?)
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?
+        };
+
+        rows.iter()
+            .map(|row| {
+                Ok(StoredUsageDashboardDailyBreakdownRow {
+                    date: row.try_get("date").map_sql_err()?,
+                    model: row.try_get("model").map_sql_err()?,
+                    provider: row.try_get("provider").map_sql_err()?,
+                    requests: row_u64(row, "requests")?,
+                    total_tokens: row_u64(row, "total_tokens")?,
+                    total_cost_usd: row.try_get("total_cost_usd").map_sql_err()?,
+                    response_time_sum_ms: row.try_get("response_time_sum_ms").map_sql_err()?,
+                    response_time_samples: row_u64(row, "response_time_samples")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn summarize_dashboard_usage(
+        &self,
+        query: &UsageDashboardSummaryQuery,
+    ) -> Result<StoredUsageDashboardSummary, DataLayerError> {
+        if let Some(summary) = self
+            .summarize_dashboard_usage_from_daily_aggregates(query)
+            .await?
+        {
+            return Ok(summary);
+        }
+
+        let repository = self.materialize_read_model().await?;
+        <InMemoryUsageReadRepository as UsageReadRepository>::summarize_dashboard_usage(
+            &repository,
+            query,
+        )
+        .await
+    }
+
+    async fn list_dashboard_daily_breakdown(
+        &self,
+        query: &UsageDashboardDailyBreakdownQuery,
+    ) -> Result<Vec<StoredUsageDashboardDailyBreakdownRow>, DataLayerError> {
+        let aggregate_rows = self
+            .list_dashboard_daily_breakdown_from_daily_aggregates(query)
+            .await?;
+        if !aggregate_rows.is_empty() {
+            return Ok(aggregate_rows);
+        }
+
+        let repository = self.materialize_read_model().await?;
+        <InMemoryUsageReadRepository as UsageReadRepository>::list_dashboard_daily_breakdown(
+            &repository,
+            query,
+        )
+        .await
+    }
+
+    async fn summarize_usage_totals_by_user_ids(
+        &self,
+        user_ids: &[String],
+    ) -> Result<Vec<StoredUsageUserTotals>, DataLayerError> {
+        if user_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let unique_user_ids = user_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut totals = BTreeMap::<String, StoredUsageUserTotals>::new();
+        let mut aggregate_cutoffs = BTreeMap::<String, u64>::new();
+
+        let mut aggregate_builder = QueryBuilder::<MySql>::new(
+            r#"
+SELECT
+  user_id,
+  COALESCE(SUM(total_requests), 0) AS request_count,
+  COALESCE(
+    SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),
+    0
+  ) AS total_tokens,
+  MAX(`date`) AS latest_date
+FROM stats_user_daily
+WHERE user_id IN (
+"#,
+        );
+        {
+            let mut separated = aggregate_builder.separated(", ");
+            for user_id in &unique_user_ids {
+                separated.push_bind(user_id.clone());
+            }
+        }
+        aggregate_builder.push(") GROUP BY user_id ORDER BY user_id ASC");
+
+        let aggregate_rows = aggregate_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        for row in aggregate_rows {
+            let user_id: String = row.try_get("user_id").map_sql_err()?;
+            let latest_date = row.try_get::<i64, _>("latest_date").map_sql_err()?.max(0) as u64;
+            aggregate_cutoffs.insert(user_id.clone(), latest_date.saturating_add(86_400));
+            totals.insert(
+                user_id.clone(),
+                StoredUsageUserTotals {
+                    user_id,
+                    request_count: row_u64(&row, "request_count")?,
+                    total_tokens: row_u64(&row, "total_tokens")?,
+                },
+            );
+        }
+
+        let mut raw_builder = QueryBuilder::<MySql>::new(
+            r#"
+SELECT
+  `usage`.user_id,
+  COUNT(*) AS request_count,
+  COALESCE(SUM(GREATEST(COALESCE(`usage`.total_tokens, 0), 0)), 0) AS total_tokens
+FROM `usage`
+JOIN (
+"#,
+        );
+        for (index, user_id) in unique_user_ids.iter().enumerate() {
+            if index > 0 {
+                raw_builder.push(" UNION ALL ");
+            }
+            let cutoff = aggregate_cutoffs.get(user_id).copied().unwrap_or_default();
+            raw_builder
+                .push("SELECT ")
+                .push_bind(user_id.clone())
+                .push(" AS user_id, ")
+                .push_bind(to_i64(cutoff, "usage aggregate cutoff")?)
+                .push(" AS cutoff_unix_secs");
+        }
+        raw_builder.push(
+            r#"
+) AS requested ON requested.user_id = `usage`.user_id
+WHERE `usage`.created_at_unix_ms >= requested.cutoff_unix_secs
+  AND `usage`.status NOT IN ('pending', 'streaming')
+  AND `usage`.provider_name NOT IN ('unknown', 'pending')
+GROUP BY `usage`.user_id
+ORDER BY `usage`.user_id ASC
+"#,
+        );
+
+        let raw_rows = raw_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        for row in raw_rows {
+            let user_id: String = row.try_get("user_id").map_sql_err()?;
+            let entry = totals
+                .entry(user_id.clone())
+                .or_insert_with(|| StoredUsageUserTotals {
+                    user_id,
+                    request_count: 0,
+                    total_tokens: 0,
+                });
+            entry.request_count = entry
+                .request_count
+                .saturating_add(row_u64(&row, "request_count")?);
+            entry.total_tokens = entry
+                .total_tokens
+                .saturating_add(row_u64(&row, "total_tokens")?);
+        }
+
+        Ok(totals.into_values().collect())
+    }
 }
 
 impl_materialized_usage_read_repository!(MysqlUsageReadRepository);
@@ -388,19 +854,28 @@ WHERE provider_api_key_id IS NOT NULL AND provider_api_key_id <> ''
             let error_message: Option<String> = row.try_get("error_message").map_sql_err()?;
             let entry = stats.entry(key_id).or_default();
             entry.request_count += 1;
-            if provider_api_key_usage_is_success(&status, status_code_u16, error_message.as_deref())
-            {
+            let is_success = provider_api_key_usage_is_success(
+                &status,
+                status_code_u16,
+                error_message.as_deref(),
+            );
+            let is_in_flight = matches!(status.as_str(), "pending" | "streaming");
+            if is_success {
                 entry.success_count += 1;
             }
             if provider_api_key_usage_is_error(&status, status_code_u16, error_message.as_deref()) {
                 entry.error_count += 1;
             }
-            entry.total_tokens += row.try_get::<i64, _>("total_tokens").map_sql_err()?;
-            entry.total_cost_usd += row.try_get::<f64, _>("total_cost_usd").map_sql_err()?;
-            entry.total_response_time_ms += row
-                .try_get::<Option<i64>, _>("response_time_ms")
-                .map_sql_err()?
-                .unwrap_or_default();
+            if !is_in_flight {
+                entry.total_tokens += row.try_get::<i64, _>("total_tokens").map_sql_err()?;
+                entry.total_cost_usd += row.try_get::<f64, _>("total_cost_usd").map_sql_err()?;
+            }
+            if is_success {
+                entry.total_response_time_ms += row
+                    .try_get::<Option<i64>, _>("response_time_ms")
+                    .map_sql_err()?
+                    .unwrap_or_default();
+            }
             entry.last_used_at = entry.last_used_at.max(
                 row.try_get::<Option<i64>, _>("updated_at_unix_secs")
                     .map_sql_err()?,
@@ -518,13 +993,20 @@ WHERE request_id = ?
                     continue;
                 }
 
-                let error_message = stale_pending_error_message(&row.status, timeout_minutes);
+                let candidate_info =
+                    latest_failed_candidate_mysql(&mut tx, &row.request_id).await?;
+                let (status_code, error_message) = resolve_stale_pending_failure(
+                    candidate_info.as_ref(),
+                    &row.status,
+                    timeout_minutes,
+                );
+                let status_code_i64 = i64::from(status_code);
                 if row.billing_status == "pending" {
                     sqlx::query(
                         r#"
 UPDATE `usage`
 SET status = 'failed',
-    status_code = 504,
+    status_code = ?,
     error_message = ?,
     billing_status = 'void',
     finalized_at = ?,
@@ -533,6 +1015,7 @@ SET status = 'failed',
 WHERE request_id = ?
 "#,
                     )
+                    .bind(status_code_i64)
                     .bind(&error_message)
                     .bind(to_i64(now_unix_secs, "usage finalized_at")?)
                     .bind(&row.request_id)
@@ -550,11 +1033,12 @@ WHERE request_id = ?
                         r#"
 UPDATE `usage`
 SET status = 'failed',
-    status_code = 504,
+    status_code = ?,
     error_message = ?
 WHERE request_id = ?
 "#,
                     )
+                    .bind(status_code_i64)
                     .bind(&error_message)
                     .bind(&row.request_id)
                     .execute(&mut *tx)
@@ -685,6 +1169,67 @@ ON DUPLICATE KEY UPDATE
 
 fn stale_pending_error_message(status: &str, timeout_minutes: u64) -> String {
     format!("请求超时: 状态 '{status}' 超过 {timeout_minutes} 分钟未完成")
+}
+
+struct FailedCandidateCleanupInfo {
+    status_code: Option<u16>,
+    error_message: Option<String>,
+}
+
+fn resolve_stale_pending_failure(
+    candidate: Option<&FailedCandidateCleanupInfo>,
+    status: &str,
+    timeout_minutes: u64,
+) -> (u16, String) {
+    match candidate {
+        Some(info) => (
+            info.status_code.unwrap_or(502),
+            info.error_message
+                .clone()
+                .unwrap_or_else(|| stale_pending_error_message(status, timeout_minutes)),
+        ),
+        None => (504, stale_pending_error_message(status, timeout_minutes)),
+    }
+}
+
+async fn latest_failed_candidate_mysql(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    request_id: &str,
+) -> Result<Option<FailedCandidateCleanupInfo>, DataLayerError> {
+    let row = sqlx::query(
+        r#"
+SELECT status_code, error_message
+FROM request_candidates
+WHERE request_id = ?
+  AND status IN ('failed', 'cancelled')
+ORDER BY
+  COALESCE(finished_at, started_at, created_at) DESC,
+  retry_index DESC,
+  candidate_index DESC
+LIMIT 1
+"#,
+    )
+    .bind(request_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_sql_err()?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let status_code = row
+        .try_get::<Option<i64>, _>("status_code")
+        .map_sql_err()?
+        .and_then(|value| u16::try_from(value).ok());
+    let error_message = row
+        .try_get::<Option<String>, _>("error_message")
+        .map_sql_err()?
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    Ok(Some(FailedCandidateCleanupInfo {
+        status_code,
+        error_message,
+    }))
 }
 
 fn bind_upsert<'q>(
@@ -881,7 +1426,7 @@ fn usage_upstream_is_stream(usage: &UpsertUsageRecord) -> bool {
         .request_metadata
         .as_ref()
         .and_then(serde_json::Value::as_object)
-        .and_then(|metadata| metadata.get("upstream_is_stream"))
+        .and_then(|metadata| metadata.get(UPSTREAM_IS_STREAM_KEY))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or_else(|| usage.is_stream.unwrap_or(false))
 }
@@ -895,7 +1440,7 @@ fn merge_usage_stream_metadata(metadata: &mut Option<serde_json::Value>, upstrea
         return;
     };
     object
-        .entry("upstream_is_stream")
+        .entry(UPSTREAM_IS_STREAM_KEY)
         .or_insert(serde_json::Value::Bool(upstream));
 }
 
@@ -919,6 +1464,25 @@ fn row_u64(row: &MySqlRow, field: &str) -> Result<u64, DataLayerError> {
     u64::try_from(value).map_err(|_| DataLayerError::UnexpectedValue(format!("{field} negative")))
 }
 
+fn map_mysql_usage_daily_summary(
+    row: &MySqlRow,
+) -> Result<StoredUsageDailySummary, DataLayerError> {
+    Ok(StoredUsageDailySummary {
+        date: row.try_get("date").map_sql_err()?,
+        requests: row_u64(row, "requests")?,
+        total_tokens: row_u64(row, "total_tokens")?,
+        total_cost_usd: row.try_get("total_cost_usd").map_sql_err()?,
+        actual_total_cost_usd: row.try_get("actual_total_cost_usd").map_sql_err()?,
+    })
+}
+
+fn usage_current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{MysqlUsageReadRepository, MysqlUsageWriteRepository};
@@ -937,6 +1501,34 @@ mod tests {
         );
 
         let _repository = MysqlUsageWriteRepository::new(pool);
+    }
+
+    #[test]
+    fn mysql_usage_daily_heatmap_reads_imported_daily_aggregates() {
+        let source = include_str!("mysql.rs");
+        assert!(source.contains("summarize_usage_daily_heatmap_from_daily_aggregates"));
+        assert!(source.contains("FROM stats_daily"));
+        assert!(source.contains("FROM stats_user_daily"));
+        assert!(source.contains("summaries.entry(item.date.clone()).or_insert(item)"));
+    }
+
+    #[test]
+    fn mysql_usage_totals_by_user_ids_reads_imported_user_daily_aggregates() {
+        let source = include_str!("mysql.rs");
+        assert!(source.contains("async fn summarize_usage_totals_by_user_ids"));
+        assert!(source.contains("FROM stats_user_daily"));
+        assert!(source.contains("MAX(`date`) AS latest_date"));
+        assert!(source.contains("requested.cutoff_unix_secs"));
+    }
+
+    #[test]
+    fn mysql_dashboard_reads_imported_daily_aggregates() {
+        let source = include_str!("mysql.rs");
+        assert!(source.contains("summarize_dashboard_usage_from_daily_aggregates"));
+        assert!(source.contains("list_dashboard_daily_breakdown_from_daily_aggregates"));
+        assert!(source.contains("FROM stats_daily"));
+        assert!(source.contains("FROM stats_user_daily"));
+        assert!(source.contains("'aggregate' AS model"));
     }
 
     #[tokio::test]

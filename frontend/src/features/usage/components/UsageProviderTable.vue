@@ -46,7 +46,7 @@
           </TableRow>
           <TableRow
             v-for="provider in data"
-            :key="provider.provider"
+            :key="provider.providerKey ?? provider.providerId ?? provider.provider"
           >
             <TableCell class="font-medium py-2 px-2">
               {{ provider.provider }}

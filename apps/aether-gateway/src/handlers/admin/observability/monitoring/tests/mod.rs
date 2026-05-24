@@ -1194,6 +1194,7 @@ async fn admin_monitoring_redis_keys_returns_local_payload_without_redis() {
     assert_eq!(payload["data"]["available"], json!(true));
     assert_eq!(payload["data"]["backend"], json!("memory"));
     assert_eq!(payload["data"]["total_keys"], json!(0));
+    assert_eq!(payload["data"]["diagnostics"], serde_json::Value::Null);
 }
 
 #[tokio::test]
@@ -1236,7 +1237,8 @@ async fn admin_monitoring_circuit_history_returns_local_payload() {
                 "openai:chat": {
                     "open": true,
                     "open_at": "2026-03-30T12:00:00+00:00",
-                    "next_probe_at": "2026-03-30T12:05:00+00:00",
+                    "next_probe_at": "2099-03-30T12:05:00+00:00",
+                    "recovery_seconds": 300,
                     "reason": "错误率过高"
                 }
             })),

@@ -275,6 +275,10 @@ mod tests {
             "gemini:generate_content"
         ));
         assert!(!api_format_alias_matches("openai:cli", "openai:responses"));
+        assert_eq!(
+            normalize_api_format_alias("openai:compact"),
+            "openai:compact"
+        );
     }
 
     #[test]

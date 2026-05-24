@@ -18,6 +18,7 @@ use super::heartbeat::HeartbeatHandle;
 use super::protocol::{decompress_if_gzip, Frame, MsgType, RequestMeta};
 use super::stream_handler;
 use super::writer::FrameSender;
+use aether_contracts::tunnel_security::SecureFrameCodec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamDispatchStatus {
@@ -27,13 +28,32 @@ enum StreamDispatchStatus {
 }
 
 /// Run the dispatcher loop, reading from the WebSocket stream.
+#[allow(dead_code)]
 pub async fn run<S>(
+    state: Arc<AppState>,
+    server: Arc<ServerContext>,
+    ws_stream: S,
+    frame_tx: FrameSender,
+    heartbeat: HeartbeatHandle,
+    drain: watch::Receiver<bool>,
+) -> Result<(), anyhow::Error>
+where
+    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Unpin
+        + Send
+        + 'static,
+{
+    run_with_security(state, server, ws_stream, frame_tx, heartbeat, drain, None).await
+}
+
+pub async fn run_with_security<S>(
     state: Arc<AppState>,
     server: Arc<ServerContext>,
     mut ws_stream: S,
     frame_tx: FrameSender,
     heartbeat: HeartbeatHandle,
     mut drain: watch::Receiver<bool>,
+    security: Option<Arc<SecureFrameCodec>>,
 ) -> Result<(), anyhow::Error>
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
@@ -129,6 +149,19 @@ where
                     .record_error("frame_decode_error", &e.to_string());
                 continue;
             }
+        };
+        let frame = match security.as_deref() {
+            Some(codec) => match codec.decrypt_frame(frame) {
+                Ok(frame) => frame,
+                Err(e) => {
+                    warn!(error = %e, "failed to decrypt secure tunnel frame");
+                    server
+                        .tunnel_metrics
+                        .record_error("secure_frame_decrypt_error", &e.to_string());
+                    break None;
+                }
+            },
+            None => frame,
         };
 
         match frame.msg_type {

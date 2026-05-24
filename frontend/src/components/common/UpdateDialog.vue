@@ -1,7 +1,7 @@
 <template>
   <Dialog
     v-model="isOpen"
-    size="md"
+    size="lg"
     title=""
   >
     <div class="flex flex-col items-center text-center py-2">
@@ -11,66 +11,174 @@
         class-name="text-primary"
       />
 
-      <!-- Title -->
-      <h2 class="text-xl font-semibold text-foreground mt-4 mb-2">
-        发现新版本
-      </h2>
-
-      <!-- Version Info -->
-      <div class="mx-auto mb-2 w-full max-w-sm rounded-lg bg-muted/20 px-4 py-3 text-center">
-        <p class="text-xs text-muted-foreground">
-          最新版本
+      <!-- Reconnecting State -->
+      <template v-if="updatePhase === 'reconnecting'">
+        <h2 class="text-xl font-semibold text-foreground mt-4 mb-2">
+          正在重启服务
+        </h2>
+        <p class="text-sm text-muted-foreground max-w-xs mt-2 mb-2">
+          服务正在切换版本并重启，请稍候...
         </p>
-        <p class="mt-1 break-all font-mono text-base font-semibold text-primary">
-          {{ formatDisplayVersion(latestVersion) }}
-        </p>
-      </div>
+        <div class="flex items-center gap-2 text-primary mt-2 mb-4">
+          <svg
+            class="animate-spin h-5 w-5"
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 24 24"
+          >
+            <circle
+              class="opacity-25"
+              cx="12"
+              cy="12"
+              r="10"
+              stroke="currentColor"
+              stroke-width="4"
+            />
+            <path
+              class="opacity-75"
+              fill="currentColor"
+              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+            />
+          </svg>
+          <span class="text-sm font-medium">
+            {{ reconnectMessage }}
+          </span>
+        </div>
+      </template>
 
-      <!-- Release Notes -->
-      <div
-        v-if="releaseNotes"
-        class="w-full mt-3 mb-4"
-      >
+      <!-- Normal Update State -->
+      <template v-else>
+        <h2 class="text-xl font-semibold text-foreground mt-4 mb-2">
+          {{ dialogTitleText }}
+        </h2>
+
+        <!-- Version Info -->
+        <div class="mx-auto mb-2 w-full max-w-sm rounded-lg bg-muted/20 px-4 py-3 text-center">
+          <p class="text-xs text-muted-foreground">
+            {{ versionLabelText }}
+          </p>
+          <p class="mt-1 break-all font-mono text-base font-semibold text-primary">
+            {{ formatDisplayVersion(latestVersion) }}
+          </p>
+        </div>
+
+        <!-- Release Notes -->
         <div
-          v-if="publishedAt"
-          class="text-left text-xs text-muted-foreground mb-2"
+          v-if="displayReleaseNotes"
+          class="w-full mt-3 mb-4"
         >
-          发布于 {{ formattedPublishedAt }}
+          <div
+            v-if="publishedAt"
+            class="mb-2 text-left text-xs text-muted-foreground"
+          >
+            发布于 {{ formattedPublishedAt }}
+          </div>
+          <div class="mb-2 text-left text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground/80">
+            更新内容
+          </div>
+          <!-- eslint-disable vue/no-v-html -->
+          <div
+            class="max-h-64 w-full overflow-y-auto rounded-xl border border-border/60 bg-muted/25 px-4 py-3 text-left text-sm leading-6 text-foreground/90 shadow-inner shadow-black/[0.02] max-w-none prose prose-sm dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-headings:font-semibold prose-headings:text-foreground prose-h3:text-sm prose-p:my-2 prose-ul:my-2 prose-ul:list-disc prose-ul:pl-5 prose-li:my-1 prose-li:marker:text-primary prose-a:text-primary prose-strong:text-foreground prose-code:rounded prose-code:bg-muted prose-code:px-1 prose-code:py-0.5"
+            v-html="renderedReleaseNotes"
+          />
+          <!-- eslint-enable vue/no-v-html -->
         </div>
-        <div class="text-left text-xs font-medium text-muted-foreground mb-2">
-          更新内容
-        </div>
-        <!-- eslint-disable vue/no-v-html -->
-        <div
-          class="w-full max-h-48 overflow-y-auto rounded-lg bg-muted/50 p-3 text-left text-sm text-foreground/80 prose prose-sm dark:prose-invert prose-p:my-1 prose-ul:my-1 prose-li:my-0"
-          v-html="renderedReleaseNotes"
-        />
-        <!-- eslint-enable vue/no-v-html -->
-      </div>
 
-      <!-- Description (fallback when no release notes) -->
-      <p
-        v-else
-        class="text-sm text-muted-foreground max-w-xs mt-2 mb-4"
-      >
-        新版本已发布，建议更新以获得最新功能和安全修复
-      </p>
+        <!-- Description (fallback when no release notes) -->
+        <p
+          v-else
+          class="text-sm text-muted-foreground max-w-xs mt-2 mb-4"
+        >
+          {{ fallbackDescriptionText }}
+        </p>
+
+        <p
+          v-if="updatePhase === 'restart'"
+          class="mt-1 text-xs text-primary"
+        >
+          更新包已下载，点击"立即重启"完成安装
+        </p>
+
+        <div
+          v-if="updating && updatePhase === 'download'"
+          class="mt-3 w-full max-w-sm"
+        >
+          <div class="mb-1.5 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+            <span class="truncate">{{ downloadProgressText }}</span>
+            <span
+              v-if="downloadProgressPercent !== null"
+              class="shrink-0 font-mono text-primary"
+            >
+              {{ downloadProgressPercent }}%
+            </span>
+          </div>
+          <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+            <div
+              class="h-full rounded-full bg-primary transition-all duration-300"
+              :style="{ width: progressBarWidth }"
+            />
+          </div>
+        </div>
+
+        <!-- Source Build Hint -->
+        <p
+          v-if="!canApplyUpdate"
+          class="mt-1 text-xs text-muted-foreground"
+        >
+          {{ updateBlockerText }}
+        </p>
+        <div
+          v-if="isDockerUpdate && dockerUpdateCommand"
+          class="mt-3 w-full max-w-sm rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-left"
+        >
+          <p class="text-xs text-muted-foreground">
+            在 docker-compose.yml 所在目录执行
+          </p>
+          <code class="mt-1 block break-all rounded bg-background/70 px-2 py-1.5 font-mono text-xs text-foreground">
+            {{ dockerUpdateCommand }}
+          </code>
+        </div>
+      </template>
     </div>
 
     <template #footer>
-      <div class="flex w-full gap-3">
+      <div
+        v-if="updatePhase !== 'reconnecting'"
+        class="flex w-full gap-3"
+      >
         <Button
           variant="outline"
           class="flex-1"
+          :disabled="updating || rollingBack"
           @click="handleLater"
         >
           稍后提醒
         </Button>
         <Button
+          v-if="rollbackAvailable"
+          variant="outline"
           class="flex-1"
+          :disabled="updating || rollingBack"
+          @click="handleRollback"
+        >
+          {{ rollingBack ? '回滚中...' : '回滚上一版本' }}
+        </Button>
+        <Button
+          v-else
+          variant="outline"
+          class="flex-1"
+          :disabled="updating || rollingBack"
           @click="handleViewRelease"
         >
-          查看更新
+          {{ releaseLinkLabelText }}
+        </Button>
+        <Button
+          v-if="updateSupported"
+          class="flex-1"
+          :disabled="updating || rollingBack || !canApplyUpdate"
+          @click="handleApplyUpdate"
+        >
+          {{ actionButtonLabel }}
         </Button>
       </div>
     </template>
@@ -83,8 +191,11 @@ import { Dialog } from '@/components/ui'
 import Button from '@/components/ui/button.vue'
 import HeaderLogo from '@/components/HeaderLogo.vue'
 import { formatDisplayVersion } from '@/utils/version'
+import { normalizeReleaseNotesForDisplay } from '@/utils/releaseNotes'
+import { sanitizeMarkdown } from '@/utils/sanitize'
 import { marked } from 'marked'
-import DOMPurify from 'dompurify'
+
+const SOURCE_BUILD_UPDATE_HINT = '当前为源码构建，请使用 git pull 后重新编译。'
 
 const props = defineProps<{
   modelValue: boolean
@@ -93,13 +204,68 @@ const props = defineProps<{
   releaseUrl: string | null
   releaseNotes: string | null
   publishedAt: string | null
+  dialogTitle?: string
+  versionLabel?: string
+  releaseLinkLabel?: string
+  updatePhase?: 'download' | 'restart' | 'reconnecting'
+  updating?: boolean
+  updateSupported?: boolean
+  updateStrategy?: string
+  updatable?: boolean
+  updateBlocker?: string | null
+  dockerUpdateCommand?: string | null
+  reconnectMessage?: string
+  rollbackAvailable?: boolean
+  rollingBack?: boolean
+  downloadProgressText?: string | null
+  downloadProgressPercent?: number | null
 }>()
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
+  applyUpdate: []
+  rollback: []
 }>()
 
 const isOpen = ref(props.modelValue)
+const updating = computed(() => props.updating ?? false)
+const updatePhase = computed(() => props.updatePhase ?? 'download')
+const updateSupported = computed(() => props.updateSupported ?? true)
+const updatable = computed(() => props.updatable ?? true)
+const canApplyUpdate = computed(() => updateSupported.value && updatable.value)
+const updateStrategy = computed(() => props.updateStrategy ?? 'manual')
+const isDockerUpdate = computed(() => updateStrategy.value === 'docker' && !canApplyUpdate.value)
+const dockerUpdateCommand = computed(() => props.dockerUpdateCommand || '')
+const updateBlockerText = computed(() => {
+  if (!updateSupported.value) return props.updateBlocker || SOURCE_BUILD_UPDATE_HINT
+  return props.updateBlocker || '当前版本暂不支持在线更新'
+})
+const reconnectMessage = computed(() => props.reconnectMessage ?? '等待服务恢复...')
+const rollbackAvailable = computed(() => props.rollbackAvailable ?? false)
+const rollingBack = computed(() => props.rollingBack ?? false)
+const downloadProgressText = computed(() => props.downloadProgressText || '正在下载更新包...')
+const dialogTitleText = computed(() => props.dialogTitle ?? '发现新版本')
+const versionLabelText = computed(() => props.versionLabel ?? '最新版本')
+const releaseLinkLabelText = computed(() => props.releaseLinkLabel ?? '查看发布')
+const fallbackDescriptionText = computed(() => {
+  if (!canApplyUpdate.value) return updateBlockerText.value
+  return '新版本已发布，建议更新以获得最新功能和安全修复'
+})
+const downloadProgressPercent = computed(() => {
+  const value = props.downloadProgressPercent
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.min(100, Math.round(value)))
+    : null
+})
+const progressBarWidth = computed(() => {
+  return downloadProgressPercent.value === null ? '35%' : `${downloadProgressPercent.value}%`
+})
+const actionButtonLabel = computed(() => {
+  if (updating.value) {
+    return updatePhase.value === 'restart' ? '重启中...' : '下载中...'
+  }
+  return updatePhase.value === 'restart' ? '立即重启' : '立即更新'
+})
 
 watch(() => props.modelValue, (val) => {
   isOpen.value = val
@@ -109,7 +275,6 @@ watch(isOpen, (val) => {
   emit('update:modelValue', val)
 })
 
-// 格式化发布时间
 const formattedPublishedAt = computed(() => {
   if (!props.publishedAt) return ''
   try {
@@ -124,15 +289,20 @@ const formattedPublishedAt = computed(() => {
   }
 })
 
-// 渲染 Markdown 格式的 Release Notes（使用 DOMPurify 防止 XSS）
+const displayReleaseNotes = computed(() => {
+  return normalizeReleaseNotesForDisplay(props.releaseNotes)
+})
+
 const renderedReleaseNotes = computed(() => {
-  if (!props.releaseNotes) return ''
+  if (!displayReleaseNotes.value) return ''
   try {
-    const html = marked.parse(props.releaseNotes, { async: false }) as string
-    return DOMPurify.sanitize(html)
+    const html = marked.parse(displayReleaseNotes.value, {
+      async: false,
+      breaks: true
+    }) as string
+    return sanitizeMarkdown(html)
   } catch {
-    // 如果 markdown 解析失败，返回原始文本（转义 HTML）
-    return props.releaseNotes
+    return displayReleaseNotes.value
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
@@ -141,11 +311,10 @@ const renderedReleaseNotes = computed(() => {
 })
 
 function handleLater() {
-  // 记录忽略的版本，24小时内不再提醒
   const ignoreKey = 'aether_update_ignore'
   const ignoreData = {
     version: props.latestVersion,
-    until: Date.now() + 24 * 60 * 60 * 1000 // 24小时
+    until: Date.now() + 24 * 60 * 60 * 1000
   }
   localStorage.setItem(ignoreKey, JSON.stringify(ignoreData))
   isOpen.value = false
@@ -156,5 +325,14 @@ function handleViewRelease() {
     window.open(props.releaseUrl, '_blank')
   }
   isOpen.value = false
+}
+
+function handleApplyUpdate() {
+  if (!canApplyUpdate.value) return
+  emit('applyUpdate')
+}
+
+function handleRollback() {
+  emit('rollback')
 }
 </script>

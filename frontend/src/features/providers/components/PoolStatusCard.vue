@@ -205,6 +205,7 @@ import { RefreshCw, RotateCcw } from 'lucide-vue-next'
 import { getPoolStatus, clearPoolCooldown, resetPoolCost } from '@/api/endpoints/pool'
 import type { PoolStatusResponse } from '@/api/endpoints/pool'
 import { parseApiError } from '@/utils/errorParser'
+import { formatTokens } from '@/utils/format'
 import { useToast } from '@/composables/useToast'
 
 import Card from '@/components/ui/card.vue'
@@ -285,12 +286,6 @@ function formatTTL(seconds: number): string {
   const m = Math.floor(seconds / 60)
   const s = seconds % 60
   return m > 0 ? `${m}m ${s}s` : `${s}s`
-}
-
-function formatTokens(tokens: number): string {
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`
-  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}K`
-  return String(tokens)
 }
 
 function formatEmaHeat(value: number): string {

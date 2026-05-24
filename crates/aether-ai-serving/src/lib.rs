@@ -22,6 +22,7 @@ pub mod request_body_diagnostics;
 pub mod runtime_miss;
 pub mod surface_spec;
 
+pub use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
 pub use aether_pool_core::{
     normalize_enabled_pool_presets, run_pool_scheduler, PoolCandidateFacts, PoolCandidateInput,
     PoolCandidateOrchestration, PoolMemberSignals, PoolRuntimeState, PoolScheduledCandidate,

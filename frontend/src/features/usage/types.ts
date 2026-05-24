@@ -41,6 +41,9 @@ export interface EnhancedModelStatsItem extends ModelStatsItem {
 
 // 提供商统计
 export interface ProviderStatsItem {
+  providerId?: string | null
+  providerKey?: string
+  providerIdentitySource?: 'provider_id' | 'legacy_name'
   provider: string
   requests: number
   totalTokens: number

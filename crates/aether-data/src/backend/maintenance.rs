@@ -8,7 +8,9 @@ use crate::maintenance::{
     WalletDailyUsageAggregationInput, WalletDailyUsageAggregationResult,
 };
 use crate::repository::system::{
-    AdminSystemPurgeSummary, AdminSystemPurgeTarget, AdminSystemStats, StoredSystemConfigEntry,
+    AdminSystemPurgeSummary, AdminSystemPurgeTarget, AdminSystemStats,
+    AdminSystemUsageAggregateImportMode, AdminSystemUsageAggregateImportSummary,
+    AdminSystemUsageAggregateSnapshot, StoredSystemConfigEntry,
 };
 use crate::DataLayerError;
 use sqlx::migrate::MigrateError;
@@ -192,6 +194,37 @@ impl DataBackends {
         match self.sql_backend() {
             Some(backend) => backend.purge_admin_system_data(target).await,
             None => Ok(AdminSystemPurgeSummary::default()),
+        }
+    }
+
+    pub async fn export_admin_system_usage_aggregates(
+        &self,
+    ) -> Result<AdminSystemUsageAggregateSnapshot, DataLayerError> {
+        match self.sql_backend() {
+            Some(backend) => backend.export_admin_system_usage_aggregates().await,
+            None => Ok(AdminSystemUsageAggregateSnapshot::default()),
+        }
+    }
+
+    pub async fn import_admin_system_usage_aggregates(
+        &self,
+        snapshot: &AdminSystemUsageAggregateSnapshot,
+        user_id_map: &std::collections::BTreeMap<String, String>,
+        api_key_id_map: &std::collections::BTreeMap<String, String>,
+        mode: AdminSystemUsageAggregateImportMode,
+    ) -> Result<AdminSystemUsageAggregateImportSummary, DataLayerError> {
+        match self.sql_backend() {
+            Some(backend) => {
+                backend
+                    .import_admin_system_usage_aggregates(
+                        snapshot,
+                        user_id_map,
+                        api_key_id_map,
+                        mode,
+                    )
+                    .await
+            }
+            None => Ok(AdminSystemUsageAggregateImportSummary::default()),
         }
     }
 
@@ -502,6 +535,57 @@ impl<'a> SqlBackendRef<'a> {
             Self::Postgres(postgres) => postgres.purge_admin_system_data(target).await,
             Self::Mysql(mysql) => mysql.purge_admin_system_data(target).await,
             Self::Sqlite(sqlite) => sqlite.purge_admin_system_data(target).await,
+        }
+    }
+
+    async fn export_admin_system_usage_aggregates(
+        self,
+    ) -> Result<AdminSystemUsageAggregateSnapshot, DataLayerError> {
+        match self {
+            Self::Postgres(postgres) => postgres.export_admin_system_usage_aggregates().await,
+            Self::Mysql(mysql) => mysql.export_admin_system_usage_aggregates().await,
+            Self::Sqlite(sqlite) => sqlite.export_admin_system_usage_aggregates().await,
+        }
+    }
+
+    async fn import_admin_system_usage_aggregates(
+        self,
+        snapshot: &AdminSystemUsageAggregateSnapshot,
+        user_id_map: &std::collections::BTreeMap<String, String>,
+        api_key_id_map: &std::collections::BTreeMap<String, String>,
+        mode: AdminSystemUsageAggregateImportMode,
+    ) -> Result<AdminSystemUsageAggregateImportSummary, DataLayerError> {
+        match self {
+            Self::Postgres(postgres) => {
+                postgres
+                    .import_admin_system_usage_aggregates(
+                        snapshot,
+                        user_id_map,
+                        api_key_id_map,
+                        mode,
+                    )
+                    .await
+            }
+            Self::Mysql(mysql) => {
+                mysql
+                    .import_admin_system_usage_aggregates(
+                        snapshot,
+                        user_id_map,
+                        api_key_id_map,
+                        mode,
+                    )
+                    .await
+            }
+            Self::Sqlite(sqlite) => {
+                sqlite
+                    .import_admin_system_usage_aggregates(
+                        snapshot,
+                        user_id_map,
+                        api_key_id_map,
+                        mode,
+                    )
+                    .await
+            }
         }
     }
 

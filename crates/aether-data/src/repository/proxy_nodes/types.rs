@@ -485,6 +485,34 @@ pub fn normalize_proxy_metadata(
     }
 }
 
+pub fn preserve_proxy_metadata_tunnel_security(
+    previous_proxy_metadata: Option<&Value>,
+    next_proxy_metadata: Option<Value>,
+) -> Option<Value> {
+    let Some(tunnel_security) = previous_proxy_metadata
+        .and_then(|value| value.get("tunnel_security"))
+        .filter(|value| value.is_object())
+        .cloned()
+    else {
+        return next_proxy_metadata;
+    };
+
+    match next_proxy_metadata {
+        Some(Value::Object(mut metadata)) => {
+            metadata
+                .entry("tunnel_security".to_string())
+                .or_insert(tunnel_security);
+            Some(Value::Object(metadata))
+        }
+        Some(value) => Some(value),
+        None => {
+            let mut metadata = serde_json::Map::new();
+            metadata.insert("tunnel_security".to_string(), tunnel_security);
+            Some(Value::Object(metadata))
+        }
+    }
+}
+
 fn extract_tunnel_metrics_counters(
     proxy_metadata: Option<&Value>,
 ) -> Option<TunnelMetricsCounters> {
@@ -772,10 +800,10 @@ mod tests {
 
     use super::{
         bucket_start_unix_secs, build_tunnel_error_event_detail, build_tunnel_metrics_sample,
-        normalize_proxy_node_scheduling_state, proxy_node_accepts_new_tunnels,
-        proxy_reported_version, reconcile_remote_config_after_heartbeat,
-        remote_config_scheduling_state, remote_config_upgrade_target, ProxyNodeMetricsStep,
-        StoredProxyNode,
+        normalize_proxy_node_scheduling_state, preserve_proxy_metadata_tunnel_security,
+        proxy_node_accepts_new_tunnels, proxy_reported_version,
+        reconcile_remote_config_after_heartbeat, remote_config_scheduling_state,
+        remote_config_upgrade_target, ProxyNodeMetricsStep, StoredProxyNode,
     };
 
     #[test]
@@ -931,6 +959,40 @@ mod tests {
         assert_eq!(
             build_tunnel_error_event_detail(&sample.recent_error_events[1]),
             "[newer] WebSocket write failed because the peer closed or reset the connection"
+        );
+    }
+
+    #[test]
+    fn preserves_secure_tunnel_metadata_across_heartbeat_metadata_refresh() {
+        let previous = json!({
+            "version": "1.0.0",
+            "tunnel_security": {
+                "mode": "non_tls_required",
+                "encryption_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+            }
+        });
+        let next = json!({
+            "version": "1.0.1",
+            "tunnel_metrics": {"connect_successes": 1}
+        });
+
+        let merged = preserve_proxy_metadata_tunnel_security(Some(&previous), Some(next))
+            .expect("metadata should remain present");
+        assert_eq!(
+            merged
+                .pointer("/tunnel_security/mode")
+                .and_then(|v| v.as_str()),
+            Some("non_tls_required")
+        );
+        assert_eq!(
+            merged
+                .pointer("/tunnel_security/encryption_key")
+                .and_then(|v| v.as_str()),
+            Some("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=")
+        );
+        assert_eq!(
+            merged.pointer("/tunnel_metrics/connect_successes"),
+            Some(&json!(1))
         );
     }
 

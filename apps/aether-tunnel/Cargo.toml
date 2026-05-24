@@ -1,6 +1,6 @@
 [package]
 name = "aether-tunnel"
-version = "0.3.12"
+version = "0.3.13"
 edition = "2021"
 description = "Tunnel agent for Aether"
 
@@ -41,6 +41,7 @@ tar = "0.4"
 socket2 = { version = "0.5", features = ["all"] }
 tower-service = "0.3"
 webpki-roots = "0.26"
+uuid.workspace = true
 
 [dev-dependencies]
 aether-gateway.workspace = true

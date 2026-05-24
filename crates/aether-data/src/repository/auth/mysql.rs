@@ -34,7 +34,8 @@ SELECT
   api_keys.expires_at AS api_key_expires_at_unix_secs,
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
-  api_keys.allowed_models AS api_key_allowed_models
+  api_keys.allowed_models AS api_key_allowed_models,
+  api_keys.ip_rules AS api_key_ip_rules
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 "#;
@@ -49,6 +50,7 @@ SELECT
   api_keys.allowed_providers,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
+  api_keys.ip_rules,
   api_keys.rate_limit,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
@@ -112,12 +114,12 @@ impl MysqlAuthApiKeyReadRepository {
             r#"
 INSERT INTO api_keys (
   id, user_id, key_hash, key_encrypted, name, allowed_providers,
-  allowed_api_formats, allowed_models, rate_limit, concurrent_limit,
+  allowed_api_formats, allowed_models, ip_rules, rate_limit, concurrent_limit,
   force_capabilities, feature_settings, is_active, expires_at, auto_delete_on_expiry,
   total_requests, total_tokens, total_cost_usd, is_standalone,
   created_at, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#,
         )
         .bind(&record.api_key_id)
@@ -136,6 +138,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         .bind(json_string_from_string_list(
             record.allowed_models.as_ref(),
             "api_keys.allowed_models",
+        )?)
+        .bind(json_string_from_string_list(
+            record.ip_rules.as_ref(),
+            "api_keys.ip_rules",
         )?)
         .bind(record.rate_limit)
         .bind(record.concurrent_limit)
@@ -175,6 +181,7 @@ struct CreateApiKeyInsertRecord {
     allowed_providers: Option<Vec<String>>,
     allowed_api_formats: Option<Vec<String>>,
     allowed_models: Option<Vec<String>>,
+    ip_rules: Option<Vec<String>>,
     rate_limit: Option<i32>,
     concurrent_limit: Option<i32>,
     force_capabilities: Option<serde_json::Value>,
@@ -417,6 +424,7 @@ WHERE id = ?
             allowed_providers: record.allowed_providers,
             allowed_api_formats: record.allowed_api_formats,
             allowed_models: record.allowed_models,
+            ip_rules: record.ip_rules,
             rate_limit: Some(record.rate_limit),
             concurrent_limit: record.concurrent_limit,
             force_capabilities: record.force_capabilities,
@@ -444,6 +452,7 @@ WHERE id = ?
             allowed_providers: record.allowed_providers,
             allowed_api_formats: record.allowed_api_formats,
             allowed_models: record.allowed_models,
+            ip_rules: record.ip_rules,
             rate_limit: record.rate_limit,
             concurrent_limit: record.concurrent_limit,
             force_capabilities: record.force_capabilities,
@@ -469,6 +478,7 @@ UPDATE api_keys
 SET name = COALESCE(?, name),
     rate_limit = COALESCE(?, rate_limit),
     concurrent_limit = COALESCE(?, concurrent_limit),
+    ip_rules = CASE WHEN ? THEN ? ELSE ip_rules END,
     updated_at = ?
 WHERE id = ?
   AND user_id = ?
@@ -478,6 +488,11 @@ WHERE id = ?
         .bind(record.name.as_deref())
         .bind(record.rate_limit)
         .bind(record.concurrent_limit)
+        .bind(record.ip_rules.is_some())
+        .bind(json_string_from_nested_string_list(
+            &record.ip_rules,
+            "api_keys.ip_rules",
+        )?)
         .bind(now)
         .bind(&record.api_key_id)
         .bind(&record.user_id)
@@ -501,6 +516,7 @@ SET name = COALESCE(?, name),
     allowed_providers = CASE WHEN ? THEN ? ELSE allowed_providers END,
     allowed_api_formats = CASE WHEN ? THEN ? ELSE allowed_api_formats END,
     allowed_models = CASE WHEN ? THEN ? ELSE allowed_models END,
+    ip_rules = CASE WHEN ? THEN ? ELSE ip_rules END,
     expires_at = CASE WHEN ? THEN ? ELSE expires_at END,
     auto_delete_on_expiry = CASE WHEN ? THEN ? ELSE auto_delete_on_expiry END,
     updated_at = ?
@@ -527,6 +543,11 @@ WHERE id = ?
         .bind(json_string_from_nested_string_list(
             &record.allowed_models,
             "api_keys.allowed_models",
+        )?)
+        .bind(record.ip_rules.is_some())
+        .bind(json_string_from_nested_string_list(
+            &record.ip_rules,
+            "api_keys.ip_rules",
         )?)
         .bind(record.expires_at_present)
         .bind(optional_i64_from_u64(
@@ -665,6 +686,34 @@ WHERE id = ?
         .bind(current_unix_secs() as i64)
         .bind(api_key_id)
         .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map_sql_err()?;
+        self.reload_export_by_id(api_key_id).await
+    }
+
+    async fn set_api_key_usage_totals(
+        &self,
+        api_key_id: &str,
+        total_requests: u64,
+        total_tokens: u64,
+        total_cost_usd: f64,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        sqlx::query(
+            r#"
+UPDATE api_keys
+SET total_requests = ?,
+    total_tokens = ?,
+    total_cost_usd = ?,
+    updated_at = ?
+WHERE id = ?
+"#,
+        )
+        .bind(total_requests as i64)
+        .bind(total_tokens as i64)
+        .bind(total_cost_usd)
+        .bind(current_unix_secs() as i64)
+        .bind(api_key_id)
         .execute(&self.pool)
         .await
         .map_sql_err()?;
@@ -922,7 +971,11 @@ fn map_auth_api_key_snapshot_row(
             row.try_get("api_key_allowed_models").map_sql_err()?,
             "api_keys.allowed_models",
         )?,
-    )?;
+    )?
+    .with_api_key_ip_rules(optional_json_from_string(
+        row.try_get("api_key_ip_rules").map_sql_err()?,
+        "api_keys.ip_rules",
+    )?)?;
     Ok(snapshot.with_user_rate_limit(row.try_get("user_rate_limit").map_sql_err()?))
 }
 
@@ -965,6 +1018,12 @@ fn map_auth_api_key_export_row(
         row.try_get("total_cost_usd").map_sql_err()?,
         row.try_get("is_standalone").map_sql_err()?,
     )
+    .and_then(|record| {
+        record.with_ip_rules(optional_json_from_string(
+            row.try_get("ip_rules").map_sql_err()?,
+            "api_keys.ip_rules",
+        )?)
+    })
     .map(|record| record.with_feature_settings(feature_settings))
     .and_then(|record| {
         record.with_activity_timestamps(

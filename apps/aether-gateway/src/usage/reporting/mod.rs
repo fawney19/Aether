@@ -18,7 +18,10 @@ use context::{report_context_is_locally_actionable, resolve_locally_actionable_r
 use aether_usage_runtime::{
     is_local_ai_stream_report_kind, is_local_ai_sync_report_kind, report_request_id,
     should_handle_local_stream_report, should_handle_local_sync_report,
-    sync_report_represents_failure,
+    stream_report_missing_terminal_event, stream_report_represents_failure,
+    sync_report_represents_failure, STREAM_MISSING_TERMINAL_EVENT_CATEGORY,
+    STREAM_MISSING_TERMINAL_EVENT_MESSAGE, STREAM_TERMINAL_ERROR_CATEGORY,
+    STREAM_TERMINAL_ERROR_MESSAGE,
 };
 pub(crate) use aether_usage_runtime::{GatewayStreamReportRequest, GatewaySyncReportRequest};
 
@@ -256,14 +259,40 @@ async fn handle_local_stream_report(state: &AppState, payload: &GatewayStreamRep
         .telemetry
         .as_ref()
         .and_then(|telemetry| telemetry.elapsed_ms);
+    let failed = stream_report_represents_failure(payload);
+    let missing_terminal_event = stream_report_missing_terminal_event(payload);
     record_report_request_candidate_status(
         state,
         payload.report_context.as_ref(),
         SchedulerRequestCandidateStatusUpdate {
-            status: RequestCandidateStatus::Success,
+            status: if failed {
+                RequestCandidateStatus::Failed
+            } else {
+                RequestCandidateStatus::Success
+            },
             status_code: Some(payload.status_code),
-            error_type: None,
-            error_message: None,
+            error_type: failed.then(|| {
+                if payload.status_code >= 400 {
+                    "stream_http_error".to_string()
+                } else if missing_terminal_event {
+                    STREAM_MISSING_TERMINAL_EVENT_CATEGORY.to_string()
+                } else {
+                    STREAM_TERMINAL_ERROR_CATEGORY.to_string()
+                }
+            }),
+            error_message: failed.then(|| {
+                payload
+                    .terminal_summary
+                    .as_ref()
+                    .and_then(|summary| summary.parser_error.clone())
+                    .unwrap_or_else(|| {
+                        if missing_terminal_event {
+                            STREAM_MISSING_TERMINAL_EVENT_MESSAGE.to_string()
+                        } else {
+                            STREAM_TERMINAL_ERROR_MESSAGE.to_string()
+                        }
+                    })
+            }),
             latency_ms,
             started_at_unix_ms: None,
             finished_at_unix_ms: Some(terminal_unix_ms),
@@ -291,9 +320,11 @@ mod tests {
     use aether_data_contracts::repository::provider_catalog::{
         ProviderCatalogReadRepository, StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
+    use aether_data_contracts::repository::usage::UsageBodyCaptureState;
     use aether_data_contracts::repository::video_tasks::{
         UpsertVideoTask, VideoTaskStatus, VideoTaskWriteRepository,
     };
+    use base64::Engine as _;
     use serde_json::json;
 
     use super::{
@@ -735,6 +766,64 @@ mod tests {
         assert_eq!(
             stored[0].endpoint_id.as_deref(),
             Some("endpoint-reporting-tests-123")
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_openai_responses_stream_report_marks_missing_terminal_event_as_failed() {
+        let repository = Arc::new(InMemoryRequestCandidateRepository::seed(vec![
+            sample_request_candidate(
+                "cand-reporting-stream-missing-terminal-1",
+                "req-reporting-stream-missing-terminal-1",
+            ),
+        ]));
+        let state = build_test_state(Arc::clone(&repository));
+        let provider_sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
+        );
+
+        submit_stream_report(
+            &state,
+            GatewayStreamReportRequest {
+                trace_id: "trace-reporting-stream-missing-terminal-1".to_string(),
+                report_kind: "openai_responses_stream_success".to_string(),
+                report_context: Some(json!({
+                    "request_id": "req-reporting-stream-missing-terminal-1",
+                    "client_api_format": "openai:responses",
+                    "provider_api_format": "openai:responses"
+                })),
+                status_code: 200,
+                headers: BTreeMap::new(),
+                provider_body_base64: Some(
+                    base64::engine::general_purpose::STANDARD.encode(provider_sse.as_bytes()),
+                ),
+                provider_body_state: Some(UsageBodyCaptureState::Inline),
+                client_body_base64: None,
+                client_body_state: None,
+                terminal_summary: None,
+                telemetry: None,
+            },
+        )
+        .await
+        .expect("stream report should stay local");
+
+        let stored = repository
+            .list_by_request_id("req-reporting-stream-missing-terminal-1")
+            .await
+            .expect("request candidates should list");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].status, RequestCandidateStatus::Failed);
+        assert_eq!(stored[0].status_code, Some(200));
+        assert_eq!(
+            stored[0].error_type.as_deref(),
+            Some("stream_missing_terminal_event")
+        );
+        assert_eq!(
+            stored[0].error_message.as_deref(),
+            Some("execution runtime stream ended before provider terminal event")
         );
     }
 

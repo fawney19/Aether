@@ -4,18 +4,19 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host",
     "build": "vite build",
     "build:with-typecheck": "vue-tsc -b && vite build",
     "preview": "vite preview",
-    "test": "NODE_OPTIONS='--experimental-require-module --disable-warning=ExperimentalWarning' vitest",
-    "test:ui": "NODE_OPTIONS='--experimental-require-module --disable-warning=ExperimentalWarning' vitest --ui",
-    "test:run": "NODE_OPTIONS='--experimental-require-module --disable-warning=ExperimentalWarning' vitest run",
+    "test": "node --experimental-require-module --disable-warning=ExperimentalWarning ./node_modules/vitest/vitest.mjs",
+    "test:ui": "node --experimental-require-module --disable-warning=ExperimentalWarning ./node_modules/vitest/vitest.mjs --ui",
+    "test:run": "node --experimental-require-module --disable-warning=ExperimentalWarning ./node_modules/vitest/vitest.mjs run",
     "lint": "eslint . --fix",
     "type-check": "vue-tsc --noEmit",
     "version": "git describe --tags --always"
   },
   "dependencies": {
+    "@stripe/stripe-js": "^9.6.0",
     "@types/dompurify": "^3.0.5",
     "@types/marked": "^5.0.2",
     "@types/three": "^0.180.0",

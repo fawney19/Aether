@@ -56,7 +56,7 @@ impl ClientSessionScope {
     pub(crate) fn scheduler_affinity(&self) -> Option<ClientSessionAffinity> {
         let client_family = self.client_family.trim();
         let client_family = if client_family.is_empty() {
-            "generic".to_string()
+            "unknown".to_string()
         } else {
             client_family.to_ascii_lowercase()
         };
@@ -84,6 +84,15 @@ struct GenericSessionScopeAdapter;
 struct CodexSessionScopeAdapter;
 struct ClaudeCodeSessionScopeAdapter;
 struct OpenCodeSessionScopeAdapter;
+struct QwenCodeSessionScopeAdapter;
+struct RooCodeSessionScopeAdapter;
+struct KiloCodeSessionScopeAdapter;
+struct CherryStudioSessionScopeAdapter;
+struct OpenUiSessionScopeAdapter;
+struct OpenAiJsSdkSessionScopeAdapter;
+struct OpenAiPythonSdkSessionScopeAdapter;
+struct AnthropicJsSdkSessionScopeAdapter;
+struct AnthropicPythonSdkSessionScopeAdapter;
 
 pub(crate) fn client_session_affinity_from_request(
     headers: &http::HeaderMap,
@@ -171,14 +180,85 @@ fn detect_client_family(request: &ClientSessionRequest<'_>) -> String {
             return adapter.family().to_string();
         }
     }
+    if let Some(client_family) = detect_fingerprint_client_family(request) {
+        return client_family.to_string();
+    }
     GenericSessionScopeAdapter.family().to_string()
 }
 
-fn specific_client_session_scope_adapters() -> [&'static dyn ClientSessionScopeAdapter; 3] {
+fn detect_fingerprint_client_family(request: &ClientSessionRequest<'_>) -> Option<&'static str> {
+    if header_contains(
+        request.headers,
+        http::header::USER_AGENT.as_str(),
+        "geminicli",
+    ) || header_contains(
+        request.headers,
+        http::header::USER_AGENT.as_str(),
+        "gemini-cli",
+    ) {
+        return Some("gemini_cli");
+    }
+    if header_contains(request.headers, http::header::USER_AGENT.as_str(), "cursor") {
+        return Some("cursor");
+    }
+    if header_contains(
+        request.headers,
+        http::header::USER_AGENT.as_str(),
+        "windsurf",
+    ) {
+        return Some("windsurf");
+    }
+    if header_contains(
+        request.headers,
+        http::header::USER_AGENT.as_str(),
+        "continue",
+    ) {
+        return Some("continue");
+    }
+    if header_contains(request.headers, http::header::USER_AGENT.as_str(), "cline") {
+        return Some("cline");
+    }
+    if header_contains(request.headers, http::header::USER_AGENT.as_str(), "aider") {
+        return Some("aider");
+    }
+    if header_contains(
+        request.headers,
+        http::header::USER_AGENT.as_str(),
+        "langchain",
+    ) {
+        return Some("langchain");
+    }
+    if header_contains(
+        request.headers,
+        http::header::USER_AGENT.as_str(),
+        "llamaindex",
+    ) || header_contains(
+        request.headers,
+        http::header::USER_AGENT.as_str(),
+        "llama-index",
+    ) {
+        return Some("llamaindex");
+    }
+    if has_header_with_prefix(request.headers, "x-stainless-") {
+        return Some("sdk");
+    }
+    None
+}
+
+fn specific_client_session_scope_adapters() -> [&'static dyn ClientSessionScopeAdapter; 12] {
     [
         &CodexSessionScopeAdapter,
         &ClaudeCodeSessionScopeAdapter,
         &OpenCodeSessionScopeAdapter,
+        &QwenCodeSessionScopeAdapter,
+        &RooCodeSessionScopeAdapter,
+        &KiloCodeSessionScopeAdapter,
+        &CherryStudioSessionScopeAdapter,
+        &OpenUiSessionScopeAdapter,
+        &AnthropicJsSdkSessionScopeAdapter,
+        &AnthropicPythonSdkSessionScopeAdapter,
+        &OpenAiJsSdkSessionScopeAdapter,
+        &OpenAiPythonSdkSessionScopeAdapter,
     ]
 }
 
@@ -199,6 +279,7 @@ fn extract_scope_from_other_specific_adapters(
     specific_client_session_scope_adapters()
         .into_iter()
         .filter(|adapter| adapter.family() != client_family)
+        .filter(|adapter| adapter.detect(request))
         .find_map(|adapter| adapter.extract_scope(request))
 }
 
@@ -218,7 +299,7 @@ fn extract_generic_scope_for_client_family(
 
 impl ClientSessionScopeAdapter for GenericSessionScopeAdapter {
     fn family(&self) -> &'static str {
-        "generic"
+        "unknown"
     }
 
     fn detect(&self, _request: &ClientSessionRequest<'_>) -> bool {
@@ -226,6 +307,18 @@ impl ClientSessionScopeAdapter for GenericSessionScopeAdapter {
     }
 
     fn extract_scope(&self, request: &ClientSessionRequest<'_>) -> Option<ClientSessionScope> {
+        if let Some(root_session) = header_value_str(request.headers, "session_id")
+            .or_else(|| header_value_str(request.headers, "conversation_id"))
+        {
+            return Some(ClientSessionScope::new(
+                self.family(),
+                root_session,
+                None,
+                None,
+                ClientSessionSignalSource::Header,
+            ));
+        }
+
         let body = request.body_json?;
         let root_session = value_at_paths(
             body,
@@ -378,6 +471,246 @@ impl ClientSessionScopeAdapter for OpenCodeSessionScopeAdapter {
     }
 }
 
+impl ClientSessionScopeAdapter for QwenCodeSessionScopeAdapter {
+    fn family(&self) -> &'static str {
+        "qwen_code"
+    }
+
+    fn detect(&self, request: &ClientSessionRequest<'_>) -> bool {
+        header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "qwencode",
+        ) || header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "qwen-code",
+        ) || header_contains(request.headers, "x-dashscope-useragent", "qwencode")
+            || header_contains(request.headers, "x-dashscope-useragent", "qwen-code")
+    }
+
+    fn extract_scope(&self, request: &ClientSessionRequest<'_>) -> Option<ClientSessionScope> {
+        scoped_from_standard_session_headers(self.family(), request)
+            .or_else(|| scoped_from_generic_body(self.family(), request))
+    }
+}
+
+impl ClientSessionScopeAdapter for RooCodeSessionScopeAdapter {
+    fn family(&self) -> &'static str {
+        "roo_code"
+    }
+
+    fn detect(&self, request: &ClientSessionRequest<'_>) -> bool {
+        header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "roo-code",
+        ) || header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "roocode",
+        ) || header_contains(request.headers, "originator", "roo-code")
+            || header_contains(request.headers, "originator", "roocode")
+    }
+
+    fn extract_scope(&self, request: &ClientSessionRequest<'_>) -> Option<ClientSessionScope> {
+        scoped_from_standard_session_headers(self.family(), request)
+            .or_else(|| scoped_from_generic_body(self.family(), request))
+    }
+}
+
+impl ClientSessionScopeAdapter for KiloCodeSessionScopeAdapter {
+    fn family(&self) -> &'static str {
+        "kilocode"
+    }
+
+    fn detect(&self, request: &ClientSessionRequest<'_>) -> bool {
+        header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "kilo-code",
+        ) || header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "kilocode",
+        ) || has_header_with_prefix(request.headers, "x-kilocode-")
+            || header_value_str(request.headers, "x-kilo-directory").is_some()
+            || header_value_str(request.headers, "x-kilo-workspace").is_some()
+    }
+
+    fn extract_scope(&self, request: &ClientSessionRequest<'_>) -> Option<ClientSessionScope> {
+        scoped_from_standard_session_headers(self.family(), request)
+            .or_else(|| scoped_from_generic_body(self.family(), request))
+    }
+}
+
+impl ClientSessionScopeAdapter for CherryStudioSessionScopeAdapter {
+    fn family(&self) -> &'static str {
+        "cherrystudio"
+    }
+
+    fn detect(&self, request: &ClientSessionRequest<'_>) -> bool {
+        header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "cherrystudio",
+        ) || header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "cherry-studio",
+        ) || header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "cherry studio",
+        )
+    }
+
+    fn extract_scope(&self, request: &ClientSessionRequest<'_>) -> Option<ClientSessionScope> {
+        scoped_from_standard_session_headers(self.family(), request)
+            .or_else(|| scoped_from_generic_body(self.family(), request))
+    }
+}
+
+impl ClientSessionScopeAdapter for OpenUiSessionScopeAdapter {
+    fn family(&self) -> &'static str {
+        "openui"
+    }
+
+    fn detect(&self, request: &ClientSessionRequest<'_>) -> bool {
+        header_contains(request.headers, http::header::USER_AGENT.as_str(), "openui")
+            || header_contains(
+                request.headers,
+                http::header::USER_AGENT.as_str(),
+                "openui-agent-manager",
+            )
+    }
+
+    fn extract_scope(&self, request: &ClientSessionRequest<'_>) -> Option<ClientSessionScope> {
+        scoped_from_standard_session_headers(self.family(), request)
+            .or_else(|| scoped_from_generic_body(self.family(), request))
+    }
+}
+
+impl ClientSessionScopeAdapter for OpenAiJsSdkSessionScopeAdapter {
+    fn family(&self) -> &'static str {
+        "openai_js_sdk"
+    }
+
+    fn detect(&self, request: &ClientSessionRequest<'_>) -> bool {
+        header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "openai/js",
+        ) || (header_contains(request.headers, http::header::USER_AGENT.as_str(), "/js ")
+            && header_contains(request.headers, "x-stainless-lang", "js"))
+    }
+
+    fn extract_scope(&self, request: &ClientSessionRequest<'_>) -> Option<ClientSessionScope> {
+        scoped_from_standard_session_headers(self.family(), request)
+            .or_else(|| scoped_from_generic_body(self.family(), request))
+    }
+}
+
+impl ClientSessionScopeAdapter for OpenAiPythonSdkSessionScopeAdapter {
+    fn family(&self) -> &'static str {
+        "openai_python_sdk"
+    }
+
+    fn detect(&self, request: &ClientSessionRequest<'_>) -> bool {
+        header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "openai/python",
+        ) || (header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "/python ",
+        ) && header_contains(request.headers, "x-stainless-lang", "python")
+            && header_value_str(request.headers, "anthropic-version").is_none())
+    }
+
+    fn extract_scope(&self, request: &ClientSessionRequest<'_>) -> Option<ClientSessionScope> {
+        scoped_from_standard_session_headers(self.family(), request)
+            .or_else(|| scoped_from_generic_body(self.family(), request))
+    }
+}
+
+impl ClientSessionScopeAdapter for AnthropicJsSdkSessionScopeAdapter {
+    fn family(&self) -> &'static str {
+        "anthropic_js_sdk"
+    }
+
+    fn detect(&self, request: &ClientSessionRequest<'_>) -> bool {
+        header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "anthropic/js",
+        ) || (header_contains(request.headers, http::header::USER_AGENT.as_str(), "/js ")
+            && header_contains(request.headers, "x-stainless-lang", "js")
+            && header_value_str(request.headers, "anthropic-version").is_some())
+    }
+
+    fn extract_scope(&self, request: &ClientSessionRequest<'_>) -> Option<ClientSessionScope> {
+        scoped_from_standard_session_headers(self.family(), request)
+            .or_else(|| scoped_from_generic_body(self.family(), request))
+    }
+}
+
+impl ClientSessionScopeAdapter for AnthropicPythonSdkSessionScopeAdapter {
+    fn family(&self) -> &'static str {
+        "anthropic_python_sdk"
+    }
+
+    fn detect(&self, request: &ClientSessionRequest<'_>) -> bool {
+        header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "anthropic/python",
+        ) || (header_contains(
+            request.headers,
+            http::header::USER_AGENT.as_str(),
+            "/python ",
+        ) && header_contains(request.headers, "x-stainless-lang", "python")
+            && header_value_str(request.headers, "anthropic-version").is_some())
+    }
+
+    fn extract_scope(&self, request: &ClientSessionRequest<'_>) -> Option<ClientSessionScope> {
+        scoped_from_standard_session_headers(self.family(), request)
+            .or_else(|| scoped_from_generic_body(self.family(), request))
+    }
+}
+
+fn scoped_from_standard_session_headers(
+    client_family: &str,
+    request: &ClientSessionRequest<'_>,
+) -> Option<ClientSessionScope> {
+    header_value_str(request.headers, "session_id")
+        .or_else(|| header_value_str(request.headers, "conversation_id"))
+        .map(|root_session| {
+            ClientSessionScope::new(
+                client_family,
+                root_session,
+                None,
+                None,
+                ClientSessionSignalSource::Header,
+            )
+        })
+}
+
+fn scoped_from_generic_body(
+    client_family: &str,
+    request: &ClientSessionRequest<'_>,
+) -> Option<ClientSessionScope> {
+    let body_session = GenericSessionScopeAdapter.extract_scope(request)?;
+    Some(ClientSessionScope::new(
+        client_family,
+        body_session.session_id,
+        body_session.agent_id,
+        body_session.account_hint,
+        body_session.source,
+    ))
+}
+
 fn claude_code_session_id_from_body(body: &Value) -> Option<&str> {
     value_at_path(body, &["metadata", "user_id"]).and_then(|user_id| {
         user_id
@@ -443,6 +776,12 @@ fn header_contains(headers: &http::HeaderMap, key: &str, needle: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn has_header_with_prefix(headers: &http::HeaderMap, prefix: &str) -> bool {
+    headers
+        .keys()
+        .any(|key| key.as_str().to_ascii_lowercase().starts_with(prefix))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -455,7 +794,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn generic_adapter_extracts_body_session_and_agent() {
+    fn unknown_adapter_extracts_body_session_and_agent() {
         let body = json!({
             "metadata": {
                 "session_id": "session-1",
@@ -466,7 +805,7 @@ mod tests {
         let affinity = client_session_affinity_from_request(&HeaderMap::new(), Some(&body))
             .expect("affinity should build");
 
-        assert_eq!(affinity.client_family.as_deref(), Some("generic"));
+        assert_eq!(affinity.client_family.as_deref(), Some("unknown"));
         assert_eq!(
             affinity.session_key.as_deref(),
             Some("session=session-1;agent=planner")
@@ -667,6 +1006,84 @@ mod tests {
             affinity.session_key.as_deref(),
             Some("session=oc-session;agent=reviewer")
         );
+    }
+
+    #[test]
+    fn qwen_code_detection_keeps_body_session() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("QwenCode/0.1.0 (linux; x64)"),
+        );
+        let body = json!({"conversation_id": "qwen-session"});
+
+        let scope = client_session_scope_from_request(&headers, Some(&body))
+            .expect("session scope should build");
+
+        assert_eq!(scope.client_family, "qwen_code");
+        assert_eq!(scope.session_id, "qwen-session");
+    }
+
+    #[test]
+    fn roo_code_detection_uses_originator_and_session_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("originator", HeaderValue::from_static("roo-code"));
+        headers.insert("session_id", HeaderValue::from_static("roo-session"));
+
+        let scope =
+            client_session_scope_from_request(&headers, None).expect("session scope should build");
+
+        assert_eq!(scope.client_family, "roo_code");
+        assert_eq!(scope.session_id, "roo-session");
+    }
+
+    #[test]
+    fn unknown_user_agent_with_session_header_stays_unknown() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("CustomClient/1.0"),
+        );
+        headers.insert("session_id", HeaderValue::from_static("custom-session"));
+
+        let scope =
+            client_session_scope_from_request(&headers, None).expect("session scope should build");
+
+        assert_eq!(scope.client_family, "unknown");
+        assert_eq!(scope.session_id, "custom-session");
+    }
+
+    #[test]
+    fn vscode_copilot_user_agent_is_not_cherrystudio_by_itself() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("Visual Studio Code (desktop) GithubCopilot/1.155.0"),
+        );
+        headers.insert("session_id", HeaderValue::from_static("vscode-session"));
+
+        let scope =
+            client_session_scope_from_request(&headers, None).expect("session scope should build");
+
+        assert_eq!(scope.client_family, "unknown");
+        assert_eq!(scope.session_id, "vscode-session");
+    }
+
+    #[test]
+    fn sdk_detection_uses_user_agent_before_stainless_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::USER_AGENT,
+            HeaderValue::from_static("OpenAI/JS 6.0.0"),
+        );
+        headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
+        let body = json!({"metadata": {"session_id": "sdk-session"}});
+
+        let scope = client_session_scope_from_request(&headers, Some(&body))
+            .expect("session scope should build");
+
+        assert_eq!(scope.client_family, "openai_js_sdk");
+        assert_eq!(scope.session_id, "sdk-session");
     }
 
     #[test]

@@ -669,6 +669,11 @@ pub trait UserReadRepository: Send + Sync {
         query: &UserExportListQuery,
     ) -> Result<Vec<StoredUserExportRow>, crate::DataLayerError>;
 
+    async fn count_export_users(
+        &self,
+        query: &UserExportListQuery,
+    ) -> Result<u64, crate::DataLayerError>;
+
     async fn summarize_export_users(&self) -> Result<UserExportSummary, crate::DataLayerError>;
 
     async fn find_export_user_by_id(

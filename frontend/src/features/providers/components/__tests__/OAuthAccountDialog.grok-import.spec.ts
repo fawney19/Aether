@@ -14,7 +14,16 @@ const endpointMocks = vi.hoisted(() => ({
   getAwsRegions: vi.fn(),
 }))
 
-vi.mock('@/api/endpoints', () => endpointMocks)
+vi.mock('@/api/endpoints', async () => {
+  const actual = await vi.importActual<typeof import('@/api/endpoints/provider_oauth')>(
+    '@/api/endpoints/provider_oauth',
+  )
+
+  return {
+    ...endpointMocks,
+    normalizeBatchImportCredentials: actual.normalizeBatchImportCredentials,
+  }
+})
 
 vi.mock('@/components/ui', async () => {
   const { defineComponent, h } = await import('vue')
@@ -358,7 +367,7 @@ describe('OAuthAccountDialog Grok import', () => {
 
     expect(endpointMocks.startBatchImportOAuthTask).toHaveBeenCalledWith(
       'provider-1',
-      'sso-1\nsso-2',
+      '["sso-1","sso-2"]',
       undefined,
     )
     expect(endpointMocks.importProviderRefreshToken).not.toHaveBeenCalled()

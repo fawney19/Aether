@@ -8,9 +8,7 @@ use aether_data::driver::postgres::{
     PostgresPoolConfig, PostgresTransactionOptions,
 };
 use aether_data::{DataLayerError, PostgresBackend};
-use aether_runtime_state::{
-    RedisClientConfig, RedisClientFactory, RedisLockRunner, RedisLockRunnerConfig,
-};
+use aether_runtime_state::{RedisClientConfig, RedisLockRunner, RedisLockRunnerConfig};
 use aether_testkit::{
     init_test_runtime_for, reserve_local_port, BenchmarkRuntimeSampler, BenchmarkRuntimeSnapshot,
     ManagedPostgresServer, ManagedRedisServer, TunnelHarness, TunnelHarnessConfig,
@@ -247,20 +245,19 @@ async fn benchmark_redis_restart_recovery(
 ) -> Result<RecoverySummary, Box<dyn std::error::Error>> {
     let mut runtime_sampler = BenchmarkRuntimeSampler::new();
     let redis_url = redis_server.lock().await.redis_url().to_string();
-    let factory = RedisClientFactory::new(RedisClientConfig {
+    let redis_config = RedisClientConfig {
         url: redis_url,
         key_prefix: Some(format!("aether-failure-recovery-{}", std::process::id())),
-    })?;
-    let client = factory.connect_lazy()?;
-    let keyspace = factory.config().keyspace();
-    let runner = RedisLockRunner::new(
-        client,
-        keyspace.clone(),
+    };
+    let keyspace = redis_config.keyspace();
+    let runner = RedisLockRunner::from_config(
+        redis_config,
         RedisLockRunnerConfig {
             command_timeout_ms: Some(250),
             default_ttl_ms: 1_000,
         },
-    )?;
+    )
+    .await?;
     let collector = Arc::new(RecoveryCollector::default());
     let next_attempt = Arc::new(AtomicUsize::new(0));
     let phase = Arc::new(AtomicUsize::new(0));

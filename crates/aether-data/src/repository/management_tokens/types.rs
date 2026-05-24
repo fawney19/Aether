@@ -208,17 +208,17 @@ impl CreateManagementTokenRecord {
         if let Some(allowed_ips) = &self.allowed_ips {
             let Some(items) = allowed_ips.as_array() else {
                 return Err(crate::DataLayerError::InvalidInput(
-                    "allowed_ips must be an array".to_string(),
+                    "IP 限制规则必须是数组".to_string(),
                 ));
             };
             if items.is_empty() {
                 return Err(crate::DataLayerError::InvalidInput(
-                    "allowed_ips must not be empty".to_string(),
+                    "IP 限制规则不能为空".to_string(),
                 ));
             }
             if items.iter().any(|value| value.as_str().is_none()) {
                 return Err(crate::DataLayerError::InvalidInput(
-                    "allowed_ips must contain only strings".to_string(),
+                    "IP 限制规则只能包含字符串".to_string(),
                 ));
             }
         }
@@ -258,17 +258,17 @@ impl UpdateManagementTokenRecord {
         if let Some(allowed_ips) = &self.allowed_ips {
             let Some(items) = allowed_ips.as_array() else {
                 return Err(crate::DataLayerError::InvalidInput(
-                    "allowed_ips must be an array".to_string(),
+                    "IP 限制规则必须是数组".to_string(),
                 ));
             };
             if items.is_empty() {
                 return Err(crate::DataLayerError::InvalidInput(
-                    "allowed_ips must not be empty".to_string(),
+                    "IP 限制规则不能为空".to_string(),
                 ));
             }
             if items.iter().any(|value| value.as_str().is_none()) {
                 return Err(crate::DataLayerError::InvalidInput(
-                    "allowed_ips must contain only strings".to_string(),
+                    "IP 限制规则只能包含字符串".to_string(),
                 ));
             }
         }

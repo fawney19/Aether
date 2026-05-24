@@ -73,7 +73,7 @@
           ]"
           @click="switchMode('oauth')"
         >
-          {{ isKiroProvider ? '设备授权' : '获取授权' }}
+          {{ isDeviceBrowserProvider ? (isWindsurfProvider ? '浏览器登录' : '设备授权') : '获取授权' }}
         </button>
         <button
           class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-all"
@@ -93,8 +93,132 @@
           class="space-y-4 transition-opacity duration-150"
           :class="mode === 'oauth' ? 'opacity-100' : 'opacity-0 pointer-events-none'"
         >
+          <!-- Windsurf: 浏览器 session/poll 授权 -->
+          <template v-if="isWindsurfProvider">
+            <div class="space-y-4">
+              <div class="grid grid-cols-3 gap-1.5">
+                <button
+                  v-for="opt in ([
+                    { key: 'default', label: '默认' },
+                    { key: 'google', label: 'Google' },
+                    { key: 'github', label: 'GitHub' },
+                  ] as const)"
+                  :key="opt.key"
+                  class="h-8 text-xs font-medium rounded-md border transition-colors"
+                  :class="device.auth_type === opt.key
+                    ? 'border-primary bg-primary/5 text-foreground'
+                    : 'border-border text-muted-foreground hover:text-foreground hover:border-foreground/20'"
+                  @click="selectWindsurfLoginOption(opt.key)"
+                >
+                  {{ opt.label }}
+                </button>
+              </div>
+
+              <div
+                v-if="device.status === 'error' || device.status === 'expired'"
+                class="rounded-xl border border-destructive/20 bg-destructive/5 p-5"
+              >
+                <div class="flex flex-col items-center text-center space-y-3">
+                  <div class="w-10 h-10 rounded-full bg-destructive/10 flex items-center justify-center">
+                    <AlertCircle class="w-5 h-5 text-destructive" />
+                  </div>
+                  <div class="space-y-1">
+                    <p class="text-sm font-medium text-destructive">
+                      {{ device.status === 'expired' ? '授权已过期' : '授权失败' }}
+                    </p>
+                    <p class="text-xs text-muted-foreground">
+                      {{ device.error || '请重试' }}
+                    </p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    @click="resetDevice"
+                  >
+                    重新开始
+                  </Button>
+                </div>
+              </div>
+
+              <div
+                v-else-if="device.starting && !device.session_id"
+                class="flex items-center justify-center py-12"
+              >
+                <div class="text-center">
+                  <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-primary mx-auto mb-3" />
+                  <p class="text-xs text-muted-foreground">
+                    正在准备登录...
+                  </p>
+                </div>
+              </div>
+
+              <div
+                v-else
+                class="space-y-4"
+              >
+                <div class="space-y-2">
+                  <div class="flex items-center gap-2">
+                    <span class="flex items-center justify-center w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-semibold shrink-0">1</span>
+                    <span class="text-xs font-medium">前往登录</span>
+                  </div>
+                  <div class="flex gap-2 pl-6">
+                    <Button
+                      size="sm"
+                      :disabled="device.starting || device.completing || !device.verification_uri_complete"
+                      @click="openDeviceVerificationUrl"
+                    >
+                      <ExternalLink class="w-3 h-3 mr-1" />
+                      打开
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      :disabled="device.starting || device.completing || !device.verification_uri_complete"
+                      @click="copyToClipboard(device.verification_uri_complete)"
+                    >
+                      <Copy class="w-3 h-3 mr-1" />
+                      复制
+                    </Button>
+                    <Button
+                      v-if="!device.session_id"
+                      size="sm"
+                      variant="outline"
+                      :disabled="device.starting"
+                      @click="startDeviceAuth"
+                    >
+                      开始
+                    </Button>
+                  </div>
+                </div>
+
+                <div class="space-y-2">
+                  <div class="flex items-center gap-2">
+                    <span class="flex items-center justify-center w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-semibold shrink-0">2</span>
+                    <span class="text-xs font-medium">粘贴回调 URL 或 token</span>
+                  </div>
+                  <div class="pl-6">
+                    <Textarea
+                      v-model="device.callback_url"
+                      :disabled="device.completing"
+                      :placeholder="deviceCallbackPlaceholder"
+                      class="min-h-[150px] text-xs font-mono break-all !rounded-xl"
+                      spellcheck="false"
+                    />
+                  </div>
+                  <div
+                    v-if="device.session_id && device.status === 'pending'"
+                    class="pl-6 flex items-center gap-1.5 text-[11px] text-muted-foreground"
+                  >
+                    <div class="animate-spin rounded-full h-3 w-3 border-[1.5px] border-primary/30 border-t-primary" />
+                    <span>会话剩余 {{ deviceCountdownFormatted }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+
           <!-- Kiro: 设备授权模式 -->
-          <template v-if="isKiroProvider">
+          <template v-else-if="isKiroProvider">
             <div class="space-y-3">
               <!-- 授权类型切换 -->
               <div class="grid grid-cols-2 gap-1.5">
@@ -198,7 +322,7 @@
                       <Textarea
                         v-model="device.callback_url"
                         :disabled="device.completing"
-                        :placeholder="kiroSocialCallbackPlaceholder"
+                        :placeholder="deviceCallbackPlaceholder"
                         class="h-full min-h-0 overflow-y-auto text-xs font-mono break-all !rounded-xl"
                         spellcheck="false"
                       />
@@ -457,7 +581,70 @@
           class="flex flex-col gap-3 justify-center transition-opacity duration-150"
           :class="mode === 'import' ? 'opacity-100' : 'opacity-0 pointer-events-none'"
         >
+          <div
+            v-if="isWindsurfProvider"
+            class="grid grid-cols-2 gap-1.5 rounded-lg border border-border p-0.5 bg-muted/30"
+          >
+            <button
+              v-for="method in ([
+                { key: 'email_password', label: '邮箱密码' },
+                { key: 'token_json', label: 'Token / JSON' },
+              ] as const)"
+              :key="method.key"
+              class="h-8 text-xs font-medium rounded-md transition-colors"
+              :class="windsurfImportMethod === method.key
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'"
+              :disabled="importing"
+              @click="setWindsurfImportMethod(method.key)"
+            >
+              {{ method.label }}
+            </button>
+          </div>
+
+          <div
+            v-if="isWindsurfEmailPasswordImport"
+            class="space-y-3"
+          >
+            <div class="space-y-1.5">
+              <label class="text-xs font-medium">邮箱</label>
+              <input
+                v-model="windsurfEmail"
+                type="email"
+                autocomplete="username"
+                :disabled="importing"
+                placeholder="you@example.com"
+                class="w-full h-9 px-2.5 text-xs rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring focus:relative focus:z-10"
+                spellcheck="false"
+              >
+            </div>
+            <div class="space-y-1.5">
+              <label class="text-xs font-medium">密码</label>
+              <input
+                v-model="windsurfPassword"
+                type="password"
+                autocomplete="current-password"
+                :disabled="importing"
+                placeholder="Windsurf 密码"
+                class="w-full h-9 px-2.5 text-xs rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring focus:relative focus:z-10"
+              >
+            </div>
+            <div class="space-y-1.5">
+              <label class="text-xs font-medium text-muted-foreground">名称（可选）</label>
+              <input
+                v-model="windsurfAccountName"
+                type="text"
+                autocomplete="off"
+                :disabled="importing"
+                placeholder="未填写时使用邮箱"
+                class="w-full h-9 px-2.5 text-xs rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring focus:relative focus:z-10"
+                spellcheck="false"
+              >
+            </div>
+          </div>
+
           <JsonImportInput
+            v-else
             v-model="importText"
             :disabled="importing"
             :reset-key="importInputResetKey"
@@ -472,7 +659,7 @@
           />
 
           <div
-            v-if="importTask"
+            v-if="importTask && !isWindsurfEmailPasswordImport"
             class="rounded-xl border border-border bg-muted/20 p-3 space-y-2"
           >
             <div class="flex items-center justify-between text-xs">
@@ -527,15 +714,15 @@
         取消
       </Button>
       <Button
-        v-if="mode === 'oauth' && showAuthorizationMode && !isKiroProvider"
+        v-if="mode === 'oauth' && showAuthorizationMode && !isDeviceBrowserProvider"
         :disabled="!canCompleteOAuth"
         @click="handleCompleteOAuth"
       >
         {{ oauth.completing ? '验证中...' : '验证' }}
       </Button>
       <Button
-        v-if="mode === 'oauth' && isKiroSocialManualCallbackMode"
-        :disabled="!canCompleteKiroSocialDeviceAuth"
+        v-if="mode === 'oauth' && isManualDeviceCallbackMode"
+        :disabled="!canCompleteDeviceAuth"
         @click="completeDeviceAuth"
       >
         {{ device.completing ? '验证中...' : '验证' }}
@@ -545,7 +732,7 @@
         :disabled="!canImport"
         @click="handleImport"
       >
-        {{ importing ? (importTask ? `导入中 ${importTask.progress_percent}%` : '导入中...') : importButtonLabel }}
+        {{ importButtonText }}
       </Button>
     </template>
   </Dialog>
@@ -577,6 +764,7 @@ import {
   getBatchImportOAuthTaskStatus,
   startDeviceAuthorize,
   pollDeviceAuthorize,
+  normalizeBatchImportCredentials,
   getAwsRegions,
 } from '@/api/endpoints'
 import type {
@@ -649,6 +837,7 @@ function getSelectedNodeLabel(): string {
 // 模式
 type DialogMode = 'oauth' | 'import'
 const mode = ref<DialogMode>((props.providerType || '').toLowerCase() === 'grok' ? 'import' : 'oauth')
+type WindsurfImportMethod = 'email_password' | 'token_json'
 
 // OAuth 状态
 interface OAuthState {
@@ -678,7 +867,8 @@ let oauthInitRequestId = 0
 let oauthCompleteRequestId = 0
 
 // 设备授权状态
-type DeviceAuthType = 'google' | 'github' | 'builder_id' | 'identity_center'
+type DeviceAuthType = 'default' | 'google' | 'github' | 'builder_id' | 'identity_center'
+type WindsurfLoginOption = 'default' | 'google' | 'github'
 
 interface DeviceAuthState {
   auth_type: DeviceAuthType
@@ -736,11 +926,17 @@ const importInputResetKey = ref(0)
 const importTask = ref<OAuthBatchImportTaskStatusResponse | null>(null)
 let importPollTimer: ReturnType<typeof setTimeout> | null = null
 const importPolling = ref(false)
+const windsurfImportMethod = ref<WindsurfImportMethod>('email_password')
+const windsurfEmail = ref('')
+const windsurfPassword = ref('')
+const windsurfAccountName = ref('')
 
 const isOpen = computed(() => props.open)
 
 const isKiroProvider = computed(() => (props.providerType || '').toLowerCase() === 'kiro')
 const isGrokProvider = computed(() => (props.providerType || '').toLowerCase() === 'grok')
+const isWindsurfProvider = computed(() => (props.providerType || '').toLowerCase() === 'windsurf')
+const isDeviceBrowserProvider = computed(() => isKiroProvider.value || isWindsurfProvider.value)
 const showAuthorizationMode = computed(() => !isGrokProvider.value)
 const defaultMode = computed<DialogMode>(() => (isGrokProvider.value ? 'import' : 'oauth'))
 
@@ -752,14 +948,20 @@ const isKiroSocialManualCallbackMode = computed(() =>
   isKiroProvider.value && isSocialDeviceAuth.value
 )
 
-const isKiroSocialManualCallbackPending = computed(() =>
-  isKiroSocialManualCallbackMode.value
+const isManualDeviceCallbackMode = computed(() =>
+  isKiroSocialManualCallbackMode.value || isWindsurfProvider.value
+)
+
+const isManualDeviceCallbackPending = computed(() =>
+  isManualDeviceCallbackMode.value
   && device.value.session_id.length > 0
   && device.value.status === 'pending'
 )
 
-const kiroSocialCallbackPlaceholder = computed(() =>
-  `http://localhost:49153/oauth/callback?login_option=${device.value.auth_type}&code=...&state=...`
+const deviceCallbackPlaceholder = computed(() =>
+  isWindsurfProvider.value
+    ? `粘贴包含 token=...&state=... 的回调 URL；session token/apiKey 也可直接粘贴，普通 token 请用导入授权`
+    : `http://localhost:49153/oauth/callback?login_option=${device.value.auth_type}&code=...&state=...`
 )
 
 const deviceCountdownFormatted = computed(() => {
@@ -779,13 +981,18 @@ const canCompleteOAuth = computed(() => {
   return !oauthBusy.value
 })
 
-const canCompleteKiroSocialDeviceAuth = computed(() => {
-  if (!isKiroSocialManualCallbackPending.value) return false
+const canCompleteDeviceAuth = computed(() => {
+  if (!isManualDeviceCallbackPending.value) return false
   if (!device.value.callback_url.trim()) return false
   return !device.value.starting && !device.value.completing
 })
 
 const canImport = computed(() => {
+  if (isWindsurfEmailPasswordImport.value) {
+    return windsurfEmail.value.trim().length > 0
+      && windsurfPassword.value.trim().length > 0
+      && !importing.value
+  }
   return importText.value.trim().length > 0 && !importing.value
 })
 
@@ -800,7 +1007,9 @@ const importDropHint = computed(() => (
 const importManualPlaceholder = computed(() => (
   isGrokProvider.value
     ? '粘贴 Grok sso/session token，支持每行一个；或粘贴包含 token、sso_token、access_token、plan_type、pool_tier 的 JSON'
-    : '粘贴 Refresh Token / Access Token 或 JSON 内容'
+    : isWindsurfProvider.value
+      ? '粘贴 show-auth-token Token、API key 或 JSON 内容'
+      : '粘贴 Refresh Token / Access Token 或 JSON 内容'
 ))
 const importManualDescription = computed(() => (
   isGrokProvider.value
@@ -814,6 +1023,18 @@ const importFileToggleText = computed(() => (
   isGrokProvider.value ? '或选择 Grok Token 文件导入' : '或选择 JSON 文件导入'
 ))
 const providerCredentialActionLabel = computed(() => (isGrokProvider.value ? '导入' : '授权'))
+const isWindsurfEmailPasswordImport = computed(() =>
+  isWindsurfProvider.value && windsurfImportMethod.value === 'email_password'
+)
+
+const importButtonText = computed(() => {
+  if (importing.value) {
+    return importTask.value && !isWindsurfEmailPasswordImport.value
+      ? `导入中 ${importTask.value.progress_percent}%`
+      : '导入中...'
+  }
+  return isWindsurfEmailPasswordImport.value ? '登录并导入' : importButtonLabel.value
+})
 
 function stopImportPolling() {
   if (importPollTimer) {
@@ -957,6 +1178,7 @@ function resetDeviceRuntimeState() {
 }
 
 function isKiroDeviceAuthOptionDisabled(_authType: DeviceAuthType): boolean {
+  if (!isKiroProvider.value) return false
   if (device.value.starting) {
     return !isSocialDeviceAuth.value
   }
@@ -965,6 +1187,14 @@ function isKiroDeviceAuthOptionDisabled(_authType: DeviceAuthType): boolean {
     return false
   }
   return true
+}
+
+function selectWindsurfLoginOption(loginOption: WindsurfLoginOption) {
+  if (!isWindsurfProvider.value) return
+  if (device.value.auth_type === loginOption && device.value.session_id && device.value.status === 'pending') return
+  deviceAuthRequestId += 1
+  resetDeviceRuntimeState()
+  device.value.auth_type = loginOption
 }
 
 function selectDeviceAuthType(authType: DeviceAuthType) {
@@ -985,11 +1215,11 @@ function resetDevice() {
   totp.stop()
   const { auth_type, start_url, region, totp_secret } = device.value
   device.value = createInitialDeviceState()
-  device.value.auth_type = auth_type
+  device.value.auth_type = isWindsurfProvider.value ? (auth_type === 'google' || auth_type === 'github' ? auth_type : 'default') : auth_type
   device.value.start_url = start_url
   device.value.region = region
   device.value.totp_secret = totp_secret
-  if (device.value.auth_type === 'google' || device.value.auth_type === 'github') {
+  if (!isWindsurfProvider.value && (device.value.auth_type === 'google' || device.value.auth_type === 'github')) {
     void ensureKiroSocialDeviceAuth()
   }
 }
@@ -1003,10 +1233,17 @@ function resetForm() {
   stopDevicePolling()
   totp.stop()
   device.value = createInitialDeviceState()
+  if (isWindsurfProvider.value) {
+    device.value.auth_type = 'default'
+  }
   importText.value = ''
   importing.value = false
   importTask.value = null
   importInputResetKey.value += 1
+  windsurfImportMethod.value = 'email_password'
+  windsurfEmail.value = ''
+  windsurfPassword.value = ''
+  windsurfAccountName.value = ''
   proxyPopoverOpen.value = false
   selectedProxyNodeId.value = ''
   mode.value = defaultMode.value
@@ -1046,7 +1283,7 @@ function openAuthorizationUrl() {
 async function initOAuth() {
   if (!props.providerId) return
   if (!showAuthorizationMode.value) return
-  if (isKiroProvider.value) return
+  if (isDeviceBrowserProvider.value) return
   if (oauth.value.starting) return
 
   const requestId = ++oauthInitRequestId
@@ -1095,35 +1332,12 @@ async function handleCompleteOAuth() {
   }
 }
 
-// 检测是否为批量导入格式
-function isBatchImport(text: string): boolean {
-  const trimmed = text.trim()
-  // JSON 数组（含单元素数组）
-  if (trimmed.startsWith('[')) {
-    try {
-      const parsed = JSON.parse(trimmed)
-      return Array.isArray(parsed) && parsed.length >= 1
-    } catch {
-      return false
-    }
-  }
-  // 单个 JSON 对象（可能是 pretty-printed 多行）不算批量导入
-  if (trimmed.startsWith('{')) {
-    try {
-      JSON.parse(trimmed)
-      return false // 可解析的单个 JSON 对象，走单条导入
-    } catch {
-      // 解析失败：可能是多个 JSON 对象（JSON Lines 格式），继续检查
-    }
-  }
-  // 多行文本（纯 Token 一行一个）
-  const lines = trimmed.split('\n').filter(line => line.trim() && !line.trim().startsWith('#'))
-  return lines.length > 1
-}
-
 function parseImportText(text: string): {
+  api_key?: string
+  token?: string
   refresh_token?: string
   access_token?: string
+  password?: string
   expires_at?: number
   name?: string
   email?: string
@@ -1152,6 +1366,35 @@ function parseImportText(text: string): {
     if (cookieImport) {
       return cookieImport
     }
+  }
+
+  if (isWindsurfProvider.value) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed)
+      if (typeof parsed === 'object' && parsed !== null) {
+        const obj = parsed as Record<string, unknown>
+        const apiKey = normalizeStringField(obj.api_key) ?? normalizeStringField(obj.apiKey)
+        const token = normalizeStringField(obj.token) ?? normalizeStringField(obj.auth_token) ?? normalizeStringField(obj.authToken)
+        const refreshToken = normalizeStringField(obj.refresh_token) ?? normalizeStringField(obj.refreshToken)
+        const accessToken = normalizeStringField(obj.access_token) ?? normalizeStringField(obj.accessToken)
+        const email = normalizeStringField(obj.email)
+        const password = normalizeStringField(obj.password)
+        if (apiKey || token || refreshToken || accessToken || (email && password)) {
+          return {
+            api_key: apiKey,
+            token,
+            refresh_token: refreshToken,
+            access_token: accessToken,
+            email,
+            password,
+            name: normalizeStringField(obj.name) ?? email,
+          }
+        }
+      }
+    } catch {
+      // Not JSON: treat as token copied from show-auth-token.
+    }
+    return { token: trimmed }
   }
 
   try {
@@ -1316,12 +1559,57 @@ function handleImportInputError(payload: { message: string; title?: string }) {
   showError(payload.message, payload.title)
 }
 
+function setWindsurfImportMethod(method: WindsurfImportMethod) {
+  if (!isWindsurfProvider.value || importing.value) return
+  windsurfImportMethod.value = method
+  importTask.value = null
+}
+
+async function handleWindsurfEmailPasswordImport() {
+  if (!props.providerId) return
+
+  const email = windsurfEmail.value.trim()
+  const password = windsurfPassword.value.trim()
+  if (!email || !password) {
+    showError('请输入邮箱和密码', '格式错误')
+    return
+  }
+
+  importing.value = true
+  try {
+    const result = await importProviderRefreshToken(props.providerId, {
+      email,
+      password,
+      name: windsurfAccountName.value.trim() || email,
+      proxy_node_id: selectedProxyNodeId.value || undefined,
+    })
+    success(getOAuthSuccessMessage('导入', result))
+    emit('saved')
+    handleClose()
+  } catch (err: unknown) {
+    const errorMessage = parseApiError(err, '导入失败')
+    showError(errorMessage, '错误')
+  } finally {
+    importing.value = false
+  }
+}
+
 async function handleImport() {
   if (!canImport.value || !props.providerId) return
+  if (isWindsurfEmailPasswordImport.value) {
+    await handleWindsurfEmailPasswordImport()
+    return
+  }
 
   const inputText = importText.value.trim()
   if (!inputText) {
     showError('请输入凭据数据', '格式错误')
+    return
+  }
+
+  const normalizedCredentials = normalizeBatchImportCredentials(inputText)
+  if (!normalizedCredentials.ok) {
+    showError(normalizedCredentials.message, '格式错误')
     return
   }
 
@@ -1330,8 +1618,8 @@ async function handleImport() {
   try {
     const proxyNodeId = selectedProxyNodeId.value || undefined
     // Kiro 的单条 JSON 凭据也必须走 batch-import 路径，后端需要完整 auth_config。
-    if (isKiroProvider.value || isBatchImport(inputText)) {
-      const task = await startBatchImportOAuthTask(props.providerId, inputText, proxyNodeId)
+    if (isKiroProvider.value || normalizedCredentials.isBatch) {
+      const task = await startBatchImportOAuthTask(props.providerId, normalizedCredentials.credentials, proxyNodeId)
       importTask.value = {
         task_id: task.task_id,
         provider_id: props.providerId,
@@ -1356,7 +1644,7 @@ async function handleImport() {
       scheduleImportPoll(task.task_id, 400)
     } else {
       // 单条导入
-      const parsed = parseImportText(inputText)
+      const parsed = parseImportText(normalizedCredentials.credentials)
       if (!parsed) {
         showError('无法解析输入内容，请检查格式', '格式错误')
         return
@@ -1413,12 +1701,18 @@ async function startDeviceAuth() {
   device.value.starting = true
   device.value.error = ''
   try {
+    const isWindsurf = isWindsurfProvider.value
     const isBuilderID = requestedAuthType === 'builder_id'
     const isSocial = requestedAuthType === 'google' || requestedAuthType === 'github'
+    const windsurfLoginOption: WindsurfLoginOption = isSocial ? requestedAuthType : 'default'
+    const authTypeForRequest = isWindsurf
+      ? 'browser'
+      : (requestedAuthType === 'default' ? 'google' : requestedAuthType)
     const resp = await startDeviceAuthorize(props.providerId, {
-      auth_type: requestedAuthType,
-      start_url: isBuilderID ? BUILDER_ID_START_URL : (isSocial ? undefined : (device.value.start_url.trim() || undefined)),
-      region: isBuilderID || isSocial ? BUILDER_ID_REGION : (device.value.region.trim() || undefined),
+      auth_type: authTypeForRequest,
+      login_option: isWindsurf ? windsurfLoginOption : undefined,
+      start_url: isWindsurf ? undefined : (isBuilderID ? BUILDER_ID_START_URL : (isSocial ? undefined : (device.value.start_url.trim() || undefined))),
+      region: isWindsurf ? undefined : (isBuilderID || isSocial ? BUILDER_ID_REGION : (device.value.region.trim() || undefined)),
       proxy_node_id: selectedProxyNodeId.value || undefined,
     })
     if (requestId !== deviceAuthRequestId || device.value.auth_type !== requestedAuthType) return
@@ -1428,7 +1722,7 @@ async function startDeviceAuth() {
     device.value.verification_uri_complete = resp.verification_uri_complete
     device.value.expires_at = Date.now() + resp.expires_in * 1000
     device.value.interval = resp.interval || 5
-    device.value.callback_required = resp.callback_required === true || isSocial
+    device.value.callback_required = resp.callback_required === true || isSocial || isWindsurf
     device.value.status = 'pending'
     startCountdown()
     if (!device.value.callback_required) {
@@ -1464,7 +1758,7 @@ function scheduleDevicePoll() {
 }
 
 async function completeDeviceAuth() {
-  if (device.value.completing || !canCompleteKiroSocialDeviceAuth.value) return
+  if (device.value.completing || !canCompleteDeviceAuth.value) return
   device.value.completing = true
   try {
     await pollDevice(true)
@@ -1473,13 +1767,39 @@ async function completeDeviceAuth() {
   }
 }
 
+function normalizeWindsurfSubmittedCredential(value: string): { callback_url?: string, token?: string } {
+  const trimmed = value.trim()
+  if (!trimmed) return {}
+  if (/^https?:\/\//i.test(trimmed)) {
+    return { callback_url: trimmed }
+  }
+
+  const query = trimmed.replace(/^[?#&]+/, '')
+  const params = new URLSearchParams(query)
+  const hasTokenParam = ['token', 'auth_token', 'access_token'].some(key => params.has(key))
+  const hasStateParam = params.has('state')
+  if (hasTokenParam && hasStateParam) {
+    return { callback_url: `https://windsurf.com/show-auth-token?${query}` }
+  }
+  if (hasTokenParam) {
+    return { token: params.get('token') || params.get('auth_token') || params.get('access_token') || trimmed }
+  }
+
+  return { token: trimmed }
+}
+
 async function pollDevice(withCallback = false) {
   if (!props.providerId || !device.value.session_id || device.value.status !== 'pending') return
 
   try {
+    const submittedCredential = withCallback ? device.value.callback_url.trim() : ''
+    const windsurfSubmitted = isWindsurfProvider.value
+      ? normalizeWindsurfSubmittedCredential(submittedCredential)
+      : {}
     const result = await pollDeviceAuthorize(props.providerId, {
       session_id: device.value.session_id,
-      callback_url: withCallback ? device.value.callback_url.trim() : undefined,
+      callback_url: withCallback ? (windsurfSubmitted.callback_url || (!isWindsurfProvider.value ? submittedCredential : undefined)) : undefined,
+      token: withCallback ? windsurfSubmitted.token : undefined,
     })
 
     switch (result.status) {
@@ -1535,7 +1855,9 @@ watch(() => props.open, (newOpen) => {
     if (!showAuthorizationMode.value) {
       return
     }
-    if (isKiroProvider.value) {
+    if (isWindsurfProvider.value) {
+      device.value.auth_type = 'default'
+    } else if (isKiroProvider.value) {
       void ensureKiroSocialDeviceAuth()
     } else {
       initOAuth()
@@ -1552,7 +1874,11 @@ watch(
       mode.value = 'import'
       return
     }
-    if (props.open && isKiroProvider.value && mode.value === 'oauth') {
+    if (props.open && isWindsurfProvider.value && mode.value === 'oauth') {
+      device.value.auth_type = ['default', 'google', 'github'].includes(device.value.auth_type)
+        ? device.value.auth_type
+        : 'default'
+    } else if (props.open && isKiroProvider.value && mode.value === 'oauth') {
       void ensureKiroSocialDeviceAuth()
     }
   },

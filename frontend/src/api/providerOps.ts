@@ -127,12 +127,19 @@ export interface ActionConfigRequest {
 }
 
 /** 保存配置请求 */
+export interface QuotaAlertConfig {
+  enabled: boolean
+  threshold_amount: number
+  fetch_interval_seconds: number
+}
+
 export interface SaveConfigRequest {
   architecture_id: string
   base_url?: string
   connector: ConnectorConfigRequest
   actions: Record<string, ActionConfigRequest>
   schedule: Record<string, string>
+  quota_alert?: QuotaAlertConfig
 }
 
 /** 连接请求 */
@@ -190,6 +197,7 @@ export interface ProviderOpsConfigResponse {
     config: Record<string, unknown>
     credentials: Record<string, unknown>
   }
+  quota_alert?: QuotaAlertConfig
 }
 
 /**

@@ -354,12 +354,7 @@ pub(crate) async fn maybe_build_internal_finalize_video_response(
 }
 
 pub(crate) fn gateway_error_message(error: GatewayError) -> String {
-    match error {
-        GatewayError::UpstreamUnavailable { message, .. }
-        | GatewayError::ControlUnavailable { message, .. }
-        | GatewayError::Client { message, .. }
-        | GatewayError::Internal(message) => message,
-    }
+    error.into_message()
 }
 
 pub(crate) fn build_internal_tunnel_heartbeat_ack(

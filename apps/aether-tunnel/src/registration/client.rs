@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 use tracing::{debug, error, info};
 
-use crate::config::Config;
+use crate::config::{effective_tunnel_security, Config, ServerEntry, TunnelSecurity};
 use crate::hardware::HardwareInfo;
 
 #[derive(Debug, Serialize)]
@@ -22,6 +22,10 @@ struct RegisterRequest {
     estimated_max_concurrency: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     proxy_metadata: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tunnel_security: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tunnel_encryption_key: Option<String>,
     tunnel_mode: bool,
 }
 
@@ -95,11 +99,17 @@ impl AetherClient {
     pub async fn register(
         &self,
         config: &Config,
+        server: &ServerEntry,
         node_name: &str,
         public_ip: &str,
         hw: Option<&HardwareInfo>,
     ) -> anyhow::Result<String> {
         let url = format!("{}/api/admin/proxy-nodes/register", self.base_url);
+        let effective_security = effective_tunnel_security(
+            &server.aether_url,
+            server.tunnel_security,
+            server.tunnel_encryption_key.as_deref(),
+        );
         let body = RegisterRequest {
             name: node_name.to_string(),
             ip: public_ip.to_string(),
@@ -111,6 +121,11 @@ impl AetherClient {
             proxy_metadata: Some(serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
             })),
+            tunnel_security: (effective_security == TunnelSecurity::NonTlsRequired)
+                .then(|| effective_security.to_string()),
+            tunnel_encryption_key: (effective_security == TunnelSecurity::NonTlsRequired)
+                .then(|| server.tunnel_encryption_key.clone())
+                .flatten(),
             tunnel_mode: true,
         };
 

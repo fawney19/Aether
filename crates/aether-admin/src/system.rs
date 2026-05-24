@@ -67,6 +67,8 @@ pub struct AdminSystemUpdateRelease {
     pub release_url: Option<String>,
     pub release_notes: Option<String>,
     pub published_at: Option<String>,
+    pub tarball_url: Option<String>,
+    pub sha256sums_url: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -171,6 +173,44 @@ fn chat_pii_redaction_default_rules() -> serde_json::Value {
             "features": {"validator": "jwt"},
             "system": true
         },
+    ])
+}
+
+fn notification_service_default_items() -> serde_json::Value {
+    json!([
+        {
+            "key": "provider_quota_alert",
+            "name": "号池额度不足",
+            "enabled": true,
+            "channel": "global",
+            "title_template": "",
+            "markdown_template": "",
+            "text_template": "",
+            "user_email_enabled": false,
+            "system": true
+        },
+        {
+            "key": "provider_pool_abnormal",
+            "name": "号池异常",
+            "enabled": true,
+            "channel": "global",
+            "title_template": "号池异常：{provider_name}",
+            "markdown_template": "号池 `{provider_name}` 出现异常，请检查服务状态。",
+            "text_template": "号池 {provider_name} 出现异常，请检查服务状态。",
+            "user_email_enabled": false,
+            "system": true
+        },
+        {
+            "key": "user_balance_low",
+            "name": "用户余额不足",
+            "enabled": true,
+            "channel": "email",
+            "title_template": "余额不足提醒",
+            "markdown_template": "你的账户余额已低于提醒阈值，请及时处理。",
+            "text_template": "你的账户余额已低于提醒阈值，请及时处理。",
+            "user_email_enabled": true,
+            "system": true
+        }
     ])
 }
 
@@ -667,10 +707,14 @@ struct AdminApiFormatDefinition {
 
 const REQUEST_RECORD_LEVEL_KEY: &str = "request_record_level";
 const LEGACY_REQUEST_LOG_LEVEL_KEY: &str = "request_log_level";
+const DEFAULT_BARK_API_BASE: &str = "https://api.day.app";
 const SENSITIVE_SYSTEM_CONFIG_KEYS: &[&str] = &[
     "smtp_password",
     "turnstile_secret_key",
     "backup_s3_secret_access_key",
+    "module.server_chan_push.send_key",
+    "module.important_notification.server_chan_send_key",
+    "module.bark_push.device_key",
 ];
 const ADMIN_API_FORMAT_DEFINITIONS: &[AdminApiFormatDefinition] = &[
     AdminApiFormatDefinition {
@@ -785,16 +829,71 @@ pub fn build_admin_system_check_update_payload_with_release(
     let has_update = latest_release
         .as_ref()
         .is_some_and(|release| admin_system_update_available(&current_version, &release.version));
+    let update_blocker = latest_release
+        .as_ref()
+        .and_then(admin_system_update_blocker);
+    let updatable = latest_release
+        .as_ref()
+        .is_some_and(|release| admin_system_update_blocker(release).is_none());
 
     json!({
         "current_version": current_version,
         "latest_version": latest_release.as_ref().map(|release| release.version.clone()),
         "has_update": has_update,
+        "updatable": updatable,
+        "update_blocker": update_blocker,
         "release_url": latest_release.as_ref().and_then(|release| release.release_url.clone()),
         "release_notes": latest_release.as_ref().and_then(|release| release.release_notes.clone()),
         "published_at": latest_release.as_ref().and_then(|release| release.published_at.clone()),
         "error": error,
     })
+}
+
+pub fn build_admin_system_releases_payload(
+    current_version: String,
+    releases: Vec<AdminSystemUpdateRelease>,
+    error: Option<String>,
+) -> serde_json::Value {
+    let entries: Vec<serde_json::Value> = releases
+        .iter()
+        .map(|release| {
+            let is_current = {
+                let norm_current = normalized_admin_system_version(&current_version);
+                let norm_release = normalized_admin_system_version(&release.version);
+                norm_current == norm_release
+            };
+            let is_newer = admin_system_update_available(&current_version, &release.version);
+            let update_blocker = admin_system_update_blocker(release);
+            json!({
+                "version": release.version,
+                "release_url": release.release_url,
+                "release_notes": release.release_notes,
+                "published_at": release.published_at,
+                "tarball_url": release.tarball_url,
+                "sha256sums_url": release.sha256sums_url,
+                "is_current": is_current,
+                "is_newer": is_newer,
+                "updatable": update_blocker.is_none(),
+                "update_blocker": update_blocker,
+            })
+        })
+        .collect();
+
+    json!({
+        "current_version": current_version,
+        "releases": entries,
+        "error": error,
+    })
+}
+
+fn admin_system_update_blocker(release: &AdminSystemUpdateRelease) -> Option<&'static str> {
+    if release.tarball_url.is_none() {
+        Some("当前平台暂无安装包")
+    } else if release.sha256sums_url.is_none() {
+        Some("缺少 SHA256SUMS 校验文件")
+    } else {
+        None
+    }
 }
 
 fn normalized_admin_system_version(version: &str) -> String {
@@ -1166,7 +1265,9 @@ pub fn build_admin_module_validation_result(
     oauth_providers: &[StoredOAuthProviderModuleConfig],
     ldap_config: Option<&StoredLdapModuleConfig>,
     gemini_files_has_capable_key: bool,
-    smtp_configured: bool,
+    important_notification_configured: bool,
+    server_chan_push_configured: bool,
+    bark_push_configured: bool,
 ) -> (bool, Option<String>) {
     match module_name {
         "oauth" => {
@@ -1237,11 +1338,25 @@ pub fn build_admin_module_validation_result(
             }
             (true, None)
         }
-        "notification_email" => {
-            if smtp_configured {
+        "important_notification" | "notification_email" => {
+            if important_notification_configured {
                 (true, None)
             } else {
-                (false, Some("请先完成邮件配置（SMTP）".to_string()))
+                (false, Some("请先完成通知服务推送渠道配置".to_string()))
+            }
+        }
+        "server_chan_push" => {
+            if server_chan_push_configured {
+                (true, None)
+            } else {
+                (false, Some("请先配置 Server 酱 SendKey".to_string()))
+            }
+        }
+        "bark_push" => {
+            if bark_push_configured {
+                (true, None)
+            } else {
+                (false, Some("请先配置 Bark Device Key".to_string()))
             }
         }
         "gemini_files" => {
@@ -1264,7 +1379,12 @@ pub fn build_admin_module_health(
     gemini_files_has_capable_key: bool,
 ) -> &'static str {
     match module_name {
-        "management_tokens" | "model_directives" | "proxy_nodes" => "healthy",
+        "management_tokens"
+        | "model_directives"
+        | "proxy_nodes"
+        | "important_notification"
+        | "bark_push"
+        | "server_chan_push" => "healthy",
         "gemini_files" => {
             if gemini_files_has_capable_key {
                 "healthy"
@@ -1441,6 +1561,14 @@ pub fn normalize_admin_system_config_key(requested_key: &str) -> String {
     let trimmed = requested_key.trim();
     if trimmed.eq_ignore_ascii_case(LEGACY_REQUEST_LOG_LEVEL_KEY) {
         REQUEST_RECORD_LEVEL_KEY.to_string()
+    } else if trimmed.eq_ignore_ascii_case("module.notification_email.enabled") {
+        "module.important_notification.enabled".to_string()
+    } else if trimmed.eq_ignore_ascii_case("module.important_notification.server_chan_enabled") {
+        "module.server_chan_push.enabled".to_string()
+    } else if trimmed.eq_ignore_ascii_case("module.important_notification.server_chan_send_key") {
+        "module.server_chan_push.send_key".to_string()
+    } else if trimmed.eq_ignore_ascii_case("module.important_notification.server_chan_template") {
+        "module.server_chan_push.template".to_string()
     } else {
         trimmed.to_string()
     }
@@ -1452,6 +1580,26 @@ pub fn admin_system_config_delete_keys(requested_key: &str) -> Vec<String> {
         vec![
             REQUEST_RECORD_LEVEL_KEY.to_string(),
             LEGACY_REQUEST_LOG_LEVEL_KEY.to_string(),
+        ]
+    } else if normalized == "module.important_notification.enabled" {
+        vec![
+            "module.important_notification.enabled".to_string(),
+            "module.notification_email.enabled".to_string(),
+        ]
+    } else if normalized == "module.server_chan_push.enabled" {
+        vec![
+            "module.server_chan_push.enabled".to_string(),
+            "module.important_notification.server_chan_enabled".to_string(),
+        ]
+    } else if normalized == "module.server_chan_push.send_key" {
+        vec![
+            "module.server_chan_push.send_key".to_string(),
+            "module.important_notification.server_chan_send_key".to_string(),
+        ]
+    } else if normalized == "module.server_chan_push.template" {
+        vec![
+            "module.server_chan_push.template".to_string(),
+            "module.important_notification.server_chan_template".to_string(),
         ]
     } else {
         vec![normalized]
@@ -1592,6 +1740,18 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "smtp_from_email" => Some(serde_json::Value::Null),
         "smtp_from_name" => Some(json!("Aether")),
         "enable_oauth_token_refresh" => Some(json!(true)),
+        "module.important_notification.enabled" => Some(json!(false)),
+        "module.important_notification.email_enabled" => Some(json!(false)),
+        "module.important_notification.email_recipients" => Some(json!("")),
+        "module.important_notification.default_channel" => Some(json!("all")),
+        "module.important_notification.items" => Some(notification_service_default_items()),
+        "module.server_chan_push.enabled" => Some(json!(false)),
+        "module.server_chan_push.send_key" => Some(serde_json::Value::Null),
+        "module.server_chan_push.template" => Some(json!("")),
+        "module.bark_push.enabled" => Some(json!(false)),
+        "module.bark_push.device_key" => Some(serde_json::Value::Null),
+        "module.bark_push.server_url" => Some(json!(DEFAULT_BARK_API_BASE)),
+        "module.bark_push.template" => Some(json!("")),
         "module.chat_pii_redaction.enabled" => Some(json!(false)),
         "module.chat_pii_redaction.rules" => Some(chat_pii_redaction_default_rules()),
         "module.chat_pii_redaction.cache_ttl_seconds" => Some(json!(300)),
@@ -1742,6 +1902,183 @@ fn normalize_chat_pii_redaction_rule_features(
     Ok(Value::Object(features))
 }
 
+fn normalize_string_list_config_value(value: serde_json::Value) -> Result<serde_json::Value, ()> {
+    match value {
+        Value::Null => Ok(json!("")),
+        Value::String(raw) => Ok(json!(raw.trim())),
+        Value::Array(items) => {
+            let mut normalized = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(raw) = item.as_str() else {
+                    return Err(());
+                };
+                let raw = raw.trim();
+                if !raw.is_empty() {
+                    normalized.push(raw.to_string());
+                }
+            }
+            Ok(json!(normalized))
+        }
+        _ => Err(()),
+    }
+}
+
+fn normalize_nullable_string_config_value(
+    value: serde_json::Value,
+) -> Result<serde_json::Value, ()> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::String(raw) => {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                Ok(Value::Null)
+            } else {
+                Ok(json!(raw))
+            }
+        }
+        _ => Err(()),
+    }
+}
+
+fn normalize_bark_server_url_config_value(
+    value: serde_json::Value,
+) -> Result<serde_json::Value, ()> {
+    match value {
+        Value::Null => Ok(json!(DEFAULT_BARK_API_BASE)),
+        Value::String(raw) => {
+            let raw = raw.trim().trim_end_matches('/');
+            if raw.is_empty() {
+                return Ok(json!(DEFAULT_BARK_API_BASE));
+            }
+            if !raw.starts_with("https://") && !raw.starts_with("http://") {
+                return Err(());
+            }
+            Ok(json!(raw))
+        }
+        _ => Err(()),
+    }
+}
+
+fn normalize_notification_channel_value(value: serde_json::Value) -> Result<serde_json::Value, ()> {
+    match value {
+        Value::Null => Ok(json!("all")),
+        Value::String(raw) => {
+            let normalized = normalize_notification_channel(raw.trim(), false)?;
+            Ok(json!(normalized))
+        }
+        _ => Err(()),
+    }
+}
+
+fn normalize_notification_channel(raw: &str, allow_global: bool) -> Result<&'static str, ()> {
+    match raw.to_ascii_lowercase().as_str() {
+        "all" => Ok("all"),
+        "email" => Ok("email"),
+        "server_chan" | "serverchan" | "serve_chan" => Ok("server_chan"),
+        "bark" => Ok("bark"),
+        "global" | "" if allow_global => Ok("global"),
+        _ => Err(()),
+    }
+}
+
+fn normalize_notification_service_items_value(
+    value: serde_json::Value,
+) -> Result<serde_json::Value, ()> {
+    let Value::Array(items) = value else {
+        return Err(());
+    };
+    let mut normalized_items = Vec::with_capacity(items.len());
+    let mut keys = BTreeSet::new();
+    for item in items {
+        let Value::Object(raw_item) = item else {
+            return Err(());
+        };
+        let key = normalize_notification_item_key(raw_item.get("key"))?;
+        if !keys.insert(key.clone()) {
+            return Err(());
+        }
+        let name = normalize_optional_bounded_string(raw_item.get("name"), 80)?
+            .unwrap_or_else(|| key.clone());
+        let enabled = raw_item
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let channel = raw_item
+            .get("channel")
+            .and_then(Value::as_str)
+            .map(|raw| normalize_notification_channel(raw.trim(), true))
+            .transpose()?
+            .unwrap_or("global");
+        let title_template =
+            normalize_optional_bounded_string(raw_item.get("title_template"), 256)?
+                .unwrap_or_default();
+        let markdown_template =
+            normalize_optional_bounded_string(raw_item.get("markdown_template"), 8_000)?
+                .unwrap_or_default();
+        let text_template =
+            normalize_optional_bounded_string(raw_item.get("text_template"), 8_000)?
+                .unwrap_or_default();
+        let user_email_enabled = raw_item
+            .get("user_email_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let system = raw_item
+            .get("system")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        normalized_items.push(json!({
+            "key": key,
+            "name": name,
+            "enabled": enabled,
+            "channel": channel,
+            "title_template": title_template,
+            "markdown_template": markdown_template,
+            "text_template": text_template,
+            "user_email_enabled": user_email_enabled,
+            "system": system,
+        }));
+    }
+    Ok(Value::Array(normalized_items))
+}
+
+fn normalize_notification_item_key(value: Option<&Value>) -> Result<String, ()> {
+    let Some(raw) = value.and_then(Value::as_str).map(str::trim) else {
+        return Err(());
+    };
+    if raw.is_empty() || raw.len() > 64 {
+        return Err(());
+    }
+    if !raw
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':'))
+    {
+        return Err(());
+    }
+    Ok(raw.to_string())
+}
+
+fn normalize_optional_bounded_string(
+    value: Option<&Value>,
+    max_len: usize,
+) -> Result<Option<String>, ()> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(raw)) => {
+            let trimmed = raw.trim();
+            if trimmed.len() > max_len {
+                return Err(());
+            }
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Some(_) => Err(()),
+    }
+}
+
 pub fn parse_admin_system_config_update(
     requested_key: &str,
     request_body: &[u8],
@@ -1795,6 +2132,97 @@ pub fn parse_admin_system_config_update(
     }
 
     match normalized_key.as_str() {
+        "module.important_notification.enabled"
+        | "module.important_notification.email_enabled"
+        | "module.server_chan_push.enabled"
+        | "module.bark_push.enabled" => match value.as_bool() {
+            Some(enabled) => value = json!(enabled),
+            None if value.is_null() => {
+                value = admin_system_config_default_value(&normalized_key).unwrap_or(json!(false));
+            }
+            None => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                ));
+            }
+        },
+        "module.important_notification.email_recipients" => {
+            value = normalize_string_list_config_value(value).map_err(|_| {
+                (
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                )
+            })?;
+        }
+        "module.important_notification.default_channel" => {
+            value = normalize_notification_channel_value(value).map_err(|_| {
+                (
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                )
+            })?;
+        }
+        "module.important_notification.items" => {
+            if value.is_null() {
+                value = notification_service_default_items();
+            } else {
+                value = normalize_notification_service_items_value(value).map_err(|_| {
+                    (
+                        http::StatusCode::BAD_REQUEST,
+                        json!({ "detail": "请求数据验证失败" }),
+                    )
+                })?;
+            }
+        }
+        "module.server_chan_push.send_key" => {
+            value = normalize_nullable_string_config_value(value).map_err(|_| {
+                (
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                )
+            })?;
+        }
+        "module.server_chan_push.template" => {
+            value = match value {
+                Value::Null => json!(""),
+                Value::String(raw) => json!(raw),
+                _ => {
+                    return Err((
+                        http::StatusCode::BAD_REQUEST,
+                        json!({ "detail": "请求数据验证失败" }),
+                    ));
+                }
+            };
+        }
+        "module.bark_push.device_key" => {
+            value = normalize_nullable_string_config_value(value).map_err(|_| {
+                (
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                )
+            })?;
+        }
+        "module.bark_push.server_url" => {
+            value = normalize_bark_server_url_config_value(value).map_err(|_| {
+                (
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                )
+            })?;
+        }
+        "module.bark_push.template" => {
+            value = match value {
+                Value::Null => json!(""),
+                Value::String(raw) => json!(raw),
+                _ => {
+                    return Err((
+                        http::StatusCode::BAD_REQUEST,
+                        json!({ "detail": "请求数据验证失败" }),
+                    ));
+                }
+            };
+        }
         "module.chat_pii_redaction.enabled" => match value.as_bool() {
             Some(enabled) => value = json!(enabled),
             None if value.is_null() => {
@@ -2598,6 +3026,8 @@ mod tests {
                 ),
                 release_notes: Some("release notes".to_string()),
                 published_at: Some("2026-05-13T00:00:00Z".to_string()),
+                tarball_url: None,
+                sha256sums_url: None,
             }),
             None,
         );
@@ -2611,7 +3041,29 @@ mod tests {
         );
         assert_eq!(payload["release_notes"], "release notes");
         assert_eq!(payload["published_at"], "2026-05-13T00:00:00Z");
+        assert_eq!(payload["updatable"], false);
+        assert_eq!(payload["update_blocker"], "当前平台暂无安装包");
         assert_eq!(payload["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn build_admin_system_check_update_payload_reports_updatable_release() {
+        let payload = build_admin_system_check_update_payload_with_release(
+            "0.7.0-rc27".to_string(),
+            Some(AdminSystemUpdateRelease {
+                version: "v0.7.0-rc28".to_string(),
+                release_url: None,
+                release_notes: None,
+                published_at: None,
+                tarball_url: Some("https://github.com/fawney19/Aether/releases/download/v0.7.0-rc28/aether.tar.gz".to_string()),
+                sha256sums_url: Some("https://github.com/fawney19/Aether/releases/download/v0.7.0-rc28/SHA256SUMS".to_string()),
+            }),
+            None,
+        );
+
+        assert_eq!(payload["has_update"], true);
+        assert_eq!(payload["updatable"], true);
+        assert_eq!(payload["update_blocker"], serde_json::Value::Null);
     }
 
     #[test]
@@ -2623,6 +3075,8 @@ mod tests {
                 release_url: None,
                 release_notes: None,
                 published_at: None,
+                tarball_url: None,
+                sha256sums_url: None,
             }),
             None,
         );
@@ -2640,6 +3094,8 @@ mod tests {
                 release_url: None,
                 release_notes: None,
                 published_at: None,
+                tarball_url: None,
+                sha256sums_url: None,
             }),
             None,
         );
@@ -2657,6 +3113,8 @@ mod tests {
                 release_url: None,
                 release_notes: None,
                 published_at: None,
+                tarball_url: None,
+                sha256sums_url: None,
             }),
             None,
         );
@@ -2674,6 +3132,8 @@ mod tests {
                 release_url: None,
                 release_notes: None,
                 published_at: None,
+                tarball_url: None,
+                sha256sums_url: None,
             }),
             None,
         );
@@ -2851,6 +3311,15 @@ mod tests {
         assert!(is_sensitive_admin_system_config_key("SMTP_PASSWORD"));
         assert!(is_sensitive_admin_system_config_key("turnstile_secret_key"));
         assert!(is_sensitive_admin_system_config_key("TURNSTILE_SECRET_KEY"));
+        assert!(is_sensitive_admin_system_config_key(
+            "module.server_chan_push.send_key"
+        ));
+        assert!(is_sensitive_admin_system_config_key(
+            "module.important_notification.server_chan_send_key"
+        ));
+        assert!(is_sensitive_admin_system_config_key(
+            "module.bark_push.device_key"
+        ));
         assert!(!is_sensitive_admin_system_config_key("site_name"));
     }
 
@@ -2890,6 +3359,21 @@ mod tests {
     }
 
     #[test]
+    fn legacy_notification_email_config_key_normalizes_to_important_notification() {
+        assert_eq!(
+            normalize_admin_system_config_key("module.notification_email.enabled"),
+            "module.important_notification.enabled"
+        );
+        assert_eq!(
+            admin_system_config_delete_keys("module.important_notification.enabled"),
+            vec![
+                "module.important_notification.enabled".to_string(),
+                "module.notification_email.enabled".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn s3_backup_secret_detail_is_write_only() {
         let payload = build_admin_system_config_detail_payload(
             "backup_s3_secret_access_key",
@@ -2900,6 +3384,70 @@ mod tests {
         assert_eq!(payload["key"], json!("backup_s3_secret_access_key"));
         assert_eq!(payload["value"], serde_json::Value::Null);
         assert_eq!(payload["is_set"], json!(true));
+    }
+
+    #[test]
+    fn legacy_server_chan_config_keys_normalize_to_push_module() {
+        assert_eq!(
+            normalize_admin_system_config_key("module.important_notification.server_chan_send_key"),
+            "module.server_chan_push.send_key"
+        );
+        assert_eq!(
+            admin_system_config_delete_keys("module.server_chan_push.send_key"),
+            vec![
+                "module.server_chan_push.send_key".to_string(),
+                "module.important_notification.server_chan_send_key".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn notification_service_items_are_normalized() {
+        let update = parse_admin_system_config_update(
+            "module.important_notification.items",
+            r#"{
+                "value": [
+                    {
+                        "key": "user_balance_low",
+                        "name": " 用户余额不足 ",
+                        "enabled": true,
+                        "channel": "serverchan",
+                        "title_template": " 余额提醒 ",
+                        "markdown_template": " {body} ",
+                        "text_template": null,
+                        "user_email_enabled": true,
+                        "system": true
+                    }
+                ]
+            }"#
+            .as_bytes(),
+        )
+        .expect("items should parse");
+
+        assert_eq!(update.normalized_key, "module.important_notification.items");
+        assert_eq!(update.value[0]["channel"], json!("server_chan"));
+        assert_eq!(update.value[0]["name"], json!("用户余额不足"));
+        assert_eq!(update.value[0]["text_template"], json!(""));
+        assert_eq!(update.value[0]["user_email_enabled"], json!(true));
+    }
+
+    #[test]
+    fn bark_push_config_values_are_normalized() {
+        let update = parse_admin_system_config_update(
+            "module.bark_push.server_url",
+            r#"{ "value": " https://api.day.app/ " }"#.as_bytes(),
+        )
+        .expect("server url should parse");
+
+        assert_eq!(update.normalized_key, "module.bark_push.server_url");
+        assert_eq!(update.value, json!("https://api.day.app"));
+
+        let err = parse_admin_system_config_update(
+            "module.bark_push.server_url",
+            r#"{ "value": "api.day.app" }"#.as_bytes(),
+        )
+        .expect_err("server url without scheme should fail");
+        assert_eq!(err.0, http::StatusCode::BAD_REQUEST);
     }
 
     #[test]

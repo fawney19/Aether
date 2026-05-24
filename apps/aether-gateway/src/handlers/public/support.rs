@@ -83,7 +83,7 @@ use self::support_payment::maybe_build_local_payment_callback_response;
 use self::support_test_connection::maybe_build_local_test_connection_response;
 use self::support_user_me::maybe_build_local_users_me_response;
 use self::support_wallet::{
-    maybe_build_local_wallet_response, sanitize_wallet_gateway_response,
+    direct_gateway_channels, maybe_build_local_wallet_response, sanitize_wallet_gateway_response,
     wallet_normalize_optional_string_field,
 };
 

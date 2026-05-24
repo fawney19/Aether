@@ -40,7 +40,7 @@ use aether_data_contracts::repository::global_models::StoredProviderActiveGlobal
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
 use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageRepository};
 use axum::response::IntoResponse;
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 
 #[path = "public_support/dashboard.rs"]
 mod dashboard;
@@ -2372,6 +2372,20 @@ fn sample_auth_wallet(user_id: &str, now: chrono::DateTime<chrono::Utc>) -> Stor
     .expect("wallet should build")
 }
 
+fn wallet_today_usage_test_time() -> chrono::DateTime<chrono::Utc> {
+    let offset =
+        chrono::FixedOffset::east_opt(8 * 3600).expect("Asia/Shanghai test offset should be valid");
+    let local_today = Utc::now().with_timezone(&offset).date_naive();
+    let local_noon = local_today
+        .and_hms_opt(12, 0, 0)
+        .expect("wallet today test noon should be valid");
+    offset
+        .from_local_datetime(&local_noon)
+        .single()
+        .expect("fixed offset local noon should be unambiguous")
+        .with_timezone(&Utc)
+}
+
 fn sample_auth_session(
     user_id: &str,
     session_id: &str,
@@ -4378,7 +4392,7 @@ async fn gateway_handles_wallet_balance_locally_without_proxying_upstream() {
 #[tokio::test]
 async fn gateway_handles_wallet_today_cost_locally_without_proxying_upstream() {
     let auth_now = Utc::now();
-    let usage_now = auth_now - chrono::Duration::minutes(30);
+    let usage_now = wallet_today_usage_test_time();
     let user = sample_auth_user(auth_now);
     let access_token = build_test_auth_token(
         "access",
@@ -4453,6 +4467,7 @@ async fn gateway_handles_wallet_today_cost_locally_without_proxying_upstream() {
 #[tokio::test]
 async fn gateway_wallet_flow_today_entry_uses_live_settled_usage() {
     let auth_now = Utc::now();
+    let usage_now = wallet_today_usage_test_time();
     let user = sample_auth_user(auth_now);
     let access_token = build_test_auth_token(
         "access",
@@ -4475,7 +4490,7 @@ async fn gateway_wallet_flow_today_entry_uses_live_settled_usage() {
             "gpt-4.1",
             "OpenAI",
             "completed",
-            auth_now - chrono::Duration::minutes(5),
+            usage_now,
         ),
     ]));
     let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =

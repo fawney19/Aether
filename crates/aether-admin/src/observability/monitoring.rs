@@ -9,6 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -384,7 +385,7 @@ fn resolve_admin_monitoring_usage_candidate_id(
     trace: &DecisionTrace,
     usage: &StoredRequestUsageAudit,
 ) -> Option<String> {
-    if usage.request_id.trim() != trace.request_id {
+    if !admin_monitoring_usage_matches_trace(usage, trace.request_id.as_str()) {
         return None;
     }
 
@@ -410,6 +411,43 @@ fn resolve_admin_monitoring_usage_candidate_id(
             )
         })
         .map(|item| item.candidate.id.clone())
+}
+
+fn admin_monitoring_usage_matches_trace(
+    usage: &StoredRequestUsageAudit,
+    trace_request_id: &str,
+) -> bool {
+    let trace_request_id = trace_request_id.trim();
+    if trace_request_id.is_empty() {
+        return false;
+    }
+    usage.request_id.trim() == trace_request_id
+        || usage
+            .trace_id()
+            .is_some_and(|value| value.trim() == trace_request_id)
+        || admin_monitoring_headers_contain_trace_id(
+            usage.request_headers.as_ref(),
+            trace_request_id,
+        )
+        || admin_monitoring_headers_contain_trace_id(
+            usage.provider_request_headers.as_ref(),
+            trace_request_id,
+        )
+}
+
+fn admin_monitoring_headers_contain_trace_id(
+    headers: Option<&Value>,
+    trace_request_id: &str,
+) -> bool {
+    headers.and_then(Value::as_object).is_some_and(|object| {
+        object.iter().any(|(key, value)| {
+            key.eq_ignore_ascii_case("x-trace-id")
+                && value
+                    .as_str()
+                    .map(str::trim)
+                    .is_some_and(|value| value == trace_request_id)
+        })
+    })
 }
 
 fn admin_monitoring_candidate_status_rank(status: RequestCandidateStatus) -> u8 {
@@ -548,14 +586,67 @@ fn admin_monitoring_trace_response_data(
         return None;
     }
 
+    let body = admin_monitoring_trace_response_body(headers, body);
     Some(json!({
         "source": source,
         "status_code": status_code,
         "headers": headers.cloned().unwrap_or(Value::Null),
-        "body": body.cloned().unwrap_or(Value::Null),
+        "body": body.unwrap_or(Value::Null),
         "body_ref": body_ref,
         "body_state": body_state.map(|state| state.as_str()),
     }))
+}
+
+fn admin_monitoring_trace_response_body(
+    headers: Option<&Value>,
+    body: Option<&Value>,
+) -> Option<Value> {
+    let body = body?;
+    admin_monitoring_decode_connect_json_error_body(headers, body).or_else(|| Some(body.clone()))
+}
+
+fn admin_monitoring_decode_connect_json_error_body(
+    headers: Option<&Value>,
+    body: &Value,
+) -> Option<Value> {
+    if !admin_monitoring_headers_indicate_connect_json(headers) {
+        return None;
+    }
+
+    let body_base64 = match body {
+        Value::String(value) => Some(value.as_str()),
+        Value::Object(object) => object
+            .get("encoding")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case("base64"))
+            .then(|| object.get("data").and_then(Value::as_str))
+            .flatten(),
+        _ => None,
+    }?
+    .trim();
+    if body_base64.is_empty() {
+        return None;
+    }
+
+    let body_bytes = BASE64_STANDARD.decode(body_base64).ok()?;
+    aether_ai_formats::api::extract_provider_private_stream_error_body(None, &body_bytes)
+}
+
+fn admin_monitoring_headers_indicate_connect_json(headers: Option<&Value>) -> bool {
+    headers
+        .and_then(Value::as_object)
+        .and_then(|object| {
+            object.iter().find_map(|(key, value)| {
+                key.eq_ignore_ascii_case("content-type")
+                    .then(|| value.as_str())
+                    .flatten()
+            })
+        })
+        .map(str::trim)
+        .is_some_and(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("application/connect+json") || value.contains("+connect+json")
+        })
 }
 
 fn merge_admin_monitoring_trace_response(

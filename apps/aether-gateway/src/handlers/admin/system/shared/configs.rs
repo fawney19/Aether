@@ -33,6 +33,21 @@ fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value> {
     admin_system_config_default_value_pure(key)
 }
 
+fn legacy_admin_system_config_fallback_key(normalized_key: &str) -> Option<&'static str> {
+    match normalized_key {
+        "module.server_chan_push.enabled" => {
+            Some("module.important_notification.server_chan_enabled")
+        }
+        "module.server_chan_push.send_key" => {
+            Some("module.important_notification.server_chan_send_key")
+        }
+        "module.server_chan_push.template" => {
+            Some("module.important_notification.server_chan_template")
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn build_admin_system_configs_payload(
     entries: &[aether_data::repository::system::StoredSystemConfigEntry],
 ) -> serde_json::Value {
@@ -44,12 +59,14 @@ pub(crate) async fn build_admin_system_config_detail_payload(
     requested_key: &str,
 ) -> Result<Result<serde_json::Value, (http::StatusCode, serde_json::Value)>, GatewayError> {
     let requested_key = requested_key.trim();
-    let value = state
-        .read_system_config_json_value(&normalize_admin_system_config_key(requested_key))
-        .await?
-        .or_else(|| {
-            admin_system_config_default_value(&normalize_admin_system_config_key(requested_key))
-        });
+    let normalized_key = normalize_admin_system_config_key(requested_key);
+    let mut value = state.read_system_config_json_value(&normalized_key).await?;
+    if value.is_none() {
+        if let Some(legacy_key) = legacy_admin_system_config_fallback_key(&normalized_key) {
+            value = state.read_system_config_json_value(legacy_key).await?;
+        }
+    }
+    let value = value.or_else(|| admin_system_config_default_value(&normalized_key));
     Ok(build_admin_system_config_detail_payload_pure(
         requested_key,
         value,

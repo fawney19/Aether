@@ -17,6 +17,7 @@ pub(crate) enum GatewayLocalAuthRejection {
     ProviderNotAllowed { provider: String },
     ApiFormatNotAllowed { api_format: String },
     ModelNotAllowed { model: String },
+    IpNotAllowed { remote_ip: String },
 }
 
 pub(crate) fn trusted_auth_local_rejection(
@@ -574,6 +575,7 @@ mod tests {
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: Some(allowed_models),
+            ip_rules: None,
         });
         decision
     }

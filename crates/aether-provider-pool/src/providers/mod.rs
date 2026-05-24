@@ -5,6 +5,7 @@ pub mod default;
 pub mod grok;
 pub mod kiro;
 pub mod unsupported;
+pub mod windsurf;
 
 pub use antigravity::AntigravityProviderPoolAdapter;
 pub use antigravity::{
@@ -31,4 +32,12 @@ pub use kiro::{
 pub use unsupported::{
     UnsupportedQuotaProviderPoolAdapter, CLAUDE_CODE_PROVIDER_POOL_ADAPTER,
     GEMINI_CLI_PROVIDER_POOL_ADAPTER, VERTEX_AI_PROVIDER_POOL_ADAPTER,
+};
+pub use windsurf::{
+    build_windsurf_pool_model_configs_request,
+    build_windsurf_pool_model_configs_request_with_base_url, build_windsurf_pool_quota_request,
+    build_windsurf_pool_quota_request_with_base_url, build_windsurf_pool_rate_limit_request,
+    build_windsurf_pool_rate_limit_request_with_base_url, WindsurfProviderPoolAdapter,
+    WINDSURF_DEFAULT_BASE_URL, WINDSURF_MODEL_CONFIGS_PATH, WINDSURF_RATE_LIMIT_PATH,
+    WINDSURF_USER_STATUS_PATH,
 };

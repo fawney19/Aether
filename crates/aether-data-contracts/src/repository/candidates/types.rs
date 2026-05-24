@@ -261,10 +261,9 @@ impl RequestCandidateTrace {
 pub fn derive_request_candidate_final_status(
     candidates: &[StoredRequestCandidate],
 ) -> RequestCandidateFinalStatus {
-    let has_success = candidates.iter().any(|candidate| {
-        candidate.status == RequestCandidateStatus::Success
-            || matches!(candidate.status_code, Some(status_code) if (200..300).contains(&status_code))
-    });
+    let has_success = candidates
+        .iter()
+        .any(|candidate| candidate.status == RequestCandidateStatus::Success);
     if has_success {
         return RequestCandidateFinalStatus::Success;
     }
@@ -295,6 +294,13 @@ pub fn derive_request_candidate_final_status(
         .any(|candidate| candidate.status == RequestCandidateStatus::Pending)
     {
         return RequestCandidateFinalStatus::Pending;
+    }
+
+    let has_legacy_success_status_code = candidates
+        .iter()
+        .any(|candidate| matches!(candidate.status_code, Some(status_code) if (200..300).contains(&status_code)));
+    if has_legacy_success_status_code {
+        return RequestCandidateFinalStatus::Success;
     }
 
     RequestCandidateFinalStatus::Failed
@@ -535,4 +541,73 @@ pub trait RequestCandidateRepository:
 impl<T> RequestCandidateRepository for T where
     T: RequestCandidateReadRepository + RequestCandidateWriteRepository + Send + Sync
 {
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        derive_request_candidate_final_status, RequestCandidateFinalStatus, RequestCandidateStatus,
+        StoredRequestCandidate,
+    };
+
+    fn candidate(
+        id: &str,
+        status: RequestCandidateStatus,
+        status_code: Option<i32>,
+    ) -> StoredRequestCandidate {
+        StoredRequestCandidate::new(
+            id.to_string(),
+            "req-1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            0,
+            0,
+            None,
+            None,
+            None,
+            status,
+            None,
+            false,
+            status_code,
+            None,
+            None,
+            Some(100),
+            None,
+            None,
+            None,
+            1_700_000_000_000,
+            Some(1_700_000_000_000),
+            Some(1_700_000_000_100),
+        )
+        .expect("candidate should build")
+    }
+
+    #[test]
+    fn failed_candidate_with_http_200_stays_final_failed() {
+        let candidates = vec![candidate(
+            "cand-1",
+            RequestCandidateStatus::Failed,
+            Some(200),
+        )];
+
+        assert_eq!(
+            derive_request_candidate_final_status(&candidates),
+            RequestCandidateFinalStatus::Failed
+        );
+    }
+
+    #[test]
+    fn explicit_success_candidate_still_wins_after_failed_attempt() {
+        let candidates = vec![
+            candidate("cand-1", RequestCandidateStatus::Failed, Some(503)),
+            candidate("cand-2", RequestCandidateStatus::Success, Some(200)),
+        ];
+
+        assert_eq!(
+            derive_request_candidate_final_status(&candidates),
+            RequestCandidateFinalStatus::Success
+        );
+    }
 }

@@ -10,7 +10,15 @@ use crate::tests::{
     to_bytes, AppState, Arc, Body, Json, Mutex, Request, Router, StatusCode, EXECUTION_PATH_HEADER,
     EXECUTION_PATH_LOCAL_AI_PUBLIC, EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS,
 };
+use aether_data::DataLayerError;
+use aether_data_contracts::repository::candidate_selection::{
+    MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
+    StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
+    StoredRequestedModelCandidateRowsQuery,
+};
+use async_trait::async_trait;
 use axum::response::IntoResponse;
+use std::future::pending;
 
 fn gemini_operation_status_label(status: VideoTaskStatus) -> &'static str {
     match status {
@@ -118,6 +126,63 @@ fn sample_gemini_video_task(
     }
 }
 
+struct PendingMinimalCandidateSelectionReadRepository;
+
+impl PendingMinimalCandidateSelectionReadRepository {
+    async fn pending_rows(
+        &self,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        pending::<Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError>>().await
+    }
+}
+
+#[async_trait]
+impl MinimalCandidateSelectionReadRepository for PendingMinimalCandidateSelectionReadRepository {
+    async fn list_for_exact_api_format(
+        &self,
+        _api_format: &str,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        self.pending_rows().await
+    }
+
+    async fn list_for_exact_api_format_and_global_model(
+        &self,
+        _api_format: &str,
+        _global_model_name: &str,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        self.pending_rows().await
+    }
+
+    async fn list_for_exact_api_format_and_requested_model(
+        &self,
+        _api_format: &str,
+        _requested_model_name: &str,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        self.pending_rows().await
+    }
+
+    async fn list_for_exact_api_format_and_requested_model_page(
+        &self,
+        _query: &StoredRequestedModelCandidateRowsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        self.pending_rows().await
+    }
+
+    async fn list_pool_key_rows_for_group(
+        &self,
+        _query: &StoredPoolKeyCandidateRowsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        self.pending_rows().await
+    }
+
+    async fn list_pool_key_rows_for_group_key_ids(
+        &self,
+        _query: &StoredPoolKeyCandidateRowsByKeyIdsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        self.pending_rows().await
+    }
+}
+
 #[tokio::test]
 async fn gateway_handles_public_openai_models_without_hitting_fallback_probe() {
     let fallback_probe_hits = Arc::new(Mutex::new(0usize));
@@ -169,6 +234,119 @@ async fn gateway_handles_public_openai_models_without_hitting_fallback_probe() {
     assert_eq!(payload["data"][0]["id"], "gpt-4.1");
     assert_eq!(payload["data"][1]["id"], "gpt-5");
     assert_eq!(payload["data"][0]["owned_by"], "aether");
+    assert_eq!(*fallback_probe_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    fallback_probe_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_returns_empty_openai_models_when_candidate_rows_stall() {
+    let fallback_probe_hits = Arc::new(Mutex::new(0usize));
+    let fallback_probe_hits_clone = Arc::clone(&fallback_probe_hits);
+    let fallback_probe = Router::new().route(
+        "/{*path}",
+        any(move |_request: Request| {
+            let fallback_probe_hits_inner = Arc::clone(&fallback_probe_hits_clone);
+            async move {
+                *fallback_probe_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("proxied"))
+            }
+        }),
+    );
+
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-openai-models-stalled")),
+        unrestricted_models_snapshot("key-stalled", "user-stalled"),
+    )]));
+    let candidate_repository = Arc::new(PendingMinimalCandidateSelectionReadRepository);
+
+    let (_unused_fallback_probe_url, fallback_probe_handle) = start_server(fallback_probe).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
+                    candidate_repository,
+                    auth_repository,
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+        .expect("client should build")
+        .get(format!("{gateway_url}/v1/models"))
+        .header("authorization", "Bearer sk-openai-models-stalled")
+        .send()
+        .await
+        .expect("request should return before client timeout");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["object"], "list");
+    assert_eq!(
+        payload["data"]
+            .as_array()
+            .expect("data should be an array")
+            .len(),
+        0
+    );
+    assert_eq!(*fallback_probe_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    fallback_probe_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_returns_not_found_for_openai_model_detail_when_candidate_rows_stall() {
+    let fallback_probe_hits = Arc::new(Mutex::new(0usize));
+    let fallback_probe_hits_clone = Arc::clone(&fallback_probe_hits);
+    let fallback_probe = Router::new().route(
+        "/{*path}",
+        any(move |_request: Request| {
+            let fallback_probe_hits_inner = Arc::clone(&fallback_probe_hits_clone);
+            async move {
+                *fallback_probe_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("proxied"))
+            }
+        }),
+    );
+
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-openai-model-detail-stalled")),
+        unrestricted_models_snapshot("key-detail-stalled", "user-detail-stalled"),
+    )]));
+    let candidate_repository = Arc::new(PendingMinimalCandidateSelectionReadRepository);
+
+    let (_unused_fallback_probe_url, fallback_probe_handle) = start_server(fallback_probe).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
+                    candidate_repository,
+                    auth_repository,
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+        .expect("client should build")
+        .get(format!("{gateway_url}/v1/models/gpt-stalled"))
+        .header("authorization", "Bearer sk-openai-model-detail-stalled")
+        .send()
+        .await
+        .expect("request should return before client timeout");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["error"]["code"], "model_not_found");
     assert_eq!(*fallback_probe_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

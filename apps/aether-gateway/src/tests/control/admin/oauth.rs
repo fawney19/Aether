@@ -12,8 +12,12 @@ use aether_data::repository::management_tokens::{
 use aether_data::repository::oauth_providers::{
     InMemoryOAuthProviderRepository, OAuthProviderReadRepository,
 };
+use aether_data::repository::pool_scores::InMemoryPoolMemberScoreRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::proxy_nodes::InMemoryProxyNodeRepository;
+use aether_data_contracts::repository::pool_scores::{
+    GetPoolMemberScoresByIdsQuery, PoolMemberHardState, PoolMemberIdentity, PoolScoreReadRepository,
+};
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogReadRepository, ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint,
 };
@@ -32,6 +36,7 @@ use super::super::{
 use crate::admin_api::{
     maybe_build_local_admin_provider_oauth_response, AdminAppState, AdminRequestContext,
 };
+use crate::ai_serving::{provider_key_pool_score_id, provider_key_pool_score_scope};
 use crate::audit::AdminAuditEvent;
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER,
@@ -211,6 +216,23 @@ fn codex_quota_execution_result(request_id: &str) -> serde_json::Value {
     })
 }
 
+fn windsurf_register_user_execution_result(request_id: &str) -> serde_json::Value {
+    json!({
+        "request_id": request_id,
+        "status_code": 200,
+        "headers": {
+            "content-type": "application/json"
+        },
+        "body": {
+            "json_body": {
+                "apiKey": "devin-session-token$registered",
+                "name": "Windsurf User",
+                "apiServerUrl": "https://server.codeium.com"
+            }
+        }
+    })
+}
+
 fn assert_single_provider_oauth_refresh_token_plan<'a>(
     plans: &'a [ExecutionPlan],
 ) -> &'a ExecutionPlan {
@@ -276,16 +298,402 @@ async fn gateway_handles_admin_provider_oauth_supported_types_locally_with_trust
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     let items = payload.as_array().expect("items should be array");
-    assert_eq!(items.len(), 5);
+    assert_eq!(items.len(), 6);
     assert_eq!(items[0]["provider_type"], "claude_code");
     assert_eq!(items[1]["provider_type"], "codex");
     assert_eq!(items[2]["provider_type"], "chatgpt_web");
     assert_eq!(items[3]["provider_type"], "gemini_cli");
     assert_eq!(items[4]["provider_type"], "antigravity");
+    assert_eq!(items[5]["provider_type"], "windsurf");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_provider_oauth_device_authorize_for_windsurf_browser() {
+    let mut provider = sample_provider("provider-windsurf", "windsurf", 10);
+    provider.provider_type = "windsurf".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-windsurf-chat",
+        "provider-windsurf",
+        "openai:chat",
+        "https://server.codeium.com",
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            provider_catalog_repository,
+        ));
+
+    let response = local_admin_provider_oauth_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/provider-oauth/providers/provider-windsurf/device-authorize",
+        Some(json!({
+            "auth_type": "browser",
+            "login_option": "github",
+            "proxy_node_id": "proxy-node-windsurf"
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    let session_id = payload["session_id"]
+        .as_str()
+        .expect("session_id should exist");
+    assert_eq!(payload["auth_type"], "browser");
+    assert_eq!(payload["login_option"], "github");
+    assert_eq!(payload["redirect_uri"], "show-auth-token");
+    assert_eq!(payload["callback_required"], true);
+
+    let authorization_url = payload["verification_uri_complete"]
+        .as_str()
+        .expect("authorization url should exist");
+    let parsed = url::Url::parse(authorization_url).expect("authorization url should parse");
+    let params = parsed
+        .query_pairs()
+        .into_owned()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        parsed.as_str().split('?').next(),
+        Some("https://windsurf.com/windsurf/signin")
+    );
+    assert_eq!(
+        params.get("response_type").map(String::as_str),
+        Some("token")
+    );
+    assert_eq!(params.get("state").map(String::as_str), Some(session_id));
+    assert_eq!(
+        params.get("redirect_uri").map(String::as_str),
+        Some("show-auth-token")
+    );
+    assert_eq!(
+        params.get("redirect_parameters_type").map(String::as_str),
+        Some("query")
+    );
+
+    let stored = state
+        .load_provider_oauth_device_session_for_tests(&format!("device_auth_session:{session_id}"))
+        .expect("device session should be stored");
+    let stored: serde_json::Value =
+        serde_json::from_str(&stored).expect("device session json should parse");
+    assert_eq!(stored["provider_id"], "provider-windsurf");
+    assert_eq!(stored["auth_type"], "browser");
+    assert_eq!(stored["social_provider"], "github");
+    assert_eq!(stored["redirect_uri"], "show-auth-token");
+    assert_eq!(stored["proxy_node_id"], "proxy-node-windsurf");
+    assert_eq!(stored["status"], "pending");
+}
+
+#[tokio::test]
+async fn gateway_rejects_generic_oauth_start_for_windsurf_provider() {
+    let mut provider = sample_provider("provider-windsurf", "windsurf", 10);
+    provider.provider_type = "windsurf".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![],
+        vec![],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            provider_catalog_repository,
+        ));
+
+    let response = local_admin_provider_oauth_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/provider-oauth/providers/provider-windsurf/start",
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    assert!(
+        payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("浏览器登录")),
+        "payload={payload}"
+    );
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_provider_oauth_device_poll_for_windsurf_callback_token() {
+    let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
+    let execution_plans_clone = Arc::clone(&execution_plans);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let execution_plans_inner = Arc::clone(&execution_plans_clone);
+            async move {
+                execution_plans_inner
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(plan.clone());
+                if plan.request_id == "provider-oauth:windsurf-register:new" {
+                    return Json(windsurf_register_user_execution_result(&plan.request_id));
+                }
+                Json(json!({
+                    "request_id": plan.request_id,
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {}
+                    }
+                }))
+            }
+        }),
+    );
+
+    let mut provider = sample_provider("provider-windsurf", "windsurf", 10);
+    provider.provider_type = "windsurf".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-windsurf-chat",
+        "provider-windsurf",
+        "openai:chat",
+        "https://server.codeium.com",
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![],
+    ));
+    let mut proxy_node = sample_proxy_node("proxy-node-windsurf");
+    proxy_node.status = "online".to_string();
+    proxy_node.is_manual = true;
+    proxy_node.tunnel_mode = false;
+    proxy_node.tunnel_connected = false;
+    proxy_node.proxy_url = Some("http://proxy.example:8080".to_string());
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![proxy_node]));
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let state = build_state_with_execution_runtime_override(execution_runtime_url)
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog_repository.clone(),
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY)
+            .attach_proxy_node_repository_for_tests(proxy_node_repository),
+        )
+        .with_provider_oauth_device_session_entry_for_tests(
+            "session-windsurf",
+            json!({
+                "provider_id": "provider-windsurf",
+                "region": "",
+                "client_id": "",
+                "client_secret": "",
+                "device_code": "",
+                "auth_type": "browser",
+                "social_provider": "google",
+                "code_verifier": null,
+                "redirect_uri": "show-auth-token",
+                "machine_id": "123e4567-e89b-12d3-a456-426614174000",
+                "interval": 5,
+                "expires_at_unix_secs": 4_102_444_800u64,
+                "status": "pending",
+                "proxy_node_id": "proxy-node-windsurf",
+                "created_at_unix_ms": 1_711_000_000u64,
+                "key_id": null,
+                "email": null,
+                "replaced": false,
+                "error_msg": null,
+            }),
+        );
+
+    let response = local_admin_provider_oauth_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/provider-oauth/providers/provider-windsurf/device-poll",
+        Some(json!({
+            "session_id": "session-windsurf",
+            "callback_url": "https://windsurf.com/show-auth-token?token=firebase-id-token&state=session-windsurf&provider=google"
+        })),
+    )
+    .await;
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={payload}");
+    assert_eq!(payload["status"], "authorized");
+    assert_eq!(payload["replaced"], false);
+
+    let stored = state
+        .load_provider_oauth_device_session_for_tests("device_auth_session:session-windsurf")
+        .expect("device session should persist");
+    let stored: serde_json::Value =
+        serde_json::from_str(&stored).expect("device session json should parse");
+    assert_eq!(stored["status"], "authorized");
+    let key_id = stored["key_id"]
+        .as_str()
+        .expect("key_id should be stored")
+        .to_string();
+    assert_eq!(payload["key_id"], key_id);
+
+    let persisted = provider_catalog_repository
+        .list_keys_by_ids(std::slice::from_ref(&key_id))
+        .await
+        .expect("keys should load")
+        .into_iter()
+        .next()
+        .expect("persisted key should exist");
+    assert_eq!(persisted.auth_type, "oauth");
+    assert_eq!(
+        persisted.proxy,
+        Some(json!({"node_id": "proxy-node-windsurf", "enabled": true}))
+    );
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
+    assert_eq!(decrypted_api_key, "devin-session-token$registered");
+    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_auth_config
+            .as_deref()
+            .expect("auth config should exist"),
+    )
+    .expect("auth config should decrypt");
+    let auth_config: serde_json::Value =
+        serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
+    assert_eq!(auth_config["provider_type"], "windsurf");
+    assert_eq!(auth_config["auth_method"], "browser");
+    assert_eq!(auth_config["register_source"], "new");
+    assert_eq!(auth_config["social_provider"], "google");
+
+    {
+        let plans = execution_plans.lock().expect("mutex should lock");
+        let register_plan = plans
+            .iter()
+            .find(|plan| plan.request_id == "provider-oauth:windsurf-register:new")
+            .expect("register plan should execute");
+        assert_eq!(register_plan.method, "POST");
+        assert_eq!(
+            register_plan
+                .body
+                .json_body
+                .as_ref()
+                .and_then(|body| body.get("firebase_id_token"))
+                .and_then(serde_json::Value::as_str),
+            Some("firebase-id-token")
+        );
+        assert_eq!(
+            register_plan
+                .proxy
+                .as_ref()
+                .and_then(|proxy| proxy.node_id.as_deref()),
+            Some("proxy-node-windsurf")
+        );
+    }
+
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_rejects_windsurf_callback_state_mismatch_and_missing_token() {
+    let mut provider = sample_provider("provider-windsurf", "windsurf", 10);
+    provider.provider_type = "windsurf".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-windsurf-chat",
+        "provider-windsurf",
+        "openai:chat",
+        "https://server.codeium.com",
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            provider_catalog_repository,
+        ))
+        .with_provider_oauth_device_session_entry_for_tests(
+            "session-windsurf",
+            json!({
+                "provider_id": "provider-windsurf",
+                "region": "",
+                "client_id": "",
+                "client_secret": "",
+                "device_code": "",
+                "auth_type": "browser",
+                "social_provider": "google",
+                "code_verifier": null,
+                "redirect_uri": "show-auth-token",
+                "machine_id": "123e4567-e89b-12d3-a456-426614174000",
+                "interval": 5,
+                "expires_at_unix_secs": 4_102_444_800u64,
+                "status": "pending",
+                "proxy_node_id": null,
+                "created_at_unix_ms": 1_711_000_000u64,
+                "key_id": null,
+                "email": null,
+                "replaced": false,
+                "error_msg": null,
+            }),
+        );
+
+    let response = local_admin_provider_oauth_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/provider-oauth/providers/provider-windsurf/device-poll",
+        Some(json!({
+            "session_id": "session-windsurf",
+            "callback_url": "https://windsurf.com/show-auth-token?token=firebase-id-token&state=wrong-state"
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    assert_eq!(payload["status"], "error");
+    assert!(payload["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("state")));
+
+    let response = local_admin_provider_oauth_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/provider-oauth/providers/provider-windsurf/device-poll",
+        Some(json!({
+            "session_id": "session-windsurf",
+            "callback_url": "https://windsurf.com/show-auth-token?state=session-windsurf"
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    assert_eq!(payload["status"], "error");
+    assert!(payload["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("token")));
 }
 
 #[tokio::test]
@@ -1930,6 +2338,7 @@ async fn gateway_batch_imports_chatgpt_web_access_tokens_with_pool_hints() {
 
     let mut provider = sample_provider("provider-chatgpt-web", "chatgpt_web", 10);
     provider.provider_type = "chatgpt_web".to_string();
+    provider.config = Some(json!({"pool_advanced": {}}));
     let endpoint = sample_endpoint(
         "endpoint-chatgpt-web-image",
         "provider-chatgpt-web",
@@ -1941,6 +2350,7 @@ async fn gateway_batch_imports_chatgpt_web_access_tokens_with_pool_hints() {
         vec![endpoint],
         vec![],
     ));
+    let pool_score_repository = Arc::new(InMemoryPoolMemberScoreRepository::default());
 
     let (token_url, token_handle) = start_server(token_server).await;
     let gateway = build_router_with_state(
@@ -1950,6 +2360,7 @@ async fn gateway_batch_imports_chatgpt_web_access_tokens_with_pool_hints() {
                 GatewayDataState::with_provider_catalog_repository_for_tests(
                     provider_catalog_repository.clone(),
                 )
+                .with_pool_score_repository_for_tests(Arc::clone(&pool_score_repository))
                 .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
             )
             .with_provider_oauth_token_url_for_tests(
@@ -2029,6 +2440,20 @@ async fn gateway_batch_imports_chatgpt_web_access_tokens_with_pool_hints() {
     );
     assert_eq!(auth_config["plan_type"], "plus");
     assert_eq!(auth_config["user_id"], "user-pool-image");
+
+    let score_scope = provider_key_pool_score_scope();
+    let score_identity =
+        PoolMemberIdentity::provider_api_key("provider-chatgpt-web", persisted.id.clone());
+    let scores = pool_score_repository
+        .get_pool_member_scores_by_ids(&GetPoolMemberScoresByIdsQuery {
+            ids: vec![provider_key_pool_score_id(&score_identity, &score_scope)],
+        })
+        .await
+        .expect("pool score should load");
+    assert_eq!(scores.len(), 1);
+    assert_eq!(scores[0].member_id, persisted.id);
+    assert_eq!(scores[0].hard_state, PoolMemberHardState::Unknown);
+    assert!(scores[0].score > 0.0);
 
     gateway_handle.abort();
     token_handle.abort();
@@ -2455,6 +2880,7 @@ async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_p
         .expect("account_state_recheck_error should be string when recheck is attempted");
     assert!(
         account_state_recheck_error == "wham/usage API 返回状态码 401"
+            || account_state_recheck_error == "wham/usage API 返回状态码 403"
             || account_state_recheck_error.starts_with("wham/usage 请求执行失败:"),
         "unexpected account_state_recheck_error: {account_state_recheck_error}"
     );
@@ -4926,6 +5352,7 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
             .expect("account_state_recheck_error should be string when attempted");
         assert!(
             account_state_recheck_error == "wham/usage API 返回状态码 401"
+                || account_state_recheck_error == "wham/usage API 返回状态码 403"
                 || account_state_recheck_error.starts_with("wham/usage 请求执行失败:"),
             "unexpected account_state_recheck_error: {account_state_recheck_error}"
         );
@@ -4975,6 +5402,14 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
             stored_key.oauth_invalid_reason.as_deref(),
             Some("[OAUTH_EXPIRED] Codex Token 无效或已过期 (401)")
         );
+    } else if account_state_recheck_attempted
+        && payload["account_state_recheck_error"] == "wham/usage API 返回状态码 403"
+    {
+        assert!(stored_key.oauth_invalid_at_unix_secs.is_some());
+        assert!(stored_key
+            .oauth_invalid_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("(403)")));
     } else {
         assert_eq!(stored_key.oauth_invalid_at_unix_secs, None);
         assert_eq!(stored_key.oauth_invalid_reason, None);
@@ -5690,6 +6125,127 @@ async fn gateway_marks_manual_oauth_refresh_failures_as_invalid_in_pool_payload(
         keys[0]["status_snapshot"]["oauth"]["usable_until_expiry"],
         json!(true)
     );
+
+    gateway_handle.abort();
+    token_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_auto_removes_manual_oauth_refresh_failure_after_access_token_expiry() {
+    let token_hits = Arc::new(Mutex::new(0usize));
+    let token_hits_clone = Arc::clone(&token_hits);
+    let token_server = Router::new().route(
+        "/oauth/token",
+        post(move |_request: Request| {
+            let token_hits_inner = Arc::clone(&token_hits_clone);
+            async move {
+                *token_hits_inner.lock().expect("mutex should lock") += 1;
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "error": {
+                            "message": "Could not validate your refresh token. Please try signing in again.",
+                            "type": "invalid_request_error",
+                            "param": serde_json::Value::Null,
+                            "code": "refresh_token_expired"
+                        }
+                    })),
+                )
+            }
+        }),
+    );
+
+    let mut provider = sample_provider("provider-codex", "codex", 10).with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "pool_advanced": {
+                "enabled": true,
+                "auto_remove_banned_keys": true
+            }
+        })),
+    );
+    provider.provider_type = "codex".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-codex-cli",
+        "provider-codex",
+        "openai:responses",
+        "https://chatgpt.com/backend-api/codex",
+    );
+    let mut key = sample_key(
+        "key-codex-oauth-refresh-expired",
+        "provider-codex",
+        "openai:responses",
+        "expired-codex-access-token",
+    );
+    key.auth_type = "oauth".to_string();
+    key.expires_at_unix_secs = Some(1);
+    key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"codex","refresh_token":"expired-refresh-token","email":"alice@example.com","account_id":"acct-codex-123","plan_type":"plus","expires_at":1}"#,
+        )
+        .expect("auth config ciphertext should build"),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![key],
+    ));
+    let (token_url, token_handle) = start_server(token_server).await;
+    let oauth_refresh =
+        crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
+            Arc::new(
+                crate::provider_transport::oauth_refresh::GenericOAuthRefreshAdapter::default()
+                    .with_token_url_for_tests("codex", format!("{token_url}/oauth/token")),
+            ),
+        ]);
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_oauth_refresh_coordinator_for_tests(oauth_refresh),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let refresh_response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/keys/key-codex-oauth-refresh-expired/refresh"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("refresh request should succeed");
+
+    assert_eq!(refresh_response.status(), StatusCode::OK);
+    let refresh_payload: serde_json::Value = refresh_response
+        .json()
+        .await
+        .expect("refresh payload should parse");
+    assert_eq!(refresh_payload["status"], json!("auto_removed"));
+    assert_eq!(refresh_payload["message"], json!("已自动删除"));
+    assert_eq!(*token_hits.lock().expect("mutex should lock"), 1);
+
+    let keys = provider_catalog_repository
+        .list_keys_by_ids(&["key-codex-oauth-refresh-expired".to_string()])
+        .await
+        .expect("keys should read");
+    assert!(keys.is_empty());
 
     gateway_handle.abort();
     token_handle.abort();

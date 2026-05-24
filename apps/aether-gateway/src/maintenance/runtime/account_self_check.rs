@@ -98,6 +98,10 @@ enum AccountSelfCheckOutcome {
         status_code: Option<u16>,
         message: String,
     },
+    AutoRemoved {
+        status_code: Option<u16>,
+        message: String,
+    },
     Failed {
         status_code: Option<u16>,
         message: String,
@@ -112,6 +116,7 @@ impl AccountSelfCheckOutcome {
         match self {
             Self::Success { .. } => "success",
             Self::Blocked { .. } => "blocked",
+            Self::AutoRemoved { .. } => "auto_removed",
             Self::Failed { .. } => "failed",
             Self::Skipped { .. } => "skipped",
         }
@@ -121,6 +126,7 @@ impl AccountSelfCheckOutcome {
         match self {
             Self::Success { status_code, .. }
             | Self::Blocked { status_code, .. }
+            | Self::AutoRemoved { status_code, .. }
             | Self::Failed { status_code, .. } => *status_code,
             Self::Skipped { .. } => None,
         }
@@ -130,6 +136,7 @@ impl AccountSelfCheckOutcome {
         match self {
             Self::Success { message, .. } => message.as_deref(),
             Self::Blocked { message, .. }
+            | Self::AutoRemoved { message, .. }
             | Self::Failed { message, .. }
             | Self::Skipped { message, .. } => Some(message.as_str()),
         }
@@ -305,17 +312,22 @@ async fn select_keys_for_provider(
     }
 
     let result = async {
-        let keys = state
-            .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
+        let summaries = state
+            .list_provider_catalog_key_maintenance_summaries_by_provider_ids(std::slice::from_ref(
+                &provider.id,
+            ))
             .await?
             .into_iter()
-            .filter(|key| key.is_active)
+            .filter(|summary| summary.is_active)
             .collect::<Vec<_>>();
-        if keys.is_empty() {
+        if summaries.is_empty() {
             return Ok(Vec::new());
         }
 
-        let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
+        let key_ids = summaries
+            .iter()
+            .map(|summary| summary.id.clone())
+            .collect::<Vec<_>>();
         let check_stamps = load_check_timestamps(runtime, &provider.id, &key_ids).await;
         let selected_ids = select_account_self_check_key_ids(
             &key_ids,
@@ -337,7 +349,9 @@ async fn select_keys_for_provider(
         )
         .await;
 
-        let mut keys_by_id = keys
+        let mut keys_by_id = state
+            .list_provider_catalog_keys_by_ids(&selected_ids)
+            .await?
             .into_iter()
             .map(|key| (key.id.clone(), key))
             .collect::<BTreeMap<_, _>>();
@@ -392,11 +406,21 @@ fn quota_payload_result_for_key(key_id: &str, payload: Option<Value>) -> Account
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let auto_removed = item
+        .get("auto_removed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     if status == "success" {
         return AccountSelfCheckOutcome::Success {
             status_code,
             message,
+        };
+    }
+    if auto_removed {
+        return AccountSelfCheckOutcome::AutoRemoved {
+            status_code,
+            message: message.unwrap_or_else(|| "已自动删除".to_string()),
         };
     }
     if quota_result_status_is_blocked(&status, status_code, message.as_deref()) {
@@ -499,6 +523,11 @@ async fn record_score_probe_result_for_key(
             Some(PoolMemberHardState::Banned),
             PoolMemberProbeStatus::Failed,
         ),
+        AccountSelfCheckOutcome::AutoRemoved { .. } => (
+            false,
+            Some(PoolMemberHardState::Banned),
+            PoolMemberProbeStatus::Failed,
+        ),
         AccountSelfCheckOutcome::Failed { .. } => (
             false,
             Some(PoolMemberHardState::Cooldown),
@@ -551,12 +580,7 @@ fn endpoint_for_self_check(
 }
 
 fn gateway_error_message(err: GatewayError) -> String {
-    match err {
-        GatewayError::UpstreamUnavailable { message, .. }
-        | GatewayError::ControlUnavailable { message, .. }
-        | GatewayError::Client { message, .. }
-        | GatewayError::Internal(message) => message,
-    }
+    err.into_message()
 }
 
 fn update_summary_from_outcome(
@@ -569,6 +593,9 @@ fn update_summary_from_outcome(
         }
         AccountSelfCheckOutcome::Blocked { .. } => {
             summary.blocked = summary.blocked.saturating_add(1);
+        }
+        AccountSelfCheckOutcome::AutoRemoved { .. } => {
+            summary.auto_removed = summary.auto_removed.saturating_add(1);
         }
         AccountSelfCheckOutcome::Failed { .. } => {
             summary.failed = summary.failed.saturating_add(1);
@@ -738,8 +765,21 @@ pub(crate) fn spawn_account_self_check_worker(
         let mut interval = tokio::time::interval(config.scan_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
+        let mut deferred_since = None;
         loop {
             interval.tick().await;
+            if state
+                .data
+                .should_defer_maintenance_for_database_pool_pressure(&mut deferred_since)
+            {
+                debug!(
+                    event_name = "maintenance_worker_deferred",
+                    log_type = "ops",
+                    worker = "account_self_check",
+                    "gateway account self-check deferred because database pool has no idle reserve"
+                );
+                continue;
+            }
             if let Err(err) = perform_account_self_check_once_with_config(&state, config).await {
                 warn!(
                     error = ?err,

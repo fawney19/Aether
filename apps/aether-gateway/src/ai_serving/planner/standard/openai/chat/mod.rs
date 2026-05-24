@@ -11,7 +11,6 @@ mod plans;
 
 use self::decision::{
     build_lazy_local_openai_chat_candidate_attempt_source,
-    build_local_openai_chat_image_candidate_attempt_source,
     maybe_build_local_openai_chat_decision_payload_for_candidate, LocalOpenAiChatCandidateAttempt,
     LocalOpenAiChatCandidateAttemptSource, LocalOpenAiChatDecisionInput,
 };

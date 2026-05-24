@@ -8,33 +8,44 @@ export type WalletCreditBucket = 'recharge' | 'gift'
 export interface EpayChannelConfig {
   channel: string
   display_name: string
+  fee_rate?: number
 }
 
 export interface EpayGatewayConfig {
-  provider: 'epay'
+  provider: PaymentGatewayProvider
   enabled: boolean
   endpoint_url?: string | null
   callback_base_url?: string | null
   merchant_id?: string | null
   has_secret: boolean
+  has_secret_keys?: string[]
   pay_currency?: string | null
   usd_exchange_rate?: number | null
   min_recharge_usd?: number | null
   channels?: EpayChannelConfig[]
+  refund_enabled?: boolean
+  allow_user_refund?: boolean
+  config?: Record<string, unknown>
   created_at?: number | null
   updated_at?: number | null
 }
 
+export type PaymentGatewayProvider = 'epay' | 'alipay' | 'wxpay' | 'stripe'
+
 export interface UpdateEpayGatewayConfigRequest {
   enabled: boolean
-  endpoint_url: string
+  endpoint_url?: string
   callback_base_url?: string | null
-  merchant_id: string
+  merchant_id?: string
   merchant_key?: string
   pay_currency: string
   usd_exchange_rate: number
   min_recharge_usd: number
   channels: EpayChannelConfig[]
+  refund_enabled?: boolean
+  allow_user_refund?: boolean
+  config?: Record<string, unknown>
+  secrets?: Record<string, string>
 }
 
 export interface GatewayTestResponse {
@@ -142,9 +153,11 @@ function normalizeChannels(channels: EpayGatewayConfig['channels']): EpayChannel
       .map((item) => {
         const raw = item as EpayChannelConfig & { type?: string }
         const channel = String(raw.channel || raw.type || '').trim()
+        const feeRate = Number(raw.fee_rate ?? 0)
         return {
           channel,
           display_name: String(raw.display_name || channel).trim(),
+          fee_rate: Number.isFinite(feeRate) && feeRate >= 0 ? feeRate : 0,
         }
       })
       .filter((item) => item.channel && item.display_name)
@@ -152,39 +165,49 @@ function normalizeChannels(channels: EpayGatewayConfig['channels']): EpayChannel
 }
 
 function normalizeGatewayConfig(config: EpayGatewayConfig): EpayGatewayConfig {
+  const refundEnabled = Boolean(config.refund_enabled)
   return {
-    provider: 'epay',
+    provider: config.provider || 'epay',
     enabled: Boolean(config.enabled),
     endpoint_url: config.endpoint_url ?? '',
     callback_base_url: config.callback_base_url ?? '',
     merchant_id: config.merchant_id ?? '',
     has_secret: Boolean(config.has_secret),
+    has_secret_keys: Array.isArray(config.has_secret_keys) ? config.has_secret_keys : [],
     pay_currency: config.pay_currency ?? 'CNY',
     usd_exchange_rate: Number(config.usd_exchange_rate ?? 7.2),
     min_recharge_usd: Number(config.min_recharge_usd ?? 1),
     channels: normalizeChannels(config.channels),
+    refund_enabled: refundEnabled,
+    allow_user_refund: refundEnabled && Boolean(config.allow_user_refund),
+    config: config.config && typeof config.config === 'object' ? config.config : {},
     created_at: config.created_at ?? null,
     updated_at: config.updated_at ?? null,
   }
 }
 
 export const epayGatewayApi = {
-  async get(): Promise<EpayGatewayConfig> {
-    const response = await apiClient.get<EpayGatewayConfig>('/api/admin/payments/gateways/epay')
+  async get(provider: PaymentGatewayProvider = 'epay'): Promise<EpayGatewayConfig> {
+    const response = await apiClient.get<EpayGatewayConfig>(`/api/admin/payments/gateways/${provider}`)
     return normalizeGatewayConfig(response.data)
   },
 
-  async update(payload: UpdateEpayGatewayConfigRequest): Promise<EpayGatewayConfig> {
+  async update(
+    payload: UpdateEpayGatewayConfigRequest,
+    provider: PaymentGatewayProvider = 'epay'
+  ): Promise<EpayGatewayConfig> {
     const request: UpdateEpayGatewayConfigRequest = {
       ...payload,
       channels: normalizeChannels(payload.channels),
+      refund_enabled: Boolean(payload.refund_enabled),
+      allow_user_refund: Boolean(payload.refund_enabled && payload.allow_user_refund),
     }
-    const response = await apiClient.put<EpayGatewayConfig>('/api/admin/payments/gateways/epay', request)
+    const response = await apiClient.put<EpayGatewayConfig>(`/api/admin/payments/gateways/${provider}`, request)
     return normalizeGatewayConfig(response.data)
   },
 
-  async test(): Promise<GatewayTestResponse> {
-    const response = await apiClient.post<GatewayTestResponse>('/api/admin/payments/gateways/epay/test', {})
+  async test(provider: PaymentGatewayProvider = 'epay'): Promise<GatewayTestResponse> {
+    const response = await apiClient.post<GatewayTestResponse>(`/api/admin/payments/gateways/${provider}/test`, {})
     return response.data
   },
 }

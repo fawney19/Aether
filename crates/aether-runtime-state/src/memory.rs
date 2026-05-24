@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use crate::{RuntimeQueueEntry, RuntimeQueueReclaimConfig};
+use crate::{DataLayerError, RuntimeQueueEntry, RuntimeQueueReclaimConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryRuntimeStateConfig {
@@ -37,9 +37,9 @@ pub(crate) struct MemoryRuntimeBackend {
     config: MemoryRuntimeStateConfig,
     kv: Mutex<HashMap<String, MemoryKvEntry>>,
     counters: Mutex<HashMap<String, MemoryCounterEntry>>,
-    sets: Mutex<HashMap<String, BTreeSet<String>>>,
-    scores: Mutex<HashMap<String, BTreeMap<String, f64>>>,
-    queues: Mutex<HashMap<String, VecDeque<RuntimeQueueEntry>>>,
+    sets: Mutex<HashMap<String, MemorySetEntry>>,
+    scores: Mutex<HashMap<String, MemoryScoreEntry>>,
+    queues: Mutex<HashMap<String, MemoryQueueStream>>,
     queue_seq: AtomicU64,
     locks: Mutex<HashMap<String, MemoryLockEntry>>,
     semaphores: Mutex<HashMap<String, BTreeMap<String, u64>>>,
@@ -50,6 +50,80 @@ struct MemoryCounterEntry {
     value: u32,
     bucket: u64,
     expires_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct MemorySetEntry {
+    members: BTreeSet<String>,
+    expires_at: Option<Instant>,
+}
+
+#[derive(Debug, Default)]
+struct MemoryScoreEntry {
+    scores: BTreeMap<String, f64>,
+    expires_at: Option<Instant>,
+}
+
+#[derive(Debug, Default)]
+struct MemoryQueueStream {
+    entries: VecDeque<MemoryQueuedEntry>,
+    groups: HashMap<String, MemoryConsumerGroup>,
+    expires_at: Option<Instant>,
+}
+
+trait MemoryExpiringKey {
+    fn is_expired(&self, now: Instant) -> bool;
+    fn set_expires_at(&mut self, expires_at: Instant);
+}
+
+impl MemoryExpiringKey for MemorySetEntry {
+    fn is_expired(&self, now: Instant) -> bool {
+        self.expires_at.is_some_and(|expires_at| now >= expires_at)
+    }
+
+    fn set_expires_at(&mut self, expires_at: Instant) {
+        self.expires_at = Some(expires_at);
+    }
+}
+
+impl MemoryExpiringKey for MemoryScoreEntry {
+    fn is_expired(&self, now: Instant) -> bool {
+        self.expires_at.is_some_and(|expires_at| now >= expires_at)
+    }
+
+    fn set_expires_at(&mut self, expires_at: Instant) {
+        self.expires_at = Some(expires_at);
+    }
+}
+
+impl MemoryExpiringKey for MemoryQueueStream {
+    fn is_expired(&self, now: Instant) -> bool {
+        self.expires_at.is_some_and(|expires_at| now >= expires_at)
+    }
+
+    fn set_expires_at(&mut self, expires_at: Instant) {
+        self.expires_at = Some(expires_at);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MemoryQueuedEntry {
+    sequence: u64,
+    entry: RuntimeQueueEntry,
+}
+
+#[derive(Debug, Default)]
+struct MemoryConsumerGroup {
+    last_delivered_sequence: u64,
+    pending: BTreeMap<String, MemoryPendingQueueEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct MemoryPendingQueueEntry {
+    sequence: u64,
+    entry: RuntimeQueueEntry,
+    consumer: String,
+    delivered_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -143,16 +217,66 @@ impl MemoryRuntimeBackend {
     }
 
     pub(crate) async fn kv_delete(&self, key: &str) -> bool {
-        self.kv.lock().await.remove(key).is_some()
+        let kv_deleted = self.kv.lock().await.remove(key).is_some();
+        let set_deleted = self.sets.lock().await.remove(key).is_some();
+        let score_deleted = self.scores.lock().await.remove(key).is_some();
+        let queue_deleted = self.queues.lock().await.remove(key).is_some();
+        kv_deleted || set_deleted || score_deleted || queue_deleted
     }
 
     pub(crate) async fn kv_delete_many(&self, keys: &[String]) -> usize {
+        let keys = keys.iter().cloned().collect::<BTreeSet<_>>();
+        let mut deleted = BTreeSet::new();
         let mut kv = self.kv.lock().await;
-        keys.iter().filter(|key| kv.remove(*key).is_some()).count()
+        for key in &keys {
+            if kv.remove(key).is_some() {
+                deleted.insert(key.clone());
+            }
+        }
+        drop(kv);
+        let mut sets = self.sets.lock().await;
+        for key in &keys {
+            if sets.remove(key).is_some() {
+                deleted.insert(key.clone());
+            }
+        }
+        drop(sets);
+        let mut scores = self.scores.lock().await;
+        for key in &keys {
+            if scores.remove(key).is_some() {
+                deleted.insert(key.clone());
+            }
+        }
+        drop(scores);
+        let mut queues = self.queues.lock().await;
+        for key in &keys {
+            if queues.remove(key).is_some() {
+                deleted.insert(key.clone());
+            }
+        }
+        deleted.len()
     }
 
     pub(crate) async fn kv_exists(&self, key: &str) -> bool {
-        self.kv_get(key).await.is_some()
+        if self.kv_get(key).await.is_some() {
+            return true;
+        }
+        let now = Instant::now();
+        let mut sets = self.sets.lock().await;
+        prune_memory_key(&mut sets, key, now);
+        if sets.contains_key(key) {
+            return true;
+        }
+        drop(sets);
+        let mut scores = self.scores.lock().await;
+        prune_memory_key(&mut scores, key, now);
+        if scores.contains_key(key) {
+            return true;
+        }
+        drop(scores);
+        let mut queues = self.queues.lock().await;
+        prune_memory_key(&mut queues, key, now);
+        queues.contains_key(key)
     }
 
     pub(crate) async fn kv_ttl_seconds(&self, key: &str) -> Option<i64> {
@@ -177,16 +301,77 @@ impl MemoryRuntimeBackend {
         )
     }
 
+    pub(crate) async fn key_expire(&self, key: &str, ttl: Duration) -> bool {
+        let now = Instant::now();
+        if ttl.is_zero() {
+            let kv_deleted = self.kv.lock().await.remove(key).is_some();
+            let set_deleted = self.sets.lock().await.remove(key).is_some();
+            let score_deleted = self.scores.lock().await.remove(key).is_some();
+            let queue_deleted = self.queues.lock().await.remove(key).is_some();
+            return kv_deleted || set_deleted || score_deleted || queue_deleted;
+        }
+
+        let expires_at = now + ttl;
+        {
+            let mut kv = self.kv.lock().await;
+            if let Some(entry) = kv.get_mut(key) {
+                if entry.is_expired(now) {
+                    kv.remove(key);
+                } else {
+                    entry.expires_at = Some(expires_at);
+                    return true;
+                }
+            }
+        }
+        if set_memory_key_expiry(&self.sets, key, expires_at, now).await {
+            return true;
+        }
+        if set_memory_key_expiry(&self.scores, key, expires_at, now).await {
+            return true;
+        }
+        if set_memory_key_expiry(&self.queues, key, expires_at, now).await {
+            return true;
+        }
+        false
+    }
+
     pub(crate) async fn kv_scan(&self, pattern: &str) -> Vec<String> {
+        let now = Instant::now();
+        let mut keys = BTreeSet::new();
         let mut kv = self.kv.lock().await;
-        prune_kv(&mut kv, Instant::now());
-        let mut keys = kv
-            .keys()
-            .filter(|key| key_matches_pattern(key, pattern))
-            .cloned()
-            .collect::<Vec<_>>();
-        keys.sort();
-        keys
+        prune_kv(&mut kv, now);
+        keys.extend(
+            kv.keys()
+                .filter(|key| key_matches_pattern(key, pattern))
+                .cloned(),
+        );
+        drop(kv);
+        let mut sets = self.sets.lock().await;
+        prune_expiring_map(&mut sets, now);
+        keys.extend(
+            sets.keys()
+                .filter(|key| key_matches_pattern(key, pattern))
+                .cloned(),
+        );
+        drop(sets);
+        let mut scores = self.scores.lock().await;
+        prune_expiring_map(&mut scores, now);
+        keys.extend(
+            scores
+                .keys()
+                .filter(|key| key_matches_pattern(key, pattern))
+                .cloned(),
+        );
+        drop(scores);
+        let mut queues = self.queues.lock().await;
+        prune_expiring_map(&mut queues, now);
+        keys.extend(
+            queues
+                .keys()
+                .filter(|key| key_matches_pattern(key, pattern))
+                .cloned(),
+        );
+        keys.into_iter().collect()
     }
 
     pub(crate) async fn check_and_consume_rate_limit(
@@ -231,6 +416,8 @@ impl MemoryRuntimeBackend {
         }
 
         let mut remaining = None::<u32>;
+        let mut user_next = None::<u32>;
+        let mut key_next = None::<u32>;
         let expires_at = now + ttl;
         if user_limit > 0 {
             let next = counters
@@ -247,6 +434,7 @@ impl MemoryRuntimeBackend {
                 })
                 .value;
             remaining = Some(user_limit.saturating_sub(next));
+            user_next = Some(next);
         }
         if key_limit > 0 {
             let next = counters
@@ -264,6 +452,15 @@ impl MemoryRuntimeBackend {
                 .value;
             let key_remaining = key_limit.saturating_sub(next);
             remaining = Some(remaining.map_or(key_remaining, |value| value.min(key_remaining)));
+            key_next = Some(next);
+        }
+        drop(counters);
+
+        if let Some(next) = user_next {
+            self.kv_set(user_key, next.to_string(), Some(ttl)).await;
+        }
+        if let Some(next) = key_next {
+            self.kv_set(key_key, next.to_string(), Some(ttl)).await;
         }
         Ok(crate::RateLimitCheck::Allowed {
             remaining: remaining.unwrap_or(0),
@@ -271,11 +468,11 @@ impl MemoryRuntimeBackend {
     }
 
     pub(crate) async fn set_add(&self, key: &str, member: &str) -> bool {
-        self.sets
-            .lock()
-            .await
-            .entry(key.to_string())
+        let mut sets = self.sets.lock().await;
+        prune_memory_key(&mut sets, key, Instant::now());
+        sets.entry(key.to_string())
             .or_default()
+            .members
             .insert(member.to_string())
     }
 
@@ -283,82 +480,113 @@ impl MemoryRuntimeBackend {
         let Ok(mut sets) = self.sets.try_lock() else {
             return false;
         };
+        prune_memory_key(&mut sets, key, Instant::now());
         sets.entry(key.to_string())
             .or_default()
+            .members
             .insert(member.to_string())
     }
 
     pub(crate) async fn set_remove(&self, key: &str, member: &str) -> bool {
-        self.sets
-            .lock()
-            .await
-            .get_mut(key)
-            .is_some_and(|set| set.remove(member))
+        let mut sets = self.sets.lock().await;
+        prune_memory_key(&mut sets, key, Instant::now());
+        sets.get_mut(key)
+            .is_some_and(|entry| entry.members.remove(member))
     }
 
     pub(crate) async fn set_members(&self, key: &str) -> Vec<String> {
-        self.sets
-            .lock()
-            .await
-            .get(key)
-            .map(|set| set.iter().cloned().collect())
+        let mut sets = self.sets.lock().await;
+        prune_memory_key(&mut sets, key, Instant::now());
+        sets.get(key)
+            .map(|entry| entry.members.iter().cloned().collect())
             .unwrap_or_default()
     }
 
     pub(crate) async fn set_len(&self, key: &str) -> usize {
-        self.sets.lock().await.get(key).map_or(0, BTreeSet::len)
+        let mut sets = self.sets.lock().await;
+        prune_memory_key(&mut sets, key, Instant::now());
+        sets.get(key).map_or(0, |entry| entry.members.len())
     }
 
     pub(crate) async fn score_set(&self, key: &str, member: &str, score: f64) {
-        self.scores
-            .lock()
-            .await
+        let mut scores = self.scores.lock().await;
+        prune_memory_key(&mut scores, key, Instant::now());
+        scores
             .entry(key.to_string())
             .or_default()
+            .scores
             .insert(member.to_string(), score);
     }
 
     pub(crate) async fn score_many(&self, key: &str, members: &[String]) -> Vec<Option<f64>> {
-        let scores = self.scores.lock().await;
+        let mut scores = self.scores.lock().await;
+        prune_memory_key(&mut scores, key, Instant::now());
         members
             .iter()
-            .map(|member| scores.get(key).and_then(|set| set.get(member)).copied())
+            .map(|member| {
+                scores
+                    .get(key)
+                    .and_then(|entry| entry.scores.get(member))
+                    .copied()
+            })
             .collect()
     }
 
     pub(crate) async fn score_range_by_min(&self, key: &str, min_score: f64) -> Vec<String> {
-        let scores = self.scores.lock().await;
+        let mut scores = self.scores.lock().await;
+        prune_memory_key(&mut scores, key, Instant::now());
         scores
             .get(key)
-            .map(|set| {
-                set.iter()
-                    .filter(|(_, score)| **score >= min_score)
-                    .map(|(member, _)| member.clone())
-                    .collect()
-            })
+            .map(|entry| sorted_score_members(&entry.scores, |score| score >= min_score))
             .unwrap_or_default()
     }
 
     pub(crate) async fn score_remove_by_score(&self, key: &str, max_score: f64) -> usize {
         let mut scores = self.scores.lock().await;
-        let Some(set) = scores.get_mut(key) else {
+        prune_memory_key(&mut scores, key, Instant::now());
+        let Some(entry) = scores.get_mut(key) else {
             return 0;
         };
-        let before = set.len();
-        set.retain(|_, score| *score > max_score);
-        before.saturating_sub(set.len())
+        let before = entry.scores.len();
+        entry.scores.retain(|_, score| *score > max_score);
+        before.saturating_sub(entry.scores.len())
     }
 
     pub(crate) async fn score_remove(&self, key: &str, member: &str) -> bool {
-        self.scores
-            .lock()
-            .await
+        let mut scores = self.scores.lock().await;
+        prune_memory_key(&mut scores, key, Instant::now());
+        scores
             .get_mut(key)
-            .is_some_and(|set| set.remove(member).is_some())
+            .is_some_and(|entry| entry.scores.remove(member).is_some())
+    }
+
+    pub(crate) async fn score_remove_by_rank(&self, key: &str, start: i64, stop: i64) -> usize {
+        let mut scores = self.scores.lock().await;
+        prune_memory_key(&mut scores, key, Instant::now());
+        let Some(entry) = scores.get_mut(key) else {
+            return 0;
+        };
+        let Some((start, stop)) = normalize_redis_rank_range(entry.scores.len(), start, stop)
+        else {
+            return 0;
+        };
+        let members = sorted_score_members(&entry.scores, |_| true);
+        let remove = members
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, member)| (index >= start && index <= stop).then_some(member))
+            .collect::<Vec<_>>();
+        let before = entry.scores.len();
+        for member in remove {
+            entry.scores.remove(&member);
+        }
+        before.saturating_sub(entry.scores.len())
     }
 
     pub(crate) async fn score_len(&self, key: &str) -> usize {
-        self.scores.lock().await.get(key).map_or(0, BTreeMap::len)
+        let mut scores = self.scores.lock().await;
+        prune_memory_key(&mut scores, key, Instant::now());
+        scores.get(key).map_or(0, |entry| entry.scores.len())
     }
 
     pub(crate) async fn queue_append(
@@ -367,51 +595,206 @@ impl MemoryRuntimeBackend {
         fields: BTreeMap<String, String>,
         maxlen: Option<usize>,
     ) -> String {
-        let id = format!(
-            "{}-0",
-            self.queue_seq
-                .fetch_add(1, Ordering::Relaxed)
-                .saturating_add(1)
-        );
+        let sequence = self
+            .queue_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        let id = format!("{sequence}-0");
         let mut queues = self.queues.lock().await;
-        let queue = queues.entry(stream.to_string()).or_default();
-        queue.push_back(RuntimeQueueEntry {
-            id: id.clone(),
-            fields,
+        prune_memory_key(&mut queues, stream, Instant::now());
+        let stream_state = queues.entry(stream.to_string()).or_default();
+        stream_state.entries.push_back(MemoryQueuedEntry {
+            sequence,
+            entry: RuntimeQueueEntry {
+                id: id.clone(),
+                fields,
+            },
         });
         if let Some(maxlen) = maxlen.filter(|value| *value > 0) {
-            while queue.len() > maxlen {
-                queue.pop_front();
+            while stream_state.entries.len() > maxlen {
+                let Some(removed) = stream_state.entries.pop_front() else {
+                    break;
+                };
+                remove_pending_from_all_groups(stream_state, &removed.entry.id);
             }
         }
         id
     }
 
-    pub(crate) async fn queue_read(&self, stream: &str, count: usize) -> Vec<RuntimeQueueEntry> {
+    pub(crate) async fn queue_ensure_consumer_group(
+        &self,
+        stream: &str,
+        group: &str,
+        start_id: &str,
+    ) -> Result<(), DataLayerError> {
         let mut queues = self.queues.lock().await;
-        let Some(queue) = queues.get_mut(stream) else {
-            return Vec::new();
-        };
-        let mut entries = Vec::new();
-        for _ in 0..count.max(1) {
-            let Some(entry) = queue.pop_front() else {
-                break;
-            };
-            entries.push(entry);
+        prune_memory_key(&mut queues, stream, Instant::now());
+        let stream_state = queues.entry(stream.to_string()).or_default();
+        if stream_state.groups.contains_key(group) {
+            return Ok(());
         }
-        entries
+        let last_delivered_sequence = match start_id {
+            "$" => stream_state
+                .entries
+                .back()
+                .map(|entry| entry.sequence)
+                .unwrap_or_default(),
+            _ => parse_memory_stream_sequence(start_id)?,
+        };
+        stream_state.groups.insert(
+            group.to_string(),
+            MemoryConsumerGroup {
+                last_delivered_sequence,
+                pending: BTreeMap::new(),
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn queue_read(
+        &self,
+        stream: &str,
+        group: &str,
+        consumer: &str,
+        count: usize,
+        block_ms: Option<u64>,
+    ) -> Result<Vec<RuntimeQueueEntry>, DataLayerError> {
+        let deadline = block_ms.map(|value| Instant::now() + Duration::from_millis(value.max(1)));
+        loop {
+            let entries = {
+                let mut queues = self.queues.lock().await;
+                prune_memory_key(&mut queues, stream, Instant::now());
+                let Some(stream_state) = queues.get_mut(stream) else {
+                    return Err(DataLayerError::InvalidInput(format!(
+                        "runtime queue stream {stream} does not exist"
+                    )));
+                };
+                let Some(group_state) = stream_state.groups.get_mut(group) else {
+                    return Err(DataLayerError::InvalidInput(format!(
+                        "runtime queue group {group} does not exist for stream {stream}"
+                    )));
+                };
+                let now = Instant::now();
+                let mut delivered = Vec::new();
+                let last_delivered_sequence = group_state.last_delivered_sequence;
+                let queued_entries = stream_state
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.sequence > last_delivered_sequence)
+                    .take(count.max(1))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for queued in queued_entries {
+                    group_state.last_delivered_sequence = queued.sequence;
+                    group_state.pending.insert(
+                        queued.entry.id.clone(),
+                        MemoryPendingQueueEntry {
+                            sequence: queued.sequence,
+                            entry: queued.entry.clone(),
+                            consumer: consumer.to_string(),
+                            delivered_at: now,
+                        },
+                    );
+                    delivered.push(queued.entry.clone());
+                }
+                delivered
+            };
+            if !entries.is_empty() {
+                return Ok(entries);
+            }
+            let Some(deadline) = deadline else {
+                return Ok(Vec::new());
+            };
+            if Instant::now() >= deadline {
+                return Ok(Vec::new());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     pub(crate) async fn queue_claim_stale(
         &self,
-        _stream: &str,
-        _config: RuntimeQueueReclaimConfig,
-    ) -> Vec<RuntimeQueueEntry> {
-        Vec::new()
+        stream: &str,
+        group: &str,
+        consumer: &str,
+        start_id: &str,
+        config: RuntimeQueueReclaimConfig,
+    ) -> Result<Vec<RuntimeQueueEntry>, DataLayerError> {
+        let start_sequence = parse_memory_stream_sequence(start_id)?;
+        let min_idle = Duration::from_millis(config.min_idle_ms.max(1));
+        let now = Instant::now();
+        let mut queues = self.queues.lock().await;
+        prune_memory_key(&mut queues, stream, now);
+        let Some(stream_state) = queues.get_mut(stream) else {
+            return Err(DataLayerError::InvalidInput(format!(
+                "runtime queue stream {stream} does not exist"
+            )));
+        };
+        let Some(group_state) = stream_state.groups.get_mut(group) else {
+            return Err(DataLayerError::InvalidInput(format!(
+                "runtime queue group {group} does not exist for stream {stream}"
+            )));
+        };
+        let ids = group_state
+            .pending
+            .values()
+            .filter(|entry| entry.sequence >= start_sequence)
+            .filter(|entry| now.saturating_duration_since(entry.delivered_at) >= min_idle)
+            .map(|entry| (entry.sequence, entry.entry.id.clone()))
+            .collect::<Vec<_>>();
+        let mut ids = ids;
+        ids.sort_by_key(|(sequence, _)| *sequence);
+
+        let mut claimed = Vec::new();
+        for (_, id) in ids.into_iter().take(config.count.max(1)) {
+            if let Some(pending) = group_state.pending.get_mut(&id) {
+                pending.consumer = consumer.to_string();
+                pending.delivered_at = now;
+                claimed.push(pending.entry.clone());
+            }
+        }
+        Ok(claimed)
     }
 
-    pub(crate) async fn queue_delete(&self, _stream: &str, _ids: &[String]) -> usize {
-        0
+    pub(crate) async fn queue_ack(
+        &self,
+        stream: &str,
+        group: &str,
+        ids: &[String],
+    ) -> Result<usize, DataLayerError> {
+        let mut queues = self.queues.lock().await;
+        prune_memory_key(&mut queues, stream, Instant::now());
+        let Some(stream_state) = queues.get_mut(stream) else {
+            return Err(DataLayerError::InvalidInput(format!(
+                "runtime queue stream {stream} does not exist"
+            )));
+        };
+        let Some(group_state) = stream_state.groups.get_mut(group) else {
+            return Err(DataLayerError::InvalidInput(format!(
+                "runtime queue group {group} does not exist for stream {stream}"
+            )));
+        };
+        Ok(ids
+            .iter()
+            .filter(|id| group_state.pending.remove(*id).is_some())
+            .count())
+    }
+
+    pub(crate) async fn queue_delete(&self, stream: &str, ids: &[String]) -> usize {
+        let mut queues = self.queues.lock().await;
+        prune_memory_key(&mut queues, stream, Instant::now());
+        let Some(stream_state) = queues.get_mut(stream) else {
+            return 0;
+        };
+        let ids = ids.iter().cloned().collect::<BTreeSet<_>>();
+        let before = stream_state.entries.len();
+        stream_state
+            .entries
+            .retain(|entry| !ids.contains(&entry.entry.id));
+        for id in &ids {
+            remove_pending_from_all_groups(stream_state, id);
+        }
+        before.saturating_sub(stream_state.entries.len())
     }
 
     pub(crate) async fn lock_try_acquire(
@@ -530,11 +913,100 @@ fn prune_kv(kv: &mut HashMap<String, MemoryKvEntry>, now: Instant) {
     kv.retain(|_, entry| !entry.is_expired(now));
 }
 
+fn prune_memory_key<T>(values: &mut HashMap<String, T>, key: &str, now: Instant)
+where
+    T: MemoryExpiringKey,
+{
+    if values.get(key).is_some_and(|entry| entry.is_expired(now)) {
+        values.remove(key);
+    }
+}
+
+fn prune_expiring_map<T>(values: &mut HashMap<String, T>, now: Instant)
+where
+    T: MemoryExpiringKey,
+{
+    values.retain(|_, entry| !entry.is_expired(now));
+}
+
+async fn set_memory_key_expiry<T>(
+    values: &Mutex<HashMap<String, T>>,
+    key: &str,
+    expires_at: Instant,
+    now: Instant,
+) -> bool
+where
+    T: MemoryExpiringKey,
+{
+    let mut values = values.lock().await;
+    if values.get(key).is_some_and(|entry| entry.is_expired(now)) {
+        values.remove(key);
+        return false;
+    }
+    let Some(entry) = values.get_mut(key) else {
+        return false;
+    };
+    entry.set_expires_at(expires_at);
+    true
+}
+
 pub(crate) fn key_matches_pattern(key: &str, pattern: &str) -> bool {
     match pattern.strip_suffix('*') {
         Some(prefix) => key.starts_with(prefix),
         None => key == pattern,
     }
+}
+
+fn sorted_score_members<F>(scores: &BTreeMap<String, f64>, include: F) -> Vec<String>
+where
+    F: Fn(f64) -> bool,
+{
+    let mut entries = scores
+        .iter()
+        .filter_map(|(member, score)| include(*score).then_some((member.clone(), *score)))
+        .collect::<Vec<_>>();
+    entries.sort_by(|(left_member, left_score), (right_member, right_score)| {
+        left_score
+            .total_cmp(right_score)
+            .then_with(|| left_member.cmp(right_member))
+    });
+    entries.into_iter().map(|(member, _)| member).collect()
+}
+
+fn normalize_redis_rank_range(len: usize, start: i64, stop: i64) -> Option<(usize, usize)> {
+    if len == 0 {
+        return None;
+    }
+    let len = i64::try_from(len).ok()?;
+    let mut start = if start < 0 { len + start } else { start };
+    let mut stop = if stop < 0 { len + stop } else { stop };
+    if start < 0 {
+        start = 0;
+    }
+    if stop < 0 || start >= len || start > stop {
+        return None;
+    }
+    if stop >= len {
+        stop = len - 1;
+    }
+    Some((usize::try_from(start).ok()?, usize::try_from(stop).ok()?))
+}
+
+fn remove_pending_from_all_groups(stream: &mut MemoryQueueStream, id: &str) {
+    for group in stream.groups.values_mut() {
+        group.pending.remove(id);
+    }
+}
+
+fn parse_memory_stream_sequence(id: &str) -> Result<u64, DataLayerError> {
+    let Some((sequence, _)) = id.split_once('-') else {
+        return Err(DataLayerError::InvalidInput(format!(
+            "runtime queue stream id {id} must use redis stream id format"
+        )));
+    };
+    sequence.parse::<u64>().map_err(|err| {
+        DataLayerError::InvalidInput(format!("runtime queue stream id {id} is invalid: {err}"))
+    })
 }
 
 fn unix_time_ms() -> u64 {

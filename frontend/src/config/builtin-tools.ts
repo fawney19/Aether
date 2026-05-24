@@ -1,4 +1,4 @@
-import { Mail, Shield, AlertTriangle } from 'lucide-vue-next'
+import { Mail, Shield, AlertTriangle, BellRing } from 'lucide-vue-next'
 import type { LucideIcon } from 'lucide-vue-next'
 
 export interface BuiltinTool {
@@ -14,6 +14,12 @@ export const BUILTIN_TOOLS: BuiltinTool[] = [
     description: '配置 SMTP 邮件服务，管理邮件模板和发送设置',
     href: '/admin/email',
     icon: Mail,
+  },
+  {
+    name: '通知服务',
+    description: '管理通知项、模板和推送服务策略',
+    href: '/admin/notification-service',
+    icon: BellRing,
   },
   {
     name: 'IP 安全',

@@ -11,6 +11,7 @@ pub(crate) const OPENAI_RESPONSES_EXTENSION_NAMESPACE: &str = "openai_responses"
 pub(crate) const OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE: &str = "openai_cli";
 const AETHER_EXTENSION_NAMESPACE: &str = "aether";
 const CLAUDE_TOOL_RESULT_SOURCE_MARKER: &str = "claude_tool_result";
+const OPENAI_CHAT_TOOL_RESULT_SOURCE_MARKER: &str = "openai_chat_tool_result";
 const OPENAI_CHAT_TOOL_ERROR_PREFIX: &str = "[tool error]";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -725,7 +726,7 @@ pub(crate) fn openai_role_to_canonical(role: &str) -> CanonicalRole {
         "assistant" => CanonicalRole::Assistant,
         "system" => CanonicalRole::System,
         "developer" => CanonicalRole::Developer,
-        "tool" => CanonicalRole::Tool,
+        "tool" | "function" => CanonicalRole::Tool,
         _ => CanonicalRole::Unknown,
     }
 }
@@ -1329,10 +1330,12 @@ pub(crate) fn openai_message_content_blocks(
             blocks.splice(0..0, reasoning_blocks);
         }
     }
+    let mut saw_tool_calls = false;
     if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
         for tool_call in tool_calls {
             let tool_call = tool_call.as_object()?;
             let function = tool_call.get("function").and_then(Value::as_object)?;
+            saw_tool_calls = true;
             blocks.push(CanonicalContentBlock::ToolUse {
                 id: tool_call
                     .get("id")
@@ -1349,12 +1352,38 @@ pub(crate) fn openai_message_content_blocks(
             });
         }
     }
+    if role == CanonicalRole::Assistant && !saw_tool_calls {
+        if let Some(function_call) = message.get("function_call").and_then(Value::as_object) {
+            let name = function_call
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            blocks.push(CanonicalContentBlock::ToolUse {
+                id: message
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or(name.as_str())
+                    .to_string(),
+                name,
+                input: parse_jsonish_value(function_call.get("arguments")),
+                extensions: openai_extensions(message, &["role", "content", "function_call"]),
+            });
+        }
+    }
     if role == CanonicalRole::Tool {
         let text = openai_content_text(message.get("content"));
+        let mut extensions = openai_extensions(message, &["role", "content", "tool_call_id"]);
+        extensions.insert(
+            AETHER_EXTENSION_NAMESPACE.to_string(),
+            json!({ "source": OPENAI_CHAT_TOOL_RESULT_SOURCE_MARKER }),
+        );
         blocks.push(CanonicalContentBlock::ToolResult {
             tool_use_id: message
                 .get("tool_call_id")
                 .and_then(Value::as_str)
+                .or_else(|| message.get("name").and_then(Value::as_str))
                 .unwrap_or_default()
                 .to_string(),
             name: None,
@@ -1374,7 +1403,7 @@ pub(crate) fn openai_message_content_blocks(
                 text
             }),
             is_error: false,
-            extensions: openai_extensions(message, &["role", "content", "tool_call_id"]),
+            extensions,
         });
     }
     Some(blocks)
@@ -1556,6 +1585,39 @@ pub(crate) fn openai_responses_input_to_canonical_messages(
                             extensions: BTreeMap::new(),
                         });
                     }
+                    "web_search_call" => {
+                        let id = item_object
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(ToOwned::to_owned)
+                            .unwrap_or_else(|| {
+                                let generated =
+                                    format!("call_auto_{next_generated_tool_call_index}");
+                                next_generated_tool_call_index += 1;
+                                generated
+                            });
+                        let query = item_object
+                            .get("action")
+                            .and_then(Value::as_object)
+                            .and_then(|action| action.get("query"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        messages.push(CanonicalMessage {
+                            role: CanonicalRole::Assistant,
+                            content: vec![CanonicalContentBlock::ToolUse {
+                                id,
+                                name: "web_search".to_string(),
+                                input: json!({ "query": query }),
+                                extensions: openai_responses_extensions(
+                                    item_object,
+                                    &["type", "id", "status", "action"],
+                                ),
+                            }],
+                            extensions: BTreeMap::new(),
+                        });
+                    }
                     "function_call_output" => {
                         let id = item_object
                             .get("call_id")
@@ -1726,6 +1788,30 @@ pub(crate) fn openai_responses_output_to_canonical_blocks(
                     extensions: openai_responses_extensions(
                         item_object,
                         &["type", "id", "call_id", "name", "arguments", "status"],
+                    ),
+                });
+            }
+            "web_search_call" => {
+                let id = item_object
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| format!("call_auto_{index}"));
+                let query = item_object
+                    .get("action")
+                    .and_then(Value::as_object)
+                    .and_then(|action| action.get("query"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                blocks.push(CanonicalContentBlock::ToolUse {
+                    id,
+                    name: "web_search".to_string(),
+                    input: json!({ "query": query }),
+                    extensions: openai_responses_extensions(
+                        item_object,
+                        &["type", "id", "status", "action"],
                     ),
                 });
             }
@@ -3741,7 +3827,10 @@ pub(crate) fn canonical_block_to_claude(
         } => {
             let mut out = Map::new();
             out.insert("type".to_string(), Value::String("tool_use".to_string()));
-            out.insert("id".to_string(), Value::String(id.clone()));
+            out.insert(
+                "id".to_string(),
+                Value::String(claude_compatible_tool_use_id(id)),
+            );
             out.insert("name".to_string(), Value::String(name.clone()));
             out.insert("input".to_string(), input.clone());
             out.extend(namespace_extension_object(extensions, "claude", &out));
@@ -3759,13 +3848,16 @@ pub(crate) fn canonical_block_to_claude(
             out.insert("type".to_string(), Value::String("tool_result".to_string()));
             out.insert(
                 "tool_use_id".to_string(),
-                Value::String(tool_use_id.clone()),
+                Value::String(claude_compatible_tool_use_id(tool_use_id)),
             );
             out.insert(
                 "content".to_string(),
-                output
-                    .clone()
-                    .unwrap_or_else(|| Value::String(content_text.clone().unwrap_or_default())),
+                canonical_tool_result_content_to_claude(
+                    output.as_ref(),
+                    content_text.as_deref(),
+                    role,
+                    extensions,
+                ),
             );
             out.insert("is_error".to_string(), Value::Bool(*is_error));
             out.extend(namespace_extension_object(extensions, "claude", &out));
@@ -3773,6 +3865,81 @@ pub(crate) fn canonical_block_to_claude(
         }
         CanonicalContentBlock::Unknown { .. } => Some(None),
     }
+}
+
+fn canonical_tool_result_content_to_claude(
+    output: Option<&Value>,
+    content_text: Option<&str>,
+    role: &CanonicalRole,
+    extensions: &BTreeMap<String, Value>,
+) -> Value {
+    if matches!(role, CanonicalRole::Assistant) {
+        return output
+            .cloned()
+            .unwrap_or_else(|| Value::String(content_text.unwrap_or_default().to_string()));
+    }
+
+    if is_openai_chat_tool_result(extensions) {
+        let text = content_text
+            .map(ToOwned::to_owned)
+            .or_else(|| output.map(openai_responses_tool_output_text))
+            .unwrap_or_default();
+        return Value::String(non_empty_tool_result_text(&text));
+    }
+
+    match output {
+        Some(Value::String(text)) => Value::String(non_empty_tool_result_text(text)),
+        Some(Value::Array(parts)) if claude_tool_result_content_blocks_are_wire_safe(parts) => {
+            Value::Array(parts.clone())
+        }
+        Some(Value::Null) => Value::String(non_empty_tool_result_text("")),
+        Some(value) => serde_json::to_string(value)
+            .map(|text| Value::String(non_empty_tool_result_text(&text)))
+            .unwrap_or_else(|_| {
+                Value::String(non_empty_tool_result_text(content_text.unwrap_or_default()))
+            }),
+        None => Value::String(non_empty_tool_result_text(content_text.unwrap_or_default())),
+    }
+}
+
+fn is_openai_chat_tool_result(extensions: &BTreeMap<String, Value>) -> bool {
+    extensions
+        .get(AETHER_EXTENSION_NAMESPACE)
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str)
+        == Some(OPENAI_CHAT_TOOL_RESULT_SOURCE_MARKER)
+}
+
+fn non_empty_tool_result_text(text: &str) -> String {
+    if text.trim().is_empty() {
+        "(empty)".to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+fn claude_compatible_tool_use_id(id: &str) -> String {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return "toolu_".to_string();
+    }
+    if trimmed.starts_with("toolu_") || trimmed.starts_with("call_") {
+        trimmed.to_string()
+    } else {
+        format!("toolu_{trimmed}")
+    }
+}
+
+fn claude_tool_result_content_blocks_are_wire_safe(parts: &[Value]) -> bool {
+    !parts.is_empty()
+        && parts.iter().all(|part| {
+            part.as_object()
+                .and_then(|object| object.get("type"))
+                .and_then(Value::as_str)
+                .is_some_and(|block_type| {
+                    matches!(block_type, "text" | "image" | "document" | "file")
+                })
+        })
 }
 
 pub(crate) fn claude_source_value(
@@ -3892,7 +4059,7 @@ pub(crate) fn canonical_tools_to_claude(canonical: &CanonicalRequest) -> Vec<Val
             }
             out.insert(
                 "input_schema".to_string(),
-                tool.parameters.clone().unwrap_or_else(|| json!({})),
+                claude_input_schema_from_tool_parameters(tool.parameters.as_ref()),
             );
             out.extend(namespace_extension_object(&tool.extensions, "claude", &out));
             Value::Object(out)
@@ -3908,6 +4075,23 @@ pub(crate) fn canonical_tools_to_claude(canonical: &CanonicalRequest) -> Vec<Val
         tools.extend(builtin_tools.iter().cloned());
     }
     tools
+}
+
+fn claude_input_schema_from_tool_parameters(parameters: Option<&Value>) -> Value {
+    match parameters {
+        Some(Value::Object(schema)) => {
+            let mut schema = schema.clone();
+            schema
+                .entry("type".to_string())
+                .or_insert_with(|| Value::String("object".to_string()));
+            schema
+                .entry("properties".to_string())
+                .or_insert_with(|| json!({}));
+            Value::Object(schema)
+        }
+        Some(Value::Null) | None => json!({"type": "object", "properties": {}}),
+        Some(_) => json!({"type": "object", "properties": {}}),
+    }
 }
 
 pub(crate) fn canonical_tool_choice_to_claude(

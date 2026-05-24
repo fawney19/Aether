@@ -121,7 +121,6 @@ pub(super) const AUTH_REFRESH_TOKEN_EXPIRATION_DAYS: i64 = 7;
 pub(super) const AUTH_EMAIL_VERIFICATION_PREFIX: &str = "email:verification:";
 pub(super) const AUTH_EMAIL_VERIFIED_PREFIX: &str = "email:verified:";
 pub(super) const AUTH_EMAIL_VERIFIED_TTL_SECS: u64 = 3600;
-pub(super) const AUTH_SMTP_TIMEOUT_SECS: u64 = 30;
 
 pub(crate) fn build_auth_json_response(
     status: http::StatusCode,

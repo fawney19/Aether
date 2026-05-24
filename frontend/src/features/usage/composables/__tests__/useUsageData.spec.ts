@@ -129,6 +129,9 @@ describe('useUsageData', () => {
     ])
     getUsageByProviderMock.mockResolvedValueOnce([
       {
+        provider_id: 'provider-openai',
+        provider_key: 'provider-openai',
+        provider_identity_source: 'provider_id',
         provider: 'OpenAI',
         request_count: 3,
         total_tokens: 300,
@@ -159,6 +162,11 @@ describe('useUsageData', () => {
     })
     expect(modelStats.value).toHaveLength(1)
     expect(providerStats.value).toHaveLength(1)
+    expect(providerStats.value[0]).toMatchObject({
+      providerId: 'provider-openai',
+      providerKey: 'provider-openai',
+      providerIdentitySource: 'provider_id',
+    })
     expect(apiFormatStats.value).toHaveLength(1)
     expect(availableModels.value).toEqual(['gpt-5'])
     expect(availableProviders.value).toEqual(['OpenAI'])
@@ -217,6 +225,53 @@ describe('useUsageData', () => {
     await loadStats(dateRange)
 
     expect(providerStats.value.map(item => item.provider)).toEqual(['OpenAI'])
+    expect(availableProviders.value).toEqual(['OpenAI'])
+  })
+
+  it('keeps previous admin provider stats when a background refresh fails', async () => {
+    const isAdminPage = ref(true)
+    const { loadStats, providerStats, availableProviders } = useUsageData({ isAdminPage })
+    const dateRange = { preset: 'last7days', tz_offset_minutes: 0 }
+
+    getUsageStatsMock.mockResolvedValueOnce({
+      total_requests: 3,
+      total_tokens: 300,
+      total_cost: 1,
+      avg_response_time: 0,
+    })
+    getUsageByProviderMock.mockResolvedValueOnce([
+      {
+        provider: 'OpenAI',
+        request_count: 3,
+        total_tokens: 300,
+        total_cost: 1.23,
+        actual_cost: 1.5,
+        avg_response_time_ms: 1250,
+        success_rate: 100,
+      },
+    ])
+
+    await loadStats(dateRange)
+
+    getUsageStatsMock.mockResolvedValueOnce({
+      total_requests: 4,
+      total_tokens: 400,
+      total_cost: 2,
+      avg_response_time: 0,
+    })
+    getUsageByProviderMock.mockRejectedValueOnce({
+      response: { status: 500 },
+      message: 'provider aggregation failed',
+    })
+
+    const hadFailure = await loadStats(dateRange, { preserveOnFailure: true })
+
+    expect(hadFailure).toBe(true)
+    expect(providerStats.value).toHaveLength(1)
+    expect(providerStats.value[0]).toMatchObject({
+      provider: 'OpenAI',
+      requests: 3,
+    })
     expect(availableProviders.value).toEqual(['OpenAI'])
   })
 })

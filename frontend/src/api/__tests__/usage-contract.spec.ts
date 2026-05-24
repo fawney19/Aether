@@ -114,4 +114,43 @@ describe('usageApi contract alignment', () => {
       },
     })
   })
+
+  it('uses an extended timeout and cache bypass option for admin analytics', async () => {
+    getMock
+      .mockResolvedValueOnce({
+        data: {
+          total_requests: 7,
+          total_tokens: 99,
+          total_cost: 12.34,
+          avg_response_time: 456,
+        },
+      })
+      .mockResolvedValueOnce({
+        data: [{ provider: 'OpenAI', request_count: 7 }],
+      })
+
+    await usageApi.getUsageStats({ preset: 'last30days' }, { skipCache: true })
+    await usageApi.getUsageByProvider({ preset: 'last30days' }, { skipCache: true })
+
+    expect(cachedRequestMock).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining(':fresh'),
+      expect.any(Function),
+      0
+    )
+    expect(cachedRequestMock).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining(':fresh'),
+      expect.any(Function),
+      0
+    )
+    expect(getMock).toHaveBeenNthCalledWith(1, '/api/admin/usage/stats', {
+      params: { preset: 'last30days' },
+      timeout: 120000,
+    })
+    expect(getMock).toHaveBeenNthCalledWith(2, '/api/admin/usage/aggregation/stats', {
+      params: { group_by: 'provider', preset: 'last30days' },
+      timeout: 120000,
+    })
+  })
 })

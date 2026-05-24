@@ -38,6 +38,32 @@ fn oauth_reason_has_tag(reason: Option<&str>, tag: &str) -> bool {
         })
 }
 
+fn oauth_refresh_failure_is_terminal(reason: Option<&str>) -> bool {
+    reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|reason| {
+            reason
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with(OAUTH_REFRESH_FAILED_PREFIX))
+                .any(|line| {
+                    let lowered = line.to_ascii_lowercase();
+                    lowered.contains("invalid_grant")
+                        || lowered.contains("invalid_refresh_token")
+                        || lowered.contains("refresh_token_expired")
+                        || lowered.contains("could not validate your refresh token")
+                        || lowered.contains("refresh_token 无效")
+                        || lowered.contains("已过期或已撤销")
+                        || lowered.contains("已被使用并轮换")
+                        || (lowered.contains("refresh token")
+                            && ["expired", "revoked", "invalid", "reused"]
+                                .iter()
+                                .any(|keyword| lowered.contains(keyword)))
+                })
+        })
+}
+
 fn oauth_access_token_expired(key: &StoredProviderCatalogKey, now_unix_secs: u64) -> bool {
     let now_unix_secs = if now_unix_secs == 0 {
         std::time::SystemTime::now()
@@ -55,6 +81,7 @@ fn oauth_access_token_expired(key: &StoredProviderCatalogKey, now_unix_secs: u64
 pub fn should_auto_remove_oauth_invalid_key(
     key: &StoredProviderCatalogKey,
     candidate_reason: Option<&str>,
+    access_token_invalid_proven: bool,
     now_unix_secs: u64,
 ) -> bool {
     if should_auto_remove_structured_reason(candidate_reason)
@@ -71,8 +98,13 @@ pub fn should_auto_remove_oauth_invalid_key(
     if !refresh_token_failed {
         return false;
     }
+    if !oauth_refresh_failure_is_terminal(candidate_reason)
+        && !oauth_refresh_failure_is_terminal(key.oauth_invalid_reason.as_deref())
+    {
+        return false;
+    }
 
-    oauth_reason_has_tag(candidate_reason, OAUTH_EXPIRED_PREFIX)
+    access_token_invalid_proven
         || oauth_reason_has_tag(key.oauth_invalid_reason.as_deref(), OAUTH_EXPIRED_PREFIX)
         || oauth_access_token_expired(key, now_unix_secs)
 }
@@ -167,7 +199,7 @@ pub fn quota_refresh_success_invalid_state(
         .as_deref()
         .map(str::trim)
         .unwrap_or_default();
-    if current_reason.starts_with(OAUTH_REFRESH_FAILED_PREFIX) {
+    if current_reason.starts_with(OAUTH_ACCOUNT_BLOCK_PREFIX) {
         return (
             key.oauth_invalid_at_unix_secs,
             (!current_reason.is_empty()).then_some(current_reason.to_string()),
@@ -890,6 +922,317 @@ pub fn parse_kiro_usage_response(
     Some(serde_json::Value::Object(result))
 }
 
+pub fn parse_windsurf_user_status_response(
+    value: &serde_json::Value,
+    updated_at_unix_secs: u64,
+) -> Option<serde_json::Value> {
+    let user_status = value
+        .get("userStatus")
+        .or_else(|| value.get("user_status"))?;
+    let plan_status = user_status
+        .get("planStatus")
+        .or_else(|| user_status.get("plan_status"))?;
+    let plan_info = plan_status
+        .get("planInfo")
+        .or_else(|| plan_status.get("plan_info"));
+
+    let mut result = serde_json::Map::new();
+    result.insert("updated_at".to_string(), json!(updated_at_unix_secs));
+
+    if let Some(plan_name) = plan_info
+        .and_then(|value| {
+            coerce_json_string(value.get("planName").or_else(|| value.get("plan_name")))
+        })
+        .or_else(|| {
+            coerce_json_string(
+                plan_status
+                    .get("planName")
+                    .or_else(|| plan_status.get("plan_name")),
+            )
+        })
+    {
+        result.insert("plan_name".to_string(), json!(plan_name));
+    }
+    if let Some(email) = coerce_json_string(user_status.get("email")) {
+        result.insert("email".to_string(), json!(email));
+    }
+    if let Some(value) = plan_status
+        .get("dailyQuotaRemainingPercent")
+        .or_else(|| plan_status.get("daily_quota_remaining_percent"))
+        .and_then(coerce_json_f64)
+    {
+        result.insert("daily_remaining_percent".to_string(), json!(value));
+    }
+    if let Some(value) = plan_status
+        .get("weeklyQuotaRemainingPercent")
+        .or_else(|| plan_status.get("weekly_quota_remaining_percent"))
+        .and_then(coerce_json_f64)
+    {
+        result.insert("weekly_remaining_percent".to_string(), json!(value));
+    }
+    if let Some(value) = plan_status
+        .get("dailyQuotaResetAtUnix")
+        .or_else(|| plan_status.get("daily_quota_reset_at_unix"))
+        .and_then(coerce_json_u64)
+    {
+        result.insert("daily_reset_at".to_string(), json!(value));
+    }
+    if let Some(value) = plan_status
+        .get("weeklyQuotaResetAtUnix")
+        .or_else(|| plan_status.get("weekly_quota_reset_at_unix"))
+        .and_then(coerce_json_u64)
+    {
+        result.insert("weekly_reset_at".to_string(), json!(value));
+    }
+    if let Some(value) = plan_status
+        .get("overageBalanceMicros")
+        .or_else(|| plan_status.get("overage_balance_micros"))
+        .and_then(coerce_json_f64)
+    {
+        result.insert("overage_balance".to_string(), json!(value / 1_000_000.0));
+    }
+
+    let legacy_credit =
+        |value: Option<&serde_json::Value>| value.and_then(coerce_json_f64).map(|n| n / 100.0);
+    if let Some(value) = legacy_credit(
+        plan_status
+            .get("availablePromptCredits")
+            .or_else(|| plan_status.get("available_prompt_credits")),
+    ) {
+        result.insert("prompt_remaining".to_string(), json!(value));
+    }
+    if let Some(value) = legacy_credit(
+        plan_status
+            .get("usedPromptCredits")
+            .or_else(|| plan_status.get("used_prompt_credits")),
+    ) {
+        result.insert("prompt_used".to_string(), json!(value));
+    }
+    if let Some(value) = legacy_credit(plan_info.and_then(|plan_info| {
+        plan_info
+            .get("monthlyPromptCredits")
+            .or_else(|| plan_info.get("monthly_prompt_credits"))
+    })) {
+        result.insert("prompt_limit".to_string(), json!(value));
+    }
+    if let Some(value) = legacy_credit(
+        plan_status
+            .get("availableFlexCredits")
+            .or_else(|| plan_status.get("available_flex_credits")),
+    ) {
+        result.insert("flex_remaining".to_string(), json!(value));
+    }
+    if let Some(value) = legacy_credit(
+        plan_status
+            .get("usedFlexCredits")
+            .or_else(|| plan_status.get("used_flex_credits")),
+    ) {
+        result.insert("flex_used".to_string(), json!(value));
+    }
+    if let Some(value) = legacy_credit(plan_info.and_then(|plan_info| {
+        plan_info
+            .get("monthlyFlexCreditPurchaseAmount")
+            .or_else(|| plan_info.get("monthly_flex_credit_purchase_amount"))
+    })) {
+        result.insert("flex_limit".to_string(), json!(value));
+    }
+
+    let mut status_sources = vec![value, user_status, plan_status];
+    if let Some(plan_info) = plan_info {
+        status_sources.push(plan_info);
+    }
+    for (target, aliases) in [
+        (
+            "banned",
+            &[
+                "banned",
+                "isBanned",
+                "is_banned",
+                "accountBanned",
+                "account_banned",
+            ][..],
+        ),
+        (
+            "quarantined",
+            &[
+                "quarantined",
+                "isQuarantined",
+                "is_quarantined",
+                "accountQuarantined",
+                "account_quarantined",
+            ][..],
+        ),
+        (
+            "is_forbidden",
+            &[
+                "isForbidden",
+                "is_forbidden",
+                "forbidden",
+                "accountForbidden",
+                "account_forbidden",
+            ][..],
+        ),
+    ] {
+        if let Some(found) = status_sources.iter().find_map(|source| {
+            aliases
+                .iter()
+                .find_map(|alias| source.get(*alias).and_then(coerce_json_bool))
+        }) {
+            result.insert(target.to_string(), json!(found));
+        }
+    }
+    for (target, aliases) in [
+        (
+            "ban_reason",
+            &[
+                "banReason",
+                "ban_reason",
+                "blockedReason",
+                "blocked_reason",
+                "reason",
+                "message",
+            ][..],
+        ),
+        (
+            "quarantine_reason",
+            &["quarantineReason", "quarantine_reason", "reason", "message"][..],
+        ),
+        (
+            "forbidden_reason",
+            &["forbiddenReason", "forbidden_reason", "reason", "message"][..],
+        ),
+    ] {
+        if let Some(found) = status_sources.iter().find_map(|source| {
+            aliases
+                .iter()
+                .find_map(|alias| coerce_json_string(source.get(*alias)))
+        }) {
+            result.insert(target.to_string(), json!(found));
+        }
+    }
+
+    Some(serde_json::Value::Object(result))
+}
+
+pub fn parse_windsurf_model_configs_response(
+    value: &serde_json::Value,
+    updated_at_unix_secs: u64,
+) -> Option<serde_json::Value> {
+    let configs = value
+        .get("clientModelConfigs")
+        .or_else(|| value.get("client_model_configs"))
+        .and_then(serde_json::Value::as_array)?;
+    let mut models = Vec::new();
+    for config in configs {
+        let Some(model_uid) = coerce_json_string(
+            config
+                .get("modelUid")
+                .or_else(|| config.get("model_uid"))
+                .or_else(|| config.get("id"))
+                .or_else(|| config.get("name")),
+        ) else {
+            continue;
+        };
+        let mut model = serde_json::Map::new();
+        model.insert("model_uid".to_string(), json!(model_uid));
+        if let Some(label) = coerce_json_string(
+            config
+                .get("label")
+                .or_else(|| config.get("displayName"))
+                .or_else(|| config.get("display_name")),
+        ) {
+            model.insert("label".to_string(), json!(label));
+        }
+        if let Some(provider) = coerce_json_string(config.get("provider")) {
+            model.insert("provider".to_string(), json!(provider));
+        }
+        if let Some(value) = config
+            .get("supportsImages")
+            .or_else(|| config.get("supports_images"))
+            .and_then(coerce_json_bool)
+        {
+            model.insert("supports_images".to_string(), json!(value));
+        }
+        if let Some(value) = config
+            .get("creditMultiplier")
+            .or_else(|| config.get("credit_multiplier"))
+            .and_then(coerce_json_f64)
+        {
+            model.insert("credit_multiplier".to_string(), json!(value));
+        }
+        models.push(serde_json::Value::Object(model));
+    }
+
+    let mut result = serde_json::Map::new();
+    result.insert("updated_at".to_string(), json!(updated_at_unix_secs));
+    result.insert(
+        "allowed_models_count".to_string(),
+        json!(models.len() as u64),
+    );
+    result.insert("models".to_string(), serde_json::Value::Array(models));
+    if let Some(default_model_uid) = value
+        .get("defaultOverrideModelConfig")
+        .or_else(|| value.get("default_override_model_config"))
+        .and_then(|default_config| {
+            coerce_json_string(
+                default_config
+                    .get("modelUid")
+                    .or_else(|| default_config.get("model_uid")),
+            )
+        })
+    {
+        result.insert("default_model_uid".to_string(), json!(default_model_uid));
+    }
+
+    Some(serde_json::Value::Object(result))
+}
+
+pub fn parse_windsurf_rate_limit_response(
+    value: &serde_json::Value,
+    updated_at_unix_secs: u64,
+) -> Option<serde_json::Value> {
+    let root = value.as_object()?;
+    if root.is_empty() {
+        return None;
+    }
+    let has_capacity = value
+        .get("hasCapacity")
+        .or_else(|| value.get("has_capacity"))
+        .and_then(coerce_json_bool)
+        .unwrap_or(true);
+    let messages_remaining = value
+        .get("messagesRemaining")
+        .or_else(|| value.get("messages_remaining"))
+        .and_then(coerce_json_f64);
+    let max_messages = value
+        .get("maxMessages")
+        .or_else(|| value.get("max_messages"))
+        .and_then(coerce_json_f64);
+    let retry_after_ms = value
+        .get("retryAfterMs")
+        .or_else(|| value.get("retry_after_ms"))
+        .and_then(coerce_json_u64);
+
+    let limited = !has_capacity || messages_remaining.is_some_and(|value| value <= 0.0);
+    let mut rate_limit = serde_json::Map::new();
+    rate_limit.insert("limited".to_string(), json!(limited));
+    rate_limit.insert("has_capacity".to_string(), json!(has_capacity));
+    if let Some(value) = messages_remaining {
+        rate_limit.insert("messages_remaining".to_string(), json!(value));
+    }
+    if let Some(value) = max_messages {
+        rate_limit.insert("max_messages".to_string(), json!(value));
+    }
+    if let Some(value) = retry_after_ms {
+        rate_limit.insert("retry_after_ms".to_string(), json!(value));
+    }
+
+    Some(json!({
+        "updated_at": updated_at_unix_secs,
+        "rate_limit": rate_limit,
+    }))
+}
+
 fn chatgpt_web_quota_feature_name(value: &serde_json::Value) -> Option<String> {
     coerce_json_string(
         value
@@ -1109,8 +1452,11 @@ mod tests {
     use super::{
         codex_build_invalid_state, codex_runtime_invalid_reason,
         parse_chatgpt_web_conversation_init_response, parse_codex_backend_me_response,
-        parse_codex_wham_usage_response, OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX,
-        OAUTH_REFRESH_FAILED_PREFIX, OAUTH_REQUEST_FAILED_PREFIX,
+        parse_codex_wham_usage_response, parse_windsurf_model_configs_response,
+        parse_windsurf_rate_limit_response, parse_windsurf_user_status_response,
+        quota_refresh_success_invalid_state, should_auto_remove_structured_reason,
+        OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
+        OAUTH_REQUEST_FAILED_PREFIX,
     };
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use serde_json::json;
@@ -1232,6 +1578,13 @@ mod tests {
     }
 
     #[test]
+    fn auto_remove_structured_reason_keeps_oauth_expired_token_invalid() {
+        assert!(!should_auto_remove_structured_reason(Some(
+            "[OAUTH_EXPIRED] token invalidated"
+        )));
+    }
+
+    #[test]
     fn auto_remove_refresh_failed_after_access_token_expiry() {
         let mut key = StoredProviderCatalogKey::new(
             "key-1".to_string(),
@@ -1243,13 +1596,15 @@ mod tests {
         )
         .expect("key should build");
         key.expires_at_unix_secs = Some(1_000);
-        key.oauth_invalid_reason = Some(format!("{OAUTH_REFRESH_FAILED_PREFIX}Token 续期失败"));
+        key.oauth_invalid_reason = Some(format!(
+            "{OAUTH_REFRESH_FAILED_PREFIX}Token 续期失败 (401): refresh_token 无效、已过期或已撤销，请重新登录授权"
+        ));
 
         assert!(!super::should_auto_remove_oauth_invalid_key(
-            &key, None, 999
+            &key, None, false, 999
         ));
         assert!(super::should_auto_remove_oauth_invalid_key(
-            &key, None, 1_000
+            &key, None, false, 1_000
         ));
     }
 
@@ -1265,12 +1620,79 @@ mod tests {
         )
         .expect("key should build");
         key.expires_at_unix_secs = Some(2_000);
-        key.oauth_invalid_reason = Some(format!("{OAUTH_REFRESH_FAILED_PREFIX}Token 续期失败"));
+        key.oauth_invalid_reason = Some(format!(
+            "{OAUTH_REFRESH_FAILED_PREFIX}Token 续期失败 (401): refresh_token 无效、已过期或已撤销，请重新登录授权"
+        ));
 
         assert!(super::should_auto_remove_oauth_invalid_key(
+            &key, None, true, 1_000,
+        ));
+    }
+
+    #[test]
+    fn auto_remove_existing_oauth_expired_after_terminal_refresh_failure() {
+        let mut key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "key-1".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.expires_at_unix_secs = Some(2_000);
+        key.oauth_invalid_reason = Some(format!(
+            "{OAUTH_EXPIRED_PREFIX}access token invalid\n{OAUTH_REFRESH_FAILED_PREFIX}Token 续期失败 (401): refresh_token 无效、已过期或已撤销，请重新登录授权"
+        ));
+
+        assert!(super::should_auto_remove_oauth_invalid_key(
+            &key, None, false, 1_000,
+        ));
+    }
+
+    #[test]
+    fn candidate_oauth_expired_is_not_auto_remove_proof_by_itself() {
+        let mut key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "key-1".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.expires_at_unix_secs = Some(2_000);
+        key.oauth_invalid_reason = Some(format!(
+            "{OAUTH_REFRESH_FAILED_PREFIX}Token 续期失败 (401): refresh_token 无效、已过期或已撤销，请重新登录授权"
+        ));
+
+        assert!(!super::should_auto_remove_oauth_invalid_key(
             &key,
             Some("[OAUTH_EXPIRED] access token invalid"),
+            false,
             1_000,
+        ));
+    }
+
+    #[test]
+    fn oauth_token_invalid_is_not_auto_remove_proof_by_itself() {
+        let mut key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "key-1".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.expires_at_unix_secs = Some(1_000);
+        key.oauth_invalid_reason = Some("oauth_token_invalid".to_string());
+
+        assert!(!super::should_auto_remove_oauth_invalid_key(
+            &key,
+            Some("oauth_token_invalid"),
+            false,
+            1_001,
         ));
     }
 
@@ -1289,8 +1711,53 @@ mod tests {
         key.oauth_invalid_reason = Some(format!("{OAUTH_EXPIRED_PREFIX}session expired"));
 
         assert!(!super::should_auto_remove_oauth_invalid_key(
-            &key, None, 1_001
+            &key, None, false, 1_001
         ));
+    }
+
+    #[test]
+    fn does_not_auto_remove_non_terminal_refresh_failure() {
+        let mut key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "key-1".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.expires_at_unix_secs = Some(1_000);
+        key.oauth_invalid_reason = Some(format!("{OAUTH_REFRESH_FAILED_PREFIX}Token 续期失败"));
+
+        assert!(!super::should_auto_remove_oauth_invalid_key(
+            &key, None, true, 1_001
+        ));
+    }
+
+    #[test]
+    fn quota_refresh_success_clears_refresh_failed_marker() {
+        let mut key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "key-1".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.oauth_invalid_reason = Some("[REFRESH_FAILED] Token 续期失败".to_string());
+
+        assert_eq!(quota_refresh_success_invalid_state(&key), (None, None));
+    }
+
+    #[test]
+    fn auto_remove_structured_reason_keeps_request_and_refresh_failures() {
+        assert!(!should_auto_remove_structured_reason(Some(
+            "[REQUEST_FAILED] 账号状态检查失败"
+        )));
+        assert!(!should_auto_remove_structured_reason(Some(
+            "[REFRESH_FAILED] Token 续期失败 (401): refresh_token 已失效"
+        )));
     }
 
     #[test]
@@ -1382,6 +1849,118 @@ mod tests {
         assert_eq!(parsed.get("updated_at"), Some(&json!(1_777_000_000u64)));
         assert!(parsed.get("primary_used_percent").is_none());
         assert!(parsed.get("secondary_used_percent").is_none());
+    }
+
+    #[test]
+    fn parses_windsurf_user_status_response() {
+        let parsed = parse_windsurf_user_status_response(
+            &json!({
+                "userStatus": {
+                    "email": "windsurf@example.com",
+                    "isQuarantined": true,
+                    "quarantineReason": "quota review",
+                    "planStatus": {
+                        "dailyQuotaRemainingPercent": 45.5,
+                        "weeklyQuotaRemainingPercent": 80,
+                        "dailyQuotaResetAtUnix": "1775553285",
+                        "weeklyQuotaResetAtUnix": 1776158085u64,
+                        "availablePromptCredits": 900,
+                        "usedPromptCredits": 100,
+                        "availableFlexCredits": 250,
+                        "usedFlexCredits": 50,
+                        "overageBalanceMicros": 1250000,
+                        "planInfo": {
+                            "planName": "Pro",
+                            "monthlyPromptCredits": 1000,
+                            "monthlyFlexCreditPurchaseAmount": 300
+                        }
+                    }
+                }
+            }),
+            1_770_000_000,
+        )
+        .expect("windsurf user status should parse");
+
+        assert_eq!(parsed.get("plan_name"), Some(&json!("Pro")));
+        assert_eq!(parsed.get("daily_remaining_percent"), Some(&json!(45.5)));
+        assert_eq!(parsed.get("weekly_remaining_percent"), Some(&json!(80.0)));
+        assert_eq!(parsed.get("daily_reset_at"), Some(&json!(1_775_553_285u64)));
+        assert_eq!(
+            parsed.get("weekly_reset_at"),
+            Some(&json!(1_776_158_085u64))
+        );
+        assert_eq!(parsed.get("prompt_remaining"), Some(&json!(9.0)));
+        assert_eq!(parsed.get("prompt_used"), Some(&json!(1.0)));
+        assert_eq!(parsed.get("prompt_limit"), Some(&json!(10.0)));
+        assert_eq!(parsed.get("flex_remaining"), Some(&json!(2.5)));
+        assert_eq!(parsed.get("flex_used"), Some(&json!(0.5)));
+        assert_eq!(parsed.get("flex_limit"), Some(&json!(3.0)));
+        assert_eq!(parsed.get("overage_balance"), Some(&json!(1.25)));
+        assert_eq!(parsed.get("email"), Some(&json!("windsurf@example.com")));
+        assert_eq!(parsed.get("quarantined"), Some(&json!(true)));
+        assert_eq!(
+            parsed.get("quarantine_reason"),
+            Some(&json!("quota review"))
+        );
+        assert_eq!(parsed.get("updated_at"), Some(&json!(1_770_000_000u64)));
+    }
+
+    #[test]
+    fn parses_windsurf_model_configs_response() {
+        let parsed = parse_windsurf_model_configs_response(
+            &json!({
+                "clientModelConfigs": [
+                    {
+                        "modelUid": "claude-sonnet-4-5",
+                        "label": "Claude Sonnet 4.5",
+                        "provider": "anthropic",
+                        "supportsImages": true,
+                        "creditMultiplier": 2
+                    },
+                    {
+                        "modelUid": "gpt-5-mini",
+                        "label": "GPT-5 mini"
+                    }
+                ],
+                "defaultOverrideModelConfig": {
+                    "modelUid": "claude-sonnet-4-5"
+                }
+            }),
+            1_770_000_100,
+        )
+        .expect("windsurf model configs should parse");
+
+        assert_eq!(parsed.get("allowed_models_count"), Some(&json!(2u64)));
+        assert_eq!(
+            parsed.get("default_model_uid"),
+            Some(&json!("claude-sonnet-4-5"))
+        );
+        assert_eq!(parsed.get("updated_at"), Some(&json!(1_770_000_100u64)));
+    }
+
+    #[test]
+    fn parses_windsurf_rate_limit_response() {
+        let parsed = parse_windsurf_rate_limit_response(
+            &json!({
+                "hasCapacity": false,
+                "messagesRemaining": 0,
+                "maxMessages": 25,
+                "retryAfterMs": 45000
+            }),
+            1_770_000_200,
+        )
+        .expect("windsurf rate limit should parse");
+
+        assert_eq!(parsed.get("updated_at"), Some(&json!(1_770_000_200u64)));
+        assert_eq!(parsed.pointer("/rate_limit/limited"), Some(&json!(true)));
+        assert_eq!(
+            parsed.pointer("/rate_limit/messages_remaining"),
+            Some(&json!(0.0))
+        );
+        assert_eq!(
+            parsed.pointer("/rate_limit/retry_after_ms"),
+            Some(&json!(45000u64))
+        );
     }
 
     #[test]

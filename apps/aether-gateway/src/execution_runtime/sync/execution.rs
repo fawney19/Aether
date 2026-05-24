@@ -3,6 +3,7 @@ use std::io::Error as IoError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use aether_ai_serving::UPSTREAM_IS_STREAM_KEY;
 use aether_contracts::{
     ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionPlan, ExecutionResult,
     ExecutionTelemetry,
@@ -20,7 +21,6 @@ use async_stream::stream;
 use axum::body::{to_bytes, Body, Bytes};
 use axum::http::header::{CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderName, HeaderValue, Response, StatusCode};
-use base64::Engine as _;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -29,8 +29,9 @@ use tokio::time::MissedTickBehavior;
 use tracing::{debug, warn};
 
 use crate::ai_serving::api::{
-    build_core_error_body_for_client_format, implicit_sync_finalize_report_kind,
-    maybe_build_sync_finalize_outcome, LocalCoreSyncErrorKind, LocalCoreSyncFinalizeOutcome,
+    build_core_error_body_for_client_format, extract_provider_private_stream_error_body,
+    implicit_sync_finalize_report_kind, maybe_build_sync_finalize_outcome, LocalCoreSyncErrorKind,
+    LocalCoreSyncFinalizeOutcome,
 };
 use crate::api::response::{
     attach_control_metadata_headers, build_client_response, build_client_response_from_parts,
@@ -43,12 +44,16 @@ use crate::execution_runtime::grok::maybe_execute_grok_sync;
 use crate::execution_runtime::oauth_retry::refresh_oauth_plan_auth_for_retry;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::post_sync_plan_to_remote_execution_runtime;
-use crate::execution_runtime::submission::submit_local_core_error_or_sync_finalize;
-use crate::execution_runtime::transport::{
-    build_request_body, collect_response_headers, decode_response_body_bytes,
-    format_upstream_request_error, format_wreq_upstream_request_error, response_body_is_json,
-    send_request, DirectHttpResponse, DirectSyncExecutionRuntime, ExecutionRuntimeTransportError,
+use crate::execution_runtime::submission::{
+    resolve_local_sync_error_status_code, submit_local_core_error_or_sync_finalize,
 };
+use crate::execution_runtime::transport::{
+    build_execution_response_body, build_request_body, collect_response_headers,
+    decode_response_body_bytes, format_upstream_request_error, format_wreq_upstream_request_error,
+    response_body_is_json, send_request, DirectHttpResponse, DirectSyncExecutionRuntime,
+    ExecutionRuntimeTransportError,
+};
+use crate::execution_runtime::windsurf::maybe_execute_windsurf_sync;
 use crate::execution_runtime::{
     analyze_local_candidate_failover_sync, apply_endpoint_response_header_rules,
     attach_provider_response_headers_to_report_context, local_failover_response_text,
@@ -396,6 +401,43 @@ fn build_invalid_provider_success_body(
         Some("invalid_provider_success_response"),
         LocalCoreSyncErrorKind::ServerError,
     )
+}
+
+fn provider_private_error_details(body_json: &Value) -> (Option<String>, Option<String>) {
+    let body_object = body_json.as_object();
+    let error_object = body_object
+        .and_then(|object| object.get("error"))
+        .and_then(Value::as_object);
+    let error_type =
+        first_non_empty_error_text(error_object, body_object, &["type", "code", "status"]);
+    let error_message = first_non_empty_error_text(
+        error_object,
+        body_object,
+        &["message", "detail", "reason", "status", "type", "code"],
+    );
+    (error_type, error_message)
+}
+
+fn first_non_empty_error_text(
+    error_object: Option<&serde_json::Map<String, Value>>,
+    body_object: Option<&serde_json::Map<String, Value>>,
+    keys: &[&str],
+) -> Option<String> {
+    for object in [error_object, body_object].into_iter().flatten() {
+        for key in keys {
+            let Some(value) = object.get(*key) else {
+                continue;
+            };
+            match value {
+                Value::String(text) if !text.trim().is_empty() => {
+                    return Some(text.trim().to_string());
+                }
+                Value::Number(number) => return Some(number.to_string()),
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone)]
@@ -788,6 +830,12 @@ async fn execute_direct_sync_runtime_candidate(
     candidate_index: &str,
     progress_snapshot: Option<Arc<Mutex<OpenAiImageSyncProgressSnapshot>>>,
 ) -> Result<ExecutionResult, SyncExecutionFailure> {
+    if let Some(result) = maybe_execute_windsurf_sync(state, plan, report_context)
+        .await
+        .map_err(SyncExecutionFailure::from_transport)?
+    {
+        return Ok(result);
+    }
     if !should_track_openai_image_sync_upstream_sse(plan_kind, plan, report_context) {
         return DirectSyncExecutionRuntime::new()
             .execute_sync(plan)
@@ -945,27 +993,9 @@ async fn execute_openai_image_sync_upstream_sse_candidate(
     let upstream_bytes = body_bytes.len() as u64;
     progress.finish(status_code, elapsed_ms).await;
 
-    let body = if body_bytes.is_empty() {
-        None
-    } else if plan.stream {
-        Some(aether_contracts::ResponseBody {
-            json_body: None,
-            body_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode(&body_bytes)),
-        })
-    } else if response_body_is_json(&headers, &decoded_body_bytes) {
-        let body_json: Value = serde_json::from_slice(&decoded_body_bytes)
-            .map_err(ExecutionRuntimeTransportError::InvalidJson)
+    let body =
+        build_execution_response_body(&headers, &body_bytes, &decoded_body_bytes, plan.stream)
             .map_err(SyncExecutionFailure::from_transport)?;
-        Some(aether_contracts::ResponseBody {
-            json_body: Some(body_json),
-            body_bytes_b64: None,
-        })
-    } else {
-        Some(aether_contracts::ResponseBody {
-            json_body: None,
-            body_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode(&body_bytes)),
-        })
-    };
 
     Ok(ExecutionResult {
         request_id: plan.request_id.clone(),
@@ -1005,7 +1035,7 @@ fn resolve_openai_image_sync_total_timeout_ms(plan: &ExecutionPlan) -> u64 {
 
 fn report_context_upstream_is_stream(report_context: Option<&Value>) -> bool {
     report_context
-        .and_then(|value| value.get("upstream_is_stream"))
+        .and_then(|value| value.get(UPSTREAM_IS_STREAM_KEY))
         .and_then(Value::as_bool)
         .unwrap_or(false)
 }
@@ -1696,8 +1726,21 @@ async fn execute_execution_runtime_sync_impl(
                 headers.insert("content-type".to_string(), "application/json".to_string());
             }
         }
-        let (result_error_type, result_error_message) =
+        let (mut result_error_type, mut result_error_message) =
             execution_error_details(result.error.as_ref(), body_json.as_ref());
+        if result.status_code < 400 && body_json.is_none() {
+            if let Some(error_body_json) =
+                extract_provider_private_stream_error_body(report_context.as_ref(), &body_bytes)
+            {
+                result.status_code =
+                    resolve_local_sync_error_status_code(result.status_code, &error_body_json);
+                let (private_error_type, private_error_message) =
+                    provider_private_error_details(&error_body_json);
+                result_error_type = private_error_type.or(result_error_type);
+                result_error_message = private_error_message.or(result_error_message);
+                body_json = Some(error_body_json);
+            }
+        }
         let local_failover_response_text = local_failover_response_text(
             body_json.as_ref(),
             &body_bytes,

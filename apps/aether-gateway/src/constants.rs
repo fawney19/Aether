@@ -26,6 +26,8 @@ pub(crate) const EXECUTION_PATH_EXECUTION_RUNTIME_STREAM: &str = "execution_runt
 pub(crate) const EXECUTION_PATH_CONTROL_EXECUTE_SYNC: &str = "control_execute_sync";
 pub(crate) const EXECUTION_PATH_CONTROL_EXECUTE_STREAM: &str = "control_execute_stream";
 pub(crate) const EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS: &str = "local_execution_runtime_miss";
+pub(crate) const EXECUTION_PATH_LOCAL_EXECUTION_PLANNING_TIMEOUT: &str =
+    "local_execution_planning_timeout";
 pub(crate) const EXECUTION_PATH_LOCAL_API_KEY_CONCURRENCY_LIMITED: &str =
     "local_api_key_concurrency_limited";
 pub(crate) const API_KEY_CONCURRENCY_WAIT_TIMEOUT_MS: u64 = 150;

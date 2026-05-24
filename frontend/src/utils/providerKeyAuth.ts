@@ -92,7 +92,7 @@ export function shouldShowOAuthRefreshControl(
   providerType?: string | null,
 ): boolean {
   if (isGrokSessionCredential(input, providerType)) return false
-  return isOAuthManagedCredential(input)
+  return canRefreshOAuthCredential(input)
 }
 
 export function canExportOAuthCredential(input: ProviderKeyAuthCarrier): boolean {

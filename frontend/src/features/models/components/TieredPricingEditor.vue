@@ -286,6 +286,7 @@
 import { ref, computed, watch, reactive } from 'vue'
 import { Plus, X } from 'lucide-vue-next'
 import { Button, Input, Label } from '@/components/ui'
+import { formatTokens } from '@/utils/format'
 import type { TieredPricingConfig, PricingTier, ImageOutputPriceRange } from '@/api/endpoints/types'
 
 type ImageOutputQuality = 'low' | 'medium' | 'high'
@@ -432,17 +433,6 @@ function getAvailableThresholds(index: number) {
   }
 
   return options
-}
-
-// 格式化 token 数量
-function formatTokens(tokens: number): string {
-  if (tokens >= 1000000) {
-    return `${(tokens / 1000000).toFixed(tokens % 1000000 === 0 ? 0 : 1)}M`
-  }
-  if (tokens >= 1000) {
-    return `${(tokens / 1000).toFixed(0)}K`
-  }
-  return tokens.toString()
 }
 
 // 缓存价格自动计算

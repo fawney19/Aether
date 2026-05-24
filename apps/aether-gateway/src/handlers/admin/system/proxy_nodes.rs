@@ -63,6 +63,10 @@ struct ProxyNodeRegisterRequest {
     proxy_version: Option<String>,
     #[serde(default)]
     tunnel_mode: Option<bool>,
+    #[serde(default)]
+    tunnel_security: Option<String>,
+    #[serde(default)]
+    tunnel_encryption_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,9 +353,21 @@ pub(crate) async fn maybe_build_local_admin_proxy_nodes_response(
             Ok(mutation) => mutation,
             Err(response) => return Ok(Some(response)),
         };
+        let tunnel_encryption_key = mutation
+            .proxy_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/tunnel_security/encryption_key"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
         let Some(node) = state.register_proxy_node(&mutation).await? else {
             return Ok(Some(build_admin_proxy_nodes_data_unavailable_response()));
         };
+        if let Some(key) = tunnel_encryption_key {
+            state
+                .app()
+                .tunnel
+                .register_secure_tunnel_key(node.id.clone(), key);
+        }
         return Ok(Some(
             Json(json!({
                 "node_id": node.id,
@@ -1358,6 +1374,9 @@ fn build_tunnel_probe_relay_envelope(
         method: "GET".to_string(),
         url: probe_url.trim().to_string(),
         headers: std::collections::HashMap::new(),
+        stream: false,
+        request_timeout_ms: None,
+        stream_first_byte_timeout_ms: None,
         timeout: timeout_secs,
         follow_redirects: Some(false),
         http1_only: false,
@@ -1420,11 +1439,42 @@ fn validate_register_request(
     }
     validate_optional_object(input.hardware_info.as_ref(), "hardware_info")?;
     validate_optional_object(input.proxy_metadata.as_ref(), "proxy_metadata")?;
+    let tunnel_security =
+        normalize_optional_string(input.tunnel_security.as_deref(), "tunnel_security", 64)?;
+    let tunnel_encryption_key = normalize_optional_string(
+        input.tunnel_encryption_key.as_deref(),
+        "tunnel_encryption_key",
+        128,
+    )?;
 
     let registered_by = request_context
         .decision()
         .and_then(|decision| decision.admin_principal.as_ref())
         .map(|principal| principal.user_id.clone());
+
+    let mut proxy_metadata = input.proxy_metadata;
+    if tunnel_security.as_deref()
+        == Some(aether_contracts::tunnel_security::TUNNEL_SECURITY_NON_TLS_REQUIRED)
+    {
+        let key = tunnel_encryption_key.as_deref().ok_or_else(|| {
+            bad_request_response(
+                "tunnel_encryption_key is required when tunnel_security=non_tls_required",
+            )
+        })?;
+        aether_contracts::tunnel_security::decode_psk(key)
+            .map_err(|err| bad_request_response(err.to_string()))?;
+        let mut metadata = proxy_metadata
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        metadata.insert(
+            "tunnel_security".to_string(),
+            json!({
+                "mode": aether_contracts::tunnel_security::TUNNEL_SECURITY_NON_TLS_REQUIRED,
+                "encryption_key": key,
+            }),
+        );
+        proxy_metadata = Some(Value::Object(metadata));
+    }
 
     Ok(
         aether_data::repository::proxy_nodes::ProxyNodeRegistrationMutation {
@@ -1438,7 +1488,7 @@ fn validate_register_request(
             avg_latency_ms: input.avg_latency_ms,
             hardware_info: input.hardware_info,
             estimated_max_concurrency: input.estimated_max_concurrency,
-            proxy_metadata: input.proxy_metadata,
+            proxy_metadata,
             proxy_version: normalize_optional_string(
                 input.proxy_version.as_deref(),
                 "proxy_version",

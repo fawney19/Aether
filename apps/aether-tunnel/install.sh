@@ -186,11 +186,17 @@ append_server_config() {
   aether_url="$1"
   management_token="$2"
   node_name="$3"
+  tunnel_security="$4"
+  tunnel_encryption_key="$5"
 
   mkdir -p "$(dirname "$CONFIG_PATH")"
   quoted_url=$(toml_quote "$aether_url")
   quoted_token=$(toml_quote "$management_token")
   quoted_name=$(toml_quote "$node_name")
+  quoted_encryption_key=$(toml_quote "$tunnel_encryption_key")
+  if [ -n "$tunnel_security" ]; then
+    quoted_security=$(toml_quote "$tunnel_security")
+  fi
 
   if has_legacy_single_server_keys; then
     fail "现有配置仍使用旧的顶层 aether_url/management_token，请先运行 aether-tunnel setup 迁移为 [[servers]] 后重试：$CONFIG_PATH"
@@ -214,6 +220,12 @@ append_server_config() {
     printf 'aether_url = %s\n' "$quoted_url"
     printf 'management_token = %s\n' "$quoted_token"
     printf 'node_name = %s\n' "$quoted_name"
+    if [ -n "$tunnel_security" ]; then
+      printf 'tunnel_security = %s\n' "$quoted_security"
+    fi
+    if [ -n "$tunnel_encryption_key" ]; then
+      printf 'tunnel_encryption_key = %s\n' "$quoted_encryption_key"
+    fi
   } >> "$CONFIG_PATH"
   chmod 600 "$CONFIG_PATH" 2>/dev/null || true
   say "已追加 [[servers]] 到：$CONFIG_PATH"
@@ -227,12 +239,21 @@ main() {
   aether_url=$(prompt_if_empty AETHER_TUNNEL_AETHER_URL "${AETHER_TUNNEL_AETHER_URL:-}" "Aether URL: ")
   management_token=$(prompt_if_empty AETHER_TUNNEL_MANAGEMENT_TOKEN "${AETHER_TUNNEL_MANAGEMENT_TOKEN:-}" "Management token (ae_xxx): ")
   node_name=$(prompt_if_empty AETHER_TUNNEL_NODE_NAME "${AETHER_TUNNEL_NODE_NAME:-}" "Node name: ")
+  tunnel_security="${AETHER_TUNNEL_SECURITY:-}"
+  tunnel_encryption_key="${AETHER_TUNNEL_ENCRYPTION_KEY:-}"
+  case "$tunnel_security" in
+    ""|off|non_tls_required) ;;
+    *) fail "AETHER_TUNNEL_SECURITY 必须是 off 或 non_tls_required" ;;
+  esac
+  if [ "$tunnel_security" = "non_tls_required" ] && [ -z "$tunnel_encryption_key" ]; then
+    fail "AETHER_TUNNEL_SECURITY=non_tls_required 时必须设置 AETHER_TUNNEL_ENCRYPTION_KEY"
+  fi
 
   tag=$(resolve_latest_tunnel_tag)
   [ -n "$tag" ] || fail "没有找到可用的 tunnel-v* release"
   asset=$(detect_asset)
   install_binary "$tag" "$asset"
-  append_server_config "$aether_url" "$management_token" "$node_name"
+  append_server_config "$aether_url" "$management_token" "$node_name" "$tunnel_security" "$tunnel_encryption_key"
 
   say "完成。运行以下命令启动/配置服务："
   say "  $INSTALL_DIR/aether-tunnel setup $CONFIG_PATH"

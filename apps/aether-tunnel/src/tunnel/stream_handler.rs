@@ -39,10 +39,10 @@ const SLOW_STREAM_LOG_THRESHOLD: Duration = Duration::from_secs(2);
 const SUCCESS_LOG_SAMPLE_MODULO: u32 = 256;
 const REQUEST_BODY_SPOOL_QUEUE_CAPACITY: usize = 64;
 
-/// Minimum allowed upstream request timeout (seconds).
-const MIN_TIMEOUT_SECS: u64 = 5;
-/// Maximum allowed upstream request timeout (seconds).
-const MAX_TIMEOUT_SECS: u64 = 300;
+/// Minimum allowed upstream request timeout (milliseconds).
+const MIN_TIMEOUT_MS: u64 = 1;
+/// Maximum allowed upstream request timeout (milliseconds).
+const MAX_TIMEOUT_MS: u64 = 300_000;
 /// Match reqwest's default redirect budget so direct execution and tunnel relay
 /// fail at the same point instead of diverging after a different number of hops.
 const MAX_REDIRECTS: usize = 10;
@@ -93,6 +93,12 @@ enum ReplayableRequestBody {
 struct PreparedRequestBody {
     first_request_body: Option<upstream_client::UpstreamRequestBody>,
     replay_body: ReplayableRequestBody,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RequestTimeouts {
+    first_byte_timeout: Duration,
+    response_body_timeout: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -588,6 +594,45 @@ fn remaining_timeout(deadline: Instant) -> Option<Duration> {
     deadline.checked_duration_since(Instant::now())
 }
 
+fn resolve_request_timeouts(meta: &RequestMeta) -> RequestTimeouts {
+    let first_byte_timeout = if meta.stream {
+        meta.stream_first_byte_timeout_ms
+            .or(meta.request_timeout_ms)
+            .map(timeout_duration_from_ms)
+            .unwrap_or_else(|| timeout_duration_from_legacy_secs(meta.timeout))
+    } else {
+        meta.request_timeout_ms
+            .or(meta.stream_first_byte_timeout_ms)
+            .map(timeout_duration_from_ms)
+            .unwrap_or_else(|| timeout_duration_from_legacy_secs(meta.timeout))
+    };
+
+    let response_body_timeout = if meta.stream {
+        None
+    } else {
+        Some(
+            meta.request_timeout_ms
+                .or(meta.stream_first_byte_timeout_ms)
+                .map(timeout_duration_from_ms)
+                .unwrap_or_else(|| timeout_duration_from_legacy_secs(meta.timeout)),
+        )
+    };
+
+    RequestTimeouts {
+        first_byte_timeout,
+        response_body_timeout,
+    }
+}
+
+fn timeout_duration_from_ms(ms: u64) -> Duration {
+    Duration::from_millis(ms.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS))
+}
+
+fn timeout_duration_from_legacy_secs(secs: u64) -> Duration {
+    let ms = secs.saturating_mul(1_000);
+    timeout_duration_from_ms(ms)
+}
+
 async fn spool_request_body(
     mut body_rx: mpsc::Receiver<TunnelFrame>,
     mut spool_tx: mpsc::Sender<SpoolBodyEvent>,
@@ -888,7 +933,7 @@ async fn relay_upstream_response<B>(
     redirect_count: usize,
     request_body_mode: &'static str,
     emit_proxy_timing_header: bool,
-    deadline: Instant,
+    response_body_deadline: Option<Instant>,
 ) -> Option<Duration>
 where
     B: hyper::body::Body<Data = Bytes> + Send + Unpin + 'static,
@@ -956,28 +1001,8 @@ where
 
     let mut stream = response.into_body().into_data_stream();
     loop {
-        let Some(remaining) = remaining_timeout(deadline) else {
-            server.metrics.stream_errors.fetch_add(1, Ordering::Release);
-            let error_message = "upstream response body timeout".to_string();
-            log_stream_failure(
-                stream_log_context(
-                    server,
-                    stream_id,
-                    method,
-                    Some(request_url),
-                    redirect_count,
-                    request_body_size.load(Ordering::Relaxed),
-                ),
-                &error_message,
-                total_elapsed,
-            );
-            send_error(frame_tx, stream_id, &error_message).await;
-            return Some(total_elapsed);
-        };
-
-        let chunk_result = match tokio::time::timeout(remaining, stream.next()).await {
-            Ok(chunk_result) => chunk_result,
-            Err(_) => {
+        let chunk_result = if let Some(deadline) = response_body_deadline {
+            let Some(remaining) = remaining_timeout(deadline) else {
                 server.metrics.stream_errors.fetch_add(1, Ordering::Release);
                 let error_message = "upstream response body timeout".to_string();
                 log_stream_failure(
@@ -994,7 +1019,31 @@ where
                 );
                 send_error(frame_tx, stream_id, &error_message).await;
                 return Some(total_elapsed);
+            };
+
+            match tokio::time::timeout(remaining, stream.next()).await {
+                Ok(chunk_result) => chunk_result,
+                Err(_) => {
+                    server.metrics.stream_errors.fetch_add(1, Ordering::Release);
+                    let error_message = "upstream response body timeout".to_string();
+                    log_stream_failure(
+                        stream_log_context(
+                            server,
+                            stream_id,
+                            method,
+                            Some(request_url),
+                            redirect_count,
+                            request_body_size.load(Ordering::Relaxed),
+                        ),
+                        &error_message,
+                        total_elapsed,
+                    );
+                    send_error(frame_tx, stream_id, &error_message).await;
+                    return Some(total_elapsed);
+                }
             }
+        } else {
+            stream.next().await
         };
 
         let Some(chunk_result) = chunk_result else {
@@ -1272,16 +1321,19 @@ async fn handle_stream_inner(
         }
     }
 
-    let deadline = Instant::now()
-        + Duration::from_secs(meta.timeout.clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS));
+    let overall_start = Instant::now();
+    let request_timeouts = resolve_request_timeouts(&meta);
+    let first_byte_deadline = overall_start + request_timeouts.first_byte_timeout;
+    let response_body_deadline = request_timeouts
+        .response_body_timeout
+        .map(|timeout| overall_start + timeout);
     let follow_redirects = follow_redirects_enabled(&meta);
     let mut current_headers = sanitize_upstream_headers(&meta.headers);
-    let timeout = Duration::from_secs(meta.timeout.clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS));
+    let first_byte_timeout = request_timeouts.first_byte_timeout;
     let request_body_size = Arc::new(AtomicUsize::new(0));
     let request_has_body = request_likely_has_body(&current_method, &meta.headers);
     let replay_budget_bytes = state.config.redirect_replay_budget_bytes;
     let can_buffer_redirect_body = request_has_body && follow_redirects && replay_budget_bytes > 0;
-    let overall_start = Instant::now();
     let request_body_mode = if can_buffer_redirect_body {
         "buffered_fixed"
     } else if request_has_body {
@@ -1293,7 +1345,7 @@ async fn handle_stream_inner(
         let buffered_body = match collect_request_body_for_replay(
             body_rx,
             Arc::clone(&request_body_size),
-            deadline,
+            first_byte_deadline,
             replay_budget_bytes,
         )
         .await
@@ -1321,7 +1373,12 @@ async fn handle_stream_inner(
             replay_body: replay_body_from_buffered(buffered_body, replay_budget_bytes),
         }
     } else if request_has_body {
-        prepare_request_body(body_rx, Arc::clone(&request_body_size), deadline, 0)
+        prepare_request_body(
+            body_rx,
+            Arc::clone(&request_body_size),
+            first_byte_deadline,
+            0,
+        )
     } else {
         PreparedRequestBody {
             first_request_body: Some(build_streaming_request_body(
@@ -1341,7 +1398,7 @@ async fn handle_stream_inner(
     let mut next_request_body = None::<upstream_client::UpstreamRequestBody>;
 
     loop {
-        let Some(remaining) = remaining_timeout(deadline) else {
+        let Some(remaining) = remaining_timeout(first_byte_deadline) else {
             log_stream_failure(
                 stream_log_context(
                     server,
@@ -1369,7 +1426,7 @@ async fn handle_stream_inner(
             current_method.clone(),
             &current_headers,
             request_body,
-            remaining.min(timeout),
+            remaining.min(first_byte_timeout),
             meta.http1_only,
         )
         .await
@@ -1419,7 +1476,7 @@ async fn handle_stream_inner(
                         redirects_followed,
                         request_body_mode,
                         state.config.emit_proxy_timing_header,
-                        deadline,
+                        response_body_deadline,
                     )
                     .await;
                 }
@@ -1431,7 +1488,7 @@ async fn handle_stream_inner(
                 } => match prepare_redirect_request_body(
                     prepared_body.replay_body.clone(),
                     body_mode,
-                    deadline,
+                    first_byte_deadline,
                 )
                 .await
                 {
@@ -1459,7 +1516,7 @@ async fn handle_stream_inner(
                             redirects_followed,
                             request_body_mode,
                             state.config.emit_proxy_timing_header,
-                            deadline,
+                            response_body_deadline,
                         )
                         .await;
                     }
@@ -1515,7 +1572,7 @@ async fn handle_stream_inner(
             redirects_followed,
             request_body_mode,
             state.config.emit_proxy_timing_header,
-            deadline,
+            response_body_deadline,
         )
         .await;
     }
@@ -1851,6 +1908,34 @@ mod tests {
     }
 
     #[test]
+    fn stream_request_timeouts_use_first_byte_without_response_body_deadline() {
+        let mut meta = sample_request_meta();
+        meta.stream = true;
+        meta.request_timeout_ms = Some(90_000);
+        meta.stream_first_byte_timeout_ms = Some(12_345);
+
+        let timeouts = resolve_request_timeouts(&meta);
+
+        assert_eq!(timeouts.first_byte_timeout, Duration::from_millis(12_345));
+        assert!(timeouts.response_body_timeout.is_none());
+    }
+
+    #[test]
+    fn non_stream_request_timeouts_use_total_for_response_body_deadline() {
+        let mut meta = sample_request_meta();
+        meta.request_timeout_ms = Some(90_000);
+        meta.stream_first_byte_timeout_ms = Some(12_345);
+
+        let timeouts = resolve_request_timeouts(&meta);
+
+        assert_eq!(timeouts.first_byte_timeout, Duration::from_millis(90_000));
+        assert_eq!(
+            timeouts.response_body_timeout,
+            Some(Duration::from_millis(90_000))
+        );
+    }
+
+    #[test]
     fn resolve_redirect_changes_post_to_get_for_302() {
         let current_url = url::Url::parse("https://redirect.test/start").expect("url");
         let response = Response::builder()
@@ -2073,7 +2158,7 @@ mod tests {
             0,
             "empty",
             true,
-            Instant::now(),
+            Some(Instant::now()),
         )
         .await;
 
@@ -2084,6 +2169,51 @@ mod tests {
             Some("upstream response body timeout")
         );
         assert_eq!(server.metrics.stream_errors.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn stream_response_body_without_total_deadline_allows_late_chunk() {
+        let state = sample_state(None, None);
+        let server = sample_server(&state);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
+        let request_url = url::Url::parse("https://example.com/stream").expect("url");
+        let request_body_size = AtomicUsize::new(0);
+        let body = Body::from_stream(stream::once(async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(b"late"))
+        }));
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(body)
+            .expect("response");
+
+        relay_upstream_response(
+            &server,
+            14,
+            &hyper::Method::GET,
+            &request_url,
+            &frame_tx,
+            response,
+            0,
+            Duration::ZERO,
+            upstream_client::RequestTiming::default(),
+            &request_body_size,
+            0,
+            "empty",
+            true,
+            None,
+        )
+        .await;
+
+        let result = collect_stream_result(frame_tx, sent, writer_handle).await;
+        assert!(
+            result.error.is_none(),
+            "unexpected error: {:?}",
+            result.error
+        );
+        assert_eq!(result.response.expect("response metadata").status, 200);
+        assert_eq!(result.body, Bytes::from_static(b"late"));
+        assert_eq!(server.metrics.stream_errors.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]
@@ -2427,6 +2557,9 @@ mod tests {
             method: "GET".to_string(),
             url: "https://example.com/ok".to_string(),
             headers: HashMap::new(),
+            stream: false,
+            request_timeout_ms: None,
+            stream_first_byte_timeout_ms: None,
             timeout: 30,
             follow_redirects: None,
             http1_only: false,
@@ -2491,6 +2624,8 @@ mod tests {
             server_label: "server".to_string(),
             aether_url: config.aether_url.clone(),
             management_token: config.management_token.clone(),
+            tunnel_security: config.tunnel_security,
+            tunnel_encryption_key: config.tunnel_encryption_key.clone(),
             node_name: config.node_name.clone(),
             node_id: Arc::new(std::sync::RwLock::new("node-1".to_string())),
             aether_client: Arc::new(AetherClient::new(
@@ -2511,6 +2646,8 @@ mod tests {
             management_token: "token".to_string(),
             public_ip: None,
             node_name: "tunnel-test".to_string(),
+            tunnel_security: crate::config::TunnelSecurity::Off,
+            tunnel_encryption_key: None,
             node_region: None,
             heartbeat_interval: 30,
             allowed_ports: vec![80, 443],
@@ -2556,6 +2693,8 @@ mod tests {
             tunnel_ping_interval_ms: 15_000,
             tunnel_max_streams: Some(8),
             tunnel_connect_timeout_ms: 15_000,
+            tunnel_ipv4_only: false,
+            tunnel_ipv6_only: false,
             tunnel_tcp_keepalive_secs: 30,
             tunnel_tcp_nodelay: true,
             tunnel_stale_timeout_ms: 45_000,

@@ -1,6 +1,7 @@
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::str::FromStr;
 use std::time::Duration;
 
 use aether_runtime::{FileLoggingConfig, LogDestination, LogRotation, ServiceRuntimeConfig};
@@ -247,6 +248,63 @@ impl From<TunnelLogRotationArg> for LogRotation {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelSecurity {
+    Off,
+    NonTlsRequired,
+}
+
+impl fmt::Display for TunnelSecurity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            TunnelSecurity::Off => "off",
+            TunnelSecurity::NonTlsRequired => "non_tls_required",
+        })
+    }
+}
+
+impl FromStr for TunnelSecurity {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim() {
+            "off" => Ok(Self::Off),
+            "non_tls_required" | "non-tls-required" => Ok(Self::NonTlsRequired),
+            other => Err(format!(
+                "invalid tunnel_security {other:?}; expected off or non_tls_required"
+            )),
+        }
+    }
+}
+
+pub fn validate_tunnel_encryption_key(value: &str) -> anyhow::Result<()> {
+    aether_contracts::tunnel_security::decode_psk(value)
+        .map(|_| ())
+        .map_err(|err| anyhow::anyhow!(err))
+}
+
+pub fn effective_tunnel_security(
+    aether_url: &str,
+    configured: Option<TunnelSecurity>,
+    tunnel_encryption_key: Option<&str>,
+) -> TunnelSecurity {
+    match configured {
+        Some(TunnelSecurity::NonTlsRequired) => return TunnelSecurity::NonTlsRequired,
+        Some(TunnelSecurity::Off) => return TunnelSecurity::Off,
+        None => {}
+    }
+    if aether_url.trim_start().starts_with("http://")
+        && tunnel_encryption_key
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+    {
+        return TunnelSecurity::NonTlsRequired;
+    }
+    TunnelSecurity::Off
+}
+
 /// Aether tunnel agent.
 ///
 /// Deployed on overseas VPS to relay API traffic for Aether instances
@@ -270,6 +328,18 @@ pub struct Config {
     /// Human-readable node name
     #[arg(long, env = "AETHER_TUNNEL_NODE_NAME")]
     pub node_name: String,
+
+    /// Application-layer tunnel security mode.
+    #[arg(
+        long,
+        env = "AETHER_TUNNEL_SECURITY",
+        default_value_t = TunnelSecurity::Off
+    )]
+    pub tunnel_security: TunnelSecurity,
+
+    /// Base64-encoded 32-byte PSK used when tunnel_security=non_tls_required.
+    #[arg(long, env = "AETHER_TUNNEL_ENCRYPTION_KEY")]
+    pub tunnel_encryption_key: Option<String>,
 
     /// Region label (e.g. ap-northeast-1)
     #[arg(long, env = "AETHER_TUNNEL_NODE_REGION")]
@@ -571,6 +641,30 @@ pub struct Config {
     )]
     pub tunnel_connect_timeout_ms: u64,
 
+    /// Force direct WebSocket tunnel TCP connects, or Aether outbound proxy endpoint connects, to IPv4 addresses only.
+    #[arg(
+        long,
+        env = "AETHER_TUNNEL_IPV4_ONLY",
+        default_value_t = false,
+        action = clap::ArgAction::Set,
+        default_missing_value = "true",
+        num_args = 0..=1,
+        require_equals = true
+    )]
+    pub tunnel_ipv4_only: bool,
+
+    /// Force direct WebSocket tunnel TCP connects, or Aether outbound proxy endpoint connects, to IPv6 addresses only.
+    #[arg(
+        long,
+        env = "AETHER_TUNNEL_IPV6_ONLY",
+        default_value_t = false,
+        action = clap::ArgAction::Set,
+        default_missing_value = "true",
+        num_args = 0..=1,
+        require_equals = true
+    )]
+    pub tunnel_ipv6_only: bool,
+
     /// WebSocket tunnel TCP keepalive in seconds (0 disables)
     #[arg(long, env = "AETHER_TUNNEL_TCP_KEEPALIVE", default_value_t = 30)]
     pub tunnel_tcp_keepalive_secs: u64,
@@ -646,6 +740,14 @@ impl Config {
         if self.node_name.trim().is_empty() {
             anyhow::bail!("node_name must not be empty");
         }
+        if self.tunnel_security == TunnelSecurity::NonTlsRequired {
+            let Some(key) = normalized_proxy_url(&self.tunnel_encryption_key) else {
+                anyhow::bail!(
+                    "tunnel_encryption_key must be set when tunnel_security=non_tls_required"
+                );
+            };
+            validate_tunnel_encryption_key(key)?;
+        }
         for &port in &self.allowed_ports {
             if port == 0 {
                 anyhow::bail!("allowed_ports: port 0 is not valid");
@@ -654,6 +756,9 @@ impl Config {
         let tunnel_connect_timeout = self.tunnel_connect_timeout()?;
         if tunnel_connect_timeout.is_zero() {
             anyhow::bail!("effective tunnel connect timeout must be > 0");
+        }
+        if self.tunnel_ipv4_only && self.tunnel_ipv6_only {
+            anyhow::bail!("tunnel_ipv4_only and tunnel_ipv6_only cannot both be enabled");
         }
         let tunnel_ping_interval = self.tunnel_ping_interval()?;
         if tunnel_ping_interval.is_zero() {
@@ -763,6 +868,16 @@ impl Config {
         Ok(Duration::from_millis(self.tunnel_connect_timeout_ms))
     }
 
+    pub fn tunnel_ip_family(&self) -> crate::egress_proxy::IpFamily {
+        if self.tunnel_ipv4_only {
+            crate::egress_proxy::IpFamily::Ipv4Only
+        } else if self.tunnel_ipv6_only {
+            crate::egress_proxy::IpFamily::Ipv6Only
+        } else {
+            crate::egress_proxy::IpFamily::Any
+        }
+    }
+
     pub fn tunnel_stale_timeout(&self) -> anyhow::Result<Duration> {
         Ok(Duration::from_millis(self.tunnel_stale_timeout_ms))
     }
@@ -859,6 +974,12 @@ pub struct ServerEntry {
     pub management_token: String,
     /// Per-server node name override. Falls back to the global `node_name`.
     pub node_name: Option<String>,
+    /// Per-server tunnel security mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_security: Option<TunnelSecurity>,
+    /// Per-server PSK for secure non-TLS tunnel handshakes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_encryption_key: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -959,6 +1080,10 @@ pub struct ConfigFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_connect_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_ipv4_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_ipv6_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_tcp_keepalive_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_tcp_nodelay: Option<bool>,
@@ -1025,6 +1150,9 @@ impl ConfigFile {
         let first_server = self.servers.first();
         let aether_url = first_server.map(|s| s.aether_url.as_str());
         let management_token = first_server.map(|s| s.management_token.as_str());
+        let tunnel_security =
+            first_server.map(|s| s.tunnel_security.unwrap_or(TunnelSecurity::Off));
+        let tunnel_encryption_key = first_server.and_then(|s| s.tunnel_encryption_key.as_deref());
         let node_name = self
             .node_name
             .as_deref()
@@ -1032,6 +1160,8 @@ impl ConfigFile {
 
         set!("AETHER_TUNNEL_AETHER_URL", aether_url);
         set!("AETHER_TUNNEL_MANAGEMENT_TOKEN", management_token);
+        set!("AETHER_TUNNEL_SECURITY", tunnel_security);
+        set!("AETHER_TUNNEL_ENCRYPTION_KEY", tunnel_encryption_key);
         set!("AETHER_TUNNEL_PUBLIC_IP", self.public_ip);
         set!("AETHER_TUNNEL_NODE_NAME", node_name);
         set!("AETHER_TUNNEL_NODE_REGION", self.node_region);
@@ -1147,6 +1277,8 @@ impl ConfigFile {
             TUNNEL_CONNECT_TIMEOUT_MS_ENV,
             self.tunnel_connect_timeout_ms
         );
+        set!("AETHER_TUNNEL_IPV4_ONLY", self.tunnel_ipv4_only);
+        set!("AETHER_TUNNEL_IPV6_ONLY", self.tunnel_ipv6_only);
         set!(
             "AETHER_TUNNEL_TCP_KEEPALIVE",
             self.tunnel_tcp_keepalive_secs
@@ -1336,6 +1468,45 @@ mod tests {
     fn config_file_deserializes_allow_private_targets() {
         let cfg: ConfigFile = toml::from_str("allow_private_targets = true").expect("bool toml");
         assert_eq!(cfg.allow_private_targets, Some(true));
+    }
+
+    #[test]
+    fn config_file_deserializes_tunnel_ip_family_flags() {
+        let cfg: ConfigFile = toml::from_str(
+            r#"
+tunnel_ipv4_only = true
+tunnel_ipv6_only = false
+"#,
+        )
+        .expect("tunnel IP-family TOML");
+
+        assert_eq!(cfg.tunnel_ipv4_only, Some(true));
+        assert_eq!(cfg.tunnel_ipv6_only, Some(false));
+    }
+
+    #[test]
+    fn config_file_deserializes_server_tunnel_security_fields() {
+        let cfg: ConfigFile = toml::from_str(
+            r#"
+[[servers]]
+aether_url = "http://aether.example.com"
+management_token = "ae_test"
+node_name = "jp-proxy-01"
+tunnel_security = "non_tls_required"
+tunnel_encryption_key = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+"#,
+        )
+        .expect("server tunnel security TOML");
+
+        assert_eq!(cfg.servers.len(), 1);
+        assert_eq!(
+            cfg.servers[0].tunnel_security,
+            Some(TunnelSecurity::NonTlsRequired)
+        );
+        assert_eq!(
+            cfg.servers[0].tunnel_encryption_key.as_deref(),
+            Some("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=")
+        );
     }
 
     #[test]
@@ -1529,6 +1700,242 @@ node_name = "tunnel-test"
             "tunnel-test",
         ]);
         assert!(config.allow_private_targets);
+    }
+
+    #[test]
+    fn cli_defaults_tunnel_ip_family_to_any() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+        ]);
+
+        assert!(!config.tunnel_ipv4_only);
+        assert!(!config.tunnel_ipv6_only);
+        assert_eq!(
+            config.tunnel_ip_family(),
+            crate::egress_proxy::IpFamily::Any
+        );
+    }
+
+    #[test]
+    fn cli_defaults_tunnel_security_to_off() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+        ]);
+
+        assert_eq!(config.tunnel_security, TunnelSecurity::Off);
+        assert!(config.tunnel_encryption_key.is_none());
+    }
+
+    #[test]
+    fn validate_requires_encryption_key_for_non_tls_security() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "http://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-security",
+            "non_tls_required",
+        ]);
+
+        let error = config
+            .validate()
+            .expect_err("non_tls_required should require a PSK");
+        assert!(error.to_string().contains("tunnel_encryption_key"));
+
+        let with_key = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "http://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-security",
+            "non_tls_required",
+            "--tunnel-encryption-key",
+            "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        ]);
+        with_key
+            .validate()
+            .expect("non_tls_required with a PSK should validate");
+    }
+
+    #[test]
+    fn validate_infers_non_tls_security_for_http_url_with_key() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "http://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-encryption-key",
+            "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        ]);
+
+        assert_eq!(config.tunnel_security, TunnelSecurity::Off);
+        assert_eq!(
+            effective_tunnel_security(
+                &config.aether_url,
+                None,
+                config.tunnel_encryption_key.as_deref(),
+            ),
+            TunnelSecurity::NonTlsRequired
+        );
+        assert_eq!(
+            effective_tunnel_security(
+                &config.aether_url,
+                Some(TunnelSecurity::Off),
+                config.tunnel_encryption_key.as_deref(),
+            ),
+            TunnelSecurity::Off
+        );
+        config
+            .validate()
+            .expect("http URL with PSK should validate when tunnel_security is off");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_tunnel_encryption_key() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "http://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-security",
+            "non_tls_required",
+            "--tunnel-encryption-key",
+            "not-a-valid-32-byte-key",
+        ]);
+
+        let error = config
+            .validate()
+            .expect_err("invalid PSK should fail validation");
+        assert!(error.to_string().contains("base64-encoded 32 bytes"));
+    }
+
+    #[test]
+    fn cli_accepts_tunnel_ipv4_only() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-ipv4-only",
+        ]);
+
+        assert!(config.tunnel_ipv4_only);
+        assert_eq!(
+            config.tunnel_ip_family(),
+            crate::egress_proxy::IpFamily::Ipv4Only
+        );
+    }
+
+    #[test]
+    fn cli_accepts_tunnel_ipv6_only() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-ipv6-only",
+        ]);
+
+        assert!(config.tunnel_ipv6_only);
+        assert_eq!(
+            config.tunnel_ip_family(),
+            crate::egress_proxy::IpFamily::Ipv6Only
+        );
+    }
+
+    #[test]
+    fn cli_parses_conflicting_tunnel_ip_family_flags_before_validation() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-ipv4-only",
+            "--tunnel-ipv6-only",
+        ]);
+
+        assert!(config.tunnel_ipv4_only);
+        assert!(config.tunnel_ipv6_only);
+        let error = config
+            .validate()
+            .expect_err("conflicting tunnel IP-family flags should fail validation");
+        assert!(error.to_string().contains("tunnel_ipv4_only"));
+    }
+
+    #[test]
+    fn cli_accepts_explicit_false_tunnel_ip_family_flags() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-ipv4-only=false",
+            "--tunnel-ipv6-only=false",
+        ]);
+
+        assert!(!config.tunnel_ipv4_only);
+        assert!(!config.tunnel_ipv6_only);
+        config
+            .validate()
+            .expect("explicit false family flags should be valid");
+    }
+
+    #[test]
+    fn validate_rejects_conflicting_toml_tunnel_ip_family_flags() {
+        let config = Config {
+            tunnel_ipv4_only: true,
+            tunnel_ipv6_only: true,
+            ..Config::parse_from([
+                "aether-tunnel",
+                "--aether-url",
+                "https://example.com",
+                "--management-token",
+                "ae_test",
+                "--node-name",
+                "tunnel-test",
+            ])
+        };
+
+        let error = config
+            .validate()
+            .expect_err("conflicting TOML-injected tunnel family flags should fail validation");
+        assert!(error.to_string().contains("tunnel_ipv4_only"));
     }
 
     #[test]

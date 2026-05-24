@@ -14,7 +14,7 @@ use crate::handlers::admin::system::shared::configs::apply_admin_system_config_u
 use crate::handlers::admin::users::{
     hash_admin_user_api_key, normalize_admin_feature_settings, normalize_admin_list_policy_mode,
     normalize_admin_rate_limit_policy_mode, normalize_admin_user_api_formats,
-    normalize_admin_user_string_list,
+    normalize_admin_user_ip_rules, normalize_admin_user_string_list,
 };
 use crate::handlers::public::normalize_admin_base_url;
 use crate::GatewayError;
@@ -38,6 +38,10 @@ use aether_data::repository::auth_modules::StoredLdapModuleConfig;
 use aether_data::repository::oauth_providers::{
     EncryptedSecretUpdate, UpsertOAuthProviderConfigRecord,
 };
+use aether_data::repository::system::{
+    AdminSystemUsageAggregateImportMode, AdminSystemUsageAggregateImportSummary,
+    AdminSystemUsageAggregateSnapshot,
+};
 use aether_data::repository::wallet::WalletLookupKey;
 use aether_data_contracts::repository::global_models::{
     AdminGlobalModelListQuery, AdminProviderModelListQuery, CreateAdminGlobalModelRecord,
@@ -49,7 +53,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const ADMIN_SYSTEM_IMPORT_MAX_SIZE_BYTES: usize = 10 * 1024 * 1024;
+const ADMIN_SYSTEM_IMPORT_MAX_SIZE_BYTES: usize = 500 * 1024 * 1024;
 
 fn invalid_request(detail: impl Into<String>) -> (http::StatusCode, Value) {
     (
@@ -173,6 +177,9 @@ fn normalize_import_endpoint_format(value: &str) -> Result<String, String> {
     let normalized = match value.trim().to_ascii_lowercase().as_str() {
         "openai:cli" => "openai:responses",
         "openai:compact" => "openai:responses:compact",
+        "openai_image" | "images" | "image" | "/v1/images/generations" | "/v1/images/edits" => {
+            "openai:image"
+        }
         "claude:chat" | "claude:cli" => "claude:messages",
         "gemini:chat" | "gemini:cli" => "gemini:generate_content",
         _ => value.trim(),
@@ -254,6 +261,68 @@ fn build_import_key_match_name(item: &ImportedProviderKey) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn normalize_selected_import_key_format(
+    value: &str,
+    allowed_formats: &BTreeSet<String>,
+) -> Option<String> {
+    let normalized = normalize_import_endpoint_format(value).ok()?;
+    allowed_formats.contains(&normalized).then_some(normalized)
+}
+
+fn normalize_import_key_format_scoped_list(
+    value: Option<&Value>,
+    normalized_api_formats: &[String],
+) -> Option<Value> {
+    let value = value?;
+    let Value::Array(items) = value else {
+        return Some(value.clone());
+    };
+    let allowed_formats = normalized_api_formats
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for item in items {
+        let Some(raw) = item
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(api_format) = normalize_selected_import_key_format(raw, &allowed_formats) else {
+            continue;
+        };
+        if seen.insert(api_format.clone()) {
+            normalized.push(json!(api_format));
+        }
+    }
+    Some(Value::Array(normalized))
+}
+
+fn normalize_import_key_format_scoped_object(
+    value: Option<&Value>,
+    normalized_api_formats: &[String],
+) -> Option<Value> {
+    let value = value?;
+    let Value::Object(map) = value else {
+        return Some(value.clone());
+    };
+    let allowed_formats = normalized_api_formats
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut normalized = Map::new();
+    for (key, value) in map {
+        let Some(api_format) = normalize_selected_import_key_format(key, &allowed_formats) else {
+            continue;
+        };
+        normalized.insert(api_format, value.clone());
+    }
+    Some(Value::Object(normalized))
+}
+
 fn normalize_import_key_raw_payload(
     raw_key: &Map<String, Value>,
     auth_type: &str,
@@ -265,6 +334,21 @@ fn normalize_import_key_raw_payload(
         payload.remove("api_key");
     }
     payload.insert("api_formats".to_string(), json!(normalized_api_formats));
+    if let Some(auth_type_by_format) = normalize_import_key_format_scoped_object(
+        raw_key.get("auth_type_by_format"),
+        normalized_api_formats,
+    ) {
+        payload.insert("auth_type_by_format".to_string(), auth_type_by_format);
+    }
+    if let Some(allow_auth_channel_mismatch_formats) = normalize_import_key_format_scoped_list(
+        raw_key.get("allow_auth_channel_mismatch_formats"),
+        normalized_api_formats,
+    ) {
+        payload.insert(
+            "allow_auth_channel_mismatch_formats".to_string(),
+            allow_auth_channel_mismatch_formats,
+        );
+    }
     if let Some(auth_config) = normalized_auth_config {
         payload.insert("auth_config".to_string(), auth_config);
     } else if raw_key.contains_key("auth_config") {
@@ -341,54 +425,6 @@ fn imported_oauth_expires_at_unix_secs(normalized_auth_config: Option<&Value>) -
     None
 }
 
-fn imported_oauth_has_refresh_token(normalized_auth_config: Option<&Value>) -> bool {
-    normalized_auth_config
-        .and_then(Value::as_object)
-        .and_then(|object| object.get("refresh_token"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .is_some_and(|value| !value.is_empty())
-}
-
-async fn refresh_imported_oauth_key_after_persist(
-    state: &AdminAppState<'_>,
-    provider: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider,
-    key_id: &str,
-) -> Result<(), GatewayError> {
-    let Some(endpoint) =
-        crate::handlers::admin::provider::oauth::runtime::resolve_provider_oauth_runtime_endpoints(
-            state,
-            provider,
-            provider.provider_type.as_str(),
-        )
-        .await?
-        .runtime_endpoint
-    else {
-        return Ok(());
-    };
-    let Some(transport) = state
-        .read_provider_transport_snapshot(&provider.id, &endpoint.id, key_id)
-        .await?
-    else {
-        return Ok(());
-    };
-    if !crate::provider_transport::supports_local_oauth_request_auth_resolution(&transport) {
-        return Ok(());
-    }
-
-    if let Err(error) = state.force_local_oauth_refresh_entry(&transport).await {
-        tracing::warn!(
-            provider_id = %provider.id,
-            provider_type = %provider.provider_type,
-            key_id = %key_id,
-            error = ?error,
-            "admin system import oauth refresh after credential import failed"
-        );
-    }
-
-    Ok(())
-}
-
 fn build_import_provider_model_record(
     provider_id: &str,
     existing_id: Option<&str>,
@@ -432,6 +468,8 @@ struct AdminSystemUsersImportStats {
     users: AdminSystemConfigImportCounter,
     api_keys: AdminSystemConfigImportCounter,
     standalone_keys: AdminSystemConfigImportCounter,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_aggregates: Option<AdminSystemUsageAggregateImportSummary>,
     errors: Vec<String>,
 }
 
@@ -483,6 +521,16 @@ fn validate_imported_system_users_export_version(version: Option<&Value>) -> Res
         ));
     }
     Ok(())
+}
+
+fn usage_aggregate_import_mode(
+    merge_mode: AdminImportMergeMode,
+) -> AdminSystemUsageAggregateImportMode {
+    match merge_mode {
+        AdminImportMergeMode::Skip => AdminSystemUsageAggregateImportMode::Skip,
+        AdminImportMergeMode::Overwrite => AdminSystemUsageAggregateImportMode::Overwrite,
+        AdminImportMergeMode::Error => AdminSystemUsageAggregateImportMode::Error,
+    }
 }
 
 fn imported_object_field<'a>(
@@ -703,6 +751,27 @@ fn normalize_imported_user_api_formats(
         object.get(field_name),
         field_name,
     )?)
+}
+
+fn imported_ip_rules_field<'a>(
+    object: &'a Map<String, Value>,
+) -> (&'static str, Option<&'a Value>) {
+    if let Some(value) = object.get("ip_rules") {
+        ("ip_rules", Some(value))
+    } else {
+        ("allowed_ips", object.get("allowed_ips"))
+    }
+}
+
+fn imported_ip_rules_present(object: &Map<String, Value>) -> bool {
+    object.contains_key("ip_rules") || object.contains_key("allowed_ips")
+}
+
+fn normalize_imported_user_ip_rules(
+    object: &Map<String, Value>,
+) -> Result<Option<Vec<String>>, String> {
+    let (field_name, value) = imported_ip_rules_field(object);
+    normalize_admin_user_ip_rules(imported_string_list_from_value(value, field_name)?)
 }
 
 fn build_imported_user_group_record(
@@ -935,7 +1004,7 @@ impl<'a> AdminAppState<'a> {
         }
 
         if request_body.len() > ADMIN_SYSTEM_DATA_IMPORT_MAX_SIZE_BYTES {
-            return Ok(Err(invalid_request("请求体大小不能超过 20MB")));
+            return Ok(Err(invalid_request("请求体大小不能超过 500MB")));
         }
 
         let root = match serde_json::from_slice::<Value>(request_body) {
@@ -1032,7 +1101,7 @@ impl<'a> AdminAppState<'a> {
             )));
         }
         if request_body.len() > ADMIN_SYSTEM_IMPORT_MAX_SIZE_BYTES {
-            return Ok(Err(invalid_request("请求体大小不能超过 10MB")));
+            return Ok(Err(invalid_request("请求体大小不能超过 500MB")));
         }
 
         let parsed = routed!(parse_admin_system_config_import_request(request_body));
@@ -1536,16 +1605,6 @@ impl<'a> AdminAppState<'a> {
                                     "更新 Provider '{provider_name}' 的 Key 失败"
                                 ))));
                             };
-                            if auth_type == "oauth"
-                                && imported_oauth_has_refresh_token(normalized_auth_config.as_ref())
-                            {
-                                refresh_imported_oauth_key_after_persist(
-                                    self,
-                                    &provider,
-                                    &persisted.id,
-                                )
-                                .await?;
-                            }
                             existing_keys[existing_index] = persisted;
                             stats.keys.updated += 1;
                         }
@@ -1586,11 +1645,6 @@ impl<'a> AdminAppState<'a> {
                         "创建 Provider '{provider_name}' 的 Key 失败"
                     ))));
                 };
-                if auth_type == "oauth"
-                    && imported_oauth_has_refresh_token(normalized_auth_config.as_ref())
-                {
-                    refresh_imported_oauth_key_after_persist(self, &provider, &created.id).await?;
-                }
                 existing_keys.push(created);
                 stats.keys.created += 1;
             }
@@ -1972,7 +2026,7 @@ impl<'a> AdminAppState<'a> {
             )));
         }
         if request_body.len() > ADMIN_SYSTEM_IMPORT_MAX_SIZE_BYTES {
-            return Ok(Err(invalid_request("请求体大小不能超过 10MB")));
+            return Ok(Err(invalid_request("请求体大小不能超过 500MB")));
         }
 
         let root = match serde_json::from_slice::<Value>(request_body) {
@@ -2028,6 +2082,8 @@ impl<'a> AdminAppState<'a> {
         ));
 
         let mut stats = AdminSystemUsersImportStats::default();
+        let mut imported_user_id_map = BTreeMap::<String, String>::new();
+        let mut imported_api_key_id_map = BTreeMap::<String, String>::new();
         let default_group_id = self.effective_default_user_group_id().await?;
         let existing_groups = self.list_user_groups().await?;
         let mut groups_by_name = existing_groups
@@ -2114,6 +2170,7 @@ impl<'a> AdminAppState<'a> {
                 Ok(value) => value,
                 Err(detail) => return Ok(Err(invalid_request(detail))),
             };
+            let source_user_id = invalid_value!(imported_optional_string(user.get("id")));
             let role = invalid_value!(imported_optional_string(user.get("role")))
                 .unwrap_or_else(|| "user".to_string())
                 .to_ascii_lowercase();
@@ -2447,6 +2504,9 @@ impl<'a> AdminAppState<'a> {
                 stats.users.created += 1;
                 created.id
             };
+            if let Some(source_user_id) = source_user_id {
+                imported_user_id_map.insert(source_user_id, user_id.clone());
+            }
 
             let existing_api_keys = self
                 .list_auth_api_key_export_records_by_user_ids(std::slice::from_ref(&user_id))
@@ -2482,6 +2542,8 @@ impl<'a> AdminAppState<'a> {
                     ));
                     continue;
                 };
+                let source_api_key_id =
+                    invalid_value!(imported_optional_string(key.get("api_key_id")));
                 let name = invalid_value!(imported_optional_string(key.get("name")));
                 let allowed_providers = invalid_value!(normalize_imported_user_string_list(
                     key,
@@ -2493,6 +2555,7 @@ impl<'a> AdminAppState<'a> {
                 ));
                 let allowed_models =
                     invalid_value!(normalize_imported_user_string_list(key, "allowed_models"));
+                let ip_rules = invalid_value!(normalize_imported_user_ip_rules(key));
                 let rate_limit =
                     invalid_value!(imported_optional_i32(key.get("rate_limit"), "rate_limit"))
                         .unwrap_or(0);
@@ -2513,21 +2576,21 @@ impl<'a> AdminAppState<'a> {
                 let auto_delete_on_expiry =
                     invalid_value!(imported_optional_bool(key.get("auto_delete_on_expiry")))
                         .unwrap_or(false);
-                let total_requests = invalid_value!(imported_optional_u64(
+                let imported_total_requests = invalid_value!(imported_optional_u64(
                     key.get("total_requests"),
                     "total_requests"
-                ))
-                .unwrap_or(0);
-                let total_tokens = invalid_value!(imported_optional_u64(
+                ));
+                let total_requests = imported_total_requests.unwrap_or(0);
+                let imported_total_tokens = invalid_value!(imported_optional_u64(
                     key.get("total_tokens"),
                     "total_tokens"
-                ))
-                .unwrap_or(0);
-                let total_cost_usd = invalid_value!(imported_optional_f64(
+                ));
+                let total_tokens = imported_total_tokens.unwrap_or(0);
+                let imported_total_cost_usd = invalid_value!(imported_optional_f64(
                     key.get("total_cost_usd"),
                     "total_cost_usd"
-                ))
-                .unwrap_or(0.0);
+                ));
+                let total_cost_usd = imported_total_cost_usd.unwrap_or(0.0);
                 let feature_settings = invalid_value!(imported_optional_json_object(
                     key.get("feature_settings"),
                     "feature_settings"
@@ -2558,6 +2621,8 @@ impl<'a> AdminAppState<'a> {
                                         } else {
                                             None
                                         },
+                                        ip_rules: imported_ip_rules_present(key)
+                                            .then(|| ip_rules.clone()),
                                     },
                                 )
                                 .await?;
@@ -2597,13 +2662,31 @@ impl<'a> AdminAppState<'a> {
                                     is_active,
                                 )
                                 .await?;
+                            if imported_total_requests.is_some()
+                                || imported_total_tokens.is_some()
+                                || imported_total_cost_usd.is_some()
+                            {
+                                let updated_usage = self
+                                    .set_api_key_usage_totals(
+                                        &existing_key.api_key_id,
+                                        imported_total_requests
+                                            .unwrap_or(existing_key.total_requests),
+                                        imported_total_tokens.unwrap_or(existing_key.total_tokens),
+                                        imported_total_cost_usd
+                                            .unwrap_or(existing_key.total_cost_usd),
+                                    )
+                                    .await?;
+                                if updated_usage.is_none() {
+                                    return Ok(Err((
+                                        http::StatusCode::SERVICE_UNAVAILABLE,
+                                        json!({ "detail": "Admin system data unavailable" }),
+                                    )));
+                                }
+                            }
                             if key.contains_key("allowed_api_formats")
                                 || key.contains_key("allowed_models")
                                 || key.contains_key("expires_at")
                                 || key.contains_key("auto_delete_on_expiry")
-                                || key.contains_key("total_requests")
-                                || key.contains_key("total_tokens")
-                                || key.contains_key("total_cost_usd")
                             {
                                 stats.errors.push(format!(
                                     "用户 '{}' 的现有 API Key 仅覆盖基础字段；高级导入字段保持原值",
@@ -2611,6 +2694,10 @@ impl<'a> AdminAppState<'a> {
                                 ));
                             }
                             stats.api_keys.updated += 1;
+                            if let Some(source_api_key_id) = source_api_key_id.clone() {
+                                imported_api_key_id_map
+                                    .insert(source_api_key_id, existing_key.api_key_id.clone());
+                            }
                         }
                     }
                     continue;
@@ -2626,6 +2713,7 @@ impl<'a> AdminAppState<'a> {
                         allowed_providers,
                         allowed_api_formats,
                         allowed_models,
+                        ip_rules,
                         rate_limit,
                         concurrent_limit,
                         force_capabilities,
@@ -2652,124 +2740,137 @@ impl<'a> AdminAppState<'a> {
                         )
                         .await?;
                 }
+                let created_api_key_id = created.api_key_id.clone();
                 existing_api_keys_by_hash.insert(key_hash, created);
+                if let Some(source_api_key_id) = source_api_key_id {
+                    imported_api_key_id_map.insert(source_api_key_id, created_api_key_id);
+                }
                 stats.api_keys.created += 1;
             }
         }
 
-        if standalone_keys.is_empty() {
-            return Ok(Ok(json!({
-                "message": "用户数据导入成功",
-                "stats": stats,
-            })));
-        }
-
-        let Some(standalone_owner_id) = standalone_owner_id else {
-            stats.standalone_keys.skipped += standalone_keys.len() as u64;
-            stats
-                .errors
-                .push("无法导入独立余额 Key: 当前管理员用户记录不存在".to_string());
-            return Ok(Ok(json!({
-                "message": "用户数据导入成功",
-                "stats": stats,
-            })));
-        };
-
-        let existing_standalone_keys = self
-            .list_auth_api_key_export_standalone_records()
-            .await?
-            .into_iter()
-            .collect::<Vec<_>>();
-        let mut existing_standalone_by_hash = existing_standalone_keys
-            .into_iter()
-            .map(|record| (record.key_hash.clone(), record))
-            .collect::<BTreeMap<_, _>>();
-
-        for (index, raw_key) in standalone_keys.iter().enumerate() {
-            let key = match imported_object_field(raw_key, &format!("standalone_keys[{index}]")) {
-                Ok(value) => value,
-                Err(detail) => return Ok(Err(invalid_request(detail))),
-            };
-            let Some((key_hash, key_encrypted)) =
-                invalid_value!(self.resolve_imported_system_user_api_key_material(key))
-            else {
-                stats.standalone_keys.skipped += 1;
+        if !standalone_keys.is_empty() {
+            let Some(standalone_owner_id) = standalone_owner_id else {
+                stats.standalone_keys.skipped += standalone_keys.len() as u64;
                 stats
                     .errors
-                    .push(format!("跳过无效独立余额 Key: standalone_keys[{index}]"));
-                continue;
+                    .push("无法导入独立余额 Key: 当前管理员用户记录不存在".to_string());
+                if let Some(summary) = self
+                    .import_admin_system_user_usage_aggregates(
+                        root.get("usage_aggregates"),
+                        &imported_user_id_map,
+                        &imported_api_key_id_map,
+                        merge_mode,
+                    )
+                    .await?
+                {
+                    stats.usage_aggregates = Some(summary);
+                }
+                return Ok(Ok(json!({
+                    "message": "用户数据导入成功",
+                    "stats": stats,
+                })));
             };
-            let name = invalid_value!(imported_optional_string(key.get("name")));
-            let allowed_providers = invalid_value!(normalize_imported_user_string_list(
-                key,
-                "allowed_providers"
-            ));
-            let allowed_api_formats = invalid_value!(normalize_imported_user_api_formats(
-                key,
-                "allowed_api_formats"
-            ));
-            let allowed_models =
-                invalid_value!(normalize_imported_user_string_list(key, "allowed_models"));
-            let rate_limit =
-                invalid_value!(imported_optional_i32(key.get("rate_limit"), "rate_limit"))
-                    .unwrap_or(0);
-            let concurrent_limit = invalid_value!(imported_optional_i32(
-                key.get("concurrent_limit"),
-                "concurrent_limit"
-            ));
-            if concurrent_limit.is_some_and(|value| value < 0) {
-                return Ok(Err(invalid_request("concurrent_limit 必须是非负整数")));
-            }
-            let force_capabilities = imported_optional_value(key.get("force_capabilities"));
-            let is_active =
-                invalid_value!(imported_optional_bool(key.get("is_active"))).unwrap_or(true);
-            let expires_at_unix_secs = invalid_value!(imported_rfc3339_to_unix_secs(
-                key.get("expires_at"),
-                "expires_at"
-            ));
-            let auto_delete_on_expiry =
-                invalid_value!(imported_optional_bool(key.get("auto_delete_on_expiry")))
-                    .unwrap_or(false);
-            let total_requests = invalid_value!(imported_optional_u64(
-                key.get("total_requests"),
-                "total_requests"
-            ))
-            .unwrap_or(0);
-            let total_tokens = invalid_value!(imported_optional_u64(
-                key.get("total_tokens"),
-                "total_tokens"
-            ))
-            .unwrap_or(0);
-            let total_cost_usd = invalid_value!(imported_optional_f64(
-                key.get("total_cost_usd"),
-                "total_cost_usd"
-            ))
-            .unwrap_or(0.0);
-            let feature_settings = invalid_value!(imported_optional_json_object(
-                key.get("feature_settings"),
-                "feature_settings"
-            )
-            .and_then(normalize_admin_feature_settings));
-            let wallet_payload = match key.get("wallet") {
-                Some(Value::Object(map)) => Some(map),
-                Some(Value::Null) | None => None,
-                Some(_) => return Ok(Err(invalid_request("wallet 必须是对象"))),
-            };
-            let unlimited =
-                invalid_value!(imported_optional_bool(key.get("unlimited"))).unwrap_or(false);
-            let wallet_target =
-                invalid_value!(normalize_imported_wallet_target(wallet_payload, unlimited));
 
-            if let Some(existing_key) = existing_standalone_by_hash.get(&key_hash).cloned() {
-                match merge_mode {
-                    AdminImportMergeMode::Skip => {
-                        stats.standalone_keys.skipped += 1;
-                    }
-                    AdminImportMergeMode::Error => {
-                        return Ok(Err(invalid_request("独立余额 Key 已存在")));
-                    }
-                    AdminImportMergeMode::Overwrite => {
-                        let updated = self
+            let existing_standalone_keys = self
+                .list_auth_api_key_export_standalone_records()
+                .await?
+                .into_iter()
+                .collect::<Vec<_>>();
+            let mut existing_standalone_by_hash = existing_standalone_keys
+                .into_iter()
+                .map(|record| (record.key_hash.clone(), record))
+                .collect::<BTreeMap<_, _>>();
+
+            for (index, raw_key) in standalone_keys.iter().enumerate() {
+                let key = match imported_object_field(raw_key, &format!("standalone_keys[{index}]"))
+                {
+                    Ok(value) => value,
+                    Err(detail) => return Ok(Err(invalid_request(detail))),
+                };
+                let Some((key_hash, key_encrypted)) =
+                    invalid_value!(self.resolve_imported_system_user_api_key_material(key))
+                else {
+                    stats.standalone_keys.skipped += 1;
+                    stats
+                        .errors
+                        .push(format!("跳过无效独立余额 Key: standalone_keys[{index}]"));
+                    continue;
+                };
+                let source_api_key_id =
+                    invalid_value!(imported_optional_string(key.get("api_key_id")));
+                let name = invalid_value!(imported_optional_string(key.get("name")));
+                let allowed_providers = invalid_value!(normalize_imported_user_string_list(
+                    key,
+                    "allowed_providers"
+                ));
+                let allowed_api_formats = invalid_value!(normalize_imported_user_api_formats(
+                    key,
+                    "allowed_api_formats"
+                ));
+                let allowed_models =
+                    invalid_value!(normalize_imported_user_string_list(key, "allowed_models"));
+                let ip_rules = invalid_value!(normalize_imported_user_ip_rules(key));
+                let rate_limit =
+                    invalid_value!(imported_optional_i32(key.get("rate_limit"), "rate_limit"))
+                        .unwrap_or(0);
+                let concurrent_limit = invalid_value!(imported_optional_i32(
+                    key.get("concurrent_limit"),
+                    "concurrent_limit"
+                ));
+                if concurrent_limit.is_some_and(|value| value < 0) {
+                    return Ok(Err(invalid_request("concurrent_limit 必须是非负整数")));
+                }
+                let force_capabilities = imported_optional_value(key.get("force_capabilities"));
+                let is_active =
+                    invalid_value!(imported_optional_bool(key.get("is_active"))).unwrap_or(true);
+                let expires_at_unix_secs = invalid_value!(imported_rfc3339_to_unix_secs(
+                    key.get("expires_at"),
+                    "expires_at"
+                ));
+                let auto_delete_on_expiry =
+                    invalid_value!(imported_optional_bool(key.get("auto_delete_on_expiry")))
+                        .unwrap_or(false);
+                let imported_total_requests = invalid_value!(imported_optional_u64(
+                    key.get("total_requests"),
+                    "total_requests"
+                ));
+                let total_requests = imported_total_requests.unwrap_or(0);
+                let imported_total_tokens = invalid_value!(imported_optional_u64(
+                    key.get("total_tokens"),
+                    "total_tokens"
+                ));
+                let total_tokens = imported_total_tokens.unwrap_or(0);
+                let imported_total_cost_usd = invalid_value!(imported_optional_f64(
+                    key.get("total_cost_usd"),
+                    "total_cost_usd"
+                ));
+                let total_cost_usd = imported_total_cost_usd.unwrap_or(0.0);
+                let feature_settings = invalid_value!(imported_optional_json_object(
+                    key.get("feature_settings"),
+                    "feature_settings"
+                )
+                .and_then(normalize_admin_feature_settings));
+                let wallet_payload = match key.get("wallet") {
+                    Some(Value::Object(map)) => Some(map),
+                    Some(Value::Null) | None => None,
+                    Some(_) => return Ok(Err(invalid_request("wallet 必须是对象"))),
+                };
+                let unlimited =
+                    invalid_value!(imported_optional_bool(key.get("unlimited"))).unwrap_or(false);
+                let wallet_target =
+                    invalid_value!(normalize_imported_wallet_target(wallet_payload, unlimited));
+
+                if let Some(existing_key) = existing_standalone_by_hash.get(&key_hash).cloned() {
+                    match merge_mode {
+                        AdminImportMergeMode::Skip => {
+                            stats.standalone_keys.skipped += 1;
+                        }
+                        AdminImportMergeMode::Error => {
+                            return Ok(Err(invalid_request("独立余额 Key 已存在")));
+                        }
+                        AdminImportMergeMode::Overwrite => {
+                            let updated = self
                             .update_standalone_api_key_basic(
                                 aether_data::repository::auth::UpdateStandaloneApiKeyBasicRecord {
                                     api_key_id: existing_key.api_key_id.clone(),
@@ -2781,6 +2882,8 @@ impl<'a> AdminAppState<'a> {
                                     allowed_providers: Some(allowed_providers.clone()),
                                     allowed_api_formats: Some(allowed_api_formats.clone()),
                                     allowed_models: Some(allowed_models.clone()),
+                                    ip_rules: imported_ip_rules_present(key)
+                                        .then(|| ip_rules.clone()),
                                     expires_at_present: false,
                                     expires_at_unix_secs: None,
                                     auto_delete_on_expiry_present: false,
@@ -2788,99 +2891,174 @@ impl<'a> AdminAppState<'a> {
                                 },
                             )
                             .await?;
-                        if updated.is_none() {
-                            return Ok(Err((
-                                http::StatusCode::SERVICE_UNAVAILABLE,
-                                json!({ "detail": "Admin system data unavailable" }),
-                            )));
-                        }
-                        let _ = self
-                            .set_standalone_api_key_active(&existing_key.api_key_id, is_active)
-                            .await?;
-                        if key.contains_key("feature_settings") {
+                            if updated.is_none() {
+                                return Ok(Err((
+                                    http::StatusCode::SERVICE_UNAVAILABLE,
+                                    json!({ "detail": "Admin system data unavailable" }),
+                                )));
+                            }
                             let _ = self
-                                .set_standalone_api_key_feature_settings(
-                                    &existing_key.api_key_id,
-                                    feature_settings.clone(),
-                                )
+                                .set_standalone_api_key_active(&existing_key.api_key_id, is_active)
                                 .await?;
+                            if key.contains_key("feature_settings") {
+                                let _ = self
+                                    .set_standalone_api_key_feature_settings(
+                                        &existing_key.api_key_id,
+                                        feature_settings.clone(),
+                                    )
+                                    .await?;
+                            }
+                            if imported_total_requests.is_some()
+                                || imported_total_tokens.is_some()
+                                || imported_total_cost_usd.is_some()
+                            {
+                                let updated_usage = self
+                                    .set_api_key_usage_totals(
+                                        &existing_key.api_key_id,
+                                        imported_total_requests
+                                            .unwrap_or(existing_key.total_requests),
+                                        imported_total_tokens.unwrap_or(existing_key.total_tokens),
+                                        imported_total_cost_usd
+                                            .unwrap_or(existing_key.total_cost_usd),
+                                    )
+                                    .await?;
+                                if updated_usage.is_none() {
+                                    return Ok(Err((
+                                        http::StatusCode::SERVICE_UNAVAILABLE,
+                                        json!({ "detail": "Admin system data unavailable" }),
+                                    )));
+                                }
+                            }
+                            if key.contains_key("expires_at")
+                                || key.contains_key("auto_delete_on_expiry")
+                                || key.contains_key("force_capabilities")
+                            {
+                                stats.errors.push(
+                                    "现有独立余额 Key 仅覆盖基础字段；高级导入字段保持原值"
+                                        .to_string(),
+                                );
+                            }
+                            self.sync_imported_api_key_wallet(
+                                &existing_key.api_key_id,
+                                &wallet_target,
+                                key.get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("独立余额 Key"),
+                            )
+                            .await?;
+                            stats.standalone_keys.updated += 1;
+                            if let Some(source_api_key_id) = source_api_key_id.clone() {
+                                imported_api_key_id_map
+                                    .insert(source_api_key_id, existing_key.api_key_id.clone());
+                            }
                         }
-                        if key.contains_key("expires_at")
-                            || key.contains_key("auto_delete_on_expiry")
-                            || key.contains_key("force_capabilities")
-                            || key.contains_key("total_requests")
-                            || key.contains_key("total_tokens")
-                            || key.contains_key("total_cost_usd")
-                        {
-                            stats.errors.push(
-                                "现有独立余额 Key 仅覆盖基础字段；高级导入字段保持原值".to_string(),
-                            );
-                        }
-                        self.sync_imported_api_key_wallet(
-                            &existing_key.api_key_id,
-                            &wallet_target,
-                            key.get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or("独立余额 Key"),
-                        )
-                        .await?;
-                        stats.standalone_keys.updated += 1;
                     }
+                    continue;
                 }
-                continue;
-            }
 
-            let created = self
-                .create_standalone_api_key(
-                    aether_data::repository::auth::CreateStandaloneApiKeyRecord {
-                        user_id: standalone_owner_id.clone(),
-                        api_key_id: Uuid::new_v4().to_string(),
-                        key_hash: key_hash.clone(),
-                        key_encrypted,
-                        name,
-                        allowed_providers,
-                        allowed_api_formats,
-                        allowed_models,
-                        rate_limit: Some(rate_limit),
-                        concurrent_limit,
-                        force_capabilities,
-                        is_active,
-                        expires_at_unix_secs,
-                        auto_delete_on_expiry,
-                        total_requests,
-                        total_tokens,
-                        total_cost_usd,
-                    },
-                )
-                .await?;
-            let Some(created) = created else {
-                return Ok(Err((
-                    http::StatusCode::SERVICE_UNAVAILABLE,
-                    json!({ "detail": "Admin system data unavailable" }),
-                )));
-            };
-            if key.contains_key("feature_settings") {
-                let _ = self
-                    .set_standalone_api_key_feature_settings(
-                        &created.api_key_id,
-                        feature_settings.clone(),
+                let created = self
+                    .create_standalone_api_key(
+                        aether_data::repository::auth::CreateStandaloneApiKeyRecord {
+                            user_id: standalone_owner_id.clone(),
+                            api_key_id: Uuid::new_v4().to_string(),
+                            key_hash: key_hash.clone(),
+                            key_encrypted,
+                            name,
+                            allowed_providers,
+                            allowed_api_formats,
+                            allowed_models,
+                            ip_rules,
+                            rate_limit: Some(rate_limit),
+                            concurrent_limit,
+                            force_capabilities,
+                            is_active,
+                            expires_at_unix_secs,
+                            auto_delete_on_expiry,
+                            total_requests,
+                            total_tokens,
+                            total_cost_usd,
+                        },
                     )
                     .await?;
+                let Some(created) = created else {
+                    return Ok(Err((
+                        http::StatusCode::SERVICE_UNAVAILABLE,
+                        json!({ "detail": "Admin system data unavailable" }),
+                    )));
+                };
+                if key.contains_key("feature_settings") {
+                    let _ = self
+                        .set_standalone_api_key_feature_settings(
+                            &created.api_key_id,
+                            feature_settings.clone(),
+                        )
+                        .await?;
+                }
+                self.sync_imported_api_key_wallet(
+                    &created.api_key_id,
+                    &wallet_target,
+                    created.name.as_deref().unwrap_or("独立余额 Key"),
+                )
+                .await?;
+                let created_api_key_id = created.api_key_id.clone();
+                existing_standalone_by_hash.insert(key_hash, created);
+                if let Some(source_api_key_id) = source_api_key_id {
+                    imported_api_key_id_map.insert(source_api_key_id, created_api_key_id);
+                }
+                stats.standalone_keys.created += 1;
             }
-            self.sync_imported_api_key_wallet(
-                &created.api_key_id,
-                &wallet_target,
-                created.name.as_deref().unwrap_or("独立余额 Key"),
+        }
+
+        if let Some(summary) = self
+            .import_admin_system_user_usage_aggregates(
+                root.get("usage_aggregates"),
+                &imported_user_id_map,
+                &imported_api_key_id_map,
+                merge_mode,
             )
-            .await?;
-            existing_standalone_by_hash.insert(key_hash, created);
-            stats.standalone_keys.created += 1;
+            .await?
+        {
+            stats.usage_aggregates = Some(summary);
         }
 
         Ok(Ok(json!({
             "message": "用户数据导入成功",
             "stats": stats,
         })))
+    }
+
+    async fn import_admin_system_user_usage_aggregates(
+        &self,
+        value: Option<&Value>,
+        user_id_map: &BTreeMap<String, String>,
+        api_key_id_map: &BTreeMap<String, String>,
+        merge_mode: AdminImportMergeMode,
+    ) -> Result<Option<AdminSystemUsageAggregateImportSummary>, GatewayError> {
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        let snapshot = serde_json::from_value::<AdminSystemUsageAggregateSnapshot>(value.clone())
+            .map_err(|err| GatewayError::Client {
+            status: http::StatusCode::BAD_REQUEST,
+            message: format!("usage_aggregates 格式无效: {err}"),
+        })?;
+        if snapshot.stats_daily.is_empty()
+            && snapshot.stats_user_daily.is_empty()
+            && snapshot.stats_daily_api_key.is_empty()
+        {
+            return Ok(None);
+        }
+        self.import_admin_system_usage_aggregates(
+            &snapshot,
+            user_id_map,
+            api_key_id_map,
+            usage_aggregate_import_mode(merge_mode),
+        )
+        .await
+        .map(Some)
     }
 
     async fn sync_imported_user_wallet(
@@ -3010,8 +3188,8 @@ mod tests {
         imported_optional_bool, imported_optional_f64, imported_optional_i32,
         imported_optional_u64, imported_rfc3339_to_unix_secs, imported_string_list_from_value,
         normalize_import_endpoint_format, normalize_import_key_formats,
-        normalize_imported_wallet_target, validate_imported_system_users_export_version,
-        ImportedProviderKey,
+        normalize_import_key_raw_payload, normalize_imported_wallet_target,
+        validate_imported_system_users_export_version, ImportedProviderKey,
     };
 
     #[test]
@@ -3033,6 +3211,10 @@ mod tests {
         for (raw, expected) in [
             ("openai:cli", "openai:responses"),
             ("openai:compact", "openai:responses:compact"),
+            ("openai_image", "openai:image"),
+            ("images", "openai:image"),
+            ("/v1/images/generations", "openai:image"),
+            ("/v1/images/edits", "openai:image"),
             ("claude:chat", "claude:messages"),
             ("claude:cli", "claude:messages"),
             ("gemini:chat", "gemini:generate_content"),
@@ -3079,6 +3261,61 @@ mod tests {
 
         assert_eq!(formats, vec!["claude:messages", "openai:responses:compact"]);
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn config_import_filters_key_format_scoped_fields_to_selected_api_formats() {
+        let raw_key = json!({
+            "name": "test-key",
+            "api_key": "sk-test",
+            "api_formats": ["openai:responses", "openai:video"],
+            "auth_type_by_format": {
+                "openai:responses": "api_key",
+                "openai:video": "bearer"
+            },
+            "allow_auth_channel_mismatch_formats": [
+                "openai:responses",
+                "openai:video"
+            ]
+        });
+        let raw_key = raw_key.as_object().expect("key should be object");
+
+        let payload = normalize_import_key_raw_payload(
+            raw_key,
+            "api_key",
+            &["openai:responses".to_string()],
+            None,
+        );
+
+        assert_eq!(payload["api_formats"], json!(["openai:responses"]));
+        assert_eq!(
+            payload["auth_type_by_format"],
+            json!({ "openai:responses": "api_key" })
+        );
+        assert_eq!(
+            payload["allow_auth_channel_mismatch_formats"],
+            json!(["openai:responses"])
+        );
+    }
+
+    #[test]
+    fn config_import_preserves_explicit_empty_mismatch_scope_after_filtering() {
+        let raw_key = json!({
+            "name": "test-key",
+            "api_key": "sk-test",
+            "api_formats": ["openai:responses"],
+            "allow_auth_channel_mismatch_formats": ["openai:video"]
+        });
+        let raw_key = raw_key.as_object().expect("key should be object");
+
+        let payload = normalize_import_key_raw_payload(
+            raw_key,
+            "api_key",
+            &["openai:responses".to_string()],
+            None,
+        );
+
+        assert_eq!(payload["allow_auth_channel_mismatch_formats"], json!([]));
     }
 
     #[test]

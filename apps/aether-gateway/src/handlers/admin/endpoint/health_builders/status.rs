@@ -4,7 +4,9 @@ use crate::handlers::public::{api_format_display_name, build_public_health_timel
 use crate::handlers::shared::unix_ms_to_rfc3339;
 use crate::provider_key_auth::provider_key_effective_api_formats;
 use aether_data_contracts::repository::candidates::PublicHealthTimelineBucket;
-use aether_scheduler_core::{is_provider_key_circuit_open, provider_key_health_score};
+use aether_scheduler_core::{
+    any_provider_key_circuit_open_at, is_provider_key_circuit_open_at, provider_key_health_score,
+};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -99,7 +101,9 @@ pub(crate) async fn build_admin_endpoint_health_status_payload(
                     .entry(api_format.clone())
                     .or_default()
                     .insert(key.id.clone());
-                if key.is_active && !is_provider_key_circuit_open(&key, &api_format) {
+                if key.is_active
+                    && !is_provider_key_circuit_open_at(&key, &api_format, now_unix_secs)
+                {
                     let key_health_score =
                         provider_key_health_score(&key, &api_format).unwrap_or(1.0);
                     active_keys_by_format
@@ -229,6 +233,10 @@ pub(crate) async fn build_admin_health_summary_payload(
         return None;
     }
 
+    let now_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
     let providers = state
         .list_provider_catalog_providers(false)
         .await
@@ -286,20 +294,7 @@ pub(crate) async fn build_admin_health_summary_payload(
         .count();
     let circuit_open_keys = keys
         .iter()
-        .filter(|key| {
-            key.circuit_breaker_by_format
-                .as_ref()
-                .and_then(serde_json::Value::as_object)
-                .map(|formats| {
-                    formats.values().any(|circuit| {
-                        circuit
-                            .get("open")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false)
-        })
+        .filter(|key| any_provider_key_circuit_open_at(key, now_unix_secs))
         .count();
 
     Some(json!({

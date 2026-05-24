@@ -126,6 +126,54 @@ pub(super) fn build_stream_failure_from_execution_error(
     }
 }
 
+pub(super) fn build_stream_failure_from_provider_error_body(
+    status_code: u16,
+    body_json: &Value,
+) -> StreamFailureReport {
+    let body_object = body_json.as_object();
+    let error_object = body_object
+        .and_then(|object| object.get("error"))
+        .and_then(Value::as_object);
+    let error_type =
+        first_non_empty_error_text(error_object, body_object, &["type", "code", "status"])
+            .unwrap_or_else(|| "upstream_error".to_string());
+    let error_message = first_non_empty_error_text(
+        error_object,
+        body_object,
+        &["message", "detail", "reason", "status", "type", "code"],
+    )
+    .unwrap_or_else(|| format!("upstream stream returned error status {status_code}"));
+
+    StreamFailureReport {
+        status_code,
+        error_type,
+        error_message,
+        extra_error_fields: Map::new(),
+    }
+}
+
+fn first_non_empty_error_text(
+    error_object: Option<&Map<String, Value>>,
+    body_object: Option<&Map<String, Value>>,
+    keys: &[&str],
+) -> Option<String> {
+    for object in [error_object, body_object].into_iter().flatten() {
+        for key in keys {
+            let Some(value) = object.get(*key) else {
+                continue;
+            };
+            match value {
+                Value::String(text) if !text.trim().is_empty() => {
+                    return Some(text.trim().to_string());
+                }
+                Value::Number(number) => return Some(number.to_string()),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 fn build_stream_failure_sync_payload(
     trace_id: &str,
     report_kind: String,
@@ -294,6 +342,49 @@ async fn record_stream_sync_failure(
         },
     )
     .await;
+}
+
+#[allow(clippy::too_many_arguments)] // internal helper for prefetch error handling
+pub(super) async fn handle_prefetch_provider_private_stream_error(
+    state: &AppState,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    plan: &ExecutionPlan,
+    report_context: Option<Value>,
+    request_id: &str,
+    candidate_id: Option<&str>,
+    report_kind: &str,
+    mut headers: std::collections::BTreeMap<String, String>,
+    telemetry: Option<ExecutionTelemetry>,
+    buffered_body: &[u8],
+    status_code: u16,
+    body_json: Value,
+) -> Result<Option<Response<Body>>, GatewayError> {
+    headers.remove("content-encoding");
+    headers.remove("content-length");
+    headers.insert("content-type".to_string(), "application/json".to_string());
+
+    let payload = GatewaySyncReportRequest {
+        trace_id: trace_id.to_string(),
+        report_kind: report_kind.to_string(),
+        report_context,
+        status_code,
+        headers,
+        body_json: Some(body_json),
+        client_body_json: None,
+        body_base64: (!buffered_body.is_empty())
+            .then(|| base64::engine::general_purpose::STANDARD.encode(buffered_body)),
+        telemetry,
+    };
+    record_stream_sync_failure(state, plan, payload.report_context.as_ref(), &payload, None).await;
+
+    let response =
+        submit_local_core_error_or_sync_finalize(state, trace_id, decision, payload).await?;
+    Ok(Some(attach_control_metadata_headers(
+        response,
+        Some(request_id),
+        candidate_id,
+    )?))
 }
 
 #[allow(clippy::too_many_arguments)] // internal helper for prefetch error handling

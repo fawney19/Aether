@@ -424,7 +424,7 @@ async fn sync_grok_quota_from_report_context(
     updated_key.updated_at_unix_secs = Some(now_unix_secs);
 
     Ok(state
-        .update_provider_catalog_key(&updated_key)
+        .update_provider_catalog_key_runtime_state(&updated_key)
         .await?
         .is_some())
 }
@@ -721,7 +721,7 @@ async fn sync_codex_quota_from_response_headers(
     updated_key.updated_at_unix_secs = Some(now_unix_secs);
 
     let updated = state
-        .update_provider_catalog_key(&updated_key)
+        .update_provider_catalog_key_runtime_state(&updated_key)
         .await?
         .is_some();
     if updated {

@@ -34,6 +34,8 @@ pub(in super::super) struct AdminWalletRefundCompleteRequest {
     #[serde(default)]
     pub(in super::super) gateway_refund_id: Option<String>,
     #[serde(default)]
+    pub(in super::super) gateway_refund: bool,
+    #[serde(default)]
     pub(in super::super) payout_reference: Option<String>,
     #[serde(default)]
     pub(in super::super) payout_proof: Option<serde_json::Value>,

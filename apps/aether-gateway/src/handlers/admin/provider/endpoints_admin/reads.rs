@@ -1,6 +1,6 @@
 use crate::handlers::admin::request::AdminAppState;
 use aether_data_contracts::repository::provider_catalog::{
-    StoredProviderCatalogEndpoint, StoredProviderCatalogProvider,
+    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 

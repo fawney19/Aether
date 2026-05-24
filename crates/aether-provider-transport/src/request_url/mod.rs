@@ -22,7 +22,6 @@ use crate::vertex::{
     build_vertex_service_account_gemini_embedding_url, resolve_local_vertex_api_key_query_auth,
     resolve_local_vertex_service_account_auth_config,
 };
-
 #[derive(Debug, Clone, Copy)]
 pub struct TransportRequestUrlParams<'a> {
     pub provider_api_format: &'a str,

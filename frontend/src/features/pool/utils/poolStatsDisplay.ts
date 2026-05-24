@@ -1,5 +1,6 @@
 import type { QuotaWindowUsageSnapshot } from '@/api/endpoints/types/statusSnapshot'
 import type { PoolManagementStatsMode } from '@/features/pool/utils/poolManagementState'
+import { formatCompactNumber } from '@/utils/format'
 
 export type PoolStatsMetricKey = 'request_count' | 'total_tokens' | 'total_cost_usd'
 export type PoolStatsDisplayKind = 'account_total' | 'codex_cycle'
@@ -63,9 +64,7 @@ export function formatPoolStatInteger(value: number | null | undefined): string 
 export function formatPoolTokenCount(value: number | null | undefined): string {
   const n = Number(value ?? 0)
   if (!Number.isFinite(n) || n <= 0) return '0'
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return String(Math.round(n))
+  return formatCompactNumber(Math.round(n), { fractionDigits: 1 })
 }
 
 export function formatPoolStatUsd(value: number | string | null | undefined): string {

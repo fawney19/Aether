@@ -1,3 +1,5 @@
+import { formatCompactNumber } from '@/utils/format'
+
 export function walletStatusLabel(status: string | null | undefined): string {
   const labels: Record<string, string> = {
     active: '正常',
@@ -41,13 +43,8 @@ export function dailyUsageCategoryLabel(isToday = false): string {
 
 export function formatTokenCount(value: number | null | undefined): string {
   const amount = Number(value ?? 0)
-  if (amount >= 1_000_000) {
-    return `${(amount / 1_000_000).toFixed(amount >= 10_000_000 ? 0 : 1)}M`
-  }
-  if (amount >= 1_000) {
-    return `${(amount / 1_000).toFixed(amount >= 10_000 ? 0 : 1)}K`
-  }
-  return `${Math.round(amount)}`
+  if (!Number.isFinite(amount) || amount <= 0) return '0'
+  return formatCompactNumber(Math.round(amount), { fractionDigits: 1 })
 }
 
 export function walletTransactionReasonLabel(reasonCode: string | null | undefined): string {
@@ -72,7 +69,11 @@ export function paymentMethodLabel(method: string | null | undefined): string {
     alipay: '支付宝',
     wechat: '微信支付',
     wxpay: '微信支付',
+    wechat_pay: '微信支付',
     epay: '易支付',
+    stripe: 'Stripe',
+    card: '银行卡/信用卡',
+    link: 'Stripe Link',
     admin_manual: '人工充值',
     card_code: '充值卡',
     gift_code: '礼品卡',

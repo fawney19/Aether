@@ -70,7 +70,7 @@ pub(super) async fn read_admin_provider_ops_balance_cache(
     }
 }
 
-pub(super) async fn store_admin_provider_ops_balance_cache(
+pub(crate) async fn store_admin_provider_ops_balance_cache(
     state: &AdminAppState<'_>,
     provider_id: &str,
     payload: &Value,

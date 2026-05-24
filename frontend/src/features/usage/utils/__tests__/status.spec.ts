@@ -51,15 +51,15 @@ describe('usage status helpers', () => {
     expect(isUsageRecordSuccessful(record)).toBe(false)
   })
 
-  it('treats explicit failed status with a 2xx status code as successful for display', () => {
+  it('treats explicit failed status as authoritative over a 2xx transport code', () => {
     const record = buildUsageRecord({
       status: 'failed',
       status_code: 200,
-      error_message: 'stale failure flag'
+      error_message: 'stream terminal error'
     })
 
-    expect(isUsageRecordFailed(record)).toBe(false)
-    expect(isUsageRecordSuccessful(record)).toBe(true)
+    expect(isUsageRecordFailed(record)).toBe(true)
+    expect(isUsageRecordSuccessful(record)).toBe(false)
   })
 
   it('normalizes request status strings before mapping timeline status', () => {

@@ -14,6 +14,7 @@ use aether_provider_transport::kiro::{
     resolve_local_kiro_request_auth,
 };
 use aether_provider_transport::vertex::resolve_local_vertex_api_key_query_auth;
+use aether_provider_transport::windsurf::resolve_windsurf_cascade_auth;
 use aether_provider_transport::{
     apply_local_header_rules, resolve_transport_execution_timeouts, resolve_transport_profile,
     GatewayProviderTransportSnapshot, LocalResolvedOAuthRequestAuth,
@@ -30,6 +31,10 @@ const CLAUDE_VERSION_HEADER: &str = "2023-06-01";
 const ANTIGRAVITY_FETCH_PROVIDER_API_FORMAT: &str = "antigravity:fetch_available_models";
 const GEMINI_CLI_LOAD_CODE_ASSIST_PROVIDER_API_FORMAT: &str = "gemini_cli:load_code_assist";
 const KIRO_LIST_AVAILABLE_MODELS_PROVIDER_API_FORMAT: &str = "kiro:list_available_models";
+const WINDSURF_MODEL_CONFIGS_PROVIDER_API_FORMAT: &str = "windsurf:model_configs";
+const WINDSURF_MODEL_CONFIGS_PATH: &str =
+    "/exa.api_server_pb.ApiServerService/GetCascadeModelConfigs";
+const WINDSURF_IDE_VERSION: &str = "1.9600.41";
 
 const BROWSER_FINGERPRINT_HEADERS: &[(&str, &str)] = &[
     (
@@ -290,6 +295,60 @@ pub async fn build_kiro_list_available_models_plan(
             client_api_format: "claude:messages".to_string(),
             provider_api_format: KIRO_LIST_AVAILABLE_MODELS_PROVIDER_API_FORMAT.to_string(),
             model_name: Some("ListAvailableModels".to_string()),
+        },
+    )
+    .await
+}
+
+pub async fn build_windsurf_model_configs_execution_plan(
+    runtime: &(impl ModelFetchTransportRuntime + ?Sized),
+    transport: &GatewayProviderTransportSnapshot,
+) -> Result<ExecutionPlan, String> {
+    let (_, auth_value) = resolve_windsurf_cascade_auth(transport)
+        .or_else(|| resolve_local_openai_bearer_auth(transport))
+        .ok_or_else(|| "Windsurf models fetch requires apiKey/sessionToken".to_string())?;
+    let api_key = auth_secret_from_header_value(&auth_value);
+    if api_key.is_empty() {
+        return Err("Windsurf models fetch requires apiKey/sessionToken".to_string());
+    }
+
+    let headers = BTreeMap::from([
+        ("content-type".to_string(), "application/json".to_string()),
+        ("accept".to_string(), "application/json".to_string()),
+        ("connect-protocol-version".to_string(), "1".to_string()),
+        (
+            "user-agent".to_string(),
+            format!("windsurf/{WINDSURF_IDE_VERSION}"),
+        ),
+    ]);
+    let headers = apply_fetch_header_rules(transport, headers, &[])?;
+    let url = format!(
+        "{}{}",
+        transport.endpoint.base_url.trim_end_matches('/'),
+        WINDSURF_MODEL_CONFIGS_PATH
+    );
+
+    build_execution_plan(
+        runtime,
+        transport,
+        ModelFetchExecutionPlanRequest {
+            method: "POST".to_string(),
+            url,
+            headers,
+            content_type: Some("application/json".to_string()),
+            body: RequestBody::from_json(json!({
+                "metadata": {
+                    "apiKey": api_key,
+                    "ideName": "windsurf",
+                    "ideVersion": WINDSURF_IDE_VERSION,
+                    "extensionName": "windsurf",
+                    "extensionVersion": WINDSURF_IDE_VERSION,
+                    "locale": "en",
+                }
+            })),
+            client_api_format: "openai:chat".to_string(),
+            provider_api_format: WINDSURF_MODEL_CONFIGS_PROVIDER_API_FORMAT.to_string(),
+            model_name: Some("GetCascadeModelConfigs".to_string()),
         },
     )
     .await
@@ -584,6 +643,16 @@ fn insert_non_empty_auth_header(
 
     protected_headers.push(name.to_string());
     headers.insert(name.to_string(), value.to_string());
+}
+
+fn auth_secret_from_header_value(auth_value: &str) -> String {
+    auth_value
+        .trim()
+        .strip_prefix("Bearer ")
+        .or_else(|| auth_value.trim().strip_prefix("bearer "))
+        .unwrap_or_else(|| auth_value.trim())
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]

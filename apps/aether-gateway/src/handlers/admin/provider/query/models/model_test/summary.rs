@@ -42,9 +42,9 @@ pub(super) fn provider_query_test_attempt_payload(
         "status_code": execution.status_code,
         "latency_ms": execution.latency_ms,
         "request_url": execution.request_url,
-        "request_headers": provider_query_redact_diagnostic_headers(&execution.request_headers),
-        "request_body": execution.request_body,
-        "response_headers": provider_query_redact_diagnostic_headers(&execution.response_headers),
+        "request_headers": redacted_provider_query_headers(&execution.request_headers),
+        "request_body": redacted_provider_query_value(&execution.request_body),
+        "response_headers": redacted_provider_query_headers(&execution.response_headers),
         "response_body": execution.response_body,
     })
 }
@@ -172,34 +172,84 @@ fn provider_query_endpoint_route_payload(
     })
 }
 
-fn provider_query_redact_diagnostic_headers(
-    headers: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
+fn redacted_provider_query_headers(headers: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     headers
         .iter()
-        .map(|(name, value)| {
-            if provider_query_header_is_sensitive(name) {
-                (name.clone(), "<redacted>".to_string())
+        .map(|(key, value)| {
+            if provider_query_field_is_sensitive(key) {
+                (key.clone(), "[REDACTED]".to_string())
             } else {
-                (name.clone(), value.clone())
+                (key.clone(), value.clone())
             }
         })
         .collect()
 }
 
-fn provider_query_header_is_sensitive(name: &str) -> bool {
+fn redacted_provider_query_value(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    if provider_query_field_is_sensitive(key) {
+                        (key.clone(), Value::String("[REDACTED]".to_string()))
+                    } else {
+                        (key.clone(), redacted_provider_query_value(value))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(redacted_provider_query_value)
+                .collect::<Vec<_>>(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn provider_query_field_is_sensitive(key: &str) -> bool {
+    let key = key.trim().to_ascii_lowercase();
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>();
+    if matches!(
+        normalized.as_str(),
+        "maxtokens"
+            | "maxoutputtokens"
+            | "inputtokens"
+            | "outputtokens"
+            | "prompttokens"
+            | "completiontokens"
+            | "totaltokens"
+    ) {
+        return false;
+    }
     matches!(
-        name.trim().to_ascii_lowercase().as_str(),
+        key.as_str(),
         "authorization"
             | "proxy-authorization"
             | "cookie"
             | "set-cookie"
-            | "x-api-key"
+            | "api_key"
+            | "apikey"
             | "api-key"
+            | "x-api-key"
             | "x-goog-api-key"
             | "anthropic-api-key"
             | "openai-api-key"
-    )
+            | "x-codeium-csrf-token"
+            | "access_token"
+            | "refresh_token"
+            | "id_token"
+            | "password"
+            | "secret"
+    ) || normalized.ends_with("token")
+        || normalized.contains("secret")
+        || normalized.contains("apikey")
+        || normalized.contains("authorization")
 }
 
 pub(super) fn provider_query_candidate_summary_payload(
@@ -309,34 +359,93 @@ pub(super) fn provider_query_candidate_summary_payload(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{redacted_provider_query_headers, redacted_provider_query_value};
+    use serde_json::json;
+    use std::collections::BTreeMap;
 
     #[test]
-    fn provider_query_diagnostic_headers_redact_credentials() {
+    fn redacts_sensitive_provider_query_headers() {
         let headers = BTreeMap::from([
             ("cookie".to_string(), "sso=secret".to_string()),
-            ("authorization".to_string(), "Bearer secret".to_string()),
+            (
+                "authorization".to_string(),
+                "Bearer secret-token".to_string(),
+            ),
             ("x-goog-api-key".to_string(), "secret".to_string()),
             ("content-type".to_string(), "application/json".to_string()),
+            (
+                "x-codeium-csrf-token".to_string(),
+                "csrf-secret".to_string(),
+            ),
         ]);
 
-        let redacted = provider_query_redact_diagnostic_headers(&headers);
+        let redacted = redacted_provider_query_headers(&headers);
 
         assert_eq!(
             redacted.get("cookie").map(String::as_str),
-            Some("<redacted>")
+            Some("[REDACTED]")
         );
         assert_eq!(
             redacted.get("authorization").map(String::as_str),
-            Some("<redacted>")
+            Some("[REDACTED]")
         );
         assert_eq!(
             redacted.get("x-goog-api-key").map(String::as_str),
-            Some("<redacted>")
+            Some("[REDACTED]")
+        );
+        assert_eq!(
+            redacted.get("x-codeium-csrf-token").map(String::as_str),
+            Some("[REDACTED]")
         );
         assert_eq!(
             redacted.get("content-type").map(String::as_str),
             Some("application/json")
+        );
+    }
+
+    #[test]
+    fn redacts_sensitive_provider_query_request_body_fields() {
+        let body = json!({
+            "metadata": {
+                "apiKey": "devin-session-token$secret",
+                "ideName": "windsurf"
+            },
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true
+        });
+
+        let redacted = redacted_provider_query_value(&body);
+
+        assert_eq!(
+            redacted.pointer("/metadata/apiKey"),
+            Some(&json!("[REDACTED]"))
+        );
+        assert_eq!(
+            redacted.pointer("/metadata/ideName"),
+            Some(&json!("windsurf"))
+        );
+        assert_eq!(redacted.pointer("/stream"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn keeps_non_secret_token_count_fields_visible() {
+        let body = json!({
+            "maxTokens": 64,
+            "usage": {
+                "inputTokens": 10,
+                "outputTokens": 2,
+                "accessToken": "secret"
+            }
+        });
+
+        let redacted = redacted_provider_query_value(&body);
+
+        assert_eq!(redacted.pointer("/maxTokens"), Some(&json!(64)));
+        assert_eq!(redacted.pointer("/usage/inputTokens"), Some(&json!(10)));
+        assert_eq!(redacted.pointer("/usage/outputTokens"), Some(&json!(2)));
+        assert_eq!(
+            redacted.pointer("/usage/accessToken"),
+            Some(&json!("[REDACTED]"))
         );
     }
 }

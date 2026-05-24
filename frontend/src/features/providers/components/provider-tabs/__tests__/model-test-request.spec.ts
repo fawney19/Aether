@@ -479,6 +479,23 @@ describe('extractModelTestResponsePreview', () => {
     })).toBe('图片：https://example.com/generated.png')
   })
 
+  it('extracts renderable URL image previews from OpenAI image responses', () => {
+    expect(extractModelTestImagePreviews({
+      data: [
+        {
+          url: 'https://example.com/generated.png',
+          revised_prompt: 'A generated image',
+        },
+      ],
+    })).toEqual([
+      {
+        src: 'https://example.com/generated.png',
+        label: '图片 1',
+        source: 'url',
+      },
+    ])
+  })
+
   it('summarizes base64 image responses without dumping the image payload', () => {
     expect(extractModelTestResponsePreview({
       data: [
@@ -498,6 +515,55 @@ describe('extractModelTestResponsePreview', () => {
         },
       ],
     })).toEqual([
+      {
+        src: 'data:image/jpeg;base64,aGVsbG8=',
+        label: '图片 1',
+        source: 'base64',
+      },
+    ])
+  })
+
+  it('accepts root-relative URLs in OpenAI image responses', () => {
+    expect(extractModelTestImagePreviews({
+      data: [
+        {
+          url: '/v1/files/image?id=2af14311-a0cb-4bbf-ae20-d1fcf44e0479',
+        },
+      ],
+    })).toEqual([
+      {
+        src: '/v1/files/image?id=2af14311-a0cb-4bbf-ae20-d1fcf44e0479',
+        label: '图片 1',
+        source: 'url',
+      },
+    ])
+  })
+
+  it('parses stringified JSON image responses', () => {
+    expect(extractModelTestImagePreviews(JSON.stringify({
+      data: [
+        {
+          url: 'https://example.com/generated.png',
+        },
+      ],
+    }))).toEqual([
+      {
+        src: 'https://example.com/generated.png',
+        label: '图片 1',
+        source: 'url',
+      },
+    ])
+  })
+
+  it('parses stringified JSON base64 image responses', () => {
+    expect(extractModelTestImagePreviews(JSON.stringify({
+      data: [
+        {
+          b64_json: 'aGVsbG8=',
+          mime_type: 'image/jpeg',
+        },
+      ],
+    }))).toEqual([
       {
         src: 'data:image/jpeg;base64,aGVsbG8=',
         label: '图片 1',

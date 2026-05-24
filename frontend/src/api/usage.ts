@@ -4,6 +4,8 @@ import type { ActivityHeatmap } from '@/types/activity'
 import type { ImageProgress } from './requestTrace'
 
 const ACTIVITY_HEATMAP_CACHE_TTL_MS = 30 * 60 * 1000
+const USAGE_ANALYTICS_CACHE_TTL_MS = 30 * 1000
+const USAGE_ANALYTICS_REQUEST_TIMEOUT_MS = 120 * 1000
 
 export interface UsageRecord {
   id: string // UUID
@@ -69,7 +71,9 @@ export interface UsageByUser {
 }
 
 export interface UsageByProvider {
-  provider_id: string
+  provider_id?: string | null
+  provider_key?: string
+  provider_identity_source?: 'provider_id' | 'legacy_name'
   provider: string
   request_count: number
   total_tokens: number
@@ -115,6 +119,10 @@ export interface UsageFilters {
   client_family?: string
   page?: number
   page_size?: number
+}
+
+export interface UsageRequestOptions {
+  skipCache?: boolean
 }
 
 type UsageListResponse = {
@@ -362,16 +370,19 @@ export const usageApi = {
     return normalizeUsageRecordPage(response.data, pagination)
   },
 
-  async getUsageStats(filters?: UsageFilters): Promise<UsageStats> {
+  async getUsageStats(filters?: UsageFilters, options?: UsageRequestOptions): Promise<UsageStats> {
     // 为统计数据添加30秒缓存
-    const cacheKey = `usage-stats-${JSON.stringify(filters || {})}`
+    const cacheKey = `usage-stats-${JSON.stringify(filters || {})}${options?.skipCache ? ':fresh' : ''}`
     return cachedRequest(
       cacheKey,
       async () => {
-        const response = await apiClient.get<UsageStats>('/api/admin/usage/stats', { params: filters })
+        const response = await apiClient.get<UsageStats>('/api/admin/usage/stats', {
+          params: filters,
+          timeout: USAGE_ANALYTICS_REQUEST_TIMEOUT_MS,
+        })
         return response.data
       },
-      30000 // 30秒缓存
+      options?.skipCache ? 0 : USAGE_ANALYTICS_CACHE_TTL_MS
     )
   },
 
@@ -382,36 +393,50 @@ export const usageApi = {
    */
   async getUsageAggregation<T = UsageByModel[] | UsageByUser[] | UsageByProvider[] | UsageByApiFormat[]>(
     groupBy: 'model' | 'user' | 'provider' | 'api_format',
-    filters?: UsageFilters & { limit?: number }
+    filters?: UsageFilters & { limit?: number },
+    options?: UsageRequestOptions
   ): Promise<T> {
-    const cacheKey = `usage-aggregation-${groupBy}-${JSON.stringify(filters || {})}`
+    const cacheKey = `usage-aggregation-${groupBy}-${JSON.stringify(filters || {})}${options?.skipCache ? ':fresh' : ''}`
     return cachedRequest(
       cacheKey,
       async () => {
         const response = await apiClient.get<T>('/api/admin/usage/aggregation/stats', {
-          params: { group_by: groupBy, ...filters }
+          params: { group_by: groupBy, ...filters },
+          timeout: USAGE_ANALYTICS_REQUEST_TIMEOUT_MS,
         })
         return response.data
       },
-      30000 // 30秒缓存
+      options?.skipCache ? 0 : USAGE_ANALYTICS_CACHE_TTL_MS
     )
   },
 
   // Shorthand methods using getUsageAggregation
-  async getUsageByModel(filters?: UsageFilters & { limit?: number }): Promise<UsageByModel[]> {
-    return this.getUsageAggregation<UsageByModel[]>('model', filters)
+  async getUsageByModel(
+    filters?: UsageFilters & { limit?: number },
+    options?: UsageRequestOptions
+  ): Promise<UsageByModel[]> {
+    return this.getUsageAggregation<UsageByModel[]>('model', filters, options)
   },
 
-  async getUsageByUser(filters?: UsageFilters & { limit?: number }): Promise<UsageByUser[]> {
-    return this.getUsageAggregation<UsageByUser[]>('user', filters)
+  async getUsageByUser(
+    filters?: UsageFilters & { limit?: number },
+    options?: UsageRequestOptions
+  ): Promise<UsageByUser[]> {
+    return this.getUsageAggregation<UsageByUser[]>('user', filters, options)
   },
 
-  async getUsageByProvider(filters?: UsageFilters & { limit?: number }): Promise<UsageByProvider[]> {
-    return this.getUsageAggregation<UsageByProvider[]>('provider', filters)
+  async getUsageByProvider(
+    filters?: UsageFilters & { limit?: number },
+    options?: UsageRequestOptions
+  ): Promise<UsageByProvider[]> {
+    return this.getUsageAggregation<UsageByProvider[]>('provider', filters, options)
   },
 
-  async getUsageByApiFormat(filters?: UsageFilters & { limit?: number }): Promise<UsageByApiFormat[]> {
-    return this.getUsageAggregation<UsageByApiFormat[]>('api_format', filters)
+  async getUsageByApiFormat(
+    filters?: UsageFilters & { limit?: number },
+    options?: UsageRequestOptions
+  ): Promise<UsageByApiFormat[]> {
+    return this.getUsageAggregation<UsageByApiFormat[]>('api_format', filters, options)
   },
 
   async getUserUsage(userId: string, filters?: UsageFilters): Promise<{

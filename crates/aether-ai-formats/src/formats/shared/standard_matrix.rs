@@ -17,7 +17,10 @@ use crate::formats::openai::responses::codex::{
     apply_codex_openai_responses_chat_body_edits, apply_codex_openai_responses_special_body_edits,
     apply_openai_responses_compact_special_body_edits,
 };
-use crate::formats::shared::standard_normalize::build_local_openai_chat_request_body_with_model_directives;
+use crate::formats::shared::standard_normalize::{
+    build_local_openai_chat_request_body_with_model_directives,
+    is_claude_messages_shaped_body_on_openai_chat_endpoint,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_standard_request_body(
@@ -91,8 +94,13 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers(
         .with_mapped_model(mapped_model)
         .with_request_path(request_path)
         .with_upstream_stream(upstream_is_stream);
-    let mut provider_request_body = convert_request(
+    let source_api_format = compatible_source_format_for_standard_request(
+        body_json,
         client_api_format,
+        provider_api_format,
+    );
+    let mut provider_request_body = convert_request(
+        source_api_format.as_ref(),
         provider_api_format,
         body_json,
         &format_context,
@@ -155,6 +163,24 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers(
         require_body_stream_field,
     );
     Some(provider_request_body)
+}
+
+fn compatible_source_format_for_standard_request<'a>(
+    body_json: &Value,
+    client_api_format: &'a str,
+    provider_api_format: &str,
+) -> Cow<'a, str> {
+    if matches!(
+        aether_ai_formats::normalize_api_format_alias(client_api_format).as_str(),
+        "openai:chat"
+    ) && matches!(
+        aether_ai_formats::normalize_api_format_alias(provider_api_format).as_str(),
+        "claude:messages"
+    ) && is_claude_messages_shaped_body_on_openai_chat_endpoint(body_json)
+    {
+        return Cow::Borrowed("claude:messages");
+    }
+    Cow::Borrowed(client_api_format)
 }
 
 pub fn build_standard_request_body_from_canonical(
@@ -442,6 +468,182 @@ mod tests {
 
             assert_explicit_stream_flag(provider_api_format, false, &converted);
         }
+    }
+
+    #[test]
+    fn standard_openai_chat_to_claude_accepts_claude_native_body_from_chat_endpoint() {
+        let request = json!({
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "user", "content": "lookup"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "checking"},
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "lookup",
+                            "input": {"q": "db"}
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "call_1",
+                        "content": {"rows": 1},
+                        "is_error": false
+                    }]
+                }
+            ],
+            "tools": [{
+                "name": "lookup",
+                "description": "Lookup data",
+                "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}}
+            }],
+            "tool_choice": {"type": "auto"},
+            "max_tokens": 128,
+            "stream": true
+        });
+
+        let converted = build_standard_request_body(
+            &request,
+            "openai:chat",
+            "claude-sonnet-4-5",
+            "custom",
+            "claude:messages",
+            "/v1/chat/completions",
+            true,
+            None,
+            None,
+        )
+        .expect("claude-native chat endpoint body should build as claude messages");
+
+        assert_eq!(converted["model"], "claude-sonnet-4-5");
+        assert_eq!(converted["max_tokens"], 128);
+        assert_eq!(converted["tools"][0]["name"], "lookup");
+        assert_eq!(
+            converted["tools"][0]["input_schema"]["properties"]["q"]["type"],
+            "string"
+        );
+        assert_eq!(converted["messages"][1]["content"][1]["type"], "tool_use");
+        assert_eq!(converted["messages"][1]["content"][1]["id"], "call_1");
+        assert_eq!(
+            converted["messages"][2]["content"][0]["type"],
+            "tool_result"
+        );
+        assert_eq!(
+            converted["messages"][2]["content"][0]["tool_use_id"],
+            "call_1"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                converted["messages"][2]["content"][0]["content"]
+                    .as_str()
+                    .expect("object tool result content should be serialized for Claude")
+            )
+            .expect("serialized tool result content should remain JSON"),
+            json!({"rows": 1})
+        );
+        assert_eq!(converted["tool_choice"]["type"], "auto");
+        assert_eq!(converted["stream"], true);
+    }
+
+    #[test]
+    fn standard_openai_chat_to_claude_normalizes_multiturn_tool_history() {
+        let request = json!({
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "system", "content": "Be precise."},
+                {"role": "user", "content": "check two things"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "id": "weather-1",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": "{\"city\":\"NYC\"}"}
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{\"q\":\"db\"}"}
+                        }
+                    ]
+                },
+                {"role": "tool", "tool_call_id": "weather-1", "content": ""},
+                {"role": "tool", "tool_call_id": "call_2", "content": [{"type": "text", "text": "rows=1"}]},
+                {"role": "user", "content": "now answer"}
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "get_weather", "description": "Get weather", "parameters": null}
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "description": "Lookup data",
+                        "parameters": {"properties": {"q": {"type": "string"}}}
+                    }
+                }
+            ],
+            "parallel_tool_calls": true,
+            "max_tokens": 128,
+            "stream": true
+        });
+
+        let converted = build_standard_request_body(
+            &request,
+            "openai:chat",
+            "claude-sonnet-4-5",
+            "custom",
+            "claude:messages",
+            "/v1/chat/completions",
+            true,
+            None,
+            None,
+        )
+        .expect("openai chat tool history should build as claude messages");
+
+        assert_eq!(converted["model"], "claude-sonnet-4-5");
+        assert_eq!(converted["system"], "Be precise.");
+        assert_eq!(converted["messages"][0]["role"], "user");
+        assert_eq!(converted["messages"][1]["role"], "assistant");
+        assert_eq!(converted["messages"][1]["content"][0]["type"], "tool_use");
+        assert_eq!(
+            converted["messages"][1]["content"][0]["id"],
+            "toolu_weather-1"
+        );
+        assert_eq!(converted["messages"][1]["content"][1]["id"], "call_2");
+        assert_eq!(converted["messages"][2]["role"], "user");
+        assert_eq!(
+            converted["messages"][2]["content"][0]["type"],
+            "tool_result"
+        );
+        assert_eq!(
+            converted["messages"][2]["content"][0]["tool_use_id"],
+            "toolu_weather-1"
+        );
+        assert_eq!(converted["messages"][2]["content"][0]["content"], "(empty)");
+        assert_eq!(
+            converted["messages"][2]["content"][1]["tool_use_id"],
+            "call_2"
+        );
+        assert_eq!(converted["messages"][2]["content"][1]["content"], "rows=1");
+        assert_eq!(converted["messages"][2]["content"][2]["type"], "text");
+        assert_eq!(converted["messages"][2]["content"][2]["text"], "now answer");
+        assert_eq!(converted["tools"][0]["input_schema"]["type"], "object");
+        assert_eq!(
+            converted["tools"][0]["input_schema"]["properties"],
+            json!({})
+        );
+        assert_eq!(converted["tools"][1]["input_schema"]["type"], "object");
+        assert_eq!(converted["stream"], true);
     }
 
     fn codex_default_body_rules() -> Value {

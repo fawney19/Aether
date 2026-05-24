@@ -10,16 +10,17 @@ export type ModelTestImagePreview = {
 }
 
 export function extractModelTestResponsePreview(responseBody: unknown): string | null {
-  const text = extractResponseText(responseBody)
+  const normalizedBody = normalizeModelTestResponseBody(responseBody)
+  const text = extractResponseText(normalizedBody)
   if (text) return text
 
-  const reasoning = extractResponseReasoning(responseBody)
+  const reasoning = extractResponseReasoning(normalizedBody)
   if (reasoning) return `推理：${reasoning}`
 
-  const image = extractImagePreview(responseBody)
+  const image = extractImagePreview(normalizedBody)
   if (image) return image
 
-  const summary = extractResponseSummary(responseBody)
+  const summary = extractResponseSummary(normalizedBody)
   if (summary) return summary
 
   return null
@@ -27,8 +28,24 @@ export function extractModelTestResponsePreview(responseBody: unknown): string |
 
 export function extractModelTestImagePreviews(responseBody: unknown): ModelTestImagePreview[] {
   const previews: ModelTestImagePreview[] = []
-  collectImagePreviews(responseBody, previews, new Set(), 0)
+  collectImagePreviews(normalizeModelTestResponseBody(responseBody), previews, new Set(), 0)
   return previews
+}
+
+function normalizeModelTestResponseBody(value: unknown): unknown {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (!trimmed) return value
+
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      return JSON.parse(trimmed)
+    } catch {
+      return value
+    }
+  }
+
+  return value
 }
 
 function isJsonRecord(value: unknown): value is JsonRecord {
@@ -146,6 +163,7 @@ function collectImagePreviews(
     value.output,
     value.images,
     value.content,
+    value.item,
   ]
   for (const nested of nestedValues) {
     collectImagePreviews(nested, previews, seen, depth + 1)
@@ -202,6 +220,9 @@ function imageUrlToPreview(value: unknown, source: 'url'): ModelTestImagePreview
   if (!url) return null
   if (url.startsWith('data:image/')) {
     return { src: url, label: 'base64', source: 'base64' }
+  }
+  if (url.startsWith('/')) {
+    return { src: url, label: 'URL', source }
   }
 
   try {

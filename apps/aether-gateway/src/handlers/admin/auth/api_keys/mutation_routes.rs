@@ -10,7 +10,8 @@ use crate::handlers::admin::users::{
     default_admin_user_api_key_name, format_optional_unix_secs_iso8601,
     generate_admin_user_api_key_plaintext, hash_admin_user_api_key, masked_user_api_key_display,
     normalize_admin_feature_settings, normalize_admin_optional_api_key_name,
-    normalize_admin_user_api_formats, normalize_admin_user_string_list,
+    normalize_admin_user_api_formats, normalize_admin_user_ip_rules,
+    normalize_admin_user_string_list,
 };
 use crate::handlers::shared::normalize_optional_api_key_concurrent_limit;
 use crate::GatewayError;
@@ -109,6 +110,10 @@ pub(super) async fn build_admin_create_api_key_response(
             Ok(value) => value,
             Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
         };
+    let ip_rules = match normalize_admin_user_ip_rules(payload.ip_rules) {
+        Ok(value) => value,
+        Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+    };
     if payload.rate_limit.is_some_and(|value| value < 0) {
         return Ok(build_admin_api_keys_bad_request_response(
             "rate_limit 必须大于等于 0",
@@ -162,6 +167,7 @@ pub(super) async fn build_admin_create_api_key_response(
                 allowed_providers,
                 allowed_api_formats,
                 allowed_models,
+                ip_rules,
                 rate_limit: payload.rate_limit,
                 concurrent_limit,
                 force_capabilities: None,
@@ -327,6 +333,19 @@ pub(super) async fn build_admin_update_api_key_response(
     } else {
         None
     };
+    let ip_rules_present =
+        field_presence.contains("ip_rules") || field_presence.contains("allowed_ips");
+    let ip_rules = if ip_rules_present {
+        match payload.ip_rules {
+            Some(value) => match normalize_admin_user_ip_rules(value) {
+                Ok(value) => Some(value),
+                Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+            },
+            None => Some(None),
+        }
+    } else {
+        None
+    };
     let effective_expires_at_unix_secs = if field_presence.contains("expires_at") {
         match parse_standalone_api_key_expires_at(payload.expires_at.as_deref()) {
             Ok(value) => value,
@@ -394,6 +413,7 @@ pub(super) async fn build_admin_update_api_key_response(
                 allowed_providers,
                 allowed_api_formats,
                 allowed_models,
+                ip_rules,
                 expires_at_present: field_presence.contains("expires_at"),
                 expires_at_unix_secs: if field_presence.contains("expires_at") {
                     effective_expires_at_unix_secs

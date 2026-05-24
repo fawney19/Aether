@@ -1,0 +1,51 @@
+# Aether 本地在线更新联调环境
+# 使用当前源码构建一个 release-layout 测试镜像，专门验证管理后台一键更新。
+#
+# 启动:
+#   docker compose -f docker-compose.release-local.yml up -d --build
+#
+# 重置（包含 /opt/aether/current 与历史版本目录）:
+#   docker compose -f docker-compose.release-local.yml down -v
+
+name: aether-release-local
+
+services:
+  release-local-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.app.release-local
+      args:
+        AETHER_BUILD_VERSION: ${AETHER_RELEASE_LOCAL_VERSION:-v0.7.0}
+        AETHER_BUILD_TYPE: release
+    image: ${LOCAL_RELEASE_APP_IMAGE:-aether-app:release-local}
+    container_name: aether-release-local-app
+    env_file:
+      - ${AETHER_ENV_FILE:-.env}
+    environment:
+      TZ: Asia/Shanghai
+      AETHER_DATABASE_DRIVER: sqlite
+      AETHER_DATABASE_URL: sqlite://./data/aether.db
+      AETHER_RUNTIME_BACKEND: memory
+      AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY: single-node
+      AETHER_GATEWAY_NODE_ROLE: all
+      AETHER_LOG_DESTINATION: ${AETHER_LOG_DESTINATION:-stdout}
+      AETHER_LOG_FORMAT: ${AETHER_LOG_FORMAT:-pretty}
+      AETHER_LOG_DIR: ${AETHER_LOG_DIR:-/opt/aether/logs}
+      AETHER_LOG_ROTATION: ${AETHER_LOG_ROTATION:-daily}
+      AETHER_LOG_RETENTION_DAYS: ${AETHER_LOG_RETENTION_DAYS:-7}
+      AETHER_LOG_MAX_FILES: ${AETHER_LOG_MAX_FILES:-30}
+      APP_PORT: ${AETHER_RELEASE_LOCAL_PORT:-18085}
+      AETHER_UPDATE_PROXY_URL: ${AETHER_UPDATE_PROXY_URL:-}
+      UPDATE_PROXY_URL: ${UPDATE_PROXY_URL:-}
+      AETHER_BASE_DIR: /opt/aether
+      AETHER_UPDATE_STRATEGY: self
+      AETHER_GATEWAY_AUTO_PREPARE_DATABASE: ${AETHER_GATEWAY_AUTO_PREPARE_DATABASE:-true}
+    ports:
+      - "${AETHER_RELEASE_LOCAL_PORT:-18085}:${AETHER_RELEASE_LOCAL_PORT:-18085}"
+    volumes:
+      - ./data-release-local:/app/data
+      - aether_release_local_root:/opt/aether
+    restart: unless-stopped
+
+volumes:
+  aether_release_local_root:

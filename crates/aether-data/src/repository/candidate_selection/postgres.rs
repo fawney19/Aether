@@ -54,15 +54,100 @@ SELECT
 FROM providers p
 INNER JOIN provider_endpoints pe
   ON pe.provider_id = p.id
-INNER JOIN provider_api_keys pak
-  ON pak.provider_id = p.id
+INNER JOIN LATERAL (
+  SELECT pak.*
+  FROM provider_api_keys pak
+  WHERE pak.provider_id = p.id
+    AND pak.is_active IS TRUE
+    AND (
+      pak.api_formats IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM json_array_elements_text(pak.api_formats) AS fmt(value)
+        WHERE LOWER(BTRIM(fmt.value)) = ANY($2::text[])
+      )
+    )
+    AND (
+      (
+        LOWER(BTRIM(p.provider_type)) = 'codex'
+        AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+        AND LOWER($3) IN ('openai:responses', 'openai:responses:compact', 'openai:image')
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) = 'chatgpt_web'
+        AND LOWER(BTRIM(pak.auth_type)) IN ('oauth', 'bearer')
+        AND LOWER($3) = 'openai:image'
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) = 'claude_code'
+        AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+        AND LOWER($3) = 'claude:messages'
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) = 'kiro'
+        AND LOWER($3) = 'claude:messages'
+        AND (
+          LOWER(BTRIM(pak.auth_type)) = 'oauth'
+          OR (
+            LOWER(BTRIM(pak.auth_type)) = 'bearer'
+            AND pak.auth_config IS NOT NULL
+            AND BTRIM(pak.auth_config) <> ''
+          )
+        )
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) = 'grok'
+        AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+        AND LOWER($3) IN ('openai:chat', 'openai:responses', 'claude:messages', 'openai:image')
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) IN ('gemini_cli', 'antigravity')
+        AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+        AND LOWER($3) = 'gemini:generate_content'
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) = 'windsurf'
+        AND LOWER(BTRIM(pak.auth_type)) IN ('oauth', 'api_key', 'bearer')
+        AND LOWER($3) = 'openai:chat'
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) = 'vertex_ai'
+        AND (
+          (
+            LOWER(BTRIM(pak.auth_type)) = 'api_key'
+            AND LOWER($3) IN ('gemini:generate_content', 'gemini:embedding')
+          )
+          OR (
+            LOWER(BTRIM(pak.auth_type)) IN ('service_account', 'vertex_ai')
+            AND LOWER($3) IN ('claude:messages', 'gemini:generate_content', 'gemini:embedding')
+          )
+        )
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) NOT IN (
+          'chatgpt_web',
+          'claude_code',
+          'codex',
+          'gemini_cli',
+          'grok',
+          'vertex_ai',
+          'antigravity',
+          'kiro',
+          'windsurf'
+        )
+        AND LOWER(BTRIM(pak.auth_type)) <> 'oauth'
+      )
+    )
+  ORDER BY pak.internal_priority ASC, pak.id ASC
+  LIMIT CASE WHEN (p.config -> 'pool_advanced') IS NOT NULL THEN 1 ELSE 2147483647 END
+) pak ON TRUE
 INNER JOIN models m
   ON m.provider_id = p.id
 INNER JOIN global_models gm
   ON gm.id = m.global_model_id
 WHERE p.is_active = TRUE
   AND pe.is_active = TRUE
-  AND pak.is_active = TRUE
+  AND pak.is_active IS TRUE
   AND m.is_active = TRUE
   AND m.is_available = TRUE
   AND gm.is_active = TRUE
@@ -114,6 +199,11 @@ WHERE p.is_active = TRUE
       AND LOWER($3) = 'gemini:generate_content'
     )
     OR (
+      LOWER(BTRIM(p.provider_type)) = 'windsurf'
+      AND LOWER(BTRIM(pak.auth_type)) IN ('oauth', 'api_key', 'bearer')
+      AND LOWER($3) = 'openai:chat'
+    )
+    OR (
       LOWER(BTRIM(p.provider_type)) = 'vertex_ai'
       AND (
         (
@@ -135,7 +225,8 @@ WHERE p.is_active = TRUE
         'grok',
         'vertex_ai',
         'antigravity',
-        'kiro'
+        'kiro',
+        'windsurf'
       )
       AND LOWER(BTRIM(pak.auth_type)) <> 'oauth'
     )
@@ -242,15 +333,100 @@ SELECT
 FROM providers p
 INNER JOIN provider_endpoints pe
   ON pe.provider_id = p.id
-INNER JOIN provider_api_keys pak
-  ON pak.provider_id = p.id
+INNER JOIN LATERAL (
+  SELECT pak.*
+  FROM provider_api_keys pak
+  WHERE pak.provider_id = p.id
+    AND pak.is_active IS TRUE
+    AND (
+      pak.api_formats IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM json_array_elements_text(pak.api_formats) AS fmt(value)
+        WHERE LOWER(BTRIM(fmt.value)) = ANY($3::text[])
+      )
+    )
+    AND (
+      (
+        LOWER(BTRIM(p.provider_type)) = 'codex'
+        AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+        AND LOWER($4) IN ('openai:responses', 'openai:responses:compact', 'openai:image')
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) = 'chatgpt_web'
+        AND LOWER(BTRIM(pak.auth_type)) IN ('oauth', 'bearer')
+        AND LOWER($4) = 'openai:image'
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) = 'claude_code'
+        AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+        AND LOWER($4) = 'claude:messages'
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) = 'kiro'
+        AND LOWER($4) = 'claude:messages'
+        AND (
+          LOWER(BTRIM(pak.auth_type)) = 'oauth'
+          OR (
+            LOWER(BTRIM(pak.auth_type)) = 'bearer'
+            AND pak.auth_config IS NOT NULL
+            AND BTRIM(pak.auth_config) <> ''
+          )
+        )
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) = 'grok'
+        AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+        AND LOWER($4) IN ('openai:chat', 'openai:responses', 'claude:messages', 'openai:image')
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) IN ('gemini_cli', 'antigravity')
+        AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+        AND LOWER($4) = 'gemini:generate_content'
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) = 'windsurf'
+        AND LOWER(BTRIM(pak.auth_type)) IN ('oauth', 'api_key', 'bearer')
+        AND LOWER($4) = 'openai:chat'
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) = 'vertex_ai'
+        AND (
+          (
+            LOWER(BTRIM(pak.auth_type)) = 'api_key'
+            AND LOWER($4) IN ('gemini:generate_content', 'gemini:embedding')
+          )
+          OR (
+            LOWER(BTRIM(pak.auth_type)) IN ('service_account', 'vertex_ai')
+            AND LOWER($4) IN ('claude:messages', 'gemini:generate_content', 'gemini:embedding')
+          )
+        )
+      )
+      OR (
+        LOWER(BTRIM(p.provider_type)) NOT IN (
+          'chatgpt_web',
+          'claude_code',
+          'codex',
+          'gemini_cli',
+          'grok',
+          'vertex_ai',
+          'antigravity',
+          'kiro',
+          'windsurf'
+        )
+        AND LOWER(BTRIM(pak.auth_type)) <> 'oauth'
+      )
+    )
+  ORDER BY pak.internal_priority ASC, pak.id ASC
+  LIMIT CASE WHEN (p.config -> 'pool_advanced') IS NOT NULL THEN 1 ELSE 2147483647 END
+) pak ON TRUE
 INNER JOIN models m
   ON m.provider_id = p.id
 INNER JOIN global_models gm
   ON gm.id = m.global_model_id
 WHERE p.is_active = TRUE
   AND pe.is_active = TRUE
-  AND pak.is_active = TRUE
+  AND pak.is_active IS TRUE
   AND m.is_active = TRUE
   AND m.is_available = TRUE
   AND gm.is_active = TRUE
@@ -303,6 +479,11 @@ WHERE p.is_active = TRUE
       AND LOWER($4) = 'gemini:generate_content'
     )
     OR (
+      LOWER(BTRIM(p.provider_type)) = 'windsurf'
+      AND LOWER(BTRIM(pak.auth_type)) IN ('oauth', 'api_key', 'bearer')
+      AND LOWER($4) = 'openai:chat'
+    )
+    OR (
       LOWER(BTRIM(p.provider_type)) = 'vertex_ai'
       AND (
         (
@@ -324,7 +505,8 @@ WHERE p.is_active = TRUE
         'grok',
         'vertex_ai',
         'antigravity',
-        'kiro'
+        'kiro',
+        'windsurf'
       )
       AND LOWER(BTRIM(pak.auth_type)) <> 'oauth'
     )
@@ -436,7 +618,7 @@ INNER JOIN global_models gm
   ON gm.id = m.global_model_id
 WHERE p.is_active = TRUE
   AND pe.is_active = TRUE
-  AND pak.is_active = TRUE
+  AND pak.is_active IS TRUE
   AND m.is_active = TRUE
   AND m.is_available = TRUE
   AND gm.is_active = TRUE
@@ -491,6 +673,11 @@ WHERE p.is_active = TRUE
       AND LOWER($6) = 'gemini:generate_content'
     )
     OR (
+      LOWER(BTRIM(p.provider_type)) = 'windsurf'
+      AND LOWER(BTRIM(pak.auth_type)) IN ('oauth', 'api_key', 'bearer')
+      AND LOWER($6) = 'openai:chat'
+    )
+    OR (
       LOWER(BTRIM(p.provider_type)) = 'vertex_ai'
       AND (
         (
@@ -512,7 +699,8 @@ WHERE p.is_active = TRUE
         'grok',
         'vertex_ai',
         'antigravity',
-        'kiro'
+        'kiro',
+        'windsurf'
       )
       AND LOWER(BTRIM(pak.auth_type)) <> 'oauth'
     )
@@ -1291,6 +1479,25 @@ mod tests {
     }
 
     #[test]
+    fn exact_candidate_selection_sql_limits_pool_key_expansion() {
+        for sql in [
+            LIST_FOR_EXACT_API_FORMAT_SQL,
+            LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL,
+        ] {
+            assert!(sql.contains("INNER JOIN LATERAL"));
+            assert!(sql.contains("FROM provider_api_keys pak"));
+            assert!(sql.contains("AND pak.is_active IS TRUE"));
+            assert!(!sql.contains("AND pak.is_active = TRUE"));
+            assert!(sql.contains(
+                "LIMIT CASE WHEN (p.config -> 'pool_advanced') IS NOT NULL THEN 1 ELSE 2147483647 END"
+            ));
+        }
+        assert!(!LIST_POOL_KEYS_FOR_GROUP_SQL.contains("INNER JOIN LATERAL"));
+        assert!(LIST_POOL_KEYS_FOR_GROUP_SQL.contains("AND pak.is_active IS TRUE"));
+        assert!(!LIST_POOL_KEYS_FOR_GROUP_SQL.contains("AND pak.is_active = TRUE"));
+    }
+
+    #[test]
     fn candidate_selection_sql_allows_chatgpt_web_image_auth() {
         let requested_model_sql = requested_model_selection_sql();
         for sql in [
@@ -1319,6 +1526,26 @@ mod tests {
             assert!(sql
                 .contains("'openai:chat', 'openai:responses', 'claude:messages', 'openai:image'"));
             assert!(sql.contains("'grok',"));
+        }
+    }
+
+    #[test]
+    fn candidate_selection_sql_allows_windsurf_openai_chat_managed_keys() {
+        let requested_model_sql = requested_model_selection_sql();
+        for sql in [
+            LIST_FOR_EXACT_API_FORMAT_SQL,
+            LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL,
+            LIST_POOL_KEYS_FOR_GROUP_SQL,
+            requested_model_sql.as_str(),
+        ] {
+            assert!(sql.contains("LOWER(BTRIM(p.provider_type)) = 'windsurf'"));
+            assert!(
+                sql.contains("LOWER($3) = 'openai:chat'")
+                    || sql.contains("LOWER($4) = 'openai:chat'")
+                    || sql.contains("LOWER($6) = 'openai:chat'")
+            );
+            assert!(sql.contains("LOWER(BTRIM(pak.auth_type)) IN ('oauth', 'api_key', 'bearer')"));
+            assert!(sql.contains("'windsurf'"));
         }
     }
 

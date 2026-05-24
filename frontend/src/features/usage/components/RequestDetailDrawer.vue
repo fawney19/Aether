@@ -537,9 +537,9 @@
               <!-- 请求链路追踪卡片 -->
               <div>
                 <HorizontalRequestTimeline
-                  v-if="showTimeline && (detail.request_id || detail.id)"
+                  v-if="showTimeline && traceTimelineRequestId"
                   ref="timelineRef"
-                  :request-id="detail.request_id || detail.id"
+                  :request-id="traceTimelineRequestId"
                   :override-status-code="detail.status_code"
                   :request-status="detail.status"
                   :request-api-format="detail.api_format || null"
@@ -794,7 +794,7 @@ import { AlertTriangle, Check, Columns2, RefreshCw, X, Monitor, Server, MessageS
 import { dashboardApi, type RequestDetail, type RequestErrorDomain } from '@/api/dashboard'
 import type { ImageProgress, RequestTrace } from '@/api/requestTrace'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
-import { formatShortRequestId } from '@/utils/format'
+import { formatCompactNumber, formatShortRequestId, formatTokens } from '@/utils/format'
 import { log } from '@/utils/logger'
 import { getEffectiveInputTokens } from '../token-normalization'
 import {
@@ -996,6 +996,17 @@ function getNestedString(record: JsonRecord | null, ...path: string[]): string |
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
+function getCaseInsensitiveString(record: JsonRecord | null, key: string): string | null {
+  if (!record) return null
+  const normalizedKey = key.toLowerCase()
+  for (const [name, value] of Object.entries(record)) {
+    if (name.toLowerCase() === normalizedKey && typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+  }
+  return null
+}
+
 function normalizeCacheTtlPricing(value: unknown): CacheTTLPriceEntry[] {
   if (!Array.isArray(value)) return []
   return value
@@ -1094,6 +1105,19 @@ const traceRequestMetadata = computed<Record<string, unknown> | null>(() => {
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return null
   return meta as Record<string, unknown>
 })
+
+const traceRecord = computed<Record<string, unknown> | null>(() =>
+  asRecord(detail.value?.trace ?? null),
+)
+
+const traceTimelineRequestId = computed(() =>
+  getNestedString(traceRecord.value, 'trace_id')
+  ?? getNestedString(traceRequestMetadata.value, 'trace_id')
+  ?? getCaseInsensitiveString(asRecord(detail.value?.request_headers ?? null), 'x-trace-id')
+  ?? detail.value?.request_id
+  ?? detail.value?.id
+  ?? null,
+)
 
 const metadataPanelData = computed<Record<string, unknown> | null>(() => {
   if (!detail.value) return null
@@ -2274,12 +2298,7 @@ function getTaskTypeLabel(taskType: string): string {
 }
 
 function formatNumber(num: number): string {
-  if (num >= 1_000_000) {
-    return `${(num / 1_000_000).toFixed(1)  }M`
-  } else if (num >= 1_000) {
-    return `${(num / 1_000).toFixed(1)  }K`
-  }
-  return num.toLocaleString()
+  return formatTokens(num)
 }
 
 function parseImageSizePixels(size: string | null): number | null {
@@ -2301,13 +2320,7 @@ function formatImagePriceBucket(bucket: string): string {
 }
 
 function formatPixels(value: number): string {
-  if (value >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(value % 1_000_000 === 0 ? 0 : 2)}M px`
-  }
-  if (value >= 1_000) {
-    return `${(value / 1_000).toFixed(0)}K px`
-  }
-  return `${value} px`
+  return `${formatCompactNumber(value)} px`
 }
 
 // 格式化响应时间，自动选择合适的单位

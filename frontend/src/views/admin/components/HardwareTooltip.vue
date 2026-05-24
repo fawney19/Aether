@@ -3,6 +3,7 @@ import type { ProxyNode } from '@/api/proxy-nodes'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Cpu } from 'lucide-vue-next'
 import { computed } from 'vue'
+import { formatCompactNumber } from '@/utils/format'
 
 const props = defineProps<{ node: ProxyNode }>()
 
@@ -104,9 +105,7 @@ function formatMemory(mb: number | null) {
 }
 
 function formatNumber(n: number) {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return String(n)
+  return formatCompactNumber(n, { fractionDigits: 1 })
 }
 
 function normalizeHardwareInfo(info: unknown): Record<string, unknown> | null {

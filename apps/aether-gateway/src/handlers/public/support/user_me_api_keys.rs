@@ -11,7 +11,8 @@ use serde_json::json;
 
 use crate::handlers::shared::{
     api_key_placeholder_display, deserialize_optional_json_patch,
-    generate_gateway_api_key_plaintext, masked_gateway_api_key_display, normalize_feature_settings,
+    deserialize_optional_string_list_patch, generate_gateway_api_key_plaintext,
+    masked_gateway_api_key_display, normalize_feature_settings, normalize_ip_rules,
     normalize_optional_api_key_concurrent_limit,
 };
 
@@ -34,6 +35,8 @@ struct UsersMeCreateApiKeyRequest {
     concurrent_limit: Option<i32>,
     #[serde(default)]
     feature_settings: Option<serde_json::Value>,
+    #[serde(default, alias = "allowed_ips")]
+    ip_rules: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +49,12 @@ struct UsersMeUpdateApiKeyRequest {
     concurrent_limit: Option<i32>,
     #[serde(default, deserialize_with = "deserialize_optional_json_patch")]
     feature_settings: Option<Option<serde_json::Value>>,
+    #[serde(
+        default,
+        alias = "allowed_ips",
+        deserialize_with = "deserialize_optional_string_list_patch"
+    )]
+    ip_rules: Option<Option<Vec<String>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,6 +169,7 @@ fn build_users_me_api_key_list_payload(
         "rate_limit": record.rate_limit,
         "concurrent_limit": record.concurrent_limit,
         "allowed_providers": record.allowed_providers,
+        "ip_rules": record.ip_rules,
         "force_capabilities": record.force_capabilities,
         "feature_settings": record.feature_settings,
     })
@@ -177,6 +187,7 @@ fn build_users_me_api_key_detail_payload(
         "is_active": record.is_active,
         "is_locked": is_locked,
         "allowed_providers": record.allowed_providers,
+        "ip_rules": record.ip_rules,
         "force_capabilities": record.force_capabilities,
         "feature_settings": record.feature_settings,
         "rate_limit": record.rate_limit,
@@ -197,6 +208,10 @@ fn normalize_users_me_required_api_key_name(value: &str) -> Result<String, Strin
 
 fn generate_users_me_api_key_plaintext() -> String {
     generate_gateway_api_key_plaintext()
+}
+
+fn normalize_users_me_ip_rules(values: Option<Vec<String>>) -> Result<Option<Vec<String>>, String> {
+    normalize_ip_rules(values)
 }
 
 fn hash_users_me_api_key(value: &str) -> String {
@@ -542,6 +557,12 @@ pub(super) async fn handle_users_me_api_key_create(
             return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
         }
     };
+    let ip_rules = match normalize_users_me_ip_rules(payload.ip_rules) {
+        Ok(value) => value,
+        Err(detail) => {
+            return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
+        }
+    };
 
     let plaintext_key = generate_users_me_api_key_plaintext();
     let Some(key_encrypted) = encrypt_catalog_secret_with_fallbacks(state, &plaintext_key) else {
@@ -560,6 +581,7 @@ pub(super) async fn handle_users_me_api_key_create(
         allowed_providers: None,
         allowed_api_formats: None,
         allowed_models: None,
+        ip_rules,
         rate_limit,
         concurrent_limit,
         force_capabilities: None,
@@ -614,6 +636,7 @@ pub(super) async fn handle_users_me_api_key_create(
         "is_locked": false,
         "rate_limit": created.rate_limit,
         "concurrent_limit": created.concurrent_limit,
+        "ip_rules": created.ip_rules,
         "feature_settings": created.feature_settings,
         "last_used_at": format_users_me_optional_unix_secs_iso8601(created.last_used_at_unix_secs),
         "created_at": format_users_me_optional_unix_secs_iso8601(created.created_at_unix_secs),
@@ -695,6 +718,15 @@ pub(super) async fn handle_users_me_api_key_update(
         },
         None => None,
     };
+    let ip_rules = match payload.ip_rules {
+        Some(value) => match normalize_users_me_ip_rules(value) {
+            Ok(value) => Some(value),
+            Err(detail) => {
+                return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
+            }
+        },
+        None => None,
+    };
 
     let Some(updated) = (match state
         .update_user_api_key_basic(aether_data::repository::auth::UpdateUserApiKeyBasicRecord {
@@ -703,6 +735,7 @@ pub(super) async fn handle_users_me_api_key_update(
             name,
             rate_limit,
             concurrent_limit,
+            ip_rules,
         })
         .await
     {
@@ -1056,4 +1089,59 @@ pub(super) async fn handle_users_me_api_key_capabilities_put(
         "force_capabilities": updated.force_capabilities.unwrap_or(serde_json::Value::Null),
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_users_me_ip_rules, UsersMeUpdateApiKeyRequest};
+    use serde_json::json;
+
+    #[test]
+    fn normalize_ip_rules_trims_ip_and_cidr_values() {
+        let values = normalize_users_me_ip_rules(Some(vec![
+            " 203.0.113.10 ".to_string(),
+            "10.0.0.0/24".to_string(),
+        ]))
+        .expect("valid IP rules should normalize");
+
+        assert_eq!(
+            values,
+            Some(vec!["203.0.113.10".to_string(), "10.0.0.0/24".to_string()]),
+        );
+    }
+
+    #[test]
+    fn normalize_ip_rules_rejects_invalid_cidr() {
+        let err = normalize_users_me_ip_rules(Some(vec!["10.0.0.0/99".to_string()]))
+            .expect_err("invalid cidr should fail");
+
+        assert_eq!(err, "无效的 IP 限制规则: 10.0.0.0/99（第 1 项）");
+    }
+
+    #[test]
+    fn update_payload_distinguishes_missing_null_and_present_ip_rules() {
+        let missing = serde_json::from_value::<UsersMeUpdateApiKeyRequest>(json!({
+            "name": "unchanged-ip-rules",
+        }))
+        .expect("missing ip_rules should deserialize");
+        assert_eq!(missing.ip_rules, None);
+
+        let cleared = serde_json::from_value::<UsersMeUpdateApiKeyRequest>(json!({
+            "ip_rules": null,
+        }))
+        .expect("null ip_rules should deserialize");
+        assert_eq!(cleared.ip_rules, Some(None));
+
+        let updated = serde_json::from_value::<UsersMeUpdateApiKeyRequest>(json!({
+            "ip_rules": ["203.0.113.10", "10.0.0.0/24"],
+        }))
+        .expect("present ip_rules should deserialize");
+        assert_eq!(
+            updated.ip_rules,
+            Some(Some(vec![
+                "203.0.113.10".to_string(),
+                "10.0.0.0/24".to_string(),
+            ])),
+        );
+    }
 }

@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use axum::extract::Request;
-use axum::http::Method;
+use axum::http::header::{CACHE_CONTROL, EXPIRES, PRAGMA};
+use axum::http::{HeaderValue, Method};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
@@ -90,7 +91,6 @@ fn frontend_path_bypasses_static(path: &str) -> bool {
         || path.starts_with("/.well-known/")
         || path.starts_with("/install/")
         || path.starts_with("/install-tunnel/")
-        || path.starts_with("/install-proxy/")
         || path.starts_with("/i/")
 }
 
@@ -112,7 +112,16 @@ async fn serve_static_asset(static_dir: &PathBuf, request: Request) -> Response 
 
 async fn serve_frontend_index(index_html: &PathBuf, request: Request) -> Response {
     match ServeFile::new(index_html).oneshot(request).await {
-        Ok(response) => response.into_response(),
+        Ok(mut response) => {
+            let headers = response.headers_mut();
+            headers.insert(
+                CACHE_CONTROL,
+                HeaderValue::from_static("no-store, no-cache, must-revalidate"),
+            );
+            headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
+            headers.insert(EXPIRES, HeaderValue::from_static("0"));
+            response.into_response()
+        }
         Err(err) => {
             warn!(error = %err, "failed to serve frontend index");
             axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()

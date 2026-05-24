@@ -3433,6 +3433,14 @@ async fn gateway_cleans_up_admin_pool_banned_keys_locally_with_trusted_admin_pri
     );
     banned_key.name = "banned".to_string();
     banned_key.oauth_invalid_reason = Some("account_banned".to_string());
+    let mut oauth_expired_key = sample_key(
+        "key-openai-oauth-expired",
+        "provider-openai",
+        "openai:chat",
+        "sk-oauth-expired",
+    );
+    oauth_expired_key.name = "oauth-expired".to_string();
+    oauth_expired_key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] token invalidated".to_string());
     let mut healthy_key = sample_key(
         "key-openai-healthy",
         "provider-openai",
@@ -3444,7 +3452,7 @@ async fn gateway_cleans_up_admin_pool_banned_keys_locally_with_trusted_admin_pri
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
         Vec::new(),
-        vec![banned_key, healthy_key],
+        vec![banned_key, oauth_expired_key, healthy_key],
     ));
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
@@ -3481,8 +3489,13 @@ async fn gateway_cleans_up_admin_pool_banned_keys_locally_with_trusted_admin_pri
         .list_keys_by_provider_ids(&["provider-openai".to_string()])
         .await
         .expect("remaining keys should load");
-    assert_eq!(remaining_keys.len(), 1);
-    assert_eq!(remaining_keys[0].id, "key-openai-healthy");
+    assert_eq!(remaining_keys.len(), 2);
+    assert!(remaining_keys
+        .iter()
+        .any(|key| key.id == "key-openai-oauth-expired"));
+    assert!(remaining_keys
+        .iter()
+        .any(|key| key.id == "key-openai-healthy"));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

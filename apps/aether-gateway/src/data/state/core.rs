@@ -511,6 +511,45 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn export_admin_system_usage_aggregates(
+        &self,
+    ) -> Result<aether_data::repository::system::AdminSystemUsageAggregateSnapshot, DataLayerError>
+    {
+        match self.backends.as_ref() {
+            Some(backends) => backends.export_admin_system_usage_aggregates().await,
+            None => {
+                Ok(aether_data::repository::system::AdminSystemUsageAggregateSnapshot::default())
+            }
+        }
+    }
+
+    pub(crate) async fn import_admin_system_usage_aggregates(
+        &self,
+        snapshot: &aether_data::repository::system::AdminSystemUsageAggregateSnapshot,
+        user_id_map: &std::collections::BTreeMap<String, String>,
+        api_key_id_map: &std::collections::BTreeMap<String, String>,
+        mode: aether_data::repository::system::AdminSystemUsageAggregateImportMode,
+    ) -> Result<
+        aether_data::repository::system::AdminSystemUsageAggregateImportSummary,
+        DataLayerError,
+    > {
+        match self.backends.as_ref() {
+            Some(backends) => {
+                backends
+                    .import_admin_system_usage_aggregates(
+                        snapshot,
+                        user_id_map,
+                        api_key_id_map,
+                        mode,
+                    )
+                    .await
+            }
+            None => Ok(
+                aether_data::repository::system::AdminSystemUsageAggregateImportSummary::default(),
+            ),
+        }
+    }
+
     pub(crate) async fn purge_admin_request_bodies_batch(
         &self,
         batch_size: usize,

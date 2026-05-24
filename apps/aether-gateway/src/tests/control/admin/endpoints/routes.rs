@@ -348,6 +348,78 @@ async fn gateway_counts_keys_with_null_api_formats_for_each_fixed_provider_endpo
 }
 
 #[tokio::test]
+async fn gateway_counts_inherited_windsurf_key_formats_for_admin_provider_endpoints() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/api/admin/endpoints/providers/provider-windsurf/endpoints",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }
+        }),
+    );
+
+    let mut key = sample_key(
+        "key-windsurf-a",
+        "provider-windsurf",
+        "openai:chat",
+        "oauth-secret",
+    );
+    key.auth_type = "oauth".to_string();
+    key.api_formats = None;
+
+    let mut provider = sample_provider("provider-windsurf", "windsurf", 10);
+    provider.provider_type = "windsurf".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-windsurf-chat",
+            "provider-windsurf",
+            "openai:chat",
+            "https://server.codeium.com",
+        )],
+        vec![key],
+    ));
+
+    let (_, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+                provider_catalog_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/endpoints/providers/provider-windsurf/endpoints?skip=0&limit=50"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    let items = payload.as_array().expect("payload should be an array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], "endpoint-windsurf-chat");
+    assert_eq!(items[0]["total_keys"], 1);
+    assert_eq!(items[0]["active_keys"], 1);
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_returns_service_unavailable_for_admin_provider_endpoint_create_when_catalog_writer_unavailable(
 ) {
     let upstream_hits = Arc::new(Mutex::new(0usize));

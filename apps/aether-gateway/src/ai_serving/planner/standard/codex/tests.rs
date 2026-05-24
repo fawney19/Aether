@@ -85,7 +85,7 @@ fn injects_stable_prompt_cache_key_for_codex_requests() {
 
     assert_eq!(
         body["prompt_cache_key"],
-        "172c39e6-c0a0-5a70-8b63-e0f8e0d185a3"
+        "53363264-dbb0-5f9d-b9c7-3e92c45c5bdf"
     );
 }
 

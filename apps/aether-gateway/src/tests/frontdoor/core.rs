@@ -145,6 +145,13 @@ async fn gateway_serves_frontend_routes_and_assets_without_shadowing_public_api(
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store, no-cache, must-revalidate")
+    );
     let content_type = response
         .headers()
         .get("content-type")
@@ -161,6 +168,13 @@ async fn gateway_serves_frontend_routes_and_assets_without_shadowing_public_api(
         .await
         .expect("spa request should succeed");
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store, no-cache, must-revalidate")
+    );
     let body = response.text().await.expect("spa body should be readable");
     assert!(body.contains("Aether Frontend"));
 

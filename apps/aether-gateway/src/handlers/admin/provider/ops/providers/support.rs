@@ -33,6 +33,8 @@ pub(super) struct AdminProviderOpsSaveConfigRequest {
     pub(crate) actions: BTreeMap<String, AdminProviderOpsActionConfigRequest>,
     #[serde(default)]
     pub(crate) schedule: BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) quota_alert: Option<AdminProviderOpsQuotaAlertConfigRequest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +55,16 @@ pub(super) struct AdminProviderOpsActionConfigRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct AdminProviderOpsQuotaAlertConfigRequest {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default, deserialize_with = "deserialize_optional_f64_from_number")]
+    pub(crate) threshold_amount: Option<f64>,
+    #[serde(default)]
+    pub(crate) fetch_interval_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct AdminProviderOpsConnectRequest {
     #[serde(default)]
     pub(crate) credentials: Option<serde_json::Map<String, serde_json::Value>>,
@@ -70,4 +82,29 @@ fn default_admin_provider_ops_architecture_id() -> String {
 
 fn default_admin_provider_ops_action_enabled() -> bool {
     true
+}
+
+fn deserialize_optional_f64_from_number<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(number)) => number
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .map(Some)
+            .ok_or_else(|| serde::de::Error::custom("expected a finite number")),
+        Some(serde_json::Value::String(raw)) => raw
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(Some)
+            .ok_or_else(|| serde::de::Error::custom("expected a finite number or numeric string")),
+        Some(_) => Err(serde::de::Error::custom(
+            "expected a finite number or numeric string",
+        )),
+    }
 }

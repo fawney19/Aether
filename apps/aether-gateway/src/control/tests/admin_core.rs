@@ -202,6 +202,10 @@ fn classifies_admin_system_maintenance_write_routes_as_admin_proxy_route() {
         ("/api/admin/system/users/import", "users_import"),
         ("/api/admin/system/data/import", "data_import"),
         ("/api/admin/system/smtp/test", "smtp_test"),
+        (
+            "/api/admin/system/important-notification/test",
+            "important_notification_test",
+        ),
         ("/api/admin/system/cleanup", "cleanup"),
         ("/api/admin/system/purge/config", "purge_config"),
         ("/api/admin/system/purge/users", "purge_users"),
@@ -251,6 +255,55 @@ fn classifies_admin_system_check_update_as_admin_proxy_route() {
         Some("admin:system")
     );
     assert!(!decision.is_execution_runtime_candidate());
+}
+
+#[test]
+fn classifies_admin_system_update_routes_as_admin_proxy_routes() {
+    let headers = headers(&[]);
+    let cases = [
+        (
+            http::Method::GET,
+            "/api/admin/system/update-capability",
+            "update_capability",
+        ),
+        (
+            http::Method::POST,
+            "/api/admin/system/prepare-update",
+            "prepare_update",
+        ),
+        (
+            http::Method::POST,
+            "/api/admin/system/apply-update",
+            "apply_update",
+        ),
+        (http::Method::POST, "/api/admin/system/rollback", "rollback"),
+        (http::Method::GET, "/api/admin/system/releases", "releases"),
+        (
+            http::Method::GET,
+            "/api/admin/system/update-history",
+            "update_history",
+        ),
+        (
+            http::Method::GET,
+            "/api/admin/system/update-status",
+            "update_status",
+        ),
+    ];
+
+    for (method, path, expected_kind) in cases {
+        let uri: Uri = path.parse().expect("uri should parse");
+        let decision =
+            classify_control_route(&method, &uri, &headers).expect("route should classify");
+
+        assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+        assert_eq!(decision.route_family.as_deref(), Some("system_manage"));
+        assert_eq!(decision.route_kind.as_deref(), Some(expected_kind));
+        assert_eq!(
+            decision.auth_endpoint_signature.as_deref(),
+            Some("admin:system")
+        );
+        assert!(!decision.is_execution_runtime_candidate());
+    }
 }
 
 #[test]

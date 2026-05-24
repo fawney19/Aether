@@ -14,10 +14,7 @@ use crate::ai_serving::planner::candidate_metadata::{
     LocalExecutionCandidateMetadataParts,
 };
 use crate::ai_serving::planner::candidate_resolution::SkippedLocalExecutionCandidate;
-use crate::ai_serving::planner::candidate_source::{
-    preselect_local_execution_candidates_for_api_formats_with_serving,
-    LocalCandidatePreselectionKeyMode,
-};
+use crate::ai_serving::planner::candidate_source::LocalCandidatePreselectionKeyMode;
 use crate::ai_serving::planner::materialization_policy::{
     build_local_candidate_persistence_policy, LocalCandidatePersistencePolicyKind,
 };
@@ -26,7 +23,7 @@ use crate::ai_serving::{
     ai_local_execution_contract_for_formats, extract_pool_sticky_session_token,
     ExecutionRuntimeAuthContext, PlannerAppState,
 };
-use crate::{AppState, GatewayError};
+use crate::AppState;
 
 pub(crate) use crate::ai_serving::planner::candidate_materialization::LocalExecutionCandidateAttempt as LocalOpenAiChatCandidateAttempt;
 pub(crate) use crate::ai_serving::planner::candidate_materialization::LocalExecutionCandidateAttemptSource as LocalOpenAiChatCandidateAttemptSource;
@@ -356,96 +353,4 @@ pub(crate) async fn build_lazy_local_openai_chat_candidate_attempt_source<'a>(
         },
     )
     .await
-}
-
-pub(crate) async fn build_local_openai_chat_image_candidate_attempt_source<'a>(
-    state: &'a AppState,
-    trace_id: &str,
-    input: &LocalOpenAiChatDecisionInput,
-    body_json: &serde_json::Value,
-) -> Result<(LocalOpenAiChatCandidateAttemptSource<'a>, usize), GatewayError> {
-    let planner_state = PlannerAppState::new(state);
-    let sticky_session_token = extract_pool_sticky_session_token(body_json);
-    let auth_context: &ExecutionRuntimeAuthContext = &input.auth_context;
-    let persistence_policy = build_local_candidate_persistence_policy(
-        auth_context,
-        input.required_capabilities.as_ref(),
-        LocalCandidatePersistencePolicyKind::OpenAiChatDecision,
-    );
-    let preselection = preselect_local_execution_candidates_for_api_formats_with_serving(
-        planner_state,
-        "openai:chat",
-        &input.requested_model,
-        false,
-        input.required_capabilities.as_ref(),
-        &input.auth_snapshot,
-        input.routing_policy.as_ref(),
-        input.client_session_affinity.as_ref(),
-        false,
-        LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
-        vec!["openai:image".to_string()],
-    )
-    .await?;
-
-    Ok(build_local_execution_candidate_attempt_source_with_serving(
-        planner_state,
-        trace_id,
-        "openai:chat",
-        Some(&input.requested_model),
-        Some(&input.auth_snapshot),
-        input.client_session_affinity.as_ref(),
-        input.required_capabilities.as_ref(),
-        input.routing_policy.as_ref(),
-        sticky_session_token.as_deref(),
-        input.request_auth_channel.as_deref(),
-        persistence_policy,
-        preselection.candidates,
-        preselection.skipped_candidates,
-        LocalCandidateResolutionMode::WithoutTransportPairGate,
-        |eligible| {
-            let provider_api_format = eligible.provider_api_format.clone();
-            let (execution_strategy, conversion_mode) =
-                ai_local_execution_contract_for_formats("openai:chat", &provider_api_format);
-            Some(build_local_execution_candidate_contract_metadata(
-                LocalExecutionCandidateMetadataParts {
-                    eligible,
-                    provider_api_format: provider_api_format.as_str(),
-                    client_api_format: "openai:chat",
-                    extra_fields: serde_json::Map::new(),
-                },
-                execution_strategy,
-                conversion_mode,
-                eligible.candidate.endpoint_api_format.trim(),
-            ))
-        },
-        |mut skipped_candidate| {
-            let provider_api_format = skipped_candidate
-                .transport
-                .as_ref()
-                .map(|transport| transport.endpoint.api_format.trim().to_ascii_lowercase())
-                .unwrap_or_else(|| {
-                    skipped_candidate
-                        .candidate
-                        .endpoint_api_format
-                        .trim()
-                        .to_ascii_lowercase()
-                });
-            let (execution_strategy, conversion_mode) =
-                ai_local_execution_contract_for_formats("openai:chat", &provider_api_format);
-            skipped_candidate.extra_data = Some(
-                build_local_execution_candidate_contract_metadata_for_candidate(
-                    &skipped_candidate.candidate,
-                    skipped_candidate.transport_ref(),
-                    provider_api_format.as_str(),
-                    "openai:chat",
-                    serde_json::Map::new(),
-                    execution_strategy,
-                    conversion_mode,
-                    provider_api_format.as_str(),
-                ),
-            );
-            skipped_candidate
-        },
-    )
-    .await)
 }

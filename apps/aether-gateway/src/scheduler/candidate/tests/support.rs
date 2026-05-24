@@ -129,6 +129,7 @@ pub(super) fn sample_auth_snapshot(api_key_id: &str) -> GatewayAuthApiKeySnapsho
         api_key_allowed_providers: None,
         api_key_allowed_api_formats: None,
         api_key_allowed_models: None,
+        api_key_ip_rules: None,
         currently_usable: true,
     }
 }

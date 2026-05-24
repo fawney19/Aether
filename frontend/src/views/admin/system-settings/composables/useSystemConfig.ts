@@ -177,6 +177,7 @@ export function useSystemConfig() {
   const systemConfig = ref<SystemConfig>(createDefaultConfig())
   const originalConfig = ref<SystemConfig | null>(null)
   const systemVersion = ref<string>('')
+  const systemConfigLoading = ref(true)
 
   // 各模块 loading 状态
   const siteInfoLoading = ref(false)
@@ -187,6 +188,7 @@ export function useSystemConfig() {
 
   // 变动检测
   const hasSiteInfoChanges = computed(() => {
+    if (systemConfigLoading.value) return false
     if (!originalConfig.value) return false
     return (
       systemConfig.value.site_name !== originalConfig.value.site_name ||
@@ -195,11 +197,13 @@ export function useSystemConfig() {
   })
 
   const hasProxyConfigChanges = computed(() => {
+    if (systemConfigLoading.value) return false
     if (!originalConfig.value) return false
     return systemConfig.value.system_proxy_node_id !== originalConfig.value.system_proxy_node_id
   })
 
   const hasBasicConfigChanges = computed(() => {
+    if (systemConfigLoading.value) return false
     if (!originalConfig.value) return false
     return (
       systemConfig.value.default_user_initial_gift_usd !== originalConfig.value.default_user_initial_gift_usd ||
@@ -231,6 +235,7 @@ export function useSystemConfig() {
   })
 
   const hasLogConfigChanges = computed(() => {
+    if (systemConfigLoading.value) return false
     if (!originalConfig.value) return false
     return (
       systemConfig.value.request_record_level !== originalConfig.value.request_record_level ||
@@ -242,6 +247,7 @@ export function useSystemConfig() {
   })
 
   const hasCleanupConfigChanges = computed(() => {
+    if (systemConfigLoading.value) return false
     if (!originalConfig.value) return false
     return (
       systemConfig.value.detail_log_retention_days !==
@@ -304,26 +310,47 @@ export function useSystemConfig() {
 
   // 加载配置
   async function loadSystemConfig() {
+    systemConfigLoading.value = true
     try {
-      for (const key of CONFIG_KEYS) {
+      const results = await Promise.all(
+        CONFIG_KEYS.map(async (key) => {
+          try {
+            return {
+              key,
+              response: await adminApi.getSystemConfig(key),
+            }
+          } catch {
+            return null
+          }
+        })
+      )
+
+      const nextConfig = createDefaultConfig()
+      for (const result of results) {
+        if (!result) {
+          continue
+        }
+        const { key, response } = result
         try {
-          const response = await adminApi.getSystemConfig(key)
           if (key === 'turnstile_secret_key') {
-            systemConfig.value.turnstile_secret_key = ''
-            systemConfig.value.turnstile_secret_key_is_set = !!response.is_set
+            nextConfig.turnstile_secret_key = ''
+            nextConfig.turnstile_secret_key_is_set = !!response.is_set
             continue
           }
           if (response.value !== null && response.value !== undefined) {
-            ; (systemConfig.value as Record<string, unknown>)[key] = response.value
+            ; (nextConfig as Record<string, unknown>)[key] = response.value
           }
         } catch {
           // 单个配置项加载失败时忽略，使用默认值
         }
       }
-      originalConfig.value = JSON.parse(JSON.stringify(systemConfig.value))
+      systemConfig.value = nextConfig
+      originalConfig.value = JSON.parse(JSON.stringify(nextConfig))
     } catch (err) {
       error('加载系统配置失败')
       log.error('加载系统配置失败:', err)
+    } finally {
+      systemConfigLoading.value = false
     }
   }
 
@@ -734,6 +761,7 @@ export function useSystemConfig() {
     systemConfig,
     originalConfig,
     systemVersion,
+    systemConfigLoading,
     // loading 状态
     siteInfoLoading,
     proxyConfigLoading,

@@ -243,12 +243,12 @@
             <Checkbox
               :checked="isAllFilteredSelected"
               :indeterminate="isPartiallyFilteredSelected"
-              :disabled="filteredUsers.length === 0 || usersStore.loading"
+              :disabled="filteredUserCount === 0 || usersStore.loading"
               @update:checked="toggleSelectFiltered"
             />
             <span>全选筛选结果</span>
           </label>
-          <span>匹配 {{ filteredUsers.length }} 个，当前页 {{ paginatedUsers.length }} 个，已选 {{ selectedCount }} 个</span>
+          <span>匹配 {{ filteredUserCount }} 个，当前页 {{ paginatedUsers.length }} 个，已选 {{ selectedCount }} 个</span>
         </div>
         <div class="flex flex-wrap items-center gap-1.5">
           <Button
@@ -576,10 +576,10 @@
             </AvatarFallback>
           </Avatar>
           <p class="text-sm font-medium text-foreground">
-            {{ searchQuery || filterRole !== 'all' || filterStatus !== 'all' ? '未找到匹配的用户' : '暂无用户' }}
+            {{ searchQuery || filterRole !== 'all' || filterStatus !== 'all' || filterGroup !== 'all' ? '未找到匹配的用户' : '暂无用户' }}
           </p>
           <p
-            v-if="searchQuery || filterRole !== 'all' || filterStatus !== 'all'"
+            v-if="searchQuery || filterRole !== 'all' || filterStatus !== 'all' || filterGroup !== 'all'"
             class="mt-1 text-xs text-muted-foreground"
           >
             尝试调整筛选条件
@@ -812,11 +812,11 @@
       <!-- 分页控件 -->
       <Pagination
         :current="currentPage"
-        :total="filteredUsers.length"
+        :total="filteredUserCount"
         :page-size="pageSize"
         cache-key="users-page-size"
-        @update:current="currentPage = $event"
-        @update:page-size="pageSize = $event"
+        @update:current="handlePageChange"
+        @update:page-size="handlePageSizeChange"
       />
     </Card>
 
@@ -843,7 +843,7 @@
 
     <UserGroupsDialog
       :open="showUserGroupsDialog"
-      :users="usersStore.users"
+      :users-version="userOptionsVersion"
       @close="showUserGroupsDialog = false"
       @changed="handleUserGroupsChanged"
     />
@@ -1089,6 +1089,9 @@
                     <code class="text-xs font-mono text-muted-foreground">
                       {{ apiKey.key_display || '****' }}
                     </code>
+                    <span class="text-xs text-muted-foreground">
+                      IP 限制：{{ formatIpRules(apiKey.ip_rules) }}
+                    </span>
                     <button
                       class="p-0.5 hover:bg-muted rounded transition-colors"
                       title="复制完整密钥"
@@ -1256,6 +1259,21 @@
           />
           <p class="text-xs text-muted-foreground">
             {{ editingUserApiKey ? '留空表示保持当前值，填 0 表示不限并发' : '留空表示不限并发，填 0 也表示不限并发' }}
+          </p>
+        </div>
+        <div class="space-y-2">
+          <Label
+            for="admin-user-key-ip-rules"
+            class="text-sm font-medium"
+          >IP 限制</Label>
+          <Input
+            id="admin-user-key-ip-rules"
+            v-model="userApiKeyForm.ip_rules_text"
+            class="h-10"
+            placeholder="例如：203.0.113.10, 10.0.0.0/24, !10.0.0.13"
+          />
+          <p class="text-xs text-muted-foreground">
+            留空表示不限制；支持 IP、CIDR、IPv4 通配符、*，用 ! 前缀拒绝，多个规则用英文逗号分隔
           </p>
         </div>
 
@@ -1562,6 +1580,7 @@ const userApiKeyForm = ref({
   name: '',
   rate_limit: undefined as number | undefined,
   concurrent_limit: undefined as number | undefined,
+  ip_rules_text: '',
   chat_pii_redaction_enabled: false,
   chat_pii_redaction_placeholder_notice: true,
 })
@@ -1573,10 +1592,11 @@ const showWalletActionDialogState = ref(false)
 const walletActionTarget = ref<{ user: User; wallet: AdminWallet } | null>(null)
 const showUserBatchDialog = ref(false)
 const showUserGroupsDialog = ref(false)
+const userOptionsVersion = ref(0)
 
 const searchQuery = ref('')
-const filterRole = ref('all')
-const filterStatus = ref('all')
+const filterRole = ref<'all' | User['role']>('all')
+const filterStatus = ref<'all' | 'active' | 'inactive'>('all')
 const filterGroup = ref('all')
 const userGroups = ref<UserGroup[]>([])
 const userRoleFilterOptions = [
@@ -1597,50 +1617,11 @@ const USERS_PAGE_CACHE_TTL_MS = 10 * 1000
 const USER_WALLETS_CACHE_TTL_MS = 10 * 1000
 let userWalletsRequestId = 0
 
-const filteredUsers = computed(() => {
-  let filtered = [...usersStore.users]
+const filteredUsers = computed(() => usersStore.users)
 
-  // 先排序：管理员优先，然后按创建时间倒序
-  filtered.sort((a, b) => {
-    const roleRank = (role: string) => role === 'admin' ? 0 : role === 'audit_admin' ? 1 : 2
-    const roleDiff = roleRank(a.role) - roleRank(b.role)
-    if (roleDiff !== 0) return roleDiff
-    // 同角色按创建时间倒序（新用户在前）
-    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-  })
+const paginatedUsers = computed(() => filteredUsers.value)
 
-  // 搜索（支持空格分隔的多关键词 AND 搜索）
-  if (searchQuery.value) {
-    const keywords = searchQuery.value.toLowerCase().split(/\s+/).filter(k => k.length > 0)
-    filtered = filtered.filter(u => {
-      const searchableText = `${u.username} ${u.email || ''}`.toLowerCase()
-      return keywords.every(keyword => searchableText.includes(keyword))
-    })
-  }
-
-  if (filterRole.value !== 'all') {
-    filtered = filtered.filter(u => u.role === filterRole.value)
-  }
-
-  if (filterStatus.value !== 'all') {
-    filtered = filtered.filter(u =>
-      filterStatus.value === 'active' ? u.is_active : !u.is_active
-    )
-  }
-
-  if (filterGroup.value !== 'all') {
-    filtered = filtered.filter(u => (u.groups || []).some(group => group.id === filterGroup.value))
-  }
-
-  return filtered
-})
-
-const paginatedUsers = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value
-  return filteredUsers.value.slice(start, start + pageSize.value)
-})
-
-const filteredUserCount = computed(() => filteredUsers.value.length)
+const filteredUserCount = computed(() => usersStore.total)
 const {
   selectedIds,
   selectAllFiltered,
@@ -1681,6 +1662,7 @@ const grantableBillingPlans = computed(() =>
 watch([searchQuery, filterRole, filterStatus, filterGroup], () => {
   currentPage.value = 1
   resetBatchSelection()
+  void refreshUsers()
 })
 
 watch(paginatedUsers, (users) => rememberBatchPageUsers(users), { immediate: true })
@@ -1701,13 +1683,34 @@ onMounted(() => {
 
 async function refreshUsers(options: { preferCache?: boolean } = {}) {
   const cacheTtlMs = options.preferCache ? USERS_PAGE_CACHE_TTL_MS : 0
+  const search = searchQuery.value.trim()
   await Promise.all([
-    usersStore.fetchUsers({ cacheTtlMs }),
+    usersStore.fetchUsers({
+      cacheTtlMs,
+      search: search || undefined,
+      role: filterRole.value === 'all' ? undefined : filterRole.value,
+      is_active: filterStatus.value === 'all' ? undefined : filterStatus.value === 'active',
+      group_id: filterGroup.value === 'all' ? undefined : filterGroup.value,
+      skip: (currentPage.value - 1) * pageSize.value,
+      limit: pageSize.value,
+    }),
     loadUserGroups(),
   ])
   void loadUserWallets({
     cacheTtlMs: options.preferCache ? USER_WALLETS_CACHE_TTL_MS : 0,
   })
+}
+
+function handlePageChange(page: number): void {
+  currentPage.value = page
+  void refreshUsers({ preferCache: true })
+}
+
+function handlePageSizeChange(size: number): void {
+  pageSize.value = size
+  currentPage.value = 1
+  resetBatchSelection()
+  void refreshUsers()
 }
 
 async function loadUserGroups(): Promise<void> {
@@ -1734,6 +1737,10 @@ function openUserBatchDialog(): void {
 async function handleUserBatchCompleted(_result: UserBatchActionResponse): Promise<void> {
   await refreshUsers()
   resetBatchSelection(true)
+}
+
+function invalidateUserOptions(): void {
+  userOptionsVersion.value += 1
 }
 
 function formatDate(dateString: string) {
@@ -1869,6 +1876,18 @@ function formatConcurrentLimitSimple(concurrentLimit?: number | null): string {
   return `${concurrentLimit} 并发`
 }
 
+function formatIpRules(ipRules?: string[] | null): string {
+  return ipRules && ipRules.length > 0 ? ipRules.join(', ') : '不限制'
+}
+
+function parseIpRulesInput(value: string): string[] | null {
+  const items = value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+  return items.length > 0 ? items : null
+}
+
 function formatUserEffectiveRateLimitSource(user: User): string {
   const source = user.effective_policy?.rate_limit
   if (!source) return ''
@@ -1901,6 +1920,8 @@ async function toggleUserStatus(user: User) {
 
   try {
     await usersStore.updateUser(user.id, { is_active: !user.is_active })
+    invalidateUserOptions()
+    await refreshUsers()
     success(`用户已${action}`)
   } catch (err: unknown) {
     error(parseApiError(err, '未知错误'), `${action}用户失败`)
@@ -1951,7 +1972,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
         updateData.password = data.password
       }
       await usersStore.updateUser(data.id, updateData)
-      await loadUserWallets()
+      invalidateUserOptions()
       success('用户信息已更新')
     } else {
       // 创建用户
@@ -1969,10 +1990,11 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
       if (data.is_active === false && newUser) {
         await usersStore.updateUser(newUser.id, { is_active: false })
       }
-      await loadUserWallets()
+      invalidateUserOptions()
       success('用户创建成功')
     }
     closeUserFormDialog()
+    await refreshUsers()
   } catch (err: unknown) {
     const title = data.id ? '更新用户失败' : '创建用户失败'
     error(parseApiError(err, '未知错误'), title)
@@ -2079,6 +2101,7 @@ function openCreateUserApiKeyDialog() {
     name: `Key-${new Date().toISOString().split('T')[0]}`,
     rate_limit: undefined,
     concurrent_limit: undefined,
+    ip_rules_text: '',
     chat_pii_redaction_enabled: redactionFeature.enabled,
     chat_pii_redaction_placeholder_notice: redactionFeature.inject_model_instruction,
   }
@@ -2093,6 +2116,7 @@ function openEditUserApiKeyDialog(apiKey: ApiKey) {
     name: apiKey.name || '',
     rate_limit: apiKey.rate_limit ?? undefined,
     concurrent_limit: apiKey.concurrent_limit ?? undefined,
+    ip_rules_text: apiKey.ip_rules?.join(', ') ?? '',
     chat_pii_redaction_enabled: redactionFeature.enabled,
     chat_pii_redaction_placeholder_notice: redactionFeature.inject_model_instruction,
   }
@@ -2106,6 +2130,7 @@ function closeUserApiKeyFormDialog() {
     name: '',
     rate_limit: undefined,
     concurrent_limit: undefined,
+    ip_rules_text: '',
     chat_pii_redaction_enabled: false,
     chat_pii_redaction_placeholder_notice: true,
   }
@@ -2120,11 +2145,13 @@ async function submitUserApiKeyForm() {
 
   creatingApiKey.value = true
   try {
+    const ipRules = parseIpRulesInput(userApiKeyForm.value.ip_rules_text)
     if (editingUserApiKey.value) {
       await usersStore.updateApiKey(selectedUser.value.id, editingUserApiKey.value.id, {
         name: userApiKeyForm.value.name,
         rate_limit: userApiKeyForm.value.rate_limit ?? 0,
         concurrent_limit: userApiKeyForm.value.concurrent_limit,
+        ip_rules: ipRules,
         feature_settings: mergeChatPiiRedactionFeatureSettings(editingUserApiKey.value.feature_settings, {
           enabled: userApiKeyForm.value.chat_pii_redaction_enabled,
           inject_model_instruction: userApiKeyForm.value.chat_pii_redaction_placeholder_notice,
@@ -2136,6 +2163,7 @@ async function submitUserApiKeyForm() {
         name: userApiKeyForm.value.name,
         rate_limit: userApiKeyForm.value.rate_limit ?? 0,
         concurrent_limit: userApiKeyForm.value.concurrent_limit,
+        ip_rules: ipRules,
         feature_settings: mergeChatPiiRedactionFeatureSettings(null, {
           enabled: userApiKeyForm.value.chat_pii_redaction_enabled,
           inject_model_instruction: userApiKeyForm.value.chat_pii_redaction_placeholder_notice,
@@ -2276,6 +2304,11 @@ async function deleteUser(user: User) {
 
   try {
     await usersStore.deleteUser(user.id)
+    invalidateUserOptions()
+    if (usersStore.users.length === 0 && currentPage.value > 1) {
+      currentPage.value -= 1
+    }
+    await refreshUsers()
     success('用户已删除')
   } catch (err: unknown) {
     error(parseApiError(err, '未知错误'), '删除用户失败')

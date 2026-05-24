@@ -14,6 +14,12 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::handlers::shared::{
+    payment_gateway_allow_user_refund, payment_gateway_provider_for_payment_method,
+};
+
+const WALLET_REFUND_CONFIGURED_PROVIDERS: &[&str] = &["epay", "alipay", "wxpay", "stripe"];
+
 #[derive(Debug, Deserialize)]
 struct WalletCreateRefundRequest {
     amount_usd: f64,
@@ -90,6 +96,41 @@ fn wallet_refund_id_from_path(request_path: &str) -> Option<String> {
 
 pub(super) fn wallet_refund_detail_path_matches(request_path: &str) -> bool {
     wallet_refund_id_from_path(request_path).is_some()
+}
+
+pub(super) async fn handle_wallet_refund_eligible_providers(
+    state: &AppState,
+    request_context: &GatewayPublicRequestContext,
+    headers: &http::HeaderMap,
+) -> Response<Body> {
+    if let Err(response) = resolve_authenticated_local_user(state, request_context, headers).await {
+        return response;
+    }
+
+    let mut payment_methods = Vec::new();
+    for provider in WALLET_REFUND_CONFIGURED_PROVIDERS {
+        match state.find_payment_gateway_config(provider).await {
+            Ok(Some(record)) if payment_gateway_allow_user_refund(&record.channels_json) => {
+                payment_methods.push((*provider).to_string());
+            }
+            Ok(_) => {}
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("payment gateway lookup failed: {err:?}"),
+                    false,
+                )
+            }
+        }
+    }
+
+    build_auth_json_response(
+        http::StatusCode::OK,
+        json!({
+            "payment_methods": payment_methods,
+        }),
+        None,
+    )
 }
 
 fn wallet_refund_payload_from_record(
@@ -347,6 +388,56 @@ pub(super) async fn handle_wallet_create_refund(
             false,
         );
     };
+
+    if let Some(payment_order_id) = payload.payment_order_id.as_deref() {
+        let order = match state
+            .find_wallet_payment_order_by_user_id(&auth.user.id, payment_order_id)
+            .await
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return build_auth_error_response(
+                    http::StatusCode::NOT_FOUND,
+                    "Payment order not found",
+                    false,
+                )
+            }
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("payment order lookup failed: {err:?}"),
+                    false,
+                )
+            }
+        };
+
+        let Some(provider) = payment_gateway_provider_for_payment_method(&order.payment_method)
+        else {
+            return build_auth_error_response(
+                http::StatusCode::FORBIDDEN,
+                "该支付方式未开放用户自助退款",
+                false,
+            );
+        };
+        let allow_user_refund = match state.find_payment_gateway_config(provider).await {
+            Ok(Some(record)) => payment_gateway_allow_user_refund(&record.channels_json),
+            Ok(None) => false,
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("payment gateway lookup failed: {err:?}"),
+                    false,
+                )
+            }
+        };
+        if !allow_user_refund {
+            return build_auth_error_response(
+                http::StatusCode::FORBIDDEN,
+                "该支付方式未开放用户自助退款",
+                false,
+            );
+        }
+    }
 
     if !state.has_database_wallet_data_writer() {
         #[cfg(test)]

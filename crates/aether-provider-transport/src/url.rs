@@ -41,6 +41,43 @@ pub fn build_openai_responses_url(
     url
 }
 
+pub fn build_openai_image_url(
+    upstream_base_url: &str,
+    request_path: Option<&str>,
+    query: Option<&str>,
+) -> String {
+    let (trimmed, base_query) = split_base_url_query(upstream_base_url);
+    let trimmed = trimmed.trim_end_matches('/');
+    let suffix = openai_image_path_suffix(request_path);
+    let mut url = if openai_image_base_includes_operation_path(trimmed) {
+        trimmed.to_string()
+    } else if trimmed.ends_with("/v1") || google_openai_compat_base_includes_api_root(trimmed) {
+        format!("{trimmed}{suffix}")
+    } else {
+        format!("{trimmed}/v1{suffix}")
+    };
+    append_merged_query(&mut url, base_query, None, query, &[]);
+    url
+}
+
+fn openai_image_path_suffix(request_path: Option<&str>) -> &'static str {
+    match request_path
+        .map(str::trim)
+        .map(|value| value.trim_end_matches('/'))
+    {
+        Some("/v1/images/edits") | Some("/images/edits") => "/images/edits",
+        _ => "/images/generations",
+    }
+}
+
+fn openai_image_base_includes_operation_path(base_url: &str) -> bool {
+    let path = Url::parse(base_url)
+        .ok()
+        .map(|url| url.path().trim_end_matches('/').to_string())
+        .unwrap_or_else(|| base_url.trim_end_matches('/').to_string());
+    path.ends_with("/images/generations") || path.ends_with("/images/edits")
+}
+
 pub fn build_claude_messages_url(upstream_base_url: &str, query: Option<&str>) -> String {
     let (trimmed, base_query) = split_base_url_query(upstream_base_url);
     let trimmed = trimmed.trim_end_matches('/');
@@ -307,7 +344,7 @@ fn merge_query_string(
 mod tests {
     use super::{
         build_gemini_content_url, build_gemini_files_passthrough_url,
-        build_gemini_video_predict_long_running_url, build_openai_chat_url,
+        build_gemini_video_predict_long_running_url, build_openai_chat_url, build_openai_image_url,
         build_openai_responses_url, build_passthrough_path_url,
         normalize_gemini_content_action_path,
     };
@@ -350,6 +387,22 @@ mod tests {
         assert_eq!(
             build_openai_responses_url("https://tiger.bookapi.cc/codex?tenant=demo", None, true),
             "https://tiger.bookapi.cc/codex/responses/compact?tenant=demo"
+        );
+    }
+
+    #[test]
+    fn openai_image_url_uses_images_surface() {
+        assert_eq!(
+            build_openai_image_url(
+                "https://api.openai.example/v1?tenant=demo",
+                Some("/v1/images/generations"),
+                Some("trace=1")
+            ),
+            "https://api.openai.example/v1/images/generations?tenant=demo&trace=1"
+        );
+        assert_eq!(
+            build_openai_image_url("https://api.openai.example", Some("/v1/images/edits"), None),
+            "https://api.openai.example/v1/images/edits"
         );
     }
 

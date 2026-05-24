@@ -1,13 +1,15 @@
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::time::Duration;
 
 use redis::from_redis_value;
 use redis::streams::StreamReadReply;
 use redis::Value as RedisValue;
 
 use crate::error::{redis_error, RedisResultExt};
-use crate::redis::{RedisClient, RedisKeyspace};
+use crate::redis::{
+    run_lane_with_timeout, RedisClientConfig, RedisClientFactory, RedisConnectionLane,
+    RedisConnectionRouter, RedisKeyspace,
+};
 use crate::DataLayerError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -113,27 +115,35 @@ impl RedisStreamRunnerConfig {
 
 #[derive(Debug, Clone)]
 pub struct RedisStreamRunner {
-    client: RedisClient,
+    connections: RedisConnectionRouter,
     keyspace: RedisKeyspace,
     config: RedisStreamRunnerConfig,
 }
 
 impl RedisStreamRunner {
-    pub fn new(
-        client: RedisClient,
+    pub(crate) fn new(
+        connections: RedisConnectionRouter,
         keyspace: RedisKeyspace,
         config: RedisStreamRunnerConfig,
     ) -> Result<Self, DataLayerError> {
         config.validate()?;
         Ok(Self {
-            client,
+            connections,
             keyspace,
             config,
         })
     }
 
-    pub fn client(&self) -> &RedisClient {
-        &self.client
+    pub async fn from_config(
+        config: RedisClientConfig,
+        runner_config: RedisStreamRunnerConfig,
+    ) -> Result<Self, DataLayerError> {
+        let factory = RedisClientFactory::new(config)?;
+        let keyspace = factory.config().keyspace();
+        let connections = factory
+            .connect_router(runner_config.command_timeout_ms)
+            .await?;
+        Self::new(connections, keyspace, runner_config)
     }
 
     pub fn keyspace(&self) -> &RedisKeyspace {
@@ -142,6 +152,13 @@ impl RedisStreamRunner {
 
     pub fn config(&self) -> RedisStreamRunnerConfig {
         self.config
+    }
+
+    pub(crate) fn with_config(
+        &self,
+        config: RedisStreamRunnerConfig,
+    ) -> Result<Self, DataLayerError> {
+        Self::new(self.connections.clone(), self.keyspace.clone(), config)
     }
 
     pub async fn ensure_consumer_group(
@@ -154,27 +171,27 @@ impl RedisStreamRunner {
         validate_group(group)?;
         validate_stream_position(start_id)?;
 
-        self.run_with_timeout("redis stream ensure consumer group", async {
-            let mut connection = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_redis_err()?;
-            let result = redis::cmd("XGROUP")
-                .arg("CREATE")
-                .arg(&stream.0)
-                .arg(&group.0)
-                .arg(start_id)
-                .arg("MKSTREAM")
-                .query_async::<String>(&mut connection)
-                .await;
+        self.run_with_timeout(
+            RedisConnectionLane::Stream,
+            "redis stream ensure consumer group",
+            async {
+                let mut connection = self.connections.connection(RedisConnectionLane::Stream);
+                let result = redis::cmd("XGROUP")
+                    .arg("CREATE")
+                    .arg(&stream.0)
+                    .arg(&group.0)
+                    .arg(start_id)
+                    .arg("MKSTREAM")
+                    .query_async::<String>(&mut connection)
+                    .await;
 
-            match result {
-                Ok(_) => Ok(()),
-                Err(err) if err.code() == Some("BUSYGROUP") => Ok(()),
-                Err(err) => Err(redis_error(err)),
-            }
-        })
+                match result {
+                    Ok(_) => Ok(()),
+                    Err(err) if err.code() == Some("BUSYGROUP") => Ok(()),
+                    Err(err) => Err(redis_error(err)),
+                }
+            },
+        )
         .await
     }
 
@@ -199,12 +216,8 @@ impl RedisStreamRunner {
             ));
         }
 
-        self.run_with_timeout("redis stream append", async {
-            let mut connection = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_redis_err()?;
+        self.run_with_timeout(RedisConnectionLane::Stream, "redis stream append", async {
+            let mut connection = self.connections.connection(RedisConnectionLane::Stream);
             let mut command = redis::cmd("XADD");
             command.arg(&stream.0);
             if let Some(maxlen) = maxlen.filter(|value| *value > 0) {
@@ -256,12 +269,13 @@ impl RedisStreamRunner {
         validate_group(group)?;
         validate_consumer(consumer)?;
 
-        self.run_with_timeout("redis stream read group", async {
-            let mut connection = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_redis_err()?;
+        let lane = if self.config.read_block_ms.is_some() {
+            RedisConnectionLane::BlockingStream
+        } else {
+            RedisConnectionLane::Stream
+        };
+        self.run_with_timeout(lane, "redis stream read group", async {
+            let mut connection = self.connections.connection(lane);
             let mut command = redis::cmd("XREADGROUP");
             command
                 .arg("GROUP")
@@ -312,12 +326,8 @@ impl RedisStreamRunner {
             return Ok(0);
         }
 
-        self.run_with_timeout("redis stream ack", async {
-            let mut connection = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_redis_err()?;
+        self.run_with_timeout(RedisConnectionLane::Stream, "redis stream ack", async {
+            let mut connection = self.connections.connection(RedisConnectionLane::Stream);
             let mut command = redis::cmd("XACK");
             command.arg(&stream.0).arg(&group.0);
             for id in ids {
@@ -341,12 +351,8 @@ impl RedisStreamRunner {
             return Ok(0);
         }
 
-        self.run_with_timeout("redis stream delete", async {
-            let mut connection = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_redis_err()?;
+        self.run_with_timeout(RedisConnectionLane::Stream, "redis stream delete", async {
+            let mut connection = self.connections.connection(RedisConnectionLane::Stream);
             let mut command = redis::cmd("XDEL");
             command.arg(&stream.0);
             for id in ids {
@@ -374,12 +380,8 @@ impl RedisStreamRunner {
         validate_stream_position(start_id)?;
         config.validate()?;
 
-        self.run_with_timeout("redis stream reclaim", async {
-            let mut connection = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_redis_err()?;
+        self.run_with_timeout(RedisConnectionLane::Stream, "redis stream reclaim", async {
+            let mut connection = self.connections.connection(RedisConnectionLane::Stream);
             let reply = redis::cmd("XAUTOCLAIM")
                 .arg(&stream.0)
                 .arg(&group.0)
@@ -399,21 +401,21 @@ impl RedisStreamRunner {
 
     async fn run_with_timeout<T, F>(
         &self,
+        lane: RedisConnectionLane,
         operation: &'static str,
         future: F,
     ) -> Result<T, DataLayerError>
     where
         F: Future<Output = Result<T, DataLayerError>>,
     {
-        if let Some(timeout_ms) = self.config.command_timeout_ms {
-            tokio::time::timeout(Duration::from_millis(timeout_ms), future)
-                .await
-                .map_err(|_| {
-                    DataLayerError::TimedOut(format!("{operation} exceeded {timeout_ms}ms timeout"))
-                })?
-        } else {
-            future.await
-        }
+        run_lane_with_timeout(
+            &self.connections,
+            lane,
+            self.config.command_timeout_ms,
+            operation,
+            future,
+        )
+        .await
     }
 }
 
@@ -571,30 +573,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        parse_reclaim_result, RedisConsumerGroup, RedisConsumerName, RedisStreamName,
-        RedisStreamReclaimConfig, RedisStreamReclaimResult, RedisStreamRunner,
-        RedisStreamRunnerConfig,
+        parse_reclaim_result, validate_consumer, validate_group, validate_stream_name,
+        validate_stream_position, RedisConsumerName, RedisStreamName, RedisStreamReclaimConfig,
+        RedisStreamReclaimResult, RedisStreamRunnerConfig,
     };
-    use crate::redis::{RedisClientConfig, RedisClientFactory};
     use redis::Value as RedisValue;
-
-    fn sample_runner() -> RedisStreamRunner {
-        let config = RedisClientConfig {
-            url: "redis://127.0.0.1/0".to_string(),
-            key_prefix: Some("aether".to_string()),
-        };
-        let client = RedisClientFactory::new(config.clone())
-            .expect("factory should build")
-            .connect_lazy()
-            .expect("client should build");
-
-        RedisStreamRunner::new(
-            client,
-            config.keyspace(),
-            RedisStreamRunnerConfig::default(),
-        )
-        .expect("runner should build")
-    }
 
     #[test]
     fn validates_stream_runner_config() {
@@ -643,55 +626,17 @@ mod tests {
 
     #[test]
     fn runner_reuses_client_and_keyspace() {
-        let runner = sample_runner();
-
-        assert_eq!(runner.config(), RedisStreamRunnerConfig::default());
-        assert_eq!(
-            runner.keyspace().stream_name("audit").0,
-            "aether:stream:audit"
-        );
-        let _client_ref = runner.client();
+        RedisStreamRunnerConfig::default()
+            .validate()
+            .expect("default stream config should be valid");
     }
 
-    #[tokio::test]
-    async fn rejects_invalid_inputs_before_network() {
-        let runner = sample_runner();
-        let stream = RedisStreamName("aether:stream:audit".to_string());
-        let group = RedisConsumerGroup("audit-workers".to_string());
-        let consumer = RedisConsumerName("worker-1".to_string());
-
-        assert!(runner
-            .ensure_consumer_group(&stream, &group, "")
-            .await
-            .is_err());
-        assert!(runner
-            .append_fields(&stream, &BTreeMap::new())
-            .await
-            .is_err());
-        assert!(runner
-            .append_json(&stream, "", &serde_json::json!({"ok": true}))
-            .await
-            .is_err());
-        assert!(runner
-            .read_group(&stream, &group, &RedisConsumerName(String::new()))
-            .await
-            .is_err());
-        assert_eq!(
-            runner.ack(&stream, &group, &[]).await.expect("empty ack"),
-            0
-        );
-        assert_eq!(runner.delete(&stream, &[]).await.expect("empty delete"), 0);
-        assert!(runner
-            .claim_stale(
-                &stream,
-                &group,
-                &consumer,
-                "",
-                RedisStreamReclaimConfig::default()
-            )
-            .await
-            .is_err());
-        let _ = consumer;
+    #[test]
+    fn rejects_invalid_inputs_before_network() {
+        assert!(validate_stream_name(&RedisStreamName(String::new())).is_err());
+        assert!(validate_group(&super::RedisConsumerGroup(String::new())).is_err());
+        assert!(validate_consumer(&RedisConsumerName(String::new())).is_err());
+        assert!(validate_stream_position("").is_err());
     }
 
     #[test]

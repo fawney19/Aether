@@ -11,8 +11,9 @@ use crate::provider::{
     ProviderPoolMemberInput,
 };
 use crate::quota::{
-    provider_pool_json_f64, provider_pool_metadata_bucket,
-    provider_pool_quota_snapshot_exhausted_decision,
+    provider_pool_current_unix_secs, provider_pool_json_f64, provider_pool_metadata_bucket,
+    provider_pool_quota_snapshot_exhausted_decision, provider_pool_reset_deadline_elapsed,
+    provider_pool_timestamp_unix_secs,
 };
 use crate::quota_refresh::ProviderPoolQuotaRequestSpec;
 
@@ -151,6 +152,15 @@ fn normalize_kiro_version(value: &str) -> &str {
 }
 
 pub(crate) fn quota_exhausted_from_bucket(bucket: &Map<String, Value>) -> bool {
+    if provider_pool_current_unix_secs().is_some_and(|now| {
+        provider_pool_reset_deadline_elapsed(
+            bucket,
+            provider_pool_timestamp_unix_secs(bucket.get("updated_at")),
+            now,
+        )
+    }) {
+        return false;
+    }
     if provider_pool_json_f64(bucket.get("remaining")).is_some_and(|value| value <= 0.0) {
         return true;
     }

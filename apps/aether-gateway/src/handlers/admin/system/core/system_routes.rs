@@ -13,10 +13,17 @@ use crate::handlers::admin::system::shared::paths::{
 };
 use crate::handlers::admin::system::shared::settings::{
     apply_admin_system_settings_update, build_admin_api_formats_payload,
-    build_admin_system_check_update_payload_from_release, build_admin_system_settings_payload,
-    build_admin_system_stats_payload, current_aether_version, fetch_latest_admin_system_release,
+    build_admin_system_check_update_payload_from_release, build_admin_system_releases_list_payload,
+    build_admin_system_settings_payload, build_admin_system_stats_payload, current_aether_version,
+    fetch_admin_system_releases, fetch_latest_admin_system_release, resolve_update_target,
 };
 use crate::handlers::admin::system::shared::smtp::build_admin_smtp_test_payload;
+use crate::handlers::admin::system::shared::update::{
+    build_admin_system_update_capability_payload, current_self_update_blocker,
+    prepare_admin_system_update_task, read_update_history, read_update_task_status,
+    self_update_supported, start_admin_system_rollback_task, start_admin_system_update_task,
+};
+use crate::important_notification::build_important_notification_test_payload;
 use crate::maintenance::{ManualUsageCleanupMode, ManualUsageCleanupOptions};
 use crate::GatewayError;
 use aether_data_contracts::repository::usage::UsageCleanupTargets;
@@ -57,7 +64,8 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
         && request_method == http::Method::GET
         && request_path == "/api/admin/system/check-update"
     {
-        let (latest_release, error) = fetch_latest_admin_system_release().await;
+        let force = query_flag(request_context.query_string(), "force");
+        let (latest_release, error) = fetch_latest_admin_system_release(force).await;
         return Ok(Some(
             Json(build_admin_system_check_update_payload_from_release(
                 latest_release,
@@ -65,6 +73,133 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
             ))
             .into_response(),
         ));
+    }
+
+    if decision.route_kind.as_deref() == Some("releases")
+        && request_method == http::Method::GET
+        && request_path == "/api/admin/system/releases"
+    {
+        let force = query_flag(request_context.query_string(), "force");
+        let (releases, error) = fetch_admin_system_releases(force).await;
+        return Ok(Some(
+            Json(build_admin_system_releases_list_payload(releases, error)).into_response(),
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("update_capability")
+        && request_method == http::Method::GET
+        && request_path == "/api/admin/system/update-capability"
+    {
+        return Ok(Some(
+            Json(build_admin_system_update_capability_payload()).into_response(),
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("prepare_update")
+        && request_method == http::Method::POST
+        && request_path == "/api/admin/system/prepare-update"
+    {
+        if !self_update_supported() {
+            return Ok(Some(
+                (
+                    http::StatusCode::PRECONDITION_REQUIRED,
+                    Json(json!({ "detail": current_self_update_blocker() })),
+                )
+                    .into_response(),
+            ));
+        }
+
+        let target_version = request_body
+            .filter(|b| !b.is_empty())
+            .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
+            .and_then(|v| v.get("version").and_then(|v| v.as_str().map(String::from)));
+
+        let (version, tarball_url, sha256sums_url) =
+            match resolve_update_target(target_version).await {
+                Ok(result) => result,
+                Err((status, payload)) => {
+                    return Ok(Some((status, Json(payload)).into_response()));
+                }
+            };
+
+        return Ok(Some(
+            match prepare_admin_system_update_task(version, tarball_url, sha256sums_url).await? {
+                Ok(payload) => attach_admin_audit_response(
+                    Json(payload).into_response(),
+                    "admin_system_update_prepared",
+                    "prepare_system_update",
+                    "system_update",
+                    "global",
+                ),
+                Err((status, payload)) => (status, Json(payload)).into_response(),
+            },
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("apply_update")
+        && request_method == http::Method::POST
+        && request_path == "/api/admin/system/apply-update"
+    {
+        let version = request_body
+            .filter(|b| !b.is_empty())
+            .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
+            .and_then(|v| v.get("version").and_then(|v| v.as_str().map(String::from)));
+
+        return Ok(Some(
+            match start_admin_system_update_task(version).await? {
+                Ok(payload) => attach_admin_audit_response(
+                    Json(payload).into_response(),
+                    "admin_system_update_started",
+                    "apply_system_update",
+                    "system_update",
+                    "global",
+                ),
+                Err((status, payload)) => (status, Json(payload)).into_response(),
+            },
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("rollback")
+        && request_method == http::Method::POST
+        && request_path == "/api/admin/system/rollback"
+    {
+        return Ok(Some(match start_admin_system_rollback_task().await? {
+            Ok(payload) => attach_admin_audit_response(
+                Json(payload).into_response(),
+                "admin_system_rollback_started",
+                "rollback_system_update",
+                "system_rollback",
+                "global",
+            ),
+            Err((status, payload)) => (status, Json(payload)).into_response(),
+        }));
+    }
+
+    if decision.route_kind.as_deref() == Some("update_status")
+        && request_method == http::Method::GET
+        && request_path == "/api/admin/system/update-status"
+    {
+        let status = read_update_task_status();
+        return Ok(Some(
+            Json(json!({
+                "phase": status.phase,
+                "error": status.error,
+                "output": status.output,
+                "progress_label": status.progress_label,
+                "downloaded_bytes": status.downloaded_bytes,
+                "total_bytes": status.total_bytes,
+                "progress_percent": status.progress_percent,
+            }))
+            .into_response(),
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("update_history")
+        && request_method == http::Method::GET
+        && request_path == "/api/admin/system/update-history"
+    {
+        let entries = read_update_history();
+        return Ok(Some(Json(json!({ "entries": entries })).into_response()));
     }
 
     if decision.route_kind.as_deref() == Some("aws_regions")
@@ -271,6 +406,16 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
     {
         return Ok(Some(
             Json(build_admin_smtp_test_payload(state, request_body).await?).into_response(),
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("important_notification_test")
+        && request_method == http::Method::POST
+        && request_path == "/api/admin/system/important-notification/test"
+    {
+        return Ok(Some(
+            Json(build_important_notification_test_payload(state, request_body).await?)
+                .into_response(),
         ));
     }
 
@@ -962,6 +1107,15 @@ fn query_param(query_string: Option<&str>, name: &str) -> Option<String> {
     let query = query_string.filter(|value| !value.is_empty())?;
     form_urlencoded::parse(query.as_bytes())
         .find_map(|(key, value)| (key == name && !value.is_empty()).then(|| value.into_owned()))
+}
+
+fn query_flag(query_string: Option<&str>, name: &str) -> bool {
+    query_param(query_string, name).is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn parse_older_than_days_query(query_string: Option<&str>) -> Result<Option<u32>, Response<Body>> {

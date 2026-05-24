@@ -275,6 +275,36 @@ const routes: RouteRecordRaw[] = [
         meta: { module: 'chat_pii_redaction' }
       },
       {
+        path: 'modules/important-notification',
+        redirect: '/admin/notification-service'
+      },
+      {
+        path: 'notification-service',
+        name: 'ImportantNotificationModule',
+        component: () => importWithRetry(() => import('@/views/admin/modules/ImportantNotification.vue')),
+        meta: { module: 'important_notification' }
+      },
+      {
+        path: 'server-chan',
+        redirect: '/admin/modules/server-chan'
+      },
+      {
+        path: 'modules/server-chan',
+        name: 'ServerChanSettings',
+        component: () => importWithRetry(() => import('@/views/admin/modules/ServerChanSettings.vue')),
+        meta: { module: 'server_chan_push' }
+      },
+      {
+        path: 'bark',
+        redirect: '/admin/modules/bark'
+      },
+      {
+        path: 'modules/bark',
+        name: 'BarkSettings',
+        component: () => importWithRetry(() => import('@/views/admin/modules/BarkSettings.vue')),
+        meta: { module: 'bark_push' }
+      },
+      {
         path: 'email',
         name: 'EmailSettings',
         component: () => importWithRetry(() => import('@/views/admin/EmailSettings.vue'))

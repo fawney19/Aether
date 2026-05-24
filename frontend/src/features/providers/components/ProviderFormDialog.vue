@@ -66,6 +66,9 @@
                   <SelectItem value="kiro">
                     Kiro
                   </SelectItem>
+                  <SelectItem value="windsurf">
+                    Windsurf
+                  </SelectItem>
                   <SelectItem value="antigravity">
                     Antigravity
                   </SelectItem>
@@ -95,6 +98,9 @@
                   </SelectItem>
                   <SelectItem value="kiro">
                     Kiro
+                  </SelectItem>
+                  <SelectItem value="windsurf">
+                    Windsurf
                   </SelectItem>
                   <SelectItem value="antigravity">
                     Antigravity
@@ -342,6 +348,7 @@ import {
   createProvider,
   normalizePoolAdvancedConfig,
   updateProvider,
+  type ProviderType,
   type ProviderWithEndpointsSummary,
 } from '@/api/endpoints'
 import { parseApiError } from '@/utils/errorParser'
@@ -377,7 +384,7 @@ const defaultPriority = computed(() => {
 // 表单数据
 const form = ref({
   name: '',
-  provider_type: 'custom' as 'custom' | 'vertex_ai' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro' | 'grok',
+  provider_type: 'custom' as ProviderType,
   description: '',
   website: '',
   // 计费配置

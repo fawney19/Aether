@@ -111,8 +111,11 @@
                   >
                     {{ apiKey.name }}
                   </div>
-                  <div class="text-xs text-muted-foreground mt-0.5">
-                    创建于 {{ formatDate(apiKey.created_at) }}
+                <div class="text-xs text-muted-foreground mt-0.5">
+                  创建于 {{ formatDate(apiKey.created_at) }}
+                </div>
+                  <div class="text-xs text-muted-foreground mt-0.5 truncate">
+                    IP 限制：{{ formatIpRules(apiKey.ip_rules) }}
                   </div>
                 </div>
               </TableCell>
@@ -355,6 +358,9 @@
                   {{ formatRateLimitSimple(apiKey.rate_limit) }}
                 </span>
               </div>
+              <div class="text-xs text-muted-foreground truncate">
+                IP 限制：{{ formatIpRules(apiKey.ip_rules) }}
+              </div>
             </div>
           </div>
         </Card>
@@ -448,6 +454,23 @@
           />
           <p class="text-xs text-muted-foreground">
             {{ editingApiKey ? '留空表示保持当前值，填 0 表示不限并发' : '留空表示不限并发，填 0 也表示不限并发' }}
+          </p>
+        </div>
+
+        <div class="space-y-2">
+          <Label
+            for="key-ip-rules"
+            class="text-sm font-semibold"
+          >IP 限制</Label>
+          <Input
+            id="key-ip-rules"
+            v-model="newKeyIpRulesText"
+            placeholder="例如：203.0.113.10, 10.0.0.0/24, !10.0.0.13"
+            class="h-11 border-border/60"
+            autocomplete="off"
+          />
+          <p class="text-xs text-muted-foreground">
+            留空表示不限制；支持 IP、CIDR、IPv4 通配符、*，用 ! 前缀拒绝，多个规则用英文逗号分隔
           </p>
         </div>
 
@@ -779,6 +802,7 @@ const showInstallDialog = ref(false)
 const newKeyName = ref('')
 const newKeyRateLimit = ref<number | undefined>(undefined)
 const newKeyConcurrentLimit = ref<number | undefined>(undefined)
+const newKeyIpRulesText = ref('')
 const keyRedactionMode = ref<'inherit' | 'custom'>('inherit')
 const newKeyRedactionEnabled = ref(false)
 const newKeyRedactionInjectNotice = ref(true)
@@ -867,6 +891,7 @@ function openEditApiKeyDialog(apiKey: ApiKey) {
   newKeyName.value = apiKey.name || ''
   newKeyRateLimit.value = apiKey.rate_limit ?? undefined
   newKeyConcurrentLimit.value = apiKey.concurrent_limit ?? undefined
+  newKeyIpRulesText.value = apiKey.ip_rules?.join(', ') ?? ''
   keyRedactionMode.value = hasRedactionFeature ? 'custom' : 'inherit'
   newKeyRedactionEnabled.value = redactionFeature.enabled
   newKeyRedactionInjectNotice.value = redactionFeature.inject_model_instruction
@@ -878,6 +903,7 @@ function openCreateApiKeyDialog() {
   newKeyName.value = ''
   newKeyRateLimit.value = undefined
   newKeyConcurrentLimit.value = undefined
+  newKeyIpRulesText.value = ''
   keyRedactionMode.value = 'inherit'
   newKeyRedactionEnabled.value = false
   newKeyRedactionInjectNotice.value = true
@@ -957,6 +983,7 @@ function closeApiKeyDialog() {
   newKeyName.value = ''
   newKeyRateLimit.value = undefined
   newKeyConcurrentLimit.value = undefined
+  newKeyIpRulesText.value = ''
   keyRedactionMode.value = 'inherit'
   newKeyRedactionEnabled.value = false
   newKeyRedactionInjectNotice.value = true
@@ -970,12 +997,14 @@ async function saveApiKey() {
 
   creating.value = true
   try {
+    const ipRules = parseIpRulesInput(newKeyIpRulesText.value)
     const isCreatingFirstApiKey = !editingApiKey.value && apiKeys.value.length === 0
     if (editingApiKey.value) {
       await meApi.updateApiKey(editingApiKey.value.id, {
         name: newKeyName.value,
         rate_limit: newKeyRateLimit.value ?? 0,
         concurrent_limit: newKeyConcurrentLimit.value,
+        ip_rules: ipRules,
         feature_settings: keyRedactionMode.value === 'custom'
           ? mergeChatPiiRedactionFeatureSettings(editingApiKey.value.feature_settings, {
                 enabled: newKeyRedactionEnabled.value,
@@ -989,6 +1018,7 @@ async function saveApiKey() {
         name: newKeyName.value,
         rate_limit: newKeyRateLimit.value ?? 0,
         concurrent_limit: newKeyConcurrentLimit.value,
+        ip_rules: ipRules,
         ...(keyRedactionMode.value === 'custom'
           ? {
               feature_settings: mergeChatPiiRedactionFeatureSettings(null, {
@@ -1116,6 +1146,18 @@ function formatConcurrentLimitSimple(concurrentLimit?: number | null): string {
     return '不限并发'
   }
   return `${concurrentLimit} 并发`
+}
+
+function formatIpRules(ipRules?: string[] | null): string {
+  return ipRules && ipRules.length > 0 ? ipRules.join(', ') : '不限制'
+}
+
+function parseIpRulesInput(value: string): string[] | null {
+  const items = value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+  return items.length > 0 ? items : null
 }
 
 function formatDate(dateString?: string | null): string {

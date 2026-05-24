@@ -360,6 +360,58 @@ fn memory_group_members(
         .collect()
 }
 
+fn filter_memory_export_rows(
+    repository: &InMemoryUserReadRepository,
+    query: &UserExportListQuery,
+) -> Vec<StoredUserExportRow> {
+    let mut rows = repository
+        .export_rows
+        .read()
+        .expect("user repository lock")
+        .clone();
+    if let Some(role) = query.role.as_deref() {
+        rows.retain(|row| row.role.eq_ignore_ascii_case(role));
+    }
+    if let Some(is_active) = query.is_active {
+        rows.retain(|row| row.is_active == is_active);
+    }
+    if let Some(group_id) = query
+        .group_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let member_ids = repository
+            .group_members
+            .read()
+            .expect("user repository lock")
+            .keys()
+            .filter(|(candidate_group_id, _)| candidate_group_id == group_id)
+            .map(|(_, user_id)| user_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        rows.retain(|row| member_ids.contains(&row.id));
+    }
+    if let Some(search) = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let search = search.to_ascii_lowercase();
+        rows.retain(|row| {
+            row.id.to_ascii_lowercase().contains(&search)
+                || row.username.to_ascii_lowercase().contains(&search)
+                || row
+                    .email
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .contains(&search)
+        });
+    }
+    rows
+}
+
 fn memory_export_row_from_auth_user(
     repository: &InMemoryUserReadRepository,
     user: &StoredUserAuthRecord,
@@ -477,57 +529,15 @@ impl UserReadRepository for InMemoryUserReadRepository {
         &self,
         query: &UserExportListQuery,
     ) -> Result<Vec<StoredUserExportRow>, DataLayerError> {
-        let mut rows = self
-            .export_rows
-            .read()
-            .expect("user repository lock")
-            .clone();
-        if let Some(role) = query.role.as_deref() {
-            rows.retain(|row| row.role.eq_ignore_ascii_case(role));
-        }
-        if let Some(is_active) = query.is_active {
-            rows.retain(|row| row.is_active == is_active);
-        }
-        if let Some(group_id) = query
-            .group_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            let member_ids = self
-                .group_members
-                .read()
-                .expect("user repository lock")
-                .keys()
-                .filter_map(|(candidate_group_id, user_id)| {
-                    (candidate_group_id == group_id).then(|| user_id.clone())
-                })
-                .collect::<std::collections::BTreeSet<_>>();
-            rows.retain(|row| member_ids.contains(&row.id));
-        }
-        if let Some(search) = query
-            .search
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            let search = search.to_ascii_lowercase();
-            rows.retain(|row| {
-                row.id.to_ascii_lowercase().contains(&search)
-                    || row.username.to_ascii_lowercase().contains(&search)
-                    || row
-                        .email
-                        .as_deref()
-                        .unwrap_or_default()
-                        .to_ascii_lowercase()
-                        .contains(&search)
-            });
-        }
-        Ok(rows
+        Ok(filter_memory_export_rows(self, query)
             .into_iter()
             .skip(query.skip)
             .take(query.limit)
             .collect())
+    }
+
+    async fn count_export_users(&self, query: &UserExportListQuery) -> Result<u64, DataLayerError> {
+        Ok(filter_memory_export_rows(self, query).len() as u64)
     }
 
     async fn summarize_export_users(&self) -> Result<UserExportSummary, DataLayerError> {

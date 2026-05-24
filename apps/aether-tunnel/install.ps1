@@ -105,7 +105,7 @@ function Test-ServerExists([string]$Path, [string]$QuotedUrl, [string]$QuotedNam
   return ($FoundUrl -and $FoundName)
 }
 
-function Add-ServerConfig([string]$AetherUrl, [string]$ManagementToken, [string]$NodeName) {
+function Add-ServerConfig([string]$AetherUrl, [string]$ManagementToken, [string]$NodeName, [string]$TunnelSecurity, [string]$TunnelEncryptionKey) {
   $ConfigDir = Split-Path -Parent $script:ConfigPath
   New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
 
@@ -116,6 +116,7 @@ function Add-ServerConfig([string]$AetherUrl, [string]$ManagementToken, [string]
   $QuotedUrl = ConvertTo-TomlQuotedString $AetherUrl
   $QuotedToken = ConvertTo-TomlQuotedString $ManagementToken
   $QuotedName = ConvertTo-TomlQuotedString $NodeName
+  $QuotedTunnelEncryptionKey = ConvertTo-TomlQuotedString $TunnelEncryptionKey
 
   if (Test-ServerExists $script:ConfigPath $QuotedUrl $QuotedName) {
     Say "Same aether_url + node_name already exists, skipping config append: $script:ConfigPath"
@@ -134,6 +135,13 @@ function Add-ServerConfig([string]$AetherUrl, [string]$ManagementToken, [string]
     "management_token = $QuotedToken",
     "node_name = $QuotedName"
   ) -join "`n"
+  if ($TunnelSecurity) {
+    $QuotedTunnelSecurity = ConvertTo-TomlQuotedString $TunnelSecurity
+    $Block += "`ntunnel_security = $QuotedTunnelSecurity"
+  }
+  if ($TunnelEncryptionKey) {
+    $Block += "`ntunnel_encryption_key = $QuotedTunnelEncryptionKey"
+  }
   Add-Content -Path $script:ConfigPath -Value ($Block + "`n") -Encoding UTF8
   Say "Appended [[servers]] to: $script:ConfigPath"
 }
@@ -143,13 +151,21 @@ function Main {
   $AetherUrl = Prompt-IfEmpty 'AETHER_TUNNEL_AETHER_URL' $env:AETHER_TUNNEL_AETHER_URL 'Aether URL'
   $ManagementToken = Prompt-IfEmpty 'AETHER_TUNNEL_MANAGEMENT_TOKEN' $env:AETHER_TUNNEL_MANAGEMENT_TOKEN 'Management token (ae_xxx)'
   $NodeName = Prompt-IfEmpty 'AETHER_TUNNEL_NODE_NAME' $env:AETHER_TUNNEL_NODE_NAME 'Node name'
+  $TunnelSecurity = if ($env:AETHER_TUNNEL_SECURITY) { $env:AETHER_TUNNEL_SECURITY } else { '' }
+  $TunnelEncryptionKey = if ($env:AETHER_TUNNEL_ENCRYPTION_KEY) { $env:AETHER_TUNNEL_ENCRYPTION_KEY } else { '' }
+  if ($TunnelSecurity -and ($TunnelSecurity -notin @('off', 'non_tls_required'))) {
+    Fail 'AETHER_TUNNEL_SECURITY must be off or non_tls_required'
+  }
+  if (($TunnelSecurity -eq 'non_tls_required') -and -not $TunnelEncryptionKey) {
+    Fail 'AETHER_TUNNEL_ENCRYPTION_KEY is required when AETHER_TUNNEL_SECURITY=non_tls_required'
+  }
 
   $TempDir = Join-Path ([IO.Path]::GetTempPath()) ("aether-tunnel-" + [Guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
   try {
     $Tag = Resolve-LatestTunnelTag
     Install-AetherTunnelBinary $Tag $TempDir
-    Add-ServerConfig $AetherUrl $ManagementToken $NodeName
+    Add-ServerConfig $AetherUrl $ManagementToken $NodeName $TunnelSecurity $TunnelEncryptionKey
   } finally {
     Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue
   }

@@ -24,6 +24,15 @@ pub(super) fn oauth_refresh_failed_bad_request_response(
     )
 }
 
+pub(super) fn oauth_refresh_auto_removed_response(error_reason: impl AsRef<str>) -> Response<Body> {
+    Json(json!({
+        "status": "auto_removed",
+        "message": "已自动删除",
+        "detail": format!("Token 刷新失败且 OAuth 凭证已不可用，已自动删除：{}", error_reason.as_ref()),
+    }))
+    .into_response()
+}
+
 pub(super) fn oauth_refresh_failed_service_unavailable_response(
     error_reason: impl Into<String>,
 ) -> Response<Body> {

@@ -56,7 +56,8 @@ use self::shared::{
 };
 pub(crate) use self::shared::{
     normalize_admin_list_policy_mode, normalize_admin_rate_limit_policy_mode,
-    normalize_admin_user_api_formats, normalize_admin_user_string_list,
+    normalize_admin_user_api_formats, normalize_admin_user_ip_rules,
+    normalize_admin_user_string_list,
 };
 pub(crate) use crate::handlers::shared::normalize_feature_settings as normalize_admin_feature_settings;
 

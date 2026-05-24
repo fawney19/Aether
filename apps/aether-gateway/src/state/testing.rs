@@ -11,7 +11,7 @@ use aether_data_contracts::repository::video_tasks::{
 };
 use serde_json::json;
 
-use super::{AppState, GatewayDataState};
+use super::{AppState, FrontdoorRuntimeGuardConfig, GatewayDataState};
 use crate::{provider_transport, usage};
 
 #[cfg(test)]
@@ -28,6 +28,14 @@ impl AppState {
 
     pub(crate) fn with_turnstile_siteverify_timeout_for_tests(mut self, timeout: Duration) -> Self {
         self.turnstile_siteverify_timeout_override = Some(timeout);
+        self
+    }
+
+    pub(crate) fn with_frontdoor_runtime_guard_config_for_tests(
+        mut self,
+        config: FrontdoorRuntimeGuardConfig,
+    ) -> Self {
+        self.frontdoor_runtime_guards = Arc::new(config);
         self
     }
 

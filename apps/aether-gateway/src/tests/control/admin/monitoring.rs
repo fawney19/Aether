@@ -2040,7 +2040,8 @@ async fn gateway_handles_admin_monitoring_resilience_circuit_history_locally_wit
                 "openai:chat": {
                     "open": true,
                     "open_at": "2026-03-30T12:00:00+00:00",
-                    "next_probe_at": "2026-03-30T12:05:00+00:00",
+                    "next_probe_at": "2099-03-30T12:05:00+00:00",
+                    "recovery_seconds": 300,
                     "reason": "错误率过高"
                 }
             })),

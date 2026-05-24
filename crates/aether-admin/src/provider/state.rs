@@ -37,9 +37,27 @@ pub fn provider_oauth_pkce_s256(verifier: &str) -> String {
 
 pub fn parse_provider_oauth_callback_params(callback_url: &str) -> BTreeMap<String, String> {
     let mut merged = BTreeMap::new();
-    let Ok(url) = Url::parse(callback_url.trim()) else {
+    let raw_callback_url = callback_url.trim();
+    let parsed_url = Url::parse(raw_callback_url).or_else(|_| {
+        Url::parse(&format!(
+            "https://aether.local/{}",
+            raw_callback_url.trim_start_matches('/')
+        ))
+    });
+    let Ok(url) = parsed_url else {
         return merged;
     };
+    if url.query().is_none()
+        && url.fragment().is_none()
+        && raw_callback_url.contains('=')
+        && !raw_callback_url.contains("://")
+    {
+        for (key, value) in
+            form_urlencoded::parse(raw_callback_url.trim_start_matches('?').as_bytes())
+        {
+            merged.insert(key.into_owned(), value.into_owned());
+        }
+    }
     for (key, value) in form_urlencoded::parse(url.query().unwrap_or_default().as_bytes()) {
         merged.insert(key.into_owned(), value.into_owned());
     }
@@ -375,6 +393,28 @@ mod tests {
 
         assert_eq!(params.get("code").map(String::as_str), Some("code-value"));
         assert_eq!(params.get("state").map(String::as_str), Some("nonce-value"));
+    }
+
+    #[test]
+    fn parse_provider_oauth_callback_params_reads_relative_show_auth_token_url() {
+        let params = parse_provider_oauth_callback_params(
+            "show-auth-token?token=firebase-id-token&state=session-1&provider=google",
+        );
+
+        assert_eq!(
+            params.get("token").map(String::as_str),
+            Some("firebase-id-token")
+        );
+        assert_eq!(params.get("state").map(String::as_str), Some("session-1"));
+        assert_eq!(params.get("provider").map(String::as_str), Some("google"));
+    }
+
+    #[test]
+    fn parse_provider_oauth_callback_params_reads_raw_query_string() {
+        let params = parse_provider_oauth_callback_params("token=raw-token&state=session-raw");
+
+        assert_eq!(params.get("token").map(String::as_str), Some("raw-token"));
+        assert_eq!(params.get("state").map(String::as_str), Some("session-raw"));
     }
 
     #[test]

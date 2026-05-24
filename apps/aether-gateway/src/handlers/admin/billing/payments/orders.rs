@@ -109,6 +109,33 @@ async fn build_admin_payment_get_order_response(
     }
 }
 
+async fn close_direct_gateway_order_before_terminal_mark(
+    state: &AdminAppState<'_>,
+    order_id: &str,
+) -> Result<Option<serde_json::Value>, Response<Body>> {
+    let order = match state.read_admin_payment_order(order_id).await {
+        Ok(crate::AdminWalletMutationOutcome::Applied(order)) => order,
+        Ok(crate::AdminWalletMutationOutcome::NotFound) => return Ok(None),
+        Ok(crate::AdminWalletMutationOutcome::Invalid(_)) => return Ok(None),
+        Ok(crate::AdminWalletMutationOutcome::Unavailable) => return Ok(None),
+        Err(err) => {
+            return Err(build_admin_payments_backend_unavailable_response(format!(
+                "Payment order read failed: {err:?}"
+            )))
+        }
+    };
+    if order.status != "pending" || !matches!(order.payment_method.as_str(), "alipay" | "wxpay") {
+        return Ok(None);
+    }
+    crate::handlers::shared::close_direct_gateway_order(state.app(), &order)
+        .await
+        .map_err(|detail| {
+            build_admin_payments_backend_unavailable_response(format!(
+                "payment gateway close failed: {detail}"
+            ))
+        })
+}
+
 async fn build_admin_payment_expire_order_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
@@ -117,12 +144,18 @@ async fn build_admin_payment_expire_order_response(
     else {
         return Ok(build_admin_payment_order_not_found_response());
     };
+    let gateway_close =
+        match close_direct_gateway_order_before_terminal_mark(state, &order_id).await {
+            Ok(value) => value,
+            Err(response) => return Ok(response),
+        };
     match state.admin_expire_payment_order(&order_id).await? {
         crate::AdminWalletMutationOutcome::Applied((order, expired)) => {
             Ok(attach_admin_audit_response(
                 Json(json!({
                     "order": build_admin_payment_order_payload(&order),
                     "expired": expired,
+                    "gateway_close": gateway_close,
                 }))
                 .into_response(),
                 "admin_payment_order_expired",
@@ -259,10 +292,16 @@ async fn build_admin_payment_fail_order_response(
     else {
         return Ok(build_admin_payment_order_not_found_response());
     };
+    let gateway_close =
+        match close_direct_gateway_order_before_terminal_mark(state, &order_id).await {
+            Ok(value) => value,
+            Err(response) => return Ok(response),
+        };
     match state.admin_fail_payment_order(&order_id).await? {
         crate::AdminWalletMutationOutcome::Applied(order) => Ok(attach_admin_audit_response(
             Json(json!({
                 "order": build_admin_payment_order_payload(&order),
+                "gateway_close": gateway_close,
             }))
             .into_response(),
             "admin_payment_order_failed",

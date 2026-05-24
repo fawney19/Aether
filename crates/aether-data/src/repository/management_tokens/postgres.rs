@@ -561,7 +561,7 @@ fn map_management_token_write_error(
                     .unwrap_or_else(|| "Management Token 名称已存在".to_string()),
             ),
             (Some("23514"), Some("check_allowed_ips_not_empty")) => {
-                Some("IP 白名单不能为空，如需取消限制请不提供此字段".to_string())
+                Some("IP 限制规则不能为空，如需取消限制请不提供此字段".to_string())
             }
             _ => None,
         }

@@ -91,6 +91,44 @@ fn provider_query_test_request_body_defaults_missing_model() {
 }
 
 #[test]
+fn provider_query_execution_json_body_decodes_stream_encoded_json_response() {
+    use base64::Engine as _;
+
+    let body = json!({
+        "created": 1,
+        "data": [{
+            "url": "https://example.test/image.png"
+        }]
+    });
+    let encoded_body = base64::engine::general_purpose::STANDARD
+        .encode(serde_json::to_vec(&body).expect("test body should serialize"));
+    let result = aether_contracts::ExecutionResult {
+        request_id: "request-1".to_string(),
+        candidate_id: None,
+        status_code: 200,
+        headers: std::collections::BTreeMap::from([(
+            "content-type".to_string(),
+            "application/json".to_string(),
+        )]),
+        body: Some(aether_contracts::ResponseBody {
+            json_body: None,
+            body_bytes_b64: Some(encoded_body),
+        }),
+        telemetry: None,
+        error: None,
+    };
+
+    assert_eq!(
+        provider_query_execution_json_body(&result),
+        Some(body.clone())
+    );
+    assert_eq!(
+        provider_query_standard_execution_response_body("openai:image", &result),
+        Some(body)
+    );
+}
+
+#[test]
 fn provider_query_test_request_body_fills_empty_conversation() {
     let payload = json!({
         "request_body": {
@@ -322,6 +360,117 @@ fn provider_query_responses_test_request_body_defaults_to_responses_input() {
     assert_eq!(body["model"], json!("gpt-5.4-mini"));
     assert_eq!(body["input"], json!("hello from responses"));
     assert!(body.get("messages").is_none());
+}
+
+#[test]
+fn provider_query_compact_test_request_body_defaults_to_responses_input() {
+    let payload = json!({"message": "hello from compact"});
+
+    let client_api_format =
+        provider_query_standard_test_client_api_format("openai:responses:compact");
+    let body = provider_query_build_test_request_body_for_api_format(
+        &payload,
+        "gpt-5.4-mini",
+        "/api/admin/provider-query/test-model",
+        client_api_format,
+    );
+
+    assert_eq!(client_api_format, "openai:responses:compact");
+    assert_eq!(body["model"], json!("gpt-5.4-mini"));
+    assert_eq!(body["input"], json!("hello from compact"));
+    assert!(body.get("messages").is_none());
+}
+
+#[test]
+fn provider_query_compact_test_request_body_promotes_prompt_to_input() {
+    let payload = json!({
+        "request_body": {
+            "model": "custom-model",
+            "prompt": "hello from prompt"
+        }
+    });
+
+    let body = provider_query_build_test_request_body_for_api_format(
+        &payload,
+        "fallback-model",
+        "/api/admin/provider-query/test-model",
+        "openai:responses:compact",
+    );
+
+    assert_eq!(body["model"], json!("custom-model"));
+    assert_eq!(body["input"], json!("hello from prompt"));
+    assert!(body.get("prompt").is_none());
+    assert!(provider_query_request_body_is_openai_responses_shape(&body));
+}
+
+#[test]
+fn provider_query_compact_test_request_body_strips_stale_chat_fields() {
+    let payload = json!({
+        "request_body": {
+            "model": "custom-model",
+            "input": "hello from input",
+            "messages": [{ "role": "user", "content": "stale chat body" }],
+            "prompt": "stale prompt"
+        }
+    });
+
+    let body = provider_query_build_test_request_body_for_api_format(
+        &payload,
+        "fallback-model",
+        "/api/admin/provider-query/test-model",
+        "openai:responses:compact",
+    );
+
+    assert_eq!(body["model"], json!("custom-model"));
+    assert_eq!(body["input"], json!("hello from input"));
+    assert!(body.get("messages").is_none());
+    assert!(body.get("prompt").is_none());
+}
+
+#[test]
+fn provider_query_compact_provider_body_builds_without_chat_conversion() {
+    let payload = json!({"message": "hello compact provider"});
+    let client_api_format =
+        provider_query_standard_test_client_api_format("openai:responses:compact");
+    let mut request_body = provider_query_build_test_request_body_for_api_format(
+        &payload,
+        "gpt-5.4-mini",
+        "/api/admin/provider-query/test-model",
+        client_api_format,
+    );
+    if let Some(object) = request_body.as_object_mut() {
+        object.insert("stream".to_string(), serde_json::Value::Bool(false));
+    }
+
+    assert!(provider_query_request_body_is_openai_responses_shape(
+        &request_body
+    ));
+
+    let mut provider_request_body = crate::ai_serving::build_local_openai_responses_request_body(
+        &request_body,
+        "upstream-gpt",
+        false,
+    )
+    .expect("compact model test body should build from responses shape");
+    crate::ai_serving::apply_openai_responses_compact_special_body_edits(
+        &mut provider_request_body,
+        "openai:responses:compact",
+    );
+    crate::ai_serving::enforce_request_body_stream_field(
+        &mut provider_request_body,
+        "openai:responses:compact",
+        false,
+        true,
+    );
+
+    assert_eq!(provider_request_body["model"], json!("upstream-gpt"));
+    assert_eq!(
+        provider_request_body["input"],
+        json!("hello compact provider")
+    );
+    assert!(provider_request_body.get("messages").is_none());
+    assert!(provider_request_body.get("stream").is_none());
+    assert!(provider_request_body.get("store").is_none());
 }
 
 #[test]
@@ -739,8 +888,26 @@ fn provider_query_grok_image_test_uses_grok_app_chat_upstream_url() {
     let transport = sample_openai_image_transport("grok");
 
     assert_eq!(
-        provider_query_openai_image_test_upstream_url(&transport, Some("trace=1")),
+        provider_query_openai_image_test_upstream_url(
+            &transport,
+            Some("/v1/images/generations"),
+            Some("trace=1"),
+        ),
         "https://grok.com/rest/app-chat/conversations/new"
+    );
+}
+
+#[test]
+fn provider_query_custom_image_test_uses_images_upstream_url() {
+    let transport = sample_openai_image_transport("custom");
+
+    assert_eq!(
+        provider_query_openai_image_test_upstream_url(
+            &transport,
+            Some("/v1/images/generations"),
+            Some("trace=1"),
+        ),
+        "https://grok.com/v1/images/generations?trace=1"
     );
 }
 
@@ -749,7 +916,11 @@ fn provider_query_chatgpt_web_image_test_uses_internal_upstream_url() {
     let transport = sample_openai_image_transport("chatgpt_web");
 
     assert_eq!(
-        provider_query_openai_image_test_upstream_url(&transport, Some("trace=1")),
+        provider_query_openai_image_test_upstream_url(
+            &transport,
+            Some("/v1/images/generations"),
+            Some("trace=1"),
+        ),
         "https://grok.com/__aether/chatgpt-web-image"
     );
 }

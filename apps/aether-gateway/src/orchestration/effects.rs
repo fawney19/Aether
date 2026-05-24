@@ -243,6 +243,35 @@ fn local_scheduler_affinity_target(plan: &ExecutionPlan) -> Option<SchedulerAffi
     })
 }
 
+async fn local_execution_plan_uses_pool(state: &AppState, plan: &ExecutionPlan) -> bool {
+    let Ok(Some(transport)) = state
+        .read_provider_transport_snapshot(&plan.provider_id, &plan.endpoint_id, &plan.key_id)
+        .await
+    else {
+        return false;
+    };
+
+    admin_provider_pool_config_from_config_value(transport.provider.config.as_ref()).is_some()
+}
+
+async fn local_scheduler_affinity_matches_failed_target(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    cached_target: &SchedulerAffinityTarget,
+    failed_target: &SchedulerAffinityTarget,
+) -> bool {
+    if cached_target == failed_target {
+        return true;
+    }
+    if cached_target.provider_id != failed_target.provider_id
+        || cached_target.endpoint_id != failed_target.endpoint_id
+    {
+        return false;
+    }
+
+    local_execution_plan_uses_pool(state, plan).await
+}
+
 async fn scheduler_cache_affinity_enabled(state: &AppState) -> bool {
     match read_scheduler_ordering_config(state).await {
         Ok(config) => config.scheduling_mode == SchedulerSchedulingMode::CacheAffinity,
@@ -360,7 +389,24 @@ async fn record_attempt_failure_effect(
     }
 
     if let Some(cache_key) = local_scheduler_affinity_cache_key(context.report_context) {
-        let _ = state.remove_scheduler_affinity_cache_entry(&cache_key);
+        let Some(failed_target) = local_scheduler_affinity_target(context.plan) else {
+            return;
+        };
+        let Some(cached_target) =
+            state.read_scheduler_affinity_target(&cache_key, SCHEDULER_AFFINITY_TTL)
+        else {
+            return;
+        };
+        if local_scheduler_affinity_matches_failed_target(
+            state,
+            context.plan,
+            &cached_target,
+            &failed_target,
+        )
+        .await
+        {
+            let _ = state.remove_scheduler_affinity_cache_entry(&cache_key);
+        }
     }
 }
 
@@ -448,7 +494,10 @@ async fn record_adaptive_rate_limit_effect(
     updated_key.status_snapshot = Some(projection.status_snapshot);
     updated_key.updated_at_unix_secs = Some(observed_at_unix_secs);
 
-    if let Err(err) = state.update_provider_catalog_key(&updated_key).await {
+    if let Err(err) = state
+        .update_provider_catalog_key_runtime_state(&updated_key)
+        .await
+    {
         warn!(
             "gateway orchestration effects: failed to persist adaptive rate-limit projection for provider {} endpoint {} key {}: {:?}",
             context.plan.provider_id, context.plan.endpoint_id, context.plan.key_id, err
@@ -496,7 +545,10 @@ async fn record_adaptive_success_effect(
     updated_key.status_snapshot = Some(projection.status_snapshot);
     updated_key.updated_at_unix_secs = Some(observed_at_unix_secs);
 
-    if let Err(err) = state.update_provider_catalog_key(&updated_key).await {
+    if let Err(err) = state
+        .update_provider_catalog_key_runtime_state(&updated_key)
+        .await
+    {
         warn!(
             "gateway orchestration effects: failed to persist adaptive success projection for provider {} endpoint {} key {}: {:?}",
             context.plan.provider_id, context.plan.endpoint_id, context.plan.key_id, err
@@ -1204,6 +1256,20 @@ mod tests {
         .expect("provider should build")
     }
 
+    fn sample_pool_health_provider() -> StoredProviderCatalogProvider {
+        sample_health_provider().with_transport_fields(
+            true,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(json!({"pool_advanced": {}})),
+        )
+    }
+
     fn sample_health_endpoint() -> StoredProviderCatalogEndpoint {
         StoredProviderCatalogEndpoint::new(
             "ep-1".to_string(),
@@ -1255,6 +1321,20 @@ mod tests {
     fn health_state() -> AppState {
         let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
             vec![sample_health_provider()],
+            vec![sample_health_endpoint()],
+            vec![sample_health_key()],
+        ));
+        AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(repository)
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+    }
+
+    fn pool_health_state() -> AppState {
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_pool_health_provider()],
             vec![sample_health_endpoint()],
             vec![sample_health_key()],
         ));
@@ -1430,6 +1510,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attempt_failure_keeps_scheduler_affinity_for_non_affinity_candidate() {
+        let state = AppState::new().expect("gateway state should build");
+        let plan = sample_plan();
+        let report_context = json!({
+            "api_key_id": "api-key-1",
+            "client_api_format": "openai:chat",
+            "model": "gpt-5",
+        });
+        let cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
+                .expect("scheduler affinity cache key should build");
+        let affinity_target = SchedulerAffinityTarget {
+            provider_id: "prov-2".to_string(),
+            endpoint_id: "ep-2".to_string(),
+            key_id: "key-2".to_string(),
+        };
+
+        state.remember_scheduler_affinity_target(
+            &cache_key,
+            affinity_target.clone(),
+            SCHEDULER_AFFINITY_TTL,
+            16,
+        );
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
+                status_code: 524,
+                classification: LocalFailoverClassification::RetryUpstreamFailure,
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            state.read_scheduler_affinity_target(cache_key.as_str(), SCHEDULER_AFFINITY_TTL),
+            Some(affinity_target)
+        );
+    }
+
+    #[tokio::test]
+    async fn attempt_failure_keeps_scheduler_affinity_for_non_pool_sibling_key() {
+        let state = health_state();
+        let plan = sample_plan();
+        let report_context = json!({
+            "api_key_id": "api-key-1",
+            "client_api_format": "openai:chat",
+            "model": "gpt-5",
+        });
+        let cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
+                .expect("scheduler affinity cache key should build");
+        let affinity_target = SchedulerAffinityTarget {
+            provider_id: "prov-1".to_string(),
+            endpoint_id: "ep-1".to_string(),
+            key_id: "key-2".to_string(),
+        };
+
+        state.remember_scheduler_affinity_target(
+            &cache_key,
+            affinity_target.clone(),
+            SCHEDULER_AFFINITY_TTL,
+            16,
+        );
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
+                status_code: 524,
+                classification: LocalFailoverClassification::RetryUpstreamFailure,
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            state.read_scheduler_affinity_target(cache_key.as_str(), SCHEDULER_AFFINITY_TTL),
+            Some(affinity_target)
+        );
+    }
+
+    #[tokio::test]
+    async fn attempt_failure_invalidates_scheduler_affinity_for_same_pool_candidate() {
+        let state = pool_health_state();
+        let plan = sample_plan();
+        let report_context = json!({
+            "api_key_id": "api-key-1",
+            "client_api_format": "openai:chat",
+            "model": "gpt-5",
+        });
+        let cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
+                .expect("scheduler affinity cache key should build");
+
+        state.remember_scheduler_affinity_target(
+            &cache_key,
+            SchedulerAffinityTarget {
+                provider_id: "prov-1".to_string(),
+                endpoint_id: "ep-1".to_string(),
+                key_id: "key-2".to_string(),
+            },
+            SCHEDULER_AFFINITY_TTL,
+            16,
+        );
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
+                status_code: 524,
+                classification: LocalFailoverClassification::RetryUpstreamFailure,
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            state.read_scheduler_affinity_target(cache_key.as_str(), SCHEDULER_AFFINITY_TTL),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn attempt_failure_keeps_scheduler_affinity_for_non_failure_status() {
         let state = AppState::new().expect("gateway state should build");
         let plan = sample_plan();
@@ -1516,6 +1727,39 @@ mod tests {
     #[tokio::test]
     async fn success_remembers_scheduler_affinity_cache_for_final_candidate() {
         let state = AppState::new().expect("gateway state should build");
+        let plan = sample_plan();
+        let report_context = json!({
+            "api_key_id": "api-key-1",
+            "client_api_format": "openai:chat",
+            "model": "gpt-5",
+        });
+        let cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
+                .expect("scheduler affinity cache key should build");
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+        )
+        .await;
+
+        assert_eq!(
+            state.read_scheduler_affinity_target(cache_key.as_str(), SCHEDULER_AFFINITY_TTL),
+            Some(SchedulerAffinityTarget {
+                provider_id: "prov-1".to_string(),
+                endpoint_id: "ep-1".to_string(),
+                key_id: "key-1".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn health_success_keeps_scheduler_affinity_after_health_state_update() {
+        let state = health_state();
         let plan = sample_plan();
         let report_context = json!({
             "api_key_id": "api-key-1",
@@ -1985,6 +2229,21 @@ mod tests {
     async fn adaptive_rate_limit_effect_updates_adaptive_key_observation() {
         let state = adaptive_state();
         let plan = sample_plan();
+        let cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
+                .expect("scheduler affinity cache key should build");
+        let target = SchedulerAffinityTarget {
+            provider_id: plan.provider_id.clone(),
+            endpoint_id: plan.endpoint_id.clone(),
+            key_id: plan.key_id.clone(),
+        };
+        state.remember_scheduler_affinity_target(
+            &cache_key,
+            target.clone(),
+            SCHEDULER_AFFINITY_TTL,
+            16,
+        );
+        let initial_epoch = state.scheduler_affinity_epoch();
 
         apply_local_execution_effect(
             &state,
@@ -2047,6 +2306,11 @@ mod tests {
                 .as_ref()
                 .and_then(|value| value.get("enforcement_active")),
             Some(&json!(false))
+        );
+        assert_eq!(state.scheduler_affinity_epoch(), initial_epoch);
+        assert_eq!(
+            state.read_scheduler_affinity_target(cache_key.as_str(), SCHEDULER_AFFINITY_TTL),
+            Some(target)
         );
     }
 
@@ -2178,6 +2442,21 @@ mod tests {
             .expect("request candidate should build")],
         );
         let plan = sample_plan();
+        let cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
+                .expect("scheduler affinity cache key should build");
+        let target = SchedulerAffinityTarget {
+            provider_id: plan.provider_id.clone(),
+            endpoint_id: plan.endpoint_id.clone(),
+            key_id: plan.key_id.clone(),
+        };
+        state.remember_scheduler_affinity_target(
+            &cache_key,
+            target.clone(),
+            SCHEDULER_AFFINITY_TTL,
+            16,
+        );
+        let initial_epoch = state.scheduler_affinity_epoch();
 
         apply_local_execution_effect(
             &state,
@@ -2208,6 +2487,11 @@ mod tests {
                 .and_then(|record| record.get("reason"))
                 .and_then(Value::as_str),
             Some("high_utilization")
+        );
+        assert_eq!(state.scheduler_affinity_epoch(), initial_epoch);
+        assert_eq!(
+            state.read_scheduler_affinity_target(cache_key.as_str(), SCHEDULER_AFFINITY_TTL),
+            Some(target)
         );
     }
 }

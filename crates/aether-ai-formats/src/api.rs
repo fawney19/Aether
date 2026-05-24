@@ -175,6 +175,7 @@ pub use crate::formats::{
             build_local_openai_chat_request_body_with_model_directives,
             build_local_openai_responses_request_body,
             build_local_openai_responses_request_body_with_model_directives,
+            is_claude_messages_shaped_body_on_openai_chat_endpoint,
         },
     },
 };
@@ -185,12 +186,13 @@ pub use crate::formats::{
     },
     openai::image::{
         request::{
-            build_chatgpt_web_image_request_body, build_openai_image_provider_request_body,
-            default_model_for_openai_image_operation, is_openai_image_stream_request,
-            normalize_openai_image_request, normalize_openai_image_request_with_options,
-            openai_image_operation_from_path, resolve_requested_openai_image_model_for_request,
-            ChatGptWebImageRequestError, NormalizedOpenAiImageRequest, OpenAiImageNormalizeOptions,
-            OpenAiImageOperation, OpenAiImageResponseFormat,
+            build_chatgpt_web_image_request_body, build_openai_image_api_provider_request_body,
+            build_openai_image_provider_request_body, default_model_for_openai_image_operation,
+            is_openai_image_stream_request, normalize_openai_image_request,
+            normalize_openai_image_request_with_options, openai_image_operation_from_path,
+            resolve_requested_openai_image_model_for_request, ChatGptWebImageRequestError,
+            NormalizedOpenAiImageRequest, OpenAiImageNormalizeOptions, OpenAiImageOperation,
+            OpenAiImageResponseFormat,
         },
         spec::{
             resolve_stream_spec as resolve_local_image_stream_spec,
@@ -210,10 +212,10 @@ pub use crate::provider_compat::kiro_stream::{
     KiroToClaudeCliStreamState, KIRO_MAX_THINKING_BUFFER,
 };
 pub use crate::provider_compat::private_envelope::{
-    maybe_build_provider_private_stream_normalizer, normalize_provider_private_report_context,
-    normalize_provider_private_response_value, provider_private_response_allows_sync_finalize,
-    stream_body_contains_error_event, transform_provider_private_stream_line,
-    ProviderPrivateStreamNormalizer,
+    extract_provider_private_stream_error_body, maybe_build_provider_private_stream_normalizer,
+    normalize_provider_private_report_context, normalize_provider_private_response_value,
+    provider_private_response_allows_sync_finalize, stream_body_contains_error_event,
+    transform_provider_private_stream_line, ProviderPrivateStreamNormalizer,
 };
 pub use crate::provider_compat::surfaces::{
     provider_adaptation_allows_sync_finalize_envelope, provider_adaptation_anchor_api_format,

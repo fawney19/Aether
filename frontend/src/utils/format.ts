@@ -1,35 +1,74 @@
+const COMPACT_NUMBER_UNITS = [
+  { value: 1_000_000_000_000, suffix: 'T' },
+  { value: 1_000_000_000, suffix: 'B' },
+  { value: 1_000_000, suffix: 'M' },
+  { value: 1_000, suffix: 'K' },
+] as const
+
+interface CompactNumberOptions {
+  fractionDigits?: number
+  nullLabel?: string
+}
+
+function trimTrailingDecimalZeros(value: string): string {
+  return value.replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1')
+}
+
+function compactFractionDigits(scaled: number, fixedFractionDigits?: number): number {
+  if (fixedFractionDigits !== undefined) return fixedFractionDigits
+  if (scaled >= 100) return 0
+  if (scaled >= 10) return 1
+  return 2
+}
+
+function formatCompactScaledValue(
+  absValue: number,
+  unitIndex: number,
+  fixedFractionDigits?: number,
+): string {
+  const unit = COMPACT_NUMBER_UNITS[unitIndex]
+  const scaled = absValue / unit.value
+  const fractionDigits = compactFractionDigits(scaled, fixedFractionDigits)
+  const rounded = Number(scaled.toFixed(fractionDigits))
+
+  if (rounded >= 1000 && unitIndex > 0) {
+    return formatCompactScaledValue(absValue, unitIndex - 1, fixedFractionDigits)
+  }
+
+  return `${trimTrailingDecimalZeros(scaled.toFixed(fractionDigits))}${unit.suffix}`
+}
+
+export function formatCompactNumber(
+  num: number | undefined | null,
+  options: CompactNumberOptions = {},
+): string {
+  if (num === undefined || num === null) {
+    return options.nullLabel ?? '0'
+  }
+
+  const value = Number(num)
+  if (!Number.isFinite(value)) {
+    return options.nullLabel ?? '0'
+  }
+
+  const sign = value < 0 ? '-' : ''
+  const absValue = Math.abs(value)
+
+  if (absValue < 1_000) {
+    return `${sign}${Number.isInteger(absValue) ? absValue.toString() : trimTrailingDecimalZeros(absValue.toFixed(1))}`
+  }
+
+  const unitIndex = COMPACT_NUMBER_UNITS.findIndex(unit => absValue >= unit.value)
+  if (unitIndex === -1) {
+    return `${sign}${Math.round(absValue)}`
+  }
+
+  return `${sign}${formatCompactScaledValue(absValue, unitIndex, options.fractionDigits)}`
+}
+
 // Token formatting - intelligent display based on value size
 export function formatTokens(num: number | undefined | null): string {
-  if (num === undefined || num === null || num === 0) {
-    return '0'
-  }
-
-  // For very small values (< 1000), show as is without unit
-  if (num < 1000) {
-    return num.toString()
-  }
-
-  // For values 1K-999K, show in thousands
-  if (num < 1000000) {
-    const thousands = num / 1000
-    if (thousands >= 100) {
-      return `${Math.round(thousands)  }K`
-    } else if (thousands >= 10) {
-      return `${thousands.toFixed(1)  }K`
-    } else {
-      return `${thousands.toFixed(2)  }K`
-    }
-  }
-
-  // For values >= 1M, show in millions
-  const millions = num / 1000000
-  if (millions >= 100) {
-    return `${Math.round(millions)  }M`
-  } else if (millions >= 10) {
-    return `${millions.toFixed(1)  }M`
-  } else {
-    return `${millions.toFixed(2)  }M`
-  }
+  return formatCompactNumber(num)
 }
 
 // Currency formatting with high precision for small values
@@ -135,12 +174,7 @@ export function formatCost(cost: number | null | undefined): string {
 
 // Usage count formatting (compact display for large numbers)
 export function formatUsageCount(count: number): string {
-  if (count >= 1000000) {
-    return `${(count / 1000000).toFixed(1)}M`
-  } else if (count >= 1000) {
-    return `${(count / 1000).toFixed(1)}K`
-  }
-  return count.toString()
+  return formatCompactNumber(count, { fractionDigits: 1 })
 }
 
 // Format remaining time from unix timestamp

@@ -42,8 +42,12 @@ use aether_data_contracts::repository::usage::{
 };
 use aether_runtime_state::RuntimeQueueStore;
 use aether_video_tasks_core::read_data_backed_video_task_response;
+use std::time::{Duration, Instant};
 
 impl GatewayDataState {
+    const MAINTENANCE_POOL_IDLE_RESERVE: usize = 1;
+    const MAINTENANCE_POOL_PRESSURE_MAX_DEFER: Duration = Duration::from_secs(30);
+
     pub(crate) async fn run_database_maintenance(
         &self,
         table_names: &[&str],
@@ -110,6 +114,47 @@ impl GatewayDataState {
         self.backends
             .as_ref()
             .and_then(|backends| backends.database_pool_summary())
+    }
+
+    pub(crate) fn database_pool_under_maintenance_pressure(&self) -> bool {
+        self.database_pool_summary()
+            .as_ref()
+            .is_some_and(Self::database_pool_summary_under_maintenance_pressure)
+    }
+
+    pub(crate) fn database_pool_summary_under_maintenance_pressure(
+        summary: &aether_data::DatabasePoolSummary,
+    ) -> bool {
+        summary.checked_out > 0 && summary.idle <= Self::MAINTENANCE_POOL_IDLE_RESERVE
+    }
+
+    pub(crate) fn should_defer_maintenance_for_database_pool_pressure(
+        &self,
+        deferred_since: &mut Option<Instant>,
+    ) -> bool {
+        Self::should_defer_maintenance_for_pool_pressure_state(
+            self.database_pool_under_maintenance_pressure(),
+            deferred_since,
+        )
+    }
+
+    pub(crate) fn should_defer_maintenance_for_pool_pressure_state(
+        pool_under_pressure: bool,
+        deferred_since: &mut Option<Instant>,
+    ) -> bool {
+        if !pool_under_pressure {
+            *deferred_since = None;
+            return false;
+        }
+
+        let now = Instant::now();
+        let since = deferred_since.get_or_insert(now);
+        if now.duration_since(*since) >= Self::MAINTENANCE_POOL_PRESSURE_MAX_DEFER {
+            *deferred_since = None;
+            return false;
+        }
+
+        true
     }
 
     pub(crate) async fn aggregate_wallet_daily_usage(
@@ -1509,6 +1554,16 @@ impl GatewayDataState {
         match &self.user_reader {
             Some(repository) => repository.list_export_users_page(query).await,
             None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn count_export_users(
+        &self,
+        query: &aether_data::repository::users::UserExportListQuery,
+    ) -> Result<u64, DataLayerError> {
+        match &self.user_reader {
+            Some(repository) => repository.count_export_users(query).await,
+            None => Ok(0),
         }
     }
 

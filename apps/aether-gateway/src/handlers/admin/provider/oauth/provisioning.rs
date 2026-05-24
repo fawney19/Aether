@@ -2,7 +2,9 @@ use super::state::{
     decode_jwt_claims, enrich_admin_provider_oauth_auth_config, json_non_empty_string,
     json_u64_value,
 };
+use crate::handlers::admin::admin_provider_pool_config;
 use crate::handlers::admin::request::AdminAppState;
+use crate::maintenance::ensure_provider_key_pool_scores_for_keys;
 use crate::provider_key_auth::provider_active_api_formats;
 use crate::GatewayError;
 use aether_data_contracts::repository::provider_catalog::{
@@ -168,6 +170,7 @@ pub(crate) async fn create_provider_oauth_catalog_key(
             .app()
             .invalidate_local_oauth_refresh_entry(&key.id)
             .await;
+        seed_provider_oauth_pool_score(state, provider_id, key, now_unix_secs).await;
     }
     Ok(created)
 }
@@ -198,10 +201,10 @@ pub(crate) async fn update_existing_provider_oauth_catalog_key(
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     let mut updated = existing_key.clone();
+    updated.is_active = true;
     updated.encrypted_api_key = Some(encrypted_api_key);
     updated.encrypted_auth_config = Some(encrypted_auth_config);
     updated.api_formats = provider_oauth_catalog_key_api_formats(provider_type, api_formats);
-    updated.is_active = true;
     updated.expires_at_unix_secs = expires_at_unix_secs;
     updated.oauth_invalid_at_unix_secs = None;
     updated.oauth_invalid_reason = None;
@@ -221,8 +224,73 @@ pub(crate) async fn update_existing_provider_oauth_catalog_key(
             .app()
             .invalidate_local_oauth_refresh_entry(&key.id)
             .await;
+        seed_provider_oauth_pool_score(state, &existing_key.provider_id, key, now_unix_secs).await;
     }
     Ok(persisted)
+}
+
+async fn seed_provider_oauth_pool_score(
+    state: &AdminAppState<'_>,
+    provider_id: &str,
+    key: &StoredProviderCatalogKey,
+    now_unix_secs: u64,
+) {
+    let provider_id = provider_id.to_string();
+    let provider = match state
+        .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
+        .await
+    {
+        Ok(mut providers) => providers.pop(),
+        Err(err) => {
+            tracing::debug!(
+                provider_id = %provider_id,
+                key_id = %key.id,
+                error = ?err,
+                "gateway provider oauth provisioning: failed to read provider for pool score seed"
+            );
+            return;
+        }
+    };
+    let Some(provider) = provider else {
+        return;
+    };
+    let Some(pool_config) = admin_provider_pool_config(&provider) else {
+        return;
+    };
+    let endpoints = match state
+        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
+        .await
+    {
+        Ok(endpoints) => endpoints,
+        Err(err) => {
+            tracing::debug!(
+                provider_id = %provider_id,
+                key_id = %key.id,
+                error = ?err,
+                "gateway provider oauth provisioning: failed to read endpoints for pool score seed"
+            );
+            return;
+        }
+    };
+    let score_ensure_budget = (pool_config.score_fallback_scan_limit as usize).clamp(1, 50_000);
+    if let Err(err) = ensure_provider_key_pool_scores_for_keys(
+        state.as_ref(),
+        &provider,
+        &pool_config,
+        &endpoints,
+        std::slice::from_ref(key),
+        now_unix_secs,
+        score_ensure_budget,
+    )
+    .await
+    {
+        tracing::debug!(
+            provider_id = %provider_id,
+            key_id = %key.id,
+            error = ?err,
+            "gateway provider oauth provisioning: failed to seed pool score row"
+        );
+    }
 }
 
 fn provider_oauth_catalog_key_api_formats(

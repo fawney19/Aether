@@ -300,7 +300,11 @@ async fn gateway_handles_admin_users_root_locally_with_trusted_admin_principal()
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    let items = payload.as_array().expect("list payload should be array");
+    assert_eq!(payload["total"], 1);
+    assert_eq!(payload["skip"], 0);
+    assert_eq!(payload["limit"], 20);
+    assert_eq!(payload["has_more"], false);
+    let items = payload["items"].as_array().expect("items should be array");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["id"], "user-1");
     assert_eq!(items[0]["email"], "alice@example.com");
@@ -332,9 +336,10 @@ async fn gateway_handles_admin_users_root_locally_with_trusted_admin_principal()
         .json()
         .await
         .expect("search json body should parse");
-    let search_items = search_payload
+    assert_eq!(search_payload["total"], 1);
+    let search_items = search_payload["items"]
         .as_array()
-        .expect("search list payload should be array");
+        .expect("search items should be array");
     assert_eq!(search_items.len(), 1);
     assert_eq!(search_items[0]["id"], "user-3");
     assert_eq!(search_items[0]["email"], "carol@example.com");
@@ -355,9 +360,10 @@ async fn gateway_handles_admin_users_root_locally_with_trusted_admin_principal()
         .json()
         .await
         .expect("id search json body should parse");
-    let id_search_items = id_search_payload
+    assert_eq!(id_search_payload["total"], 1);
+    let id_search_items = id_search_payload["items"]
         .as_array()
-        .expect("id search list payload should be array");
+        .expect("id search items should be array");
     assert_eq!(id_search_items.len(), 1);
     assert_eq!(id_search_items[0]["id"], "user-3");
 
@@ -377,9 +383,11 @@ async fn gateway_handles_admin_users_root_locally_with_trusted_admin_principal()
         .json()
         .await
         .expect("limited search json body should parse");
-    let limited_search_items = limited_search_payload
+    assert_eq!(limited_search_payload["total"], 3);
+    assert_eq!(limited_search_payload["has_more"], true);
+    let limited_search_items = limited_search_payload["items"]
         .as_array()
-        .expect("limited search list payload should be array");
+        .expect("limited search items should be array");
     assert_eq!(limited_search_items.len(), 2);
 
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
@@ -1057,7 +1065,8 @@ async fn gateway_handles_admin_users_root_locally_with_bearer_admin_session() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    let items = payload.as_array().expect("list payload should be array");
+    assert_eq!(payload["total"], 1);
+    let items = payload["items"].as_array().expect("items should be array");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["id"], "user-1");
     assert_eq!(items[0]["email"], "alice@example.com");

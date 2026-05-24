@@ -48,6 +48,8 @@ pub(crate) struct GatewayControlAuthContext {
     pub(crate) local_rejection: Option<GatewayLocalAuthRejection>,
     #[serde(skip)]
     pub(crate) allowed_models: Option<Vec<String>>,
+    #[serde(skip)]
+    pub(crate) ip_rules: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +208,9 @@ fn log_local_auth_rejection(trace_id: &str, decision: &GatewayControlDecision) {
         }
         GatewayLocalAuthRejection::ModelNotAllowed { model } => {
             ("model_not_allowed", model.clone())
+        }
+        GatewayLocalAuthRejection::IpNotAllowed { remote_ip } => {
+            ("ip_not_allowed", remote_ip.clone())
         }
     };
     info!(
@@ -581,6 +586,7 @@ pub(super) async fn resolve_data_backed_auth_context(
                     admin_bypass_limits: false,
                     local_rejection: Some(GatewayLocalAuthRejection::InvalidApiKey),
                     allowed_models: None,
+                    ip_rules: None,
                 }));
             };
 
@@ -638,6 +644,7 @@ async fn resolve_trusted_auth_context(
             admin_bypass_limits: false,
             local_rejection: Some(GatewayLocalAuthRejection::InvalidApiKey),
             allowed_models: None,
+            ip_rules: None,
         }));
     };
 
@@ -728,6 +735,7 @@ async fn build_data_backed_auth_context(
             && !snapshot.api_key_is_standalone,
         local_rejection,
         allowed_models,
+        ip_rules: snapshot.api_key_ip_rules,
     }
 }
 

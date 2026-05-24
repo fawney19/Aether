@@ -927,6 +927,7 @@ mod tests {
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: Some(vec!["gpt-4.1".to_string()]),
+            ip_rules: None,
         }
     }
 

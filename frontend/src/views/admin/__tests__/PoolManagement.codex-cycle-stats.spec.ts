@@ -643,6 +643,47 @@ describe('PoolManagement Codex cycle stats mode', () => {
     expect(root.querySelectorAll('button[title="查看评分计算结果"]').length).toBeGreaterThan(0)
   })
 
+  it('shows ChatGPT Web image quota reset countdown above the quota bar', async () => {
+    const chatgptWebKey = createPoolKey('chatgpt_web', {
+      api_formats: ['openai:image'],
+      status_snapshot: {
+        oauth: { code: 'valid' },
+        account: { code: 'ok', blocked: false },
+        quota: {
+          code: 'ok',
+          exhausted: false,
+          provider_type: 'chatgpt_web',
+          updated_at: 1_700_000_000,
+          windows: [
+            {
+              code: 'image_gen',
+              label: '生图',
+              scope: 'account',
+              remaining_ratio: 0.96,
+              remaining_value: 24,
+              limit_value: 25,
+              reset_seconds: 3600,
+            },
+          ],
+        },
+      },
+    })
+    endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('chatgpt_web')] })
+    endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(chatgptWebKey))
+    endpointMocks.getProvider.mockResolvedValue(createProvider('chatgpt_web', {
+      api_formats: ['openai:image'],
+    }))
+
+    const root = mountPoolManagement()
+    await settle()
+
+    const resetTexts = Array.from(root.querySelectorAll('[data-testid="pool-quota-reset-text"]'))
+      .map((element) => element.textContent?.trim())
+      .filter(Boolean)
+    expect(resetTexts).toContain('1h')
+    expect(root.textContent).toContain('生图')
+  })
+
   it('opens only one score popover across desktop and mobile layouts', async () => {
     const scoredKey = createPoolKey('codex', {
       pool_score: {

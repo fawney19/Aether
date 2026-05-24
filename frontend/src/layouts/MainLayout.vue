@@ -118,8 +118,18 @@
                 v-if="isAdmin"
                 :status="versionStatus"
                 :loading="loadingVersionStatus"
+                :updating="applyingSystemUpdate"
+                :update-phase="systemUpdatePhase"
+                :update-supported="updateSupported"
+                :rollback-available="rollbackAvailable"
+                :rolling-back="rollingBack"
+                :download-progress-text="updateProgressText"
+                :download-progress-percent="updateProgressPercent"
                 @refresh="handleVersionRefresh"
                 @open-release="openVersionReleasePage"
+                @preview-release="openReleaseUpdateDialog"
+                @apply-update="handleApplySystemUpdate"
+                @rollback="handleRollback"
               />
               <button
                 class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
@@ -301,8 +311,18 @@
             v-if="isAdmin"
             :status="versionStatus"
             :loading="loadingVersionStatus"
+            :updating="applyingSystemUpdate"
+            :update-phase="systemUpdatePhase"
+            :update-supported="updateSupported"
+            :rollback-available="rollbackAvailable"
+            :rolling-back="rollingBack"
+            :download-progress-text="updateProgressText"
+            :download-progress-percent="updateProgressPercent"
             @refresh="handleVersionRefresh"
             @open-release="openVersionReleasePage"
+            @preview-release="openReleaseUpdateDialog"
+            @apply-update="handleApplySystemUpdate"
+            @rollback="handleRollback"
           />
           <!-- Theme Toggle -->
           <button
@@ -385,6 +405,23 @@
       :release-url="updateInfo.release_url"
       :release-notes="updateInfo.release_notes"
       :published-at="updateInfo.published_at"
+      :dialog-title="updateDialogTitle"
+      :version-label="updateDialogVersionLabel"
+      :release-link-label="updateDialogReleaseLinkLabel"
+      :updating="applyingSystemUpdate"
+      :update-phase="systemUpdatePhase"
+      :update-supported="updateSupported"
+      :updatable="updateInfo.updatable"
+      :update-blocker="updateInfo.update_blocker"
+      :update-strategy="updateStrategy"
+      :docker-update-command="dockerUpdateCommand"
+      :reconnect-message="reconnectMessage"
+      :rollback-available="rollbackAvailable"
+      :rolling-back="rollingBack"
+      :download-progress-text="updateProgressText"
+      :download-progress-percent="updateProgressPercent"
+      @apply-update="handleApplySystemUpdate"
+      @rollback="handleRollback"
     />
   </AppShell>
 </template>
@@ -397,9 +434,11 @@ import { useAuthStore } from '@/stores/auth'
 import { useModuleStore } from '@/stores/modules'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { useSiteInfo } from '@/composables/useSiteInfo'
+import { useToast } from '@/composables/useToast'
 import { isDemoMode } from '@/config/demo'
-import { adminApi, type CheckUpdateResponse } from '@/api/admin'
+import { adminApi, type CheckUpdateResponse, type ReleaseEntry, type SystemUpdateCapabilityResponse, type UpdateTaskStatusResponse } from '@/api/admin'
 import { announcementApi, type Announcement } from '@/api/announcements'
+import { parseApiError } from '@/utils/errorParser'
 import Button from '@/components/ui/button.vue'
 import { Dialog } from '@/components/ui'
 import AppShell from '@/components/layout/AppShell.vue'
@@ -439,6 +478,7 @@ import {
   Puzzle,
   Zap,
   FileUp,
+  Send,
   Server,
   SlidersHorizontal,
   type LucideIcon,
@@ -449,12 +489,15 @@ import { BUILTIN_TOOL_BREADCRUMBS } from '@/config/builtin-tools'
 import { prefetchAdminNavigationTarget } from '@/utils/adminNavigationPrefetch'
 import { sanitizeMarkdown } from '@/utils/sanitize'
 
+type SystemUpdatePhase = 'download' | 'restart' | 'reconnecting'
+
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 const moduleStore = useModuleStore()
 const { themeMode, toggleDarkMode } = useDarkMode()
 const { siteName, siteSubtitle } = useSiteInfo()
+const { success, error: showError } = useToast()
 const isDemo = computed(() => isDemoMode())
 const isAdmin = computed(() => authStore.user?.role === 'admin')
 
@@ -475,7 +518,158 @@ const showUpdateDialog = ref(false)
 const updateInfo = ref<CheckUpdateResponse | null>(null)
 const versionStatus = ref<CheckUpdateResponse | null>(null)
 const loadingVersionStatus = ref(false)
+const applyingSystemUpdate = ref(false)
+const updateSupported = ref(true)
+const updateStrategy = ref('manual')
+const updateCapabilityMessage = ref<string | null>(null)
+const dockerUpdateCommand = ref<string | null>(null)
+const reconnectMessage = ref('等待服务恢复...')
+const rollbackAvailable = ref(false)
+const rollingBack = ref(false)
+const updateTaskStatus = ref<UpdateTaskStatusResponse | null>(null)
+const updateDialogMode = ref<'latest' | 'selected'>('latest')
+const systemUpdatePhase = ref<SystemUpdatePhase>(readStoredSystemUpdatePhase())
+const preparedUpdateVersion = ref<string | null>(
+  readSessionStorageItem('aether_prepared_update_version')
+)
+const SOURCE_BUILD_UPDATE_HINT = '当前为源码构建，请使用 git pull 后重新编译。'
+const SOURCE_BUILD_RELEASE_HINT = '当前为源码构建，请手动切换到对应标签后重新编译。'
+const MANUAL_UPDATE_HINT = '当前部署策略不支持在线自更新，请手动下载 Release 或使用安装脚本更新。'
 let versionStatusLoadPromise: Promise<CheckUpdateResponse | null> | null = null
+let updateStatusPollTimer: number | null = null
+const updateProgressPercent = computed(() => updateTaskStatus.value?.progress_percent ?? null)
+const updateProgressText = computed(() => formatUpdateProgressText(updateTaskStatus.value))
+const updateDialogTitle = computed(() => {
+  if (updateDialogMode.value === 'selected') {
+    return updateSupported.value ? '切换版本' : '版本详情'
+  }
+  return '发现新版本'
+})
+const updateDialogVersionLabel = computed(() => {
+  if (updateDialogMode.value === 'selected') {
+    return updateSupported.value ? '目标版本' : '版本标签'
+  }
+  return '最新版本'
+})
+const updateDialogReleaseLinkLabel = computed(() => {
+  if (updateDialogMode.value === 'selected') return '查看标签页'
+  return updateSupported.value ? '查看更新' : '查看发布'
+})
+
+watch(systemUpdatePhase, (val) => {
+  setSessionStorageItem('aether_update_phase', val)
+})
+watch(preparedUpdateVersion, (val) => {
+  if (val) {
+    setSessionStorageItem('aether_prepared_update_version', val)
+  } else {
+    removeSessionStorageItem('aether_prepared_update_version')
+  }
+})
+
+function readStoredSystemUpdatePhase(): SystemUpdatePhase {
+  const stored = readSessionStorageItem('aether_update_phase')
+  if (stored === 'restart' || stored === 'reconnecting') return stored
+  return 'download'
+}
+
+function readSessionStorageItem(key: string): string | null {
+  try {
+    return sessionStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function setSessionStorageItem(key: string, value: string) {
+  try {
+    sessionStorage.setItem(key, value)
+  } catch {
+    // Ignore storage failures; update state still lives in memory for this page.
+  }
+}
+
+function removeSessionStorageItem(key: string) {
+  try {
+    sessionStorage.removeItem(key)
+  } catch {
+    // Ignore storage failures; update state still lives in memory for this page.
+  }
+}
+
+function formatUpdateProgressText(status: UpdateTaskStatusResponse | null): string {
+  if (!status) return '正在下载更新包...'
+  const label = status.progress_label ? `正在下载${status.progress_label}` : formatUpdateTaskPhase(status.phase)
+  const downloaded = status.downloaded_bytes
+  const total = status.total_bytes
+  if (typeof downloaded === 'number' && typeof total === 'number' && total > 0) {
+    return `${label} ${formatFileSize(downloaded)} / ${formatFileSize(total)}`
+  }
+  if (typeof downloaded === 'number' && downloaded > 0) {
+    return `${label} ${formatFileSize(downloaded)}`
+  }
+  return label
+}
+
+function formatUpdateTaskPhase(phase: string): string {
+  switch (phase) {
+    case 'downloading':
+      return '正在下载更新包'
+    case 'downloading_checksum':
+      return '正在下载校验文件'
+    case 'verifying':
+      return '正在校验更新包'
+    case 'extracting':
+      return '正在解压更新包'
+    case 'prepared':
+      return '更新包已准备完成'
+    default:
+      return '正在准备更新'
+  }
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${bytes} B`
+}
+
+async function refreshUpdateTaskStatus() {
+  try {
+    updateTaskStatus.value = await adminApi.getUpdateStatus()
+  } catch {
+    // Keep the last progress snapshot while the request is in flight or the service restarts.
+  }
+}
+
+async function waitForPreparedUpdate(): Promise<UpdateTaskStatusResponse> {
+  const deadline = Date.now() + 10 * 60 * 1000
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 1000))
+    await refreshUpdateTaskStatus()
+    const status = updateTaskStatus.value
+    if (status?.phase === 'prepared') return status
+    if (status?.phase === 'failed') {
+      throw new Error(status.error || '下载更新失败')
+    }
+  }
+  throw new Error('下载更新超时')
+}
+
+function startUpdateStatusPolling() {
+  stopUpdateStatusPolling()
+  void refreshUpdateTaskStatus()
+  updateStatusPollTimer = window.setInterval(() => {
+    void refreshUpdateTaskStatus()
+  }, 1000)
+}
+
+function stopUpdateStatusPolling() {
+  if (updateStatusPollTimer !== null) {
+    window.clearInterval(updateStatusPollTimer)
+    updateStatusPollTimer = null
+  }
+}
 
 // 路由变化时自动关闭移动端菜单
 watch(() => route.path, () => {
@@ -500,14 +694,28 @@ function shouldShowUpdatePrompt(latestVersion: string): boolean {
   return true
 }
 
-async function loadVersionStatus() {
+async function loadVersionStatus(force = false) {
   if (!isAdmin.value) return null
   if (versionStatusLoadPromise) return versionStatusLoadPromise
 
   loadingVersionStatus.value = true
   versionStatusLoadPromise = (async () => {
     try {
-      versionStatus.value = await adminApi.checkUpdate()
+      const [status, capability] = await Promise.all([
+        adminApi.checkUpdate(force),
+        adminApi.getSystemUpdateCapability().catch(() => null),
+      ])
+      if (capability) {
+        applyUpdateCapability(capability)
+      }
+      versionStatus.value = updateSupported.value === false && status.has_update
+        ? {
+            ...status,
+            updatable: false,
+            update_blocker: updateUnsupportedMessage(SOURCE_BUILD_UPDATE_HINT),
+          }
+        : status
+      syncSystemUpdatePhase(versionStatus.value)
       return versionStatus.value
     } catch (error) {
       versionStatus.value = buildUpdateErrorStatus(versionStatus.value, error)
@@ -521,8 +729,34 @@ async function loadVersionStatus() {
   return versionStatusLoadPromise
 }
 
+function applyUpdateCapability(capability: SystemUpdateCapabilityResponse) {
+  updateSupported.value = capability.supported
+  rollbackAvailable.value = capability.supported && capability.rollback_available
+  updateStrategy.value = capability.update_strategy || capability.strategy || 'manual'
+  updateCapabilityMessage.value = capability.message || null
+  dockerUpdateCommand.value = capability.docker_update_command || null
+}
+
+function updateUnsupportedMessage(fallback = MANUAL_UPDATE_HINT): string {
+  return updateCapabilityMessage.value || fallback
+}
+
+function syncSystemUpdatePhase(status: CheckUpdateResponse | null) {
+  if (systemUpdatePhase.value === 'reconnecting') return
+  if (systemUpdatePhase.value === 'restart') {
+    if (!preparedUpdateVersion.value) {
+      systemUpdatePhase.value = 'download'
+    }
+    return
+  }
+  if (!status?.has_update) {
+    systemUpdatePhase.value = 'download'
+    preparedUpdateVersion.value = null
+  }
+}
+
 function handleVersionRefresh() {
-  void loadVersionStatus()
+  void loadVersionStatus(true)
 }
 
 function openVersionReleasePage() {
@@ -531,8 +765,170 @@ function openVersionReleasePage() {
   }
 }
 
+function buildUpdateInfoFromRelease(release: ReleaseEntry): CheckUpdateResponse {
+  const currentVersion =
+    versionStatus.value?.current_version ||
+    updateInfo.value?.current_version ||
+    __APP_VERSION__ ||
+    ''
+  const canSelfUpdate = updateSupported.value
+  return {
+    current_version: currentVersion,
+    latest_version: release.version,
+    has_update: !release.is_current,
+    updatable: canSelfUpdate && !release.is_current && release.updatable,
+    update_blocker: release.is_current
+      ? '当前已是这个版本'
+      : !canSelfUpdate
+        ? updateUnsupportedMessage(SOURCE_BUILD_RELEASE_HINT)
+      : release.update_blocker,
+    release_url: release.release_url,
+    release_notes: release.release_notes,
+    published_at: release.published_at,
+    error: null,
+  }
+}
+
+function openReleaseUpdateDialog(release: ReleaseEntry) {
+  updateDialogMode.value = 'selected'
+  updateInfo.value = buildUpdateInfoFromRelease(release)
+  if (systemUpdatePhase.value !== 'reconnecting') {
+    systemUpdatePhase.value = 'download'
+    preparedUpdateVersion.value = null
+  }
+  showUpdateDialog.value = true
+}
+
+async function handleApplySystemUpdate() {
+  if (applyingSystemUpdate.value) return
+  applyingSystemUpdate.value = true
+  try {
+    const capability = await adminApi.getSystemUpdateCapability()
+    applyUpdateCapability(capability)
+    if (!capability.supported) {
+      showError(
+        updateUnsupportedMessage('不支持在线自更新'),
+        '不支持在线更新'
+      )
+      return
+    }
+
+    if (systemUpdatePhase.value === 'download') {
+      const targetStatus = updateInfo.value || versionStatus.value
+      if (targetStatus?.has_update && targetStatus.updatable === false) {
+        showError(
+          targetStatus.update_blocker || '当前版本暂不支持在线更新',
+          '无法在线更新'
+        )
+        return
+      }
+      const targetVersion = updateInfo.value?.latest_version || versionStatus.value?.latest_version || null
+      updateTaskStatus.value = null
+      startUpdateStatusPolling()
+      try {
+        const result = await adminApi.prepareSystemUpdate(targetVersion)
+        const finalStatus = await waitForPreparedUpdate()
+        preparedUpdateVersion.value = targetVersion
+        systemUpdatePhase.value = 'restart'
+        success(finalStatus.output || result.message || '更新包已下载完成，请点击“立即重启”完成安装')
+      } finally {
+        stopUpdateStatusPolling()
+        void refreshUpdateTaskStatus()
+      }
+      return
+    }
+
+    const result = await adminApi.applySystemUpdate(preparedUpdateVersion.value)
+    success(result.message || '一键重启已启动')
+    systemUpdatePhase.value = 'reconnecting'
+    reconnectMessage.value = '服务正在重启...'
+    showUpdateDialog.value = true
+    applyingSystemUpdate.value = false
+    await pollHealthUntilReady()
+  } catch (err) {
+    const fallback = systemUpdatePhase.value === 'download' ? '下载更新失败' : '启动重启失败'
+    showError(parseApiError(err, fallback))
+  } finally {
+    applyingSystemUpdate.value = false
+  }
+}
+
+async function handleRollback() {
+  if (rollingBack.value) return
+  rollingBack.value = true
+  try {
+    const result = await adminApi.rollbackSystemUpdate()
+    success(result.message || '回滚已启动')
+    systemUpdatePhase.value = 'reconnecting'
+    reconnectMessage.value = '正在回滚到上一版本...'
+    showUpdateDialog.value = true
+    rollingBack.value = false
+    await pollHealthUntilReady()
+  } catch (err) {
+    showError(parseApiError(err, '回滚失败'))
+  } finally {
+    rollingBack.value = false
+  }
+}
+
+async function pollHealthUntilReady() {
+  const maxAttempts = 60
+  const intervalMs = 2000
+
+  for (let i = 0; i < maxAttempts; i++) {
+    if (i < 3) {
+      reconnectMessage.value = i === 0 ? '服务正在重启...' : `服务正在重启... (${i * 2}s)`
+      await new Promise(r => setTimeout(r, intervalMs))
+      continue
+    }
+
+    const elapsed = i * 2
+    reconnectMessage.value = `等待服务恢复... (${elapsed}s)`
+    try {
+      const resp = await fetch('/_gateway/health', {
+        method: 'GET',
+        signal: AbortSignal.timeout(3000),
+      })
+      if (resp.ok) {
+        reconnectMessage.value = '服务已恢复，正在刷新...'
+        await new Promise(r => setTimeout(r, 500))
+        window.location.replace(buildFreshReloadUrl())
+        return
+      }
+    } catch {
+      // expected while service is down
+    }
+
+    // After 30 seconds, start checking if the task actually failed
+    if (i > 15) {
+      try {
+        const status = await adminApi.getUpdateStatus()
+        if (status.phase === 'failed' && status.error) {
+          reconnectMessage.value = `更新失败: ${status.error}`
+          systemUpdatePhase.value = 'download'
+          return
+        }
+      } catch {
+        // service still down, continue polling
+      }
+    }
+
+    await new Promise(r => setTimeout(r, intervalMs))
+  }
+
+  reconnectMessage.value = '等待超时，请手动刷新页面'
+  systemUpdatePhase.value = 'download'
+}
+
+function buildFreshReloadUrl(): string {
+  const url = new URL(window.location.href)
+  url.searchParams.set('__aether_reload', Date.now().toString())
+  return url.toString()
+}
+
 function showDebugUpdateDialog() {
   const currentVersion = versionStatus.value?.current_version || __APP_VERSION__ || '0.7.0-rc28'
+  updateDialogMode.value = 'latest'
   updateInfo.value = {
     current_version: currentVersion,
     latest_version: 'v0.7.0-rc99',
@@ -545,8 +941,12 @@ function showDebugUpdateDialog() {
       '- 统一版本号显示格式',
     ].join('\n'),
     published_at: new Date().toISOString(),
+    updatable: true,
+    update_blocker: null,
     error: null,
   }
+  systemUpdatePhase.value = 'download'
+  preparedUpdateVersion.value = null
   showUpdateDialog.value = true
 }
 
@@ -566,8 +966,12 @@ function showDebugVersionStatus(hasUpdate = true) {
       ].join('\n')
       : null,
     published_at: hasUpdate ? new Date().toISOString() : null,
+    updatable: hasUpdate,
+    update_blocker: null,
     error: null,
   }
+  systemUpdatePhase.value = 'download'
+  preparedUpdateVersion.value = null
 }
 
 // 检查更新
@@ -583,6 +987,7 @@ async function checkForUpdate() {
   const result = versionStatus.value ?? await loadVersionStatus()
   if (result?.has_update && result.latest_version) {
     if (shouldShowUpdatePrompt(result.latest_version)) {
+      updateDialogMode.value = 'latest'
       updateInfo.value = result
       showUpdateDialog.value = true
     }
@@ -675,6 +1080,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('storage', handleStorageChange)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
+  stopUpdateStatusPolling()
   if (import.meta.env.DEV && window.__aetherShowUpdateDialog === showDebugUpdateDialog) {
     delete window.__aetherShowUpdateDialog
   }
@@ -727,7 +1133,7 @@ const navigation = computed(() => {
       items: [
          { name: '钱包中心', href: '/dashboard/wallet', icon: Wallet },
          { name: '套餐中心', href: '/dashboard/billing', icon: Package },
-         { name: '我的邀请', href: '/dashboard/referral', icon: Gift },
+         ...(moduleStore.isActive('referral') ? [{ name: '我的邀请', href: '/dashboard/referral', icon: Gift }] : []),
          { name: '使用统计', href: '/dashboard/usage', icon: BarChart3 },
       ]
     }
@@ -748,20 +1154,23 @@ const navigation = computed(() => {
     Shield,
     Puzzle,
     Server,
+    Send,
     SlidersHorizontal,
+    CreditCard,
+    Gift,
   }
 
-  // 添加模块菜单项（按 admin_menu_order 排序，只显示已激活的）
-  const moduleMenuItems = Object.values(moduleStore.modules)
-    .filter(m => m.active && m.admin_route && m.admin_menu_group === 'system')
-    .sort((a, b) => a.admin_menu_order - b.admin_menu_order)
-    .map(m => ({
-      name: m.display_name,
-      href: m.admin_route ?? '',
-      icon: iconMap[m.admin_menu_icon || ''] || Puzzle
-    }))
+  const activeModuleItems = (group: string) =>
+    Object.values(moduleStore.modules)
+      .filter(m => m.active && m.admin_route && m.admin_menu_group === group)
+      .sort((a, b) => a.admin_menu_order - b.admin_menu_order)
+      .map(m => ({
+        name: m.display_name,
+        href: m.admin_route ?? '',
+        icon: iconMap[m.admin_menu_icon || ''] || Puzzle
+      }))
 
-  systemItems.push(...moduleMenuItems)
+  systemItems.push(...activeModuleItems('system'))
 
   // 模块管理和系统设置放在最后
   systemItems.push({ name: '模块管理', href: '/admin/modules', icon: Puzzle })
@@ -788,9 +1197,8 @@ const navigation = computed(() => {
         { name: '号池管理', href: '/admin/pool', icon: Database },
         { name: '独立密钥', href: '/admin/keys', icon: Key },
         { name: '钱包管理', href: '/admin/wallets', icon: Wallet },
-        { name: '支付配置', href: '/admin/payment-gateways', icon: CreditCard },
         { name: '套餐管理', href: '/admin/billing-plans', icon: Package },
-        { name: '邀请返利', href: '/admin/referrals', icon: Gift },
+        ...activeModuleItems('management'),
         { name: '异步任务', href: '/admin/async-tasks', icon: Zap },
         { name: '使用记录', href: '/admin/usage', icon: BarChart3 },
       ]

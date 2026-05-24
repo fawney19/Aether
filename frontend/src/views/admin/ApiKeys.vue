@@ -1420,6 +1420,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
         allowed_providers: data.allowed_providers,
         allowed_api_formats: data.allowed_api_formats,
         allowed_models: data.allowed_models,
+        ip_rules: data.ip_rules,
         feature_settings: data.feature_settings ?? null
       }
       const { message: _, ...updated } = await adminApi.updateApiKey(data.id, updateData)
@@ -1451,6 +1452,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
         allowed_providers: data.allowed_providers,
         allowed_api_formats: data.allowed_api_formats,
         allowed_models: data.allowed_models,
+        ip_rules: data.ip_rules,
         feature_settings: data.feature_settings ?? null
       }
       const response = await adminApi.createStandaloneApiKey(createData)

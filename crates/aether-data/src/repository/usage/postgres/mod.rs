@@ -175,6 +175,38 @@ fn split_dashboard_hourly_aggregate_range(
     }
 }
 
+fn dashboard_aggregate_schema_mismatch_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    let references_dashboard_aggregate = [
+        "stats_summary",
+        "stats_daily",
+        "stats_user_daily",
+        "stats_daily_model_provider",
+        "stats_user_daily_model_provider",
+        "cutoff_date",
+        "effective_input_tokens",
+        "total_input_context",
+        "response_time_sum_ms",
+        "response_time_samples",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern));
+    if !references_dashboard_aggregate {
+        return false;
+    }
+
+    message.contains("does not exist")
+        || message.contains("unknown column")
+        || message.contains("no column named")
+        || message.contains("error occurred while decoding column")
+        || message.contains("is not compatible with sql type")
+        || message.contains("unexpected null")
+}
+
+fn dashboard_should_fallback_to_raw_on_aggregate_error(err: &DataLayerError) -> bool {
+    dashboard_aggregate_schema_mismatch_message(&err.to_string())
+}
+
 fn absorb_dashboard_summary(
     target: &mut StoredUsageDashboardSummary,
     part: &StoredUsageDashboardSummary,
@@ -1488,8 +1520,16 @@ const REBUILD_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_STATS_SQL: &str =
     include_str!("queries/rebuild_provider_api_key_codex_window_usage_stats_sql.sql");
 
 const LIST_USAGE_AUDITS_PREFIX: &str = include_str!("queries/list_usage_audits_prefix.sql");
-const USAGE_RESERVED_PROVIDER_LABELS_FILTER_SQL: &str = " AND BTRIM(COALESCE(\"usage\".provider_name, '')) <> '' AND lower(BTRIM(COALESCE(\"usage\".provider_name, ''))) NOT IN ('unknown', 'unknow', 'pending')";
-const USAGE_PROVIDER_IDENTITY_FILTER_SQL: &str = " AND BTRIM(COALESCE(\"usage\".provider_id, '')) <> '' AND lower(BTRIM(COALESCE(\"usage\".provider_id, ''))) NOT IN ('unknown', 'unknow', 'pending')";
+const USAGE_PROVIDER_IDENTITY_FILTER_SQL: &str = r#" AND (
+      (
+        BTRIM(COALESCE("usage".provider_id, '')) <> ''
+        AND lower(BTRIM(COALESCE("usage".provider_id, ''))) NOT IN ('unknown', 'unknow', 'pending')
+      )
+      OR (
+        BTRIM(COALESCE("usage".provider_name, '')) <> ''
+        AND lower(BTRIM(COALESCE("usage".provider_name, ''))) NOT IN ('unknown', 'unknow', 'pending')
+      )
+    )"#;
 const USAGE_RAW_PROVIDER_GROUP_KEY_SQL: &str = r#"CASE
       WHEN BTRIM(COALESCE("usage".provider_id, '')) = ''
         OR lower(BTRIM(COALESCE("usage".provider_id, ''))) IN ('unknown', 'unknow', 'pending')
@@ -1502,13 +1542,33 @@ const USAGE_RAW_PROVIDER_DISPLAY_NAME_SQL: &str = r#"CASE
       THEN NULL
       ELSE BTRIM("usage".provider_name)
     END"#;
+const USAGE_PROVIDER_IDENTITY_SOURCE_SQL: &str = r#"CASE
+      WHEN BTRIM(COALESCE("usage".provider_id, '')) <> ''
+        AND lower(BTRIM(COALESCE("usage".provider_id, ''))) NOT IN ('unknown', 'unknow', 'pending')
+      THEN 'provider_id'
+      WHEN BTRIM(COALESCE("usage".provider_name, '')) <> ''
+        AND lower(BTRIM(COALESCE("usage".provider_name, ''))) NOT IN ('unknown', 'unknow', 'pending')
+      THEN 'legacy_name'
+      ELSE NULL
+    END"#;
 const USAGE_PROVIDER_IDENTITY_JOIN_SQL: &str = r#"  LEFT JOIN providers AS provider_by_id
     ON BTRIM(COALESCE("usage".provider_id, '')) <> ''
    AND lower(BTRIM(COALESCE("usage".provider_id, ''))) NOT IN ('unknown', 'unknow', 'pending')
    AND provider_by_id.id = BTRIM("usage".provider_id)"#;
 const USAGE_RESOLVED_PROVIDER_GROUP_KEY_SQL: &str = r#"COALESCE(
       provider_by_id.id,
-      BTRIM("usage".provider_id)
+      CASE
+        WHEN BTRIM(COALESCE("usage".provider_id, '')) = ''
+          OR lower(BTRIM(COALESCE("usage".provider_id, ''))) IN ('unknown', 'unknow', 'pending')
+        THEN NULL
+        ELSE BTRIM("usage".provider_id)
+      END,
+      CASE
+        WHEN BTRIM(COALESCE("usage".provider_name, '')) = ''
+          OR lower(BTRIM(COALESCE("usage".provider_name, ''))) IN ('unknown', 'unknow', 'pending')
+        THEN NULL
+        ELSE BTRIM("usage".provider_name)
+      END
     )"#;
 const USAGE_RESOLVED_PROVIDER_DISPLAY_NAME_SQL: &str = r#"COALESCE(
       provider_by_id.name,
@@ -1558,9 +1618,9 @@ fn usage_audit_aggregation_sql_fragments(
             filtered_extra_where: "",
             group_key_expr: "provider_group_key",
             display_name_expr: "provider_display_name",
-            secondary_name_expr: "NULL::varchar",
+            secondary_name_expr: "provider_identity_source",
             aggregate_display_name_expr: "MAX(display_name)",
-            aggregate_secondary_name_expr: "NULL::varchar",
+            aggregate_secondary_name_expr: "CASE WHEN COUNT(*) FILTER (WHERE secondary_name = 'provider_id') > 0 THEN 'provider_id' WHEN COUNT(*) FILTER (WHERE secondary_name = 'legacy_name') > 0 THEN 'legacy_name' ELSE NULL END",
             avg_response_time_expr: "AVG(response_time_ms::DOUBLE PRECISION)",
             success_count_expr: "COALESCE(SUM(success_flag), 0)::BIGINT",
         },
@@ -1662,10 +1722,25 @@ SET status = 'completed',
 WHERE request_id = $1
 "#;
 
+const SELECT_LATEST_FAILED_CANDIDATE_FOR_STALE_REQUESTS_SQL: &str = r#"
+SELECT DISTINCT ON (request_id)
+  request_id,
+  status_code,
+  error_message
+FROM request_candidates
+WHERE request_id = ANY($1)
+  AND status IN ('failed', 'cancelled')
+ORDER BY request_id,
+         COALESCE(finished_at, started_at, created_at) DESC,
+         retry_index DESC,
+         candidate_index DESC,
+         created_at DESC
+"#;
+
 const UPDATE_FAILED_STALE_USAGE_SQL: &str = r#"
 UPDATE usage
 SET status = 'failed',
-    status_code = 504,
+    status_code = $3,
     error_message = $2
 WHERE request_id = $1
 "#;
@@ -1674,7 +1749,7 @@ const UPDATE_FAILED_VOID_STALE_USAGE_SQL: &str = r#"
 WITH updated_usage AS (
     UPDATE usage
     SET status = 'failed',
-        status_code = 504,
+        status_code = $4,
         error_message = $2,
         billing_status = 'void',
         finalized_at = $3,
@@ -1752,11 +1827,39 @@ LIMIT 1
         .await
         .map_postgres_err()?;
 
-        row.map(|row| {
-            row.try_get::<DateTime<Utc>, _>("cutoff_date")
-                .map_postgres_err()
-        })
-        .transpose()
+        if let Some(row) = row {
+            return row
+                .try_get::<DateTime<Utc>, _>("cutoff_date")
+                .map(Some)
+                .map_postgres_err();
+        }
+
+        let row = sqlx::query(
+            r#"
+SELECT MAX(date) AS latest_date
+FROM (
+    SELECT MAX(date) AS date
+    FROM stats_daily
+    WHERE total_requests > 0
+       OR is_complete IS TRUE
+    UNION ALL
+    SELECT MAX(date) AS date
+    FROM stats_user_daily
+    WHERE total_requests > 0
+    UNION ALL
+    SELECT MAX(date) AS date
+    FROM stats_daily_api_key
+    WHERE total_requests > 0
+) AS imported_daily_aggregates
+"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_postgres_err()?;
+        let latest_date = row
+            .try_get::<Option<DateTime<Utc>>, _>("latest_date")
+            .map_postgres_err()?;
+        Ok(latest_date.map(|value| value + chrono::Duration::days(1)))
     }
 
     async fn read_stats_hourly_cutoff(&self) -> Result<Option<DateTime<Utc>>, DataLayerError> {
@@ -1792,9 +1895,22 @@ WHERE is_complete IS TRUE
 SELECT
   COALESCE(SUM(total_requests), 0)::BIGINT AS total_requests,
   COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
-  COALESCE(SUM(effective_input_tokens), 0)::BIGINT AS effective_input_tokens,
+  COALESCE(SUM(
+    CASE
+      WHEN effective_input_tokens = 0 AND total_input_context = 0 AND input_tokens > 0
+      THEN input_tokens
+      ELSE effective_input_tokens
+    END
+  ), 0)::BIGINT AS effective_input_tokens,
   COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
-  COALESCE(SUM(effective_input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0)::BIGINT AS total_tokens,
+  COALESCE(SUM(
+    CASE
+      WHEN effective_input_tokens = 0 AND total_input_context = 0 AND input_tokens > 0
+      THEN input_tokens
+      ELSE effective_input_tokens
+    END
+    + output_tokens + cache_creation_tokens + cache_read_tokens
+  ), 0)::BIGINT AS total_tokens,
   COALESCE(SUM(cache_creation_tokens), 0)::BIGINT AS cache_creation_tokens,
   COALESCE(SUM(cache_read_tokens), 0)::BIGINT AS cache_read_tokens,
   COALESCE(SUM(total_input_context), 0)::BIGINT AS total_input_context,
@@ -1823,9 +1939,22 @@ WHERE user_id = $1
 SELECT
   COALESCE(SUM(total_requests), 0)::BIGINT AS total_requests,
   COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
-  COALESCE(SUM(effective_input_tokens), 0)::BIGINT AS effective_input_tokens,
+  COALESCE(SUM(
+    CASE
+      WHEN effective_input_tokens = 0 AND total_input_context = 0 AND input_tokens > 0
+      THEN input_tokens
+      ELSE effective_input_tokens
+    END
+  ), 0)::BIGINT AS effective_input_tokens,
   COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
-  COALESCE(SUM(effective_input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0)::BIGINT AS total_tokens,
+  COALESCE(SUM(
+    CASE
+      WHEN effective_input_tokens = 0 AND total_input_context = 0 AND input_tokens > 0
+      THEN input_tokens
+      ELSE effective_input_tokens
+    END
+    + output_tokens + cache_creation_tokens + cache_read_tokens
+  ), 0)::BIGINT AS total_tokens,
   COALESCE(SUM(cache_creation_tokens), 0)::BIGINT AS cache_creation_tokens,
   COALESCE(SUM(cache_read_tokens), 0)::BIGINT AS cache_read_tokens,
   COALESCE(SUM(total_input_context), 0)::BIGINT AS total_input_context,
@@ -1849,6 +1978,75 @@ WHERE date >= $1
         };
 
         decode_dashboard_summary_row(&row)
+    }
+
+    async fn list_dashboard_daily_breakdown_from_daily_totals(
+        &self,
+        start_day_utc: DateTime<Utc>,
+        end_day_utc: DateTime<Utc>,
+        user_id: Option<&str>,
+    ) -> Result<Vec<StoredUsageDashboardDailyBreakdownRow>, DataLayerError> {
+        if start_day_utc >= end_day_utc {
+            return Ok(Vec::new());
+        }
+
+        let sql = if user_id.is_some() {
+            r#"
+SELECT
+  TO_CHAR(date, 'YYYY-MM-DD') AS date,
+  'aggregate'::TEXT AS model,
+  'aggregate'::TEXT AS provider,
+  COALESCE(SUM(total_requests), 0)::BIGINT AS requests,
+  COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0)::BIGINT AS total_tokens,
+  COALESCE(SUM(total_cost), 0)::DOUBLE PRECISION AS total_cost_usd,
+  0::DOUBLE PRECISION AS response_time_sum_ms,
+  0::BIGINT AS response_time_samples
+FROM stats_user_daily
+WHERE user_id = $1
+  AND date >= $2
+  AND date < $3
+  AND total_requests > 0
+GROUP BY date
+ORDER BY date ASC
+"#
+        } else {
+            r#"
+SELECT
+  TO_CHAR(date, 'YYYY-MM-DD') AS date,
+  'aggregate'::TEXT AS model,
+  'aggregate'::TEXT AS provider,
+  COALESCE(SUM(total_requests), 0)::BIGINT AS requests,
+  COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0)::BIGINT AS total_tokens,
+  COALESCE(SUM(total_cost), 0)::DOUBLE PRECISION AS total_cost_usd,
+  0::DOUBLE PRECISION AS response_time_sum_ms,
+  0::BIGINT AS response_time_samples
+FROM stats_daily
+WHERE date >= $1
+  AND date < $2
+  AND total_requests > 0
+GROUP BY date
+ORDER BY date ASC
+"#
+        };
+
+        let mut rows = if let Some(user_id) = user_id {
+            sqlx::query(sql)
+                .bind(user_id)
+                .bind(start_day_utc)
+                .bind(end_day_utc)
+                .fetch(&self.pool)
+        } else {
+            sqlx::query(sql)
+                .bind(start_day_utc)
+                .bind(end_day_utc)
+                .fetch(&self.pool)
+        };
+
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(decode_dashboard_daily_breakdown_row(&row)?);
+        }
+        Ok(items)
     }
 
     async fn summarize_dashboard_usage_raw(
@@ -4022,7 +4220,20 @@ ORDER BY created_at_unix_secs ASC, group_id ASC, usage_id ASC
         &self,
         query: &UsageDashboardSummaryQuery,
     ) -> Result<StoredUsageDashboardSummary, DataLayerError> {
-        let Some(cutoff_utc) = self.read_stats_daily_cutoff_date().await? else {
+        let cutoff_utc = match self.read_stats_daily_cutoff_date().await {
+            Ok(value) => value,
+            Err(err) if dashboard_should_fallback_to_raw_on_aggregate_error(&err) => {
+                return self
+                    .summarize_dashboard_usage_raw(
+                        query.created_from_unix_secs,
+                        query.created_until_unix_secs,
+                        query.user_id.as_deref(),
+                    )
+                    .await;
+            }
+            Err(err) => return Err(err),
+        };
+        let Some(cutoff_utc) = cutoff_utc else {
             return self
                 .summarize_dashboard_usage_raw(
                     query.created_from_unix_secs,
@@ -4056,13 +4267,26 @@ ORDER BY created_at_unix_secs ASC, group_id ASC, usage_id ASC
             absorb_dashboard_summary(&mut summary, &raw);
         }
         if let Some((aggregate_start, aggregate_end)) = split.aggregate {
-            let aggregate = self
+            let aggregate = match self
                 .summarize_dashboard_usage_from_daily_aggregates(
                     aggregate_start,
                     aggregate_end,
                     query.user_id.as_deref(),
                 )
-                .await?;
+                .await
+            {
+                Ok(value) => value,
+                Err(err) if dashboard_should_fallback_to_raw_on_aggregate_error(&err) => {
+                    return self
+                        .summarize_dashboard_usage_raw(
+                            query.created_from_unix_secs,
+                            query.created_until_unix_secs,
+                            query.user_id.as_deref(),
+                        )
+                        .await;
+                }
+                Err(err) => return Err(err),
+            };
             absorb_dashboard_summary(&mut summary, &aggregate);
         }
         if let Some((raw_start, raw_end)) = split.raw_trailing {
@@ -4140,8 +4364,19 @@ ORDER BY date ASC, total_cost_usd DESC, model ASC, provider_name ASC
         };
 
         let mut items = Vec::new();
+        let mut detailed_dates = std::collections::BTreeSet::<String>::new();
         while let Some(row) = rows.try_next().await.map_postgres_err()? {
-            items.push(decode_dashboard_daily_breakdown_row(&row)?);
+            let item = decode_dashboard_daily_breakdown_row(&row)?;
+            detailed_dates.insert(item.date.clone());
+            items.push(item);
+        }
+        for item in self
+            .list_dashboard_daily_breakdown_from_daily_totals(start_day_utc, end_day_utc, user_id)
+            .await?
+        {
+            if !detailed_dates.contains(&item.date) {
+                items.push(item);
+            }
         }
         Ok(items)
     }
@@ -4249,15 +4484,63 @@ ORDER BY date ASC, total_cost_usd DESC, "usage".model ASC, "usage".provider_name
         Ok(items)
     }
 
+    async fn list_dashboard_daily_breakdown_aggregate_segments(
+        &self,
+        query: &UsageDashboardDailyBreakdownQuery,
+    ) -> Result<Vec<StoredUsageDashboardDailyBreakdownRow>, DataLayerError> {
+        let cutoff_utc = match self.read_stats_daily_cutoff_date().await {
+            Ok(value) => value,
+            Err(err) if dashboard_should_fallback_to_raw_on_aggregate_error(&err) => {
+                return Ok(Vec::new());
+            }
+            Err(err) => return Err(err),
+        };
+        let Some(cutoff_utc) = cutoff_utc else {
+            return Ok(Vec::new());
+        };
+        let start_utc = dashboard_unix_secs_to_utc(query.created_from_unix_secs);
+        let end_utc = dashboard_unix_secs_to_utc(query.created_until_unix_secs);
+        let split = split_dashboard_daily_aggregate_range(start_utc, end_utc, cutoff_utc);
+        let Some((aggregate_start, aggregate_end)) = split.aggregate else {
+            return Ok(Vec::new());
+        };
+
+        self.list_dashboard_daily_breakdown_from_daily_aggregates(
+            aggregate_start,
+            aggregate_end,
+            query.user_id.as_deref(),
+        )
+        .await
+    }
+
     pub async fn list_dashboard_daily_breakdown(
         &self,
         query: &UsageDashboardDailyBreakdownQuery,
     ) -> Result<Vec<StoredUsageDashboardDailyBreakdownRow>, DataLayerError> {
         if query.tz_offset_minutes != 0 {
-            return self.list_dashboard_daily_breakdown_raw(query).await;
+            let mut items = self
+                .list_dashboard_daily_breakdown_aggregate_segments(query)
+                .await?;
+            let mut aggregate_dates = items
+                .iter()
+                .map(|item| item.date.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            for item in self.list_dashboard_daily_breakdown_raw(query).await? {
+                if aggregate_dates.insert(item.date.clone()) {
+                    items.push(item);
+                }
+            }
+            return Ok(finalize_dashboard_daily_breakdown_rows(items));
         }
 
-        let Some(cutoff_utc) = self.read_stats_daily_cutoff_date().await? else {
+        let cutoff_utc = match self.read_stats_daily_cutoff_date().await {
+            Ok(value) => value,
+            Err(err) if dashboard_should_fallback_to_raw_on_aggregate_error(&err) => {
+                return self.list_dashboard_daily_breakdown_raw(query).await;
+            }
+            Err(err) => return Err(err),
+        };
+        let Some(cutoff_utc) = cutoff_utc else {
             return self.list_dashboard_daily_breakdown_raw(query).await;
         };
         let start_utc = dashboard_unix_secs_to_utc(query.created_from_unix_secs);
@@ -4280,14 +4563,21 @@ ORDER BY date ASC, total_cost_usd DESC, "usage".model ASC, "usage".provider_name
             );
         }
         if let Some((aggregate_start, aggregate_end)) = split.aggregate {
-            items.extend(
-                self.list_dashboard_daily_breakdown_from_daily_aggregates(
+            let aggregate_rows = match self
+                .list_dashboard_daily_breakdown_from_daily_aggregates(
                     aggregate_start,
                     aggregate_end,
                     query.user_id.as_deref(),
                 )
-                .await?,
-            );
+                .await
+            {
+                Ok(value) => value,
+                Err(err) if dashboard_should_fallback_to_raw_on_aggregate_error(&err) => {
+                    return self.list_dashboard_daily_breakdown_raw(query).await;
+                }
+                Err(err) => return Err(err),
+            };
+            items.extend(aggregate_rows);
         }
         if let Some((raw_start, raw_end)) = split.raw_trailing {
             items.extend(
@@ -6687,10 +6977,10 @@ ORDER BY request_count DESC, group_key ASC
     ) -> Result<Vec<StoredUsageAuditAggregation>, DataLayerError> {
         let fragments = usage_audit_aggregation_sql_fragments(query.group_by);
         let provider_extra_where =
-            if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider) {
+            if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider)
+                || query.exclude_reserved_provider_labels
+            {
                 USAGE_PROVIDER_IDENTITY_FILTER_SQL
-            } else if query.exclude_reserved_provider_labels {
-                USAGE_RESERVED_PROVIDER_LABELS_FILTER_SQL
             } else {
                 ""
             };
@@ -6702,6 +6992,7 @@ WITH filtered_usage AS (
     "usage".user_id AS user_id,
     {provider_group_key_expr} AS provider_group_key,
     {provider_display_name_expr} AS provider_display_name,
+    {provider_identity_source_expr} AS provider_identity_source,
     COALESCE("usage".api_format, 'unknown') AS api_format_group_key,
     GREATEST(COALESCE("usage".input_tokens, 0), 0) AS input_tokens,
     GREATEST(COALESCE("usage".output_tokens, 0), 0) AS output_tokens,
@@ -6835,6 +7126,7 @@ LIMIT $3
             provider_identity_join = fragments.provider_identity_join,
             provider_group_key_expr = fragments.provider_group_key_expr,
             provider_display_name_expr = fragments.provider_display_name_expr,
+            provider_identity_source_expr = USAGE_PROVIDER_IDENTITY_SOURCE_SQL,
             group_key_expr = fragments.group_key_expr,
             display_name_expr = fragments.display_name_expr,
             secondary_name_expr = fragments.secondary_name_expr,
@@ -7253,6 +7545,7 @@ ORDER BY api_key_id ASC
 
         let mut totals = std::collections::BTreeMap::<String, StoredUsageUserTotals>::new();
         if let Some(cutoff_utc) = self.read_stats_daily_cutoff_date().await? {
+            let mut summary_user_ids = std::collections::BTreeSet::<String>::new();
             let mut aggregate_rows = sqlx::query(
                 r#"
 SELECT
@@ -7275,6 +7568,50 @@ ORDER BY user_id ASC
 
             while let Some(row) = aggregate_rows.try_next().await.map_postgres_err()? {
                 let user_id = row.try_get::<String, _>("user_id").map_postgres_err()?;
+                let request_count = row
+                    .try_get::<i64, _>("request_count")
+                    .map_postgres_err()?
+                    .max(0) as u64;
+                let total_tokens = row
+                    .try_get::<i64, _>("total_tokens")
+                    .map_postgres_err()?
+                    .max(0) as u64;
+                summary_user_ids.insert(user_id.clone());
+                totals.insert(
+                    user_id.clone(),
+                    StoredUsageUserTotals {
+                        user_id,
+                        request_count,
+                        total_tokens,
+                    },
+                );
+            }
+
+            let mut daily_rows = sqlx::query(
+                r#"
+SELECT
+  user_id,
+  COALESCE(SUM(total_requests), 0)::BIGINT AS request_count,
+  COALESCE(
+    SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),
+    0
+  )::BIGINT AS total_tokens
+FROM stats_user_daily
+WHERE user_id = ANY($1::TEXT[])
+  AND date < $2
+GROUP BY user_id
+ORDER BY user_id ASC
+"#,
+            )
+            .bind(user_ids)
+            .bind(cutoff_utc)
+            .fetch(&self.pool);
+
+            while let Some(row) = daily_rows.try_next().await.map_postgres_err()? {
+                let user_id = row.try_get::<String, _>("user_id").map_postgres_err()?;
+                if summary_user_ids.contains(&user_id) {
+                    continue;
+                }
                 let request_count = row
                     .try_get::<i64, _>("request_count")
                     .map_postgres_err()?
@@ -8262,17 +8599,44 @@ ORDER BY "usage".user_id ASC
                 .iter()
                 .map(|row| row.request_id.clone())
                 .collect::<Vec<_>>();
-            let completed_request_ids = if request_ids.is_empty() {
-                Vec::new()
+            let (completed_request_ids, failed_candidate_info) = if request_ids.is_empty() {
+                (Vec::new(), std::collections::HashMap::new())
             } else {
-                sqlx::query(SELECT_COMPLETED_PENDING_REQUEST_IDS_SQL)
-                    .bind(request_ids)
+                let completed = sqlx::query(SELECT_COMPLETED_PENDING_REQUEST_IDS_SQL)
+                    .bind(&request_ids)
                     .fetch_all(&mut *tx)
                     .await
                     .map_postgres_err()?
                     .iter()
                     .map(|row| row.try_get("request_id").map_postgres_err())
-                    .collect::<Result<Vec<String>, DataLayerError>>()?
+                    .collect::<Result<Vec<String>, DataLayerError>>()?;
+                let failed_rows =
+                    sqlx::query(SELECT_LATEST_FAILED_CANDIDATE_FOR_STALE_REQUESTS_SQL)
+                        .bind(&request_ids)
+                        .fetch_all(&mut *tx)
+                        .await
+                        .map_postgres_err()?;
+                let mut failed_map = std::collections::HashMap::new();
+                for row in failed_rows {
+                    let request_id: String = row.try_get("request_id").map_postgres_err()?;
+                    let status_code = row
+                        .try_get::<Option<i32>, _>("status_code")
+                        .map_postgres_err()?
+                        .and_then(|value| u16::try_from(value).ok());
+                    let error_message = row
+                        .try_get::<Option<String>, _>("error_message")
+                        .map_postgres_err()?
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty());
+                    failed_map.insert(
+                        request_id,
+                        FailedCandidateCleanupInfo {
+                            status_code,
+                            error_message,
+                        },
+                    );
+                }
+                (completed, failed_map)
             };
 
             for row in stale_rows {
@@ -8292,12 +8656,16 @@ ORDER BY "usage".user_id ASC
                     continue;
                 }
 
-                let error_message = stale_pending_error_message(&row.status, timeout_minutes);
+                let candidate_info = failed_candidate_info.get(&row.request_id);
+                let (status_code, error_message) =
+                    resolve_stale_pending_failure(candidate_info, &row.status, timeout_minutes);
+                let status_code_i32 = i32::from(status_code);
                 if row.billing_status == "pending" {
                     sqlx::query(UPDATE_FAILED_VOID_STALE_USAGE_SQL)
                         .bind(&row.request_id)
                         .bind(&error_message)
                         .bind(now)
+                        .bind(status_code_i32)
                         .execute(&mut *tx)
                         .await
                         .map_postgres_err()?;
@@ -8305,6 +8673,7 @@ ORDER BY "usage".user_id ASC
                     sqlx::query(UPDATE_FAILED_STALE_USAGE_SQL)
                         .bind(&row.request_id)
                         .bind(&error_message)
+                        .bind(status_code_i32)
                         .execute(&mut *tx)
                         .await
                         .map_postgres_err()?;
@@ -8755,8 +9124,29 @@ struct StalePendingUsageRow {
     billing_status: String,
 }
 
+struct FailedCandidateCleanupInfo {
+    status_code: Option<u16>,
+    error_message: Option<String>,
+}
+
 fn stale_pending_error_message(status: &str, timeout_minutes: u64) -> String {
     format!("请求超时: 状态 '{status}' 超过 {timeout_minutes} 分钟未完成")
+}
+
+fn resolve_stale_pending_failure(
+    candidate: Option<&FailedCandidateCleanupInfo>,
+    status: &str,
+    timeout_minutes: u64,
+) -> (u16, String) {
+    match candidate {
+        Some(info) => (
+            info.status_code.unwrap_or(502),
+            info.error_message
+                .clone()
+                .unwrap_or_else(|| stale_pending_error_message(status, timeout_minutes)),
+        ),
+        None => (504, stale_pending_error_message(status, timeout_minutes)),
+    }
 }
 
 async fn find_usage_by_request_id_in_tx(

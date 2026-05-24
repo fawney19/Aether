@@ -59,6 +59,11 @@ pub(super) async fn build_admin_monitoring_redis_cache_categories_response(
 ) -> Result<Response<Body>, GatewayError> {
     let mut categories = Vec::with_capacity(ADMIN_MONITORING_REDIS_CACHE_CATEGORIES.len());
     let mut total_keys = 0usize;
+    let diagnostics = state
+        .runtime_state()
+        .redis_diagnostics()
+        .await
+        .map_err(|err| GatewayError::Internal(format!("redis diagnostics failed: {err}")))?;
 
     for (key, name, pattern, description) in ADMIN_MONITORING_REDIS_CACHE_CATEGORIES {
         let count = list_admin_monitoring_namespaced_keys(state, pattern)
@@ -81,6 +86,7 @@ pub(super) async fn build_admin_monitoring_redis_cache_categories_response(
             "backend": state.runtime_state().backend_kind().as_str(),
             "categories": categories,
             "total_keys": total_keys,
+            "diagnostics": diagnostics,
         }
     }))
     .into_response())

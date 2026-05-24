@@ -17,14 +17,19 @@ pub use provider::{ProviderPoolAdapter, ProviderPoolMemberInput};
 pub use providers::{
     build_antigravity_pool_quota_request, build_chatgpt_web_pool_quota_request,
     build_codex_pool_quota_request, build_kiro_pool_quota_request,
-    enrich_chatgpt_web_quota_metadata, grok_mode_id_for_model, grok_pool_tier_from_quota_bucket,
-    grok_quota_window_key_for_model, grok_supported_quota_windows_for_tier,
-    normalize_chatgpt_web_image_quota_limit, AntigravityProviderPoolAdapter,
-    ChatGptWebProviderPoolAdapter, CodexProviderPoolAdapter, DefaultProviderPoolAdapter,
-    GrokProviderPoolAdapter, KiroPoolQuotaAuthInput, KiroProviderPoolAdapter,
-    UnsupportedQuotaProviderPoolAdapter, ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH,
-    CHATGPT_WEB_CONVERSATION_INIT_PATH, CHATGPT_WEB_DEFAULT_BASE_URL, CODEX_WHAM_USAGE_URL,
-    KIRO_USAGE_LIMITS_PATH, KIRO_USAGE_SDK_VERSION,
+    build_windsurf_pool_model_configs_request,
+    build_windsurf_pool_model_configs_request_with_base_url, build_windsurf_pool_quota_request,
+    build_windsurf_pool_quota_request_with_base_url, build_windsurf_pool_rate_limit_request,
+    build_windsurf_pool_rate_limit_request_with_base_url, enrich_chatgpt_web_quota_metadata,
+    grok_mode_id_for_model, grok_pool_tier_from_quota_bucket, grok_quota_window_key_for_model,
+    grok_supported_quota_windows_for_tier, normalize_chatgpt_web_image_quota_limit,
+    AntigravityProviderPoolAdapter, ChatGptWebProviderPoolAdapter, CodexProviderPoolAdapter,
+    DefaultProviderPoolAdapter, GrokProviderPoolAdapter, KiroPoolQuotaAuthInput,
+    KiroProviderPoolAdapter, UnsupportedQuotaProviderPoolAdapter,
+    ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH, CHATGPT_WEB_CONVERSATION_INIT_PATH,
+    CHATGPT_WEB_DEFAULT_BASE_URL, CODEX_WHAM_USAGE_URL, KIRO_USAGE_LIMITS_PATH,
+    KIRO_USAGE_SDK_VERSION, WINDSURF_MODEL_CONFIGS_PATH, WINDSURF_RATE_LIMIT_PATH,
+    WINDSURF_USER_STATUS_PATH,
 };
 pub use quota::{
     provider_pool_key_account_quota_exhausted, provider_pool_key_scheduling_label,
@@ -69,7 +74,8 @@ mod tests {
                 "gemini_cli",
                 "grok",
                 "kiro",
-                "vertex_ai"
+                "vertex_ai",
+                "windsurf"
             ]
         );
         assert!(service
@@ -85,11 +91,19 @@ mod tests {
 
         assert_eq!(
             service.provider_types_for_capability(ProviderPoolCapability::QuotaRefresh),
-            ["antigravity", "chatgpt_web", "codex", "grok", "kiro"]
+            [
+                "antigravity",
+                "chatgpt_web",
+                "codex",
+                "grok",
+                "kiro",
+                "windsurf"
+            ]
         );
         assert!(service.supports_quota_refresh("codex"));
         assert!(service.supports_quota_refresh("antigravity"));
         assert!(service.supports_quota_refresh("grok"));
+        assert!(service.supports_quota_refresh("windsurf"));
         assert!(!service.supports_quota_refresh("gemini_cli"));
         assert_eq!(
             service.quota_refresh_unsupported_message("claude_code"),
@@ -198,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn chatgpt_web_quota_metadata_enriches_auth_and_normalizes_free_limit() {
+    fn chatgpt_web_quota_metadata_enriches_auth_and_uses_first_remaining_as_limit() {
         let mut metadata = json!({
             "image_quota_remaining": 12,
         });
@@ -215,8 +229,8 @@ mod tests {
         assert_eq!(metadata["plan_type"], json!("free"));
         assert_eq!(metadata["email"], json!("user@example.com"));
         assert_eq!(metadata["account_id"], json!("acct-1"));
-        assert_eq!(metadata["image_quota_total"], json!(25.0));
-        assert_eq!(metadata["image_quota_used"], json!(13.0));
+        assert_eq!(metadata["image_quota_total"], json!(12.0));
+        assert_eq!(metadata["image_quota_used"], json!(0.0));
     }
 
     #[test]
@@ -239,6 +253,176 @@ mod tests {
     }
 
     #[test]
+    fn chatgpt_web_quota_metadata_does_not_preserve_legacy_free_25_limit() {
+        let mut metadata = json!({
+            "plan_type": "free",
+            "image_quota_remaining": 19,
+        });
+        normalize_chatgpt_web_image_quota_limit(
+            &mut metadata,
+            Some(&json!({
+                "chatgpt_web": {
+                    "plan_type": "free",
+                    "image_quota_total": 25
+                }
+            })),
+        );
+
+        assert_eq!(metadata["image_quota_total"], json!(19.0));
+        assert_eq!(metadata["image_quota_used"], json!(0.0));
+        assert_eq!(
+            metadata["image_quota_limit_source"],
+            json!("first_remaining")
+        );
+    }
+
+    #[test]
+    fn chatgpt_web_quota_metadata_ignores_upstream_free_25_default() {
+        let mut metadata = json!({
+            "plan_type": "free",
+            "image_quota_remaining": 19,
+            "image_quota_total": 25,
+        });
+        normalize_chatgpt_web_image_quota_limit(&mut metadata, None);
+
+        assert_eq!(metadata["image_quota_total"], json!(19.0));
+        assert_eq!(metadata["image_quota_used"], json!(0.0));
+        assert_eq!(
+            metadata["image_quota_limit_source"],
+            json!("first_remaining")
+        );
+    }
+
+    #[test]
+    fn chatgpt_web_quota_metadata_preserves_marked_free_first_limit() {
+        let mut metadata = json!({
+            "plan_type": "free",
+            "image_quota_remaining": 18,
+        });
+        normalize_chatgpt_web_image_quota_limit(
+            &mut metadata,
+            Some(&json!({
+                "chatgpt_web": {
+                    "plan_type": "free",
+                    "image_quota_total": 19,
+                    "image_quota_limit_source": "first_remaining"
+                }
+            })),
+        );
+
+        assert_eq!(metadata["image_quota_total"], json!(19.0));
+        assert_eq!(metadata["image_quota_used"], json!(1.0));
+        assert_eq!(
+            metadata["image_quota_limit_source"],
+            json!("first_remaining")
+        );
+    }
+
+    #[test]
+    fn windsurf_quota_request_uses_user_status_connect_rpc() {
+        let spec = build_windsurf_pool_quota_request("key-ws", "session-token-123");
+
+        assert_eq!(spec.request_id, "windsurf-quota:key-ws");
+        assert_eq!(spec.method, "POST");
+        assert_eq!(
+            spec.url,
+            format!("https://server.codeium.com{WINDSURF_USER_STATUS_PATH}")
+        );
+        assert_eq!(spec.content_type.as_deref(), Some("application/json"));
+        assert_eq!(
+            spec.headers
+                .get("connect-protocol-version")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            spec.json_body
+                .as_ref()
+                .and_then(|body| body.pointer("/metadata/apiKey"))
+                .and_then(Value::as_str),
+            Some("session-token-123")
+        );
+        assert_eq!(spec.provider_api_format, "windsurf:user_status");
+    }
+
+    #[test]
+    fn windsurf_model_and_rate_limit_requests_use_connect_rpc_metadata() {
+        let models = build_windsurf_pool_model_configs_request("key-ws", "api-key-123");
+        let rate_limit = build_windsurf_pool_rate_limit_request("key-ws", "api-key-123");
+
+        assert_eq!(
+            models.url,
+            format!("https://server.codeium.com{WINDSURF_MODEL_CONFIGS_PATH}")
+        );
+        assert_eq!(
+            rate_limit.url,
+            format!("https://server.codeium.com{WINDSURF_RATE_LIMIT_PATH}")
+        );
+        for spec in [models, rate_limit] {
+            assert_eq!(spec.method, "POST");
+            assert_eq!(
+                spec.headers
+                    .get("connect-protocol-version")
+                    .map(String::as_str),
+                Some("1")
+            );
+            assert_eq!(
+                spec.json_body
+                    .as_ref()
+                    .and_then(|body| body.pointer("/metadata/apiKey"))
+                    .and_then(Value::as_str),
+                Some("api-key-123")
+            );
+            assert_eq!(spec.client_api_format, "openai:chat");
+        }
+    }
+
+    #[test]
+    fn windsurf_rate_limit_metadata_keeps_member_schedulable() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let key = sample_key(Some(json!({
+            "windsurf": {
+                "updated_at": 1_700_000_000u64,
+                "rate_limit": {
+                    "limited": true,
+                    "retry_after_ms": 60_000
+                }
+            }
+        })));
+
+        let signals = service.member_signals("windsurf", &key, None);
+
+        assert!(!signals.quota_exhausted);
+    }
+
+    #[test]
+    fn windsurf_status_snapshot_ban_marks_member_exhausted() {
+        let service = ProviderPoolService::with_builtin_adapters();
+        let mut key = sample_key(Some(json!({
+            "windsurf": {
+                "updated_at": 1_700_000_000u64,
+                "daily_remaining_percent": 100.0
+            }
+        })));
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "provider_type": "windsurf",
+                "code": "banned",
+                "exhausted": false,
+                "windows": [{
+                    "code": "daily",
+                    "used_ratio": 0.0,
+                    "remaining_ratio": 1.0
+                }]
+            }
+        }));
+
+        let signals = service.member_signals("windsurf", &key, None);
+
+        assert!(signals.quota_exhausted);
+    }
+
+    #[test]
     fn preset_payload_derives_provider_support_from_capabilities() {
         let payload = build_admin_pool_scheduling_presets_payload();
         let items = payload.as_array().expect("payload should be array");
@@ -251,10 +435,13 @@ mod tests {
             .find(|item| item["name"] == "recent_refresh")
             .expect("recent_refresh should exist");
 
-        assert_eq!(free_first["providers"], json!(["codex", "grok", "kiro"]));
+        assert_eq!(
+            free_first["providers"],
+            json!(["codex", "grok", "kiro", "windsurf"])
+        );
         assert_eq!(
             recent_refresh["providers"],
-            json!(["codex", "grok", "kiro"])
+            json!(["codex", "grok", "kiro", "windsurf"])
         );
     }
 
@@ -374,6 +561,81 @@ mod tests {
                 "codex": {
                     "has_credits": false,
                     "credits_unlimited": true
+                }
+            }))),
+            "codex",
+        ));
+    }
+
+    #[test]
+    fn provider_quota_exhaustion_snapshot_expires_after_reset_at() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_secs();
+
+        let mut expired = sample_key(None);
+        expired.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "code": "exhausted",
+                "exhausted": true,
+                "updated_at": now.saturating_sub(600),
+                "windows": [{
+                    "code": "5h",
+                    "used_ratio": 1.0,
+                    "reset_at": now.saturating_sub(60),
+                    "is_exhausted": true
+                }]
+            }
+        }));
+        assert!(!provider_pool_key_account_quota_exhausted(
+            &expired, "codex"
+        ));
+
+        let mut active = sample_key(None);
+        active.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "code": "exhausted",
+                "exhausted": true,
+                "updated_at": now,
+                "windows": [{
+                    "code": "5h",
+                    "used_ratio": 1.0,
+                    "reset_at": now.saturating_add(3600),
+                    "is_exhausted": true
+                }]
+            }
+        }));
+        assert!(provider_pool_key_account_quota_exhausted(&active, "codex"));
+    }
+
+    #[test]
+    fn provider_quota_exhaustion_metadata_expires_after_reset_at() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_secs();
+
+        assert!(!provider_pool_key_account_quota_exhausted(
+            &sample_key(Some(json!({
+                "codex": {
+                    "updated_at": now.saturating_sub(600),
+                    "primary_used_percent": 100.0,
+                    "primary_reset_at": now.saturating_sub(60)
+                }
+            }))),
+            "codex",
+        ));
+        assert!(provider_pool_key_account_quota_exhausted(
+            &sample_key(Some(json!({
+                "codex": {
+                    "updated_at": now,
+                    "primary_used_percent": 100.0,
+                    "primary_reset_at": now.saturating_add(3600)
                 }
             }))),
             "codex",

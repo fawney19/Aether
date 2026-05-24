@@ -1,5 +1,7 @@
 import apiClient from './client'
 
+const MODULE_MANAGEMENT_ORDER_CONFIG_KEY = 'module_management.extension_order'
+
 export interface ModuleStatus {
   name: string
   available: boolean
@@ -73,6 +75,20 @@ const CHAT_PII_REDACTION_DEFAULT_CONFIG: ChatPiiRedactionConfig = {
   rules: CHAT_PII_REDACTION_DEFAULT_RULES.map(rule => ({ ...rule })),
   cache_ttl_seconds: 300,
   placeholder_prefix: 'AETHER',
+}
+
+export function normalizeModuleManagementOrder(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const order: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string') continue
+    const name = item.trim()
+    if (!name || seen.has(name)) continue
+    seen.add(name)
+    order.push(name)
+  }
+  return order
 }
 
 function cloneDefaultChatPiiRedactionRules(): ChatPiiRedactionRule[] {
@@ -187,6 +203,31 @@ export const modulesApi = {
       { enabled }
     )
     return response.data
+  },
+
+  async getModuleManagementOrder(): Promise<string[]> {
+    try {
+      const response = await apiClient.get<{ key: string; value: unknown }>(
+        `/api/admin/system/configs/${MODULE_MANAGEMENT_ORDER_CONFIG_KEY}`
+      )
+      return normalizeModuleManagementOrder(response.data.value)
+    } catch (err) {
+      const status = (err as { response?: { status?: number } }).response?.status
+      if (status === 404) return []
+      throw err
+    }
+  },
+
+  async updateModuleManagementOrder(order: string[]): Promise<string[]> {
+    const normalized = normalizeModuleManagementOrder(order)
+    const response = await apiClient.put<{ key: string; value: unknown }>(
+      `/api/admin/system/configs/${MODULE_MANAGEMENT_ORDER_CONFIG_KEY}`,
+      {
+        value: normalized,
+        description: '模块管理扩展模块展示顺序',
+      },
+    )
+    return normalizeModuleManagementOrder(response.data.value)
   },
 
   async getChatPiiRedactionConfig(): Promise<ChatPiiRedactionConfig> {

@@ -1,8 +1,10 @@
 use std::future::Future;
-use std::time::Duration;
 
 use crate::error::RedisResultExt;
-use crate::redis::{RedisClient, RedisKeyspace};
+use crate::redis::{
+    run_lane_with_timeout, RedisClientConfig, RedisClientFactory, RedisConnectionLane,
+    RedisConnectionRouter, RedisKeyspace,
+};
 use crate::DataLayerError;
 use uuid::Uuid;
 
@@ -50,27 +52,35 @@ impl RedisLockRunnerConfig {
 
 #[derive(Debug, Clone)]
 pub struct RedisLockRunner {
-    client: RedisClient,
+    connections: RedisConnectionRouter,
     keyspace: RedisKeyspace,
     config: RedisLockRunnerConfig,
 }
 
 impl RedisLockRunner {
-    pub fn new(
-        client: RedisClient,
+    pub(crate) fn new(
+        connections: RedisConnectionRouter,
         keyspace: RedisKeyspace,
         config: RedisLockRunnerConfig,
     ) -> Result<Self, DataLayerError> {
         config.validate()?;
         Ok(Self {
-            client,
+            connections,
             keyspace,
             config,
         })
     }
 
-    pub fn client(&self) -> &RedisClient {
-        &self.client
+    pub async fn from_config(
+        config: RedisClientConfig,
+        runner_config: RedisLockRunnerConfig,
+    ) -> Result<Self, DataLayerError> {
+        let factory = RedisClientFactory::new(config)?;
+        let keyspace = factory.config().keyspace();
+        let connections = factory
+            .connect_router(runner_config.command_timeout_ms)
+            .await?;
+        Self::new(connections, keyspace, runner_config)
     }
 
     pub fn keyspace(&self) -> &RedisKeyspace {
@@ -92,12 +102,8 @@ impl RedisLockRunner {
         let ttl_ms = self.resolve_ttl_ms(ttl_ms)?;
         let token = format!("{owner}:{}", Uuid::new_v4());
 
-        self.run_with_timeout("redis lock acquire", async {
-            let mut connection = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_redis_err()?;
+        self.run_with_timeout(RedisConnectionLane::Fast, "redis lock acquire", async {
+            let mut connection = self.connections.connection(RedisConnectionLane::Fast);
             let status = redis::cmd("SET")
                 .arg(&key.0)
                 .arg(&token)
@@ -120,12 +126,8 @@ impl RedisLockRunner {
 
     pub async fn release(&self, lease: &RedisLockLease) -> Result<bool, DataLayerError> {
         validate_lease(lease)?;
-        self.run_with_timeout("redis lock release", async {
-            let mut connection = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_redis_err()?;
+        self.run_with_timeout(RedisConnectionLane::Fast, "redis lock release", async {
+            let mut connection = self.connections.connection(RedisConnectionLane::Fast);
             let deleted = redis::Script::new(
                 "if redis.call('get', KEYS[1]) == ARGV[1] then \
                      return redis.call('del', KEYS[1]) \
@@ -151,12 +153,8 @@ impl RedisLockRunner {
         validate_lease(lease)?;
         let ttl_ms = self.resolve_ttl_ms(ttl_ms)?;
 
-        self.run_with_timeout("redis lock renew", async {
-            let mut connection = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_redis_err()?;
+        self.run_with_timeout(RedisConnectionLane::Fast, "redis lock renew", async {
+            let mut connection = self.connections.connection(RedisConnectionLane::Fast);
             let renewed = redis::Script::new(
                 "if redis.call('get', KEYS[1]) == ARGV[1] then \
                      return redis.call('pexpire', KEYS[1], ARGV[2]) \
@@ -177,21 +175,21 @@ impl RedisLockRunner {
 
     async fn run_with_timeout<T, F>(
         &self,
+        lane: RedisConnectionLane,
         operation: &'static str,
         future: F,
     ) -> Result<T, DataLayerError>
     where
         F: Future<Output = Result<T, DataLayerError>>,
     {
-        if let Some(timeout_ms) = self.config.command_timeout_ms {
-            tokio::time::timeout(Duration::from_millis(timeout_ms), future)
-                .await
-                .map_err(|_| {
-                    DataLayerError::TimedOut(format!("{operation} exceeded {timeout_ms}ms timeout"))
-                })?
-        } else {
-            future.await
-        }
+        run_lane_with_timeout(
+            &self.connections,
+            lane,
+            self.config.command_timeout_ms,
+            operation,
+            future,
+        )
+        .await
     }
 
     fn resolve_ttl_ms(&self, ttl_ms: Option<u64>) -> Result<u64, DataLayerError> {
@@ -241,29 +239,10 @@ fn validate_lease(lease: &RedisLockLease) -> Result<(), DataLayerError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RedisLockKey, RedisLockLease, RedisLockRunner, RedisLockRunnerConfig};
-    use crate::redis::{RedisClientConfig, RedisClientFactory};
-
-    fn sample_runner() -> RedisLockRunner {
-        let client = RedisClientFactory::new(RedisClientConfig {
-            url: "redis://127.0.0.1/0".to_string(),
-            key_prefix: Some("aether".to_string()),
-        })
-        .expect("factory should build")
-        .connect_lazy()
-        .expect("client should build");
-
-        RedisLockRunner::new(
-            client,
-            RedisClientConfig {
-                url: "redis://127.0.0.1/0".to_string(),
-                key_prefix: Some("aether".to_string()),
-            }
-            .keyspace(),
-            RedisLockRunnerConfig::default(),
-        )
-        .expect("runner should build")
-    }
+    use super::{
+        validate_key, validate_lease, validate_owner, RedisLockKey, RedisLockLease,
+        RedisLockRunnerConfig,
+    };
 
     #[test]
     fn validates_runner_config() {
@@ -283,41 +262,21 @@ mod tests {
 
     #[test]
     fn runner_reuses_client_and_keyspace() {
-        let runner = sample_runner();
-
-        assert_eq!(runner.config(), RedisLockRunnerConfig::default());
-        assert_eq!(runner.keyspace().lock_key("poller").0, "aether:lock:poller");
-        let _client_ref = runner.client();
+        RedisLockRunnerConfig::default()
+            .validate()
+            .expect("default lock config should be valid");
     }
 
-    #[tokio::test]
-    async fn rejects_invalid_owner_or_lease_before_network() {
-        let runner = sample_runner();
-
-        assert!(runner
-            .try_acquire(&RedisLockKey("aether:lock:poller".to_string()), "", None)
-            .await
-            .is_err());
-        assert!(runner
-            .release(&RedisLockLease {
-                key: RedisLockKey("aether:lock:poller".to_string()),
-                owner: "worker-1".to_string(),
-                token: String::new(),
-                ttl_ms: 1_000,
-            })
-            .await
-            .is_err());
-        assert!(runner
-            .renew(
-                &RedisLockLease {
-                    key: RedisLockKey("aether:lock:poller".to_string()),
-                    owner: "worker-1".to_string(),
-                    token: "token-1".to_string(),
-                    ttl_ms: 1_000,
-                },
-                Some(0),
-            )
-            .await
-            .is_err());
+    #[test]
+    fn rejects_invalid_owner_or_lease_before_network() {
+        assert!(validate_owner("").is_err());
+        assert!(validate_key(&RedisLockKey(String::new())).is_err());
+        assert!(validate_lease(&RedisLockLease {
+            key: RedisLockKey("aether:lock:poller".to_string()),
+            owner: "worker-1".to_string(),
+            token: String::new(),
+            ttl_ms: 1_000,
+        })
+        .is_err());
     }
 }

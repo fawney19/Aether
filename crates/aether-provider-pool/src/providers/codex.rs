@@ -10,8 +10,9 @@ use crate::provider::{
     ProviderPoolMemberInput,
 };
 use crate::quota::{
-    provider_pool_json_bool, provider_pool_json_f64, provider_pool_metadata_bucket,
-    provider_pool_quota_snapshot_exhausted_decision,
+    provider_pool_current_unix_secs, provider_pool_json_bool, provider_pool_json_f64,
+    provider_pool_metadata_bucket, provider_pool_quota_snapshot_exhausted_decision,
+    provider_pool_reset_deadline_elapsed, provider_pool_timestamp_unix_secs,
 };
 use crate::quota_refresh::ProviderPoolQuotaRequestSpec;
 
@@ -121,6 +122,37 @@ pub fn build_codex_pool_quota_request(
     })
 }
 
+fn codex_window_reset_elapsed(bucket: &Map<String, Value>, prefix: &str) -> bool {
+    let Some(now_unix_secs) = provider_pool_current_unix_secs() else {
+        return false;
+    };
+    let mut window = Map::new();
+    for (target, source) in [
+        ("reset_at", format!("{prefix}_reset_at")),
+        ("next_reset_at", format!("{prefix}_next_reset_at")),
+        ("reset_seconds", format!("{prefix}_reset_seconds")),
+        (
+            "reset_after_seconds",
+            format!("{prefix}_reset_after_seconds"),
+        ),
+    ] {
+        if let Some(value) = bucket.get(source.as_str()) {
+            window.insert(target.to_string(), value.clone());
+        }
+    }
+    provider_pool_reset_deadline_elapsed(
+        &window,
+        provider_pool_timestamp_unix_secs(bucket.get("updated_at")),
+        now_unix_secs,
+    )
+}
+
+fn codex_window_used_percent_exhausted(bucket: &Map<String, Value>, prefix: &str) -> bool {
+    let used_percent_key = format!("{prefix}_used_percent");
+    provider_pool_json_f64(bucket.get(used_percent_key.as_str()))
+        .is_some_and(|value| value >= 100.0 && !codex_window_reset_elapsed(bucket, prefix))
+}
+
 pub(crate) fn quota_exhausted_from_bucket(bucket: &Map<String, Value>) -> bool {
     if provider_pool_json_bool(bucket.get("credits_unlimited")) == Some(true) {
         return false;
@@ -130,7 +162,6 @@ pub(crate) fn quota_exhausted_from_bucket(bucket: &Map<String, Value>) -> bool {
     if !has_window_data && provider_pool_json_bool(bucket.get("has_credits")) == Some(false) {
         return true;
     }
-    provider_pool_json_f64(bucket.get("primary_used_percent")).is_some_and(|value| value >= 100.0)
-        || provider_pool_json_f64(bucket.get("secondary_used_percent"))
-            .is_some_and(|value| value >= 100.0)
+    codex_window_used_percent_exhausted(bucket, "primary")
+        || codex_window_used_percent_exhausted(bucket, "secondary")
 }

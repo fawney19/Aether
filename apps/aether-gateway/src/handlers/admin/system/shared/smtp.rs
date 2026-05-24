@@ -1,14 +1,10 @@
+use crate::email_delivery::{probe_smtp_connection, system_config_u16, SmtpDeliveryConfig};
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::shared::{system_config_bool, system_config_string};
 use crate::GatewayError;
 use axum::body::Bytes;
-use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
-use std::io::{BufRead, Write};
-use std::time::Duration;
-
-const SMTP_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Default, Deserialize)]
 struct AdminSmtpTestRequest {
@@ -53,12 +49,12 @@ pub(crate) async fn build_admin_smtp_test_payload(
         }));
     }
 
-    let result = tokio::task::spawn_blocking(move || test_smtp_connection_blocking(config))
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let result = probe_smtp_connection(config.into_delivery_config()).await;
     Ok(match result {
         Ok(()) => json!({ "success": true, "message": "SMTP 连接测试成功" }),
-        Err(error) => json!({ "success": false, "message": translate_smtp_error(&error) }),
+        Err(error) => {
+            json!({ "success": false, "message": translate_smtp_error(&smtp_gateway_error_message(&error)) })
+        }
     })
 }
 
@@ -94,8 +90,8 @@ async fn resolve_admin_smtp_config(
         port: request
             .smtp_port
             .as_ref()
-            .map(|value| system_config_u16(value, 587))
-            .unwrap_or_else(|| system_config_u16_opt(smtp_port.as_ref(), 587)),
+            .map(|value| system_config_u16(Some(value), 587))
+            .unwrap_or_else(|| system_config_u16(smtp_port.as_ref(), 587)),
         user: request
             .smtp_user
             .as_ref()
@@ -128,6 +124,21 @@ async fn resolve_admin_smtp_config(
             .or_else(|| system_config_string(smtp_from_name.as_ref()))
             .unwrap_or_else(|| "Aether".to_string()),
     })
+}
+
+impl ResolvedSmtpConfig {
+    fn into_delivery_config(self) -> SmtpDeliveryConfig {
+        SmtpDeliveryConfig {
+            host: self.host.unwrap_or_default(),
+            port: self.port,
+            user: self.user,
+            password: self.password,
+            use_tls: self.use_tls,
+            use_ssl: self.use_ssl,
+            from_email: self.from_email.unwrap_or_default(),
+            from_name: self.from_name,
+        }
+    }
 }
 
 fn missing_smtp_fields(config: &ResolvedSmtpConfig) -> Vec<&'static str> {
@@ -171,176 +182,11 @@ fn missing_smtp_fields(config: &ResolvedSmtpConfig) -> Vec<&'static str> {
     fields
 }
 
-fn system_config_u16_opt(value: Option<&serde_json::Value>, default: u16) -> u16 {
-    value
-        .map(|value| system_config_u16(value, default))
-        .unwrap_or(default)
-}
-
-fn system_config_u16(value: &serde_json::Value, default: u16) -> u16 {
-    match value {
-        serde_json::Value::Number(value) => value
-            .as_u64()
-            .and_then(|value| u16::try_from(value).ok())
-            .unwrap_or(default),
-        serde_json::Value::String(value) => value.trim().parse::<u16>().unwrap_or(default),
-        _ => default,
+fn smtp_gateway_error_message(error: &GatewayError) -> String {
+    match error {
+        GatewayError::Internal(message) => message.clone(),
+        _ => format!("{error:?}"),
     }
-}
-
-fn build_tls_config() -> std::sync::Arc<rustls::ClientConfig> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let root_store =
-        rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    std::sync::Arc::new(
-        rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth(),
-    )
-}
-
-fn resolve_server_name(host: &str) -> Result<rustls::pki_types::ServerName<'static>, String> {
-    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return Ok(rustls::pki_types::ServerName::from(ip));
-    }
-    rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|err| err.to_string())
-}
-
-fn connect_tcp_stream(config: &ResolvedSmtpConfig) -> Result<std::net::TcpStream, String> {
-    let host = config.host.as_deref().unwrap_or_default();
-    let stream =
-        std::net::TcpStream::connect((host, config.port)).map_err(|err| err.to_string())?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(SMTP_TIMEOUT_SECS)))
-        .map_err(|err| err.to_string())?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(SMTP_TIMEOUT_SECS)))
-        .map_err(|err| err.to_string())?;
-    Ok(stream)
-}
-
-fn wrap_tls_stream(
-    stream: std::net::TcpStream,
-    host: &str,
-) -> Result<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>, String> {
-    let server_name = resolve_server_name(host)?;
-    let connection = rustls::ClientConnection::new(build_tls_config(), server_name)
-        .map_err(|err| err.to_string())?;
-    Ok(rustls::StreamOwned::new(connection, stream))
-}
-
-fn smtp_read_response<T: BufRead>(reader: &mut T) -> Result<(u16, String), String> {
-    let mut message = String::new();
-    let code = loop {
-        let mut line = String::new();
-        let bytes = reader.read_line(&mut line).map_err(|err| err.to_string())?;
-        if bytes == 0 {
-            return Err("smtp connection closed unexpectedly".to_string());
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
-        if trimmed.len() < 3 {
-            return Err("invalid smtp response".to_string());
-        }
-        let parsed_code = trimmed[..3].parse::<u16>().map_err(|err| err.to_string())?;
-        let continuation = trimmed.as_bytes().get(3).copied() == Some(b'-');
-        if !message.is_empty() {
-            message.push('\n');
-        }
-        message.push_str(&trimmed);
-        if !continuation {
-            break parsed_code;
-        }
-    };
-    Ok((code, message))
-}
-
-fn smtp_expect<T: BufRead>(reader: &mut T, allowed_codes: &[u16]) -> Result<String, String> {
-    let (code, message) = smtp_read_response(reader)?;
-    if allowed_codes.contains(&code) {
-        return Ok(message);
-    }
-    Err(format!("unexpected smtp response {code}: {message}"))
-}
-
-fn smtp_write_line<T: Write>(writer: &mut T, line: &str) -> Result<(), String> {
-    writer
-        .write_all(line.as_bytes())
-        .map_err(|err| err.to_string())?;
-    writer.write_all(b"\r\n").map_err(|err| err.to_string())?;
-    writer.flush().map_err(|err| err.to_string())
-}
-
-fn smtp_send_command<S: std::io::Read + Write>(
-    reader: &mut std::io::BufReader<S>,
-    command: &str,
-    allowed_codes: &[u16],
-) -> Result<String, String> {
-    smtp_write_line(reader.get_mut(), command)?;
-    smtp_expect(reader, allowed_codes)
-}
-
-fn smtp_authenticate<S: std::io::Read + Write>(
-    reader: &mut std::io::BufReader<S>,
-    config: &ResolvedSmtpConfig,
-) -> Result<(), String> {
-    let Some(username) = config
-        .user
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(());
-    };
-    let password = config.password.as_deref().unwrap_or_default();
-    smtp_send_command(reader, "AUTH LOGIN", &[334])?;
-    smtp_send_command(
-        reader,
-        &base64::engine::general_purpose::STANDARD.encode(username.as_bytes()),
-        &[334],
-    )?;
-    smtp_send_command(
-        reader,
-        &base64::engine::general_purpose::STANDARD.encode(password.as_bytes()),
-        &[235],
-    )?;
-    Ok(())
-}
-
-fn smtp_probe<S: std::io::Read + Write>(
-    reader: &mut std::io::BufReader<S>,
-    config: &ResolvedSmtpConfig,
-) -> Result<(), String> {
-    smtp_send_command(reader, "EHLO aether.local", &[250])?;
-    smtp_authenticate(reader, config)?;
-    let _ = smtp_send_command(reader, "QUIT", &[221]);
-    Ok(())
-}
-
-fn test_smtp_connection_blocking(config: ResolvedSmtpConfig) -> Result<(), String> {
-    if config.use_ssl {
-        let stream = connect_tcp_stream(&config)?;
-        let tls_stream = wrap_tls_stream(stream, config.host.as_deref().unwrap_or_default())?;
-        let mut reader = std::io::BufReader::new(tls_stream);
-        smtp_expect(&mut reader, &[220])?;
-        return smtp_probe(&mut reader, &config);
-    }
-
-    let stream = connect_tcp_stream(&config)?;
-    let mut reader = std::io::BufReader::new(stream);
-    smtp_expect(&mut reader, &[220])?;
-    smtp_send_command(&mut reader, "EHLO aether.local", &[250])?;
-    if config.use_tls {
-        smtp_send_command(&mut reader, "STARTTLS", &[220])?;
-        let stream = reader.into_inner();
-        let tls_stream = wrap_tls_stream(stream, config.host.as_deref().unwrap_or_default())?;
-        let mut reader = std::io::BufReader::new(tls_stream);
-        return smtp_probe(&mut reader, &config);
-    }
-
-    smtp_authenticate(&mut reader, &config)?;
-    let _ = smtp_send_command(&mut reader, "QUIT", &[221]);
-    Ok(())
 }
 
 fn translate_smtp_error(error: &str) -> String {

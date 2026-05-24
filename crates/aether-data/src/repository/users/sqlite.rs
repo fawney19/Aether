@@ -325,6 +325,48 @@ impl UserReadRepository for SqliteUserReadRepository {
         self.fetch_export_rows(builder).await
     }
 
+    async fn count_export_users(&self, query: &UserExportListQuery) -> Result<u64, DataLayerError> {
+        let mut builder = QueryBuilder::<Sqlite>::new("SELECT COUNT(*) AS total FROM users");
+        builder.push(" WHERE is_deleted = 0");
+        if let Some(role) = query.role.as_deref() {
+            builder
+                .push(" AND LOWER(role) = ")
+                .push_bind(role.trim().to_ascii_lowercase());
+        }
+        if let Some(is_active) = query.is_active {
+            builder.push(" AND is_active = ").push_bind(is_active);
+        }
+        if let Some(group_id) = query
+            .group_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            builder.push(" AND id IN (SELECT user_id FROM user_group_members WHERE group_id = ");
+            builder.push_bind(group_id);
+            builder.push(")");
+        }
+        if let Some(search) = query
+            .search
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let pattern = format!("%{}%", search.to_ascii_lowercase());
+            builder
+                .push(" AND (LOWER(id) LIKE ")
+                .push_bind(pattern.clone())
+                .push(" OR LOWER(username) LIKE ")
+                .push_bind(pattern.clone())
+                .push(" OR LOWER(COALESCE(email, '')) LIKE ")
+                .push_bind(pattern)
+                .push(")");
+        }
+
+        let row = builder.build().fetch_one(&self.pool).await.map_sql_err()?;
+        Ok(row.try_get::<i64, _>("total").map_sql_err()?.max(0) as u64)
+    }
+
     async fn summarize_export_users(&self) -> Result<UserExportSummary, DataLayerError> {
         let row = sqlx::query(
             r#"

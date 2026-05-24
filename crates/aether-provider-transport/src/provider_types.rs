@@ -253,6 +253,17 @@ const GROK_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     ..STANDARD_RUNTIME_POLICY
 };
 
+const WINDSURF_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    fixed_provider: true,
+    api_format_inheritance: ProviderApiFormatInheritance::OAuthOrBearer,
+    enable_format_conversion_by_default: true,
+    oauth_is_bearer_like: true,
+    supports_model_fetch: false,
+    supports_local_openai_chat_transport: false,
+    supports_local_same_format_transport: false,
+    ..STANDARD_RUNTIME_POLICY
+};
+
 const CLAUDE_CODE_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
     provider_type: "claude_code",
     version: 1,
@@ -405,6 +416,19 @@ const GROK_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplat
     runtime_policy: GROK_RUNTIME_POLICY,
 };
 
+const WINDSURF_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
+    provider_type: "windsurf",
+    version: 1,
+    base_url: "https://server.codeium.com",
+    endpoints: &[FixedProviderEndpointTemplate {
+        item_key: "openai:chat",
+        api_format: "openai:chat",
+        custom_path: None,
+        config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+    }],
+    runtime_policy: WINDSURF_RUNTIME_POLICY,
+};
+
 pub fn provider_type_is_fixed(provider_type: &str) -> bool {
     provider_runtime_policy(provider_type).fixed_provider
 }
@@ -455,6 +479,7 @@ pub fn fixed_provider_template(provider_type: &str) -> Option<&'static FixedProv
         "gemini_cli" => Some(&GEMINI_CLI_FIXED_PROVIDER_TEMPLATE),
         "vertex_ai" => Some(&VERTEX_AI_FIXED_PROVIDER_TEMPLATE),
         "antigravity" => Some(&ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE),
+        "windsurf" => Some(&WINDSURF_FIXED_PROVIDER_TEMPLATE),
         _ => None,
     }
 }
@@ -565,6 +590,17 @@ pub fn provider_type_admin_oauth_template(provider_type: &str) -> Option<Provide
             redirect_uri: "http://localhost:51121/oauth2callback",
             use_pkce: true,
         }),
+        "windsurf" => Some(ProviderOAuthTemplate {
+            provider_type: "windsurf",
+            display_name: "Windsurf",
+            authorize_url: "https://windsurf.com/windsurf/signin",
+            token_url: "https://register.windsurf.com/exa.seat_management_pb.SeatManagementService/RegisterUser",
+            client_id: "3GUryQ7ldAeKEuD2obYnppsnmj58eP5u",
+            client_secret: "",
+            scopes: &[],
+            redirect_uri: "show-auth-token",
+            use_pkce: false,
+        }),
         _ => None,
     }
 }
@@ -575,16 +611,18 @@ pub const ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES: &[&str] = &[
     "chatgpt_web",
     "gemini_cli",
     "antigravity",
+    "windsurf",
 ];
 
 #[cfg(test)]
 mod tests {
     use super::{
         fixed_provider_endpoint_template_by_api_format, fixed_provider_key_inherits_api_formats,
-        fixed_provider_template, provider_runtime_policy,
+        fixed_provider_template, provider_runtime_policy, provider_type_admin_oauth_template,
         provider_type_allows_auth_channel_mismatch_by_default, provider_type_oauth_is_bearer_like,
         provider_type_supports_local_embedding_transport,
         provider_type_supports_local_same_format_transport, FixedProviderEndpointConfigValue,
+        ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES,
     };
 
     #[test]
@@ -673,6 +711,47 @@ mod tests {
         assert!(!template.runtime_policy.supports_model_fetch);
         assert!(!template.runtime_policy.supports_local_openai_chat_transport);
         assert!(!template.runtime_policy.supports_local_same_format_transport);
+    }
+
+    #[test]
+    fn windsurf_fixed_provider_template_exposes_openai_chat() {
+        let template = fixed_provider_template("windsurf").expect("windsurf template should exist");
+        assert_eq!(template.provider_type, "windsurf");
+        assert_eq!(template.base_url, "https://server.codeium.com");
+        assert_eq!(template.version, 1);
+        assert_eq!(
+            template
+                .endpoints
+                .iter()
+                .map(|item| item.api_format)
+                .collect::<Vec<_>>(),
+            vec!["openai:chat"]
+        );
+        assert!(
+            fixed_provider_endpoint_template_by_api_format("windsurf", "openai:chat").is_some()
+        );
+
+        let policy = provider_runtime_policy("windsurf");
+        assert!(policy.fixed_provider);
+        assert!(policy.enable_format_conversion_by_default);
+        assert!(policy.oauth_is_bearer_like);
+        assert!(!policy.supports_model_fetch);
+        assert!(!policy.supports_local_same_format_transport);
+    }
+
+    #[test]
+    fn windsurf_admin_oauth_template_is_advertised() {
+        let template =
+            provider_type_admin_oauth_template("windsurf").expect("windsurf oauth template");
+
+        assert_eq!(template.provider_type, "windsurf");
+        assert_eq!(template.display_name, "Windsurf");
+        assert_eq!(
+            template.authorize_url,
+            "https://windsurf.com/windsurf/signin"
+        );
+        assert_eq!(template.redirect_uri, "show-auth-token");
+        assert!(ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES.contains(&"windsurf"));
     }
 
     #[test]

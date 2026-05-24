@@ -22,6 +22,7 @@ import {
   MOCK_PROVIDERS,
   MOCK_GLOBAL_MODELS,
   MOCK_SYSTEM_CONFIGS,
+  MOCK_MODULE_STATUSES,
   MOCK_API_FORMATS
 } from './data'
 
@@ -1290,6 +1291,13 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     return createMockResponse({ requests: [] })
   },
 
+  // ========== Admin: Modules ==========
+  'GET /api/admin/modules/status': async () => {
+    await delay()
+    requireAdmin()
+    return createMockResponse(MOCK_MODULE_STATUSES)
+  },
+
   // ========== Admin: System ==========
   'GET /api/admin/system/configs': async () => {
     await delay()
@@ -1787,6 +1795,79 @@ function generateMockModelsForProvider(providerId: string) {
 }
 
 // ========== 注册动态路由 ==========
+
+// 系统配置详情
+registerDynamicRoute('GET', '/api/admin/system/configs/:configKey', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const key = decodeURIComponent(params.configKey)
+  const entry = MOCK_SYSTEM_CONFIGS.find(item => item.key === key)
+  if (!entry) {
+    throw { response: createMockResponse({ detail: `配置项 '${key}' 不存在` }, 404) }
+  }
+  if (key === 'module.server_chan_push.send_key' || key === 'module.bark_push.device_key') {
+    return createMockResponse({
+      key: entry.key,
+      value: null,
+      description: entry.description,
+      is_set: typeof entry.value === 'string' && entry.value.trim() !== '',
+    })
+  }
+  return createMockResponse({ key: entry.key, value: entry.value, description: entry.description })
+})
+
+// 系统配置更新
+registerDynamicRoute('PUT', '/api/admin/system/configs/:configKey', async (config, params) => {
+  await delay()
+  requireAdmin()
+  const key = decodeURIComponent(params.configKey)
+  const body = JSON.parse(config.data || '{}') as { value?: unknown; description?: string }
+  const index = MOCK_SYSTEM_CONFIGS.findIndex(item => item.key === key)
+  const entry = {
+    key,
+    value: body.value ?? null,
+    description: body.description,
+  }
+  if (index === -1) {
+    MOCK_SYSTEM_CONFIGS.push(entry)
+  } else {
+    MOCK_SYSTEM_CONFIGS[index] = {
+      ...MOCK_SYSTEM_CONFIGS[index],
+      ...entry,
+    }
+  }
+  return createMockResponse(entry)
+})
+
+// 模块状态详情
+registerDynamicRoute('GET', '/api/admin/modules/status/:moduleName', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const moduleStatus = MOCK_MODULE_STATUSES[params.moduleName]
+  if (!moduleStatus) {
+    throw { response: createMockResponse({ detail: '模块不存在' }, 404) }
+  }
+  return createMockResponse(moduleStatus)
+})
+
+// 模块启用状态更新
+registerDynamicRoute('PUT', '/api/admin/modules/status/:moduleName/enabled', async (config, params) => {
+  await delay()
+  requireAdmin()
+  const moduleStatus = MOCK_MODULE_STATUSES[params.moduleName]
+  if (!moduleStatus) {
+    throw { response: createMockResponse({ detail: '模块不存在' }, 404) }
+  }
+  const body = JSON.parse(config.data || '{}') as { enabled?: boolean }
+  const enabled = body.enabled === true
+  const updated = {
+    ...moduleStatus,
+    enabled,
+    active: moduleStatus.available && enabled && moduleStatus.config_validated,
+  }
+  MOCK_MODULE_STATUSES[params.moduleName] = updated
+  return createMockResponse(updated)
+})
 
 // Provider 详情
 registerDynamicRoute('GET', '/api/admin/providers/:providerId/summary', async (_config, params) => {

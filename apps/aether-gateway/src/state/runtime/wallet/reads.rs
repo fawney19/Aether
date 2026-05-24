@@ -144,9 +144,51 @@ impl AppState {
         refund_id: &str,
     ) -> Result<Option<aether_data::repository::wallet::StoredAdminWalletRefund>, GatewayError>
     {
+        #[cfg(test)]
+        if let Some(store) = self.admin_wallet_refund_store.as_ref() {
+            return Ok(store
+                .lock()
+                .expect("admin wallet refund store should lock")
+                .get(refund_id)
+                .filter(|refund| refund.wallet_id == wallet_id)
+                .cloned()
+                .map(test_admin_wallet_refund_to_stored));
+        }
+
         self.data
             .find_wallet_refund(wallet_id, refund_id)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+}
+
+#[cfg(test)]
+fn test_admin_wallet_refund_to_stored(
+    refund: crate::AdminWalletRefundRecord,
+) -> aether_data::repository::wallet::StoredAdminWalletRefund {
+    aether_data::repository::wallet::StoredAdminWalletRefund {
+        id: refund.id,
+        refund_no: refund.refund_no,
+        wallet_id: refund.wallet_id,
+        user_id: refund.user_id,
+        payment_order_id: refund.payment_order_id,
+        source_type: refund.source_type,
+        source_id: refund.source_id,
+        refund_mode: refund.refund_mode,
+        amount_usd: refund.amount_usd,
+        status: refund.status,
+        reason: refund.reason,
+        failure_reason: refund.failure_reason,
+        gateway_refund_id: refund.gateway_refund_id,
+        payout_method: refund.payout_method,
+        payout_reference: refund.payout_reference,
+        payout_proof: refund.payout_proof,
+        requested_by: refund.requested_by,
+        approved_by: refund.approved_by,
+        processed_by: refund.processed_by,
+        created_at_unix_ms: refund.created_at_unix_ms,
+        updated_at_unix_secs: refund.updated_at_unix_secs,
+        processed_at_unix_secs: refund.processed_at_unix_secs,
+        completed_at_unix_secs: refund.completed_at_unix_secs,
     }
 }

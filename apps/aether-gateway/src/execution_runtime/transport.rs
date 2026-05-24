@@ -25,8 +25,10 @@ use serde_json::json;
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::ai_serving::api::extract_provider_private_stream_error_body;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::execute_sync_plan_via_remote_execution_runtime;
+use crate::execution_runtime::windsurf::maybe_execute_windsurf_sync;
 use crate::frontdoor_loop_guard::{
     configured_gateway_frontdoor_base_url, gateway_frontdoor_self_loop_guard_error,
 };
@@ -36,6 +38,9 @@ use crate::{AppState, GatewayError};
 const HUB_RELAY_CONTENT_TYPE: &str = "application/vnd.aether.tunnel-envelope";
 const HUB_RELAY_ERROR_HEADER: &str = "x-aether-tunnel-error";
 const TUNNEL_RELAY_PATH_PREFIX: &str = "/api/internal/tunnel/relay";
+const DEFAULT_TUNNEL_TIMEOUT_MS: u64 = 60_000;
+const MIN_TUNNEL_TIMEOUT_SECS: u64 = 1;
+const MAX_TUNNEL_TIMEOUT_SECS: u64 = 300;
 pub(crate) fn format_upstream_request_error(err: &reqwest::Error) -> String {
     let mut kinds = Vec::new();
     if err.is_connect() {
@@ -174,6 +179,12 @@ struct RelayRequestMeta {
     method: String,
     url: String,
     headers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_first_byte_timeout_ms: Option<u64>,
     timeout: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     follow_redirects: Option<bool>,
@@ -191,6 +202,13 @@ pub(crate) struct ExecutionTransportControls {
     follow_redirects: Option<bool>,
     http1_only: bool,
     accept_invalid_certs: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TunnelTimeoutMetadata {
+    request_timeout_ms: Option<u64>,
+    stream_first_byte_timeout_ms: Option<u64>,
+    legacy_timeout_secs: u64,
 }
 
 pub(crate) enum DirectUpstreamResponse {
@@ -232,26 +250,8 @@ impl DirectSyncExecutionRuntime {
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
         let upstream_bytes = body_bytes.len() as u64;
 
-        let body = if body_bytes.is_empty() {
-            None
-        } else if plan.stream {
-            Some(ResponseBody {
-                json_body: None,
-                body_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode(&body_bytes)),
-            })
-        } else if response_body_is_json(&headers, &decoded_body_bytes) {
-            let body_json: Value = serde_json::from_slice(&decoded_body_bytes)
-                .map_err(ExecutionRuntimeTransportError::InvalidJson)?;
-            Some(ResponseBody {
-                json_body: Some(body_json),
-                body_bytes_b64: None,
-            })
-        } else {
-            Some(ResponseBody {
-                json_body: None,
-                body_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode(&body_bytes)),
-            })
-        };
+        let body =
+            build_execution_response_body(&headers, &body_bytes, &decoded_body_bytes, plan.stream)?;
 
         Ok(ExecutionResult {
             request_id: plan.request_id.clone(),
@@ -347,6 +347,11 @@ pub(crate) async fn execute_sync_plan_with_report_context(
     }
 
     let _ = trace_id;
+    match maybe_execute_windsurf_sync(state, plan, None).await {
+        Ok(Some(result)) => return Ok(result),
+        Ok(None) => {}
+        Err(err) => return Err(GatewayError::Internal(err.to_string())),
+    }
     match DirectSyncExecutionRuntime::new().execute_sync(plan).await {
         Ok(result) => {
             record_manual_proxy_request_outcome(state, plan, result.status_code).await;
@@ -567,26 +572,8 @@ async fn execute_sync_plan_via_local_tunnel(
         );
     }
 
-    let body = if body_bytes.is_empty() {
-        None
-    } else if plan.stream {
-        Some(ResponseBody {
-            json_body: None,
-            body_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode(&body_bytes)),
-        })
-    } else if response_body_is_json(&headers, &decoded_body_bytes) {
-        let body_json: Value = serde_json::from_slice(&decoded_body_bytes)
-            .map_err(ExecutionRuntimeTransportError::InvalidJson)?;
-        Some(ResponseBody {
-            json_body: Some(body_json),
-            body_bytes_b64: None,
-        })
-    } else {
-        Some(ResponseBody {
-            json_body: None,
-            body_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode(&body_bytes)),
-        })
-    };
+    let body =
+        build_execution_response_body(&headers, &body_bytes, &decoded_body_bytes, plan.stream)?;
 
     Ok(ExecutionResult {
         request_id: plan.request_id.clone(),
@@ -608,6 +595,7 @@ fn build_direct_tunnel_request_meta(
     headers: &HeaderMap,
     transport_controls: ExecutionTransportControls,
 ) -> tunnel_protocol::RequestMeta {
+    let timeout_metadata = resolve_tunnel_timeout_metadata(plan);
     tunnel_protocol::RequestMeta {
         provider_id: Some(plan.provider_id.clone()),
         endpoint_id: Some(plan.endpoint_id.clone()),
@@ -615,7 +603,10 @@ fn build_direct_tunnel_request_meta(
         method: plan.method.clone(),
         url: plan.url.clone(),
         headers: header_map_to_string_map(headers).into_iter().collect(),
-        timeout: resolve_relay_timeout_seconds(plan),
+        stream: plan.stream,
+        request_timeout_ms: timeout_metadata.request_timeout_ms,
+        stream_first_byte_timeout_ms: timeout_metadata.stream_first_byte_timeout_ms,
+        timeout: timeout_metadata.legacy_timeout_secs,
         follow_redirects: transport_controls.follow_redirects,
         http1_only: transport_controls.http1_only,
         transport_profile: plan.transport_profile.clone(),
@@ -782,7 +773,8 @@ async fn send_via_tunnel_relay(
 ) -> Result<reqwest::Response, ExecutionRuntimeTransportError> {
     let client = build_relay_client(plan.timeouts.as_ref())?;
     let relay_url = build_relay_url(plan.proxy.as_ref(), node_id);
-    let timeout_secs = resolve_relay_timeout_seconds(plan);
+    let timeout_metadata = resolve_tunnel_timeout_metadata(plan);
+    let timeout_secs = timeout_metadata.legacy_timeout_secs;
     let envelope = build_relay_envelope(
         RelayRequestMeta {
             provider_id: plan.provider_id.clone(),
@@ -791,6 +783,9 @@ async fn send_via_tunnel_relay(
             method: method.as_str().to_string(),
             url: plan.url.clone(),
             headers: header_map_to_string_map(&headers),
+            stream: plan.stream,
+            request_timeout_ms: timeout_metadata.request_timeout_ms,
+            stream_first_byte_timeout_ms: timeout_metadata.stream_first_byte_timeout_ms,
             timeout: timeout_secs,
             follow_redirects: transport_controls.follow_redirects,
             http1_only: transport_controls.http1_only,
@@ -820,15 +815,22 @@ async fn send_via_tunnel_relay(
         .request(reqwest::Method::POST, relay_url)
         .header(reqwest::header::CONTENT_TYPE, HUB_RELAY_CONTENT_TYPE)
         .body(envelope);
-    if let Some(timeout) = total_timeout {
-        request = request.timeout(timeout);
+    if !plan.stream {
+        if let Some(timeout) = total_timeout {
+            request = request.timeout(timeout);
+        }
     }
 
+    let first_byte_timeout = if plan.stream {
+        resolve_tunnel_first_byte_timeout(plan)
+    } else {
+        None
+    };
+
     let started_at = Instant::now();
-    let response = request
-        .send()
+    let response = send_relay_request(request, first_byte_timeout)
         .await
-        .map_err(|err| ExecutionRuntimeTransportError::RelayError(err.to_string()))?;
+        .map_err(ExecutionRuntimeTransportError::RelayError)?;
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
     let status_code = response.status().as_u16();
     let proxy_timing = response
@@ -896,6 +898,21 @@ async fn send_via_tunnel_relay(
     }
 
     Ok(response)
+}
+
+async fn send_relay_request(
+    request: reqwest::RequestBuilder,
+    first_byte_timeout: Option<Duration>,
+) -> Result<reqwest::Response, String> {
+    if let Some(timeout) = first_byte_timeout {
+        return match tokio::time::timeout(timeout, request.send()).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(error)) => Err(error.to_string()),
+            Err(_) => Err("tunnel relay first byte timeout".to_string()),
+        };
+    }
+
+    request.send().await.map_err(|err| err.to_string())
 }
 
 pub(crate) fn build_request_body(
@@ -994,18 +1011,49 @@ fn resolve_tunnel_base_url_from_proxy(proxy: &ProxySnapshot) -> Option<String> {
 }
 
 fn resolve_relay_timeout_seconds(plan: &ExecutionPlan) -> u64 {
-    let ms = plan
-        .timeouts
+    resolve_tunnel_timeout_metadata(plan).legacy_timeout_secs
+}
+
+fn resolve_tunnel_first_byte_timeout(plan: &ExecutionPlan) -> Option<Duration> {
+    plan.stream.then(|| {
+        Duration::from_millis(
+            resolve_selected_tunnel_timeout_ms(plan).unwrap_or(DEFAULT_TUNNEL_TIMEOUT_MS),
+        )
+    })
+}
+
+fn resolve_tunnel_timeout_metadata(plan: &ExecutionPlan) -> TunnelTimeoutMetadata {
+    TunnelTimeoutMetadata {
+        request_timeout_ms: plan
+            .timeouts
+            .as_ref()
+            .and_then(|timeouts| timeouts.total_ms),
+        stream_first_byte_timeout_ms: plan
+            .timeouts
+            .as_ref()
+            .and_then(|timeouts| timeouts.first_byte_ms),
+        legacy_timeout_secs: timeout_ms_to_secs(
+            resolve_selected_tunnel_timeout_ms(plan).unwrap_or(DEFAULT_TUNNEL_TIMEOUT_MS),
+        ),
+    }
+}
+
+fn resolve_selected_tunnel_timeout_ms(plan: &ExecutionPlan) -> Option<u64> {
+    plan.timeouts
         .as_ref()
         .and_then(|timeouts| {
-            timeouts
-                .read_ms
-                .or(timeouts.total_ms)
-                .or(timeouts.connect_ms)
+            if plan.stream {
+                timeouts.first_byte_ms.or(timeouts.total_ms)
+            } else {
+                timeouts.total_ms.or(timeouts.first_byte_ms)
+            }
         })
-        .unwrap_or(60_000);
+        .map(|value| value.max(1))
+}
+
+fn timeout_ms_to_secs(ms: u64) -> u64 {
     let secs = ms.div_ceil(1_000);
-    secs.clamp(1, 300)
+    secs.clamp(MIN_TUNNEL_TIMEOUT_SECS, MAX_TUNNEL_TIMEOUT_SECS)
 }
 
 fn resolve_tunnel_node_id(proxy: Option<&ProxySnapshot>) -> Option<String> {
@@ -1470,15 +1518,61 @@ pub(crate) fn decode_response_body_bytes(
 }
 
 pub(crate) fn response_body_is_json(headers: &BTreeMap<String, String>, body_bytes: &[u8]) -> bool {
-    if headers
+    let content_type = headers
         .get("content-type")
         .map(|value| value.to_ascii_lowercase())
-        .is_some_and(|value| value.contains("json"))
+        .unwrap_or_default();
+    if content_type.contains("application/connect+json")
+        || content_type.contains("application/connect+proto")
     {
+        return false;
+    }
+    if content_type.contains("json") {
         return true;
     }
 
     serde_json::from_slice::<Value>(body_bytes).is_ok()
+}
+
+pub(crate) fn build_execution_response_body(
+    headers: &BTreeMap<String, String>,
+    body_bytes: &[u8],
+    decoded_body_bytes: &[u8],
+    stream: bool,
+) -> Result<Option<ResponseBody>, ExecutionRuntimeTransportError> {
+    if body_bytes.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(body_json) = extract_provider_private_stream_error_body(None, decoded_body_bytes)
+        .or_else(|| extract_provider_private_stream_error_body(None, body_bytes))
+    {
+        return Ok(Some(ResponseBody {
+            json_body: Some(body_json),
+            body_bytes_b64: None,
+        }));
+    }
+
+    if stream {
+        return Ok(Some(ResponseBody {
+            json_body: None,
+            body_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode(body_bytes)),
+        }));
+    }
+
+    if response_body_is_json(headers, decoded_body_bytes) {
+        let body_json: Value = serde_json::from_slice(decoded_body_bytes)
+            .map_err(ExecutionRuntimeTransportError::InvalidJson)?;
+        return Ok(Some(ResponseBody {
+            json_body: Some(body_json),
+            body_bytes_b64: None,
+        }));
+    }
+
+    Ok(Some(ResponseBody {
+        json_body: None,
+        body_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode(body_bytes)),
+    }))
 }
 
 #[cfg(test)]
@@ -1505,10 +1599,11 @@ mod tests {
     use tokio::sync::watch;
 
     use super::{
-        build_browser_wreq_client, build_client, build_request_headers, execute_sync_plan,
+        build_browser_wreq_client, build_client, build_direct_tunnel_request_meta,
+        build_execution_response_body, build_request_headers, execute_sync_plan,
         record_manual_proxy_request_failure, record_manual_proxy_request_outcome,
         record_manual_proxy_request_success, record_manual_proxy_stream_error,
-        resolve_execution_transport_controls, DirectSyncExecutionRuntime,
+        resolve_execution_transport_controls, response_body_is_json, DirectSyncExecutionRuntime,
         ExecutionRuntimeTransportError, ExecutionTransportControls,
     };
     use crate::constants::{
@@ -1609,6 +1704,64 @@ mod tests {
         assert!(forwarded
             .get("x-aether-execution-accept-invalid-certs")
             .is_none());
+    }
+
+    #[test]
+    fn tunnel_request_meta_uses_total_timeout_for_non_stream_requests() {
+        let plan = tunnel_timeout_plan(false);
+        let meta = build_direct_tunnel_request_meta(
+            &plan,
+            &reqwest::header::HeaderMap::new(),
+            ExecutionTransportControls::default(),
+        );
+
+        assert!(!meta.stream);
+        assert_eq!(meta.request_timeout_ms, Some(90_000));
+        assert_eq!(meta.stream_first_byte_timeout_ms, Some(12_345));
+        assert_eq!(meta.timeout, 90);
+    }
+
+    #[test]
+    fn tunnel_request_meta_uses_first_byte_timeout_for_stream_requests() {
+        let plan = tunnel_timeout_plan(true);
+        let meta = build_direct_tunnel_request_meta(
+            &plan,
+            &reqwest::header::HeaderMap::new(),
+            ExecutionTransportControls::default(),
+        );
+
+        assert!(meta.stream);
+        assert_eq!(meta.request_timeout_ms, Some(90_000));
+        assert_eq!(meta.stream_first_byte_timeout_ms, Some(12_345));
+        assert_eq!(meta.timeout, 13);
+    }
+
+    fn tunnel_timeout_plan(stream: bool) -> ExecutionPlan {
+        ExecutionPlan {
+            request_id: "req-timeout".into(),
+            candidate_id: None,
+            provider_name: Some("provider".into()),
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://example.com/chat".into(),
+            headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "gpt-4.1"})),
+            stream,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("gpt-4.1".into()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: Some(ExecutionTimeouts {
+                total_ms: Some(90_000),
+                first_byte_ms: Some(12_345),
+                ..ExecutionTimeouts::default()
+            }),
+        }
     }
 
     fn tunnel_proxy_snapshot(base_url: String) -> ProxySnapshot {
@@ -2762,6 +2915,41 @@ mod tests {
             ExecutionRuntimeTransportError::UnsupportedTransportProfile(backend)
                 if backend == "utls"
         ));
+    }
+
+    #[test]
+    fn connect_json_response_is_not_treated_as_plain_json() {
+        let headers = BTreeMap::from([(
+            "content-type".to_string(),
+            "application/connect+json".to_string(),
+        )]);
+        let body = [2, 0, 0, 0, 2, b'{', b'}'];
+
+        assert!(!response_body_is_json(&headers, &body));
+    }
+
+    #[test]
+    fn connect_json_error_response_is_decoded_for_stream_sync_body() {
+        let headers = BTreeMap::from([(
+            "content-type".to_string(),
+            "application/connect+json".to_string(),
+        )]);
+        let payload = br#"{"error":{"code":"resource_exhausted","message":"quota exhausted"}}"#;
+        let mut body_bytes = vec![2];
+        body_bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        body_bytes.extend_from_slice(payload);
+
+        let body = build_execution_response_body(&headers, &body_bytes, &body_bytes, true)
+            .expect("body should build")
+            .expect("body should be present");
+
+        assert_eq!(
+            body.json_body
+                .as_ref()
+                .and_then(|value| value.pointer("/error/code")),
+            Some(&json!("resource_exhausted"))
+        );
+        assert!(body.body_bytes_b64.is_none());
     }
 
     #[tokio::test]

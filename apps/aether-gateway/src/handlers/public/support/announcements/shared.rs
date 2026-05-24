@@ -136,12 +136,7 @@ pub(super) fn announcements_internal_error_response(detail: impl Into<String>) -
 }
 
 pub(super) fn announcements_internal_detail(err: GatewayError) -> String {
-    match err {
-        GatewayError::UpstreamUnavailable { message, .. }
-        | GatewayError::ControlUnavailable { message, .. }
-        | GatewayError::Client { message, .. }
-        | GatewayError::Internal(message) => message,
-    }
+    err.into_message()
 }
 
 pub(super) fn parse_optional_rfc3339_unix_secs(

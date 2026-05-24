@@ -1,6 +1,8 @@
 use serde_json::Value;
 
-use aether_ai_formats::api::is_openai_responses_family_format;
+use aether_ai_formats::api::{
+    is_claude_messages_shaped_body_on_openai_chat_endpoint, is_openai_responses_family_format,
+};
 
 use crate::{CandidateFailureDiagnostic, CandidateFailureDiagnosticKind};
 
@@ -110,6 +112,15 @@ fn diagnose_openai_chat_cross_format_request(
     body_json: &Value,
     provider_api_format: &str,
 ) -> Option<RequestBodyBuildDiagnostic> {
+    if provider_api_format.starts_with("claude:")
+        && is_claude_messages_shaped_body_on_openai_chat_endpoint(body_json)
+    {
+        return Some(diagnostic(
+            "$",
+            "请求体看起来是 Claude Messages 原生格式；Aether 会按 Claude Messages 兼容路径处理，若仍失败请检查 Claude messages/tools/tool_choice 结构或 Body 规则",
+        ));
+    }
+
     let request = body_json.as_object()?;
 
     if let Some(messages) = request.get("messages") {
@@ -585,7 +596,7 @@ mod tests {
     use super::request_body_build_failure_extra_data;
 
     #[test]
-    fn openai_chat_to_claude_reports_claude_native_tool_shape() {
+    fn openai_chat_to_claude_recognizes_compatible_claude_native_tool_shape() {
         let body = json!({
             "model": "gpt-5.4",
             "messages": [{ "role": "user", "content": "hello" }],
@@ -600,10 +611,7 @@ mod tests {
             request_body_build_failure_extra_data(&body, "openai:chat", "claude:messages")
                 .expect("diagnostic");
 
-        assert_eq!(
-            diagnostic["request_body_build_error"]["path"],
-            "$.tools[0].function"
-        );
+        assert_eq!(diagnostic["request_body_build_error"]["path"], "$");
         assert_eq!(
             diagnostic["failure_diagnostic"]["kind"],
             "request_body_build"
@@ -615,7 +623,7 @@ mod tests {
         assert!(diagnostic["request_body_build_error"]["message"]
             .as_str()
             .expect("message")
-            .contains("Claude 原生 tool"));
+            .contains("Claude Messages 原生格式"));
     }
 
     #[test]

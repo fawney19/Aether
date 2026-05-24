@@ -78,6 +78,14 @@ impl InMemoryAuthApiKeySnapshotRepository {
                     0.0,
                     snapshot.api_key_is_standalone,
                 )
+                .and_then(|record| {
+                    record.with_ip_rules(
+                        snapshot
+                            .api_key_ip_rules
+                            .as_ref()
+                            .map(|value| serde_json::json!(value)),
+                    )
+                })
                 .expect("derived auth api key export record should build"),
             );
             if let Some(key_hash) = key_hash {
@@ -496,6 +504,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 api_key_allowed_providers: record.allowed_providers.clone(),
                 api_key_allowed_api_formats: record.allowed_api_formats.clone(),
                 api_key_allowed_models: record.allowed_models.clone(),
+                api_key_ip_rules: record.ip_rules.clone(),
                 ..template
             }
         } else {
@@ -534,6 +543,12 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                     .as_ref()
                     .map(|value| serde_json::json!(value)),
             )?
+            .with_api_key_ip_rules(
+                record
+                    .ip_rules
+                    .as_ref()
+                    .map(|value| serde_json::json!(value)),
+            )?
         };
 
         let now_unix_secs = current_unix_secs() as i64;
@@ -565,6 +580,12 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             record.total_tokens as i64,
             record.total_cost_usd,
             false,
+        )?
+        .with_ip_rules(
+            record
+                .ip_rules
+                .as_ref()
+                .map(|value| serde_json::json!(value)),
         )?
         .with_activity_timestamps(None, Some(now_unix_secs), Some(now_unix_secs))?;
 
@@ -619,6 +640,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 api_key_allowed_providers: record.allowed_providers.clone(),
                 api_key_allowed_api_formats: record.allowed_api_formats.clone(),
                 api_key_allowed_models: record.allowed_models.clone(),
+                api_key_ip_rules: record.ip_rules.clone(),
                 ..template
             }
         } else {
@@ -657,6 +679,12 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                     .as_ref()
                     .map(|value| serde_json::json!(value)),
             )?
+            .with_api_key_ip_rules(
+                record
+                    .ip_rules
+                    .as_ref()
+                    .map(|value| serde_json::json!(value)),
+            )?
         };
 
         let now_unix_secs = current_unix_secs() as i64;
@@ -688,6 +716,12 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             record.total_tokens as i64,
             record.total_cost_usd,
             true,
+        )?
+        .with_ip_rules(
+            record
+                .ip_rules
+                .as_ref()
+                .map(|value| serde_json::json!(value)),
         )?
         .with_activity_timestamps(None, Some(now_unix_secs), Some(now_unix_secs))?;
 
@@ -739,6 +773,14 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             }
             if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
                 export.concurrent_limit = Some(concurrent_limit);
+            }
+        }
+        if let Some(ip_rules) = record.ip_rules {
+            if let Some(snapshot) = index.by_api_key_id.get_mut(&record.api_key_id) {
+                snapshot.api_key_ip_rules = ip_rules.clone();
+            }
+            if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
+                export.ip_rules = ip_rules;
             }
         }
         Ok(index.export_by_api_key_id.get(&record.api_key_id).cloned())
@@ -804,6 +846,14 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             }
             if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
                 export.allowed_models = allowed_models;
+            }
+        }
+        if let Some(ip_rules) = record.ip_rules {
+            if let Some(snapshot) = index.by_api_key_id.get_mut(&record.api_key_id) {
+                snapshot.api_key_ip_rules = ip_rules.clone();
+            }
+            if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
+                export.ip_rules = ip_rules;
             }
         }
         if record.expires_at_present {
@@ -964,6 +1014,26 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             Some(serde_json::Value::Null) | None => None,
             Some(value) => Some(value),
         };
+        Ok(Some(export.clone()))
+    }
+
+    async fn set_api_key_usage_totals(
+        &self,
+        api_key_id: &str,
+        total_requests: u64,
+        total_tokens: u64,
+        total_cost_usd: f64,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        let mut index = self
+            .index
+            .write()
+            .expect("auth api key snapshot repository lock");
+        let Some(export) = index.export_by_api_key_id.get_mut(api_key_id) else {
+            return Ok(None);
+        };
+        export.total_requests = total_requests;
+        export.total_tokens = total_tokens;
+        export.total_cost_usd = total_cost_usd;
         Ok(Some(export.clone()))
     }
 
@@ -1239,6 +1309,7 @@ mod tests {
                 name: None,
                 rate_limit: None,
                 concurrent_limit: Some(11),
+                ip_rules: None,
             })
             .await
             .expect("update should succeed")
@@ -1273,6 +1344,7 @@ mod tests {
                 allowed_providers: None,
                 allowed_api_formats: None,
                 allowed_models: None,
+                ip_rules: None,
                 expires_at_present: false,
                 expires_at_unix_secs: None,
                 auto_delete_on_expiry_present: false,

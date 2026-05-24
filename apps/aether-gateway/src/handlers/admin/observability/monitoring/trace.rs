@@ -12,6 +12,7 @@ use aether_admin::observability::monitoring::{
 use aether_data_contracts::repository::{
     candidates::{DecisionTrace, RequestCandidateStatus},
     provider_catalog::StoredProviderCatalogKey,
+    usage::StoredRequestUsageAudit,
 };
 use axum::{
     body::Body,
@@ -21,12 +22,16 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use tracing::debug;
 
+struct ResolvedAdminMonitoringTrace {
+    trace: DecisionTrace,
+    usage: Option<StoredRequestUsageAudit>,
+}
+
 pub(super) async fn build_admin_monitoring_trace_request_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
     let admin_state = state;
-    let state = state.as_ref();
     let Some(request_id) =
         admin_monitoring_trace_request_id_from_path(&request_context.request_path)
     else {
@@ -39,11 +44,8 @@ pub(super) async fn build_admin_monitoring_trace_request_response(
         Err(detail) => return Ok(admin_monitoring_bad_request_response(detail)),
     };
 
-    let Some(trace) = state
-        .data
-        .read_decision_trace(&request_id, attempted_only)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?
+    let Some(resolved) =
+        resolve_admin_monitoring_trace(admin_state, &request_id, attempted_only).await?
     else {
         debug!(
             event_name = "admin_monitoring_request_trace_not_found",
@@ -58,20 +60,111 @@ pub(super) async fn build_admin_monitoring_trace_request_response(
             attempted_only,
         ));
     };
-    let usage = state
-        .data
-        .read_request_usage_audit(&request_id)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
-    let key_accounts = build_admin_monitoring_key_account_display_map(admin_state, &trace).await?;
+    let key_accounts =
+        build_admin_monitoring_key_account_display_map(admin_state, &resolved.trace).await?;
 
     Ok(
         build_admin_monitoring_trace_request_payload_response_with_key_accounts(
-            &trace,
-            usage.as_ref(),
+            &resolved.trace,
+            resolved.usage.as_ref(),
             &key_accounts,
         ),
     )
+}
+
+async fn resolve_admin_monitoring_trace(
+    state: &AdminAppState<'_>,
+    request_id: &str,
+    attempted_only: bool,
+) -> Result<Option<ResolvedAdminMonitoringTrace>, GatewayError> {
+    let app = state.as_ref();
+    if let Some(trace) = app
+        .data
+        .read_decision_trace(request_id, attempted_only)
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))?
+    {
+        let usage = app
+            .data
+            .read_request_usage_audit(request_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        return Ok(Some(ResolvedAdminMonitoringTrace { trace, usage }));
+    }
+
+    let mut usage_candidates = Vec::new();
+    if let Some(usage) = app
+        .data
+        .read_request_usage_audit(request_id)
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))?
+    {
+        usage_candidates.push(usage);
+    }
+    if let Some(usage) = state.find_request_usage_by_id(request_id).await? {
+        if !usage_candidates.iter().any(|item| item.id == usage.id) {
+            usage_candidates.push(usage);
+        }
+    }
+
+    for usage in usage_candidates {
+        for trace_request_id in admin_monitoring_usage_trace_request_ids(&usage) {
+            if trace_request_id == request_id {
+                continue;
+            }
+            if let Some(trace) = app
+                .data
+                .read_decision_trace(&trace_request_id, attempted_only)
+                .await
+                .map_err(|err| GatewayError::Internal(err.to_string()))?
+            {
+                return Ok(Some(ResolvedAdminMonitoringTrace {
+                    trace,
+                    usage: Some(usage),
+                }));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn admin_monitoring_usage_trace_request_ids(usage: &StoredRequestUsageAudit) -> Vec<String> {
+    let mut ids = Vec::new();
+    push_non_empty_unique(&mut ids, usage.request_id.as_str());
+    if let Some(trace_id) = usage.trace_id() {
+        push_non_empty_unique(&mut ids, trace_id);
+    }
+    if let Some(trace_id) = usage_trace_id_from_headers(usage.request_headers.as_ref()) {
+        push_non_empty_unique(&mut ids, trace_id.as_str());
+    }
+    if let Some(trace_id) = usage_trace_id_from_headers(usage.provider_request_headers.as_ref()) {
+        push_non_empty_unique(&mut ids, trace_id.as_str());
+    }
+    ids
+}
+
+fn usage_trace_id_from_headers(headers: Option<&Value>) -> Option<String> {
+    let object = headers?.as_object()?;
+    object.iter().find_map(|(key, value)| {
+        key.eq_ignore_ascii_case(crate::constants::TRACE_ID_HEADER)
+            .then(|| {
+                value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+            .flatten()
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn push_non_empty_unique(values: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if value.is_empty() || values.iter().any(|existing| existing == value) {
+        return;
+    }
+    values.push(value.to_string());
 }
 
 async fn build_admin_monitoring_key_account_display_map(

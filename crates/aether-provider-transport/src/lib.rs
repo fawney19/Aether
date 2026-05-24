@@ -24,6 +24,7 @@ mod standard;
 pub mod url;
 pub mod vertex;
 mod video;
+pub mod windsurf;
 
 pub use aether_oauth as oauth;
 pub use auth::{build_passthrough_headers, ensure_upstream_auth_header};
@@ -130,4 +131,10 @@ pub use video::{
     reconstruct_local_video_task_snapshot, resolve_local_video_task_transport,
     resolve_video_create_auth, video_create_transport_unsupported_reason,
     ProviderVideoCreateFamily, ProviderVideoCreateHeadersInput, VideoTaskTransportSnapshotLookup,
+};
+pub use windsurf::{
+    build_windsurf_cascade_headers, build_windsurf_cascade_request_body,
+    build_windsurf_cascade_upstream_url, is_windsurf_provider_transport,
+    local_windsurf_request_transport_unsupported_reason_with_network, GET_CHAT_MESSAGE_PATH,
+    WINDSURF_ENVELOPE_NAME,
 };

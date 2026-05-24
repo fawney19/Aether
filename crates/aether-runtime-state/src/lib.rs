@@ -3,21 +3,18 @@ mod memory;
 pub mod redis;
 
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::redis::{cmd as redis_cmd, script as redis_script, RedisCmd};
 pub use crate::redis::{
-    RedisClient, RedisClientConfig, RedisClientFactory, RedisConsumerGroup, RedisConsumerName,
-    RedisKeyspace, RedisKvRunner, RedisKvRunnerConfig, RedisLockLease, RedisLockRunner,
-    RedisLockRunnerConfig, RedisStreamEntry, RedisStreamName, RedisStreamReclaimConfig,
-    RedisStreamRunner, RedisStreamRunnerConfig,
+    RedisClientConfig, RedisConsumerGroup, RedisConsumerName, RedisKeyspace, RedisKvRunner,
+    RedisKvRunnerConfig, RedisLaneDiagnostics, RedisLockLease, RedisLockRunner,
+    RedisLockRunnerConfig, RedisRuntimeDiagnostics, RedisStreamEntry, RedisStreamName,
+    RedisStreamReclaimConfig, RedisStreamRunner, RedisStreamRunnerConfig,
 };
 use async_trait::async_trait;
 pub use error::DataLayerError;
-use error::RedisResultExt;
 use memory::MemoryRuntimeBackend;
 pub use memory::MemoryRuntimeStateConfig;
 use tokio::task::JoinHandle;
@@ -26,48 +23,6 @@ use uuid::Uuid;
 
 const DEFAULT_KV_TTL_SECONDS: u64 = 300;
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 1_000;
-
-const RATE_LIMIT_CHECK_AND_CONSUME_SCRIPT: &str = r#"
-local user_key = KEYS[1]
-local key_key = KEYS[2]
-local user_limit = tonumber(ARGV[1])
-local key_limit = tonumber(ARGV[2])
-local ttl = tonumber(ARGV[3])
-
-local user_count = 0
-if user_limit > 0 then
-    user_count = tonumber(redis.call('GET', user_key) or '0')
-    if user_count >= user_limit then
-        return {0, 1, user_limit, 0}
-    end
-end
-
-local key_count = 0
-if key_limit > 0 then
-    key_count = tonumber(redis.call('GET', key_key) or '0')
-    if key_count >= key_limit then
-        return {0, 2, key_limit, 0}
-    end
-end
-
-local remaining = -1
-if user_limit > 0 then
-    user_count = redis.call('INCR', user_key)
-    redis.call('EXPIRE', user_key, ttl)
-    remaining = user_limit - user_count
-end
-
-if key_limit > 0 then
-    key_count = redis.call('INCR', key_key)
-    redis.call('EXPIRE', key_key, ttl)
-    local key_remaining = key_limit - key_count
-    if remaining == -1 or key_remaining < remaining then
-        remaining = key_remaining
-    end
-end
-
-return {1, 0, 0, remaining}
-"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeStateBackendMode {
@@ -209,17 +164,17 @@ pub struct RuntimeState {
 
 #[derive(Debug)]
 enum RuntimeStateBackend {
-    Memory(MemoryRuntimeBackend),
-    Redis(RedisRuntimeBackend),
+    Memory(Box<MemoryRuntimeBackend>),
+    Redis(Box<RedisRuntimeBackend>),
 }
 
 #[derive(Debug, Clone)]
 struct RedisRuntimeBackend {
-    client: RedisClient,
     keyspace: RedisKeyspace,
     kv: RedisKvRunner,
     lock: RedisLockRunner,
     stream: RedisStreamRunner,
+    runtime: redis::RedisRuntimeRunner,
     command_timeout_ms: Option<u64>,
 }
 
@@ -247,8 +202,8 @@ impl RuntimeState {
 
     pub fn memory(config: MemoryRuntimeStateConfig) -> Self {
         Self {
-            backend: Arc::new(RuntimeStateBackend::Memory(MemoryRuntimeBackend::new(
-                config,
+            backend: Arc::new(RuntimeStateBackend::Memory(Box::new(
+                MemoryRuntimeBackend::new(config),
             ))),
         }
     }
@@ -257,12 +212,17 @@ impl RuntimeState {
         config: RedisClientConfig,
         command_timeout_ms: Option<u64>,
     ) -> Result<Self, DataLayerError> {
-        let factory = RedisClientFactory::new(config)?;
-        let client = factory.connect_lazy()?;
+        let factory = redis::RedisClientFactory::new(config)?;
         let keyspace = factory.config().keyspace();
-        ping_redis(&client, command_timeout_ms).await?;
+        let connections = factory.connect_router(command_timeout_ms).await?;
+        let runtime = redis::RedisRuntimeRunner::new(
+            connections.clone(),
+            keyspace.clone(),
+            command_timeout_ms,
+        );
+        runtime.ping().await?;
         let kv = RedisKvRunner::new(
-            client.clone(),
+            connections.clone(),
             keyspace.clone(),
             RedisKvRunnerConfig {
                 command_timeout_ms,
@@ -270,7 +230,7 @@ impl RuntimeState {
             },
         )?;
         let lock = RedisLockRunner::new(
-            client.clone(),
+            connections.clone(),
             keyspace.clone(),
             RedisLockRunnerConfig {
                 command_timeout_ms,
@@ -278,7 +238,7 @@ impl RuntimeState {
             },
         )?;
         let stream = RedisStreamRunner::new(
-            client.clone(),
+            connections,
             keyspace.clone(),
             RedisStreamRunnerConfig {
                 command_timeout_ms,
@@ -287,14 +247,14 @@ impl RuntimeState {
             },
         )?;
         Ok(Self {
-            backend: Arc::new(RuntimeStateBackend::Redis(RedisRuntimeBackend {
-                client,
+            backend: Arc::new(RuntimeStateBackend::Redis(Box::new(RedisRuntimeBackend {
                 keyspace,
                 kv,
                 lock,
                 stream,
+                runtime,
                 command_timeout_ms,
-            })),
+            }))),
         })
     }
 
@@ -311,6 +271,15 @@ impl RuntimeState {
 
     pub fn is_redis(&self) -> bool {
         matches!(self.backend_kind(), RuntimeStateBackendKind::Redis)
+    }
+
+    pub async fn redis_diagnostics(
+        &self,
+    ) -> Result<Option<RedisRuntimeDiagnostics>, DataLayerError> {
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(_) => Ok(None),
+            RuntimeStateBackend::Redis(redis) => Ok(Some(redis.runtime.diagnostics().await?)),
+        }
     }
 
     pub fn kv_set_local_nowait(&self, key: &str, value: String, ttl: Option<Duration>) -> bool {
@@ -362,26 +331,9 @@ impl RuntimeState {
             RuntimeStateBackend::Redis(redis) => {
                 let value = value.into();
                 if let Some(ttl) = ttl {
-                    redis
-                        .kv
-                        .setex(key, &value, Some(ttl.as_secs().max(1)))
-                        .await?;
+                    redis.runtime.kv_set_with_ttl(key, value, ttl).await?;
                 } else {
-                    let namespaced_key = redis.keyspace.key(key);
-                    run_redis_with_timeout(redis.command_timeout_ms, "runtime kv set", async {
-                        let mut connection = redis
-                            .client
-                            .get_multiplexed_async_connection()
-                            .await
-                            .map_redis_err()?;
-                        redis_cmd("SET")
-                            .arg(namespaced_key)
-                            .arg(value)
-                            .query_async::<String>(&mut connection)
-                            .await
-                            .map_redis_err()
-                    })
-                    .await?;
+                    redis.runtime.kv_set_plain(key, value).await?;
                 }
                 Ok(())
             }
@@ -410,25 +362,7 @@ impl RuntimeState {
                 }
                 Ok(values)
             }
-            RuntimeStateBackend::Redis(redis) => {
-                let namespaced = keys
-                    .iter()
-                    .map(|key| redis.keyspace.key(key))
-                    .collect::<Vec<_>>();
-                run_redis_with_timeout(redis.command_timeout_ms, "runtime kv mget", async {
-                    let mut connection = redis
-                        .client
-                        .get_multiplexed_async_connection()
-                        .await
-                        .map_redis_err()?;
-                    redis_cmd("MGET")
-                        .arg(&namespaced)
-                        .query_async::<Vec<Option<String>>>(&mut connection)
-                        .await
-                        .map_redis_err()
-                })
-                .await
-            }
+            RuntimeStateBackend::Redis(redis) => redis.runtime.kv_get_many(keys).await,
         }
     }
 
@@ -452,36 +386,7 @@ impl RuntimeState {
         }
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.kv_delete_many(keys).await),
-            RuntimeStateBackend::Redis(redis) => {
-                let namespaced = keys
-                    .iter()
-                    .map(|key| {
-                        if key.starts_with(redis.keyspace.key("").trim_end_matches(':')) {
-                            key.clone()
-                        } else {
-                            redis.keyspace.key(key)
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let deleted = run_redis_with_timeout(
-                    redis.command_timeout_ms,
-                    "runtime kv delete many",
-                    async {
-                        let mut connection = redis
-                            .client
-                            .get_multiplexed_async_connection()
-                            .await
-                            .map_redis_err()?;
-                        redis_cmd("DEL")
-                            .arg(&namespaced)
-                            .query_async::<i64>(&mut connection)
-                            .await
-                            .map_redis_err()
-                    },
-                )
-                .await?;
-                Ok(usize::try_from(deleted).unwrap_or(0))
-            }
+            RuntimeStateBackend::Redis(redis) => redis.runtime.kv_delete_many(keys).await,
         }
     }
 
@@ -495,24 +400,7 @@ impl RuntimeState {
     pub async fn kv_ttl_seconds(&self, key: &str) -> Result<Option<i64>, DataLayerError> {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.kv_ttl_seconds(key).await),
-            RuntimeStateBackend::Redis(redis) => {
-                let namespaced_key = redis.keyspace.key(key);
-                let ttl =
-                    run_redis_with_timeout(redis.command_timeout_ms, "runtime kv ttl", async {
-                        let mut connection = redis
-                            .client
-                            .get_multiplexed_async_connection()
-                            .await
-                            .map_redis_err()?;
-                        redis_cmd("TTL")
-                            .arg(&namespaced_key)
-                            .query_async::<i64>(&mut connection)
-                            .await
-                            .map_redis_err()
-                    })
-                    .await?;
-                Ok((ttl >= -1).then_some(ttl))
-            }
+            RuntimeStateBackend::Redis(redis) => redis.runtime.kv_ttl_seconds(key).await,
         }
     }
 
@@ -523,37 +411,7 @@ impl RuntimeState {
     ) -> Result<Vec<String>, DataLayerError> {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.kv_scan(pattern).await),
-            RuntimeStateBackend::Redis(redis) => {
-                let pattern = redis.keyspace.key(pattern);
-                run_redis_with_timeout(redis.command_timeout_ms, "runtime scan keys", async {
-                    let mut connection = redis
-                        .client
-                        .get_multiplexed_async_connection()
-                        .await
-                        .map_redis_err()?;
-                    let mut cursor = 0u64;
-                    let mut keys = Vec::new();
-                    loop {
-                        let (next_cursor, mut batch) = redis_cmd("SCAN")
-                            .arg(cursor)
-                            .arg("MATCH")
-                            .arg(&pattern)
-                            .arg("COUNT")
-                            .arg(count.max(1))
-                            .query_async::<(u64, Vec<String>)>(&mut connection)
-                            .await
-                            .map_redis_err()?;
-                        keys.append(&mut batch);
-                        if next_cursor == 0 {
-                            break;
-                        }
-                        cursor = next_cursor;
-                    }
-                    keys.sort();
-                    Ok(keys)
-                })
-                .await
-            }
+            RuntimeStateBackend::Redis(redis) => redis.runtime.scan_keys(pattern, count).await,
         }
     }
 
@@ -575,51 +433,7 @@ impl RuntimeState {
                     .await
             }
             RuntimeStateBackend::Redis(redis) => {
-                let user_key = redis.keyspace.key(input.user_key);
-                let key_key = redis.keyspace.key(input.key_key);
-                let raw = run_redis_with_timeout(
-                    redis.command_timeout_ms,
-                    "runtime rate limit check",
-                    async {
-                        let mut connection = redis
-                            .client
-                            .get_multiplexed_async_connection()
-                            .await
-                            .map_redis_err()?;
-                        redis_script(RATE_LIMIT_CHECK_AND_CONSUME_SCRIPT)
-                            .key(user_key)
-                            .key(key_key)
-                            .arg(i64::from(input.user_limit))
-                            .arg(i64::from(input.key_limit))
-                            .arg(i64::try_from(input.ttl_seconds.max(1)).unwrap_or(i64::MAX))
-                            .invoke_async::<Vec<i64>>(&mut connection)
-                            .await
-                            .map_redis_err()
-                    },
-                )
-                .await?;
-                if raw.first().copied().unwrap_or_default() == 1 {
-                    return Ok(RateLimitCheck::Allowed {
-                        remaining: raw
-                            .get(3)
-                            .copied()
-                            .and_then(|value| u32::try_from(value).ok())
-                            .unwrap_or_default(),
-                    });
-                }
-                let scope = match raw.get(1).copied().unwrap_or_default() {
-                    2 => RateLimitScope::Key,
-                    _ => RateLimitScope::User,
-                };
-                let limit = raw
-                    .get(2)
-                    .copied()
-                    .and_then(|value| u32::try_from(value).ok())
-                    .unwrap_or(match scope {
-                        RateLimitScope::User => input.user_limit,
-                        RateLimitScope::Key => input.key_limit,
-                    });
-                Ok(RateLimitCheck::Rejected { scope, limit })
+                redis.runtime.check_and_consume_rate_limit(input).await
             }
         }
     }
@@ -627,67 +441,28 @@ impl RuntimeState {
     pub async fn set_add(&self, key: &str, member: &str) -> Result<bool, DataLayerError> {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.set_add(key, member).await),
-            RuntimeStateBackend::Redis(redis) => {
-                let key = redis.keyspace.key(key);
-                let mut command = redis_cmd("SADD");
-                command.arg(&key).arg(member);
-                let added = redis_query_i64(redis, "runtime set add", command).await?;
-                Ok(added > 0)
-            }
+            RuntimeStateBackend::Redis(redis) => redis.runtime.set_add(key, member).await,
         }
     }
 
     pub async fn set_remove(&self, key: &str, member: &str) -> Result<bool, DataLayerError> {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.set_remove(key, member).await),
-            RuntimeStateBackend::Redis(redis) => {
-                let key = redis.keyspace.key(key);
-                let mut command = redis_cmd("SREM");
-                command.arg(&key).arg(member);
-                let removed = redis_query_i64(redis, "runtime set remove", command).await?;
-                Ok(removed > 0)
-            }
+            RuntimeStateBackend::Redis(redis) => redis.runtime.set_remove(key, member).await,
         }
     }
 
     pub async fn set_members(&self, key: &str) -> Result<Vec<String>, DataLayerError> {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.set_members(key).await),
-            RuntimeStateBackend::Redis(redis) => {
-                let key = redis.keyspace.key(key);
-                let mut values = run_redis_with_timeout(
-                    redis.command_timeout_ms,
-                    "runtime set members",
-                    async {
-                        let mut connection = redis
-                            .client
-                            .get_multiplexed_async_connection()
-                            .await
-                            .map_redis_err()?;
-                        redis_cmd("SMEMBERS")
-                            .arg(&key)
-                            .query_async::<Vec<String>>(&mut connection)
-                            .await
-                            .map_redis_err()
-                    },
-                )
-                .await?;
-                values.sort();
-                Ok(values)
-            }
+            RuntimeStateBackend::Redis(redis) => redis.runtime.set_members(key).await,
         }
     }
 
     pub async fn set_len(&self, key: &str) -> Result<usize, DataLayerError> {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.set_len(key).await),
-            RuntimeStateBackend::Redis(redis) => {
-                let key = redis.keyspace.key(key);
-                let mut command = redis_cmd("SCARD");
-                command.arg(&key);
-                let len = redis_query_i64(redis, "runtime set len", command).await?;
-                Ok(usize::try_from(len).unwrap_or(0))
-            }
+            RuntimeStateBackend::Redis(redis) => redis.runtime.set_len(key).await,
         }
     }
 
@@ -697,18 +472,17 @@ impl RuntimeState {
         member: &str,
         score: f64,
     ) -> Result<(), DataLayerError> {
+        if !score.is_finite() {
+            return Err(DataLayerError::InvalidInput(
+                "runtime score must be finite".to_string(),
+            ));
+        }
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => {
                 memory.score_set(key, member, score).await;
                 Ok(())
             }
-            RuntimeStateBackend::Redis(redis) => {
-                let key = redis.keyspace.key(key);
-                let mut command = redis_cmd("ZADD");
-                command.arg(&key).arg(score).arg(member);
-                redis_query_i64(redis, "runtime score set", command).await?;
-                Ok(())
-            }
+            RuntimeStateBackend::Redis(redis) => redis.runtime.score_set(key, member, score).await,
         }
     }
 
@@ -722,26 +496,7 @@ impl RuntimeState {
         }
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.score_many(key, members).await),
-            RuntimeStateBackend::Redis(redis) => {
-                let key = redis.keyspace.key(key);
-                run_redis_with_timeout(redis.command_timeout_ms, "runtime score many", async {
-                    let mut connection = redis
-                        .client
-                        .get_multiplexed_async_connection()
-                        .await
-                        .map_redis_err()?;
-                    let mut command = redis_cmd("ZMSCORE");
-                    command.arg(&key);
-                    for member in members {
-                        command.arg(member);
-                    }
-                    command
-                        .query_async::<Vec<Option<f64>>>(&mut connection)
-                        .await
-                        .map_redis_err()
-                })
-                .await
-            }
+            RuntimeStateBackend::Redis(redis) => redis.runtime.score_many(key, members).await,
         }
     }
 
@@ -755,22 +510,7 @@ impl RuntimeState {
                 Ok(memory.score_range_by_min(key, min_score).await)
             }
             RuntimeStateBackend::Redis(redis) => {
-                let key = redis.keyspace.key(key);
-                run_redis_with_timeout(redis.command_timeout_ms, "runtime score range", async {
-                    let mut connection = redis
-                        .client
-                        .get_multiplexed_async_connection()
-                        .await
-                        .map_redis_err()?;
-                    redis_cmd("ZRANGEBYSCORE")
-                        .arg(&key)
-                        .arg(min_score)
-                        .arg("+inf")
-                        .query_async::<Vec<String>>(&mut connection)
-                        .await
-                        .map_redis_err()
-                })
-                .await
+                redis.runtime.score_range_by_min(key, min_score).await
             }
         }
     }
@@ -785,24 +525,7 @@ impl RuntimeState {
                 Ok(memory.score_remove_by_score(key, max_score).await)
             }
             RuntimeStateBackend::Redis(redis) => {
-                let key = redis.keyspace.key(key);
-                let removed =
-                    run_redis_with_timeout(redis.command_timeout_ms, "runtime score trim", async {
-                        let mut connection = redis
-                            .client
-                            .get_multiplexed_async_connection()
-                            .await
-                            .map_redis_err()?;
-                        redis_cmd("ZREMRANGEBYSCORE")
-                            .arg(&key)
-                            .arg("-inf")
-                            .arg(max_score)
-                            .query_async::<i64>(&mut connection)
-                            .await
-                            .map_redis_err()
-                    })
-                    .await?;
-                Ok(usize::try_from(removed).unwrap_or(0))
+                redis.runtime.score_remove_by_score(key, max_score).await
             }
         }
     }
@@ -810,16 +533,7 @@ impl RuntimeState {
     pub async fn score_remove(&self, key: &str, member: &str) -> Result<bool, DataLayerError> {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.score_remove(key, member).await),
-            RuntimeStateBackend::Redis(redis) => {
-                let key = redis.keyspace.key(key);
-                let removed = redis_query_i64(redis, "runtime score remove", {
-                    let mut command = redis_cmd("ZREM");
-                    command.arg(&key).arg(member);
-                    command
-                })
-                .await?;
-                Ok(removed > 0)
-            }
+            RuntimeStateBackend::Redis(redis) => redis.runtime.score_remove(key, member).await,
         }
     }
 
@@ -830,29 +544,11 @@ impl RuntimeState {
         stop: i64,
     ) -> Result<usize, DataLayerError> {
         match self.backend.as_ref() {
-            RuntimeStateBackend::Memory(_) => Ok(0),
+            RuntimeStateBackend::Memory(memory) => {
+                Ok(memory.score_remove_by_rank(key, start, stop).await)
+            }
             RuntimeStateBackend::Redis(redis) => {
-                let key = redis.keyspace.key(key);
-                let removed = run_redis_with_timeout(
-                    redis.command_timeout_ms,
-                    "runtime score rank trim",
-                    async {
-                        let mut connection = redis
-                            .client
-                            .get_multiplexed_async_connection()
-                            .await
-                            .map_redis_err()?;
-                        redis_cmd("ZREMRANGEBYRANK")
-                            .arg(&key)
-                            .arg(start)
-                            .arg(stop)
-                            .query_async::<i64>(&mut connection)
-                            .await
-                            .map_redis_err()
-                    },
-                )
-                .await?;
-                Ok(usize::try_from(removed).unwrap_or(0))
+                redis.runtime.score_remove_by_rank(key, start, stop).await
             }
         }
     }
@@ -860,32 +556,14 @@ impl RuntimeState {
     pub async fn score_len(&self, key: &str) -> Result<usize, DataLayerError> {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.score_len(key).await),
-            RuntimeStateBackend::Redis(redis) => {
-                let key = redis.keyspace.key(key);
-                let len = redis_query_i64(redis, "runtime score len", {
-                    let mut command = redis_cmd("ZCARD");
-                    command.arg(&key);
-                    command
-                })
-                .await?;
-                Ok(usize::try_from(len).unwrap_or(0))
-            }
+            RuntimeStateBackend::Redis(redis) => redis.runtime.score_len(key).await,
         }
     }
 
     pub async fn key_expire(&self, key: &str, ttl: Duration) -> Result<bool, DataLayerError> {
         match self.backend.as_ref() {
-            RuntimeStateBackend::Memory(_) => Ok(true),
-            RuntimeStateBackend::Redis(redis) => {
-                let key = redis.keyspace.key(key);
-                let updated = redis_query_i64(redis, "runtime key expire", {
-                    let mut command = redis_cmd("EXPIRE");
-                    command.arg(&key).arg(ttl.as_secs().max(1));
-                    command
-                })
-                .await?;
-                Ok(updated > 0)
-            }
+            RuntimeStateBackend::Memory(memory) => Ok(memory.key_expire(key, ttl).await),
+            RuntimeStateBackend::Redis(redis) => redis.runtime.key_expire(key, ttl).await,
         }
     }
 
@@ -1042,6 +720,31 @@ pub struct RuntimeQueueReclaimConfig {
     pub count: usize,
 }
 
+fn validate_runtime_queue_name(value: &str, field: &str) -> Result<(), DataLayerError> {
+    if value.trim().is_empty() {
+        return Err(DataLayerError::InvalidInput(format!(
+            "{field} cannot be empty"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_runtime_queue_reclaim_config(
+    config: RuntimeQueueReclaimConfig,
+) -> Result<(), DataLayerError> {
+    if config.min_idle_ms == 0 {
+        return Err(DataLayerError::InvalidInput(
+            "runtime queue reclaim min_idle_ms must be positive".to_string(),
+        ));
+    }
+    if config.count == 0 {
+        return Err(DataLayerError::InvalidInput(
+            "runtime queue reclaim count must be positive".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 pub trait RuntimeQueueStore: Send + Sync {
     async fn ensure_consumer_group(
@@ -1090,8 +793,15 @@ impl RuntimeQueueStore for RuntimeState {
         group: &str,
         start_id: &str,
     ) -> Result<(), DataLayerError> {
+        validate_runtime_queue_name(stream, "runtime queue stream")?;
+        validate_runtime_queue_name(group, "runtime queue group")?;
+        validate_runtime_queue_name(start_id, "runtime queue start id")?;
         match self.backend.as_ref() {
-            RuntimeStateBackend::Memory(_) => Ok(()),
+            RuntimeStateBackend::Memory(memory) => {
+                memory
+                    .queue_ensure_consumer_group(stream, group, start_id)
+                    .await
+            }
             RuntimeStateBackend::Redis(redis) => {
                 redis
                     .stream
@@ -1111,6 +821,12 @@ impl RuntimeQueueStore for RuntimeState {
         fields: &BTreeMap<String, String>,
         maxlen: Option<usize>,
     ) -> Result<String, DataLayerError> {
+        validate_runtime_queue_name(stream, "runtime queue stream")?;
+        if fields.is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "runtime queue fields cannot be empty".to_string(),
+            ));
+        }
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => {
                 Ok(memory.queue_append(stream, fields.clone(), maxlen).await)
@@ -1132,21 +848,29 @@ impl RuntimeQueueStore for RuntimeState {
         count: usize,
         block_ms: Option<u64>,
     ) -> Result<Vec<RuntimeQueueEntry>, DataLayerError> {
+        validate_runtime_queue_name(stream, "runtime queue stream")?;
+        validate_runtime_queue_name(group, "runtime queue group")?;
+        validate_runtime_queue_name(consumer, "runtime queue consumer")?;
+        if matches!(block_ms, Some(0)) {
+            return Err(DataLayerError::InvalidInput(
+                "runtime queue block_ms must be positive".to_string(),
+            ));
+        }
         match self.backend.as_ref() {
-            RuntimeStateBackend::Memory(memory) => Ok(memory.queue_read(stream, count).await),
+            RuntimeStateBackend::Memory(memory) => {
+                memory
+                    .queue_read(stream, group, consumer, count, block_ms)
+                    .await
+            }
             RuntimeStateBackend::Redis(redis) => {
-                let runner = RedisStreamRunner::new(
-                    redis.client.clone(),
-                    redis.keyspace.clone(),
-                    RedisStreamRunnerConfig {
-                        command_timeout_ms: redis_stream_command_timeout_for_block(
-                            redis.command_timeout_ms,
-                            block_ms,
-                        ),
-                        read_block_ms: block_ms,
-                        read_count: count.max(1),
-                    },
-                )?;
+                let runner = redis.stream.with_config(RedisStreamRunnerConfig {
+                    command_timeout_ms: redis_stream_command_timeout_for_block(
+                        redis.command_timeout_ms,
+                        block_ms,
+                    ),
+                    read_block_ms: block_ms,
+                    read_count: count.max(1),
+                })?;
                 Ok(runner
                     .read_group(
                         &RedisStreamName(stream.to_string()),
@@ -1172,9 +896,16 @@ impl RuntimeQueueStore for RuntimeState {
         start_id: &str,
         config: RuntimeQueueReclaimConfig,
     ) -> Result<Vec<RuntimeQueueEntry>, DataLayerError> {
+        validate_runtime_queue_name(stream, "runtime queue stream")?;
+        validate_runtime_queue_name(group, "runtime queue group")?;
+        validate_runtime_queue_name(consumer, "runtime queue consumer")?;
+        validate_runtime_queue_name(start_id, "runtime queue start id")?;
+        validate_runtime_queue_reclaim_config(config)?;
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => {
-                Ok(memory.queue_claim_stale(stream, config).await)
+                memory
+                    .queue_claim_stale(stream, group, consumer, start_id, config)
+                    .await
             }
             RuntimeStateBackend::Redis(redis) => Ok(redis
                 .stream
@@ -1205,8 +936,10 @@ impl RuntimeQueueStore for RuntimeState {
         group: &str,
         ids: &[String],
     ) -> Result<usize, DataLayerError> {
+        validate_runtime_queue_name(stream, "runtime queue stream")?;
+        validate_runtime_queue_name(group, "runtime queue group")?;
         match self.backend.as_ref() {
-            RuntimeStateBackend::Memory(_) => Ok(ids.len()),
+            RuntimeStateBackend::Memory(memory) => memory.queue_ack(stream, group, ids).await,
             RuntimeStateBackend::Redis(redis) => {
                 redis
                     .stream
@@ -1221,6 +954,7 @@ impl RuntimeQueueStore for RuntimeState {
     }
 
     async fn delete(&self, stream: &str, ids: &[String]) -> Result<usize, DataLayerError> {
+        validate_runtime_queue_name(stream, "runtime queue stream")?;
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.queue_delete(stream, ids).await),
             RuntimeStateBackend::Redis(redis) => {
@@ -1513,38 +1247,16 @@ impl RuntimeSemaphoreState {
         redis: &RedisRuntimeBackend,
         token: &str,
     ) -> Result<usize, RuntimeSemaphoreError> {
-        let now_ms = unix_time_ms();
-        let expires_at_ms = now_ms.saturating_add(self.config.lease_ttl_ms);
-        let key = redis.keyspace.key(&self.key);
-        let result = self
-            .run_redis("acquire", redis, async {
-                let mut connection = redis
-                    .client
-                    .get_multiplexed_async_connection()
-                    .await
-                    .map_err(|err| self.unavailable(format!("connect failed: {err}")))?;
-                redis_script(
-                    "redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1]); \
-                     local count = redis.call('ZCARD', KEYS[1]); \
-                     if count >= tonumber(ARGV[3]) then \
-                        redis.call('PEXPIRE', KEYS[1], ARGV[5]); \
-                        return {0, count}; \
-                     end; \
-                     redis.call('ZADD', KEYS[1], ARGV[2], ARGV[4]); \
-                     count = redis.call('ZCARD', KEYS[1]); \
-                     redis.call('PEXPIRE', KEYS[1], ARGV[5]); \
-                     return {1, count};",
-                )
-                .key(&key)
-                .arg(now_ms as i64)
-                .arg(expires_at_ms as i64)
-                .arg(self.limit as i64)
-                .arg(token)
-                .arg(self.config.lease_ttl_ms as i64)
-                .invoke_async::<(i64, i64)>(&mut connection)
-                .await
-                .map_err(|err| self.unavailable(format!("acquire failed: {err}")))
-            })
+        let result = redis
+            .runtime
+            .semaphore_try_acquire(
+                self.gate,
+                self.limit,
+                &self.key,
+                token,
+                self.config.lease_ttl_ms,
+                self.config.command_timeout_ms,
+            )
             .await?;
         let acquired = result.0 > 0;
         let in_flight = result.1.max(0) as usize;
@@ -1572,33 +1284,16 @@ impl RuntimeSemaphoreState {
                 }
             }
             RuntimeStateBackend::Redis(redis) => {
-                let now_ms = unix_time_ms();
-                let expires_at_ms = now_ms.saturating_add(self.config.lease_ttl_ms);
-                let key = redis.keyspace.key(&self.key);
-                let renewed = self
-                    .run_redis("renew", redis, async {
-                        let mut connection = redis
-                            .client
-                            .get_multiplexed_async_connection()
-                            .await
-                            .map_err(|err| self.unavailable(format!("connect failed: {err}")))?;
-                        redis_script(
-                            "redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1]); \
-                             local score = redis.call('ZSCORE', KEYS[1], ARGV[2]); \
-                             if not score then return 0; end; \
-                             redis.call('ZADD', KEYS[1], 'XX', ARGV[3], ARGV[2]); \
-                             redis.call('PEXPIRE', KEYS[1], ARGV[4]); \
-                             return 1;",
-                        )
-                        .key(&key)
-                        .arg(now_ms as i64)
-                        .arg(token)
-                        .arg(expires_at_ms as i64)
-                        .arg(self.config.lease_ttl_ms as i64)
-                        .invoke_async::<i64>(&mut connection)
-                        .await
-                        .map_err(|err| self.unavailable(format!("renew failed: {err}")))
-                    })
+                let renewed = redis
+                    .runtime
+                    .semaphore_renew(
+                        self.gate,
+                        self.limit,
+                        &self.key,
+                        token,
+                        self.config.lease_ttl_ms,
+                        self.config.command_timeout_ms,
+                    )
                     .await?;
                 if renewed == 0 {
                     return Err(self.unavailable("lease token expired".to_string()));
@@ -1615,28 +1310,16 @@ impl RuntimeSemaphoreState {
                 Ok(())
             }
             RuntimeStateBackend::Redis(redis) => {
-                let key = redis.keyspace.key(&self.key);
-                self.run_redis("release", redis, async {
-                    let mut connection = redis
-                        .client
-                        .get_multiplexed_async_connection()
-                        .await
-                        .map_err(|err| self.unavailable(format!("connect failed: {err}")))?;
-                    redis_script(
-                        "local removed = redis.call('ZREM', KEYS[1], ARGV[1]); \
-                         if removed > 0 and redis.call('ZCARD', KEYS[1]) == 0 then \
-                            redis.call('DEL', KEYS[1]); \
-                         end; \
-                         return removed;",
+                redis
+                    .runtime
+                    .semaphore_release(
+                        self.gate,
+                        self.limit,
+                        &self.key,
+                        token,
+                        self.config.command_timeout_ms,
                     )
-                    .key(&key)
-                    .arg(token)
-                    .invoke_async::<i64>(&mut connection)
                     .await
-                    .map_err(|err| self.unavailable(format!("release failed: {err}")))?;
-                    Ok(())
-                })
-                .await
             }
         }
     }
@@ -1645,50 +1328,19 @@ impl RuntimeSemaphoreState {
         let count = match self.runtime.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => memory.semaphore_live_count(&self.key).await,
             RuntimeStateBackend::Redis(redis) => {
-                let now_ms = unix_time_ms();
-                let key = redis.keyspace.key(&self.key);
-                self.run_redis("snapshot", redis, async {
-                    let mut connection = redis
-                        .client
-                        .get_multiplexed_async_connection()
-                        .await
-                        .map_err(|err| self.unavailable(format!("connect failed: {err}")))?;
-                    redis_script(
-                        "redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1]); \
-                         return redis.call('ZCARD', KEYS[1]);",
+                redis
+                    .runtime
+                    .semaphore_live_count(
+                        self.gate,
+                        self.limit,
+                        &self.key,
+                        self.config.command_timeout_ms,
                     )
-                    .key(&key)
-                    .arg(now_ms as i64)
-                    .invoke_async::<i64>(&mut connection)
-                    .await
-                    .map(|value| value.max(0) as usize)
-                    .map_err(|err| self.unavailable(format!("snapshot failed: {err}")))
-                })
-                .await?
+                    .await?
             }
         };
         self.observe_in_flight(count);
         Ok(count)
-    }
-
-    async fn run_redis<T, F>(
-        &self,
-        operation: &'static str,
-        redis: &RedisRuntimeBackend,
-        future: F,
-    ) -> Result<T, RuntimeSemaphoreError>
-    where
-        F: Future<Output = Result<T, RuntimeSemaphoreError>>,
-    {
-        if let Some(timeout_ms) = self.config.command_timeout_ms.or(redis.command_timeout_ms) {
-            tokio::time::timeout(Duration::from_millis(timeout_ms), future)
-                .await
-                .map_err(|_| {
-                    self.unavailable(format!("{operation} exceeded {timeout_ms}ms timeout"))
-                })?
-        } else {
-            future.await
-        }
     }
 
     fn unavailable(&self, message: String) -> RuntimeSemaphoreError {
@@ -1713,65 +1365,6 @@ impl RuntimeSemaphoreState {
             }
         }
     }
-}
-
-async fn ping_redis(client: &RedisClient, timeout_ms: Option<u64>) -> Result<(), DataLayerError> {
-    run_redis_with_timeout(timeout_ms, "runtime redis ping", async {
-        let mut connection = client
-            .get_multiplexed_async_connection()
-            .await
-            .map_redis_err()?;
-        let pong = redis_cmd("PING")
-            .query_async::<String>(&mut connection)
-            .await
-            .map_redis_err()?;
-        if pong.eq_ignore_ascii_case("PONG") {
-            Ok(())
-        } else {
-            Err(DataLayerError::UnexpectedValue(format!(
-                "unexpected runtime redis ping response {pong}"
-            )))
-        }
-    })
-    .await
-}
-
-async fn run_redis_with_timeout<T, F>(
-    timeout_ms: Option<u64>,
-    operation: &'static str,
-    future: F,
-) -> Result<T, DataLayerError>
-where
-    F: Future<Output = Result<T, DataLayerError>>,
-{
-    if let Some(timeout_ms) = timeout_ms {
-        tokio::time::timeout(Duration::from_millis(timeout_ms), future)
-            .await
-            .map_err(|_| {
-                DataLayerError::TimedOut(format!("{operation} exceeded {timeout_ms}ms timeout"))
-            })?
-    } else {
-        future.await
-    }
-}
-
-async fn redis_query_i64(
-    redis: &RedisRuntimeBackend,
-    operation: &'static str,
-    command: RedisCmd,
-) -> Result<i64, DataLayerError> {
-    run_redis_with_timeout(redis.command_timeout_ms, operation, async {
-        let mut connection = redis
-            .client
-            .get_multiplexed_async_connection()
-            .await
-            .map_redis_err()?;
-        command
-            .query_async::<i64>(&mut connection)
-            .await
-            .map_redis_err()
-    })
-    .await
 }
 
 fn env_value(name: &str) -> Option<String> {
@@ -1804,6 +1397,9 @@ fn redis_stream_command_timeout_for_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::process::{Child, Command, Stdio};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn memory_kv_expires_entries() {
@@ -1877,6 +1473,209 @@ mod tests {
         assert_eq!(gate.snapshot().await.expect("snapshot").in_flight, 0);
     }
 
+    #[tokio::test]
+    async fn redis_runtime_reuses_fixed_connections_for_repeated_operations() {
+        let Some(redis) = TestRedisServer::start().await else {
+            return;
+        };
+        let runtime = RuntimeState::redis(
+            RedisClientConfig {
+                url: redis.redis_url.clone(),
+                key_prefix: Some(format!("aether-runtime-test-{}", std::process::id())),
+            },
+            Some(1_000),
+        )
+        .await
+        .expect("runtime should connect");
+        let before = runtime
+            .redis_diagnostics()
+            .await
+            .expect("diagnostics")
+            .expect("redis diagnostics")
+            .total_connections_received
+            .expect("total connections");
+
+        for index in 0..200 {
+            let key = format!("kv:{index}");
+            runtime
+                .kv_set(
+                    &key,
+                    format!("value-{index}"),
+                    Some(Duration::from_secs(30)),
+                )
+                .await
+                .expect("set");
+            assert_eq!(
+                runtime.kv_get(&key).await.expect("get").as_deref(),
+                Some(format!("value-{index}").as_str())
+            );
+        }
+
+        let after = runtime
+            .redis_diagnostics()
+            .await
+            .expect("diagnostics")
+            .expect("redis diagnostics")
+            .total_connections_received
+            .expect("total connections");
+        assert_eq!(
+            after, before,
+            "runtime Redis operations should reuse initialized lanes"
+        );
+    }
+
+    #[tokio::test]
+    async fn redis_blocking_stream_read_does_not_block_fast_lane() {
+        let Some(redis) = TestRedisServer::start().await else {
+            return;
+        };
+        let runtime = RuntimeState::redis(
+            RedisClientConfig {
+                url: redis.redis_url.clone(),
+                key_prefix: Some(format!("aether-block-test-{}", std::process::id())),
+            },
+            Some(1_000),
+        )
+        .await
+        .expect("runtime should connect");
+        RuntimeQueueStore::ensure_consumer_group(&runtime, "blocking-stream", "workers", "0-0")
+            .await
+            .expect("consumer group");
+
+        let blocking_runtime = runtime.clone();
+        let blocking = tokio::spawn(async move {
+            RuntimeQueueStore::read_group(
+                &blocking_runtime,
+                "blocking-stream",
+                "workers",
+                "consumer-a",
+                1,
+                Some(500),
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        runtime
+            .kv_set("fast-lane", "ok", Some(Duration::from_secs(30)))
+            .await
+            .expect("fast lane set should complete while stream read blocks");
+        assert_eq!(
+            runtime
+                .kv_get("fast-lane")
+                .await
+                .expect("fast lane get")
+                .as_deref(),
+            Some("ok")
+        );
+        let _ = blocking.await.expect("blocking task join");
+    }
+
+    #[tokio::test]
+    async fn redis_connection_manager_recovers_after_restart() {
+        let Some(mut redis) = TestRedisServer::start().await else {
+            return;
+        };
+        let runtime = RuntimeState::redis(
+            RedisClientConfig {
+                url: redis.redis_url.clone(),
+                key_prefix: Some(format!("aether-restart-test-{}", std::process::id())),
+            },
+            Some(500),
+        )
+        .await
+        .expect("runtime should connect");
+        runtime
+            .kv_set("before-restart", "ok", Some(Duration::from_secs(30)))
+            .await
+            .expect("initial set");
+
+        redis.stop();
+        let _ = runtime
+            .kv_set("during-restart", "may-fail", Some(Duration::from_secs(30)))
+            .await;
+        redis.restart().await.expect("redis restart");
+
+        let mut recovered = false;
+        for _ in 0..20 {
+            if runtime
+                .kv_set("after-restart", "ok", Some(Duration::from_secs(30)))
+                .await
+                .is_ok()
+            {
+                recovered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            recovered,
+            "connection manager should reconnect after restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_backends_share_kv_score_and_queue_contracts() {
+        let memory = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        assert_kv_score_and_queue_contract(&memory).await;
+
+        let Some((_redis, redis_runtime)) = redis_runtime_for_test("shared-contract").await else {
+            return;
+        };
+        assert_kv_score_and_queue_contract(&redis_runtime).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_backends_reject_invalid_shared_inputs() {
+        let memory = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        assert_invalid_shared_inputs(&memory).await;
+
+        let Some((_redis, redis_runtime)) = redis_runtime_for_test("invalid-contract").await else {
+            return;
+        };
+        assert_invalid_shared_inputs(&redis_runtime).await;
+    }
+
+    #[tokio::test]
+    async fn memory_blocking_queue_read_does_not_block_kv_operations() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        RuntimeQueueStore::ensure_consumer_group(&runtime, "memory-blocking", "workers", "0-0")
+            .await
+            .expect("consumer group");
+
+        let blocking_runtime = runtime.clone();
+        let blocking = tokio::spawn(async move {
+            RuntimeQueueStore::read_group(
+                &blocking_runtime,
+                "memory-blocking",
+                "workers",
+                "consumer-a",
+                1,
+                Some(100),
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        runtime
+            .kv_set("memory-fast-lane", "ok", Some(Duration::from_millis(100)))
+            .await
+            .expect("set should complete while memory stream read blocks");
+        assert_eq!(
+            runtime
+                .kv_get("memory-fast-lane")
+                .await
+                .expect("get")
+                .as_deref(),
+            Some("ok")
+        );
+        assert!(blocking
+            .await
+            .expect("blocking task join")
+            .expect("read should complete")
+            .is_empty());
+    }
+
     #[test]
     fn redis_stream_timeout_expands_past_blocking_read() {
         assert_eq!(
@@ -1891,5 +1690,334 @@ mod tests {
             redis_stream_command_timeout_for_block(None, Some(500)),
             None
         );
+    }
+
+    async fn assert_kv_score_and_queue_contract(runtime: &RuntimeState) {
+        runtime
+            .kv_set("contract:ttl:set", "value", Some(Duration::from_millis(30)))
+            .await
+            .expect("set with ttl");
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            runtime.kv_get("contract:ttl:set").await.expect("ttl get"),
+            None
+        );
+
+        runtime
+            .kv_set("contract:ttl:expire", "value", None)
+            .await
+            .expect("set without ttl");
+        assert!(runtime
+            .key_expire("contract:ttl:expire", Duration::from_millis(30))
+            .await
+            .expect("expire existing key"));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            runtime
+                .kv_get("contract:ttl:expire")
+                .await
+                .expect("expired get"),
+            None
+        );
+
+        runtime
+            .kv_set("contract:ttl:zero", "value", None)
+            .await
+            .expect("set zero ttl key");
+        assert!(runtime
+            .key_expire("contract:ttl:zero", Duration::ZERO)
+            .await
+            .expect("zero expire existing key"));
+        assert_eq!(
+            runtime
+                .kv_get("contract:ttl:zero")
+                .await
+                .expect("zero expired get"),
+            None
+        );
+
+        runtime
+            .set_add("contract:set", "member")
+            .await
+            .expect("set add");
+        assert!(runtime
+            .key_expire("contract:set", Duration::from_millis(30))
+            .await
+            .expect("expire set"));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(runtime.set_len("contract:set").await.expect("set len"), 0);
+
+        for (member, score) in [("a", 1.0), ("b", 2.0), ("c", 3.0), ("d", 4.0)] {
+            runtime
+                .score_set("contract:zset", member, score)
+                .await
+                .expect("score set");
+        }
+        assert_eq!(
+            runtime
+                .score_range_by_min("contract:zset", 0.0)
+                .await
+                .expect("score range"),
+            vec!["a", "b", "c", "d"]
+        );
+        assert_eq!(
+            runtime
+                .score_remove_by_rank("contract:zset", 0, -3)
+                .await
+                .expect("rank trim"),
+            2
+        );
+        assert_eq!(
+            runtime
+                .score_many(
+                    "contract:zset",
+                    &["a".to_string(), "b".to_string(), "c".to_string()]
+                )
+                .await
+                .expect("score many"),
+            vec![None, None, Some(3.0)]
+        );
+        assert!(runtime
+            .key_expire("contract:zset", Duration::from_millis(30))
+            .await
+            .expect("expire zset"));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            runtime
+                .score_len("contract:zset")
+                .await
+                .expect("expired zset len"),
+            0
+        );
+
+        RuntimeQueueStore::ensure_consumer_group(runtime, "contract:stream", "workers", "0-0")
+            .await
+            .expect("consumer group");
+        let fields = BTreeMap::from([("payload".to_string(), "one".to_string())]);
+        let first = RuntimeQueueStore::append_fields_with_maxlen(
+            runtime,
+            "contract:stream",
+            &fields,
+            Some(100),
+        )
+        .await
+        .expect("append first");
+        let fields = BTreeMap::from([("payload".to_string(), "two".to_string())]);
+        let second = RuntimeQueueStore::append_fields_with_maxlen(
+            runtime,
+            "contract:stream",
+            &fields,
+            Some(100),
+        )
+        .await
+        .expect("append second");
+        let delivered = RuntimeQueueStore::read_group(
+            runtime,
+            "contract:stream",
+            "workers",
+            "consumer-a",
+            10,
+            None,
+        )
+        .await
+        .expect("read group");
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>(),
+            vec![first.clone(), second.clone()]
+        );
+        assert!(RuntimeQueueStore::read_group(
+            runtime,
+            "contract:stream",
+            "workers",
+            "consumer-a",
+            10,
+            None
+        )
+        .await
+        .expect("second read")
+        .is_empty());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let claimed = RuntimeQueueStore::claim_stale(
+            runtime,
+            "contract:stream",
+            "workers",
+            "consumer-b",
+            "0-0",
+            RuntimeQueueReclaimConfig {
+                min_idle_ms: 1,
+                count: 10,
+            },
+        )
+        .await
+        .expect("claim stale");
+        let ids = claimed
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![first.clone(), second.clone()]);
+        assert_eq!(
+            RuntimeQueueStore::ack(runtime, "contract:stream", "workers", &ids)
+                .await
+                .expect("ack"),
+            2
+        );
+        assert_eq!(
+            RuntimeQueueStore::delete(runtime, "contract:stream", &ids)
+                .await
+                .expect("delete"),
+            2
+        );
+        assert!(RuntimeQueueStore::read_group(
+            runtime,
+            "contract:stream",
+            "workers",
+            "consumer-b",
+            10,
+            None
+        )
+        .await
+        .expect("read after delete")
+        .is_empty());
+    }
+
+    async fn assert_invalid_shared_inputs(runtime: &RuntimeState) {
+        assert!(matches!(
+            runtime
+                .score_set("contract:invalid-score", "nan", f64::NAN)
+                .await,
+            Err(DataLayerError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            RuntimeQueueStore::read_group(runtime, "", "workers", "consumer-a", 1, None).await,
+            Err(DataLayerError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            RuntimeQueueStore::claim_stale(
+                runtime,
+                "contract:stream",
+                "workers",
+                "consumer-a",
+                "0-0",
+                RuntimeQueueReclaimConfig {
+                    min_idle_ms: 0,
+                    count: 1,
+                },
+            )
+            .await,
+            Err(DataLayerError::InvalidInput(_))
+        ));
+    }
+
+    async fn redis_runtime_for_test(prefix: &str) -> Option<(TestRedisServer, RuntimeState)> {
+        let redis = TestRedisServer::start().await?;
+        let runtime = RuntimeState::redis(
+            RedisClientConfig {
+                url: redis.redis_url.clone(),
+                key_prefix: Some(format!(
+                    "aether-runtime-test-{prefix}-{}",
+                    std::process::id()
+                )),
+            },
+            Some(1_000),
+        )
+        .await
+        .ok()?;
+        Some((redis, runtime))
+    }
+
+    struct TestRedisServer {
+        child: Option<Child>,
+        binary: String,
+        port: u16,
+        workdir: PathBuf,
+        redis_url: String,
+    }
+
+    impl TestRedisServer {
+        async fn start() -> Option<Self> {
+            let port = reserve_local_port().ok()?;
+            let workdir = std::env::temp_dir().join(format!(
+                "aether-runtime-state-redis-{}-{port}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&workdir).ok()?;
+            let binary = std::env::var("AETHER_REDIS_SERVER_BIN")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "redis-server".to_string());
+            let mut server = Self {
+                child: None,
+                binary,
+                port,
+                workdir,
+                redis_url: format!("redis://127.0.0.1:{port}/0"),
+            };
+            server.restart().await.ok()?;
+            Some(server)
+        }
+
+        fn stop(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+
+        async fn restart(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+            self.stop();
+            let child = Command::new(&self.binary)
+                .arg("--save")
+                .arg("")
+                .arg("--appendonly")
+                .arg("no")
+                .arg("--port")
+                .arg(self.port.to_string())
+                .arg("--dir")
+                .arg(&self.workdir)
+                .arg("--bind")
+                .arg("127.0.0.1")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            self.child = Some(child);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while tokio::time::Instant::now() < deadline {
+                if redis_ping(self.port).await.unwrap_or(false) {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            self.stop();
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out waiting for test redis-server",
+            )
+            .into())
+        }
+    }
+
+    impl Drop for TestRedisServer {
+        fn drop(&mut self) {
+            self.stop();
+            let _ = std::fs::remove_dir_all(&self.workdir);
+        }
+    }
+
+    async fn redis_ping(port: u16) -> Result<bool, std::io::Error> {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+        stream.write_all(b"*1\r\n$4\r\nPING\r\n").await?;
+        let mut buffer = [0_u8; 16];
+        let len = stream.read(&mut buffer).await?;
+        Ok(buffer[..len].starts_with(b"+PONG"))
+    }
+
+    fn reserve_local_port() -> Result<u16, std::io::Error> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
+        Ok(port)
     }
 }

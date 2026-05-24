@@ -23,6 +23,17 @@ use super::{
     LocalProviderDeleteTaskState, ProviderTransportSnapshotCacheKey,
 };
 
+const DEFAULT_REQUEST_BODY_READ_TIMEOUT_MS: u64 = 120_000;
+const MIN_REQUEST_BODY_READ_TIMEOUT_MS: u64 = 1_000;
+const MAX_REQUEST_BODY_READ_TIMEOUT_MS: u64 = 600_000;
+const REQUEST_BODY_READ_TIMEOUT_MS_ENV: &str = "AETHER_GATEWAY_REQUEST_BODY_READ_TIMEOUT_MS";
+
+const DEFAULT_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS: u64 = 30_000;
+const MIN_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS: u64 = 500;
+const MAX_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS: u64 = 120_000;
+const LOCAL_EXECUTION_PLANNING_TIMEOUT_MS_ENV: &str =
+    "AETHER_GATEWAY_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS";
+
 #[cfg(test)]
 type TestExecutionRuntimeSyncOverrideFn = dyn Fn(
         &aether_contracts::ExecutionPlan,
@@ -44,6 +55,52 @@ impl std::fmt::Debug for TestExecutionRuntimeSyncOverride {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct FrontdoorRuntimeGuardConfig {
+    pub(crate) request_body_read_timeout: Duration,
+    pub(crate) local_execution_planning_timeout: Duration,
+}
+
+impl FrontdoorRuntimeGuardConfig {
+    pub(crate) fn from_env() -> Self {
+        Self {
+            request_body_read_timeout: env_duration_ms(
+                REQUEST_BODY_READ_TIMEOUT_MS_ENV,
+                DEFAULT_REQUEST_BODY_READ_TIMEOUT_MS,
+                MIN_REQUEST_BODY_READ_TIMEOUT_MS,
+                MAX_REQUEST_BODY_READ_TIMEOUT_MS,
+            ),
+            local_execution_planning_timeout: env_duration_ms(
+                LOCAL_EXECUTION_PLANNING_TIMEOUT_MS_ENV,
+                DEFAULT_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS,
+                MIN_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS,
+                MAX_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS,
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        request_body_read_timeout: Duration,
+        local_execution_planning_timeout: Duration,
+    ) -> Self {
+        Self {
+            request_body_read_timeout,
+            local_execution_planning_timeout,
+        }
+    }
+}
+
+fn env_duration_ms(key: &str, default_ms: u64, min_ms: u64, max_ms: u64) -> Duration {
+    let ms = std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default_ms)
+        .clamp(min_ms, max_ms);
+    Duration::from_millis(ms)
+}
+
+#[derive(Debug, Clone)]
 pub struct AppState {
     #[cfg(test)]
     pub(crate) execution_runtime_override_base_url: Option<String>,
@@ -54,6 +111,7 @@ pub struct AppState {
     pub(crate) usage_runtime: Arc<usage::UsageRuntime>,
     pub(crate) video_tasks: Arc<VideoTaskService>,
     pub(crate) video_task_poller: Option<VideoTaskPollerConfig>,
+    pub(crate) frontdoor_runtime_guards: Arc<FrontdoorRuntimeGuardConfig>,
     pub(crate) request_gate: Option<Arc<ConcurrencyGate>>,
     pub(crate) distributed_request_gate: Option<Arc<RuntimeSemaphore>>,
     pub(crate) client: reqwest::Client,

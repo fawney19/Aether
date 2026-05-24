@@ -3,6 +3,7 @@ use aether_data_contracts::DataLayerError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRuntimeConfig {
     pub enabled: bool,
+    pub queue_terminal_events: bool,
     pub stream_key: String,
     pub consumer_group: String,
     pub dlq_stream_key: String,
@@ -18,6 +19,7 @@ impl Default for UsageRuntimeConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            queue_terminal_events: false,
             stream_key: "usage:events".to_string(),
             consumer_group: "usage_consumers".to_string(),
             dlq_stream_key: "usage:events:dlq".to_string(),

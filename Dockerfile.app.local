@@ -1,11 +1,13 @@
-# syntax=docker/dockerfile:1
+# syntax=docker.m.daocloud.io/docker/dockerfile:1
 # Aether 运行镜像：Rust gateway 直接服务 API + 前端静态文件（国内镜像源版本）
 # 构建命令: docker build --build-arg AETHER_BUILD_VERSION=v0.7.2 -f Dockerfile.app.local -t aether-app:latest .
 
 ARG RUST_VERSION=1.95.0
+ARG NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:22-slim
+ARG RUST_BASE_IMAGE=docker.m.daocloud.io/library/rust:${RUST_VERSION}-slim
 
 # ==================== 前端构建 ====================
-FROM node:22-slim AS frontend-builder
+FROM ${NODE_BASE_IMAGE} AS frontend-builder
 ARG AETHER_BUILD_VERSION
 ENV AETHER_BUILD_VERSION=${AETHER_BUILD_VERSION} \
     AETHER_VERSION=${AETHER_BUILD_VERSION}
@@ -18,7 +20,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # ==================== Rust gateway 构建 ====================
-FROM rust:${RUST_VERSION}-slim AS gateway-base
+FROM ${RUST_BASE_IMAGE} AS gateway-base
 WORKDIR /build
 
 # 本地镜像优先缩短构建时间，保留 release 语义，但改用更快的 thin LTO。
@@ -134,6 +136,7 @@ ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     RUST_LOG=aether_gateway=info \
     APP_PORT=8084 \
+    AETHER_UPDATE_STRATEGY=manual \
     AETHER_GATEWAY_STATIC_DIR=/srv/frontend
 
 EXPOSE 8084

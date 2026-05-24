@@ -559,41 +559,62 @@ pub(super) fn classify_admin_basic_family_route(
             false,
         ))
     } else if method == http::Method::GET
-        && matches!(
-            normalized_path,
-            "/api/admin/payments/gateways/epay" | "/api/admin/payments/gateways/epay/"
+        && has_single_segment_after_prefix(
+            normalized_path_no_trailing,
+            "/api/admin/payments/gateways/",
         )
     {
         Some(classified(
             "admin_proxy",
             "payments_manage",
-            "get_epay_gateway",
+            if matches!(
+                normalized_path,
+                "/api/admin/payments/gateways/epay" | "/api/admin/payments/gateways/epay/"
+            ) {
+                "get_epay_gateway"
+            } else {
+                "get_payment_gateway"
+            },
             "admin:payments",
             false,
         ))
     } else if method == http::Method::PUT
-        && matches!(
-            normalized_path,
-            "/api/admin/payments/gateways/epay" | "/api/admin/payments/gateways/epay/"
+        && has_single_segment_after_prefix(
+            normalized_path_no_trailing,
+            "/api/admin/payments/gateways/",
         )
     {
         Some(classified(
             "admin_proxy",
             "payments_manage",
-            "update_epay_gateway",
+            if matches!(
+                normalized_path,
+                "/api/admin/payments/gateways/epay" | "/api/admin/payments/gateways/epay/"
+            ) {
+                "update_epay_gateway"
+            } else {
+                "update_payment_gateway"
+            },
             "admin:payments",
             false,
         ))
     } else if method == http::Method::POST
-        && matches!(
-            normalized_path,
-            "/api/admin/payments/gateways/epay/test" | "/api/admin/payments/gateways/epay/test/"
-        )
+        && normalized_path_no_trailing.starts_with("/api/admin/payments/gateways/")
+        && normalized_path_no_trailing.ends_with("/test")
+        && normalized_path_no_trailing.matches('/').count() == 6
     {
         Some(classified(
             "admin_proxy",
             "payments_manage",
-            "test_epay_gateway",
+            if matches!(
+                normalized_path,
+                "/api/admin/payments/gateways/epay/test"
+                    | "/api/admin/payments/gateways/epay/test/"
+            ) {
+                "test_epay_gateway"
+            } else {
+                "test_payment_gateway"
+            },
             "admin:payments",
             false,
         ))
@@ -747,4 +768,11 @@ pub(super) fn classify_admin_basic_family_route(
     } else {
         None
     }
+}
+
+fn has_single_segment_after_prefix(path: &str, prefix: &str) -> bool {
+    let Some(suffix) = path.strip_prefix(prefix) else {
+        return false;
+    };
+    !suffix.is_empty() && !suffix.contains('/')
 }

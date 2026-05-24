@@ -21,6 +21,10 @@ static MAX_REQUEST_BODY_BYTES: LazyLock<u64> = LazyLock::new(|| {
         .saturating_mul(1024 * 1024)
 });
 
+pub(crate) fn max_request_body_bytes() -> u64 {
+    *MAX_REQUEST_BODY_BYTES
+}
+
 pub(crate) fn extract_or_generate_trace_id(headers: &http::HeaderMap) -> String {
     header_value_str(headers, TRACE_ID_HEADER).unwrap_or_else(|| Uuid::new_v4().to_string())
 }
@@ -247,8 +251,20 @@ pub(crate) fn normalize_request_body_headers_and_bytes(
     headers: &mut http::HeaderMap,
     body_bytes: Bytes,
 ) -> Result<Bytes, RequestBodyNormalizationError> {
+    normalize_request_body_headers_and_bytes_with_limit(
+        headers,
+        body_bytes,
+        max_request_body_bytes(),
+    )
+}
+
+pub(crate) fn normalize_request_body_headers_and_bytes_with_limit(
+    headers: &mut http::HeaderMap,
+    body_bytes: Bytes,
+    limit_bytes: u64,
+) -> Result<Bytes, RequestBodyNormalizationError> {
     let body_was_encoded = !request_content_encodings(headers).is_empty();
-    let decoded = decoded_request_body_bytes(headers, body_bytes.as_ref())?;
+    let decoded = decoded_request_body_bytes_with_limit(headers, body_bytes.as_ref(), limit_bytes)?;
     if !body_was_encoded {
         return Ok(body_bytes);
     }
@@ -264,7 +280,13 @@ pub(crate) fn normalize_request_body_headers_and_bytes(
 pub(crate) fn check_request_content_length(
     headers: &http::HeaderMap,
 ) -> Result<(), RequestBodyNormalizationError> {
-    let limit = *MAX_REQUEST_BODY_BYTES;
+    check_request_content_length_with_limit(headers, max_request_body_bytes())
+}
+
+pub(crate) fn check_request_content_length_with_limit(
+    headers: &http::HeaderMap,
+    limit: u64,
+) -> Result<(), RequestBodyNormalizationError> {
     let declared = header_value_str(headers, http::header::CONTENT_LENGTH.as_str())
         .and_then(|value| value.trim().parse::<u64>().ok());
     if declared.is_some_and(|value| value > limit) {
@@ -277,9 +299,16 @@ pub(crate) fn decoded_request_body_bytes<'a>(
     headers: &http::HeaderMap,
     body_bytes: &'a [u8],
 ) -> Result<Cow<'a, [u8]>, RequestBodyNormalizationError> {
+    decoded_request_body_bytes_with_limit(headers, body_bytes, max_request_body_bytes())
+}
+
+pub(crate) fn decoded_request_body_bytes_with_limit<'a>(
+    headers: &http::HeaderMap,
+    body_bytes: &'a [u8],
+    limit: u64,
+) -> Result<Cow<'a, [u8]>, RequestBodyNormalizationError> {
     let encodings = request_content_encodings(headers);
     if encodings.is_empty() {
-        let limit = *MAX_REQUEST_BODY_BYTES;
         if body_bytes.len() as u64 > limit {
             return Err(RequestBodyNormalizationError::RequestBodyTooLarge { limit_bytes: limit });
         }
@@ -288,7 +317,7 @@ pub(crate) fn decoded_request_body_bytes<'a>(
 
     let mut decoded = body_bytes.to_vec();
     for encoding in encodings.iter().rev() {
-        decoded = decode_single_request_body(encoding, decoded.as_slice())?;
+        decoded = decode_single_request_body_with_limit(encoding, decoded.as_slice(), limit)?;
     }
     Ok(Cow::Owned(decoded))
 }
@@ -311,10 +340,18 @@ fn decode_single_request_body(
     encoding: &str,
     body_bytes: &[u8],
 ) -> Result<Vec<u8>, RequestBodyNormalizationError> {
+    decode_single_request_body_with_limit(encoding, body_bytes, max_request_body_bytes())
+}
+
+fn decode_single_request_body_with_limit(
+    encoding: &str,
+    body_bytes: &[u8],
+    limit: u64,
+) -> Result<Vec<u8>, RequestBodyNormalizationError> {
     match encoding {
-        "gzip" | "x-gzip" => decode_gzip_body(encoding, body_bytes),
-        "deflate" => decode_deflate_body(encoding, body_bytes),
-        "zstd" => decode_zstd_body(encoding, body_bytes),
+        "gzip" | "x-gzip" => decode_gzip_body_with_limit(encoding, body_bytes, limit),
+        "deflate" => decode_deflate_body_with_limit(encoding, body_bytes, limit),
+        "zstd" => decode_zstd_body_with_limit(encoding, body_bytes, limit),
         _ => Err(RequestBodyNormalizationError::UnsupportedContentEncoding(
             encoding.to_string(),
         )),
@@ -325,26 +362,42 @@ fn decode_gzip_body(
     encoding: &str,
     body_bytes: &[u8],
 ) -> Result<Vec<u8>, RequestBodyNormalizationError> {
+    decode_gzip_body_with_limit(encoding, body_bytes, max_request_body_bytes())
+}
+
+fn decode_gzip_body_with_limit(
+    encoding: &str,
+    body_bytes: &[u8],
+    limit: u64,
+) -> Result<Vec<u8>, RequestBodyNormalizationError> {
     let mut decoder = GzDecoder::new(body_bytes);
-    read_request_decoder_to_end(encoding, &mut decoder)
+    read_request_decoder_to_end_with_limit(encoding, &mut decoder, limit)
 }
 
 fn decode_deflate_body(
     encoding: &str,
     body_bytes: &[u8],
 ) -> Result<Vec<u8>, RequestBodyNormalizationError> {
+    decode_deflate_body_with_limit(encoding, body_bytes, max_request_body_bytes())
+}
+
+fn decode_deflate_body_with_limit(
+    encoding: &str,
+    body_bytes: &[u8],
+    limit: u64,
+) -> Result<Vec<u8>, RequestBodyNormalizationError> {
     let mut zlib_decoder = ZlibDecoder::new(body_bytes);
-    match read_request_decoder_to_end(encoding, &mut zlib_decoder) {
+    match read_request_decoder_to_end_with_limit(encoding, &mut zlib_decoder, limit) {
         Ok(decoded) => Ok(decoded),
         Err(err @ RequestBodyNormalizationError::DecompressedBodyTooLarge { .. }) => Err(err),
         Err(zlib_error) => {
             let mut raw_decoder = DeflateDecoder::new(body_bytes);
-            read_request_decoder_to_end(encoding, &mut raw_decoder).map_err(|raw_error| {
-                RequestBodyNormalizationError::DecodeFailed {
+            read_request_decoder_to_end_with_limit(encoding, &mut raw_decoder, limit).map_err(
+                |raw_error| RequestBodyNormalizationError::DecodeFailed {
                     encoding: encoding.to_string(),
                     reason: format!("{zlib_error}; raw deflate fallback failed: {raw_error}"),
-                }
-            })
+                },
+            )
         }
     }
 }
@@ -353,20 +406,35 @@ fn decode_zstd_body(
     encoding: &str,
     body_bytes: &[u8],
 ) -> Result<Vec<u8>, RequestBodyNormalizationError> {
+    decode_zstd_body_with_limit(encoding, body_bytes, max_request_body_bytes())
+}
+
+fn decode_zstd_body_with_limit(
+    encoding: &str,
+    body_bytes: &[u8],
+    limit: u64,
+) -> Result<Vec<u8>, RequestBodyNormalizationError> {
     let mut decoder = zstd::stream::read::Decoder::new(body_bytes).map_err(|err| {
         RequestBodyNormalizationError::DecodeFailed {
             encoding: encoding.to_string(),
             reason: err.to_string(),
         }
     })?;
-    read_request_decoder_to_end(encoding, &mut decoder)
+    read_request_decoder_to_end_with_limit(encoding, &mut decoder, limit)
 }
 
 fn read_request_decoder_to_end(
     encoding: &str,
     decoder: &mut impl Read,
 ) -> Result<Vec<u8>, RequestBodyNormalizationError> {
-    let limit = *MAX_REQUEST_BODY_BYTES;
+    read_request_decoder_to_end_with_limit(encoding, decoder, max_request_body_bytes())
+}
+
+fn read_request_decoder_to_end_with_limit(
+    encoding: &str,
+    decoder: &mut impl Read,
+    limit: u64,
+) -> Result<Vec<u8>, RequestBodyNormalizationError> {
     let mut limited = decoder.take(limit.saturating_add(1));
     let mut out = Vec::new();
     limited

@@ -44,6 +44,7 @@ pub struct NormalizedOpenAiImageRequest {
     images: Vec<Value>,
     tool: Map<String, Value>,
     image_count: Option<u64>,
+    stream: Option<bool>,
     user: Option<String>,
 }
 
@@ -204,6 +205,21 @@ pub fn build_chatgpt_web_image_request_body(
     body.insert("count".to_string(), Value::Number(Number::from(1)));
     if let Some(user) = request.user.as_ref() {
         body.insert("user".to_string(), Value::String(user.clone()));
+    }
+    if let Some(quality) = request
+        .tool
+        .get("quality")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body.insert("quality".to_string(), Value::String(quality.to_string()));
+    }
+    if let Some(partial_images) = request.tool.get("partial_images").and_then(Value::as_u64) {
+        body.insert(
+            "partial_images".to_string(),
+            Value::Number(Number::from(partial_images)),
+        );
     }
     if let Some(output_format) = request
         .summary_json
@@ -521,6 +537,54 @@ pub fn build_openai_image_provider_request_body(request: &NormalizedOpenAiImageR
     Value::Object(body)
 }
 
+pub fn build_openai_image_api_provider_request_body(
+    request: &NormalizedOpenAiImageRequest,
+    mapped_model: Option<&str>,
+) -> Value {
+    let model = mapped_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(request.requested_model.as_deref())
+        .unwrap_or_else(|| default_model_for_openai_image_operation(request.operation));
+    let mut body = Map::new();
+    body.insert("model".to_string(), Value::String(model.to_string()));
+    if let Some(prompt) = request.prompt.as_ref() {
+        body.insert("prompt".to_string(), Value::String(prompt.clone()));
+    }
+    if let Some(image_count) = request.image_count {
+        body.insert("n".to_string(), Value::Number(Number::from(image_count)));
+    }
+    if let Some(user) = request.user.as_ref() {
+        body.insert("user".to_string(), Value::String(user.clone()));
+    }
+    if let Some(stream) = request.stream {
+        body.insert("stream".to_string(), Value::Bool(stream));
+    }
+    for (key, value) in &request.tool {
+        match key.as_str() {
+            "type" | "action" => {}
+            "input_image_mask" => {
+                body.insert("mask".to_string(), value.clone());
+            }
+            _ => {
+                body.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    if let Some(response_format) = request.summary_json.get("response_format") {
+        body.entry("response_format".to_string())
+            .or_insert_with(|| response_format.clone());
+    }
+    if !request.images.is_empty() {
+        if request.images.len() == 1 {
+            body.insert("image".to_string(), request.images[0].clone());
+        } else {
+            body.insert("images".to_string(), Value::Array(request.images.clone()));
+        }
+    }
+    Value::Object(body)
+}
+
 fn normalize_openai_image_json_request(
     body_json: &Value,
     operation: OpenAiImageOperation,
@@ -549,6 +613,7 @@ fn normalize_openai_image_json_request(
     let output_format =
         normalize_output_format(object.get("output_format").and_then(Value::as_str))?;
     let partial_images = normalize_partial_images(object.get("partial_images"))?;
+    let stream = object.get("stream").and_then(value_as_bool);
     let user = object
         .get("user")
         .and_then(Value::as_str)
@@ -579,6 +644,7 @@ fn normalize_openai_image_json_request(
         images,
         tool,
         image_count,
+        stream,
         user,
         summary_json: build_image_request_summary_json(
             operation,
@@ -627,6 +693,9 @@ fn normalize_openai_image_multipart_request(
             .map(Value::String)
             .as_ref(),
     )?;
+    let stream = find_multipart_text_field(&multipart_fields, "stream")
+        .as_deref()
+        .and_then(parse_bool_string);
     let user = find_multipart_text_field(&multipart_fields, "user")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
@@ -679,6 +748,7 @@ fn normalize_openai_image_multipart_request(
         images,
         tool,
         image_count,
+        stream,
         user,
         summary_json: build_image_request_summary_json(
             operation,
@@ -1136,10 +1206,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_chatgpt_web_image_request_body, build_openai_image_provider_request_body,
-        is_openai_image_stream_request, normalize_openai_image_request,
-        normalize_openai_image_request_with_options, openai_image_operation_from_path,
-        OpenAiImageNormalizeOptions, OpenAiImageOperation,
+        build_chatgpt_web_image_request_body, build_openai_image_api_provider_request_body,
+        build_openai_image_provider_request_body, is_openai_image_stream_request,
+        normalize_openai_image_request, normalize_openai_image_request_with_options,
+        openai_image_operation_from_path, OpenAiImageNormalizeOptions, OpenAiImageOperation,
     };
     use crate::formats::openai::image::spec::{resolve_stream_spec, resolve_sync_spec};
     use crate::formats::openai::responses::codex::{
@@ -1479,6 +1549,35 @@ mod tests {
     }
 
     #[test]
+    fn build_image_api_provider_request_body_keeps_images_api_shape() {
+        let parts = request_parts("/v1/images/generations", Some("application/json"));
+        let request = normalize_openai_image_request_with_options(
+            &parts,
+            &json!({
+                "model": "grok-imagine-image-lite",
+                "prompt": "draw a cat",
+                "n": 1,
+                "size": "1024x1024",
+                "stream": true
+            }),
+            None,
+            OpenAiImageNormalizeOptions::with_max_generation_count(4),
+        )
+        .expect("generation request should normalize");
+
+        let provider_request_body =
+            build_openai_image_api_provider_request_body(&request, Some("mapped-image-model"));
+
+        assert_eq!(provider_request_body["model"], "mapped-image-model");
+        assert_eq!(provider_request_body["prompt"], "draw a cat");
+        assert_eq!(provider_request_body["n"], 1);
+        assert_eq!(provider_request_body["size"], "1024x1024");
+        assert_eq!(provider_request_body["stream"], true);
+        assert!(provider_request_body.get("input").is_none());
+        assert!(provider_request_body.get("tools").is_none());
+    }
+
+    #[test]
     fn chatgpt_web_accepts_1k_tier_and_1024_size() {
         let parts = request_parts("/v1/images/generations", Some("application/json"));
         let by_tier = build_chatgpt_web_image_request_body(
@@ -1507,6 +1606,28 @@ mod tests {
         )
         .expect("1024x1024 should pass");
         assert_eq!(by_size["size"], "1024x1024");
+    }
+
+    #[test]
+    fn chatgpt_web_preserves_quality_and_partial_images() {
+        let parts = request_parts("/v1/images/generations", Some("application/json"));
+        let body = build_chatgpt_web_image_request_body(
+            &parts,
+            &json!({
+                "model": "gpt-image-2",
+                "prompt": "draw",
+                "size": "1024x1024",
+                "quality": "high",
+                "partial_images": 2,
+                "output_format": "png"
+            }),
+            None,
+        )
+        .expect("request should pass");
+
+        assert_eq!(body["quality"], "high");
+        assert_eq!(body["partial_images"], 2);
+        assert_eq!(body["output_format"], "png");
     }
 
     #[test]

@@ -1684,6 +1684,28 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn set_api_key_usage_totals(
+        &self,
+        api_key_id: &str,
+        total_requests: u64,
+        total_tokens: u64,
+        total_cost_usd: f64,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .set_api_key_usage_totals(
+                        api_key_id,
+                        total_requests,
+                        total_tokens,
+                        total_cost_usd,
+                    )
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn set_standalone_api_key_feature_settings(
         &self,
         api_key_id: &str,
@@ -2000,7 +2022,7 @@ fn resolve_effective_rate_limit_policy(
     groups: &[aether_data::repository::users::StoredUserGroup],
 ) -> Option<i32> {
     let group_policy = groups.iter().fold(None, |effective, group| {
-        intersect_rate_limit_policies(
+        union_rate_limit_policies(
             effective,
             rate_limit_restriction_from_mode(&group.rate_limit_mode, group.rate_limit),
         )
@@ -2069,6 +2091,22 @@ fn intersect_rate_limit_policies(
         }
         (Some(RateLimitRestriction::Limited(left)), Some(RateLimitRestriction::Limited(right))) => {
             Some(RateLimitRestriction::Limited(left.min(right)))
+        }
+    }
+}
+
+fn union_rate_limit_policies(
+    left: Option<RateLimitRestriction>,
+    right: Option<RateLimitRestriction>,
+) -> Option<RateLimitRestriction> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (Some(RateLimitRestriction::Unlimited), _) | (_, Some(RateLimitRestriction::Unlimited)) => {
+            Some(RateLimitRestriction::Unlimited)
+        }
+        (Some(RateLimitRestriction::Limited(left)), Some(RateLimitRestriction::Limited(right))) => {
+            Some(RateLimitRestriction::Limited(left.max(right)))
         }
     }
 }
@@ -2358,35 +2396,44 @@ mod tests {
     }
 
     #[test]
-    fn rate_limit_policy_uses_most_restrictive_custom_limit() {
-        let groups = vec![sample_group(
-            "restricted",
-            10,
-            None,
-            "unrestricted",
-            Some(60),
-            "custom",
-        )];
+    fn rate_limit_policy_uses_highest_group_limit_before_user_restriction() {
+        let groups = vec![
+            sample_group("default", 10, None, "unrestricted", Some(30), "custom"),
+            sample_group("tier-1", 20, None, "unrestricted", Some(100), "custom"),
+        ];
 
         assert_eq!(
             resolve_effective_rate_limit_policy(Some(120), "custom", &groups),
-            Some(60)
+            Some(100)
         );
     }
 
     #[test]
-    fn rate_limit_unlimited_does_not_bypass_limited_group() {
+    fn rate_limit_unlimited_group_overrides_limited_groups() {
+        let groups = vec![
+            sample_group("default", 10, None, "unrestricted", Some(30), "custom"),
+            sample_group("tier-2", 20, None, "unrestricted", Some(0), "custom"),
+        ];
+
+        assert_eq!(
+            resolve_effective_rate_limit_policy(None, "system", &groups),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn rate_limit_user_policy_still_restricts_group_grants() {
         let groups = vec![sample_group(
-            "restricted",
+            "tier-1",
             10,
             None,
             "unrestricted",
-            Some(60),
+            Some(100),
             "custom",
         )];
 
         assert_eq!(
-            resolve_effective_rate_limit_policy(Some(0), "custom", &groups),
+            resolve_effective_rate_limit_policy(Some(60), "custom", &groups),
             Some(60)
         );
     }

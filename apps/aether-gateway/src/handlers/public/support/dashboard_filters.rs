@@ -160,21 +160,26 @@ fn dashboard_format_token_compact(value: u64) -> String {
         return dashboard_format_integer(value);
     }
 
-    if value < 1_000_000 {
-        let thousands = value as f64 / 1_000.0;
-        if thousands >= 100.0 {
-            return format!("{}K", thousands.round() as u64);
+    const UNITS: &[(u64, &str)] = &[
+        (1_000_000_000_000, "T"),
+        (1_000_000_000, "B"),
+        (1_000_000, "M"),
+        (1_000, "K"),
+    ];
+
+    for (divisor, suffix) in UNITS {
+        if value < *divisor {
+            continue;
         }
-        let decimals = if thousands >= 10.0 { 1 } else { 2 };
-        return format!("{}K", dashboard_trimmed_decimal(thousands, decimals));
+        let scaled = value as f64 / *divisor as f64;
+        if scaled >= 100.0 {
+            return format!("{}{}", scaled.round() as u64, suffix);
+        }
+        let decimals = if scaled >= 10.0 { 1 } else { 2 };
+        return format!("{}{}", dashboard_trimmed_decimal(scaled, decimals), suffix);
     }
 
-    let millions = value as f64 / 1_000_000.0;
-    if millions >= 100.0 {
-        return format!("{}M", millions.round() as u64);
-    }
-    let decimals = if millions >= 10.0 { 1 } else { 2 };
-    format!("{}M", dashboard_trimmed_decimal(millions, decimals))
+    dashboard_format_integer(value)
 }
 
 fn dashboard_format_usd(value: f64) -> String {
@@ -1499,4 +1504,18 @@ fn dashboard_format_time_hhmm(unix_secs: u64) -> Option<String> {
     let timestamp = i64::try_from(unix_secs).ok()?;
     let datetime = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0)?;
     Some(datetime.format("%H:%M").to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dashboard_format_token_compact;
+
+    #[test]
+    fn dashboard_format_token_compact_promotes_above_millions() {
+        assert_eq!(dashboard_format_token_compact(999), "999");
+        assert_eq!(dashboard_format_token_compact(1_250), "1.25K");
+        assert_eq!(dashboard_format_token_compact(12_500_000), "12.5M");
+        assert_eq!(dashboard_format_token_compact(1_250_000_000), "1.25B");
+        assert_eq!(dashboard_format_token_compact(12_500_000_000_000), "12.5T");
+    }
 }

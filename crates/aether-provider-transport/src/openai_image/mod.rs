@@ -7,7 +7,7 @@ use crate::grok::{is_grok_provider_transport, resolve_grok_session_auth};
 use crate::policy::local_standard_transport_unsupported_reason_with_network;
 use crate::rules::apply_local_header_rules_with_request_headers;
 use crate::snapshot::GatewayProviderTransportSnapshot;
-use crate::url::build_openai_responses_url;
+use crate::url::{build_openai_image_url, build_openai_responses_url};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderOpenAiImageHeadersInput<'a> {
@@ -56,9 +56,18 @@ pub fn resolve_openai_image_auth(
 
 pub fn build_openai_image_upstream_url(
     transport: &GatewayProviderTransportSnapshot,
+    request_path: Option<&str>,
     request_query: Option<&str>,
 ) -> String {
-    build_openai_responses_url(&transport.endpoint.base_url, request_query, false)
+    if transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("codex")
+    {
+        return build_openai_responses_url(&transport.endpoint.base_url, request_query, false);
+    }
+    build_openai_image_url(&transport.endpoint.base_url, request_path, request_query)
 }
 
 pub fn build_openai_image_headers(
@@ -155,10 +164,28 @@ mod tests {
     }
 
     #[test]
-    fn builds_openai_image_url_on_responses_surface() {
-        let url = build_openai_image_upstream_url(&sample_transport(), Some("trace=1"));
+    fn codex_openai_image_url_stays_on_responses_surface() {
+        let url = build_openai_image_upstream_url(
+            &sample_transport(),
+            Some("/v1/images/generations"),
+            Some("trace=1"),
+        );
 
         assert_eq!(url, "https://api.openai.com/v1/responses?trace=1");
+    }
+
+    #[test]
+    fn standard_openai_image_url_uses_images_surface() {
+        let mut transport = sample_transport();
+        transport.provider.provider_type = "openai".to_string();
+
+        let url = build_openai_image_upstream_url(
+            &transport,
+            Some("/v1/images/generations"),
+            Some("trace=1"),
+        );
+
+        assert_eq!(url, "https://api.openai.com/v1/images/generations?trace=1");
     }
 
     #[test]

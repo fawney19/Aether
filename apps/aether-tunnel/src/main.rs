@@ -15,9 +15,9 @@ mod upstream_client;
 
 use std::path::PathBuf;
 
-use clap::{CommandFactory, FromArgMatches, Parser};
+use clap::{parser::ValueSource, CommandFactory, FromArgMatches, Parser};
 
-use config::Config;
+use config::{Config, ServerEntry, TunnelSecurity};
 
 /// Default config file name.
 const DEFAULT_CONFIG: &str = "aether-tunnel.toml";
@@ -102,7 +102,8 @@ async fn main() -> anyhow::Result<()> {
             None => {
                 // No subcommand: run the tunnel with parsed config.
                 let config = Config::from_arg_matches(&matches)?;
-                run_tunnel(config).await
+                let tunnel_security = configured_tunnel_security_from_matches(&matches, &config);
+                run_tunnel(config, tunnel_security).await
             }
         },
         Err(e) => {
@@ -139,7 +140,7 @@ async fn handle_setup_result(outcome: setup::SetupOutcome) -> anyhow::Result<()>
             let config = Config::try_parse_from(["aether-tunnel"])
                 .map_err(|e| anyhow::anyhow!("config invalid after setup: {}", e))?;
             eprintln!("  Starting tunnel...\n");
-            run_tunnel(config).await
+            run_tunnel(config, None).await
         }
         setup::SetupOutcome::Cancelled => {
             eprintln!("  Setup cancelled.");
@@ -148,8 +149,31 @@ async fn handle_setup_result(outcome: setup::SetupOutcome) -> anyhow::Result<()>
     }
 }
 
+fn configured_tunnel_security_from_matches(
+    matches: &clap::ArgMatches,
+    config: &Config,
+) -> Option<TunnelSecurity> {
+    matches
+        .value_source("tunnel_security")
+        .filter(|source| *source != ValueSource::DefaultValue)
+        .map(|_| config.tunnel_security)
+}
+
+fn single_server_entry(config: &Config, tunnel_security: Option<TunnelSecurity>) -> ServerEntry {
+    ServerEntry {
+        aether_url: config.aether_url.clone(),
+        management_token: config.management_token.clone(),
+        node_name: None,
+        tunnel_security,
+        tunnel_encryption_key: config.tunnel_encryption_key.clone(),
+    }
+}
+
 /// Start the tunnel agent, checking for managed-service conflicts first.
-async fn run_tunnel(config: Config) -> anyhow::Result<()> {
+async fn run_tunnel(
+    config: Config,
+    single_server_tunnel_security: Option<TunnelSecurity>,
+) -> anyhow::Result<()> {
     // Warn if a managed service is already running (would cause conflicts).
     if std::env::var_os("AETHER_TUNNEL_SERVICE_MANAGER").is_none()
         && std::env::var_os("INVOCATION_ID").is_none()
@@ -178,12 +202,76 @@ async fn run_tunnel(config: Config) -> anyhow::Result<()> {
         }
         file_cfg.servers.clone()
     } else {
-        vec![config::ServerEntry {
-            aether_url: config.aether_url.clone(),
-            management_token: config.management_token.clone(),
-            node_name: None,
-        }]
+        vec![single_server_entry(&config, single_server_tunnel_security)]
     };
 
     app::run(config, servers).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_config_and_security(args: &[&str]) -> (Config, Option<TunnelSecurity>) {
+        let matches = build_command()
+            .try_get_matches_from(args)
+            .expect("arguments should parse");
+        let config = Config::from_arg_matches(&matches).expect("config should parse");
+        let tunnel_security = configured_tunnel_security_from_matches(&matches, &config);
+        (config, tunnel_security)
+    }
+
+    #[test]
+    fn single_server_entry_omits_default_tunnel_security_for_auto_inference() {
+        let (config, tunnel_security) = parse_config_and_security(&[
+            "aether-tunnel",
+            "--aether-url",
+            "http://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-encryption-key",
+            "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        ]);
+
+        let entry = single_server_entry(&config, tunnel_security);
+        assert_eq!(entry.tunnel_security, None);
+        assert_eq!(
+            config::effective_tunnel_security(
+                &entry.aether_url,
+                entry.tunnel_security,
+                entry.tunnel_encryption_key.as_deref(),
+            ),
+            TunnelSecurity::NonTlsRequired
+        );
+    }
+
+    #[test]
+    fn single_server_entry_preserves_explicit_tunnel_security_off() {
+        let (config, tunnel_security) = parse_config_and_security(&[
+            "aether-tunnel",
+            "--aether-url",
+            "http://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-security",
+            "off",
+            "--tunnel-encryption-key",
+            "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        ]);
+
+        let entry = single_server_entry(&config, tunnel_security);
+        assert_eq!(entry.tunnel_security, Some(TunnelSecurity::Off));
+        assert_eq!(
+            config::effective_tunnel_security(
+                &entry.aether_url,
+                entry.tunnel_security,
+                entry.tunnel_encryption_key.as_deref(),
+            ),
+            TunnelSecurity::Off
+        );
+    }
 }

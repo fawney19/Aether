@@ -24,6 +24,42 @@ fn admin_system_build_version_contract_uses_explicit_local_build_arg() {
             "Dockerfile.app.local should pass explicit build version pattern {pattern}"
         );
     }
+
+    let deploy = read_workspace_file("deploy.sh");
+    for pattern in [
+        "detect_build_version()",
+        "git describe --tags --always --dirty",
+        "AETHER_BUILD_VERSION=\"${AETHER_BUILD_VERSION:-$(detect_build_version)}\"",
+        "--build-arg \"AETHER_BUILD_VERSION=$AETHER_BUILD_VERSION\"",
+        ">>> AETHER_BUILD_VERSION",
+    ] {
+        assert!(
+            deploy.contains(pattern),
+            "deploy.sh should pass deterministic local build version pattern {pattern}"
+        );
+    }
+
+    let vite_config = read_workspace_file("frontend/vite.config.ts");
+    for pattern in [
+        "process.env.AETHER_BUILD_VERSION",
+        "process.env.AETHER_VERSION",
+    ] {
+        assert!(
+            vite_config.contains(pattern),
+            "frontend/vite.config.ts should consume local build version pattern {pattern}"
+        );
+    }
+
+    let core_api = read_workspace_file("apps/aether-gateway/src/api/core.rs");
+    for pattern in [
+        "option_env!(\"AETHER_BUILD_VERSION\")",
+        "\"version\": current_gateway_version()",
+    ] {
+        assert!(
+            core_api.contains(pattern),
+            "api/core.rs should expose build version pattern {pattern}"
+        );
+    }
 }
 
 #[test]

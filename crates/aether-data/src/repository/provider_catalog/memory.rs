@@ -8,7 +8,8 @@ use serde_json::{json, Map, Value};
 use super::{
     ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery, ProviderCatalogReadRepository,
     ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
-    StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
+    StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
+    StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
 use crate::repository::usage::{ProviderApiKeyUsageContribution, ProviderApiKeyUsageDelta};
 use crate::DataLayerError;
@@ -429,6 +430,34 @@ impl ProviderCatalogReadRepository for InMemoryProviderCatalogReadRepository {
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
         Self::list_keys_by_provider_ids(self, provider_ids).await
+    }
+
+    async fn list_key_maintenance_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKeyMaintenanceSummary>, DataLayerError> {
+        let index = self.index.read().expect("provider catalog repository lock");
+        let mut keys = index
+            .keys
+            .values()
+            .filter(|key| {
+                provider_ids
+                    .iter()
+                    .any(|provider_id| provider_id == &key.provider_id)
+            })
+            .map(|key| StoredProviderCatalogKeyMaintenanceSummary {
+                id: key.id.clone(),
+                provider_id: key.provider_id.clone(),
+                is_active: key.is_active,
+                upstream_metadata: key.upstream_metadata.clone(),
+            })
+            .collect::<Vec<_>>();
+        keys.sort_by(|left, right| {
+            left.provider_id
+                .cmp(&right.provider_id)
+                .then(left.id.cmp(&right.id))
+        });
+        Ok(keys)
     }
 
     async fn list_keys_page(

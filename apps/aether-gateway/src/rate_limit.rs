@@ -150,11 +150,20 @@ impl FrontdoorUserRpmLimiter {
         scope_key: &str,
         bucket: u64,
     ) -> Result<u32, GatewayError> {
-        if !state.runtime_state.is_memory() {
-            let raw = state.runtime_state.kv_get(scope_key).await.map_err(|err| {
-                GatewayError::Internal(format!("frontdoor user rpm runtime read failed: {err}"))
-            })?;
-            return Ok(raw.and_then(|value| value.parse::<u32>().ok()).unwrap_or(0));
+        match state.runtime_state.kv_get(scope_key).await {
+            Ok(raw) => return Ok(raw.and_then(|value| value.parse::<u32>().ok()).unwrap_or(0)),
+            Err(err) if !self.config.allow_local_fallback() => {
+                return Err(GatewayError::Internal(format!(
+                    "frontdoor user rpm runtime read failed: {err}"
+                )));
+            }
+            Err(err) => {
+                warn!(
+                    error = ?err,
+                    scope_key = %scope_key,
+                    "frontdoor user rpm runtime count read failed; using local fallback"
+                );
+            }
         }
 
         let counts = self.memory_counts.lock().await;
@@ -187,24 +196,22 @@ impl FrontdoorUserRpmLimiter {
             return Ok(FrontdoorUserRpmOutcome::Allowed);
         }
 
-        if !state.runtime_state.is_memory() {
-            match self.check_and_consume_runtime(state, &plan).await {
-                Ok(outcome) => return Ok(outcome),
-                Err(err) => {
-                    warn!(
-                        error = ?err,
-                        user_rpm_key = %plan.user_rpm_key,
-                        key_rpm_key = %plan.key_rpm_key,
-                        "frontdoor user rpm redis check failed"
-                    );
-                    if self.config.fail_open() {
-                        return Ok(FrontdoorUserRpmOutcome::NotApplicable);
-                    }
-                    if !self.config.allow_local_fallback() {
-                        return Err(GatewayError::Internal(
-                            "frontdoor user rpm runtime backend is unavailable and local fallback is disabled for the current deployment mode".to_string(),
-                        ));
-                    }
+        match self.check_and_consume_runtime(state, &plan).await {
+            Ok(outcome) => return Ok(outcome),
+            Err(err) => {
+                warn!(
+                    error = ?err,
+                    user_rpm_key = %plan.user_rpm_key,
+                    key_rpm_key = %plan.key_rpm_key,
+                    "frontdoor user rpm runtime check failed"
+                );
+                if self.config.fail_open() {
+                    return Ok(FrontdoorUserRpmOutcome::NotApplicable);
+                }
+                if !self.config.allow_local_fallback() {
+                    return Err(GatewayError::Internal(
+                        "frontdoor user rpm runtime backend is unavailable and local fallback is disabled for the current deployment mode".to_string(),
+                    ));
                 }
             }
         }
@@ -498,6 +505,7 @@ mod tests {
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: None,
+            ip_rules: None,
         });
         let state = AppState::new().expect("state should build for tests");
 
@@ -537,6 +545,7 @@ mod tests {
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: None,
+            ip_rules: None,
         });
         let state = AppState::new().expect("state should build for tests");
 
@@ -576,6 +585,7 @@ mod tests {
             admin_bypass_limits: true,
             local_rejection: None,
             allowed_models: None,
+            ip_rules: None,
         });
         let state = AppState::new().expect("state should build for tests");
 
@@ -602,7 +612,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn limiter_rejects_missing_shared_runtime_when_local_fallback_disabled() {
+    async fn limiter_uses_runtime_state_when_local_fallback_disabled() {
         let limiter = FrontdoorUserRpmLimiter::new(
             FrontdoorUserRpmConfig::new(60, 120, false).with_local_fallback(false),
         );
@@ -619,18 +629,26 @@ mod tests {
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: None,
+            ip_rules: None,
         });
         let state = AppState::new().expect("state should build for tests");
 
-        let err = limiter
+        let first = limiter
             .check_and_consume(&state, Some(&decision))
             .await
-            .expect_err("missing shared runtime should fail in strict mode");
-        match err {
-            crate::GatewayError::Internal(message) => {
-                assert!(message.contains("requires shared runtime state"));
+            .expect("runtime check should succeed");
+        assert_eq!(first, FrontdoorUserRpmOutcome::Allowed);
+
+        let second = limiter
+            .check_and_consume(&state, Some(&decision))
+            .await
+            .expect("runtime check should succeed");
+        match second {
+            FrontdoorUserRpmOutcome::Rejected(rejection) => {
+                assert_eq!(rejection.scope, "user");
+                assert_eq!(rejection.limit, 1);
             }
-            other => panic!("expected internal error, got {other:?}"),
+            other => panic!("expected rejection, got {other:?}"),
         }
     }
 }

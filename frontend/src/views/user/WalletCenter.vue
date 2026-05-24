@@ -195,6 +195,12 @@
                     >
                       · {{ option.pay_currency }}
                     </span>
+                    <span
+                      v-if="Number(option.fee_rate || 0) > 0"
+                      class="text-xs text-muted-foreground"
+                    >
+                      · 手续费 {{ Number(option.fee_rate || 0).toFixed(2) }}%
+                    </span>
                   </SelectItem>
                 </SelectContent>
               </Select>
@@ -208,10 +214,14 @@
             预计支付:
             <span class="font-medium text-foreground">
               {{ estimatedRechargePayAmount }}
-              {{ selectedRechargeOption.pay_currency || 'CNY' }}
+              {{ rechargePayCurrency }}
             </span>
             · 1 USD = {{ Number(selectedRechargeOption.usd_exchange_rate).toFixed(4) }}
-            {{ selectedRechargeOption.pay_currency || 'CNY' }}
+            {{ rechargePayCurrency }}
+            <template v-if="estimatedRechargeFeeAmount > 0">
+              · 手续费 {{ estimatedRechargeFeeAmount.toFixed(2) }} {{ rechargePayCurrency }}
+              ({{ estimatedRechargeFeeRate.toFixed(2) }}%)
+            </template>
           </div>
 
           <Button
@@ -239,15 +249,23 @@
               </Badge>
             </div>
             <a
-              v-if="latestRecharge.payment_instructions?.payment_url"
+              v-if="latestRechargePaymentUrl"
               class="inline-flex text-xs text-primary hover:underline"
-              :href="String(latestRecharge.payment_instructions.payment_url)"
+              :href="latestRechargePaymentUrl"
               target="_blank"
               rel="noopener noreferrer"
               @click.prevent="submitPaymentInstructions(latestRecharge.payment_instructions)"
             >
               打开支付链接
             </a>
+            <button
+              v-if="latestRechargeStripeInstructions"
+              type="button"
+              class="inline-flex text-xs text-primary hover:underline"
+              @click="submitPaymentInstructions(latestRecharge?.payment_instructions)"
+            >
+              打开 Stripe 支付
+            </button>
             <div
               v-if="latestRecharge.payment_instructions?.qr_code"
               class="text-xs text-muted-foreground break-all"
@@ -263,9 +281,16 @@
               申请退款
             </h3>
             <RefreshButton
-              :loading="loadingRefunds"
-              @click="loadRefunds"
+              :loading="loadingRefunds || loadingRefundEligibility"
+              @click="refreshRefundPanel"
             />
+          </div>
+
+          <div
+            v-if="!loadingRefundEligibility && refundableOrders.length === 0"
+            class="rounded-xl border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground"
+          >
+            当前没有开启用户自助退款的可退充值订单。
           </div>
 
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -299,15 +324,12 @@
           </div>
 
           <div class="space-y-1.5">
-            <Label>关联充值订单（可选）</Label>
+            <Label>关联充值订单</Label>
             <Select v-model="refundForm.payment_order_id">
               <SelectTrigger>
-                <SelectValue placeholder="不指定订单，直接从钱包余额退款" />
+                <SelectValue placeholder="选择允许用户退款的订单" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="__none__">
-                  不指定
-                </SelectItem>
                 <SelectItem
                   v-for="order in refundableOrders"
                   :key="order.id"
@@ -329,13 +351,13 @@
           </div>
 
           <div class="rounded-xl border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground">
-            仅充值余额可退款，赠款余额不可退款。
+            仅开启“允许用户退款”的支付方式可由用户自助提交退款申请。
           </div>
 
           <Button
             class="w-full"
             variant="outline"
-            :disabled="submittingRefund"
+            :disabled="submittingRefund || refundableOrders.length === 0"
             @click="submitRefund"
           >
             {{ submittingRefund ? '提交中...' : '提交退款申请' }}
@@ -647,6 +669,15 @@
         </div>
       </Card>
     </template>
+
+    <StripePaymentDialog
+      v-model:open="stripeDialogOpen"
+      :instructions="stripePaymentInstructions"
+      title="钱包 Stripe 支付"
+      description="完成支付后，钱包余额会由 Stripe Webhook 自动入账。"
+      confirm-text="支付充值"
+      @success="handleStripePaymentSuccess"
+    />
   </div>
 </template>
 
@@ -677,7 +708,7 @@ import {
   TabsTrigger,
   Textarea,
 } from '@/components/ui'
-import { EmptyState, LoadingState } from '@/components/common'
+import { EmptyState, LoadingState, StripePaymentDialog } from '@/components/common'
 import {
   walletApi,
   type DailyUsageRecord,
@@ -691,6 +722,11 @@ import {
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
+import {
+  getPaymentInstructionString,
+  getStripePaymentInstructions,
+  type PaymentInstructionMap,
+} from '@/utils/paymentInstructions'
 import {
   dailyUsageCategoryLabel,
   formatTokenCount,
@@ -715,6 +751,7 @@ const loadingInitial = ref(true)
 const loadingTransactions = ref(false)
 const loadingOrders = ref(false)
 const loadingRefunds = ref(false)
+const loadingRefundEligibility = ref(false)
 const submittingRedeem = ref(false)
 const submittingRecharge = ref(false)
 const submittingRefund = ref(false)
@@ -723,6 +760,8 @@ const walletBalance = ref<WalletBalanceResponse | null>(null)
 const latestRecharge = ref<{ order: PaymentOrder; payment_instructions: Record<string, unknown> } | null>(null)
 const latestRedeem = ref<WalletRedeemResponse | null>(null)
 const rechargeOptions = ref<WalletRechargeOption[]>([])
+const stripeDialogOpen = ref(false)
+const stripePaymentInstructions = ref<PaymentInstructionMap | null>(null)
 
 const flowItems = ref<FlowItem[]>([])
 const todayUsage = ref<DailyUsageRecord | null>(null)
@@ -734,6 +773,7 @@ const rechargeOrders = ref<PaymentOrder[]>([])
 const orderTotal = ref(0)
 const orderPage = ref(1)
 const orderPageSize = ref(20)
+const refundEligiblePaymentMethods = ref<Set<string>>(new Set())
 
 const refunds = ref<RefundRequest[]>([])
 const refundTotal = ref(0)
@@ -750,7 +790,7 @@ const rechargeForm = reactive({
 
 const refundForm = reactive({
   amount_usd: 0,
-  payment_order_id: '__none__',
+  payment_order_id: '',
   refund_mode: 'offline_payout',
   reason: '',
 })
@@ -760,7 +800,10 @@ const redeemForm = reactive({
 })
 
 const refundableOrders = computed(() =>
-  rechargeOrders.value.filter(o => (o.refundable_amount_usd || 0) > 0)
+  rechargeOrders.value.filter(order =>
+    (order.refundable_amount_usd || 0) > 0
+    && refundEligiblePaymentMethods.value.has(refundPaymentMethod(order))
+  )
 )
 
 const rechargeOptionsWithKey = computed(() =>
@@ -781,11 +824,44 @@ const selectedRechargeOption = computed(() => {
     || rechargeOptionsWithKey.value[0]
 })
 
-const estimatedRechargePayAmount = computed(() => {
+function roundPayAmount(value: number): number {
+  return Math.round(value * 100) / 100
+}
+
+const rechargePaymentBreakdown = computed(() => {
   const rate = Number(selectedRechargeOption.value?.usd_exchange_rate || 0)
-  if (!Number.isFinite(rate) || rate <= 0) return '-'
-  return (Number(rechargeForm.amount_usd || 0) * rate).toFixed(2)
+  const amount = Number(rechargeForm.amount_usd || 0)
+  if (!Number.isFinite(rate) || rate <= 0 || !Number.isFinite(amount) || amount <= 0) return null
+  const rawFeeRate = Number(selectedRechargeOption.value?.fee_rate || 0)
+  const feeRate = Number.isFinite(rawFeeRate) && rawFeeRate > 0 ? rawFeeRate : 0
+  const basePayAmount = roundPayAmount(amount * rate)
+  const feeAmount = roundPayAmount(basePayAmount * feeRate / 100)
+  return {
+    basePayAmount,
+    feeAmount,
+    feeRate,
+    totalPayAmount: roundPayAmount(basePayAmount + feeAmount),
+  }
 })
+
+const rechargePayCurrency = computed(() => selectedRechargeOption.value?.pay_currency || 'CNY')
+
+const estimatedRechargePayAmount = computed(() => {
+  if (!rechargePaymentBreakdown.value) return '-'
+  return rechargePaymentBreakdown.value.totalPayAmount.toFixed(2)
+})
+const estimatedRechargeFeeAmount = computed(() =>
+  rechargePaymentBreakdown.value?.feeAmount || 0
+)
+const estimatedRechargeFeeRate = computed(() =>
+  rechargePaymentBreakdown.value?.feeRate || 0
+)
+const latestRechargePaymentUrl = computed(() =>
+  getPaymentInstructionString(latestRecharge.value?.payment_instructions, 'payment_url')
+)
+const latestRechargeStripeInstructions = computed(() =>
+  getStripePaymentInstructions(latestRecharge.value?.payment_instructions)
+)
 
 const dailyQuota = computed(() => walletBalance.value?.daily_quota ?? null)
 const hasActiveDailyQuota = computed(() => Boolean(dailyQuota.value?.has_active))
@@ -836,6 +912,7 @@ onMounted(async () => {
       loadTodayCost(),
       loadOrders(),
       loadRefunds(),
+      loadRefundEligibility(),
       loadRechargeOptions(),
     ])
     syncTodayCostPolling()
@@ -851,6 +928,10 @@ onBeforeUnmount(() => {
 
 watch(activeTab, () => {
   syncTodayCostPolling()
+})
+
+watch(refundableOrders, () => {
+  syncRefundOrderSelection()
 })
 
 async function loadBalance() {
@@ -928,11 +1009,30 @@ async function loadOrders() {
     const resp = await walletApi.listRechargeOrders({ limit: orderPageSize.value, offset })
     rechargeOrders.value = resp.items
     orderTotal.value = resp.total
+    syncRefundOrderSelection()
   } catch (error) {
     log.error('加载充值订单失败:', error)
     showError(parseApiError(error, '加载充值订单失败'))
   } finally {
     loadingOrders.value = false
+  }
+}
+
+async function loadRefundEligibility() {
+  loadingRefundEligibility.value = true
+  try {
+    const resp = await walletApi.listRefundEligibleProviders()
+    refundEligiblePaymentMethods.value = new Set(
+      (resp.payment_methods || [])
+        .map(item => item.trim().toLowerCase())
+        .filter(Boolean)
+    )
+    syncRefundOrderSelection()
+  } catch (error) {
+    refundEligiblePaymentMethods.value = new Set()
+    log.error('加载退款资格失败:', error)
+  } finally {
+    loadingRefundEligibility.value = false
   }
 }
 
@@ -949,6 +1049,10 @@ async function loadRefunds() {
   } finally {
     loadingRefunds.value = false
   }
+}
+
+async function refreshRefundPanel() {
+  await Promise.all([loadRefunds(), loadRefundEligibility(), loadOrders()])
 }
 
 async function submitRedeem() {
@@ -1011,14 +1115,23 @@ async function submitRecharge() {
 
 function submitPaymentInstructions(instructions: Record<string, unknown> | null | undefined) {
   if (!instructions) return
-  const paymentUrl = instructions.payment_url
-  if (typeof paymentUrl !== 'string' || !paymentUrl) return
+  const stripeInstructions = getStripePaymentInstructions(instructions)
+  if (stripeInstructions) {
+    stripePaymentInstructions.value = instructions
+    stripeDialogOpen.value = true
+    return
+  }
+  const paymentUrl = getPaymentInstructionString(instructions, 'payment_url')
+  if (!paymentUrl) return
   const paymentParams = instructions.payment_params
   if (paymentParams && typeof paymentParams === 'object' && !Array.isArray(paymentParams)) {
     submitPaymentForm(paymentUrl, paymentParams as Record<string, unknown>)
     return
   }
-  window.open(paymentUrl, '_blank', 'noopener,noreferrer')
+  const opened = window.open(paymentUrl, '_blank', 'noopener,noreferrer')
+  if (!opened) {
+    window.location.href = paymentUrl
+  }
 }
 
 function submitPaymentForm(url: string, params: Record<string, unknown>) {
@@ -1045,9 +1158,24 @@ function isSafariBrowser(): boolean {
   return navigator.userAgent.includes('Safari') && !navigator.userAgent.includes('Chrome')
 }
 
+async function handleStripePaymentSuccess() {
+  success('支付已完成，正在刷新钱包余额')
+  await Promise.all([loadBalance(), loadOrders(), loadTransactions(), loadTodayCost()])
+  activeTab.value = 'orders'
+}
+
 async function submitRefund() {
   if (!refundForm.amount_usd || refundForm.amount_usd <= 0) {
     showError('请输入有效的退款金额')
+    return
+  }
+  const selectedOrder = refundableOrders.value.find(order => order.id === refundForm.payment_order_id)
+  if (!selectedOrder) {
+    showError('请选择允许用户退款的充值订单')
+    return
+  }
+  if (refundForm.amount_usd > (selectedOrder.refundable_amount_usd || 0)) {
+    showError(`退款金额超过该订单可退金额（当前可退 ${formatCurrency(selectedOrder.refundable_amount_usd || 0)}）`)
     return
   }
   const refundableBalance =
@@ -1061,19 +1189,15 @@ async function submitRefund() {
   try {
     await walletApi.createRefund({
       amount_usd: refundForm.amount_usd,
-      payment_order_id:
-        refundForm.payment_order_id && refundForm.payment_order_id !== '__none__'
-          ? refundForm.payment_order_id
-          : undefined,
+      payment_order_id: selectedOrder.id,
       refund_mode: refundForm.refund_mode || undefined,
       reason: refundForm.reason || undefined,
       idempotency_key: `web_refund_${buildRefundIdempotencyKey()}`,
     })
     success('退款申请已提交')
     refundForm.amount_usd = 0
-    refundForm.payment_order_id = '__none__'
     refundForm.reason = ''
-    await Promise.all([loadRefunds(), loadBalance(), loadOrders(), loadTransactions(), loadTodayCost()])
+    await Promise.all([loadRefunds(), loadBalance(), loadOrders(), loadRefundEligibility(), loadTransactions(), loadTodayCost()])
     activeTab.value = 'refunds'
   } catch (error) {
     log.error('提交退款申请失败:', error)
@@ -1081,6 +1205,15 @@ async function submitRefund() {
   } finally {
     submittingRefund.value = false
   }
+}
+
+function refundPaymentMethod(order: PaymentOrder): string {
+  return String(order.payment_provider || order.payment_method || '').trim().toLowerCase()
+}
+
+function syncRefundOrderSelection() {
+  if (refundableOrders.value.some(order => order.id === refundForm.payment_order_id)) return
+  refundForm.payment_order_id = refundableOrders.value[0]?.id || ''
 }
 
 function buildRefundIdempotencyKey(): string {

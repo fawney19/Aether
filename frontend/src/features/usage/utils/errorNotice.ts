@@ -18,7 +18,9 @@ function normalizeErrorDomain(domain: RequestErrorDomain | null | undefined): Re
 }
 
 function formatHttpStatus(statusCode: number | null | undefined): string | null {
-  return typeof statusCode === 'number' ? `HTTP ${statusCode}` : null
+  return typeof statusCode === 'number' && (statusCode < 200 || statusCode >= 300)
+    ? `HTTP ${statusCode}`
+    : null
 }
 
 function uniqueMeta(values: Array<string | null | undefined>): string[] {

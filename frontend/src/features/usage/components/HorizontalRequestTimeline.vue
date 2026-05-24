@@ -542,6 +542,7 @@ import { ChevronLeft, ChevronRight, ExternalLink } from 'lucide-vue-next'
 import { requestTraceApi, type RequestTrace, type CandidateRecord, type ImageProgress } from '@/api/requestTrace'
 import { log } from '@/utils/logger'
 import { parseApiError } from '@/utils/errorParser'
+import { formatTokens } from '@/utils/format'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { resolveTimelineFinalStatus } from '../utils/status'
@@ -629,7 +630,7 @@ const usageData = computed(() => props.usageData)
 
 // 格式化数字
 const formatNumber = (num: number): string => {
-  return num.toLocaleString('zh-CN')
+  return formatTokens(num)
 }
 
 // 获取最终状态标签

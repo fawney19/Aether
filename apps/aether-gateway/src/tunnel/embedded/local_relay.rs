@@ -24,6 +24,8 @@ use super::AppState;
 
 pub const TUNNEL_ERROR_HEADER: &str = "x-aether-tunnel-error";
 const MAX_RELAY_META_LEN: usize = 256 * 1024;
+const MIN_RELAY_TIMEOUT_MS: u64 = 1;
+const MAX_RELAY_TIMEOUT_MS: u64 = 300_000;
 
 struct StreamGuard {
     hub: std::sync::Arc<super::hub::HubRouter>,
@@ -92,7 +94,7 @@ pub(crate) async fn open_direct_relay_stream(
         return Err(format!("connect: {error}"));
     }
 
-    let wait_timeout = Duration::from_secs(meta.timeout.clamp(5, 300));
+    let wait_timeout = relay_header_timeout(&meta);
     let response_head = match stream.wait_headers(wait_timeout).await {
         Ok(response) => response,
         Err(error) => {
@@ -146,6 +148,19 @@ fn map_request_admission_error(error: super::RequestAdmissionError) -> String {
             aether_runtime_state::RuntimeSemaphoreError::InvalidConfiguration(_),
         ) => "overloaded: hub relay distributed gate invalid".to_string(),
     }
+}
+
+fn relay_header_timeout(meta: &protocol::RequestMeta) -> Duration {
+    let timeout_ms = if meta.stream {
+        meta.stream_first_byte_timeout_ms
+            .or(meta.request_timeout_ms)
+            .unwrap_or_else(|| meta.timeout.saturating_mul(1_000))
+    } else {
+        meta.request_timeout_ms
+            .or(meta.stream_first_byte_timeout_ms)
+            .unwrap_or_else(|| meta.timeout.saturating_mul(1_000))
+    };
+    Duration::from_millis(timeout_ms.clamp(MIN_RELAY_TIMEOUT_MS, MAX_RELAY_TIMEOUT_MS))
 }
 
 pub async fn relay_request(
@@ -322,7 +337,7 @@ pub async fn relay_request(
         finished: false,
     };
 
-    let wait_timeout = Duration::from_secs(meta.timeout.clamp(5, 300));
+    let wait_timeout = relay_header_timeout(&meta);
     let response_head = match stream.wait_headers(wait_timeout).await {
         Ok(response) => response,
         Err(error) => {
@@ -639,6 +654,9 @@ mod tests {
             method: "GET".to_string(),
             url: "https://example.com/health".to_string(),
             headers: HashMap::new(),
+            stream: false,
+            request_timeout_ms: None,
+            stream_first_byte_timeout_ms: None,
             timeout: 30,
             follow_redirects: None,
             http1_only: false,
@@ -754,6 +772,9 @@ mod tests {
             method: "GET".to_string(),
             url: "https://example.com/headers".to_string(),
             headers: HashMap::new(),
+            stream: false,
+            request_timeout_ms: None,
+            stream_first_byte_timeout_ms: None,
             timeout: 30,
             follow_redirects: None,
             http1_only: false,

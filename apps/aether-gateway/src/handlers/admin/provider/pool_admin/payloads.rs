@@ -13,6 +13,7 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
 };
 use aether_data_contracts::repository::usage::StoredProviderApiKeyWindowUsageSummary;
+use aether_scheduler_core::provider_key_circuit_payload_is_active_open_at;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -921,19 +922,14 @@ fn admin_pool_health_score(key: &StoredProviderCatalogKey) -> f64 {
     }
 }
 
-fn admin_pool_circuit_breaker_open(key: &StoredProviderCatalogKey) -> bool {
+fn admin_pool_circuit_breaker_open(key: &StoredProviderCatalogKey, now_unix_secs: u64) -> bool {
     key.circuit_breaker_by_format
         .as_ref()
         .and_then(serde_json::Value::as_object)
         .map(|formats| {
             formats
                 .values()
-                .filter_map(serde_json::Value::as_object)
-                .any(|item| {
-                    item.get("open")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false)
-                })
+                .any(|item| provider_key_circuit_payload_is_active_open_at(item, now_unix_secs))
         })
         .unwrap_or(false)
 }
@@ -1032,7 +1028,7 @@ pub(super) fn build_admin_pool_key_payload(
         .as_ref()
         .and_then(|_| runtime.cooldown_ttl_by_key.get(&key.id).copied());
     let health_score = admin_pool_health_score(key);
-    let circuit_breaker_open = admin_pool_circuit_breaker_open(key);
+    let circuit_breaker_open = admin_pool_circuit_breaker_open(key, now_unix_secs);
     let auth_semantics = provider_key_auth_semantics(key, provider_type);
     let account_quota_exhausted = pool_config
         .as_ref()

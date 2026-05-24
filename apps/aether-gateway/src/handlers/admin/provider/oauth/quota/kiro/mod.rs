@@ -5,7 +5,8 @@ use self::parse::parse_kiro_usage_response;
 use self::plan::execute_kiro_quota_plan;
 use super::shared::{
     build_quota_snapshot_payload, extract_execution_error_message,
-    persist_provider_quota_refresh_state, quota_refresh_success_invalid_state,
+    oauth_refresh_auto_removed_result, persist_provider_quota_refresh_state,
+    persist_quota_oauth_refresh_failure_state, quota_refresh_success_invalid_state,
     ProviderQuotaExecutionOutcome,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminLocalOAuthRefreshError};
@@ -95,6 +96,7 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
     let mut results = Vec::new();
     let mut success_count = 0usize;
     let mut failed_count = 0usize;
+    let mut auto_removed_count = 0usize;
 
     for key in keys {
         let transport = match state
@@ -145,6 +147,13 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
                 }
             },
             Err(err) => {
+                if persist_quota_oauth_refresh_failure_state(state, &transport, &err).await?
+                    || super::shared::quota_key_auto_removed(state, &key.id).await?
+                {
+                    auto_removed_count += 1;
+                    results.push(oauth_refresh_auto_removed_result(&key));
+                    continue;
+                }
                 failed_count += 1;
                 let mut payload = serde_json::Map::new();
                 payload.insert("key_id".to_string(), json!(key.id));
@@ -328,10 +337,10 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
     Ok(Some(json!({
         "success": success_count,
         "failed": failed_count,
-        "total": success_count + failed_count,
+        "total": results.len(),
         "results": results,
-        "message": format!("已处理 {} 个 Key", success_count + failed_count),
-        "auto_removed": 0,
+        "message": format!("已处理 {} 个 Key", results.len()),
+        "auto_removed": auto_removed_count,
     })))
 }
 

@@ -153,20 +153,16 @@ pub fn resolve_provider_model_name_with_model_directives(
         return None;
     }
 
-    if key_allowed_models
-        .iter()
-        .any(|value| value == requested_model_name)
+    for candidate_name in
+        requested_model_name_candidates(requested_model_name, enable_model_directives)
     {
-        return Some((selected_provider_model_name, None));
-    }
-
-    if enable_model_directives {
-        if let Some(base_model) =
-            aether_ai_formats::model_directive_base_model(requested_model_name)
+        if key_allowed_models
+            .iter()
+            .any(|value| value == candidate_name.as_ref())
         {
-            if key_allowed_models.iter().any(|value| value == &base_model) {
-                return Some((selected_provider_model_name, Some(base_model)));
-            }
+            let matched = (candidate_name.as_ref() != requested_model_name)
+                .then(|| candidate_name.into_owned());
+            return Some((selected_provider_model_name, matched));
         }
     }
 
@@ -428,10 +424,55 @@ fn requested_model_name_candidates(
     enable_model_directives: bool,
 ) -> impl Iterator<Item = Cow<'_, str>> {
     let requested_model_name = requested_model_name.trim();
-    let base_model = enable_model_directives
-        .then(|| aether_ai_formats::model_directive_base_model(requested_model_name))
-        .flatten();
-    std::iter::once(Cow::Borrowed(requested_model_name)).chain(base_model.map(Cow::Owned))
+    let mut candidates = Vec::new();
+    push_model_name_candidate(&mut candidates, Cow::Borrowed(requested_model_name));
+    for alias in requested_model_name_aliases(requested_model_name) {
+        push_model_name_candidate(&mut candidates, Cow::Owned(alias));
+    }
+    if enable_model_directives {
+        if let Some(base_model) =
+            aether_ai_formats::model_directive_base_model(requested_model_name)
+        {
+            for alias in requested_model_name_aliases(&base_model) {
+                push_model_name_candidate(&mut candidates, Cow::Owned(alias));
+            }
+            push_model_name_candidate(&mut candidates, Cow::Owned(base_model));
+        }
+    }
+    candidates.into_iter()
+}
+
+fn push_model_name_candidate<'a>(candidates: &mut Vec<Cow<'a, str>>, candidate: Cow<'a, str>) {
+    if candidate.trim().is_empty() {
+        return;
+    }
+    if candidates
+        .iter()
+        .any(|existing| existing.as_ref() == candidate.as_ref())
+    {
+        return;
+    }
+    candidates.push(candidate);
+}
+
+fn requested_model_name_aliases(requested_model_name: &str) -> Vec<String> {
+    let requested_model_name = requested_model_name.trim();
+    let Some(alias) = windsurf_gpt55_model_alias(requested_model_name) else {
+        return Vec::new();
+    };
+    vec![alias]
+}
+
+fn windsurf_gpt55_model_alias(model_name: &str) -> Option<String> {
+    let suffix = model_name
+        .strip_prefix("gpt-5-5")
+        .map(|suffix| format!("gpt-5.5{suffix}"))
+        .or_else(|| {
+            model_name
+                .strip_prefix("gpt-5.5")
+                .map(|suffix| format!("gpt-5-5{suffix}"))
+        })?;
+    (suffix != model_name).then_some(suffix)
 }
 
 #[cfg(test)]
@@ -542,6 +583,39 @@ mod tests {
 
         assert_eq!(resolved.0, "gpt-5.4-upstream");
         assert_eq!(resolved.1.as_deref(), Some("gpt-5.4"));
+    }
+
+    #[test]
+    fn windsurf_dashed_gpt55_alias_matches_dotted_model_name() {
+        let row = sample_row("gpt-5.5-low", "gpt-5.5-low");
+
+        assert!(row_supports_requested_model(
+            &row,
+            "gpt-5-5-low",
+            "openai:chat"
+        ));
+        assert_eq!(
+            resolve_requested_global_model_name_with_model_directives(
+                &[row],
+                "gpt-5-5-low",
+                "openai:chat",
+                false,
+            )
+            .as_deref(),
+            Some("gpt-5.5-low")
+        );
+    }
+
+    #[test]
+    fn windsurf_dashed_gpt55_alias_satisfies_key_allowed_models() {
+        let mut row = sample_row("gpt-5.5-low", "windsurf-upstream-uid");
+        row.key_allowed_models = Some(vec!["gpt-5.5-low".to_string()]);
+
+        let resolved = resolve_provider_model_name(&row, "gpt-5-5-low", "openai:chat")
+            .expect("dashed alias should satisfy dotted allowed model");
+
+        assert_eq!(resolved.0, "windsurf-upstream-uid");
+        assert_eq!(resolved.1.as_deref(), Some("gpt-5.5-low"));
     }
 
     #[test]

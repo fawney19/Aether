@@ -6,6 +6,10 @@ use super::{
     build_auth_error_response, build_auth_json_response, resolve_authenticated_local_user,
     sanitize_wallet_gateway_response, unix_secs_to_rfc3339, AppState, GatewayPublicRequestContext,
 };
+use crate::handlers::shared::{
+    create_alipay_direct_checkout, create_stripe_direct_checkout, create_wxpay_direct_checkout,
+    direct_payment_client_ip, DirectPaymentCheckoutInput,
+};
 use axum::{
     body::{Body, Bytes},
     http,
@@ -14,7 +18,7 @@ use axum::{
 };
 use chrono::Utc;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 const BILLING_STORAGE_UNAVAILABLE_DETAIL: &str = "套餐后端暂不可用";
@@ -56,15 +60,18 @@ fn normalize_checkout_request(
     let payment_provider = normalize_optional_checkout_string(payload.payment_provider, 30)
         .or_else(|| normalize_optional_checkout_string(payload.payment_method.clone(), 30))
         .unwrap_or_else(|| "epay".to_string());
-    if payment_provider != "epay" {
+    if !matches!(
+        payment_provider.as_str(),
+        "epay" | "alipay" | "wxpay" | "stripe"
+    ) {
         return Err("unsupported payment_provider");
     }
     let payment_method = normalize_optional_checkout_string(payload.payment_method, 30)
-        .unwrap_or_else(|| "epay".to_string());
+        .unwrap_or_else(|| payment_provider.clone());
     let payment_channel = normalize_optional_checkout_string(payload.payment_channel, 30)
         .or_else(|| (payment_method != "epay").then_some(payment_method.clone()));
     Ok(NormalizedBillingPlanCheckoutRequest {
-        payment_method: "epay".to_string(),
+        payment_method: payment_provider.clone(),
         payment_provider,
         payment_channel,
     })
@@ -320,110 +327,297 @@ pub(super) async fn handle_billing_plan_checkout(
             false,
         );
     }
-    let config = match load_epay_config(state).await {
-        Ok(value) => value,
-        Err(detail) => {
-            return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false)
-        }
-    };
+    let now = Utc::now();
+    let order_no = billing_order_no(now);
+    let expires_at = now + chrono::Duration::minutes(30);
+    let requested_provider = checkout_request.payment_provider.as_str();
+    let payment_method = checkout_request.payment_method.clone();
     let payment_channel =
-        match resolve_epay_channel(&config, checkout_request.payment_channel.as_deref()) {
-            Ok(value) => value,
-            Err(detail) => {
-                return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
-            }
-        };
-    let (amount_usd, pay_amount) =
-        match compute_plan_payment_amounts(&plan, &config.pay_currency, config.usd_exchange_rate) {
+        checkout_request
+            .payment_channel
+            .clone()
+            .or_else(|| match requested_provider {
+                "alipay" => Some("alipay".to_string()),
+                "wxpay" => Some("native".to_string()),
+                "stripe" => Some("card".to_string()),
+                _ => None,
+            });
+    if requested_provider == "epay" {
+        let config = match load_epay_config(state).await {
             Ok(value) => value,
             Err(detail) => {
                 return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false)
             }
         };
-    let Some(callback_base_url) = epay_callback_base_url(
-        config.callback_base_url.as_deref(),
-        headers,
-        request_context,
-    ) else {
-        return build_auth_error_response(
-            http::StatusCode::BAD_REQUEST,
-            "epay callback_base_url is required",
-            false,
-        );
-    };
-    let now = Utc::now();
-    let order_no = billing_order_no(now);
-    let expires_at = now + chrono::Duration::minutes(30);
-    let checkout = build_epay_checkout_url(
-        &config,
-        &EpayCheckoutInput {
-            order_no: order_no.clone(),
-            channel: payment_channel.clone(),
-            subject: plan.title.clone(),
-            pay_amount,
-            notify_url: format!("{callback_base_url}/api/payment/epay/notify"),
-            return_url: format!("{callback_base_url}/api/payment/epay/return"),
-        },
-    );
-    let outcome = match state
-        .create_plan_purchase_order(
-            aether_data::repository::wallet::CreatePlanPurchaseOrderInput {
-                preferred_wallet_id: None,
-                user_id: auth.user.id.clone(),
-                amount_usd,
-                pay_amount,
-                pay_currency: config.pay_currency.clone(),
-                exchange_rate: config.usd_exchange_rate,
-                payment_method: checkout_request.payment_method,
-                payment_provider: Some(checkout_request.payment_provider),
-                payment_channel: Some(payment_channel),
-                gateway_order_id: order_no.clone(),
-                gateway_response: checkout.clone(),
-                order_no,
-                product_id: plan.id.clone(),
-                product_snapshot: billing_plan_snapshot(&plan),
-                expires_at_unix_secs: expires_at.timestamp().max(0) as u64,
-            },
-        )
-        .await
-    {
-        Ok(Some(value)) => value,
-        Ok(None) => return billing_storage_unavailable_response(),
-        Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("billing checkout create failed: {err:?}"),
-                false,
-            )
-        }
-    };
-    let order = match outcome {
-        aether_data::repository::wallet::CreatePlanPurchaseOrderOutcome::Created(order) => {
-            payment_order_payload(&order, &plan)
-        }
-        aether_data::repository::wallet::CreatePlanPurchaseOrderOutcome::WalletInactive => {
+        let payment_channel =
+            match resolve_epay_channel(&config, checkout_request.payment_channel.as_deref()) {
+                Ok(value) => value,
+                Err(detail) => {
+                    return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
+                }
+            };
+        let payment_channel_id = payment_channel.channel.clone();
+        let (amount_usd, pay_amount) = match compute_plan_payment_amounts(
+            &plan,
+            &config.pay_currency,
+            config.usd_exchange_rate,
+        ) {
+            Ok(value) => value,
+            Err(detail) => {
+                return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false)
+            }
+        };
+        let Some(callback_base_url) = epay_callback_base_url(
+            config.callback_base_url.as_deref(),
+            headers,
+            request_context,
+        ) else {
             return build_auth_error_response(
                 http::StatusCode::BAD_REQUEST,
-                "wallet is not active",
+                "epay callback_base_url is required",
                 false,
+            );
+        };
+        let checkout = build_epay_checkout_url(
+            &config,
+            &EpayCheckoutInput {
+                order_no: order_no.clone(),
+                channel: payment_channel_id.clone(),
+                subject: plan.title.clone(),
+                pay_amount,
+                notify_url: format!("{callback_base_url}/api/payment/epay/notify"),
+                return_url: format!("{callback_base_url}/api/payment/epay/return"),
+            },
+        );
+        let outcome = match state
+            .create_plan_purchase_order(
+                aether_data::repository::wallet::CreatePlanPurchaseOrderInput {
+                    preferred_wallet_id: None,
+                    user_id: auth.user.id.clone(),
+                    amount_usd,
+                    pay_amount,
+                    pay_currency: config.pay_currency.clone(),
+                    exchange_rate: config.usd_exchange_rate,
+                    payment_method: payment_method.clone(),
+                    payment_provider: Some(checkout_request.payment_provider.clone()),
+                    payment_channel: Some(payment_channel_id),
+                    gateway_order_id: order_no.clone(),
+                    gateway_response: checkout.clone(),
+                    order_no: order_no.clone(),
+                    product_id: plan.id.clone(),
+                    product_snapshot: billing_plan_snapshot(&plan),
+                    expires_at_unix_secs: expires_at.timestamp().max(0) as u64,
+                },
             )
-        }
-        aether_data::repository::wallet::CreatePlanPurchaseOrderOutcome::ActivePlanLimitReached => {
+            .await
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => return billing_storage_unavailable_response(),
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("billing checkout create failed: {err:?}"),
+                    false,
+                )
+            }
+        };
+        let order = match outcome {
+            aether_data::repository::wallet::CreatePlanPurchaseOrderOutcome::Created(order) => {
+                payment_order_payload(&order, &plan)
+            }
+            aether_data::repository::wallet::CreatePlanPurchaseOrderOutcome::WalletInactive => {
+                return build_auth_error_response(
+                    http::StatusCode::BAD_REQUEST,
+                    "wallet is not active",
+                    false,
+                )
+            }
+            aether_data::repository::wallet::CreatePlanPurchaseOrderOutcome::ActivePlanLimitReached => {
+                return build_auth_error_response(
+                    http::StatusCode::CONFLICT,
+                    "套餐购买限制已达到上限",
+                    false,
+                )
+            }
+        };
+        build_auth_json_response(
+            http::StatusCode::OK,
+            json!({
+                "order": order,
+                "payment_instructions": sanitize_wallet_gateway_response(Some(checkout)),
+            }),
+            None,
+        )
+    } else {
+        let (payment_channel, display_name, pay_currency, usd_exchange_rate, callback_base_url) = {
+            let record = match state.find_payment_gateway_config(requested_provider).await {
+                Ok(Some(value)) if value.enabled && value.merchant_key_encrypted.is_some() => value,
+                Ok(Some(_)) | Ok(None) => {
+                    return build_auth_error_response(
+                        http::StatusCode::BAD_REQUEST,
+                        "支付网关未启用或密钥未配置",
+                        false,
+                    )
+                }
+                Err(err) => {
+                    return build_auth_error_response(
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("payment gateway lookup failed: {err:?}"),
+                        false,
+                    )
+                }
+            };
+            let payment_channel =
+                payment_channel
+                    .clone()
+                    .unwrap_or_else(|| match requested_provider {
+                        "alipay" => "alipay".to_string(),
+                        "wxpay" => "native".to_string(),
+                        "stripe" => "card".to_string(),
+                        _ => "alipay".to_string(),
+                    });
+            let display_name = match requested_provider {
+                "alipay" => "支付宝官方".to_string(),
+                "wxpay" => match payment_channel.as_str() {
+                    "h5" => "微信 H5".to_string(),
+                    "jsapi" => "微信 JSAPI".to_string(),
+                    _ => "微信 Native".to_string(),
+                },
+                "stripe" => match payment_channel.as_str() {
+                    "alipay" => "Stripe Alipay".to_string(),
+                    "wechat_pay" => "Stripe WeChat Pay".to_string(),
+                    "link" => "Stripe Link".to_string(),
+                    _ => "Stripe Card".to_string(),
+                },
+                _ => "支付".to_string(),
+            };
+            (
+                payment_channel,
+                display_name,
+                record.pay_currency,
+                record.usd_exchange_rate,
+                record.callback_base_url,
+            )
+        };
+        let (amount_usd, pay_amount) =
+            match compute_plan_payment_amounts(&plan, &pay_currency, usd_exchange_rate) {
+                Ok(value) => value,
+                Err(detail) => {
+                    return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false)
+                }
+            };
+        let Some(callback_base_url) =
+            epay_callback_base_url(callback_base_url.as_deref(), headers, request_context)
+        else {
             return build_auth_error_response(
-                http::StatusCode::CONFLICT,
-                "套餐购买限制已达到上限",
+                http::StatusCode::BAD_REQUEST,
+                "支付网关 callback_base_url is required",
                 false,
+            );
+        };
+        let direct_input = DirectPaymentCheckoutInput {
+            payment_channel: payment_channel.clone(),
+            display_name,
+            order_no: order_no.clone(),
+            subject: plan.title.clone(),
+            pay_amount,
+            pay_currency: pay_currency.clone(),
+            notify_url: format!("{callback_base_url}/api/payment/{requested_provider}/notify"),
+            return_url: Some(format!("{callback_base_url}/dashboard/billing")),
+            client_ip: direct_payment_client_ip(headers),
+            expires_at,
+        };
+        let checkout = match requested_provider {
+            "alipay" => match create_alipay_direct_checkout(state, &direct_input).await {
+                Ok(value) => value,
+                Err(detail) => {
+                    return build_auth_error_response(http::StatusCode::BAD_GATEWAY, detail, false)
+                }
+            },
+            "wxpay" => match create_wxpay_direct_checkout(state, &direct_input).await {
+                Ok(value) => value,
+                Err(detail) => {
+                    return build_auth_error_response(http::StatusCode::BAD_GATEWAY, detail, false)
+                }
+            },
+            "stripe" => match create_stripe_direct_checkout(state, &direct_input).await {
+                Ok(value) => value,
+                Err(detail) => {
+                    return build_auth_error_response(http::StatusCode::BAD_GATEWAY, detail, false)
+                }
+            },
+            _ => {
+                return build_auth_error_response(
+                    http::StatusCode::BAD_REQUEST,
+                    "unsupported payment provider",
+                    false,
+                )
+            }
+        };
+        let outcome = match state
+            .create_plan_purchase_order(
+                aether_data::repository::wallet::CreatePlanPurchaseOrderInput {
+                    preferred_wallet_id: None,
+                    user_id: auth.user.id.clone(),
+                    amount_usd,
+                    pay_amount,
+                    pay_currency: pay_currency.clone(),
+                    exchange_rate: usd_exchange_rate,
+                    payment_method,
+                    payment_provider: Some(requested_provider.to_string()),
+                    payment_channel: Some(payment_channel.clone()),
+                    gateway_order_id: checkout
+                        .get("gateway_order_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&order_no)
+                        .to_string(),
+                    gateway_response: checkout.clone(),
+                    order_no: order_no.clone(),
+                    product_id: plan.id.clone(),
+                    product_snapshot: billing_plan_snapshot(&plan),
+                    expires_at_unix_secs: expires_at.timestamp().max(0) as u64,
+                },
             )
-        }
-    };
-    build_auth_json_response(
-        http::StatusCode::OK,
-        json!({
-            "order": order,
-            "payment_instructions": sanitize_wallet_gateway_response(Some(checkout)),
-        }),
-        None,
-    )
+            .await
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => return billing_storage_unavailable_response(),
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("billing checkout create failed: {err:?}"),
+                    false,
+                )
+            }
+        };
+        let order = match outcome {
+            aether_data::repository::wallet::CreatePlanPurchaseOrderOutcome::Created(order) => {
+                payment_order_payload(&order, &plan)
+            }
+            aether_data::repository::wallet::CreatePlanPurchaseOrderOutcome::WalletInactive => {
+                return build_auth_error_response(
+                    http::StatusCode::BAD_REQUEST,
+                    "wallet is not active",
+                    false,
+                )
+            }
+            aether_data::repository::wallet::CreatePlanPurchaseOrderOutcome::ActivePlanLimitReached => {
+                return build_auth_error_response(
+                    http::StatusCode::CONFLICT,
+                    "套餐购买限制已达到上限",
+                    false,
+                )
+            }
+        };
+        build_auth_json_response(
+            http::StatusCode::OK,
+            json!({
+                "order": order,
+                "payment_instructions": sanitize_wallet_gateway_response(Some(checkout)),
+            }),
+            None,
+        )
+    }
 }
 
 pub(super) async fn maybe_build_local_billing_response(

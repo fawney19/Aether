@@ -879,6 +879,7 @@ impl AppState {
                             &current_transport,
                             status_code,
                             body_excerpt.as_str(),
+                            false,
                         )
                         .await
                     {
@@ -1165,7 +1166,6 @@ impl AppState {
 
         latest_key.encrypted_api_key = Some(encrypted_api_key);
         latest_key.encrypted_auth_config = encrypted_auth_config;
-        latest_key.is_active = true;
         latest_key.expires_at_unix_secs = entry.expires_at_unix_secs;
         let (oauth_invalid_at_unix_secs, oauth_invalid_reason) =
             local_oauth_refresh_success_invalid_state(&latest_key);
@@ -1212,11 +1212,12 @@ impl AppState {
         Ok(())
     }
 
-    async fn persist_local_oauth_refresh_failure_state(
+    pub(crate) async fn persist_local_oauth_refresh_failure_state(
         &self,
         transport: &provider_transport::GatewayProviderTransportSnapshot,
         status_code: u16,
         body_excerpt: &str,
+        access_token_invalid_proven: bool,
     ) -> Result<bool, GatewayError> {
         let key_id = transport.key.id.trim();
         if key_id.is_empty() {
@@ -1248,44 +1249,71 @@ impl AppState {
         ) else {
             return Ok(false);
         };
-        if latest_key.oauth_invalid_reason.as_deref() == Some(merged_reason.as_str())
-            && latest_key.oauth_invalid_at_unix_secs.is_some()
-        {
-            return Ok(false);
-        }
 
         let now_unix_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
             .map(|duration| duration.as_secs())
             .unwrap_or(0);
-        latest_key.oauth_invalid_at_unix_secs = latest_key
-            .oauth_invalid_at_unix_secs
-            .or(Some(now_unix_secs));
-        latest_key.oauth_invalid_reason = Some(merged_reason);
-        latest_key.updated_at_unix_secs = Some(now_unix_secs);
-        let current_status_snapshot = latest_key.status_snapshot.take();
-        latest_key.status_snapshot =
-            sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
+        let mut updated = false;
+        if latest_key.oauth_invalid_reason.as_deref() != Some(merged_reason.as_str())
+            || latest_key.oauth_invalid_at_unix_secs.is_none()
+        {
+            latest_key.oauth_invalid_at_unix_secs = latest_key
+                .oauth_invalid_at_unix_secs
+                .or(Some(now_unix_secs));
+            latest_key.oauth_invalid_reason = Some(merged_reason);
+            latest_key.updated_at_unix_secs = Some(now_unix_secs);
+            let current_status_snapshot = latest_key.status_snapshot.take();
+            latest_key.status_snapshot =
+                sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
 
-        let updated = self
-            .update_provider_catalog_key(&latest_key)
-            .await?
-            .is_some();
-        if updated {
-            self.clear_provider_transport_snapshot_cache();
-            let _ = self.invalidate_local_oauth_refresh_entry(key_id).await;
+            updated = self
+                .update_provider_catalog_key(&latest_key)
+                .await?
+                .is_some();
+            if updated {
+                self.clear_provider_transport_snapshot_cache();
+                let _ = self.invalidate_local_oauth_refresh_entry(key_id).await;
+            }
         }
+
+        let auto_removed = if admin_provider_quota_pure::provider_auto_remove_banned_keys(
+            transport.provider.config.as_ref(),
+        ) && admin_provider_quota_pure::should_auto_remove_oauth_invalid_key(
+            &latest_key,
+            None,
+            access_token_invalid_proven,
+            now_unix_secs,
+        ) {
+            self.clear_provider_transport_snapshot_cache();
+            if self.delete_provider_catalog_key(key_id).await? {
+                let deleted_key_ids = [key_id.to_string()];
+                self.cleanup_deleted_provider_catalog_refs(
+                    &transport.provider.id,
+                    &[],
+                    &deleted_key_ids,
+                )
+                .await?;
+                let _ = self.invalidate_local_oauth_refresh_entry(key_id).await;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         tracing::info!(
             key_id = %key_id,
             provider_id = %transport.provider.id,
             provider_type = %transport.provider.provider_type,
             status_code,
             updated,
-            cleared_provider_transport_snapshot_cache = updated,
+            auto_removed,
+            cleared_provider_transport_snapshot_cache = updated || auto_removed,
             "gateway local oauth refresh failure state persisted"
         );
-        Ok(updated)
+        Ok(auto_removed)
     }
 
     async fn execute_local_oauth_http_request(
@@ -1419,12 +1447,7 @@ impl AppState {
                 .map_err(
                     |err| provider_transport::LocalOAuthRefreshError::InvalidResponse {
                         provider_type,
-                        message: match err {
-                            GatewayError::UpstreamUnavailable { message, .. }
-                            | GatewayError::ControlUnavailable { message, .. }
-                            | GatewayError::Client { message, .. }
-                            | GatewayError::Internal(message) => message,
-                        },
+                        message: err.into_message(),
                     },
                 )?;
         let response_body_text = local_oauth_execution_body_text(&result);

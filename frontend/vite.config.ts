@@ -3,9 +3,19 @@ import vue from '@vitejs/plugin-vue'
 import path from 'path'
 import { execSync } from 'child_process'
 
+function normalizeVersion(version: string): string {
+  const trimmed = version.trim()
+  return trimmed.startsWith('v') || trimmed.startsWith('V') ? trimmed.slice(1) : trimmed
+}
+
 function getGitVersion(): string {
+  const envVersion = process.env.AETHER_BUILD_VERSION || process.env.AETHER_VERSION
+  if (envVersion?.trim()) {
+    return normalizeVersion(envVersion)
+  }
+
   try {
-    return execSync('git describe --tags --always').toString().trim()
+    return normalizeVersion(execSync('git describe --tags --always --dirty').toString())
   } catch {
     return '0.0.0.dev0'
   }

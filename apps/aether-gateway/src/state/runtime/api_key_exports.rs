@@ -169,6 +169,16 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn count_export_users(
+        &self,
+        query: &aether_data::repository::users::UserExportListQuery,
+    ) -> Result<u64, GatewayError> {
+        self.data
+            .count_export_users(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn find_export_user_by_id(
         &self,
         user_id: &str,
@@ -351,6 +361,25 @@ impl AppState {
         let api_key = self
             .data
             .set_user_api_key_feature_settings(user_id, api_key_id, feature_settings)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if api_key.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(api_key)
+    }
+
+    pub(crate) async fn set_api_key_usage_totals(
+        &self,
+        api_key_id: &str,
+        total_requests: u64,
+        total_tokens: u64,
+        total_cost_usd: f64,
+    ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
+    {
+        let api_key = self
+            .data
+            .set_api_key_usage_totals(api_key_id, total_requests, total_tokens, total_cost_usd)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if api_key.is_some() {

@@ -3,6 +3,7 @@ use crate::handlers::admin::shared::{query_param_value, AdminTypedObjectPatch};
 use crate::handlers::admin::users::{
     format_optional_unix_secs_iso8601, masked_user_api_key_display,
 };
+use crate::handlers::shared::deserialize_optional_string_list_patch;
 use aether_admin::system::serialize_admin_system_users_export_wallet;
 use axum::{
     body::Body,
@@ -20,6 +21,8 @@ pub(super) struct AdminStandaloneApiKeyCreateRequest {
     pub(super) allowed_providers: Option<Vec<String>>,
     pub(super) allowed_api_formats: Option<Vec<String>>,
     pub(super) allowed_models: Option<Vec<String>>,
+    #[serde(default, alias = "allowed_ips")]
+    pub(super) ip_rules: Option<Vec<String>>,
     pub(super) rate_limit: Option<i32>,
     pub(super) concurrent_limit: Option<i32>,
     pub(super) initial_balance_usd: Option<f64>,
@@ -36,6 +39,12 @@ pub(super) struct AdminStandaloneApiKeyUpdateRequest {
     pub(super) allowed_providers: Option<Vec<String>>,
     pub(super) allowed_api_formats: Option<Vec<String>>,
     pub(super) allowed_models: Option<Vec<String>>,
+    #[serde(
+        default,
+        alias = "allowed_ips",
+        deserialize_with = "deserialize_optional_string_list_patch"
+    )]
+    pub(super) ip_rules: Option<Option<Vec<String>>>,
     pub(super) rate_limit: Option<i32>,
     pub(super) concurrent_limit: Option<i32>,
     pub(super) initial_balance_usd: Option<f64>,
@@ -161,6 +170,7 @@ pub(super) fn build_admin_api_key_list_item_payload(
         "allowed_providers": record.allowed_providers,
         "allowed_api_formats": record.allowed_api_formats,
         "allowed_models": record.allowed_models,
+        "ip_rules": record.ip_rules,
         "last_used_at": format_optional_unix_secs_iso8601(record.last_used_at_unix_secs),
         "expires_at": format_optional_unix_secs_iso8601(record.expires_at_unix_secs),
         "created_at": format_optional_unix_secs_iso8601(record.created_at_unix_secs),
@@ -191,6 +201,7 @@ pub(super) fn build_admin_api_key_detail_payload(
         "allowed_providers": record.allowed_providers,
         "allowed_api_formats": record.allowed_api_formats,
         "allowed_models": record.allowed_models,
+        "ip_rules": record.ip_rules,
         "last_used_at": format_optional_unix_secs_iso8601(record.last_used_at_unix_secs),
         "expires_at": format_optional_unix_secs_iso8601(record.expires_at_unix_secs),
         "created_at": format_optional_unix_secs_iso8601(record.created_at_unix_secs),

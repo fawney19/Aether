@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
 use aether_contracts::{ExecutionPlan, ExecutionTelemetry};
 use aether_data_contracts::repository::usage::{UpsertUsageRecord, UsageBodyCaptureState};
 use aether_data_contracts::DataLayerError;
@@ -17,8 +18,11 @@ use crate::request_metadata::{
     sanitize_usage_request_metadata_ref,
 };
 use crate::{
-    map_usage_from_response, GatewayStreamReportRequest, GatewaySyncReportRequest,
-    StandardizedUsage, UsageEvent, UsageEventData, UsageEventType,
+    map_usage_from_response, stream_capture_terminal_state, GatewayStreamReportRequest,
+    GatewaySyncReportRequest, StandardizedUsage, StreamCapturedTerminalState, UsageEvent,
+    UsageEventData, UsageEventType, STREAM_MISSING_TERMINAL_EVENT_CATEGORY,
+    STREAM_MISSING_TERMINAL_EVENT_MESSAGE, STREAM_TERMINAL_ERROR_CATEGORY,
+    STREAM_TERMINAL_ERROR_MESSAGE,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +162,8 @@ pub struct StreamTerminalUsagePayloadSeed {
     pub client_response: Option<Value>,
     pub client_response_body_state: Option<UsageBodyCaptureState>,
     pub standardized_usage: Option<StandardizedUsage>,
+    pub observed_stream_finish: Option<bool>,
+    pub terminal_error_message: Option<String>,
     pub capture_metadata: Option<Value>,
 }
 
@@ -183,6 +189,8 @@ pub struct TerminalUsageSeed {
     pub has_format_conversion: bool,
     pub is_stream: bool,
     pub status_code: u16,
+    pub terminal_error_message: Option<String>,
+    pub terminal_failure_category: Option<String>,
     pub response_time_ms: Option<u64>,
     pub first_byte_time_ms: Option<u64>,
     pub request_headers: Option<Value>,
@@ -506,6 +514,8 @@ fn build_terminal_usage_event_from_seed_impl(
         has_format_conversion,
         is_stream,
         status_code,
+        terminal_error_message,
+        terminal_failure_category,
         response_time_ms,
         first_byte_time_ms,
         request_headers,
@@ -530,7 +540,8 @@ fn build_terminal_usage_event_from_seed_impl(
     };
     let routing = merge_routing_seed_with_metadata_owned(routing, request_metadata.as_ref());
     let body_refs = merge_body_refs_seed_with_metadata_owned(body_refs, request_metadata.as_ref());
-    let error_message = resolve_error_message(status_code, provider_response.as_ref(), None)
+    let error_message = terminal_error_message
+        .or_else(|| resolve_error_message(status_code, provider_response.as_ref(), None))
         .or_else(|| resolve_error_message(status_code, client_response.as_ref(), None));
     let api_family = infer_api_family(&client_contract).map(ToOwned::to_owned);
     let endpoint_kind = infer_endpoint_kind(&client_contract).map(ToOwned::to_owned);
@@ -573,7 +584,12 @@ fn build_terminal_usage_event_from_seed_impl(
         is_stream: Some(is_stream),
         status_code: Some(status_code),
         error_message,
-        error_category: resolve_error_category(status_code, event_type),
+        error_category: resolve_error_category(
+            status_code,
+            event_type,
+            is_stream,
+            terminal_failure_category.as_deref(),
+        ),
         response_time_ms,
         first_byte_time_ms,
         request_headers,
@@ -621,10 +637,6 @@ fn build_terminal_usage_event_from_seed_impl(
 
     if matches!(event_type, UsageEventType::Completed) {
         apply_completed_image_usage_estimate(&mut data);
-    }
-
-    if matches!(event_type, UsageEventType::Cancelled) {
-        apply_cancelled_usage_estimate(&mut data);
     }
 
     let data = if trusted_request_metadata {
@@ -718,7 +730,7 @@ pub fn build_sync_terminal_usage_payload_seed(
         .report_context
         .as_ref()
         .and_then(Value::as_object)
-        .and_then(|context| context.get("upstream_is_stream"))
+        .and_then(|context| context.get(UPSTREAM_IS_STREAM_KEY))
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let provider_response_full = if upstream_is_stream && payload.body_base64.is_some() {
@@ -779,6 +791,16 @@ pub fn build_stream_terminal_usage_payload_seed(
     let provider_response_headers = context_usage_value(context, "provider_response_headers")
         .or_else(|| headers_to_json(&payload.headers));
     let client_response_headers = headers_to_json(&payload.headers);
+    let observed_stream_finish = payload
+        .terminal_summary
+        .as_ref()
+        .map(|summary| summary.observed_finish);
+    let terminal_error_message = payload
+        .terminal_summary
+        .as_ref()
+        .and_then(|summary| summary.parser_error.clone())
+        .map(|message| message.trim().to_string())
+        .filter(|message| !message.is_empty());
     StreamTerminalUsagePayloadSeed {
         report_kind: payload.report_kind.clone(),
         status_code: payload.status_code,
@@ -797,6 +819,8 @@ pub fn build_stream_terminal_usage_payload_seed(
             .terminal_summary
             .as_ref()
             .and_then(|summary| summary.standardized_usage.clone()),
+        observed_stream_finish,
+        terminal_error_message,
         capture_metadata: build_payload_body_capture_metadata(
             payload.provider_body_base64.as_deref(),
             payload.client_body_base64.as_deref(),
@@ -853,6 +877,8 @@ pub fn build_sync_terminal_usage_seed(
         has_format_conversion: context_seed.has_format_conversion,
         is_stream: context_seed.is_stream,
         status_code,
+        terminal_error_message: None,
+        terminal_failure_category: None,
         response_time_ms,
         first_byte_time_ms,
         request_headers: context_seed.request_headers,
@@ -891,9 +917,11 @@ pub fn build_stream_terminal_usage_seed(
         client_response_headers,
         provider_response_full,
         provider_response_body_state,
-        client_response,
-        client_response_body_state,
+        mut client_response,
+        mut client_response_body_state,
         standardized_usage,
+        observed_stream_finish,
+        terminal_error_message,
         capture_metadata,
     } = payload_seed;
     let standardized_usage = standardized_usage.or_else(|| {
@@ -901,7 +929,75 @@ pub fn build_stream_terminal_usage_seed(
             map_usage_from_response(response, context_seed.provider_contract.as_str())
         })
     });
-    let terminal_state = infer_stream_terminal_state(report_kind.as_str(), status_code, cancelled);
+    let captured_terminal_state = captured_stream_terminal_state(
+        report_kind.as_str(),
+        context_seed.client_contract.as_str(),
+        context_seed.provider_contract.as_str(),
+        provider_response_full.as_ref(),
+        provider_response_body_state,
+        client_response.as_ref(),
+        client_response_body_state,
+    );
+    let requires_observed_terminal_event = stream_usage_requires_observed_terminal_event(
+        report_kind.as_str(),
+        context_seed.client_contract.as_str(),
+        context_seed.provider_contract.as_str(),
+    );
+    let observed_stream_finish = observed_stream_finish.or_else(|| {
+        captured_terminal_state.map(|state| state != StreamCapturedTerminalState::Missing)
+    });
+    let missing_observed_finish = matches!(observed_stream_finish, Some(false))
+        && (requires_observed_terminal_event
+            || !standardized_usage
+                .as_ref()
+                .is_some_and(StandardizedUsage::has_token_signal));
+    let captured_terminal_failure = matches!(
+        captured_terminal_state,
+        Some(StreamCapturedTerminalState::Failed)
+    );
+    let terminal_error_message = terminal_error_message
+        .or_else(|| {
+            provider_response_full
+                .as_ref()
+                .and_then(extract_explicit_error_message_from_json)
+        })
+        .or_else(|| {
+            client_response
+                .as_ref()
+                .and_then(extract_explicit_error_message_from_json)
+        })
+        .or_else(|| captured_terminal_failure.then(|| STREAM_TERMINAL_ERROR_MESSAGE.to_string()));
+    let terminal_failure_category = if terminal_error_message.is_some() {
+        Some(STREAM_TERMINAL_ERROR_CATEGORY.to_string())
+    } else if missing_observed_finish {
+        Some(STREAM_MISSING_TERMINAL_EVENT_CATEGORY.to_string())
+    } else {
+        None
+    };
+    let terminal_error_message = terminal_error_message.or_else(|| {
+        missing_observed_finish.then(|| STREAM_MISSING_TERMINAL_EVENT_MESSAGE.to_string())
+    });
+    if client_response.is_none() {
+        if let (Some(message), Some(category)) = (
+            terminal_error_message.as_deref(),
+            terminal_failure_category.as_deref(),
+        ) {
+            client_response = Some(build_stream_terminal_error_client_response(
+                category,
+                message,
+                status_code,
+                provider_response_full.as_ref(),
+            ));
+            client_response_body_state = Some(UsageBodyCaptureState::Inline);
+        }
+    }
+    let terminal_state = infer_stream_terminal_state(
+        report_kind.as_str(),
+        status_code,
+        cancelled,
+        missing_observed_finish,
+        terminal_error_message.is_some(),
+    );
 
     TerminalUsageSeed {
         terminal_state,
@@ -924,6 +1020,8 @@ pub fn build_stream_terminal_usage_seed(
         has_format_conversion: context_seed.has_format_conversion,
         is_stream: context_seed.is_stream,
         status_code,
+        terminal_error_message,
+        terminal_failure_category,
         response_time_ms,
         first_byte_time_ms,
         request_headers: context_seed.request_headers,
@@ -970,14 +1068,119 @@ fn infer_stream_terminal_state(
     report_kind: &str,
     status_code: u16,
     cancelled: bool,
+    missing_observed_finish: bool,
+    terminal_error: bool,
 ) -> UsageTerminalState {
     if cancelled || status_code == 499 || report_kind.contains("cancel") {
         UsageTerminalState::Cancelled
-    } else if !(200..300).contains(&status_code) {
+    } else if !(200..300).contains(&status_code) || missing_observed_finish || terminal_error {
         UsageTerminalState::Failed
     } else {
         UsageTerminalState::Completed
     }
+}
+
+fn captured_stream_terminal_state(
+    report_kind: &str,
+    client_contract: &str,
+    provider_contract: &str,
+    provider_response: Option<&Value>,
+    provider_response_body_state: Option<UsageBodyCaptureState>,
+    client_response: Option<&Value>,
+    client_response_body_state: Option<UsageBodyCaptureState>,
+) -> Option<StreamCapturedTerminalState> {
+    let report_kind_requires_terminal_event =
+        stream_report_kind_requires_observed_terminal_event(report_kind);
+    let provider_contract_requires_terminal_event =
+        is_openai_responses_family_format_alias(provider_contract);
+    let client_contract_requires_terminal_event =
+        is_openai_responses_family_format_alias(client_contract);
+    let fallback_requires_terminal_event = report_kind_requires_terminal_event
+        && !provider_contract_requires_terminal_event
+        && !client_contract_requires_terminal_event;
+
+    combine_stream_capture_terminal_states(
+        (provider_contract_requires_terminal_event || fallback_requires_terminal_event)
+            .then(|| {
+                captured_stream_terminal_state_from_body(
+                    provider_response,
+                    provider_response_body_state,
+                )
+            })
+            .flatten(),
+        (client_contract_requires_terminal_event || fallback_requires_terminal_event)
+            .then(|| {
+                captured_stream_terminal_state_from_body(
+                    client_response,
+                    client_response_body_state,
+                )
+            })
+            .flatten(),
+    )
+}
+
+fn captured_stream_terminal_state_from_body(
+    response: Option<&Value>,
+    body_state: Option<UsageBodyCaptureState>,
+) -> Option<StreamCapturedTerminalState> {
+    let state = response.and_then(stream_capture_terminal_state);
+    match state {
+        Some(StreamCapturedTerminalState::Missing)
+            if !stream_body_capture_can_prove_missing_terminal(body_state) =>
+        {
+            None
+        }
+        other => other,
+    }
+}
+
+fn stream_body_capture_can_prove_missing_terminal(
+    body_state: Option<UsageBodyCaptureState>,
+) -> bool {
+    matches!(body_state, None | Some(UsageBodyCaptureState::Inline))
+}
+
+fn combine_stream_capture_terminal_states(
+    current: Option<StreamCapturedTerminalState>,
+    next: Option<StreamCapturedTerminalState>,
+) -> Option<StreamCapturedTerminalState> {
+    match (current, next) {
+        (Some(StreamCapturedTerminalState::Failed), _)
+        | (_, Some(StreamCapturedTerminalState::Failed)) => {
+            Some(StreamCapturedTerminalState::Failed)
+        }
+        (Some(StreamCapturedTerminalState::Missing), _)
+        | (_, Some(StreamCapturedTerminalState::Missing)) => {
+            Some(StreamCapturedTerminalState::Missing)
+        }
+        (Some(StreamCapturedTerminalState::Completed), _)
+        | (_, Some(StreamCapturedTerminalState::Completed)) => {
+            Some(StreamCapturedTerminalState::Completed)
+        }
+        (None, None) => None,
+    }
+}
+
+fn stream_report_kind_requires_observed_terminal_event(report_kind: &str) -> bool {
+    let report_kind = report_kind.trim().to_ascii_lowercase();
+    report_kind.starts_with("openai_responses_")
+        || report_kind.starts_with("openai_compact_")
+        || report_kind.starts_with("openai_cli_")
+}
+
+fn stream_usage_requires_observed_terminal_event(
+    report_kind: &str,
+    client_contract: &str,
+    provider_contract: &str,
+) -> bool {
+    stream_report_kind_requires_observed_terminal_event(report_kind)
+        || is_openai_responses_family_format_alias(client_contract)
+        || is_openai_responses_family_format_alias(provider_contract)
+}
+
+fn is_openai_responses_family_format_alias(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', ":");
+    aether_ai_formats::is_openai_responses_family_format(normalized.as_str())
 }
 
 fn resolve_has_format_conversion(
@@ -1592,9 +1795,9 @@ fn build_runtime_request_metadata_seed_from_parts(
             Value::Bool(client_requested_stream),
         );
     }
-    if let Some(upstream_is_stream) = context_bool(context, "upstream_is_stream") {
+    if let Some(upstream_is_stream) = context_bool(context, UPSTREAM_IS_STREAM_KEY) {
         metadata.insert(
-            "upstream_is_stream".to_string(),
+            UPSTREAM_IS_STREAM_KEY.to_string(),
             Value::Bool(upstream_is_stream),
         );
     }
@@ -1739,7 +1942,7 @@ fn clone_usage_capture_value(value: Option<&Value>) -> Option<Value> {
 }
 
 fn clone_usage_body_value(value: Option<&Value>) -> Option<Value> {
-    value.cloned()
+    value.cloned().map(mask_sensitive_body_fields)
 }
 
 fn sanitize_usage_event_capture_fields(mut data: UsageEventData) -> UsageEventData {
@@ -2057,13 +2260,119 @@ fn mask_sensitive_headers_in_json_value(value: Option<Value>) -> Option<Value> {
     Some(value)
 }
 
-fn resolve_error_category(status_code: u16, event_type: UsageEventType) -> Option<String> {
+fn mask_sensitive_body_fields(mut value: Value) -> Value {
+    mask_sensitive_body_fields_in_place(&mut value);
+    value
+}
+
+fn mask_sensitive_body_fields_in_place(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object.iter_mut() {
+                if is_sensitive_body_key(key) {
+                    let replacement = if value.is_null() {
+                        Value::Null
+                    } else if let Some(text) = value.as_str() {
+                        Value::String(mask_sensitive_header_value(text))
+                    } else {
+                        Value::String(mask_sensitive_header_value(&value.to_string()))
+                    };
+                    *value = replacement;
+                } else {
+                    mask_sensitive_body_fields_in_place(value);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                mask_sensitive_body_fields_in_place(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_sensitive_body_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    normalized.contains("token")
+        || normalized.contains("apikey")
+        || normalized.contains("password")
+        || normalized.contains("authorization")
+        || normalized.contains("secret")
+        || normalized == "cookie"
+}
+
+fn resolve_error_category(
+    status_code: u16,
+    event_type: UsageEventType,
+    is_stream: bool,
+    terminal_failure_category: Option<&str>,
+) -> Option<String> {
     match event_type {
         UsageEventType::Cancelled => Some("cancelled".to_string()),
         UsageEventType::Failed if status_code >= 500 => Some("server_error".to_string()),
         UsageEventType::Failed if status_code >= 400 => Some("client_error".to_string()),
         UsageEventType::Failed if status_code >= 300 => Some("redirect".to_string()),
+        UsageEventType::Failed if (200..300).contains(&status_code) => terminal_failure_category
+            .map(ToOwned::to_owned)
+            .or_else(|| is_stream.then(|| "stream_terminal_error".to_string()))
+            .or_else(|| Some("non_success_status".to_string())),
         UsageEventType::Failed => Some("non_success_status".to_string()),
+        _ => None,
+    }
+}
+
+fn build_stream_terminal_error_client_response(
+    category: &str,
+    message: &str,
+    status_code: u16,
+    provider_response: Option<&Value>,
+) -> Value {
+    let mut error = provider_response
+        .and_then(extract_error_object_from_json)
+        .unwrap_or_default();
+    error
+        .entry("type".to_string())
+        .or_insert_with(|| Value::String(category.to_string()));
+    error
+        .entry("message".to_string())
+        .or_insert_with(|| Value::String(message.to_string()));
+    error
+        .entry("upstream_status".to_string())
+        .or_insert_with(|| Value::from(status_code));
+
+    json!({ "error": Value::Object(error) })
+}
+
+fn extract_error_object_from_json(value: &Value) -> Option<Map<String, Value>> {
+    value
+        .get("error")
+        .and_then(value_to_error_object)
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("error"))
+                .and_then(value_to_error_object)
+        })
+        .or_else(|| {
+            value
+                .get("chunks")
+                .and_then(Value::as_array)
+                .and_then(|chunks| chunks.iter().find_map(extract_error_object_from_json))
+        })
+}
+
+fn value_to_error_object(value: &Value) -> Option<Map<String, Value>> {
+    match value {
+        Value::Object(object) => Some(object.clone()),
+        Value::String(message) if !message.trim().is_empty() => Some(Map::from_iter([(
+            "message".to_string(),
+            Value::String(message.trim().to_string()),
+        )])),
         _ => None,
     }
 }
@@ -2095,6 +2404,31 @@ fn extract_explicit_error_message_from_json(value: &Value) -> Option<String> {
         .and_then(|error| error.get("message"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("error"))
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("incomplete_details"))
+                .and_then(|details| details.get("reason"))
+                .and_then(Value::as_str)
+                .map(|reason| format!("Response incomplete: {reason}"))
+        })
+        .or_else(|| extract_stream_error_message_from_chunks(value))
+}
+
+fn extract_stream_error_message_from_chunks(value: &Value) -> Option<String> {
+    value
+        .get("chunks")
+        .and_then(Value::as_array)?
+        .iter()
+        .find_map(extract_explicit_error_message_from_json)
 }
 
 fn extract_generic_error_message_from_json(value: &Value) -> Option<String> {
@@ -2111,6 +2445,11 @@ fn decode_body_for_storage(body_base64: Option<&str>) -> Option<Value> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(body_base64)
         .ok()?;
+    if let Some(error_body) =
+        aether_ai_formats::api::extract_provider_private_stream_error_body(None, &bytes)
+    {
+        return Some(error_body);
+    }
     if let Ok(json_body) = serde_json::from_slice::<Value>(&bytes) {
         return Some(json_body);
     }
@@ -2252,48 +2591,6 @@ fn extract_token_counts_from_value(value: &Value) -> Option<(u64, u64, u64)> {
     }
 }
 
-fn apply_cancelled_usage_estimate(data: &mut UsageEventData) {
-    let provider_usage_available = data
-        .response_body
-        .as_ref()
-        .and_then(extract_token_counts_from_value)
-        .is_some();
-    let request_usage = data
-        .provider_request_body
-        .as_ref()
-        .or(data.request_body.as_ref())
-        .and_then(estimate_request_usage);
-
-    if positive_tokens(data.input_tokens) == 0 {
-        if let Some(usage) = request_usage.as_ref() {
-            data.input_tokens = Some(usage.input_tokens);
-        }
-    }
-
-    if !provider_usage_available {
-        apply_cancelled_request_cache_estimate(data, request_usage.as_ref());
-    }
-
-    if positive_tokens(data.output_tokens) == 0 {
-        if let Some(output_tokens) = data
-            .response_body
-            .as_ref()
-            .or(data.client_response_body.as_ref())
-            .and_then(estimate_response_output_tokens)
-        {
-            data.output_tokens = Some(output_tokens);
-        }
-    }
-
-    if positive_tokens(data.total_tokens) == 0 {
-        let total_tokens =
-            positive_tokens(data.input_tokens).saturating_add(positive_tokens(data.output_tokens));
-        if total_tokens > 0 {
-            data.total_tokens = Some(total_tokens);
-        }
-    }
-}
-
 fn apply_completed_image_usage_estimate(data: &mut UsageEventData) {
     if !usage_event_data_is_image(data) {
         return;
@@ -2318,7 +2615,7 @@ fn apply_completed_image_usage_estimate(data: &mut UsageEventData) {
             data.input_tokens = Some(usage.input_tokens);
         }
     }
-    apply_cancelled_request_cache_estimate(data, request_usage.as_ref());
+    apply_request_cache_usage_estimate(data, request_usage.as_ref());
     if positive_tokens(data.total_tokens) == 0 {
         let total_tokens =
             positive_tokens(data.input_tokens).saturating_add(positive_tokens(data.output_tokens));
@@ -2456,7 +2753,7 @@ fn usage_event_data_is_image(data: &UsageEventData) -> bool {
             .is_some_and(|value| value.eq_ignore_ascii_case("image"))
 }
 
-fn apply_cancelled_request_cache_estimate(
+fn apply_request_cache_usage_estimate(
     data: &mut UsageEventData,
     request_usage: Option<&EstimatedRequestUsage>,
 ) {
@@ -2623,280 +2920,6 @@ fn estimate_text_tokens(text: &str) -> u64 {
     }
 }
 
-#[derive(Default)]
-struct StreamOutputEstimate {
-    text: String,
-    saw_delta: bool,
-}
-
-impl StreamOutputEstimate {
-    fn push_delta(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        self.saw_delta = true;
-        self.text.push_str(text);
-    }
-
-    fn push_done(&mut self, text: &str) {
-        if text.is_empty() || self.saw_delta {
-            return;
-        }
-        self.text.push_str(text);
-    }
-}
-
-fn estimate_response_output_tokens(value: &Value) -> Option<u64> {
-    let mut estimate = StreamOutputEstimate::default();
-    collect_stream_output_text(value, &mut estimate);
-    let tokens = estimate_text_tokens(estimate.text.as_str());
-    (tokens > 0).then_some(tokens)
-}
-
-fn collect_stream_output_text(value: &Value, estimate: &mut StreamOutputEstimate) {
-    match value {
-        Value::String(text) => {
-            for_each_sse_payload(text, |payload| {
-                if payload == "[DONE]" {
-                    return;
-                }
-                if let Ok(json_body) = serde_json::from_str::<Value>(payload) {
-                    collect_stream_output_text(&json_body, estimate);
-                }
-            });
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect_stream_output_text(item, estimate);
-            }
-        }
-        Value::Object(object) => {
-            if let Some(chunks) = object.get("chunks").and_then(Value::as_array) {
-                for chunk in chunks {
-                    collect_stream_output_text(chunk, estimate);
-                }
-                return;
-            }
-            collect_openai_responses_output_text(object, estimate);
-            collect_openai_chat_output_text(object, estimate);
-            collect_claude_output_text(object, estimate);
-            collect_gemini_output_text(object, estimate);
-        }
-        _ => {}
-    }
-}
-
-fn collect_openai_responses_output_text(
-    object: &Map<String, Value>,
-    estimate: &mut StreamOutputEstimate,
-) {
-    match object
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-    {
-        "response.output_text.delta" | "response.outtext.delta" => {
-            if let Some(text) = openai_delta_text(object.get("delta")) {
-                estimate.push_delta(text.as_str());
-            }
-        }
-        "response.reasoning_summary_text.delta" | "response.function_call_arguments.delta" => {
-            if let Some(text) = object.get("delta").and_then(Value::as_str) {
-                estimate.push_delta(text);
-            }
-        }
-        "response.output_text.done" | "response.reasoning_summary_text.done" => {
-            if let Some(text) = object
-                .get("text")
-                .and_then(Value::as_str)
-                .or_else(|| part_text(object.get("part")))
-            {
-                estimate.push_done(text);
-            }
-        }
-        "response.function_call_arguments.done" => {
-            if let Some(text) = object.get("arguments").and_then(Value::as_str) {
-                estimate.push_done(text);
-            }
-        }
-        "response.output_item.done" => {
-            if let Some(item) = object.get("item").and_then(Value::as_object) {
-                collect_openai_responses_output_item_text(item, estimate);
-            }
-        }
-        "response.completed" => {
-            if let Some(response) = object.get("response").and_then(Value::as_object) {
-                collect_openai_responses_completed_text(response, estimate);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_openai_responses_completed_text(
-    response: &Map<String, Value>,
-    estimate: &mut StreamOutputEstimate,
-) {
-    for item in response
-        .get("output")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_object)
-    {
-        collect_openai_responses_output_item_text(item, estimate);
-    }
-}
-
-fn collect_openai_responses_output_item_text(
-    item: &Map<String, Value>,
-    estimate: &mut StreamOutputEstimate,
-) {
-    match item.get("type").and_then(Value::as_str).unwrap_or_default() {
-        "message" => {
-            for content in item
-                .get("content")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_object)
-            {
-                if content.get("type").and_then(Value::as_str) == Some("output_text") {
-                    if let Some(text) = content.get("text").and_then(Value::as_str) {
-                        estimate.push_done(text);
-                    }
-                }
-            }
-        }
-        "reasoning" => {
-            for summary in item
-                .get("summary")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_object)
-            {
-                if let Some(text) = summary.get("text").and_then(Value::as_str) {
-                    estimate.push_done(text);
-                }
-            }
-        }
-        "function_call" => {
-            if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
-                estimate.push_done(arguments);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_openai_chat_output_text(
-    object: &Map<String, Value>,
-    estimate: &mut StreamOutputEstimate,
-) {
-    for choice in object
-        .get("choices")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_object)
-    {
-        if let Some(delta) = choice.get("delta").and_then(Value::as_object) {
-            if let Some(content) = delta.get("content").and_then(Value::as_str) {
-                estimate.push_delta(content);
-            }
-            if let Some(reasoning_content) = delta.get("reasoning_content").and_then(Value::as_str)
-            {
-                estimate.push_delta(reasoning_content);
-            }
-            for tool_call in delta
-                .get("tool_calls")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_object)
-            {
-                if let Some(arguments) = tool_call
-                    .get("function")
-                    .and_then(Value::as_object)
-                    .and_then(|function| function.get("arguments"))
-                    .and_then(Value::as_str)
-                {
-                    estimate.push_delta(arguments);
-                }
-            }
-        }
-    }
-}
-
-fn collect_claude_output_text(object: &Map<String, Value>, estimate: &mut StreamOutputEstimate) {
-    if object.get("type").and_then(Value::as_str) != Some("content_block_delta") {
-        return;
-    }
-    let Some(delta) = object.get("delta").and_then(Value::as_object) else {
-        return;
-    };
-    match delta
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-    {
-        "text_delta" => {
-            if let Some(text) = delta.get("text").and_then(Value::as_str) {
-                estimate.push_delta(text);
-            }
-        }
-        "thinking_delta" => {
-            if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
-                estimate.push_delta(text);
-            }
-        }
-        "input_json_delta" => {
-            if let Some(text) = delta.get("partial_json").and_then(Value::as_str) {
-                estimate.push_delta(text);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_gemini_output_text(object: &Map<String, Value>, estimate: &mut StreamOutputEstimate) {
-    for part in object
-        .get("candidates")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|candidate| candidate.get("content"))
-        .filter_map(Value::as_object)
-        .filter_map(|content| content.get("parts"))
-        .filter_map(Value::as_array)
-        .flatten()
-        .filter_map(Value::as_object)
-    {
-        if let Some(text) = part.get("text").and_then(Value::as_str) {
-            estimate.push_delta(text);
-        }
-    }
-}
-
-fn openai_delta_text(value: Option<&Value>) -> Option<String> {
-    match value {
-        Some(Value::String(text)) => Some(text.clone()),
-        Some(Value::Object(object)) => object
-            .get("text")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        _ => None,
-    }
-}
-
-fn part_text(value: Option<&Value>) -> Option<&str> {
-    value
-        .and_then(Value::as_object)
-        .and_then(|part| part.get("text"))
-        .and_then(Value::as_str)
-}
-
 fn extract_token_counts_from_json(value: &Value) -> Option<(u64, u64, u64)> {
     if let Some(usage) = value.get("usage").and_then(Value::as_object) {
         let input = usage
@@ -2968,12 +2991,12 @@ mod tests {
         build_stream_terminal_usage_event, build_streaming_usage_record,
         build_sync_terminal_usage_event, build_sync_terminal_usage_payload_seed,
         build_sync_terminal_usage_seed, build_terminal_usage_context_seed,
-        build_terminal_usage_event_from_seed, build_usage_event_data_seed,
+        build_terminal_usage_event_from_seed, build_usage_event_data_seed, decode_body_for_storage,
         extract_token_counts_from_json, extract_token_counts_from_value, headers_to_json,
-        mask_header_value, mask_sensitive_headers_in_json_value, parse_sse_body_for_storage,
-        resolve_error_message, trim_owned_non_empty_string, LifecycleUsageSeed, TerminalUsageSeed,
-        UsageBodyRefsSeed, UsageBodyStatesSeed, UsageRoutingSeed, UsageTerminalState,
-        MAX_USAGE_CAPTURE_BYTES, MAX_USAGE_CAPTURE_DEPTH,
+        mask_header_value, mask_sensitive_body_fields, mask_sensitive_headers_in_json_value,
+        parse_sse_body_for_storage, resolve_error_message, trim_owned_non_empty_string,
+        LifecycleUsageSeed, TerminalUsageSeed, UsageBodyRefsSeed, UsageBodyStatesSeed,
+        UsageRoutingSeed, UsageTerminalState, MAX_USAGE_CAPTURE_BYTES, MAX_USAGE_CAPTURE_DEPTH,
     };
     use crate::{
         build_upsert_usage_record_from_event, GatewayStreamReportRequest, GatewaySyncReportRequest,
@@ -3379,6 +3402,114 @@ mod tests {
     }
 
     #[test]
+    fn usage_body_capture_redacts_nested_provider_secrets() {
+        let masked = mask_sensitive_body_fields(json!({
+            "metadata": {
+                "apiKey": "devin-session-token$secret-value",
+                "nested": {
+                    "sessionToken": "session-token-secret"
+                }
+            },
+            "password": "plain-password",
+            "messages": [{"content": "safe text"}]
+        }));
+
+        assert_ne!(
+            masked.pointer("/metadata/apiKey").and_then(Value::as_str),
+            Some("devin-session-token$secret-value")
+        );
+        assert_ne!(
+            masked
+                .pointer("/metadata/nested/sessionToken")
+                .and_then(Value::as_str),
+            Some("session-token-secret")
+        );
+        assert_ne!(
+            masked.get("password").and_then(Value::as_str),
+            Some("plain-password")
+        );
+        assert_eq!(
+            masked
+                .pointer("/messages/0/content")
+                .and_then(Value::as_str),
+            Some("safe text")
+        );
+    }
+
+    #[test]
+    fn sync_terminal_usage_redacts_provider_request_body_secrets_from_context() {
+        let plan = ExecutionPlan {
+            request_id: "req-sync-redact-provider-request-1".to_string(),
+            candidate_id: Some("cand-sync-redact-provider-request-1".to_string()),
+            provider_name: Some("Windsurf".to_string()),
+            provider_id: "provider-windsurf".to_string(),
+            endpoint_id: "endpoint-windsurf".to_string(),
+            key_id: "key-windsurf".to_string(),
+            method: "POST".to_string(),
+            url: "https://server.codeium.com/exa.api_server_pb.ApiServerService/GetChatMessage"
+                .to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "windsurf-model"})),
+            stream: false,
+            client_api_format: "openai:chat".to_string(),
+            provider_api_format: "openai:chat".to_string(),
+            model_name: Some("windsurf-model".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let payload = GatewaySyncReportRequest {
+            trace_id: "trace-sync-redact-provider-request-1".to_string(),
+            report_kind: "openai_chat_sync_success".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:chat",
+                "provider_api_format": "openai:chat",
+                "provider_request_body": {
+                    "metadata": {
+                        "apiKey": "devin-session-token$abc",
+                        "sessionToken": "session-token-secret"
+                    },
+                    "message": "safe prompt"
+                }
+            })),
+            status_code: 200,
+            headers: BTreeMap::new(),
+            body_json: Some(json!({"id": "resp_1", "choices": []})),
+            client_body_json: None,
+            body_base64: None,
+            telemetry: None,
+        };
+
+        let event =
+            build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("terminal usage should build");
+        let provider_request = event
+            .data
+            .provider_request_body
+            .as_ref()
+            .expect("provider request body should be captured");
+
+        assert_ne!(
+            provider_request
+                .pointer("/metadata/apiKey")
+                .and_then(Value::as_str),
+            Some("devin-session-token$abc")
+        );
+        assert_ne!(
+            provider_request
+                .pointer("/metadata/sessionToken")
+                .and_then(Value::as_str),
+            Some("session-token-secret")
+        );
+        assert_eq!(
+            provider_request.pointer("/message").and_then(Value::as_str),
+            Some("safe prompt")
+        );
+    }
+
+    #[test]
     fn builds_stream_terminal_usage_from_provider_body_and_preserves_client_body() {
         let plan = ExecutionPlan {
             request_id: "req-stream-usage-1".to_string(),
@@ -3474,7 +3605,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_stream_usage_estimates_tokens_from_request_and_partial_response() {
+    fn cancelled_stream_usage_does_not_estimate_tokens_from_request_or_partial_response() {
         let plan = ExecutionPlan {
             request_id: "req-stream-cancelled-estimated-usage-1".to_string(),
             candidate_id: Some("cand-stream-cancelled-estimated-usage-1".to_string()),
@@ -3533,16 +3664,14 @@ mod tests {
                 .expect("usage event should build");
 
         assert_eq!(event.event_type, UsageEventType::Cancelled);
-        assert!(event.data.input_tokens.unwrap_or_default() > 0);
-        assert_eq!(event.data.output_tokens, Some(5));
-        assert_eq!(
-            event.data.total_tokens,
-            Some(event.data.input_tokens.unwrap_or_default() + 5)
-        );
+        assert_eq!(event.data.input_tokens, None);
+        assert_eq!(event.data.output_tokens, None);
+        assert_eq!(event.data.total_tokens, None);
+        assert_eq!(event.data.cache_read_input_tokens, None);
     }
 
     #[test]
-    fn cancelled_stream_usage_does_not_infer_cache_read_from_prompt_cache_key() {
+    fn cancelled_stream_usage_does_not_infer_cache_or_token_estimates_from_prompt_cache_key() {
         let request_body = json!({
             "model": "gpt-5.4",
             "input": "Use the cached project context and answer briefly",
@@ -3593,15 +3722,81 @@ mod tests {
         let event =
             build_stream_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
                 .expect("usage event should build");
-        let input_tokens = event
-            .data
-            .input_tokens
-            .expect("input estimate should exist");
 
         assert_eq!(event.event_type, UsageEventType::Cancelled);
+        assert_eq!(event.data.input_tokens, None);
+        assert_eq!(event.data.output_tokens, None);
+        assert_eq!(event.data.total_tokens, None);
         assert_eq!(event.data.cache_read_input_tokens, None);
-        assert_eq!(event.data.output_tokens, Some(4));
-        assert_eq!(event.data.total_tokens, Some(input_tokens + 4));
+    }
+
+    #[test]
+    fn cancelled_stream_usage_preserves_terminal_summary_usage() {
+        let plan = ExecutionPlan {
+            request_id: "req-stream-cancelled-summary-usage-1".to_string(),
+            candidate_id: Some("cand-stream-cancelled-summary-usage-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "gpt-5.4",
+                "input": "This cancelled request has terminal upstream usage",
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let mut standardized_usage = StandardizedUsage::new();
+        standardized_usage.input_tokens = 13;
+        standardized_usage.output_tokens = 21;
+        standardized_usage.cache_creation_tokens = 2;
+        standardized_usage.cache_read_tokens = 3;
+        let payload = GatewayStreamReportRequest {
+            trace_id: "trace-stream-cancelled-summary-usage-1".to_string(),
+            report_kind: "openai_responses_stream_cancelled".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses"
+            })),
+            status_code: 499,
+            headers: BTreeMap::new(),
+            provider_body_base64: None,
+            provider_body_state: Some(UsageBodyCaptureState::None),
+            client_body_base64: None,
+            client_body_state: Some(UsageBodyCaptureState::None),
+            terminal_summary: Some(ExecutionStreamTerminalSummary {
+                standardized_usage: Some(standardized_usage),
+                finish_reason: None,
+                response_id: Some("resp_cancel_summary_1".to_string()),
+                model: Some("gpt-5.4".to_string()),
+                observed_finish: true,
+                unknown_event_count: 0,
+                parser_error: None,
+            }),
+            telemetry: None,
+        };
+
+        let event =
+            build_stream_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        assert_eq!(event.event_type, UsageEventType::Cancelled);
+        assert_eq!(event.data.input_tokens, Some(13));
+        assert_eq!(event.data.output_tokens, Some(21));
+        assert_eq!(event.data.total_tokens, Some(34));
+        assert_eq!(event.data.cache_creation_input_tokens, Some(2));
+        assert_eq!(event.data.cache_read_input_tokens, Some(3));
     }
 
     #[test]
@@ -3809,6 +4004,305 @@ mod tests {
         assert_eq!(event.data.cache_read_input_tokens, Some(3));
         assert!(event.data.response_body.is_none());
         assert!(event.data.client_response_body.is_none());
+    }
+
+    #[test]
+    fn stream_terminal_usage_marks_missing_observed_finish_as_failed() {
+        let plan = ExecutionPlan {
+            request_id: "req-stream-missing-finish-1".to_string(),
+            candidate_id: Some("cand-stream-missing-finish-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: None,
+            content_encoding: None,
+            body: RequestBody {
+                json_body: None,
+                body_bytes_b64: None,
+                body_ref: None,
+            },
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let payload = GatewayStreamReportRequest {
+            trace_id: "trace-stream-missing-finish-1".to_string(),
+            report_kind: "openai_responses_stream_success".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses"
+            })),
+            status_code: 200,
+            headers: BTreeMap::new(),
+            provider_body_base64: None,
+            provider_body_state: Some(UsageBodyCaptureState::None),
+            client_body_base64: None,
+            client_body_state: Some(UsageBodyCaptureState::None),
+            terminal_summary: Some(ExecutionStreamTerminalSummary {
+                response_id: Some("resp_missing_finish".to_string()),
+                model: Some("gpt-5.5".to_string()),
+                observed_finish: false,
+                ..ExecutionStreamTerminalSummary::default()
+            }),
+            telemetry: None,
+        };
+
+        let event =
+            build_stream_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        assert_eq!(event.event_type, UsageEventType::Failed);
+        assert_eq!(event.data.status_code, Some(200));
+        assert_eq!(
+            event.data.error_category.as_deref(),
+            Some("stream_missing_terminal_event")
+        );
+        assert_eq!(
+            event.data.error_message.as_deref(),
+            Some("execution runtime stream ended before provider terminal event")
+        );
+        assert_eq!(event.data.input_tokens, None);
+        assert_eq!(event.data.output_tokens, None);
+    }
+
+    #[test]
+    fn stream_terminal_usage_marks_missing_captured_openai_responses_terminal_as_failed() {
+        let plan = ExecutionPlan {
+            request_id: "req-stream-missing-captured-finish-1".to_string(),
+            candidate_id: Some("cand-stream-missing-captured-finish-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: None,
+            content_encoding: None,
+            body: RequestBody {
+                json_body: None,
+                body_bytes_b64: None,
+                body_ref: None,
+            },
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let provider_sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
+        );
+        let payload = GatewayStreamReportRequest {
+            trace_id: "trace-stream-missing-captured-finish-1".to_string(),
+            report_kind: "openai_responses_stream_success".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses"
+            })),
+            status_code: 200,
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )]),
+            provider_body_base64: Some(
+                base64::engine::general_purpose::STANDARD.encode(provider_sse.as_bytes()),
+            ),
+            provider_body_state: Some(UsageBodyCaptureState::Inline),
+            client_body_base64: None,
+            client_body_state: Some(UsageBodyCaptureState::None),
+            terminal_summary: None,
+            telemetry: None,
+        };
+
+        let event =
+            build_stream_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        assert_eq!(event.event_type, UsageEventType::Failed);
+        assert_eq!(event.data.status_code, Some(200));
+        assert_eq!(
+            event.data.error_category.as_deref(),
+            Some("stream_missing_terminal_event")
+        );
+        assert_eq!(
+            event.data.error_message.as_deref(),
+            Some("execution runtime stream ended before provider terminal event")
+        );
+    }
+
+    #[test]
+    fn stream_terminal_usage_ignores_missing_terminal_from_truncated_capture() {
+        let plan = ExecutionPlan {
+            request_id: "req-stream-truncated-captured-finish-1".to_string(),
+            candidate_id: Some("cand-stream-truncated-captured-finish-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: None,
+            content_encoding: None,
+            body: RequestBody {
+                json_body: None,
+                body_bytes_b64: None,
+                body_ref: None,
+            },
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let provider_sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
+        );
+        let payload = GatewayStreamReportRequest {
+            trace_id: "trace-stream-truncated-captured-finish-1".to_string(),
+            report_kind: "openai_responses_stream_success".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses"
+            })),
+            status_code: 200,
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )]),
+            provider_body_base64: Some(
+                base64::engine::general_purpose::STANDARD.encode(provider_sse.as_bytes()),
+            ),
+            provider_body_state: Some(UsageBodyCaptureState::Truncated),
+            client_body_base64: None,
+            client_body_state: Some(UsageBodyCaptureState::None),
+            terminal_summary: None,
+            telemetry: None,
+        };
+
+        let event =
+            build_stream_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        assert_eq!(event.event_type, UsageEventType::Completed);
+        assert_eq!(event.data.status_code, Some(200));
+        assert_eq!(event.data.error_category, None);
+        assert_eq!(event.data.error_message, None);
+    }
+
+    #[test]
+    fn stream_terminal_usage_marks_http_200_response_failed_as_stream_terminal_error() {
+        let plan = ExecutionPlan {
+            request_id: "req-stream-response-failed-1".to_string(),
+            candidate_id: Some("cand-stream-response-failed-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: None,
+            content_encoding: None,
+            body: RequestBody {
+                json_body: None,
+                body_bytes_b64: None,
+                body_ref: None,
+            },
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let message = "This content was flagged for possible cybersecurity risk";
+        let provider_sse = format!(
+            concat!(
+                "event: response.failed\n",
+                "data: {{\"type\":\"response.failed\",\"response\":{{\"status\":\"failed\",\"error\":{{\"message\":\"{}\",\"code\":\"cyber_policy\"}}}}}}\n\n"
+            ),
+            message
+        );
+        let payload = GatewayStreamReportRequest {
+            trace_id: "trace-stream-response-failed-1".to_string(),
+            report_kind: "openai_responses_stream_success".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses"
+            })),
+            status_code: 200,
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )]),
+            provider_body_base64: Some(
+                base64::engine::general_purpose::STANDARD.encode(provider_sse),
+            ),
+            provider_body_state: Some(UsageBodyCaptureState::Inline),
+            client_body_base64: None,
+            client_body_state: Some(UsageBodyCaptureState::None),
+            terminal_summary: Some(ExecutionStreamTerminalSummary {
+                response_id: Some("resp_failed".to_string()),
+                model: Some("gpt-5.5".to_string()),
+                observed_finish: true,
+                parser_error: Some(message.to_string()),
+                ..ExecutionStreamTerminalSummary::default()
+            }),
+            telemetry: None,
+        };
+
+        let event =
+            build_stream_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        assert_eq!(event.event_type, UsageEventType::Failed);
+        assert_eq!(event.data.status_code, Some(200));
+        assert_eq!(event.data.error_message.as_deref(), Some(message));
+        assert_eq!(
+            event.data.error_category.as_deref(),
+            Some("stream_terminal_error")
+        );
+        assert_eq!(
+            event
+                .data
+                .client_response_body
+                .as_ref()
+                .and_then(|body| body.get("error"))
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str),
+            Some("cyber_policy")
+        );
+        assert_eq!(
+            event
+                .data
+                .client_response_body
+                .as_ref()
+                .and_then(|body| body.get("error"))
+                .and_then(|error| error.get("type"))
+                .and_then(Value::as_str),
+            Some("stream_terminal_error")
+        );
     }
 
     #[test]
@@ -4920,6 +5414,8 @@ mod tests {
                 ..UsageRoutingSeed::default()
             },
             status_code: 200,
+            terminal_error_message: None,
+            terminal_failure_category: None,
             response_time_ms: Some(123),
             first_byte_time_ms: Some(45),
             request_headers: Some(json!({
@@ -5246,6 +5742,27 @@ mod tests {
         assert_eq!(
             resolve_error_message(500, None, Some(body_base64.as_str())),
             Some("upstream exploded".to_string()),
+        );
+    }
+
+    #[test]
+    fn decode_body_for_storage_extracts_connect_json_error_frames() {
+        let payload = br#"{"error":{"code":"resource_exhausted","message":"quota exhausted"}}"#;
+        let mut framed = Vec::new();
+        framed.push(2);
+        framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        framed.extend_from_slice(payload);
+        let body_base64 = base64::engine::general_purpose::STANDARD.encode(framed);
+
+        assert_eq!(
+            decode_body_for_storage(Some(body_base64.as_str())),
+            Some(json!({
+                "error": {
+                    "code": "resource_exhausted",
+                    "message": "quota exhausted",
+                    "type": "resource_exhausted"
+                }
+            }))
         );
     }
 

@@ -6,6 +6,7 @@ use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKe
 use aether_pool_core::{
     score_pool_member_with_rules, PoolMemberScoreInput, PoolMemberScoreRules, POOL_SCORE_VERSION,
 };
+use aether_scheduler_core::any_provider_key_circuit_open_at;
 use serde_json::Value;
 
 use crate::handlers::shared::{provider_key_health_summary, provider_key_status_snapshot_payload};
@@ -98,7 +99,8 @@ fn provider_key_score_input(
         .as_object()
         .and_then(|snapshot| snapshot.get("account"))
         .and_then(Value::as_object);
-    let (health_score, _, _, any_circuit_open, _) = provider_key_health_summary(key);
+    let (health_score, _, _, _, _) = provider_key_health_summary(key);
+    let active_circuit_open = any_provider_key_circuit_open_at(key, now_unix_secs);
     let health_score = key
         .health_by_format
         .as_ref()
@@ -125,7 +127,7 @@ fn provider_key_score_input(
             .and_then(Value::as_bool)
             .unwrap_or(false),
         oauth_invalid_reason: key.oauth_invalid_reason.clone(),
-        circuit_open: any_circuit_open,
+        circuit_open: active_circuit_open,
         success_count: key.success_count.unwrap_or(0).into(),
         error_count: key.error_count.unwrap_or(0).into(),
         total_response_time_ms: key.total_response_time_ms.unwrap_or(0).into(),
@@ -158,4 +160,71 @@ fn stable_hash(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_data_contracts::repository::pool_scores::PoolMemberHardState;
+    use serde_json::json;
+
+    fn sample_key_with_circuit_next_probe(
+        next_probe_at_unix_secs: u64,
+    ) -> StoredProviderCatalogKey {
+        let mut key = StoredProviderCatalogKey::new(
+            "key-gemini-5".to_string(),
+            "provider-google-api".to_string(),
+            "5".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("sample key should be valid");
+        key.health_by_format = Some(json!({
+            "gemini:generate_content": {
+                "health_score": 0.2,
+                "consecutive_failures": 8
+            }
+        }));
+        key.circuit_breaker_by_format = Some(json!({
+            "gemini:generate_content": {
+                "open": true,
+                "reason": "consecutive_failures_8",
+                "next_probe_at_unix_secs": next_probe_at_unix_secs
+            }
+        }));
+        key
+    }
+
+    #[test]
+    fn expired_circuit_probe_deadline_does_not_leave_pool_score_in_cooldown() {
+        let now_unix_secs = 1_000;
+        let key = sample_key_with_circuit_next_probe(900);
+
+        let score = build_provider_key_pool_score_upsert(
+            &key,
+            "custom",
+            None,
+            now_unix_secs,
+            PoolMemberScoreRules::default(),
+        );
+
+        assert_eq!(score.hard_state, PoolMemberHardState::Available);
+    }
+
+    #[test]
+    fn future_circuit_probe_deadline_keeps_pool_score_in_cooldown() {
+        let now_unix_secs = 1_000;
+        let key = sample_key_with_circuit_next_probe(1_100);
+
+        let score = build_provider_key_pool_score_upsert(
+            &key,
+            "custom",
+            None,
+            now_unix_secs,
+            PoolMemberScoreRules::default(),
+        );
+
+        assert_eq!(score.hard_state, PoolMemberHardState::Cooldown);
+    }
 }

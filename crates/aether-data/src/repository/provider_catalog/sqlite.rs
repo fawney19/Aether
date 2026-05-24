@@ -4,7 +4,8 @@ use sqlx::{sqlite::SqliteRow, QueryBuilder, Row, Sqlite};
 use super::{
     ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery, ProviderCatalogReadRepository,
     ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
-    StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
+    StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
+    StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
 use crate::driver::sqlite::{sqlite_optional_real, SqlitePool};
 use crate::error::SqlResultExt;
@@ -278,6 +279,16 @@ FROM provider_api_keys
 WHERE provider_id IN (
 "#;
 
+const LIST_KEY_MAINTENANCE_SUMMARIES_BY_PROVIDER_IDS_PREFIX: &str = r#"
+SELECT
+  id,
+  provider_id,
+  is_active,
+  upstream_metadata
+FROM provider_api_keys
+WHERE provider_id IN (
+"#;
+
 #[derive(Debug, Clone)]
 pub struct SqliteProviderCatalogReadRepository {
     pool: SqlitePool,
@@ -421,6 +432,26 @@ impl SqliteProviderCatalogReadRepository {
         .await
         .map_sql_err()?;
         rows.iter().map(map_key_row).collect()
+    }
+
+    pub async fn list_key_maintenance_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKeyMaintenanceSummary>, DataLayerError> {
+        if provider_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = build_list_query(
+            LIST_KEY_MAINTENANCE_SUMMARIES_BY_PROVIDER_IDS_PREFIX,
+            provider_ids,
+            " ORDER BY provider_id ASC, id ASC",
+        )
+        .build()
+        .fetch_all(&self.pool)
+        .await
+        .map_sql_err()?;
+        rows.iter().map(map_key_maintenance_summary_row).collect()
     }
 
     pub async fn list_keys_page(
@@ -1322,6 +1353,13 @@ impl ProviderCatalogReadRepository for SqliteProviderCatalogReadRepository {
         Self::list_key_summaries_by_provider_ids(self, provider_ids).await
     }
 
+    async fn list_key_maintenance_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKeyMaintenanceSummary>, DataLayerError> {
+        Self::list_key_maintenance_summaries_by_provider_ids(self, provider_ids).await
+    }
+
     async fn list_keys_page(
         &self,
         query: &ProviderCatalogKeyListQuery,
@@ -1803,6 +1841,20 @@ fn map_key_stats_row(row: &SqliteRow) -> Result<StoredProviderCatalogKeyStats, D
         row.try_get("total_keys").map_sql_err()?,
         row.try_get("active_keys").map_sql_err()?,
     )
+}
+
+fn map_key_maintenance_summary_row(
+    row: &SqliteRow,
+) -> Result<StoredProviderCatalogKeyMaintenanceSummary, DataLayerError> {
+    Ok(StoredProviderCatalogKeyMaintenanceSummary {
+        id: row.try_get("id").map_sql_err()?,
+        provider_id: row.try_get("provider_id").map_sql_err()?,
+        is_active: row.try_get("is_active").map_sql_err()?,
+        upstream_metadata: optional_json_from_string(
+            row.try_get("upstream_metadata").map_sql_err()?,
+            "provider_api_keys.upstream_metadata",
+        )?,
+    })
 }
 
 fn map_key_row(row: &SqliteRow) -> Result<StoredProviderCatalogKey, DataLayerError> {

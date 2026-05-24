@@ -28,6 +28,12 @@ use crate::ai_serving::transport::kiro::{
     KIRO_ENVELOPE_NAME,
 };
 use crate::ai_serving::transport::local_openai_chat_transport_unsupported_reason;
+use crate::ai_serving::transport::windsurf::{
+    build_windsurf_cascade_headers, build_windsurf_cascade_request_body,
+    build_windsurf_cascade_upstream_url, is_windsurf_provider_transport,
+    local_windsurf_request_transport_unsupported_reason_with_network,
+    resolve_windsurf_cascade_auth, WINDSURF_ENVELOPE_NAME,
+};
 use crate::ai_serving::transport::{
     build_grok_browser_headers, build_grok_upstream_url, build_kiro_cross_format_upstream_url,
     build_openai_image_headers, build_openai_image_upstream_url,
@@ -332,6 +338,25 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             transport_profile,
             image_request_summary: None,
         }));
+    }
+
+    if provider_api_format == "openai:chat" && is_windsurf_provider_transport(transport) {
+        return build_windsurf_openai_chat_payload_parts(
+            state,
+            parts,
+            trace_id,
+            body_json,
+            input,
+            eligible,
+            candidate_index,
+            candidate_id,
+            decision_kind,
+            report_kind,
+            transport,
+            upstream_is_stream,
+            redaction.redacted,
+        )
+        .await;
     }
 
     if provider_api_format == "openai:chat" {
@@ -909,7 +934,11 @@ async fn resolve_openai_chat_to_openai_image_payload_parts(
     let upstream_url = if is_chatgpt_web {
         chatgpt_web_image_internal_url(&transport.endpoint.base_url)
     } else {
-        build_openai_image_upstream_url(transport, parts.uri.query())
+        build_openai_image_upstream_url(
+            transport,
+            Some("/v1/images/generations"),
+            parts.uri.query(),
+        )
     };
     let Some(mut provider_request_headers) =
         build_openai_image_headers(ProviderOpenAiImageHeadersInput {
@@ -1027,6 +1056,15 @@ fn build_openai_image_provider_body_from_openai_chat_body(
         body.insert("model".to_string(), Value::String(model.to_string()));
     }
     body.insert("input".to_string(), input);
+    let mut image_tool = image_options.clone();
+    image_tool.insert(
+        "type".to_string(),
+        Value::String("image_generation".to_string()),
+    );
+    body.insert(
+        "tools".to_string(),
+        Value::Array(vec![Value::Object(image_tool)]),
+    );
     if upstream_is_stream {
         body.insert("stream".to_string(), Value::Bool(true));
     }
@@ -1238,6 +1276,181 @@ fn chatgpt_web_image_internal_url(base_url: &str) -> String {
         base_url
     };
     format!("{base_url}/__aether/chatgpt-web-image")
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_windsurf_openai_chat_payload_parts(
+    state: &AppState,
+    parts: &http::request::Parts,
+    trace_id: &str,
+    body_json: &serde_json::Value,
+    input: &LocalOpenAiChatDecisionInput,
+    eligible: &EligibleLocalExecutionCandidate,
+    candidate_index: u32,
+    candidate_id: &str,
+    decision_kind: &str,
+    report_kind: &str,
+    transport: &Arc<GatewayProviderTransportSnapshot>,
+    upstream_is_stream: bool,
+    request_redacted: bool,
+) -> Result<Option<LocalOpenAiChatCandidatePayloadParts>, GatewayError> {
+    let planner_state = crate::ai_serving::PlannerAppState::new(state);
+    let candidate = &eligible.candidate;
+    if let Some(skip_reason) =
+        local_windsurf_request_transport_unsupported_reason_with_network(transport)
+    {
+        mark_skipped_local_openai_chat_candidate(
+            state,
+            input,
+            trace_id,
+            candidate,
+            candidate_index,
+            candidate_id,
+            skip_reason,
+        )
+        .await;
+        return Ok(None);
+    }
+
+    let prepared_candidate = match prepare_header_authenticated_candidate(
+        planner_state,
+        transport,
+        candidate,
+        resolve_windsurf_cascade_auth(transport)
+            .or_else(|| resolve_local_openai_bearer_auth(transport)),
+        OauthPreparationContext {
+            trace_id,
+            api_format: "openai:chat",
+            operation: "openai_chat_windsurf_cascade",
+        },
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(skip_reason) => {
+            mark_skipped_local_openai_chat_candidate(
+                state,
+                input,
+                trace_id,
+                candidate,
+                candidate_index,
+                candidate_id,
+                skip_reason,
+            )
+            .await;
+            return Ok(None);
+        }
+    };
+
+    let Some(provider_request_body) = build_windsurf_cascade_request_body(
+        body_json,
+        &prepared_candidate.mapped_model,
+        &prepared_candidate.auth_value,
+        transport.endpoint.body_rules.as_ref(),
+        Some(&parts.headers),
+        upstream_is_stream,
+    ) else {
+        mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
+            state,
+            input,
+            trace_id,
+            candidate,
+            candidate_index,
+            candidate_id,
+            "provider_request_body_build_failed",
+            CandidateFailureDiagnostic::envelope_build_failed(
+                "openai:chat",
+                "openai:chat",
+                "openai_chat_windsurf_cascade",
+            ),
+        )
+        .await;
+        return Ok(None);
+    };
+
+    let Some(upstream_url) = build_windsurf_cascade_upstream_url(
+        transport.endpoint.base_url.as_str(),
+        parts.uri.query(),
+    ) else {
+        mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
+            state,
+            input,
+            trace_id,
+            candidate,
+            candidate_index,
+            candidate_id,
+            "upstream_url_missing",
+            CandidateFailureDiagnostic::upstream_url_missing(
+                "openai:chat",
+                "openai:chat",
+                "openai_chat_windsurf_url",
+            ),
+        )
+        .await;
+        return Ok(None);
+    };
+
+    let mut provider_request_headers = match build_windsurf_cascade_headers(
+        &parts.headers,
+        &provider_request_body,
+        body_json,
+        transport.endpoint.header_rules.as_ref(),
+        &prepared_candidate.auth_header,
+        &prepared_candidate.auth_value,
+        upstream_is_stream,
+    ) {
+        Some(headers) => headers,
+        None => {
+            mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
+                state,
+                input,
+                trace_id,
+                candidate,
+                candidate_index,
+                candidate_id,
+                "transport_header_rules_apply_failed",
+                CandidateFailureDiagnostic::header_rules_apply_failed(
+                    "openai:chat",
+                    "openai:chat",
+                    "openai_chat_windsurf_headers",
+                ),
+            )
+            .await;
+            return Ok(None);
+        }
+    };
+    request_identity_response_encoding_when_redacted(
+        &mut provider_request_headers,
+        request_redacted,
+    );
+
+    let (execution_strategy, conversion_mode) =
+        ai_local_execution_contract_for_formats("openai:chat", "openai:chat");
+    let resolved_report_kind =
+        if decision_kind == OPENAI_CHAT_STREAM_PLAN_KIND || !upstream_is_stream {
+            report_kind.to_string()
+        } else {
+            "openai_chat_sync_finalize".to_string()
+        };
+
+    Ok(Some(LocalOpenAiChatCandidatePayloadParts {
+        client_api_format: "openai:chat".to_string(),
+        auth_header: prepared_candidate.auth_header,
+        auth_value: prepared_candidate.auth_value,
+        mapped_model: prepared_candidate.mapped_model,
+        provider_api_format: "openai:chat".to_string(),
+        provider_request_body,
+        provider_request_headers,
+        upstream_url,
+        execution_strategy,
+        conversion_mode,
+        report_kind: resolved_report_kind,
+        envelope_name: Some(WINDSURF_ENVELOPE_NAME),
+        transport: Arc::clone(transport),
+        request_redacted,
+        transport_profile: None,
+        image_request_summary: None,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1507,7 +1720,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_chat_image_bridge_body_does_not_inject_tools() {
+    fn openai_chat_image_bridge_body_injects_image_generation_tool() {
         let body_json = json!({
             "model": "gpt-image-2",
             "messages": [
@@ -1521,7 +1734,9 @@ mod tests {
             build_openai_image_provider_body_from_openai_chat_body(&body_json, "gpt-image-2", true)
                 .expect("chat image body should convert");
 
-        assert!(provider_body.get("tools").is_none());
+        assert_eq!(provider_body["tools"][0]["type"], "image_generation");
+        assert_eq!(provider_body["tools"][0]["size"], "1024x1024");
+        assert_eq!(provider_body["tools"][0]["output_format"], "png");
         assert_eq!(provider_body["model"], "gpt-image-2");
         assert_eq!(provider_body["stream"], true);
         assert_eq!(provider_body["input"][0]["content"], "Draw a glass city");

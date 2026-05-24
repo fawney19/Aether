@@ -1,8 +1,10 @@
 use std::future::Future;
-use std::time::Duration;
 
 use crate::error::RedisResultExt;
-use crate::redis::{RedisClient, RedisKeyspace};
+use crate::redis::{
+    run_lane_with_timeout, RedisClientConfig, RedisClientFactory, RedisConnectionLane,
+    RedisConnectionRouter, RedisKeyspace,
+};
 use crate::DataLayerError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,27 +42,35 @@ impl RedisKvRunnerConfig {
 
 #[derive(Debug, Clone)]
 pub struct RedisKvRunner {
-    client: RedisClient,
+    connections: RedisConnectionRouter,
     keyspace: RedisKeyspace,
     config: RedisKvRunnerConfig,
 }
 
 impl RedisKvRunner {
-    pub fn new(
-        client: RedisClient,
+    pub(crate) fn new(
+        connections: RedisConnectionRouter,
         keyspace: RedisKeyspace,
         config: RedisKvRunnerConfig,
     ) -> Result<Self, DataLayerError> {
         config.validate()?;
         Ok(Self {
-            client,
+            connections,
             keyspace,
             config,
         })
     }
 
-    pub fn client(&self) -> &RedisClient {
-        &self.client
+    pub async fn from_config(
+        config: RedisClientConfig,
+        runner_config: RedisKvRunnerConfig,
+    ) -> Result<Self, DataLayerError> {
+        let factory = RedisClientFactory::new(config)?;
+        let keyspace = factory.config().keyspace();
+        let connections = factory
+            .connect_router(runner_config.command_timeout_ms)
+            .await?;
+        Self::new(connections, keyspace, runner_config)
     }
 
     pub fn keyspace(&self) -> &RedisKeyspace {
@@ -79,12 +89,8 @@ impl RedisKvRunner {
     ) -> Result<String, DataLayerError> {
         let resolved_ttl = ttl_seconds.unwrap_or(self.config.default_ttl_seconds);
         let namespaced_key = self.keyspace.key(key);
-        self.run_with_timeout("redis kv setex", async {
-            let mut connection = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_redis_err()?;
+        self.run_with_timeout(RedisConnectionLane::Fast, "redis kv setex", async {
+            let mut connection = self.connections.connection(RedisConnectionLane::Fast);
             redis::cmd("SETEX")
                 .arg(&namespaced_key)
                 .arg(resolved_ttl)
@@ -98,12 +104,8 @@ impl RedisKvRunner {
 
     pub async fn get(&self, key: &str) -> Result<Option<String>, DataLayerError> {
         let namespaced_key = self.keyspace.key(key);
-        self.run_with_timeout("redis kv get", async {
-            let mut connection = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_redis_err()?;
+        self.run_with_timeout(RedisConnectionLane::Fast, "redis kv get", async {
+            let mut connection = self.connections.connection(RedisConnectionLane::Fast);
             redis::cmd("GET")
                 .arg(&namespaced_key)
                 .query_async(&mut connection)
@@ -115,12 +117,8 @@ impl RedisKvRunner {
 
     pub async fn getdel(&self, key: &str) -> Result<Option<String>, DataLayerError> {
         let namespaced_key = self.keyspace.key(key);
-        self.run_with_timeout("redis kv getdel", async {
-            let mut connection = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_redis_err()?;
+        self.run_with_timeout(RedisConnectionLane::Fast, "redis kv getdel", async {
+            let mut connection = self.connections.connection(RedisConnectionLane::Fast);
             redis::cmd("GETDEL")
                 .arg(&namespaced_key)
                 .query_async(&mut connection)
@@ -133,12 +131,8 @@ impl RedisKvRunner {
     pub async fn exists(&self, key: &str) -> Result<bool, DataLayerError> {
         let namespaced_key = self.keyspace.key(key);
         let exists = self
-            .run_with_timeout("redis kv exists", async {
-                let mut connection = self
-                    .client
-                    .get_multiplexed_async_connection()
-                    .await
-                    .map_redis_err()?;
+            .run_with_timeout(RedisConnectionLane::Fast, "redis kv exists", async {
+                let mut connection = self.connections.connection(RedisConnectionLane::Fast);
                 redis::cmd("EXISTS")
                     .arg(&namespaced_key)
                     .query_async::<i64>(&mut connection)
@@ -151,12 +145,8 @@ impl RedisKvRunner {
 
     pub async fn del(&self, key: &str) -> Result<i64, DataLayerError> {
         let namespaced_key = self.keyspace.key(key);
-        self.run_with_timeout("redis kv del", async {
-            let mut connection = self
-                .client
-                .get_multiplexed_async_connection()
-                .await
-                .map_redis_err()?;
+        self.run_with_timeout(RedisConnectionLane::Fast, "redis kv del", async {
+            let mut connection = self.connections.connection(RedisConnectionLane::Fast);
             redis::cmd("DEL")
                 .arg(&namespaced_key)
                 .query_async(&mut connection)
@@ -168,49 +158,33 @@ impl RedisKvRunner {
 
     async fn run_with_timeout<T, F>(
         &self,
+        lane: RedisConnectionLane,
         operation: &'static str,
         future: F,
     ) -> Result<T, DataLayerError>
     where
         F: Future<Output = Result<T, DataLayerError>>,
     {
-        if let Some(timeout_ms) = self.config.command_timeout_ms {
-            tokio::time::timeout(Duration::from_millis(timeout_ms), future)
-                .await
-                .map_err(|_| {
-                    DataLayerError::TimedOut(format!("{operation} exceeded {timeout_ms}ms timeout"))
-                })?
-        } else {
-            future.await
-        }
+        run_lane_with_timeout(
+            &self.connections,
+            lane,
+            self.config.command_timeout_ms,
+            operation,
+            future,
+        )
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{RedisKvRunner, RedisKvRunnerConfig};
-    use crate::redis::{RedisClientConfig, RedisClientFactory, RedisKeyspace};
-
-    fn build_runner() -> RedisKvRunner {
-        let config = RedisClientConfig {
-            url: "redis://localhost/0".to_string(),
-            key_prefix: Some("aether-test".to_string()),
-        };
-        let factory = RedisClientFactory::new(config).expect("redis factory");
-        let client = factory.connect_lazy().expect("connect");
-        let keyspace = factory.config().keyspace();
-        RedisKvRunner::new(client, keyspace, RedisKvRunnerConfig::default()).expect("runner build")
-    }
+    use super::RedisKvRunnerConfig;
 
     #[test]
-    fn runner_reuses_client_keyspace_and_config() {
-        let runner = build_runner();
-        assert_eq!(
-            runner.keyspace().key("kv:setex:1"),
-            "aether-test:kv:setex:1"
-        );
-        assert_eq!(runner.config(), RedisKvRunnerConfig::default());
-        let _client = runner.client();
+    fn validates_default_config() {
+        RedisKvRunnerConfig::default()
+            .validate()
+            .expect("default kv config should be valid");
     }
 
     #[test]
@@ -219,17 +193,6 @@ mod tests {
             command_timeout_ms: Some(100),
             default_ttl_seconds: 0,
         };
-        assert!(RedisKvRunner::new(
-            RedisClientFactory::new(RedisClientConfig {
-                url: "redis://localhost/0".to_string(),
-                key_prefix: Some("aether-test".to_string()),
-            })
-            .expect("redis factory")
-            .connect_lazy()
-            .expect("redis client"),
-            RedisKeyspace::new(Some("aether-test")),
-            config,
-        )
-        .is_err());
+        assert!(config.validate().is_err());
     }
 }

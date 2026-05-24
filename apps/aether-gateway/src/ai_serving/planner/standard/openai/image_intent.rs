@@ -1,75 +1,55 @@
-pub(crate) fn openai_request_is_image_generation_intent(
-    requested_model: &str,
-    body_json: &serde_json::Value,
+use serde_json::Value;
+
+pub(super) fn openai_request_is_image_generation_intent(
+    _requested_model: &str,
+    body_json: &Value,
 ) -> bool {
-    openai_model_is_image_generation(requested_model)
-        || body_json
-            .get("model")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(openai_model_is_image_generation)
-        || openai_tool_choice_selects_image_generation(body_json.get("tool_choice"))
+    request_forces_image_generation_tool(body_json)
 }
 
-fn openai_model_is_image_generation(model: &str) -> bool {
-    model.trim().to_ascii_lowercase().starts_with("gpt-image-")
+fn request_forces_image_generation_tool(body_json: &Value) -> bool {
+    body_json
+        .get("tool_choice")
+        .is_some_and(value_is_image_generation_tool)
 }
 
-fn openai_tool_choice_selects_image_generation(choice: Option<&serde_json::Value>) -> bool {
-    let Some(choice) = choice else {
-        return false;
-    };
-    if let Some(value) = choice.as_str() {
-        return value.trim().eq_ignore_ascii_case("image_generation");
-    }
-    let Some(object) = choice.as_object() else {
-        return false;
-    };
-    object
+fn value_is_image_generation_tool(value: &Value) -> bool {
+    value
         .get("type")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("image_generation"))
-        || object
-            .get("tool")
-            .and_then(|value| value.get("type"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("image_generation"))
-        || object
-            .get("function")
-            .and_then(|value| value.get("name"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("image_generation"))
+        .and_then(Value::as_str)
+        .is_some_and(|tool_type| tool_type.trim().eq_ignore_ascii_case("image_generation"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::openai_request_is_image_generation_intent;
-    use serde_json::json;
+    use super::*;
 
     #[test]
-    fn detects_openai_image_generation_intent_like_compat_proxies() {
-        assert!(openai_request_is_image_generation_intent(
-            "GPT-IMAGE-2",
-            &json!({})
-        ));
-        assert!(openai_request_is_image_generation_intent(
-            "gpt-5",
-            &json!({"model":"gpt-image-2"})
-        ));
-        assert!(openai_request_is_image_generation_intent(
-            "gpt-5",
-            &json!({"tool_choice":{"function":{"name":"image_generation"}}})
-        ));
-        assert!(openai_request_is_image_generation_intent(
-            "gpt-5",
-            &json!({"tool_choice":{"type":"image_generation"}})
-        ));
+    fn tools_declaration_without_tool_choice_does_not_trigger_image_generation() {
+        let body_json = serde_json::json!({
+            "model": "gpt-image-2",
+            "input": "Draw a mountain observatory",
+            "tools": [{"type": "image_generation"}]
+        });
+
         assert!(!openai_request_is_image_generation_intent(
-            "gpt-5",
-            &json!({"tools":[{"type":"image_generation"}]})
+            "gpt-image-2",
+            &body_json
         ));
-        assert!(!openai_request_is_image_generation_intent(
-            "gpt-5",
-            &json!({"messages":[{"role":"user","content":"hello"}]})
+    }
+
+    #[test]
+    fn explicit_image_generation_tool_choice_triggers_image_generation() {
+        let body_json = serde_json::json!({
+            "model": "gpt-image-2",
+            "input": "Draw a mountain observatory",
+            "tools": [{"type": "image_generation"}],
+            "tool_choice": {"type": "image_generation"}
+        });
+
+        assert!(openai_request_is_image_generation_intent(
+            "gpt-image-2",
+            &body_json
         ));
     }
 }

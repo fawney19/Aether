@@ -2,6 +2,7 @@ use super::enabled_key_capability_short_names;
 use crate::handlers::shared::unix_secs_to_rfc3339;
 use crate::provider_key_auth::provider_key_effective_api_formats;
 use crate::AppState;
+use aether_scheduler_core::provider_key_circuit_payload_is_active_open_at;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -46,7 +47,7 @@ pub(crate) async fn build_admin_keys_grouped_by_format_payload(
 
     let (endpoints_result, keys_result) = tokio::join!(
         state.list_provider_catalog_endpoints_by_provider_ids(&provider_ids),
-        state.list_provider_catalog_key_summaries_by_provider_ids(&provider_ids),
+        state.list_provider_catalog_keys_by_provider_ids(&provider_ids),
     );
 
     let active_endpoints = endpoints_result
@@ -173,10 +174,10 @@ pub(crate) async fn build_admin_keys_grouped_by_format_payload(
                     .get("health_score")
                     .and_then(serde_json::Value::as_f64)
                     .unwrap_or(1.0),
-                "circuit_breaker_open": format_circuit
-                    .get("open")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
+                "circuit_breaker_open": provider_key_circuit_payload_is_active_open_at(
+                    &format_circuit,
+                    now_unix_secs,
+                ),
                 "last_used_at": key.last_used_at_unix_secs.and_then(unix_secs_to_rfc3339),
                 "created_at": unix_secs_to_rfc3339(key.created_at_unix_ms.unwrap_or(now_unix_secs)),
                 "updated_at": unix_secs_to_rfc3339(key.updated_at_unix_secs.unwrap_or(now_unix_secs)),

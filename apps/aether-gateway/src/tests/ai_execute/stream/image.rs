@@ -13,7 +13,6 @@ use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadReposi
 use aether_data_contracts::repository::candidate_selection::{
     StoredMinimalCandidateSelectionRow, StoredProviderModelMapping,
 };
-use aether_data_contracts::repository::candidates::RequestCandidateReadRepository;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
@@ -751,7 +750,6 @@ struct SeenImageBridgeExecutionPlan {
     url: String,
     plan_stream: bool,
     auth_header: String,
-    chatgpt_web_marker: String,
     body_json: serde_json::Value,
 }
 
@@ -1017,12 +1015,6 @@ fn capture_image_bridge_execution_plan(
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_string(),
-        chatgpt_web_marker: payload
-            .get("headers")
-            .and_then(|value| value.get("x-aether-chatgpt-web-image"))
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_string(),
         body_json: payload
             .get("body")
             .and_then(|value| value.get("json_body"))
@@ -1066,75 +1058,6 @@ fn image_bridge_execution_runtime(
 }
 
 #[tokio::test]
-async fn gateway_routes_openai_chat_stream_image_intent_to_openai_image_plan_without_streaming_support(
-) {
-    let seen_execution_plan = Arc::new(Mutex::new(None::<SeenImageBridgeExecutionPlan>));
-    let execution_runtime = image_bridge_execution_runtime(Arc::clone(&seen_execution_plan));
-    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
-    let (gateway_url, gateway_handle, client_api_key, request_candidate_repository) =
-        start_image_bridge_gateway(
-            "chat-stream-image-bridge",
-            "image-provider",
-            "custom",
-            "https://images.example.com",
-            execution_runtime_url,
-        )
-        .await;
-
-    let response = reqwest::Client::new()
-        .post(format!("{gateway_url}/v1/chat/completions"))
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .header(http::header::AUTHORIZATION, format!("Bearer {client_api_key}"))
-        .header(TRACE_ID_HEADER, "trace-chat-stream-image-bridge-123")
-        .body(
-            r#"{"model":"gpt-image-2","messages":[{"role":"user","content":"Draw a city made of glass"}],"stream":true,"size":"1024x1024"}"#,
-        )
-        .send()
-        .await
-        .expect("request should succeed");
-
-    let status = response.status();
-    let response_text = response.text().await.expect("body should read");
-    let stored_candidates = request_candidate_repository
-        .list_by_request_id("trace-chat-stream-image-bridge-123")
-        .await
-        .expect("request candidates should read");
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "{response_text}\n{stored_candidates:#?}"
-    );
-    assert!(response_text.contains("\"object\":\"chat.completion.chunk\""));
-    assert!(response_text.contains("![generated image](data:image/png;base64,aGVsbG8=)"));
-    assert!(response_text.contains("data: [DONE]"));
-    assert!(!response_text.contains("image_generation.completed"));
-
-    let seen_plan = seen_execution_plan
-        .lock()
-        .expect("mutex should lock")
-        .clone()
-        .expect("execution plan should be captured");
-    assert_eq!(seen_plan.trace_id, "trace-chat-stream-image-bridge-123");
-    assert_eq!(seen_plan.client_api_format, "openai:chat");
-    assert_eq!(seen_plan.provider_api_format, "openai:image");
-    assert_eq!(seen_plan.url, "https://images.example.com/v1/responses");
-    assert!(seen_plan.plan_stream);
-    assert_eq!(seen_plan.auth_header, "Bearer sk-upstream-image-bridge");
-    assert_eq!(seen_plan.chatgpt_web_marker, "");
-    assert_eq!(seen_plan.body_json["model"], "gpt-image-2");
-    assert_eq!(seen_plan.body_json["stream"], true);
-    assert_eq!(
-        seen_plan.body_json["input"][0]["content"],
-        "Draw a city made of glass"
-    );
-    assert_eq!(seen_plan.body_json["tools"][0]["type"], "image_generation");
-    assert_eq!(seen_plan.body_json["tools"][0]["size"], "1024x1024");
-
-    gateway_handle.abort();
-    execution_runtime_handle.abort();
-}
-
-#[tokio::test]
 async fn gateway_routes_openai_responses_stream_image_intent_to_openai_image_plan_without_streaming_support(
 ) {
     let seen_execution_plan = Arc::new(Mutex::new(None::<SeenImageBridgeExecutionPlan>));
@@ -1156,7 +1079,7 @@ async fn gateway_routes_openai_responses_stream_image_intent_to_openai_image_pla
         .header(http::header::AUTHORIZATION, format!("Bearer {client_api_key}"))
         .header(TRACE_ID_HEADER, "trace-responses-stream-image-bridge-123")
         .body(
-            r#"{"model":"gpt-image-2","input":"Draw a mountain observatory","tools":[{"type":"image_generation","size":"1024x1024"}],"stream":true}"#,
+            r#"{"model":"gpt-image-2","input":"Draw a mountain observatory","tools":[{"type":"image_generation","size":"1024x1024"}],"tool_choice":{"type":"image_generation"},"stream":true}"#,
         )
         .send()
         .await
@@ -1179,7 +1102,10 @@ async fn gateway_routes_openai_responses_stream_image_intent_to_openai_image_pla
     );
     assert_eq!(seen_plan.client_api_format, "openai:responses");
     assert_eq!(seen_plan.provider_api_format, "openai:image");
-    assert_eq!(seen_plan.url, "https://images.example.com/v1/responses");
+    assert_eq!(
+        seen_plan.url,
+        "https://images.example.com/v1/images/generations"
+    );
     assert!(seen_plan.plan_stream);
     assert_eq!(seen_plan.auth_header, "Bearer sk-upstream-image-bridge");
     assert_eq!(seen_plan.body_json["stream"], true);

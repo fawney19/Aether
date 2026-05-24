@@ -37,16 +37,20 @@ pub(in super::super) async fn build_admin_list_users_response(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
-    let paged_rows = state
-        .list_export_users_page(&aether_data::repository::users::UserExportListQuery {
-            skip,
-            limit,
-            role: role.clone(),
-            is_active,
-            search,
-            group_id,
-        })
-        .await?;
+    let query = aether_data::repository::users::UserExportListQuery {
+        skip,
+        limit,
+        role: role.clone(),
+        is_active,
+        search,
+        group_id,
+    };
+    let (paged_rows_result, total_result) = tokio::join!(
+        state.list_export_users_page(&query),
+        state.count_export_users(&query),
+    );
+    let paged_rows = paged_rows_result?;
+    let total = total_result?;
     let user_ids = paged_rows
         .iter()
         .map(|row| row.id.clone())
@@ -116,7 +120,15 @@ pub(in super::super) async fn build_admin_list_users_response(
         ));
     }
 
-    Ok(Json(payload).into_response())
+    let has_more = (skip as u64).saturating_add(payload.len() as u64) < total;
+    Ok(Json(json!({
+        "items": payload,
+        "total": total,
+        "skip": skip,
+        "limit": limit,
+        "has_more": has_more,
+    }))
+    .into_response())
 }
 
 pub(in super::super) async fn build_admin_get_user_response(

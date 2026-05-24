@@ -251,4 +251,20 @@ describe('providerKeyStatus', () => {
     })
     expect(getOAuthStatusTitle(input, 0)).toBe('Refresh Token 未添加，无法自动刷新')
   })
+
+  it('does not treat non-refreshable provider sessions as missing refresh token', () => {
+    const input = {
+      auth_type: 'oauth',
+      oauth_managed: true,
+      can_refresh_oauth: false,
+    }
+
+    expect(getOAuthStatusDisplayWithFallback(input, 0)).toEqual({
+      text: '有效期未知',
+      isExpired: false,
+      isExpiringSoon: false,
+      isInvalid: false,
+    })
+    expect(getOAuthStatusTitle(input, 0)).toBe('Token 有效期未知')
+  })
 })

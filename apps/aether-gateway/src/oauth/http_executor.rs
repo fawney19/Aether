@@ -157,10 +157,5 @@ fn decode_response_bytes(bytes: &[u8], content_encoding: Option<&str>) -> Option
 }
 
 fn gateway_error_to_oauth_error(error: GatewayError) -> OAuthError {
-    match error {
-        GatewayError::UpstreamUnavailable { message, .. }
-        | GatewayError::ControlUnavailable { message, .. }
-        | GatewayError::Client { message, .. }
-        | GatewayError::Internal(message) => OAuthError::Transport(message),
-    }
+    OAuthError::Transport(error.into_message())
 }

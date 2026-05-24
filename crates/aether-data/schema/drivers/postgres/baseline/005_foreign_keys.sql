@@ -553,21 +553,6 @@ END $mig$;
 
 
 --
--- Name: usage usage_provider_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-DO $mig$ BEGIN
-  ALTER TABLE ONLY public.usage
-    ADD CONSTRAINT usage_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.providers(id) ON DELETE SET NULL;
-EXCEPTION
-  WHEN duplicate_object THEN NULL;
-  WHEN duplicate_table THEN NULL;
-  WHEN invalid_table_definition THEN NULL;
-END $mig$;
-
-
-
---
 -- Name: usage usage_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 

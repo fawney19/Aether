@@ -8,9 +8,9 @@ use aether_data::driver::postgres::{
 };
 use aether_data::PostgresBackend;
 use aether_runtime_state::{
-    RedisClientConfig, RedisClientFactory, RedisConsumerGroup, RedisConsumerName, RedisKeyspace,
-    RedisLockLease, RedisLockRunner, RedisLockRunnerConfig, RedisStreamName,
-    RedisStreamReclaimConfig, RedisStreamRunner, RedisStreamRunnerConfig,
+    RedisClientConfig, RedisConsumerGroup, RedisConsumerName, RedisKeyspace, RedisLockLease,
+    RedisLockRunner, RedisLockRunnerConfig, RedisStreamName, RedisStreamReclaimConfig,
+    RedisStreamRunner, RedisStreamRunnerConfig,
 };
 use aether_testkit::{init_test_runtime_for, ManagedPostgresServer, ManagedRedisServer};
 use futures_util::stream::{self, StreamExt};
@@ -189,12 +189,11 @@ async fn run_suite(
         })
         .expect("postgres url should resolve");
 
-    let redis_factory = RedisClientFactory::new(RedisClientConfig {
+    let redis_config = RedisClientConfig {
         url: redis_url.clone(),
         key_prefix: Some(format!("aether-dependency-pressure-{}", std::process::id())),
-    })?;
-    let redis_client = redis_factory.connect_lazy()?;
-    let redis_keyspace = redis_factory.config().keyspace();
+    };
+    let redis_keyspace = redis_config.keyspace();
     let postgres_backend = PostgresBackend::from_config(PostgresPoolConfig {
         database_url: postgres_url.clone(),
         min_connections: 1,
@@ -208,23 +207,23 @@ async fn run_suite(
 
     bootstrap_postgres_lease_table(postgres_backend.pool_clone(), config).await?;
 
-    let lock_runner = RedisLockRunner::new(
-        redis_client.clone(),
-        redis_keyspace.clone(),
+    let lock_runner = RedisLockRunner::from_config(
+        redis_config.clone(),
         RedisLockRunnerConfig {
             command_timeout_ms: Some(config.timeout.as_millis() as u64),
             default_ttl_ms: 5_000,
         },
-    )?;
-    let stream_runner = RedisStreamRunner::new(
-        redis_client.clone(),
-        redis_keyspace.clone(),
+    )
+    .await?;
+    let stream_runner = RedisStreamRunner::from_config(
+        redis_config,
         RedisStreamRunnerConfig {
             command_timeout_ms: Some(config.timeout.as_millis() as u64),
             read_block_ms: Some(10),
             read_count: 64,
         },
-    )?;
+    )
+    .await?;
     let lease_runner = postgres_backend.lease_runner(PostgresLeaseRunnerConfig {
         statement_timeout_ms: Some(config.timeout.as_millis() as u64),
         lock_timeout_ms: Some(1_000),

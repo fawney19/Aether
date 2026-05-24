@@ -185,6 +185,7 @@ impl<'a> AdminAppState<'a> {
         let standalone_wallets = self
             .list_wallet_snapshots_by_api_key_ids(&standalone_api_key_ids)
             .await?;
+        let usage_aggregates = self.export_admin_system_usage_aggregates().await?;
 
         let wallets_by_user_id = user_wallets
             .into_iter()
@@ -262,6 +263,7 @@ impl<'a> AdminAppState<'a> {
                     .collect::<Vec<_>>();
 
                 json!({
+                    "id": user.id.clone(),
                     "email": user.email.clone(),
                     "email_verified": user.email_verified,
                     "username": user.username.clone(),
@@ -306,6 +308,7 @@ impl<'a> AdminAppState<'a> {
             "user_groups": user_groups_data,
             "users": users_data,
             "standalone_keys": standalone_keys_data,
+            "usage_aggregates": usage_aggregates,
         }))
     }
 
@@ -330,6 +333,7 @@ impl<'a> AdminAppState<'a> {
         include_is_standalone: bool,
     ) -> serde_json::Value {
         let mut payload = serde_json::Map::from_iter([
+            ("api_key_id".to_string(), json!(key.api_key_id.clone())),
             ("key_hash".to_string(), json!(key.key_hash.clone())),
             ("name".to_string(), json!(key.name.clone())),
             (
@@ -344,6 +348,7 @@ impl<'a> AdminAppState<'a> {
                 "allowed_models".to_string(),
                 json!(key.allowed_models.clone()),
             ),
+            ("ip_rules".to_string(), json!(key.ip_rules.clone())),
             ("rate_limit".to_string(), json!(key.rate_limit)),
             ("concurrent_limit".to_string(), json!(key.concurrent_limit)),
             (

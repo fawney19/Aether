@@ -60,12 +60,7 @@ impl provider_transport::VideoTaskTransportSnapshotLookup for AppState {
     ) -> Result<Option<GatewayProviderTransportSnapshot>, String> {
         self.read_provider_transport_snapshot(provider_id, endpoint_id, key_id)
             .await
-            .map_err(|err| match err {
-                GatewayError::UpstreamUnavailable { message, .. }
-                | GatewayError::ControlUnavailable { message, .. }
-                | GatewayError::Client { message, .. }
-                | GatewayError::Internal(message) => message,
-            })
+            .map_err(GatewayError::into_message)
     }
 }
 
@@ -77,12 +72,7 @@ impl ModelFetchTransportRuntime for AppState {
     ) -> Result<Option<LocalResolvedOAuthRequestAuth>, String> {
         AppState::resolve_local_oauth_request_auth(self, transport)
             .await
-            .map_err(|err| match err {
-                GatewayError::UpstreamUnavailable { message, .. }
-                | GatewayError::ControlUnavailable { message, .. }
-                | GatewayError::Client { message, .. }
-                | GatewayError::Internal(message) => message,
-            })
+            .map_err(GatewayError::into_message)
     }
 
     async fn resolve_model_fetch_proxy(
@@ -99,12 +89,7 @@ impl ModelFetchTransportRuntime for AppState {
     ) -> Result<ExecutionResult, String> {
         execution_runtime::execute_execution_runtime_sync_plan(self, None, plan)
             .await
-            .map_err(|err| match err {
-                GatewayError::UpstreamUnavailable { message, .. }
-                | GatewayError::ControlUnavailable { message, .. }
-                | GatewayError::Client { message, .. }
-                | GatewayError::Internal(message) => message,
-            })
+            .map_err(GatewayError::into_message)
     }
 }
 

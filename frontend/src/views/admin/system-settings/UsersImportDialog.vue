@@ -67,6 +67,22 @@
       <p class="text-xs text-muted-foreground">
         注意：用户 API Keys 需要目标系统使用相同的 ENCRYPTION_KEY 环境变量才能正常工作。
       </p>
+
+      <div
+        v-if="importUsersProgress"
+        class="space-y-2 rounded-md border border-border p-3"
+      >
+        <div class="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+          <span>{{ importUsersProgress.message }}</span>
+          <span>{{ importUsersProgress.percent }}%</span>
+        </div>
+        <div class="h-1.5 overflow-hidden rounded-full bg-muted">
+          <div
+            class="h-full bg-primary transition-all"
+            :style="{ width: `${importUsersProgress.percent}%` }"
+          />
+        </div>
+      </div>
     </div>
 
     <template #footer>
@@ -175,6 +191,7 @@ import SelectContent from '@/components/ui/select-content.vue'
 import SelectItem from '@/components/ui/select-item.vue'
 import { Dialog } from '@/components/ui'
 import type { UsersExportData, UsersImportResponse } from '@/api/admin'
+import type { ImportProgressState } from './composables/useConfigExportImport'
 
 defineProps<{
   importUsersDialogOpen: boolean
@@ -184,6 +201,7 @@ defineProps<{
   usersMergeMode: 'skip' | 'overwrite' | 'error'
   usersMergeModeSelectOpen: boolean
   importUsersLoading: boolean
+  importUsersProgress: ImportProgressState | null
 }>()
 
 defineEmits<{

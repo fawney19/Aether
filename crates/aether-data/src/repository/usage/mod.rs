@@ -108,8 +108,7 @@ macro_rules! impl_materialized_usage_read_repository {
                 user_ids: &[String],
             ) -> Result<Vec<$crate::repository::usage::StoredUsageUserTotals>, $crate::DataLayerError>
             {
-                let repository = self.materialize_read_model().await?;
-                <$crate::repository::usage::InMemoryUsageReadRepository as $crate::repository::usage::UsageReadRepository>::summarize_usage_totals_by_user_ids(&repository, user_ids).await
+                <$repository>::summarize_usage_totals_by_user_ids(self, user_ids).await
             }
 
             async fn summarize_usage_cache_hit_summary(
@@ -163,8 +162,7 @@ macro_rules! impl_materialized_usage_read_repository {
                 $crate::repository::usage::StoredUsageDashboardSummary,
                 $crate::DataLayerError,
             > {
-                let repository = self.materialize_read_model().await?;
-                <$crate::repository::usage::InMemoryUsageReadRepository as $crate::repository::usage::UsageReadRepository>::summarize_dashboard_usage(&repository, query).await
+                <$repository>::summarize_dashboard_usage(self, query).await
             }
 
             async fn list_dashboard_daily_breakdown(
@@ -174,8 +172,7 @@ macro_rules! impl_materialized_usage_read_repository {
                 Vec<$crate::repository::usage::StoredUsageDashboardDailyBreakdownRow>,
                 $crate::DataLayerError,
             > {
-                let repository = self.materialize_read_model().await?;
-                <$crate::repository::usage::InMemoryUsageReadRepository as $crate::repository::usage::UsageReadRepository>::list_dashboard_daily_breakdown(&repository, query).await
+                <$repository>::list_dashboard_daily_breakdown(self, query).await
             }
 
             async fn summarize_dashboard_provider_counts(
@@ -349,8 +346,7 @@ macro_rules! impl_materialized_usage_read_repository {
                 Vec<$crate::repository::usage::StoredUsageDailySummary>,
                 $crate::DataLayerError,
             > {
-                let repository = self.materialize_read_model().await?;
-                <$crate::repository::usage::InMemoryUsageReadRepository as $crate::repository::usage::UsageReadRepository>::summarize_usage_daily_heatmap(&repository, query).await
+                <$repository>::summarize_usage_daily_heatmap(self, query).await
             }
         }
     };
@@ -640,15 +636,13 @@ pub(crate) fn provider_api_key_usage_is_error(
 pub(crate) fn provider_api_key_usage_contribution(
     usage: &StoredRequestUsageAudit,
 ) -> Option<ProviderApiKeyUsageContribution> {
-    if matches!(usage.status.as_str(), "pending" | "streaming") {
-        return None;
-    }
     let key_id = usage
         .provider_api_key_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())?
         .to_string();
+    let is_in_flight = matches!(usage.status.as_str(), "pending" | "streaming");
     let is_success = provider_api_key_usage_is_success(
         usage.status.as_str(),
         usage.status_code,
@@ -665,8 +659,14 @@ pub(crate) fn provider_api_key_usage_contribution(
         request_count: 1,
         success_count: i64::from(is_success),
         error_count: i64::from(is_error),
-        total_tokens: i64::try_from(usage.total_tokens).unwrap_or(i64::MAX),
-        total_cost_usd: if usage.total_cost_usd.is_finite() {
+        total_tokens: if is_in_flight {
+            0
+        } else {
+            i64::try_from(usage.total_tokens).unwrap_or(i64::MAX)
+        },
+        total_cost_usd: if is_in_flight {
+            0.0
+        } else if usage.total_cost_usd.is_finite() {
             usage.total_cost_usd.max(0.0)
         } else {
             0.0
@@ -1029,7 +1029,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_api_key_usage_contribution_tracks_terminal_requests_only() {
+    fn provider_api_key_usage_contribution_counts_in_flight_requests_once() {
         let usage = StoredRequestUsageAudit::new(
             "usage-1".to_string(),
             "request-1".to_string(),
@@ -1074,11 +1074,36 @@ mod tests {
 
         let mut streaming = usage.clone();
         streaming.status = "streaming".to_string();
-        assert!(provider_api_key_usage_contribution(&streaming).is_none());
+        let streaming_contribution =
+            provider_api_key_usage_contribution(&streaming).expect("streaming should count");
+        assert_eq!(streaming_contribution.request_count, 1);
+        assert_eq!(streaming_contribution.success_count, 0);
+        assert_eq!(streaming_contribution.error_count, 0);
+        assert_eq!(streaming_contribution.total_tokens, 0);
+        assert_eq!(streaming_contribution.total_cost_usd, 0.0);
+        assert_eq!(streaming_contribution.total_response_time_ms, 0);
 
-        let mut pending = usage;
+        let mut pending = usage.clone();
         pending.status = "pending".to_string();
-        assert!(provider_api_key_usage_contribution(&pending).is_none());
+        let pending_contribution =
+            provider_api_key_usage_contribution(&pending).expect("pending should count");
+        assert_eq!(pending_contribution.request_count, 1);
+        assert_eq!(pending_contribution.success_count, 0);
+        assert_eq!(pending_contribution.error_count, 0);
+        assert_eq!(pending_contribution.total_tokens, 0);
+        assert_eq!(pending_contribution.total_cost_usd, 0.0);
+        assert_eq!(pending_contribution.total_response_time_ms, 0);
+
+        let terminal_contribution =
+            provider_api_key_usage_contribution(&usage).expect("terminal should count");
+        let delta =
+            ProviderApiKeyUsageDelta::between(&pending_contribution, &terminal_contribution);
+        assert_eq!(delta.request_count, 0);
+        assert_eq!(delta.success_count, 1);
+        assert_eq!(delta.error_count, 0);
+        assert_eq!(delta.total_tokens, 20);
+        assert_eq!(delta.total_cost_usd, 0.25);
+        assert_eq!(delta.total_response_time_ms, 120);
     }
 
     #[test]

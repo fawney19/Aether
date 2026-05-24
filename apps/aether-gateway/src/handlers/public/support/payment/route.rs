@@ -7,8 +7,8 @@ use super::payment_shared::{
 };
 use super::{
     build_auth_error_response, build_payment_callback_storage_unavailable_response,
-    handle_payment_callback_with_wallet_repository, payment_epay, AppState,
-    GatewayPublicRequestContext,
+    handle_payment_callback_with_wallet_repository, payment_alipay, payment_epay, payment_stripe,
+    payment_wxpay, AppState, GatewayPublicRequestContext,
 };
 
 pub(super) async fn maybe_build_local_payment_callback_route_response(
@@ -28,6 +28,25 @@ pub(super) async fn maybe_build_local_payment_callback_route_response(
 
     if decision.route_kind.as_deref() == Some("epay_return") {
         return Some(payment_epay::handle_epay_return(state, request_context, request_body).await);
+    }
+
+    if decision.route_kind.as_deref() == Some("alipay_notify") {
+        return Some(
+            payment_alipay::handle_alipay_notify(state, request_context, request_body).await,
+        );
+    }
+
+    if decision.route_kind.as_deref() == Some("wxpay_notify") {
+        return Some(
+            payment_wxpay::handle_wxpay_notify(state, request_context, headers, request_body).await,
+        );
+    }
+
+    if decision.route_kind.as_deref() == Some("stripe_webhook") {
+        return Some(
+            payment_stripe::handle_stripe_webhook(state, request_context, headers, request_body)
+                .await,
+        );
     }
 
     if decision.route_kind.as_deref() != Some("callback") {

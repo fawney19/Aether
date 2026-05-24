@@ -66,6 +66,8 @@ export interface QuotaStatusSnapshot {
   plan_type?: string | null
   pool_tier?: string | null
   credits?: QuotaCreditsSnapshot | null
+  allowed_models_count?: number | null
+  rate_limit?: Record<string, unknown> | null
   windows?: QuotaWindowSnapshot[] | null
 }
 

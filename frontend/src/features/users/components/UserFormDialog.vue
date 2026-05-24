@@ -214,6 +214,9 @@
         </div>
 
         <div class="rounded-lg border border-border bg-muted/30 p-3">
+          <div class="mb-3 text-xs font-semibold text-muted-foreground">
+            功能权限
+          </div>
           <div class="flex items-center justify-between gap-3">
             <Label class="text-sm font-medium">敏感信息保护</Label>
             <Switch v-model="form.chat_pii_redaction_enabled" />
@@ -224,6 +227,15 @@
               v-model="form.chat_pii_redaction_placeholder_notice"
               :disabled="!form.chat_pii_redaction_enabled"
             />
+          </div>
+          <div class="mt-3 flex items-center justify-between gap-3 border-t border-border/60 pt-3">
+            <div>
+              <Label class="text-sm font-medium">通知推送服务</Label>
+              <p class="mt-1 text-xs text-muted-foreground">
+                允许用户配置自己的第三方推送渠道
+              </p>
+            </div>
+            <Switch v-model="form.notification_push_service_enabled" />
           </div>
         </div>
       </div>
@@ -271,6 +283,8 @@ import { log } from '@/utils/logger'
 import { parseNumberInput } from '@/utils/form'
 import {
   mergeChatPiiRedactionFeatureSettings,
+  mergeNotificationPushServiceFeatureSettings,
+  readNotificationPushServiceFeatureSettings,
   readChatPiiRedactionFeatureSettings,
 } from '@/utils/featureSettings'
 import {
@@ -323,6 +337,7 @@ const form = ref({
   group_ids: [] as string[],
   chat_pii_redaction_enabled: false,
   chat_pii_redaction_placeholder_notice: true,
+  notification_push_service_enabled: false,
 })
 
 const groupOptions = computed(() => (props.groups || []).map((group) => ({
@@ -348,6 +363,7 @@ function resetForm() {
     group_ids: [],
     chat_pii_redaction_enabled: false,
     chat_pii_redaction_placeholder_notice: true,
+    notification_push_service_enabled: false,
   }
 }
 
@@ -355,6 +371,7 @@ function loadUserData() {
   if (!props.user) return
   formNonce.value = createFieldNonce()
   const redactionFeature = readChatPiiRedactionFeatureSettings(props.user.feature_settings)
+  const notificationPushFeature = readNotificationPushServiceFeatureSettings(props.user.feature_settings)
   // 创建数组副本，避免与 props 数据共享引用
   form.value = {
     username: props.user.username,
@@ -368,6 +385,7 @@ function loadUserData() {
     group_ids: props.user.group_ids ? [...props.user.group_ids] : [],
     chat_pii_redaction_enabled: redactionFeature.enabled,
     chat_pii_redaction_placeholder_notice: redactionFeature.inject_model_instruction,
+    notification_push_service_enabled: notificationPushFeature.enabled,
   }
 }
 
@@ -442,10 +460,7 @@ async function handleSubmit() {
       unlimited: form.value.unlimited,
       role: form.value.role,
       group_ids: [...form.value.group_ids],
-      feature_settings: mergeChatPiiRedactionFeatureSettings(props.user?.feature_settings, {
-        enabled: form.value.chat_pii_redaction_enabled,
-        inject_model_instruction: form.value.chat_pii_redaction_placeholder_notice,
-      }),
+      feature_settings: buildFeatureSettingsPayload(),
     }
 
     if (isEditMode.value && props.user?.id) {
@@ -470,6 +485,16 @@ async function handleSubmit() {
   } finally {
     saving.value = false
   }
+}
+
+function buildFeatureSettingsPayload(): Record<string, unknown> | null {
+  const withRedaction = mergeChatPiiRedactionFeatureSettings(props.user?.feature_settings, {
+    enabled: form.value.chat_pii_redaction_enabled,
+    inject_model_instruction: form.value.chat_pii_redaction_placeholder_notice,
+  })
+  return mergeNotificationPushServiceFeatureSettings(withRedaction, {
+    enabled: form.value.notification_push_service_enabled,
+  })
 }
 
 // 设置保存状态（供父组件调用）

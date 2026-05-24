@@ -202,7 +202,7 @@ function mergeOAuthStatusDisplay(
 }
 
 function isOAuthCredentialWithoutRefreshToken(input: ProviderKeyStatusCarrier): boolean {
-  return isOAuthManagedCredential(input) && !canRefreshOAuthCredential(input)
+  return isOAuthManagedCredential(input) && input.oauth_temporary === true
 }
 
 function getMissingRefreshTokenStatus(): OAuthStatusInfo {

@@ -662,10 +662,5 @@ fn admin_provider_oauth_decode_response_bytes(
 }
 
 fn admin_provider_oauth_gateway_error_message(error: GatewayError) -> String {
-    match error {
-        GatewayError::UpstreamUnavailable { message, .. }
-        | GatewayError::ControlUnavailable { message, .. }
-        | GatewayError::Client { message, .. }
-        | GatewayError::Internal(message) => message,
-    }
+    error.into_message()
 }

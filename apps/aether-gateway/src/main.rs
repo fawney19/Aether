@@ -254,7 +254,7 @@ struct GatewayDataArgs {
     #[arg(
         long,
         env = "AETHER_GATEWAY_DATA_POSTGRES_MIN_CONNECTIONS",
-        default_value_t = 1
+        default_value_t = 4
     )]
     postgres_min_connections: u32,
 
@@ -497,6 +497,7 @@ impl GatewayUsageArgs {
     fn to_config(&self) -> UsageRuntimeConfig {
         UsageRuntimeConfig {
             enabled: true,
+            queue_terminal_events: true,
             stream_key: self.queue_stream_key.trim().to_string(),
             consumer_group: self.queue_group.trim().to_string(),
             dlq_stream_key: self.queue_dlq_stream_key.trim().to_string(),
@@ -1670,7 +1671,7 @@ mod tests {
                 encryption_key: None,
                 redis_url: None,
                 redis_key_prefix: None,
-                postgres_min_connections: 1,
+                postgres_min_connections: 4,
                 postgres_max_connections: 20,
                 postgres_acquire_timeout_ms: 10_000,
                 postgres_idle_timeout_ms: 30_000,

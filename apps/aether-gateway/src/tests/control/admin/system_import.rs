@@ -4,7 +4,9 @@ use aether_contracts::ExecutionPlan;
 use aether_crypto::{
     decrypt_python_fernet_ciphertext, encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY,
 };
-use aether_data::repository::auth::InMemoryAuthApiKeySnapshotRepository;
+use aether_data::repository::auth::{
+    InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
+};
 use aether_data::repository::auth_modules::{
     AuthModuleReadRepository, InMemoryAuthModuleReadRepository, StoredOAuthProviderModuleConfig,
 };
@@ -27,7 +29,7 @@ use axum::{extract::Request, Json, Router};
 use http::StatusCode;
 use serde_json::{json, Value};
 
-use super::super::helpers::{sample_endpoint, sample_key, sample_provider};
+use super::super::helpers::{hash_api_key, sample_endpoint, sample_key, sample_provider};
 use super::super::{
     build_router_with_state, build_state_with_execution_runtime_override, start_server, AppState,
 };
@@ -122,6 +124,14 @@ fn sample_system_import_payload() -> Value {
                 "name": "primary",
                 "api_formats": ["openai:chat"],
                 "auth_type": "api_key",
+                "auth_type_by_format": {
+                    "openai:chat": "api_key",
+                    "openai:video": "bearer"
+                },
+                "allow_auth_channel_mismatch_formats": [
+                    "openai:chat",
+                    "openai:video"
+                ],
                 "api_key": "sk-import-123",
                 "internal_priority": 5,
                 "is_active": true
@@ -371,6 +381,15 @@ async fn gateway_imports_admin_system_config_locally_and_persists_data() {
         .expect("api key should decrypt"),
         "sk-import-123"
     );
+    assert_eq!(keys[0].api_formats, Some(json!(["openai:chat"])));
+    assert_eq!(
+        keys[0].auth_type_by_format,
+        Some(json!({ "openai:chat": "api_key" }))
+    );
+    assert_eq!(
+        keys[0].allow_auth_channel_mismatch_formats,
+        Some(json!(["openai:chat"]))
+    );
 
     let provider_models = global_model_repository
         .list_admin_provider_models(&AdminProviderModelListQuery {
@@ -476,6 +495,73 @@ async fn gateway_imports_admin_system_config_locally_and_persists_data() {
     gateway_handle.abort();
     upstream_handle.abort();
     let _ = upstream_url;
+}
+
+#[tokio::test]
+async fn gateway_imports_admin_system_config_openai_image_aliases() {
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ));
+    let global_model_repository = Arc::new(InMemoryGlobalModelReadRepository::seed(Vec::<
+        StoredPublicGlobalModel,
+    >::new()));
+    let data_state = build_admin_system_data_state_with_repositories(
+        Arc::clone(&provider_catalog_repository),
+        Arc::clone(&global_model_repository),
+    );
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data_state),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let mut payload = sample_system_import_payload();
+    payload["providers"][0]["endpoints"][0]["api_format"] = json!("openai_image");
+    payload["providers"][0]["api_keys"][0]["api_formats"] = json!(["images"]);
+    payload["providers"][0]["api_keys"][0]["supported_endpoints"] = json!(["openai:image"]);
+    payload["providers"][0]["models"][0]["supports_image_generation"] = json!(true);
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/system/config/import"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&payload)
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let body: Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={body}");
+    assert_eq!(body["stats"]["endpoints"]["created"], json!(1));
+    assert_eq!(body["stats"]["keys"]["created"], json!(1));
+
+    let providers = provider_catalog_repository
+        .list_providers(false)
+        .await
+        .expect("providers should load");
+    let provider_ids = providers
+        .iter()
+        .map(|provider| provider.id.clone())
+        .collect::<Vec<_>>();
+    let endpoints = provider_catalog_repository
+        .list_endpoints_by_provider_ids(&provider_ids)
+        .await
+        .expect("endpoints should load");
+    assert_eq!(endpoints[0].api_format, "openai:image");
+
+    let keys = provider_catalog_repository
+        .list_keys_by_provider_ids(&provider_ids)
+        .await
+        .expect("keys should load");
+    assert_eq!(keys[0].api_formats, Some(json!(["openai:image"])));
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]
@@ -985,6 +1071,7 @@ async fn gateway_imports_admin_system_users_locally_and_persists_data() {
         .expect("user api keys should load");
     assert_eq!(user_api_keys.len(), 1);
     assert_eq!(user_api_keys[0].name.as_deref(), Some("Alice CLI"));
+    assert_eq!(user_api_keys[0].total_requests, 12);
     assert_eq!(user_api_keys[0].total_tokens, 3456);
     assert_eq!(user_api_keys[0].total_cost_usd, 1.25);
     assert_eq!(
@@ -1012,6 +1099,7 @@ async fn gateway_imports_admin_system_users_locally_and_persists_data() {
         standalone_keys[0].name.as_deref(),
         Some("Imported Standalone")
     );
+    assert_eq!(standalone_keys[0].total_requests, 3);
     assert_eq!(standalone_keys[0].total_tokens, 789);
     assert_eq!(standalone_keys[0].total_cost_usd, 0.75);
     assert_eq!(
@@ -1050,6 +1138,211 @@ async fn gateway_imports_admin_system_users_locally_and_persists_data() {
     gateway_handle.abort();
     upstream_handle.abort();
     let _ = upstream_url;
+}
+
+#[tokio::test]
+async fn gateway_overwrites_existing_admin_system_user_key_usage_totals() {
+    let user_key_hash = hash_api_key("sk-existing-user-key");
+    let standalone_key_hash = hash_api_key("sk-existing-standalone-key");
+    let existing_user = StoredUserAuthRecord::new(
+        "user-existing".to_string(),
+        Some("existing@example.com".to_string()),
+        true,
+        "existing".to_string(),
+        Some("existing-hash".to_string()),
+        "user".to_string(),
+        "local".to_string(),
+        None,
+        None,
+        None,
+        true,
+        false,
+        Some(chrono::Utc::now()),
+        Some(chrono::Utc::now()),
+    )
+    .expect("existing user should build");
+    let user_key_snapshot = StoredAuthApiKeySnapshot::new(
+        "user-existing".to_string(),
+        "existing".to_string(),
+        Some("existing@example.com".to_string()),
+        "user".to_string(),
+        "local".to_string(),
+        true,
+        false,
+        None,
+        None,
+        None,
+        "key-user-existing".to_string(),
+        Some("Existing User Key".to_string()),
+        true,
+        false,
+        false,
+        Some(10),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("user key snapshot should build");
+    let standalone_key_snapshot = StoredAuthApiKeySnapshot::new(
+        "admin-user-123".to_string(),
+        "admin".to_string(),
+        Some("admin@example.com".to_string()),
+        "admin".to_string(),
+        "local".to_string(),
+        true,
+        false,
+        None,
+        None,
+        None,
+        "key-standalone-existing".to_string(),
+        Some("Existing Standalone Key".to_string()),
+        true,
+        false,
+        true,
+        Some(20),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("standalone key snapshot should build");
+    let auth_repository = Arc::new(
+        InMemoryAuthApiKeySnapshotRepository::seed(vec![
+            (Some(user_key_hash.clone()), user_key_snapshot),
+            (Some(standalone_key_hash.clone()), standalone_key_snapshot),
+        ])
+        .with_export_records(vec![
+            StoredAuthApiKeyExportRecord::new(
+                "user-existing".to_string(),
+                "key-user-existing".to_string(),
+                user_key_hash.clone(),
+                None,
+                Some("Existing User Key".to_string()),
+                None,
+                None,
+                None,
+                Some(10),
+                None,
+                None,
+                true,
+                None,
+                false,
+                1,
+                2,
+                0.03,
+                false,
+            )
+            .expect("existing user key export should build"),
+            StoredAuthApiKeyExportRecord::new(
+                "admin-user-123".to_string(),
+                "key-standalone-existing".to_string(),
+                standalone_key_hash.clone(),
+                None,
+                Some("Existing Standalone Key".to_string()),
+                None,
+                None,
+                None,
+                Some(20),
+                None,
+                None,
+                true,
+                None,
+                false,
+                4,
+                5,
+                0.06,
+                true,
+            )
+            .expect("existing standalone key export should build"),
+        ]),
+    );
+    let user_repository =
+        Arc::new(aether_data::repository::users::InMemoryUserReadRepository::default());
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_auth_api_key_repository_for_tests(Arc::clone(&auth_repository))
+                .with_user_reader(user_repository)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        )
+        .with_auth_users_for_tests([sample_import_admin_user("admin-user-123"), existing_user])
+        .with_auth_wallets_for_tests(Vec::<StoredWalletSnapshot>::new());
+    let gateway = build_router_with_state(state.clone());
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/system/users/import"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "version": "1.4",
+            "merge_mode": "overwrite",
+            "users": [{
+                "id": "source-user-existing",
+                "email": "existing@example.com",
+                "username": "existing",
+                "password_hash": "existing-hash",
+                "role": "user",
+                "is_active": true,
+                "api_keys": [{
+                    "api_key_id": "source-user-key",
+                    "key_hash": user_key_hash,
+                    "name": "Imported User Key",
+                    "is_active": true,
+                    "total_requests": 222,
+                    "total_tokens": 3333,
+                    "total_cost_usd": 4.56
+                }]
+            }],
+            "standalone_keys": [{
+                "api_key_id": "source-standalone-key",
+                "key_hash": standalone_key_hash,
+                "name": "Imported Standalone Key",
+                "is_active": true,
+                "total_requests": 444,
+                "total_tokens": 5555,
+                "total_cost_usd": 6.78
+            }]
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let payload: Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={payload}");
+    assert_eq!(payload["stats"]["users"]["updated"], json!(1));
+    assert_eq!(payload["stats"]["api_keys"]["updated"], json!(1));
+    assert_eq!(payload["stats"]["standalone_keys"]["updated"], json!(1));
+
+    let updated_records = state
+        .list_auth_api_key_export_records_by_ids(&[
+            "key-user-existing".to_string(),
+            "key-standalone-existing".to_string(),
+        ])
+        .await
+        .expect("api key export records should load");
+    let user_key = updated_records
+        .iter()
+        .find(|record| record.api_key_id == "key-user-existing")
+        .expect("updated user key should exist");
+    assert_eq!(user_key.total_requests, 222);
+    assert_eq!(user_key.total_tokens, 3333);
+    assert_eq!(user_key.total_cost_usd, 4.56);
+    let standalone_key = updated_records
+        .iter()
+        .find(|record| record.api_key_id == "key-standalone-existing")
+        .expect("updated standalone key should exist");
+    assert_eq!(standalone_key.total_requests, 444);
+    assert_eq!(standalone_key.total_tokens, 5555);
+    assert_eq!(standalone_key.total_cost_usd, 6.78);
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]
@@ -1604,33 +1897,20 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
 }
 
 #[tokio::test]
-async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_import_and_forces_refresh(
+async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_import_without_refresh(
 ) {
-    #[derive(Debug, Clone)]
-    struct SeenRefreshRequest {
-        content_type: String,
-        body: String,
-    }
-
-    let seen_refresh = Arc::new(Mutex::new(None::<SeenRefreshRequest>));
+    let seen_refresh = Arc::new(Mutex::new(false));
     let seen_refresh_clone = Arc::clone(&seen_refresh);
     let refresh_hits = Arc::new(Mutex::new(0usize));
     let refresh_hits_clone = Arc::clone(&refresh_hits);
     let refresh_server = Router::new().route(
         "/oauth/token",
-        post(move |headers: HeaderMap, body: Bytes| {
+        post(move |_headers: HeaderMap, _body: Bytes| {
             let seen_refresh_inner = Arc::clone(&seen_refresh_clone);
             let refresh_hits_inner = Arc::clone(&refresh_hits_clone);
             async move {
                 *refresh_hits_inner.lock().expect("mutex should lock") += 1;
-                *seen_refresh_inner.lock().expect("mutex should lock") = Some(SeenRefreshRequest {
-                    content_type: headers
-                        .get(http::header::CONTENT_TYPE)
-                        .and_then(|value| value.to_str().ok())
-                        .unwrap_or_default()
-                        .to_string(),
-                    body: String::from_utf8(body.to_vec()).unwrap_or_default(),
-                });
+                *seen_refresh_inner.lock().expect("mutex should lock") = true;
                 axum::Json(json!({
                     "access_token": "oauth-access-token-refreshed",
                     "refresh_token": "oauth-refresh-token-refreshed",
@@ -1725,21 +2005,8 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(*refresh_hits.lock().expect("mutex should lock"), 1);
-
-    let seen_refresh = seen_refresh
-        .lock()
-        .expect("mutex should lock")
-        .clone()
-        .expect("refresh request should be captured");
-    assert_eq!(
-        seen_refresh.content_type,
-        "application/x-www-form-urlencoded"
-    );
-    assert!(seen_refresh.body.contains("grant_type=refresh_token"));
-    assert!(seen_refresh
-        .body
-        .contains("refresh_token=oauth-refresh-token-new"));
+    assert_eq!(*refresh_hits.lock().expect("mutex should lock"), 0);
+    assert!(!*seen_refresh.lock().expect("mutex should lock"));
 
     let providers = provider_catalog_repository
         .list_providers(false)
@@ -1756,7 +2023,7 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
     assert_eq!(key.name, "oauth-primary");
     assert_eq!(key.oauth_invalid_at_unix_secs, None);
     assert_eq!(key.oauth_invalid_reason, None);
-    assert!(key.expires_at_unix_secs.is_some());
+    assert_eq!(key.expires_at_unix_secs, None);
     assert_eq!(
         decrypt_python_fernet_ciphertext(
             DEVELOPMENT_ENCRYPTION_KEY,
@@ -1765,7 +2032,7 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
                 .expect("api key should be present"),
         )
         .expect("oauth access token should decrypt"),
-        "oauth-access-token-refreshed"
+        "oauth-access-token-new"
     );
 
     let auth_config = decrypt_python_fernet_ciphertext(
@@ -1778,15 +2045,12 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
     let auth_config: Value =
         serde_json::from_str(&auth_config).expect("oauth auth config json should parse");
     assert_eq!(auth_config["provider_type"], "codex");
-    assert_eq!(
-        auth_config["refresh_token"],
-        "oauth-refresh-token-refreshed"
-    );
+    assert_eq!(auth_config["refresh_token"], "oauth-refresh-token-new");
     assert_eq!(auth_config["email"], "alice@example.com");
     assert_eq!(auth_config["account_id"], "acct-codex-123");
     assert_eq!(auth_config["plan_type"], "plus");
-    assert_eq!(auth_config["token_type"], "Bearer");
-    assert_eq!(auth_config["expires_at"].as_u64(), key.expires_at_unix_secs);
+    assert!(auth_config.get("token_type").is_none());
+    assert!(auth_config.get("expires_at").is_none());
 
     gateway_handle.abort();
     refresh_handle.abort();

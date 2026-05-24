@@ -12,10 +12,16 @@ WHERE created_at >= $1
   AND provider_name NOT IN ('unknown', 'pending')
 "#;
 pub(super) const SELECT_STATS_HOURLY_AGGREGATE_SQL: &str = r#"
+WITH bucket_usage AS MATERIALIZED (
+    SELECT *
+    FROM usage_billing_facts
+    WHERE created_at >= $1
+      AND created_at < $2
+)
 SELECT
     (
         SELECT CAST(COUNT(cache_hit_usage.id) AS BIGINT)
-        FROM usage_billing_facts AS cache_hit_usage
+        FROM bucket_usage AS cache_hit_usage
         WHERE cache_hit_usage.created_at >= $1
           AND cache_hit_usage.created_at < $2
     ) AS cache_hit_total_requests,
@@ -25,13 +31,13 @@ SELECT
                 WHERE GREATEST(COALESCE(cache_hit_usage.cache_read_input_tokens, 0), 0) > 0
             ) AS BIGINT
         )
-        FROM usage_billing_facts AS cache_hit_usage
+        FROM bucket_usage AS cache_hit_usage
         WHERE cache_hit_usage.created_at >= $1
           AND cache_hit_usage.created_at < $2
     ) AS cache_hit_requests,
     (
         SELECT CAST(COUNT(completed_usage.id) AS BIGINT)
-        FROM usage_billing_facts AS completed_usage
+        FROM bucket_usage AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -42,7 +48,7 @@ SELECT
                 WHERE GREATEST(COALESCE(completed_usage.cache_read_input_tokens, 0), 0) > 0
             ) AS BIGINT
         )
-        FROM usage_billing_facts AS completed_usage
+        FROM bucket_usage AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -51,7 +57,7 @@ SELECT
         SELECT CAST(
             COALESCE(SUM(GREATEST(COALESCE(completed_usage.input_tokens, 0), 0)), 0) AS BIGINT
         )
-        FROM usage_billing_facts AS completed_usage
+        FROM bucket_usage AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -74,7 +80,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage_billing_facts AS completed_usage
+        FROM bucket_usage AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -86,7 +92,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage_billing_facts AS completed_usage
+        FROM bucket_usage AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -224,7 +230,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage_billing_facts AS completed_usage
+        FROM bucket_usage AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -241,7 +247,7 @@ SELECT
                 0
             ) AS DOUBLE PRECISION
         )
-        FROM usage_billing_facts AS completed_usage
+        FROM bucket_usage AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -255,7 +261,7 @@ SELECT
                 0
             ) AS DOUBLE PRECISION
         )
-        FROM usage_billing_facts AS completed_usage
+        FROM bucket_usage AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -265,7 +271,7 @@ SELECT
             COALESCE(SUM(COALESCE(CAST(settled_usage.total_cost_usd AS DOUBLE PRECISION), 0)), 0)
                 AS DOUBLE PRECISION
         )
-        FROM usage_billing_facts AS settled_usage
+        FROM bucket_usage AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -273,7 +279,7 @@ SELECT
     ) AS settled_total_cost,
     (
         SELECT CAST(COUNT(settled_usage.id) AS BIGINT)
-        FROM usage_billing_facts AS settled_usage
+        FROM bucket_usage AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -283,7 +289,7 @@ SELECT
         SELECT CAST(
             COALESCE(SUM(GREATEST(COALESCE(settled_usage.input_tokens, 0), 0)), 0) AS BIGINT
         )
-        FROM usage_billing_facts AS settled_usage
+        FROM bucket_usage AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -293,7 +299,7 @@ SELECT
         SELECT CAST(
             COALESCE(SUM(GREATEST(COALESCE(settled_usage.output_tokens, 0), 0)), 0) AS BIGINT
         )
-        FROM usage_billing_facts AS settled_usage
+        FROM bucket_usage AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -306,7 +312,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage_billing_facts AS settled_usage
+        FROM bucket_usage AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -319,7 +325,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage_billing_facts AS settled_usage
+        FROM bucket_usage AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -327,7 +333,7 @@ SELECT
     ) AS settled_cache_read_tokens,
     (
         SELECT MIN(CAST(EXTRACT(EPOCH FROM settled_usage.finalized_at) AS BIGINT))
-        FROM usage_billing_facts AS settled_usage
+        FROM bucket_usage AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -335,7 +341,7 @@ SELECT
     ) AS settled_first_finalized_at_unix_secs,
     (
         SELECT MAX(CAST(EXTRACT(EPOCH FROM settled_usage.finalized_at) AS BIGINT))
-        FROM usage_billing_facts AS settled_usage
+        FROM bucket_usage AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'

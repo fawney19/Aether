@@ -426,6 +426,7 @@ mod tests {
         keys: Arc<Mutex<Vec<StoredProviderCatalogKey>>>,
         transports: Arc<HashMap<(String, String, String), GatewayProviderTransportSnapshot>>,
         execution_results: Arc<Mutex<VecDeque<ExecutionResult>>>,
+        executed_plans: Arc<Mutex<Vec<ExecutionPlan>>>,
         cached_models: Arc<Mutex<HashMap<(String, String), Vec<Value>>>>,
     }
 
@@ -443,6 +444,7 @@ mod tests {
                 keys: Arc::new(Mutex::new(keys)),
                 transports: Arc::new(transports),
                 execution_results: Arc::new(Mutex::new(VecDeque::from(execution_results))),
+                executed_plans: Arc::new(Mutex::new(Vec::new())),
                 cached_models: Arc::new(Mutex::new(HashMap::new())),
             }
         }
@@ -482,8 +484,12 @@ mod tests {
 
         async fn execute_model_fetch_execution_plan(
             &self,
-            _plan: &ExecutionPlan,
+            plan: &ExecutionPlan,
         ) -> Result<ExecutionResult, String> {
+            self.executed_plans
+                .lock()
+                .expect("executed plans mutex")
+                .push(plan.clone());
             self.execution_results
                 .lock()
                 .expect("execution result mutex")
@@ -907,6 +913,134 @@ mod tests {
                 .and_then(|value| value.get("gemini-2.5-pro"))
                 .and_then(|value| value.get("reset_time")),
             Some(&json!("2026-04-12T00:00:00Z"))
+        );
+    }
+
+    #[tokio::test]
+    async fn model_fetch_fetches_windsurf_model_configs_and_persists_allowed_models() {
+        let provider = sample_provider("provider-windsurf", "windsurf");
+        let endpoint = StoredProviderCatalogEndpoint::new(
+            "endpoint-windsurf-chat".to_string(),
+            "provider-windsurf".to_string(),
+            "openai:chat".to_string(),
+            None,
+            None,
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://server.codeium.com".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build");
+        let key = sample_key(
+            "key-windsurf",
+            "provider-windsurf",
+            "api_key",
+            &["openai:chat"],
+        );
+        let mut transport = sample_transport(
+            "windsurf",
+            "provider-windsurf",
+            "endpoint-windsurf-chat",
+            "key-windsurf",
+            "openai:chat",
+            "api_key",
+            Some(r#"{"provider_type":"windsurf"}"#),
+        );
+        transport.endpoint.base_url = "https://server.codeium.com".to_string();
+        transport.key.decrypted_api_key = "devin-session-token$abc".to_string();
+        let state = TestState::new(
+            vec![provider],
+            vec![endpoint],
+            vec![key],
+            HashMap::from([(
+                (
+                    "provider-windsurf".to_string(),
+                    "endpoint-windsurf-chat".to_string(),
+                    "key-windsurf".to_string(),
+                ),
+                transport,
+            )]),
+            vec![execution_result(json!({
+                "clientModelConfigs": [
+                    {
+                        "modelUid": "claude-sonnet-4-6",
+                        "label": "Claude Sonnet 4.6",
+                        "provider": "anthropic",
+                        "supportsImages": true,
+                        "creditMultiplier": 4
+                    },
+                    {
+                        "modelUid": "gpt-5.4",
+                        "label": "GPT-5.4",
+                        "provider": "openai"
+                    }
+                ],
+                "defaultOverrideModelConfig": {
+                    "modelUid": "claude-sonnet-4-6"
+                }
+            }))],
+        );
+
+        let summary = perform_model_fetch_once_with_state(&state)
+            .await
+            .expect("fetch should succeed");
+
+        assert_eq!(summary.succeeded, 1);
+        let plans = state.executed_plans.lock().expect("executed plans mutex");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].url,
+            "https://server.codeium.com/exa.api_server_pb.ApiServerService/GetCascadeModelConfigs"
+        );
+        assert_eq!(plans[0].method, "POST");
+        assert_eq!(plans[0].provider_api_format, "windsurf:model_configs");
+        assert_eq!(
+            plans[0]
+                .body
+                .json_body
+                .as_ref()
+                .and_then(|body| body.get("metadata"))
+                .and_then(|metadata| metadata.get("apiKey")),
+            Some(&json!("devin-session-token$abc"))
+        );
+        drop(plans);
+
+        let updated = state.key("key-windsurf");
+        assert_eq!(
+            updated.allowed_models,
+            Some(json!(["claude-sonnet-4-6", "gpt-5.4"]))
+        );
+        assert_eq!(
+            updated
+                .upstream_metadata
+                .as_ref()
+                .and_then(|value| value.get("windsurf"))
+                .and_then(|value| value.get("allowed_models_count")),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            updated
+                .upstream_metadata
+                .as_ref()
+                .and_then(|value| value.get("windsurf"))
+                .and_then(|value| value.get("default_model_uid")),
+            Some(&json!("claude-sonnet-4-6"))
+        );
+        let cached = state.cached_models.lock().expect("cache mutex");
+        let cached_models = cached
+            .get(&("provider-windsurf".to_string(), "key-windsurf".to_string()))
+            .expect("cached models should be written");
+        assert_eq!(
+            cached_models[0]["api_formats"],
+            json!(["openai:chat", "openai:responses", "claude:messages"])
         );
     }
 

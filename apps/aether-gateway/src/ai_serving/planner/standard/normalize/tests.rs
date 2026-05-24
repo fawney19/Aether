@@ -209,7 +209,7 @@ fn local_openai_responses_compact_wrapper_strips_include_for_codex_requests() {
     assert_eq!(provider_request_body["instructions"], "");
     assert_eq!(
         provider_request_body["prompt_cache_key"],
-        "172c39e6-c0a0-5a70-8b63-e0f8e0d185a3"
+        "3d2e2842-74cb-55dd-803a-b8940b3500c2"
     );
 }
 
@@ -355,7 +355,7 @@ fn injects_codex_prompt_cache_key_for_openai_responses_cross_format_requests() {
 
     assert_eq!(
         provider_request_body["prompt_cache_key"],
-        "172c39e6-c0a0-5a70-8b63-e0f8e0d185a3"
+        "b4dfeb75-b105-544c-a706-39b92f0bddb0"
     );
 }
 
@@ -385,6 +385,6 @@ fn injects_codex_prompt_cache_key_for_openai_chat_cross_format_requests() {
 
     assert_eq!(
         provider_request_body["prompt_cache_key"],
-        "172c39e6-c0a0-5a70-8b63-e0f8e0d185a3"
+        "4ee6ea6e-3ac6-5a18-8cb8-1f8b956419e5"
     );
 }

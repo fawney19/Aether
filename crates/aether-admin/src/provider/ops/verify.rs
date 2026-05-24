@@ -797,27 +797,29 @@ pub fn admin_provider_ops_sub2api_verify_payload(
         }
     }
 
+    let username_or_email = admin_provider_ops_sub2api_non_empty_string(user_data, "username")
+        .or_else(|| admin_provider_ops_sub2api_non_empty_string(user_data, "email"));
     admin_provider_ops_verify_success(
         admin_provider_ops_verify_user_payload(
-            user_data
-                .get("username")
-                .or_else(|| user_data.get("email"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            user_data
-                .get("username")
-                .or_else(|| user_data.get("email"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            user_data
-                .get("email")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
+            username_or_email.clone(),
+            username_or_email,
+            admin_provider_ops_sub2api_non_empty_string(user_data, "email"),
             Some(balance + points),
             Some(extra),
         ),
         updated_credentials,
     )
+}
+
+fn admin_provider_ops_sub2api_non_empty_string(
+    map: &Map<String, Value>,
+    key: &str,
+) -> Option<String> {
+    map.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 #[cfg(test)]
@@ -911,6 +913,28 @@ mod tests {
             payload["updated_credentials"],
             json!({ "refresh_token": "refresh-token-new" })
         );
+    }
+
+    #[test]
+    fn sub2api_verify_payload_falls_back_to_email_when_username_is_null() {
+        let payload = admin_provider_ops_sub2api_verify_payload(
+            StatusCode::OK,
+            &json!({
+                "code": 0,
+                "data": {
+                    "username": null,
+                    "email": "user@example.com",
+                    "balance": 2.0,
+                    "points": 0.0
+                }
+            }),
+            None,
+        );
+
+        assert_eq!(payload["success"], json!(true));
+        assert_eq!(payload["data"]["username"], json!("user@example.com"));
+        assert_eq!(payload["data"]["display_name"], json!("user@example.com"));
+        assert_eq!(payload["data"]["email"], json!("user@example.com"));
     }
 
     #[test]

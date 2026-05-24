@@ -14,9 +14,12 @@ use crate::formats::openai::chat::stream::{
 };
 use crate::formats::shared::sse::{encode_done_sse, encode_json_sse};
 use crate::formats::shared::stream_core::common::{
-    build_openai_chat_chunk, build_openai_chat_finish_chunk, build_openai_chat_usage_chunk,
+    build_openai_chat_chunk, build_openai_chat_finish_chunk,
+    build_openai_chat_usage_chunk_with_cache,
 };
-use crate::formats::shared::stream_core::CanonicalStreamFrame;
+use crate::formats::shared::stream_core::{
+    CanonicalStreamFrame, StreamingStandardFormatMatrix, StreamingStandardTerminalObserver,
+};
 use crate::formats::shared::AiSurfaceFinalizeError;
 
 pub struct SyncToStreamBridgeOutcome {
@@ -32,6 +35,14 @@ pub fn maybe_bridge_standard_sync_json_to_stream(
 ) -> Result<Option<SyncToStreamBridgeOutcome>, AiSurfaceFinalizeError> {
     let provider_api_format = normalize_api_format(provider_api_format);
     let client_api_format = normalize_api_format(client_api_format);
+    if let Some(outcome) = maybe_bridge_aether_sse_response_capture_to_stream(
+        provider_body_json,
+        provider_api_format.as_str(),
+        client_api_format.as_str(),
+        report_context,
+    )? {
+        return Ok(Some(outcome));
+    }
     if provider_api_format == "openai:image" {
         return match client_api_format.as_str() {
             "openai:image" => {
@@ -161,20 +172,29 @@ fn maybe_bridge_openai_image_sync_json_to_chat_stream(
         None,
         &build_openai_chat_finish_chunk(&response_id, &model, Some("stop")),
     )?);
-    if let Some((input_tokens, output_tokens, total_tokens, reasoning_tokens)) = summary
+    if let Some((
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        reasoning_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    )) = summary
         .standardized_usage
         .as_ref()
         .and_then(openai_chat_usage_counts)
     {
         sse_body.extend(encode_json_sse(
             None,
-            &build_openai_chat_usage_chunk(
+            &build_openai_chat_usage_chunk_with_cache(
                 &response_id,
                 &model,
                 input_tokens,
                 output_tokens,
                 total_tokens,
                 reasoning_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
             ),
         )?);
     }
@@ -479,10 +499,12 @@ fn openai_image_standardized_usage(
     (standardized_usage.signal_score() > 0).then_some(standardized_usage)
 }
 
-fn openai_chat_usage_counts(usage: &StandardizedUsage) -> Option<(u64, u64, u64, u64)> {
+fn openai_chat_usage_counts(usage: &StandardizedUsage) -> Option<(u64, u64, u64, u64, u64, u64)> {
     let input_tokens = usage.input_tokens.max(0) as u64;
     let output_tokens = usage.output_tokens.max(0) as u64;
     let reasoning_tokens = usage.reasoning_tokens.max(0) as u64;
+    let cache_creation_tokens = usage.cache_creation_tokens.max(0) as u64;
+    let cache_read_tokens = usage.cache_read_tokens.max(0) as u64;
     let total_tokens = usage
         .dimensions
         .get("total_tokens")
@@ -492,7 +514,14 @@ fn openai_chat_usage_counts(usage: &StandardizedUsage) -> Option<(u64, u64, u64,
                 .saturating_add(output_tokens)
                 .saturating_add(reasoning_tokens)
         });
-    (total_tokens > 0).then_some((input_tokens, output_tokens, total_tokens, reasoning_tokens))
+    (total_tokens > 0).then_some((
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        reasoning_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    ))
 }
 
 fn openai_image_bridge_response_id(
@@ -584,6 +613,173 @@ fn is_standard_api_format(value: &str) -> bool {
             | "claude:messages"
             | "gemini:generate_content"
     )
+}
+
+fn maybe_bridge_aether_sse_response_capture_to_stream(
+    provider_body_json: &Value,
+    provider_api_format: &str,
+    client_api_format: &str,
+    report_context: Option<&Value>,
+) -> Result<Option<SyncToStreamBridgeOutcome>, AiSurfaceFinalizeError> {
+    let Some(object) = provider_body_json.as_object() else {
+        return Ok(None);
+    };
+    let status_code = object
+        .get("status_code")
+        .or_else(|| object.get("statusCode"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if !(200..300).contains(&status_code) {
+        return Ok(None);
+    }
+
+    let Some(headers) = object.get("headers").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let content_type = response_capture_header(headers, "content-type").unwrap_or_default();
+    if !content_type
+        .to_ascii_lowercase()
+        .contains("text/event-stream")
+    {
+        return Ok(None);
+    }
+
+    let Some(body_text) = object.get("body").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if body_text.trim().is_empty() || body_text.contains("...[truncated]") {
+        return Ok(None);
+    }
+
+    let captured_api_format =
+        response_capture_header(headers, "x-aether-control-endpoint-signature")
+            .map(normalize_api_format)
+            .or_else(|| infer_sse_body_api_format(body_text))
+            .unwrap_or_else(|| provider_api_format.to_string());
+    if !is_standard_api_format(captured_api_format.as_str())
+        || !is_standard_api_format(client_api_format)
+    {
+        return Ok(None);
+    }
+
+    let bridge_context = build_bridge_report_context(
+        report_context,
+        captured_api_format.as_str(),
+        client_api_format,
+    );
+    let sse_body = if captured_api_format == client_api_format {
+        body_text.as_bytes().to_vec()
+    } else {
+        rewrite_sse_body_between_formats(
+            body_text.as_bytes(),
+            captured_api_format.as_str(),
+            client_api_format,
+            &bridge_context,
+        )?
+    };
+    let terminal_summary = observe_sse_terminal_summary(
+        body_text.as_bytes(),
+        captured_api_format.as_str(),
+        &bridge_context,
+    )?;
+
+    Ok(Some(SyncToStreamBridgeOutcome {
+        sse_body,
+        terminal_summary,
+    }))
+}
+
+fn response_capture_header<'a>(headers: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .and_then(|(_, value)| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn infer_sse_body_api_format(body_text: &str) -> Option<String> {
+    if body_text.contains("event: message_start")
+        || body_text.contains("\"type\":\"message_start\"")
+    {
+        return Some("claude:messages".to_string());
+    }
+    if body_text.contains("event: response.") || body_text.contains("\"type\":\"response.") {
+        return Some("openai:responses".to_string());
+    }
+    if body_text.contains("data: [DONE]")
+        || body_text.contains("\"object\":\"chat.completion.chunk\"")
+    {
+        return Some("openai:chat".to_string());
+    }
+    if body_text.contains("\"candidates\"") && body_text.contains("\"finishReason\"") {
+        return Some("gemini:generate_content".to_string());
+    }
+    None
+}
+
+fn rewrite_sse_body_between_formats(
+    body: &[u8],
+    provider_api_format: &str,
+    client_api_format: &str,
+    report_context: &Value,
+) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+    let mut context =
+        build_bridge_report_context(Some(report_context), provider_api_format, client_api_format);
+    if let Some(object) = context.as_object_mut() {
+        object.insert(
+            "provider_stream_event_api_format".to_string(),
+            Value::String(provider_api_format.to_string()),
+        );
+    }
+
+    let mut matrix = StreamingStandardFormatMatrix::default();
+    let mut out = Vec::new();
+    for_each_sse_line(body, |line| {
+        out.extend(matrix.transform_line(&context, line)?);
+        Ok(())
+    })?;
+    out.extend(matrix.finish(&context)?);
+    Ok(out)
+}
+
+fn observe_sse_terminal_summary(
+    body: &[u8],
+    provider_api_format: &str,
+    report_context: &Value,
+) -> Result<Option<ExecutionStreamTerminalSummary>, AiSurfaceFinalizeError> {
+    let mut context = build_bridge_report_context(
+        Some(report_context),
+        provider_api_format,
+        provider_api_format,
+    );
+    if let Some(object) = context.as_object_mut() {
+        object.insert(
+            "provider_stream_event_api_format".to_string(),
+            Value::String(provider_api_format.to_string()),
+        );
+    }
+
+    let mut observer = StreamingStandardTerminalObserver::default();
+    for_each_sse_line(body, |line| observer.push_line(&context, line))?;
+    observer.finish(&context)
+}
+
+fn for_each_sse_line<F>(body: &[u8], mut on_line: F) -> Result<(), AiSurfaceFinalizeError>
+where
+    F: FnMut(Vec<u8>) -> Result<(), AiSurfaceFinalizeError>,
+{
+    let mut start = 0usize;
+    for (index, byte) in body.iter().enumerate() {
+        if *byte == b'\n' {
+            on_line(body[start..=index].to_vec())?;
+            start = index + 1;
+        }
+    }
+    if start < body.len() {
+        on_line(body[start..].to_vec())?;
+    }
+    Ok(())
 }
 
 fn extract_openai_image_sync_b64_json(item: &serde_json::Map<String, Value>) -> Option<String> {
@@ -1030,7 +1226,11 @@ mod tests {
                 "usage": {
                     "total_tokens": 100,
                     "input_tokens": 50,
-                    "output_tokens": 50
+                    "output_tokens": 50,
+                    "input_tokens_details": {
+                        "cached_tokens": 20,
+                        "cached_creation_tokens": 10
+                    }
                 }
             }),
             "openai:image",
@@ -1045,6 +1245,8 @@ mod tests {
         assert!(output.contains("![generated image](data:image/png;base64,aGVsbG8=)"));
         assert!(output.contains("![generated image 2](data:image/png;base64,d29ybGQ=)"));
         assert!(output.contains("\"finish_reason\":\"stop\""));
+        assert!(output.contains("\"cached_tokens\":20"));
+        assert!(output.contains("\"cached_creation_tokens\":10"));
         assert!(output.contains("data: [DONE]"));
         assert!(!output.contains("image_generation.completed"));
 
@@ -1100,5 +1302,87 @@ mod tests {
         assert!(output.contains("\"type\":\"image_edit.completed\""));
         assert!(output.contains("\"b64_json\":\"d29ybGQ=\""));
         assert!(output.contains("\"total_tokens\":9"));
+    }
+
+    #[test]
+    fn bridges_aether_sse_response_capture_to_same_client_stream() {
+        let captured_body = concat!(
+            ": aether-keepalive\n\n",
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"gpt-5.5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let outcome = maybe_bridge_standard_sync_json_to_stream(
+            &json!({
+                "status_code": 200,
+                "headers": {
+                    "content-type": "text/event-stream",
+                    "x-aether-control-endpoint-signature": "claude:messages"
+                },
+                "body": captured_body
+            }),
+            "openai:responses",
+            "claude:messages",
+            None,
+        )
+        .expect("bridge should succeed")
+        .expect("capture should bridge");
+
+        let output = utf8(outcome.sse_body);
+        assert!(output.contains("event: message_start"));
+        assert!(output.contains("event: message_stop"));
+        assert!(output.contains("\"stop_reason\":\"end_turn\""));
+        assert!(!output.contains("status_code"));
+        assert_eq!(
+            outcome
+                .terminal_summary
+                .as_ref()
+                .and_then(|summary| summary.finish_reason.as_deref()),
+            Some("stop")
+        );
+    }
+
+    #[test]
+    fn rewrites_aether_sse_response_capture_to_requested_client_stream() {
+        let captured_body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"gpt-5.5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"Edit\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"file_path\\\":\\\"/tmp/a.txt\\\"}\"}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let outcome = maybe_bridge_standard_sync_json_to_stream(
+            &json!({
+                "status_code": 200,
+                "headers": {
+                    "content-type": "text/event-stream",
+                    "x-aether-control-endpoint-signature": "claude:messages"
+                },
+                "body": captured_body
+            }),
+            "claude:messages",
+            "openai:responses",
+            None,
+        )
+        .expect("bridge should succeed")
+        .expect("capture should bridge");
+
+        let output = utf8(outcome.sse_body);
+        assert!(output.contains("event: response.output_item.added"));
+        assert!(output.contains("event: response.function_call_arguments.delta"));
+        assert!(output.contains("event: response.completed"));
+        assert!(!output.contains("status_code"));
     }
 }

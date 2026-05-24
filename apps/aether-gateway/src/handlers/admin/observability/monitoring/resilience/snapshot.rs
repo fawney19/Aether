@@ -1,6 +1,6 @@
 use super::super::usage_helpers::admin_monitoring_usage_is_error;
 use crate::handlers::admin::request::AdminAppState;
-use crate::handlers::admin::shared::{provider_key_health_summary, unix_secs_to_rfc3339};
+use crate::handlers::admin::shared::{provider_key_health_summary_at, unix_secs_to_rfc3339};
 use crate::GatewayError;
 use aether_data_contracts::repository::{
     provider_catalog::StoredProviderCatalogKey, usage::UsageMonitoringErrorListQuery,
@@ -99,7 +99,7 @@ pub(super) async fn build_admin_monitoring_resilience_snapshot(
             last_failure_at,
             circuit_breaker_open,
             circuit_by_format,
-        ) = provider_key_health_summary(key);
+        ) = provider_key_health_summary_at(key, now.timestamp().max(0) as u64);
         if health_score < 0.8 {
             degraded_keys += 1;
         }
@@ -110,11 +110,12 @@ pub(super) async fn build_admin_monitoring_resilience_snapshot(
         let open_formats = circuit_by_format
             .iter()
             .filter_map(|(api_format, value)| {
-                value
-                    .get("open")
-                    .and_then(serde_json::Value::as_bool)
-                    .filter(|open| *open)
-                    .map(|_| api_format.clone())
+                aether_scheduler_core::provider_key_circuit_payload_is_active_open_at(
+                    value,
+                    now.timestamp().max(0) as u64,
+                )
+                .then_some(())
+                .map(|_| api_format.clone())
             })
             .collect::<Vec<_>>();
 

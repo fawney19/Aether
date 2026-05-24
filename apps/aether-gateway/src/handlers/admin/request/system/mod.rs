@@ -9,7 +9,7 @@ mod proxy_nodes;
 mod templates;
 
 const ADMIN_SYSTEM_DATA_EXPORT_VERSION: &str = "1.0";
-const ADMIN_SYSTEM_DATA_IMPORT_MAX_SIZE_BYTES: usize = 20 * 1024 * 1024;
+const ADMIN_SYSTEM_DATA_IMPORT_MAX_SIZE_BYTES: usize = 500 * 1024 * 1024;
 
 impl<'a> AdminAppState<'a> {
     pub(crate) async fn upsert_system_config_json_value(
@@ -68,6 +68,26 @@ impl<'a> AdminAppState<'a> {
         target: aether_data::repository::system::AdminSystemPurgeTarget,
     ) -> Result<aether_data::repository::system::AdminSystemPurgeSummary, GatewayError> {
         self.app.purge_admin_system_data(target).await
+    }
+
+    pub(crate) async fn export_admin_system_usage_aggregates(
+        &self,
+    ) -> Result<aether_data::repository::system::AdminSystemUsageAggregateSnapshot, GatewayError>
+    {
+        self.app.export_admin_system_usage_aggregates().await
+    }
+
+    pub(crate) async fn import_admin_system_usage_aggregates(
+        &self,
+        snapshot: &aether_data::repository::system::AdminSystemUsageAggregateSnapshot,
+        user_id_map: &std::collections::BTreeMap<String, String>,
+        api_key_id_map: &std::collections::BTreeMap<String, String>,
+        mode: aether_data::repository::system::AdminSystemUsageAggregateImportMode,
+    ) -> Result<aether_data::repository::system::AdminSystemUsageAggregateImportSummary, GatewayError>
+    {
+        self.app
+            .import_admin_system_usage_aggregates(snapshot, user_id_map, api_key_id_map, mode)
+            .await
     }
 
     pub(crate) async fn run_admin_system_cleanup_once(

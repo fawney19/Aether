@@ -5,6 +5,7 @@ services:
   postgres:
     image: postgres:15
     container_name: aether-postgres
+    shm_size: ${POSTGRES_SHM_SIZE:-512mb}
     environment:
       POSTGRES_DB: aether
       POSTGRES_USER: postgres
@@ -14,7 +15,18 @@ services:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "127.0.0.1:${DB_PORT:-5432}:5432"
-    command: postgres -c idle_in_transaction_session_timeout=30000 -c tcp_keepalives_idle=30 -c tcp_keepalives_interval=10
+    command: >
+      postgres
+      -c idle_in_transaction_session_timeout=30000
+      -c tcp_keepalives_idle=30
+      -c tcp_keepalives_interval=10
+      -c shared_preload_libraries=pg_stat_statements
+      -c pg_stat_statements.track=all
+      -c pg_stat_statements.max=10000
+      -c shared_buffers=${POSTGRES_SHARED_BUFFERS:-1GB}
+      -c effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-3GB}
+      -c work_mem=${POSTGRES_WORK_MEM:-16MB}
+      -c maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-256MB}
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U postgres" ]
       interval: 5s
@@ -25,7 +37,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: aether-redis
-    command: redis-server --appendonly yes --appendfsync everysec --save 60 1000 --requirepass ${REDIS_PASSWORD}
+    command: redis-server --appendonly yes --appendfsync everysec --save 60 1000 --requirepass ${REDIS_PASSWORD} --maxclients ${REDIS_MAXCLIENTS:-10000}
     volumes:
       - redis_data:/data
     ports:
@@ -64,18 +76,18 @@ services:
   app:
     image: ${APP_IMAGE:-ghcr.io/fawney19/aether:latest}
     container_name: aether-app
+    user: "0:0"
     env_file:
       - .env
     environment:
       DATABASE_URL: postgresql://postgres:${DB_PASSWORD}@postgres:5432/aether
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       TZ: Asia/Shanghai
-      AETHER_LOG_DESTINATION: ${AETHER_LOG_DESTINATION:-both}
+      AETHER_BASE_DIR: /opt/aether
+      AETHER_UPDATE_STRATEGY: docker
+      AETHER_DOCKER_UPDATE_COMMAND: ${AETHER_DOCKER_UPDATE_COMMAND:-./update.sh}
+      AETHER_LOG_DESTINATION: stdout
       AETHER_LOG_FORMAT: ${AETHER_LOG_FORMAT:-pretty}
-      AETHER_LOG_DIR: ${AETHER_LOG_DIR:-/app/logs}
-      AETHER_LOG_ROTATION: ${AETHER_LOG_ROTATION:-daily}
-      AETHER_LOG_RETENTION_DAYS: ${AETHER_LOG_RETENTION_DAYS:-7}
-      AETHER_LOG_MAX_FILES: ${AETHER_LOG_MAX_FILES:-30}
       APP_PORT: ${APP_PORT:-8084}
       AETHER_GATEWAY_AUTO_PREPARE_DATABASE: ${AETHER_GATEWAY_AUTO_PREPARE_DATABASE:-true}
     depends_on:
@@ -85,14 +97,11 @@ services:
         condition: service_healthy
     ports:
       - "${APP_PORT:-8084}:${APP_PORT:-8084}"
-    volumes:
-      - ./logs:/app/logs
-    healthcheck:
-      test: ["CMD", "aether-gateway", "--healthcheck"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "10"
     restart: unless-stopped
 
 volumes:

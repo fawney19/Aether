@@ -15,6 +15,7 @@ pub const CURRENT_TUNNEL_PROTOCOL_VERSION_STR: &str = "2";
 pub mod flags {
     pub const END_STREAM: u8 = 0x01;
     pub const GZIP_COMPRESSED: u8 = 0x02;
+    pub const ENCRYPTED: u8 = crate::tunnel_security::FLAG_ENCRYPTED;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +66,7 @@ pub const HEARTBEAT_DATA: u8 = MsgType::HeartbeatData as u8;
 pub const HEARTBEAT_ACK: u8 = MsgType::HeartbeatAck as u8;
 pub const FLAG_END_STREAM: u8 = flags::END_STREAM;
 pub const FLAG_GZIP_COMPRESSED: u8 = flags::GZIP_COMPRESSED;
+pub const FLAG_ENCRYPTED: u8 = flags::ENCRYPTED;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
@@ -183,6 +185,12 @@ pub struct RequestMeta {
     pub method: String,
     pub url: String,
     pub headers: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stream: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_first_byte_timeout_ms: Option<u64>,
     #[serde(default = "default_timeout", deserialize_with = "deserialize_timeout")]
     pub timeout: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

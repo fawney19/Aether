@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use aether_runtime_state::{
-    RedisClientConfig, RedisClientFactory, RedisConsumerGroup, RedisConsumerName, RedisStreamName,
+    RedisClientConfig, RedisConsumerGroup, RedisConsumerName, RedisStreamName,
     RedisStreamReclaimConfig, RedisStreamRunner, RedisStreamRunnerConfig,
 };
 use aether_testkit::{init_test_runtime_for, ManagedRedisServer};
@@ -86,25 +86,24 @@ async fn run_suite(
         })
         .expect("redis url should be resolved");
 
-    let factory = RedisClientFactory::new(RedisClientConfig {
+    let redis_config = RedisClientConfig {
         url: redis_url.clone(),
         key_prefix: Some(format!("aether-baseline-{}", std::process::id())),
-    })?;
-    let client = factory.connect_lazy()?;
-    let keyspace = factory.config().keyspace();
+    };
+    let keyspace = redis_config.keyspace();
     let stream = keyspace.stream_name("worker-baseline");
     let group = RedisConsumerGroup("worker-group".to_string());
     let consumer_a = RedisConsumerName("consumer-a".to_string());
     let consumer_b = RedisConsumerName("consumer-b".to_string());
-    let runner = RedisStreamRunner::new(
-        client,
-        keyspace,
+    let runner = RedisStreamRunner::from_config(
+        redis_config,
         RedisStreamRunnerConfig {
             command_timeout_ms: Some(2_000),
             read_block_ms: Some(10),
             read_count: 64,
         },
-    )?;
+    )
+    .await?;
     runner
         .ensure_consumer_group(&stream, &group, "0-0")
         .await

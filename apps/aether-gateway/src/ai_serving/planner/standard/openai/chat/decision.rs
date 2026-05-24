@@ -9,7 +9,6 @@ pub(super) use self::payload::maybe_build_local_openai_chat_decision_payload_for
 pub(super) use self::support::{
     build_lazy_local_openai_chat_candidate_attempt_source,
     build_local_openai_chat_candidate_attempt_source,
-    build_local_openai_chat_image_candidate_attempt_source,
     materialize_local_openai_chat_candidate_attempts, LocalOpenAiChatCandidateAttempt,
     LocalOpenAiChatCandidateAttemptSource, LocalOpenAiChatDecisionInput,
 };

@@ -597,42 +597,20 @@
                   >({{ record.rate_multiplier }}x)</span>
                 </span>
               </div>
-              <!-- 故障转移图标（优先显示） -->
-              <svg
+              <Shuffle
                 v-if="record.has_fallback"
-                xmlns="http://www.w3.org/2000/svg"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
+                data-usage-attempt-marker="fallback"
                 class="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 flex-shrink-0"
                 title="此请求发生了 Provider 故障转移"
-              >
-                <path d="m16 3 4 4-4 4" />
-                <path d="M20 7H4" />
-                <path d="m8 21-4-4 4-4" />
-                <path d="M4 17h16" />
-              </svg>
-              <!-- 重试图标（仅在无故障转移时显示） -->
-              <svg
-                v-else-if="record.has_retry"
-                xmlns="http://www.w3.org/2000/svg"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
+                aria-label="发生 Provider 故障转移"
+              />
+              <RefreshCcw
+                v-if="record.has_retry"
+                data-usage-attempt-marker="retry"
                 class="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 flex-shrink-0"
-                title="此请求发生了亲和缓存重试"
-              >
-                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-                <path d="M21 21v-5h-5" />
-                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                <path d="M3 3v5h5" />
-              </svg>
+                title="此请求发生了重试"
+                aria-label="发生重试"
+              />
             </div>
           </TableCell>
           <TableCell
@@ -871,7 +849,7 @@ import {
   SortableTableHead,
   TableFilterMenu,
 } from '@/components/ui'
-import { RefreshCcw, Search } from 'lucide-vue-next'
+import { RefreshCcw, Search, Shuffle } from 'lucide-vue-next'
 import { formatTokens, formatCurrency } from '@/utils/format'
 import { getCacheCreationTokens, getCacheReadTokens, getEffectiveInputTokens } from '../token-normalization'
 import {
@@ -888,7 +866,8 @@ import {
   resolveUsageStreamLabelSegments
 } from '../utils/status'
 import { useRowClick } from '@/composables/useRowClick'
-import { formatApiFormat } from '@/api/endpoints/types/api-format'
+import { API_FORMAT_ORDER, formatApiFormat } from '@/api/endpoints/types/api-format'
+import { formatClientFamily } from '@/features/usage/utils/clientFamily'
 import type { DateRangeParams, UsageRecord } from '../types'
 import { MultiSelect, TimeRangePicker } from '@/components/common'
 import type { MultiSelectOption } from '@/components/common/MultiSelect.vue'
@@ -1013,20 +992,11 @@ const emit = defineEmits<{
   'prefetchDetail': [id: string]
 }>()
 
-// 静态常量（放在 defineProps/defineEmits 之后）
-const AVAILABLE_API_FORMATS = [
-  { value: 'openai:chat', label: 'OpenAI Chat' },
-  { value: 'openai:responses', label: 'OpenAI Responses' },
-  { value: 'openai:responses:compact', label: 'OpenAI Responses Compact' },
-  { value: 'openai:video', label: 'OpenAI Video' },
-  { value: 'claude:messages', label: 'Claude Messages' },
-  { value: 'gemini:generate_content', label: 'Gemini Generate Content' },
-  { value: 'gemini:video', label: 'Gemini Video' },
-  { value: 'gemini:files', label: 'Gemini Files' },
-] as const
-
-// 使用模块级常量
-const availableApiFormats = AVAILABLE_API_FORMATS
+// 使用统一 API 格式枚举，避免使用记录筛选项和系统格式列表漂移。
+const availableApiFormats = API_FORMAT_ORDER.map((value) => ({
+  value,
+  label: formatApiFormat(value),
+}))
 
 const adminVisibleColumnIds = useLocalStorage<UsageRecordColumnId[]>(
   'usage-records-visible-columns-admin',
@@ -1111,19 +1081,6 @@ const providerFilterOptions = computed<FilterOption[]>(() => [
     label: provider,
   })),
 ])
-
-function formatClientFamily(value: string | null | undefined): string {
-  const normalized = value?.trim().toLowerCase()
-  if (!normalized) return '-'
-  if (normalized === 'codex') return 'Codex'
-  if (normalized === 'codex_vscode') return 'Codex VS Code'
-  if (normalized === 'claude_code') return 'Claude Code'
-  if (normalized === 'opencode') return 'OpenCode'
-  if (normalized === 'gemini_cli') return 'Gemini CLI'
-  if (normalized === 'openai_js_sdk') return 'OpenAI JS SDK'
-  if (normalized === 'generic') return '通用客户端'
-  return value?.trim() || '-'
-}
 
 const clientFamilyFilterOptions = computed<FilterOption[]>(() => {
   const families = new Set<string>(props.availableClientFamilies)

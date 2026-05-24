@@ -10,6 +10,8 @@ function updateStatus(overrides: Partial<CheckUpdateResponse> = {}): CheckUpdate
     current_version: '0.7.0-rc27',
     latest_version: null,
     has_update: false,
+    updatable: false,
+    update_blocker: null,
     release_url: null,
     release_notes: null,
     published_at: null,

@@ -20,6 +20,7 @@ pub(crate) use aether_ai_formats::api::{
     build_local_openai_responses_request_body,
     build_local_openai_responses_request_body_with_model_directives,
     build_local_success_background_report, build_local_success_conversion_background_report,
+    build_openai_image_api_provider_request_body,
     build_openai_image_provider_body_from_response_stream_sync_body,
     build_openai_image_provider_request_body,
     build_openai_image_request_body_from_gemini_image_request,

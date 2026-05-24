@@ -11,6 +11,23 @@ cd "$(dirname "$0")"
 LOCAL_APP_IMAGE="${LOCAL_APP_IMAGE:-aether-app:latest}"
 export LOCAL_APP_IMAGE
 
+detect_build_version() {
+    if command -v git >/dev/null 2>&1; then
+        local version
+        if version=$(git describe --tags --always --dirty 2>/dev/null); then
+            if [ -n "$version" ]; then
+                printf '%s\n' "$version"
+                return 0
+            fi
+        fi
+    fi
+
+    printf 'local-%s\n' "$(date -u +%Y%m%d%H%M%S)"
+}
+
+AETHER_BUILD_VERSION="${AETHER_BUILD_VERSION:-$(detect_build_version)}"
+export AETHER_BUILD_VERSION
+
 # 兼容 docker-compose 和 docker compose
 if command -v docker-compose &> /dev/null; then
     DC=(docker-compose -f docker-compose.yml -f docker-compose.local.yml)
@@ -41,6 +58,7 @@ Options:
 
 Environment:
   LOCAL_APP_IMAGE          本地构建镜像名，默认 aether-app:latest
+  AETHER_BUILD_VERSION     应用显示版本，默认 git describe --tags --always --dirty
 EOF
 }
 
@@ -103,6 +121,8 @@ emit_tree_for_hash() {
 # 计算代码文件的哈希值
 calc_code_hash() {
     {
+        printf '\n>>> AETHER_BUILD_VERSION\n%s\n' "$AETHER_BUILD_VERSION"
+
         for file in \
             Dockerfile.app.local \
             docker-compose.yml \
@@ -149,7 +169,13 @@ save_code_hash() { calc_code_hash > "$CODE_HASH_FILE"; }
 build_app() {
     require_file Dockerfile.app.local
     echo ">>> Building app image: $LOCAL_APP_IMAGE"
-    DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}" docker build --pull=false -f Dockerfile.app.local -t "$LOCAL_APP_IMAGE" .
+    echo ">>> Build version: $AETHER_BUILD_VERSION"
+    DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}" docker build \
+        --pull=false \
+        --build-arg "AETHER_BUILD_VERSION=$AETHER_BUILD_VERSION" \
+        -f Dockerfile.app.local \
+        -t "$LOCAL_APP_IMAGE" \
+        .
     save_code_hash
 }
 

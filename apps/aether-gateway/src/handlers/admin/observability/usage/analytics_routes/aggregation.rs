@@ -53,6 +53,15 @@ fn admin_usage_aggregation_by_provider_json(
     json!(rows
         .iter()
         .map(|row| {
+            let identity_source = match row.secondary_name.as_deref() {
+                Some("legacy_name") => "legacy_name",
+                _ => "provider_id",
+            };
+            let provider_id = if identity_source == "provider_id" {
+                json!(row.group_key)
+            } else {
+                serde_json::Value::Null
+            };
             let success_count = row.success_count.unwrap_or_default();
             let error_count = row.request_count.saturating_sub(success_count);
             let success_rate = if row.request_count == 0 {
@@ -67,7 +76,9 @@ fn admin_usage_aggregation_by_provider_json(
                 .filter(|value| !value.is_empty())
                 .unwrap_or(row.group_key.as_str());
             json!({
-                "provider_id": row.group_key,
+                "provider_id": provider_id,
+                "provider_key": row.group_key,
+                "provider_identity_source": identity_source,
                 "provider": provider_name,
                 "request_count": row.request_count,
                 "total_tokens": row.total_tokens,

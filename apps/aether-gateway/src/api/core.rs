@@ -20,6 +20,12 @@ pub(crate) fn mount_core_routes(router: Router<AppState>) -> Router<AppState> {
         .route("/_gateway/health", get(health))
 }
 
+fn current_gateway_version() -> &'static str {
+    option_env!("AETHER_BUILD_VERSION")
+        .filter(|version| !version.is_empty())
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 pub(crate) async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let request_concurrency = state.request_concurrency_snapshot().map(|snapshot| {
         json!({
@@ -78,7 +84,7 @@ pub(crate) async fn frontdoor_manifest(State(state): State<AppState>) -> impl In
     Json(json!({
         "component": "aether-gateway",
         "manifest_version": FRONTDOOR_MANIFEST_VERSION,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": current_gateway_version(),
         "mode": "compatibility_frontdoor",
         "entrypoints": {
             "public_manifest": FRONTDOOR_MANIFEST_PATH,

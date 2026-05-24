@@ -8,7 +8,7 @@ use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogReadRepository, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use axum::body::{to_bytes, Body};
-use axum::routing::any;
+use axum::routing::{any, post};
 use axum::{extract::Request, Json, Router};
 use http::StatusCode;
 use serde_json::json;
@@ -392,7 +392,7 @@ async fn gateway_marks_codex_quota_exhausted_when_wham_usage_returns_payment_req
 }
 
 #[tokio::test]
-async fn gateway_auto_removes_codex_key_when_refresh_and_access_tokens_are_invalid() {
+async fn gateway_retains_codex_key_when_quota_only_reports_oauth_invalid() {
     let upstream = Router::new().route(
         "/api/admin/endpoints/providers/provider-codex/refresh-quota",
         any(move |_request: Request| async move {
@@ -496,15 +496,19 @@ async fn gateway_auto_removes_codex_key_when_refresh_and_access_tokens_are_inval
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["success"], 0);
     assert_eq!(payload["failed"], 1);
-    assert_eq!(payload["auto_removed"], 1);
+    assert_eq!(payload["auto_removed"], 0);
     assert_eq!(payload["results"][0]["status"], "auth_invalid");
-    assert_eq!(payload["results"][0]["auto_removed"], true);
+    assert!(payload["results"][0].get("auto_removed").is_none());
 
     let reloaded = provider_catalog_repository
         .list_keys_by_ids(&["key-codex-expired".to_string()])
         .await
         .expect("keys should read");
-    assert!(reloaded.is_empty());
+    assert_eq!(reloaded.len(), 1);
+    assert!(reloaded[0]
+        .oauth_invalid_reason
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with("[OAUTH_EXPIRED]")));
 
     gateway_handle.abort();
     execution_runtime_handle.abort();
@@ -1068,6 +1072,159 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_kiro_with_trusted_ad
     gateway_handle.abort();
     execution_runtime_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_auto_removes_kiro_quota_refresh_after_terminal_oauth_refresh_failure() {
+    let token_hits = Arc::new(Mutex::new(0usize));
+    let token_hits_clone = Arc::clone(&token_hits);
+    let token_server = Router::new().route(
+        "/refreshToken",
+        post(move |_request: Request| {
+            let token_hits_inner = Arc::clone(&token_hits_clone);
+            async move {
+                *token_hits_inner.lock().expect("mutex should lock") += 1;
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "message": "refresh token invalid"
+                    })),
+                )
+            }
+        }),
+    );
+    let execution_hits = Arc::new(Mutex::new(0usize));
+    let execution_hits_clone = Arc::clone(&execution_hits);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |_request: Request| {
+            let execution_hits_inner = Arc::clone(&execution_hits_clone);
+            async move {
+                *execution_hits_inner.lock().expect("mutex should lock") += 1;
+                (
+                    StatusCode::OK,
+                    Body::from("unexpected execution runtime hit"),
+                )
+            }
+        }),
+    );
+
+    let encrypted_auth_config = encrypt_python_fernet_plaintext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        &json!({
+            "provider_type": "kiro",
+            "auth_method": "social",
+            "refresh_token": "r".repeat(120),
+            "machine_id": "123e4567-e89b-12d3-a456-426614174000",
+            "kiro_version": "1.2.3",
+            "expires_at": 1u64
+        })
+        .to_string(),
+    )
+    .expect("auth config ciphertext should build");
+    let encrypted_api_key =
+        encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
+            .expect("api key ciphertext should build");
+    let mut key = StoredProviderCatalogKey::new(
+        "key-kiro-expired-refresh-failed".to_string(),
+        "provider-kiro-auto-remove".to_string(),
+        "default".to_string(),
+        "oauth".to_string(),
+        None,
+        true,
+    )
+    .expect("key should build")
+    .with_transport_fields(
+        Some(json!(["claude:messages"])),
+        encrypted_api_key,
+        Some(encrypted_auth_config),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("key transport should build");
+    key.expires_at_unix_secs = Some(1);
+
+    let mut provider = StoredProviderCatalogProvider::new(
+        "provider-kiro-auto-remove".to_string(),
+        "kiro".to_string(),
+        Some("https://example.com".to_string()),
+        "kiro".to_string(),
+    )
+    .expect("provider should build");
+    provider.config = Some(json!({
+        "pool_advanced": {
+            "auto_remove_banned_keys": true
+        }
+    }));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-kiro-cli",
+            "provider-kiro-auto-remove",
+            "claude:messages",
+            "https://q.us-west-2.amazonaws.com",
+        )],
+        vec![key],
+    ));
+
+    let (token_url, token_handle) = start_server(token_server).await;
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let oauth_refresh =
+        crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
+            Arc::new(
+                crate::provider_transport::kiro::KiroOAuthRefreshAdapter::default()
+                    .with_refresh_base_urls(Some(token_url), None),
+            )
+                as Arc<dyn crate::provider_transport::oauth_refresh::LocalOAuthRefreshAdapter>,
+        ]);
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url.clone())
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_oauth_refresh_coordinator_for_tests(oauth_refresh),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/endpoints/providers/provider-kiro-auto-remove/refresh-quota"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], 0);
+    assert_eq!(payload["failed"], 0);
+    assert_eq!(payload["auto_removed"], 1);
+    assert_eq!(payload["total"], 1);
+    assert_eq!(payload["results"][0]["status"], "auto_removed");
+    assert_eq!(payload["results"][0]["auto_removed"], true);
+    assert_eq!(*token_hits.lock().expect("mutex should lock"), 1);
+    assert_eq!(*execution_hits.lock().expect("mutex should lock"), 0);
+
+    let reloaded = provider_catalog_repository
+        .list_keys_by_ids(&["key-kiro-expired-refresh-failed".to_string()])
+        .await
+        .expect("keys should read");
+    assert!(reloaded.is_empty());
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+    token_handle.abort();
 }
 
 #[tokio::test]

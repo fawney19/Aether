@@ -20,7 +20,7 @@ use super::{
     GatewayPublicRequestContext,
 };
 use crate::control::normalize_assignable_management_token_permissions;
-use crate::handlers::shared::generate_gateway_secret_plaintext;
+use crate::handlers::shared::{generate_gateway_secret_plaintext, parse_json_ip_rules};
 use crate::LocalMutationOutcome;
 
 const USERS_ME_MANAGEMENT_TOKEN_PREFIX: &str = "ae";
@@ -177,59 +177,10 @@ fn users_me_management_token_skip(query: Option<&str>) -> usize {
         .unwrap_or(0)
 }
 
-fn users_me_validate_ip_or_cidr(value: &str) -> bool {
-    let value = value.trim();
-    if value.is_empty() {
-        return false;
-    }
-    if value.parse::<std::net::IpAddr>().is_ok() {
-        return true;
-    }
-    let Some((host, prefix)) = value.split_once('/') else {
-        return false;
-    };
-    let Ok(ip) = host.trim().parse::<std::net::IpAddr>() else {
-        return false;
-    };
-    let Ok(prefix) = prefix.trim().parse::<u8>() else {
-        return false;
-    };
-    match ip {
-        std::net::IpAddr::V4(_) => prefix <= 32,
-        std::net::IpAddr::V6(_) => prefix <= 128,
-    }
-}
-
 fn users_me_parse_management_token_allowed_ips(
     value: Option<&serde_json::Value>,
 ) -> Result<Option<serde_json::Value>, String> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    match value {
-        serde_json::Value::Null => Ok(None),
-        serde_json::Value::Array(items) => {
-            if items.is_empty() {
-                return Err("IP 白名单不能为空列表，如需取消限制请不提供此字段".to_string());
-            }
-            let mut normalized = Vec::with_capacity(items.len());
-            for (index, item) in items.iter().enumerate() {
-                let Some(raw) = item.as_str() else {
-                    return Err("IP 白名单必须是字符串数组".to_string());
-                };
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    return Err(format!("IP 白名单第 {} 项为空", index + 1));
-                }
-                if !users_me_validate_ip_or_cidr(trimmed) {
-                    return Err(format!("无效的 IP 地址或 CIDR: {raw}"));
-                }
-                normalized.push(trimmed.to_string());
-            }
-            Ok(Some(json!(normalized)))
-        }
-        _ => Err("IP 白名单必须是字符串数组".to_string()),
-    }
+    parse_json_ip_rules(value)
 }
 
 fn users_me_parse_management_token_expires_at(

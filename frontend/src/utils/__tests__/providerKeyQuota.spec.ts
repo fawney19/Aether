@@ -104,4 +104,144 @@ describe('providerKeyQuota', () => {
       },
     }, 'grok')).toBe('Auto剩余 40.0% (60/150) | Heavy剩余 0.0% (0/20)')
   })
+
+  it('formats ChatGPT Web image quota as remaining count', () => {
+    expect(getQuotaDisplayText({
+      status_snapshot: {
+        quota: {
+          provider_type: 'chatgpt_web',
+          code: 'ok',
+          exhausted: false,
+          windows: [
+            {
+              code: 'image_gen',
+              scope: 'account',
+              remaining_ratio: 0.96,
+              used_value: 1,
+              remaining_value: 24,
+              limit_value: 25,
+            },
+          ],
+        },
+      },
+    }, 'chatgpt_web')).toBe('生图剩余 24/25')
+  })
+
+  it('surfaces Windsurf hard account states', () => {
+    expect(getQuotaDisplayText({
+      status_snapshot: {
+        quota: {
+          provider_type: 'windsurf',
+          code: 'quarantined',
+          label: '账号隔离中',
+          exhausted: false,
+        },
+      },
+    }, 'windsurf')).toBe('账号隔离中')
+
+    expect(getQuotaDisplayText({
+      status_snapshot: {
+        quota: {
+          provider_type: 'windsurf',
+          code: 'cooldown',
+          label: '冷却中',
+          exhausted: false,
+        },
+      },
+    }, 'windsurf')).toBe('冷却中')
+
+    expect(getQuotaDisplayText({
+      status_snapshot: {
+        quota: {
+          provider_type: 'windsurf',
+          code: 'cooldown',
+          exhausted: false,
+        },
+      },
+    }, 'windsurf')).toBe('冷却中')
+  })
+
+  it('includes Windsurf quota windows and model availability in display text', () => {
+    expect(getQuotaDisplayText({
+      status_snapshot: {
+        quota: {
+          provider_type: 'windsurf',
+          code: 'ok',
+          exhausted: false,
+          allowed_models_count: 7,
+          windows: [
+            {
+              code: 'daily',
+              remaining_ratio: 0.75,
+            },
+            {
+              code: 'weekly',
+              remaining_ratio: 0.5,
+            },
+            {
+              code: 'prompt',
+              remaining_value: 12,
+              limit_value: 20,
+            },
+            {
+              code: 'flex',
+              used_value: 2,
+              limit_value: 5,
+            },
+          ],
+        },
+      },
+    }, 'windsurf')).toBe('日剩余 75.0% | 周剩余 50.0% | Prompt 剩余 12/20 | Flex 剩余 3/5 | 可用模型 7 个')
+
+    expect(getQuotaDisplayText({
+      status_snapshot: {
+        quota: {
+          provider_type: 'windsurf',
+          code: 'cooldown',
+          label: '冷却中',
+          exhausted: false,
+          rate_limit: {
+            limited: true,
+            has_capacity: true,
+            messages_remaining: -1,
+            max_messages: -1,
+          },
+          allowed_models_count: 118,
+          windows: [
+            {
+              code: 'daily',
+              remaining_ratio: 0.99,
+            },
+            {
+              code: 'weekly',
+              remaining_ratio: 1,
+            },
+            {
+              code: 'prompt',
+              remaining_value: 100,
+              limit_value: 100,
+            },
+            {
+              code: 'rate_limit',
+              reset_seconds: null,
+              is_exhausted: false,
+            },
+          ],
+        },
+      },
+    }, 'windsurf')).toBe('日剩余 99.0% | 周剩余 100.0% | Prompt 剩余 100/100 | 可用模型 118 个')
+  })
+
+  it('uses Windsurf model availability when no quota window is present', () => {
+    expect(getQuotaDisplayText({
+      status_snapshot: {
+        quota: {
+          provider_type: 'windsurf',
+          code: 'ok',
+          exhausted: false,
+          allowed_models_count: 3,
+        },
+      },
+    }, 'windsurf')).toBe('可用模型 3 个')
+  })
 })

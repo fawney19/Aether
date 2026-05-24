@@ -13,6 +13,7 @@ use aether_runtime::{
 use aether_runtime_state::{RuntimeSemaphore, RuntimeSemaphoreError, RuntimeSemaphoreSnapshot};
 
 use crate::config::Config;
+use crate::config::TunnelSecurity;
 use crate::hardware::RuntimeResourceMonitor;
 use crate::registration::client::AetherClient;
 use crate::runtime::SharedDynamicConfig;
@@ -44,6 +45,10 @@ pub struct ServerContext {
     pub aether_url: String,
     /// Management token for this server.
     pub management_token: String,
+    /// Effective security mode for this server connection.
+    pub tunnel_security: TunnelSecurity,
+    /// PSK used for secure non-TLS tunnel frames.
+    pub tunnel_encryption_key: Option<String>,
     /// Resolved node name at registration time (per-server override or global fallback).
     /// After startup, the active node_name is read from `dynamic` (may be updated remotely).
     #[allow(dead_code)]

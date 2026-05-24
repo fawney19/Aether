@@ -166,13 +166,25 @@ pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value, _compact: b
                     &response_id,
                     &mut message_index,
                 );
-                output.push(json!({
-                    "type": "function_call",
-                    "id": id,
-                    "call_id": id,
-                    "name": name,
-                    "arguments": canonicalize_tool_arguments(input),
-                }));
+                if is_responses_web_search_tool(name) {
+                    output.push(json!({
+                        "type": "web_search_call",
+                        "id": id,
+                        "status": "completed",
+                        "action": {
+                            "type": "search",
+                            "query": web_search_query_from_value(input),
+                        },
+                    }));
+                } else {
+                    output.push(json!({
+                        "type": "function_call",
+                        "id": id,
+                        "call_id": id,
+                        "name": name,
+                        "arguments": canonicalize_tool_arguments(input),
+                    }));
+                }
             }
             CanonicalContentBlock::ToolResult {
                 tool_use_id,
@@ -324,4 +336,74 @@ fn openai_responses_output_format_from_mime_type(mime_type: &str) -> String {
         _ => "png",
     }
     .to_string()
+}
+
+fn is_responses_web_search_tool(name: &str) -> bool {
+    matches!(name, "web_search" | "web_search_preview")
+}
+
+fn web_search_query_from_value(input: &Value) -> String {
+    input
+        .get("query")
+        .and_then(Value::as_str)
+        .or_else(|| input.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn responses_response_builder_emits_web_search_call_for_web_search_tool_use() {
+        let response = CanonicalResponse {
+            id: "resp_test".to_string(),
+            model: "gpt-5-5-low".to_string(),
+            content: vec![CanonicalContentBlock::ToolUse {
+                id: "call_ws_1".to_string(),
+                name: "web_search".to_string(),
+                input: json!({"query": "today tech"}),
+                extensions: BTreeMap::new(),
+            }],
+            outputs: Vec::new(),
+            stop_reason: Some(CanonicalStopReason::ToolUse),
+            usage: None,
+            extensions: BTreeMap::new(),
+        };
+
+        let body = to_raw(&response, &json!({}), false);
+
+        assert_eq!(body["output"][0]["type"], "web_search_call");
+        assert_eq!(body["output"][0]["id"], "call_ws_1");
+        assert_eq!(body["output"][0]["status"], "completed");
+        assert_eq!(body["output"][0]["action"]["type"], "search");
+        assert_eq!(body["output"][0]["action"]["query"], "today tech");
+    }
+
+    #[test]
+    fn responses_response_parser_reads_web_search_call_as_tool_use() {
+        let body = json!({
+            "id": "resp_test",
+            "model": "gpt-5-5-low",
+            "status": "incomplete",
+            "output": [{
+                "type": "web_search_call",
+                "id": "call_ws_1",
+                "status": "completed",
+                "action": {"type": "search", "query": "today tech"}
+            }]
+        });
+
+        let canonical = from_raw(&body).expect("response should parse");
+
+        assert!(
+            matches!(canonical.content.first(), Some(CanonicalContentBlock::ToolUse {
+            id,
+            name,
+            input,
+            ..
+        }) if id == "call_ws_1" && name == "web_search" && input["query"] == "today tech")
+        );
+    }
 }

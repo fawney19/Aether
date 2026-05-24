@@ -10,8 +10,9 @@ use crate::provider::{
     ProviderPoolMemberInput,
 };
 use crate::quota::{
-    provider_pool_json_bool, provider_pool_json_f64, provider_pool_metadata_bucket,
-    provider_pool_quota_snapshot_exhausted_decision,
+    provider_pool_current_unix_secs, provider_pool_json_bool, provider_pool_json_f64,
+    provider_pool_metadata_bucket, provider_pool_quota_snapshot_exhausted_decision,
+    provider_pool_reset_deadline_elapsed, provider_pool_timestamp_unix_secs,
 };
 use crate::quota_refresh::ProviderPoolQuotaRequestSpec;
 
@@ -23,8 +24,6 @@ const CHATGPT_WEB_CLIENT_VERSION: &str = "prod-be885abbfcfe7b1f511e88b3003d9ee44
 const CHATGPT_WEB_BUILD_NUMBER: &str = "5955942";
 const CHATGPT_WEB_SEC_CH_UA: &str =
     r#""Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24""#;
-const CHATGPT_WEB_FREE_IMAGE_QUOTA_LIMIT: f64 = 25.0;
-
 #[derive(Debug, Clone, Default)]
 pub struct ChatGptWebProviderPoolAdapter;
 
@@ -182,28 +181,47 @@ pub fn normalize_chatgpt_web_image_quota_limit(
     };
 
     let remaining = provider_pool_json_f64(object.get("image_quota_remaining"));
-    let explicit_limit =
+    let plan_type = chatgpt_web_image_quota_plan_type(object)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            existing_limit
+                .as_ref()
+                .and_then(|existing| existing.plan_type.clone())
+        });
+    let raw_explicit_limit =
         provider_pool_json_f64(object.get("image_quota_total")).filter(|value| *value > 0.0);
-    let plan_type = chatgpt_web_json_string(object.get("plan_type"));
-    let is_free_plan = plan_type.is_some_and(|value| value.trim().eq_ignore_ascii_case("free"));
-    let limit = if is_free_plan {
-        Some(CHATGPT_WEB_FREE_IMAGE_QUOTA_LIMIT)
-    } else {
-        explicit_limit
-            .or_else(|| infer_chatgpt_web_image_quota_limit(plan_type, remaining, existing_limit))
-    };
+    let explicit_limit_is_free_default = raw_explicit_limit.is_some_and(|limit| {
+        is_legacy_chatgpt_web_free_default_limit_value(limit, None, plan_type.as_deref(), remaining)
+    });
+    if explicit_limit_is_free_default {
+        object.remove("image_quota_total");
+        object.remove("image_quota_limit_source");
+    }
+    let explicit_limit = raw_explicit_limit.filter(|_| !explicit_limit_is_free_default);
+    let limit = explicit_limit
+        .map(|limit| ChatGptWebImageQuotaLimit {
+            value: limit,
+            source: Some("upstream_total".to_string()),
+            plan_type: plan_type.clone(),
+        })
+        .or_else(|| {
+            infer_chatgpt_web_image_quota_limit(remaining, existing_limit, plan_type.as_deref())
+        });
 
     if let Some(limit) = limit {
-        object.insert("image_quota_total".to_string(), json!(limit));
+        object.insert("image_quota_total".to_string(), json!(limit.value));
+        if let Some(source) = limit.source.as_deref().filter(|value| !value.is_empty()) {
+            object.insert("image_quota_limit_source".to_string(), json!(source));
+        }
 
         if !object.contains_key("image_quota_used") {
             if let Some(remaining) = remaining {
                 object.insert(
                     "image_quota_used".to_string(),
-                    json!((limit - remaining).max(0.0)),
+                    json!((limit.value - remaining).max(0.0)),
                 );
             } else if object.get("image_quota_blocked").and_then(Value::as_bool) == Some(true) {
-                object.insert("image_quota_used".to_string(), json!(limit));
+                object.insert("image_quota_used".to_string(), json!(limit.value));
             }
         }
     }
@@ -221,40 +239,109 @@ fn chatgpt_web_auth_config_string(auth_config: Option<&Value>, fields: &[&str]) 
     })
 }
 
-fn chatgpt_web_json_string(value: Option<&Value>) -> Option<&str> {
-    value
+#[derive(Debug, Clone)]
+struct ChatGptWebImageQuotaLimit {
+    value: f64,
+    source: Option<String>,
+    plan_type: Option<String>,
+}
+
+fn chatgpt_web_image_quota_plan_type(object: &Map<String, Value>) -> Option<&str> {
+    object
+        .get("plan_type")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
 }
 
-fn existing_chatgpt_web_image_quota_limit(upstream_metadata: Option<&Value>) -> Option<f64> {
-    upstream_metadata
+fn existing_chatgpt_web_image_quota_limit(
+    upstream_metadata: Option<&Value>,
+) -> Option<ChatGptWebImageQuotaLimit> {
+    let bucket = upstream_metadata
         .and_then(Value::as_object)
         .and_then(|metadata| metadata.get("chatgpt_web"))
-        .and_then(Value::as_object)
-        .and_then(|bucket| provider_pool_json_f64(bucket.get("image_quota_total")))
-        .filter(|value| *value > 0.0)
+        .and_then(Value::as_object)?;
+    let value =
+        provider_pool_json_f64(bucket.get("image_quota_total")).filter(|value| *value > 0.0)?;
+    let source = bucket
+        .get("image_quota_limit_source")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let plan_type = chatgpt_web_image_quota_plan_type(bucket).map(ToOwned::to_owned);
+    Some(ChatGptWebImageQuotaLimit {
+        value,
+        source,
+        plan_type,
+    })
 }
 
 fn infer_chatgpt_web_image_quota_limit(
+    remaining: Option<f64>,
+    existing_limit: Option<ChatGptWebImageQuotaLimit>,
+    plan_type: Option<&str>,
+) -> Option<ChatGptWebImageQuotaLimit> {
+    if let Some(existing_limit) = existing_limit {
+        if !is_legacy_chatgpt_web_free_default_limit(&existing_limit, plan_type, remaining) {
+            return Some(existing_limit);
+        }
+    }
+
+    remaining
+        .filter(|value| *value > 0.0)
+        .map(|value| ChatGptWebImageQuotaLimit {
+            value,
+            source: Some("first_remaining".to_string()),
+            plan_type: plan_type.map(ToOwned::to_owned),
+        })
+}
+
+fn is_legacy_chatgpt_web_free_default_limit(
+    existing_limit: &ChatGptWebImageQuotaLimit,
     plan_type: Option<&str>,
     remaining: Option<f64>,
-    existing_limit: Option<f64>,
-) -> Option<f64> {
-    let normalized_plan = plan_type.unwrap_or_default().trim().to_ascii_lowercase();
-    if normalized_plan == "free" {
-        return Some(CHATGPT_WEB_FREE_IMAGE_QUOTA_LIMIT);
-    }
+) -> bool {
+    is_legacy_chatgpt_web_free_default_limit_value(
+        existing_limit.value,
+        existing_limit.source.as_deref(),
+        plan_type,
+        remaining,
+    )
+}
 
-    if let Some(existing_limit) = existing_limit.filter(|value| *value > 0.0) {
-        return Some(existing_limit);
+fn is_legacy_chatgpt_web_free_default_limit_value(
+    value: f64,
+    source: Option<&str>,
+    plan_type: Option<&str>,
+    remaining: Option<f64>,
+) -> bool {
+    let plan_type_is_free = plan_type
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("free"));
+    if !plan_type_is_free || source.is_some() {
+        return false;
     }
-
-    remaining.filter(|value| *value > 0.0)
+    if (value - 25.0).abs() > f64::EPSILON {
+        return false;
+    }
+    remaining.is_none_or(|remaining| remaining < value)
 }
 
 pub(crate) fn quota_exhausted_from_bucket(bucket: &Map<String, Value>) -> bool {
+    if provider_pool_current_unix_secs().is_some_and(|now| {
+        let mut image_quota = Map::new();
+        if let Some(value) = bucket.get("image_quota_reset_at") {
+            image_quota.insert("reset_at".to_string(), value.clone());
+        }
+        provider_pool_reset_deadline_elapsed(
+            &image_quota,
+            provider_pool_timestamp_unix_secs(bucket.get("updated_at")),
+            now,
+        )
+    }) {
+        return false;
+    }
     if provider_pool_json_bool(bucket.get("image_quota_blocked")) == Some(true) {
         return true;
     }

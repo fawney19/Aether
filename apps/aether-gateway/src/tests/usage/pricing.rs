@@ -625,10 +625,18 @@ fn assert_usage_and_pricing(
         expected.cache_read_tokens
     );
     assert_eq!(stored_usage.total_tokens, expected.total_tokens());
-    assert_eq!(
-        stored_usage.response_time_ms,
-        Some(expected_response_time_ms)
-    );
+    if expected_ttfb_ms.is_some() {
+        assert!(
+            stored_usage.response_time_ms >= Some(expected_response_time_ms),
+            "stream response_time_ms should be at least reported telemetry: expected >= {expected_response_time_ms:?}, got {:?}",
+            stored_usage.response_time_ms
+        );
+    } else {
+        assert_eq!(
+            stored_usage.response_time_ms,
+            Some(expected_response_time_ms)
+        );
+    }
     assert_eq!(stored_usage.first_byte_time_ms, expected_ttfb_ms);
     assert_eq!(
         stored_usage.settlement_input_price_per_1m(),

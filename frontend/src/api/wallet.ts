@@ -171,6 +171,7 @@ export interface WalletRechargeOption {
   pay_currency?: string
   usd_exchange_rate?: number
   min_recharge_usd?: number
+  fee_rate?: number
 }
 
 export interface WalletRefundCreateRequest {
@@ -181,6 +182,10 @@ export interface WalletRefundCreateRequest {
   refund_mode?: string
   reason?: string
   idempotency_key?: string
+}
+
+export interface WalletRefundEligibilityResponse {
+  payment_methods: string[]
 }
 
 export interface WalletRedeemRequest {
@@ -255,6 +260,11 @@ export const walletApi = {
 
   async getRefund(refundId: string): Promise<RefundRequest> {
     const response = await apiClient.get<RefundRequest>(`/api/wallet/refunds/${refundId}`)
+    return response.data
+  },
+
+  async listRefundEligibleProviders(): Promise<WalletRefundEligibilityResponse> {
+    const response = await apiClient.get<WalletRefundEligibilityResponse>('/api/wallet/refunds/eligible-providers')
     return response.data
   },
 

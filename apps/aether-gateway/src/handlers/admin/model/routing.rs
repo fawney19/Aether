@@ -8,10 +8,12 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
 };
 use aether_scheduler_core::{
-    is_provider_key_circuit_open, matches_model_mapping, provider_key_health_score,
+    is_provider_key_circuit_open_at, matches_model_mapping,
+    provider_key_circuit_payload_is_active_open_at, provider_key_health_score,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 pub(crate) async fn build_admin_global_model_routing_payload(
@@ -86,6 +88,10 @@ pub(crate) async fn build_admin_global_model_routing_payload(
         .flatten()
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
+    let now_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
 
     let global_model_mappings = global_model
         .config
@@ -163,9 +169,11 @@ pub(crate) async fn build_admin_global_model_routing_payload(
                             entries
                                 .iter()
                                 .filter_map(|(api_format, value)| {
-                                    value.get("open")
-                                        .and_then(serde_json::Value::as_bool)
-                                        .filter(|is_open| *is_open)
+                                    provider_key_circuit_payload_is_active_open_at(
+                                        value,
+                                        now_unix_secs,
+                                    )
+                                    .then_some(())
                                         .map(|_| api_format.clone())
                                 })
                                 .collect::<Vec<_>>()
@@ -188,7 +196,7 @@ pub(crate) async fn build_admin_global_model_routing_payload(
                         "effective_rpm": effective_rpm,
                         "allowed_models": allowed_models,
                         "health_score": provider_key_health_score(key, &endpoint.api_format),
-                        "circuit_breaker_open": is_provider_key_circuit_open(key, &endpoint.api_format),
+                        "circuit_breaker_open": is_provider_key_circuit_open_at(key, &endpoint.api_format, now_unix_secs),
                         "circuit_breaker_formats": circuit_breaker_formats,
                         "next_probe_at": next_probe_at,
                     });

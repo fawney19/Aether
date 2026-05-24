@@ -346,7 +346,7 @@ async fn gateway_handles_admin_key_health_locally_with_trusted_admin_principal()
                     Some(json!({"openai:chat": {
                         "open": true,
                         "open_at": "2026-03-26T12:01:00+00:00",
-                        "next_probe_at": "2026-03-26T12:05:00+00:00",
+                        "next_probe_at": "2099-03-26T12:05:00+00:00",
                         "half_open_until": null,
                         "half_open_successes": 1,
                         "half_open_failures": 0
@@ -399,9 +399,88 @@ async fn gateway_handles_admin_key_health_locally_with_trusted_admin_principal()
         payload["circuit_breaker_open_at"],
         "2026-03-26T12:01:00+00:00"
     );
-    assert_eq!(payload["next_probe_at"], "2026-03-26T12:05:00+00:00");
+    assert_eq!(payload["next_probe_at"], "2099-03-26T12:05:00+00:00");
     assert_eq!(payload["half_open_successes"], 1);
     assert_eq!(payload["half_open_failures"], 0);
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_admin_key_health_summary_treats_expired_unix_circuit_as_closed() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/api/admin/endpoints/health/key/key-openai",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }
+        }),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider("provider-openai", "openai", 10)],
+        vec![sample_endpoint(
+            "endpoint-openai",
+            "provider-openai",
+            "openai:chat",
+            "https://api.openai.example",
+        )],
+        vec![
+            sample_key("key-openai", "provider-openai", "openai:chat", "sk-test")
+                .with_health_fields(
+                    Some(json!({"openai:chat": {
+                        "health_score": 0.7,
+                        "consecutive_failures": 2
+                    }})),
+                    Some(json!({"openai:chat": {
+                        "open": true,
+                        "open_at": "2026-03-26T12:01:00+00:00",
+                        "next_probe_at_unix_secs": 1u64
+                    }})),
+                ),
+        ],
+    ));
+
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_reader_for_tests(
+                    provider_catalog_repository,
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/endpoints/health/key/key-openai"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let body = response.text().await.expect("body should read");
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json body should parse");
+    let circuit = &payload["health_by_format"]["openai:chat"]["circuit_breaker"];
+    assert_eq!(payload["any_circuit_open"], false);
+    assert_eq!(circuit["open"], false);
+    assert_eq!(circuit["state"], "closed");
+    assert_eq!(payload["key_health_score"], 0.7);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -442,7 +521,7 @@ async fn gateway_recovers_admin_key_health_locally_with_trusted_admin_principal(
                     Some(json!({"openai:chat": {
                         "open": true,
                         "open_at": "2026-03-26T12:01:00+00:00",
-                        "next_probe_at": "2026-03-26T12:05:00+00:00",
+                        "next_probe_at": "2099-03-26T12:05:00+00:00",
                         "half_open_until": null,
                         "half_open_successes": 0,
                         "half_open_failures": 1
@@ -754,6 +833,14 @@ async fn gateway_handles_admin_modules_status_locally_with_trusted_admin_princip
         .with_system_config_values_for_tests(vec![
             ("module.oauth.enabled".to_string(), json!(true)),
             ("module.management_tokens.enabled".to_string(), json!(true)),
+            (
+                "module.important_notification.email_enabled".to_string(),
+                json!(true),
+            ),
+            (
+                "module.important_notification.email_recipients".to_string(),
+                json!("ops@example.com"),
+            ),
             ("smtp_host".to_string(), json!("smtp.example.com")),
             ("smtp_from_email".to_string(), json!("ops@example.com")),
         ]);
@@ -796,9 +883,20 @@ async fn gateway_handles_admin_modules_status_locally_with_trusted_admin_princip
         "/admin/modules/chat-pii-redaction"
     );
     assert_eq!(
-        payload["notification_email"]["config_validated"],
+        payload["important_notification"]["config_validated"],
         json!(true)
     );
+    assert_eq!(
+        payload["important_notification"]["admin_route"],
+        "/admin/notification-service"
+    );
+    assert_eq!(payload["server_chan_push"]["display_name"], "Server 酱推送");
+    assert_eq!(
+        payload["server_chan_push"]["admin_route"],
+        "/admin/modules/server-chan"
+    );
+    assert_eq!(payload["bark_push"]["display_name"], "Bark 推送");
+    assert_eq!(payload["bark_push"]["admin_route"], "/admin/modules/bark");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -828,6 +926,14 @@ async fn gateway_handles_admin_modules_status_locally_with_bearer_admin_session(
         .with_system_config_values_for_tests(vec![
             ("module.oauth.enabled".to_string(), json!(true)),
             ("module.management_tokens.enabled".to_string(), json!(true)),
+            (
+                "module.important_notification.email_enabled".to_string(),
+                json!(true),
+            ),
+            (
+                "module.important_notification.email_recipients".to_string(),
+                json!("ops@example.com"),
+            ),
             ("smtp_host".to_string(), json!("smtp.example.com")),
             ("smtp_from_email".to_string(), json!("ops@example.com")),
         ]);
@@ -855,7 +961,7 @@ async fn gateway_handles_admin_modules_status_locally_with_bearer_admin_session(
     assert_eq!(payload["oauth"]["config_validated"], json!(true));
     assert_eq!(payload["management_tokens"]["active"], json!(true));
     assert_eq!(
-        payload["notification_email"]["config_validated"],
+        payload["important_notification"]["config_validated"],
         json!(true)
     );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);

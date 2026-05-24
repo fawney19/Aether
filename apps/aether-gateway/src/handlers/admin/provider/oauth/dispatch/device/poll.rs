@@ -26,6 +26,9 @@ use aether_data::repository::provider_oauth::StoredAdminProviderOAuthDeviceSessi
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogProvider,
 };
+use aether_oauth::provider::{
+    ProviderOAuthImportInput, ProviderOAuthService, ProviderOAuthTransportContext,
+};
 use axum::{
     body::{Body, Bytes},
     http,
@@ -84,6 +87,99 @@ fn kiro_social_poll_error_response(error: impl Into<String>) -> Response<Body> {
         "replaced": false,
     }))
     .into_response()
+}
+
+fn windsurf_browser_poll_error_response(error: impl Into<String>) -> Response<Body> {
+    Json(json!({
+        "status": "error",
+        "error": error.into(),
+        "replaced": false,
+    }))
+    .into_response()
+}
+
+fn sanitize_windsurf_browser_poll_detail(detail: impl AsRef<str>) -> String {
+    let detail = detail.as_ref().trim();
+    if detail.is_empty() {
+        return "-".to_string();
+    }
+    if contains_windsurf_sensitive_marker(detail) {
+        "[REDACTED upstream error body]".to_string()
+    } else {
+        detail.chars().take(500).collect()
+    }
+}
+
+fn sanitize_windsurf_browser_poll_callback_error(error: &str, description: &str) -> String {
+    let error = sanitize_windsurf_browser_poll_error_code(error);
+    let description = sanitize_windsurf_browser_poll_detail(description);
+    format!("{error}: {description}")
+}
+
+fn sanitize_windsurf_browser_poll_error_code(error: &str) -> String {
+    let error = error.trim();
+    if !error.is_empty()
+        && error.len() <= 80
+        && error
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return error.to_string();
+    }
+    sanitize_windsurf_browser_poll_detail(error)
+}
+
+fn sanitize_windsurf_browser_poll_oauth_error(error: &aether_oauth::core::OAuthError) -> String {
+    match error {
+        aether_oauth::core::OAuthError::InvalidRequest(_) => {
+            "Windsurf token 验证失败: 请求参数无效".to_string()
+        }
+        aether_oauth::core::OAuthError::HttpStatus { status_code, .. } => {
+            format!("Windsurf token 验证失败: HTTP {status_code}")
+        }
+        _ => "Windsurf token 验证失败".to_string(),
+    }
+}
+
+fn contains_windsurf_sensitive_marker(value: &str) -> bool {
+    let lowered = value.to_ascii_lowercase();
+    [
+        "token",
+        "api_key",
+        "apikey",
+        "sessiontoken",
+        "firebase_id_token",
+        "idtoken",
+        "authorization",
+        "password",
+        "secret",
+        "devin-session-token$",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+        || value.contains("sk-")
+}
+
+fn secret_fingerprint(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(value.as_bytes());
+    Some(
+        digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    )
+}
+
+fn insert_secret_fingerprint(target: &mut serde_json::Map<String, Value>, key: &str, secret: &str) {
+    if let Some(fingerprint) = secret_fingerprint(secret) {
+        target.insert(key.to_string(), json!(fingerprint));
+    }
 }
 
 fn kiro_social_provider_from_login_option(login_option: Option<&str>) -> Option<&'static str> {
@@ -322,8 +418,9 @@ pub(super) async fn handle_admin_provider_oauth_device_poll(
             "Provider 不存在",
         ));
     };
+    let provider_type = provider.provider_type.trim().to_ascii_lowercase();
     let endpoint_resolution =
-        resolve_provider_oauth_runtime_endpoints(state, &provider, "kiro").await?;
+        resolve_provider_oauth_runtime_endpoints(state, &provider, &provider_type).await?;
     let endpoints = endpoint_resolution.endpoints;
     let runtime_endpoint = endpoint_resolution.runtime_endpoint;
     let request_proxy = state
@@ -337,6 +434,20 @@ pub(super) async fn handle_admin_provider_oauth_device_poll(
             ],
         )
         .await;
+
+    if provider_type == "windsurf" {
+        return handle_admin_provider_oauth_windsurf_browser_device_poll(
+            state,
+            &provider,
+            &endpoints,
+            request_proxy,
+            session_id,
+            session,
+            payload.callback_url.as_deref(),
+            payload.token.as_deref(),
+        )
+        .await;
+    }
 
     if kiro_device_session_is_social(&session) {
         return handle_admin_provider_oauth_kiro_social_device_poll(
@@ -630,6 +741,276 @@ pub(super) async fn handle_admin_provider_oauth_device_poll(
     ))
 }
 
+fn windsurf_raw_api_key(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.starts_with("devin-session-token$") || value.starts_with("sk-") {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+async fn handle_admin_provider_oauth_windsurf_browser_device_poll(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    endpoints: &[StoredProviderCatalogEndpoint],
+    request_proxy: Option<ProxySnapshot>,
+    session_id: &str,
+    mut session: StoredAdminProviderOAuthDeviceSession,
+    callback_url: Option<&str>,
+    token: Option<&str>,
+) -> Result<Response<Body>, GatewayError> {
+    let callback_url = callback_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let token = token.map(str::trim).filter(|value| !value.is_empty());
+    if callback_url.is_none() && token.is_none() {
+        return Ok(Json(json!({"status": "pending", "replaced": false})).into_response());
+    }
+
+    let mut social_provider = session
+        .social_provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let imported_token = if let Some(callback_url) = callback_url {
+        let callback_params = parse_provider_oauth_callback_params(callback_url);
+        if let Some(error) = callback_params.get("error").map(String::as_str) {
+            let error_description = callback_params
+                .get("error_description")
+                .map(String::as_str)
+                .unwrap_or("用户拒绝授权");
+            let sanitized_error =
+                sanitize_windsurf_browser_poll_callback_error(error, error_description);
+            session.status = "error".to_string();
+            session.error_msg = Some(sanitized_error.clone());
+            let _ = state
+                .save_provider_oauth_device_session(session_id, &session, 30)
+                .await;
+            return Ok(attach_admin_provider_oauth_device_poll_terminal_response(
+                session_id,
+                "error",
+                windsurf_browser_poll_error_response(sanitized_error),
+            ));
+        }
+        let Some(callback_state) = callback_params
+            .get("state")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(windsurf_browser_poll_error_response("回调 URL 缺少 state"));
+        };
+        if callback_state != session_id {
+            return Ok(windsurf_browser_poll_error_response(
+                "回调 state 与会话不匹配",
+            ));
+        }
+        if let Some(provider) = callback_params
+            .get("provider")
+            .or_else(|| callback_params.get("login_option"))
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            social_provider = Some(provider.to_string());
+        }
+        let Some(callback_token) = callback_params
+            .get("token")
+            .or_else(|| callback_params.get("auth_token"))
+            .or_else(|| callback_params.get("access_token"))
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(windsurf_browser_poll_error_response("回调 URL 缺少 token"));
+        };
+        callback_token.to_string()
+    } else {
+        let token = token.unwrap_or_default();
+        if windsurf_raw_api_key(token).is_none() {
+            return Ok(windsurf_browser_poll_error_response(
+                "浏览器授权请提交包含 state 的回调 URL；纯 token 请使用导入授权",
+            ));
+        }
+        token.to_string()
+    };
+
+    let mut raw_credentials = serde_json::Map::new();
+    if windsurf_raw_api_key(&imported_token).is_some() {
+        raw_credentials.insert("api_key".to_string(), json!(imported_token));
+    } else {
+        raw_credentials.insert("token".to_string(), json!(imported_token));
+    }
+    if let Some(social_provider) = social_provider.as_ref() {
+        raw_credentials.insert("social_provider".to_string(), json!(social_provider));
+    }
+
+    let ctx = ProviderOAuthTransportContext {
+        provider_id: provider.id.clone(),
+        provider_type: provider.provider_type.clone(),
+        endpoint_id: None,
+        key_id: None,
+        auth_type: Some("oauth".to_string()),
+        decrypted_api_key: None,
+        decrypted_auth_config: None,
+        provider_config: provider.config.clone(),
+        endpoint_config: None,
+        key_config: None,
+        network: aether_oauth::network::OAuthNetworkContext::provider_operation(
+            request_proxy.clone(),
+        ),
+    };
+    let executor = crate::oauth::GatewayOAuthHttpExecutor::new(*state);
+    let result = match ProviderOAuthService::with_builtin_adapters()
+        .import_credentials(
+            &executor,
+            &ctx,
+            ProviderOAuthImportInput {
+                provider_type: provider.provider_type.clone(),
+                name: None,
+                refresh_token: None,
+                raw_credentials: Some(Value::Object(raw_credentials)),
+                network: ctx.network.clone(),
+            },
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let sanitized_error = sanitize_windsurf_browser_poll_oauth_error(&error);
+            session.status = "error".to_string();
+            session.error_msg = Some(sanitized_error.clone());
+            let _ = state
+                .save_provider_oauth_device_session(session_id, &session, 30)
+                .await;
+            return Ok(attach_admin_provider_oauth_device_poll_terminal_response(
+                session_id,
+                "error",
+                windsurf_browser_poll_error_response(sanitized_error),
+            ));
+        }
+    };
+    let access_token = result.token_set.access_token.trim().to_string();
+    if access_token.is_empty() {
+        return Ok(windsurf_browser_poll_error_response(
+            "Windsurf token 验证返回缺少 apiKey/sessionToken",
+        ));
+    }
+    let mut auth_config = result.auth_config.as_object().cloned().unwrap_or_default();
+    auth_config.insert("provider_type".to_string(), json!("windsurf"));
+    auth_config.insert("auth_method".to_string(), json!("browser"));
+    if let Some(social_provider) = social_provider.as_ref() {
+        auth_config
+            .entry("social_provider".to_string())
+            .or_insert_with(|| json!(social_provider));
+    }
+
+    let duplicate = match state
+        .find_duplicate_provider_oauth_key(&provider.id, &auth_config, None)
+        .await
+    {
+        Ok(duplicate) => duplicate,
+        Err(detail) => {
+            return Ok(Json(json!({
+                "status": "error",
+                "error": detail,
+                "replaced": false,
+            }))
+            .into_response());
+        }
+    };
+
+    let api_formats = provider_oauth_active_api_formats(endpoints);
+    let key_proxy = provider_oauth_key_proxy_value(session.proxy_node_id.as_deref());
+    let expires_at = result.token_set.expires_at_unix_secs;
+    let email = auth_config
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let mut replaced = false;
+    let persisted_key = if let Some(existing_key) = duplicate {
+        replaced = true;
+        match state
+            .update_existing_provider_oauth_catalog_key(
+                &existing_key,
+                &provider.provider_type,
+                &access_token,
+                &auth_config,
+                &api_formats,
+                key_proxy.clone(),
+                expires_at,
+            )
+            .await?
+        {
+            Some(key) => key,
+            None => {
+                return Ok(build_internal_control_error_response(
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    "provider oauth write unavailable",
+                ));
+            }
+        }
+    } else {
+        let key_name = email
+            .as_deref()
+            .map(|email| format!("windsurf_{email}"))
+            .unwrap_or_else(|| format!("windsurf_{}", current_unix_secs()));
+        match state
+            .create_provider_oauth_catalog_key(
+                &provider.id,
+                &provider.provider_type,
+                &key_name,
+                &access_token,
+                &auth_config,
+                &api_formats,
+                key_proxy,
+                expires_at,
+            )
+            .await?
+        {
+            Some(key) => key,
+            None => {
+                return Ok(build_internal_control_error_response(
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    "provider oauth write unavailable",
+                ));
+            }
+        }
+    };
+
+    spawn_provider_oauth_account_state_refresh_after_update(
+        state.cloned_app(),
+        provider.clone(),
+        persisted_key.id.clone(),
+        request_proxy.clone(),
+    );
+
+    session.status = "authorized".to_string();
+    session.key_id = Some(persisted_key.id.clone());
+    session.email = email.clone();
+    session.replaced = replaced;
+    session.error_msg = None;
+    let _ = state
+        .save_provider_oauth_device_session(session_id, &session, 60)
+        .await;
+
+    Ok(attach_admin_provider_oauth_device_poll_terminal_response(
+        session_id,
+        "authorized",
+        Json(json!({
+            "status": "authorized",
+            "key_id": persisted_key.id,
+            "email": email,
+            "replaced": replaced,
+        }))
+        .into_response(),
+    ))
+}
+
 async fn handle_admin_provider_oauth_kiro_social_device_poll(
     state: &AdminAppState<'_>,
     provider: &StoredProviderCatalogProvider,
@@ -814,7 +1195,7 @@ async fn handle_admin_provider_oauth_kiro_social_device_poll(
             .get("idToken")
             .or_else(|| token_result.get("id_token")),
     ) {
-        auth_config_object.insert("id_token".to_string(), json!(id_token));
+        insert_secret_fingerprint(&mut auth_config_object, "id_token_fingerprint", &id_token);
     }
     if let Some(token_type) = json_non_empty_string(
         token_result
@@ -920,4 +1301,19 @@ async fn handle_admin_provider_oauth_kiro_social_device_poll(
         }))
         .into_response(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn windsurf_browser_poll_callback_error_redacts_sensitive_values() {
+        let detail = super::sanitize_windsurf_browser_poll_callback_error(
+            "access_denied",
+            "bad token devin-session-token$secret and apiKey sk-secret",
+        );
+
+        assert_eq!(detail, "access_denied: [REDACTED upstream error body]");
+        assert!(!detail.contains("devin-session-token$secret"));
+        assert!(!detail.contains("sk-secret"));
+    }
 }

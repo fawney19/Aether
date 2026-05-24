@@ -20,6 +20,7 @@ mod stream_pump;
 pub(crate) mod submission;
 pub(crate) mod sync;
 pub(crate) mod transport;
+mod windsurf;
 
 pub(crate) use self::chatgpt_web_image::maybe_execute_chatgpt_web_image_sync;
 pub(crate) use self::constants::{

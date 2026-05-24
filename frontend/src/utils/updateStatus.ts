@@ -15,6 +15,8 @@ export function buildUpdateErrorStatus(
     current_version: previousStatus?.current_version || '',
     latest_version: null,
     has_update: false,
+    updatable: false,
+    update_blocker: null,
     release_url: null,
     release_notes: null,
     published_at: null,

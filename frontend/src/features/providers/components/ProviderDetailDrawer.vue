@@ -902,6 +902,138 @@
                         </div>
                       </template>
                     </div>
+                    <!-- Windsurf 上游额度信息 -->
+                    <div
+                      v-if="provider.provider_type === 'windsurf' && (hasWindsurfQuotaDisplayData(key) || isWindsurfUnavailableKey(key) || isWindsurfExhaustedKey(key))"
+                      class="mt-2 p-2 rounded-md"
+                      :class="isWindsurfUnavailableKey(key) ? 'bg-destructive/10 border border-destructive/30' : (isWindsurfExhaustedKey(key) ? 'bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50' : 'bg-muted/30')"
+                    >
+                      <div
+                        v-if="isWindsurfUnavailableKey(key)"
+                        class="flex items-center gap-2 text-destructive"
+                      >
+                        <ShieldX class="w-4 h-4 shrink-0" />
+                        <div class="flex-1 min-w-0">
+                          <div class="text-[11px] font-medium">
+                            账号不可用
+                          </div>
+                          <div
+                            v-if="getWindsurfQuotaDisplay(key)?.last_error"
+                            class="text-[10px] text-destructive/80 truncate"
+                            :title="getWindsurfQuotaDisplay(key)?.last_error || ''"
+                          >
+                            {{ getWindsurfQuotaDisplay(key)?.last_error }}
+                          </div>
+                        </div>
+                      </div>
+                      <template v-else>
+                        <div
+                          v-if="isWindsurfExhaustedKey(key)"
+                          class="mb-2 flex items-center gap-2 text-amber-700 dark:text-amber-300"
+                        >
+                          <ShieldX class="w-4 h-4 shrink-0" />
+                          <div class="flex-1 min-w-0">
+                            <div class="text-[11px] font-medium">
+                              {{ getWindsurfQuotaStatusLabel(key) }}
+                            </div>
+                            <div
+                              v-if="getWindsurfQuotaDisplay(key)?.last_error"
+                              class="text-[10px] text-amber-700/80 dark:text-amber-300/80 truncate"
+                              :title="getWindsurfQuotaDisplay(key)?.last_error || ''"
+                            >
+                              {{ getWindsurfQuotaDisplay(key)?.last_error }}
+                            </div>
+                          </div>
+                        </div>
+                        <div class="flex items-center justify-between mb-1">
+                          <span class="text-[10px] text-muted-foreground">账号配额</span>
+                          <div class="flex items-center gap-1">
+                            <RefreshCw
+                              v-if="refreshingQuota"
+                              class="w-3 h-3 text-muted-foreground/70 animate-spin"
+                            />
+                            <span
+                              v-if="getWindsurfQuotaDisplay(key)?.updated_at"
+                              class="text-[9px] text-muted-foreground/70"
+                            >
+                              {{ formatKiroUpdatedAt(getWindsurfQuotaDisplay(key)?.updated_at || 0) }}
+                            </span>
+                          </div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-3">
+                          <div v-if="getWindsurfQuotaDisplay(key)?.daily_remaining_percent !== undefined">
+                            <div class="flex items-center justify-between text-[10px] mb-0.5">
+                              <span class="text-muted-foreground">日额度</span>
+                              <span :class="getQuotaRemainingClass(getWindsurfQuotaDisplay(key)?.daily_used_percent || 0)">
+                                {{ (getWindsurfQuotaDisplay(key)?.daily_remaining_percent || 0).toFixed(1) }}%
+                              </span>
+                            </div>
+                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
+                              <div
+                                class="absolute left-0 top-0 h-full transition-all duration-300"
+                                :class="getQuotaRemainingBarColor(getWindsurfQuotaDisplay(key)?.daily_used_percent || 0)"
+                                :style="{ width: `${Math.max(getWindsurfQuotaDisplay(key)?.daily_remaining_percent || 0, 0)}%` }"
+                              />
+                            </div>
+                            <div
+                              v-if="getWindsurfQuotaDisplay(key)?.daily_reset_at"
+                              class="text-[9px] text-muted-foreground/70 mt-0.5"
+                            >
+                              {{ formatKiroResetTime(getWindsurfQuotaDisplay(key)?.daily_reset_at || 0) }}重置
+                            </div>
+                          </div>
+                          <div v-if="getWindsurfQuotaDisplay(key)?.weekly_remaining_percent !== undefined">
+                            <div class="flex items-center justify-between text-[10px] mb-0.5">
+                              <span class="text-muted-foreground">周额度</span>
+                              <span :class="getQuotaRemainingClass(getWindsurfQuotaDisplay(key)?.weekly_used_percent || 0)">
+                                {{ (getWindsurfQuotaDisplay(key)?.weekly_remaining_percent || 0).toFixed(1) }}%
+                              </span>
+                            </div>
+                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
+                              <div
+                                class="absolute left-0 top-0 h-full transition-all duration-300"
+                                :class="getQuotaRemainingBarColor(getWindsurfQuotaDisplay(key)?.weekly_used_percent || 0)"
+                                :style="{ width: `${Math.max(getWindsurfQuotaDisplay(key)?.weekly_remaining_percent || 0, 0)}%` }"
+                              />
+                            </div>
+                            <div
+                              v-if="getWindsurfQuotaDisplay(key)?.weekly_reset_at"
+                              class="text-[9px] text-muted-foreground/70 mt-0.5"
+                            >
+                              {{ formatKiroResetTime(getWindsurfQuotaDisplay(key)?.weekly_reset_at || 0) }}重置
+                            </div>
+                          </div>
+                        </div>
+                        <div
+                          v-if="hasWindsurfPromptQuota(key) || hasWindsurfFlexQuota(key)"
+                          class="mt-2 flex items-center gap-3 text-[9px] text-muted-foreground/70"
+                        >
+                          <span v-if="hasWindsurfPromptQuota(key)">
+                            Prompt {{ formatKiroUsage(getWindsurfQuotaDisplay(key)?.prompt_used || 0) }} /
+                            {{ formatKiroUsage(getWindsurfQuotaDisplay(key)?.prompt_limit || 0) }}
+                          </span>
+                          <span v-if="hasWindsurfFlexQuota(key)">
+                            Flex {{ formatKiroUsage(getWindsurfQuotaDisplay(key)?.flex_used || 0) }} /
+                            {{ formatKiroUsage(getWindsurfQuotaDisplay(key)?.flex_limit || 0) }}
+                          </span>
+                        </div>
+                        <div
+                          v-if="hasWindsurfModelCount(key) || hasWindsurfModelPreview(key)"
+                          class="mt-2 flex items-center justify-between gap-2 text-[9px] text-muted-foreground/70"
+                        >
+                          <span>
+                            模型 {{ getWindsurfQuotaDisplay(key)?.allowed_models_count ?? getWindsurfQuotaDisplay(key)?.models?.length }} 个
+                          </span>
+                          <span
+                            v-if="getWindsurfModelPreview(key)"
+                            class="truncate"
+                            :title="getWindsurfModelPreview(key) || ''"
+                          >
+                            {{ getWindsurfModelPreview(key) }}
+                          </span>
+                        </div>
+                      </template>
+                    </div>
                     <!-- ChatGPT Web 上游额度信息（生图配额） -->
                     <div
                       v-if="provider.provider_type === 'chatgpt_web' && hasChatGPTWebQuotaDisplayData(key)"
@@ -924,7 +1056,7 @@
                       </div>
                       <div>
                         <div class="flex items-center justify-between text-[10px] mb-0.5">
-                          <span class="text-muted-foreground">使用额度</span>
+                          <span class="text-muted-foreground">剩余额度</span>
                           <span :class="getQuotaRemainingClass(getChatGPTWebQuotaUsedPercent(key))">
                             {{ getChatGPTWebQuotaRemainingPercent(key).toFixed(1) }}%
                           </span>
@@ -938,7 +1070,7 @@
                         </div>
                         <div class="flex items-center justify-between text-[9px] text-muted-foreground/70 mt-0.5">
                           <span>
-                            {{ formatChatGPTWebUsage(getChatGPTWebQuotaDisplay(key)?.image_quota_used) }} /
+                            {{ formatChatGPTWebUsage(getChatGPTWebQuotaDisplay(key)?.image_quota_remaining) }} /
                             {{ formatChatGPTWebUsage(getChatGPTWebQuotaDisplay(key)?.image_quota_total) }}
                           </span>
                           <span v-if="getChatGPTWebQuotaDisplay(key)?.image_quota_reset_at">
@@ -1296,6 +1428,7 @@ import type {
   ChatGPTWebUpstreamMetadata,
   GrokUpstreamMetadata,
   KiroUpstreamMetadata,
+  WindsurfUpstreamMetadata,
   QuotaStatusSnapshot,
   QuotaWindowSnapshot,
 } from '@/api/endpoints/types'
@@ -1307,6 +1440,7 @@ import {
 } from '../utils/quotaAutoRefreshCooldown'
 import { getOAuthOrgBadge } from '@/utils/oauthIdentity'
 import { getOAuthRefreshFeedback } from '@/utils/oauthRefreshFeedback'
+import { formatCompactNumber } from '@/utils/format'
 import {
   canEditOAuthCredential,
   canExportOAuthCredential,
@@ -1947,7 +2081,7 @@ async function handleClearOAuthInvalid(key: EndpointAPIKey) {
   }
 }
 
-// Codex / Antigravity / Kiro / ChatGPT Web：打开抽屉后自动后台刷新（配额缓存缺失/过期，或 Token 即将过期时触发）
+// Codex / Antigravity / Kiro / Windsurf / ChatGPT Web：打开抽屉后自动后台刷新（配额缓存缺失/过期，或 Token 即将过期时触发）
 const AUTO_QUOTA_REFRESH_STALE_SECONDS = 5 * 60
 // 与后端 OAuth 懒刷新阈值对齐：到期前 2 分钟内视为需要刷新
 const AUTO_TOKEN_REFRESH_SKEW_SECONDS = 2 * 60
@@ -1966,7 +2100,7 @@ function quotaSnapshotHasDisplayData(quota: QuotaStatusSnapshot | null | undefin
 
 function getQuotaSnapshotForProvider(
   key: EndpointAPIKey,
-  providerType: 'codex' | 'kiro' | 'antigravity' | 'chatgpt_web' | 'gemini_cli' | 'grok',
+  providerType: 'codex' | 'kiro' | 'windsurf' | 'antigravity' | 'chatgpt_web' | 'gemini_cli' | 'grok',
 ): QuotaStatusSnapshot | null {
   const quota = key.status_snapshot?.quota
   if (!quota) return null
@@ -2225,9 +2359,158 @@ function getGrokQuotaDisplay(key: EndpointAPIKey): GrokQuotaDisplay | null {
   return Object.keys(display).length > 0 ? display : null
 }
 
+type WindsurfQuotaDisplay = WindsurfUpstreamMetadata & {
+  daily_used_percent?: number
+  weekly_used_percent?: number
+}
+
+function getWindsurfQuotaDisplay(key: EndpointAPIKey): WindsurfQuotaDisplay | null {
+  const quota = getQuotaSnapshotForProvider(key, 'windsurf')
+  const upstream = key.upstream_metadata?.windsurf
+  if (!quota && !upstream) return null
+
+  const display: WindsurfQuotaDisplay = {}
+  const updatedAt = getQuotaSnapshotUpdatedAt(quota) ?? upstream?.updated_at
+  if (updatedAt !== undefined) display.updated_at = updatedAt
+  if (quota?.plan_type) display.plan_name = quota.plan_type
+  else if (upstream?.plan_name) display.plan_name = upstream.plan_name
+  if (quota?.reason) display.last_error = quota.reason
+  else if (upstream?.last_error) display.last_error = upstream.last_error
+  if (typeof quota?.allowed_models_count === 'number') display.allowed_models_count = quota.allowed_models_count
+  else if (typeof upstream?.allowed_models_count === 'number') display.allowed_models_count = upstream.allowed_models_count
+  if (quota?.rate_limit) display.rate_limit = quota.rate_limit
+  else if (upstream?.rate_limit) display.rate_limit = upstream.rate_limit
+  if (Array.isArray(upstream?.models)) display.models = upstream.models
+
+  const dailyWindow = getQuotaWindow(quota, 'daily')
+  const dailyRemaining = getQuotaWindowRemainingPercent(dailyWindow)
+  const dailyUsed = getQuotaWindowUsedPercent(dailyWindow)
+  if (dailyRemaining !== undefined) display.daily_remaining_percent = dailyRemaining
+  else if (typeof upstream?.daily_remaining_percent === 'number') display.daily_remaining_percent = upstream.daily_remaining_percent
+  if (dailyUsed !== undefined) display.daily_used_percent = dailyUsed
+  else if (typeof upstream?.daily_remaining_percent === 'number') display.daily_used_percent = Math.max(100 - upstream.daily_remaining_percent, 0)
+  const dailyResetAt = getQuotaWindowResetAt(dailyWindow)
+  if (dailyResetAt !== undefined) display.daily_reset_at = dailyResetAt
+  else if (typeof upstream?.daily_reset_at === 'number') display.daily_reset_at = upstream.daily_reset_at
+
+  const weeklyWindow = getQuotaWindow(quota, 'weekly')
+  const weeklyRemaining = getQuotaWindowRemainingPercent(weeklyWindow)
+  const weeklyUsed = getQuotaWindowUsedPercent(weeklyWindow)
+  if (weeklyRemaining !== undefined) display.weekly_remaining_percent = weeklyRemaining
+  else if (typeof upstream?.weekly_remaining_percent === 'number') display.weekly_remaining_percent = upstream.weekly_remaining_percent
+  if (weeklyUsed !== undefined) display.weekly_used_percent = weeklyUsed
+  else if (typeof upstream?.weekly_remaining_percent === 'number') display.weekly_used_percent = Math.max(100 - upstream.weekly_remaining_percent, 0)
+  const weeklyResetAt = getQuotaWindowResetAt(weeklyWindow)
+  if (weeklyResetAt !== undefined) display.weekly_reset_at = weeklyResetAt
+  else if (typeof upstream?.weekly_reset_at === 'number') display.weekly_reset_at = upstream.weekly_reset_at
+
+  const promptWindow = getQuotaWindow(quota, 'prompt')
+  if (typeof promptWindow?.used_value === 'number') display.prompt_used = promptWindow.used_value
+  else if (typeof upstream?.prompt_used === 'number') display.prompt_used = upstream.prompt_used
+  if (typeof promptWindow?.limit_value === 'number') display.prompt_limit = promptWindow.limit_value
+  else if (typeof upstream?.prompt_limit === 'number') display.prompt_limit = upstream.prompt_limit
+  if (typeof promptWindow?.remaining_value === 'number') display.prompt_remaining = promptWindow.remaining_value
+  else if (typeof upstream?.prompt_remaining === 'number') display.prompt_remaining = upstream.prompt_remaining
+
+  const flexWindow = getQuotaWindow(quota, 'flex')
+  if (typeof flexWindow?.used_value === 'number') display.flex_used = flexWindow.used_value
+  else if (typeof upstream?.flex_used === 'number') display.flex_used = upstream.flex_used
+  if (typeof flexWindow?.limit_value === 'number') display.flex_limit = flexWindow.limit_value
+  else if (typeof upstream?.flex_limit === 'number') display.flex_limit = upstream.flex_limit
+  if (typeof flexWindow?.remaining_value === 'number') display.flex_remaining = flexWindow.remaining_value
+  else if (typeof upstream?.flex_remaining === 'number') display.flex_remaining = upstream.flex_remaining
+
+  return Object.keys(display).length > 0 ? display : null
+}
+
 function hasGrokQuotaDisplayData(key: EndpointAPIKey): boolean {
   const grok = getGrokQuotaDisplay(key)
   return !!grok && (grok.usage_percentage !== undefined || grok.usage_limit !== undefined)
+}
+
+function hasWindsurfQuotaDisplayData(key: EndpointAPIKey): boolean {
+  const windsurf = getWindsurfQuotaDisplay(key)
+  return !!windsurf && (
+    windsurf.daily_remaining_percent !== undefined
+    || windsurf.weekly_remaining_percent !== undefined
+    || windsurf.prompt_limit !== undefined
+    || windsurf.flex_limit !== undefined
+    || windsurf.allowed_models_count !== undefined
+    || windsurf.rate_limit !== undefined
+    || !!windsurf.last_error
+    || (Array.isArray(windsurf.models) && windsurf.models.length > 0)
+  )
+}
+
+function isWindsurfUnavailableKey(key: EndpointAPIKey): boolean {
+  const code = String(getQuotaSnapshotForProvider(key, 'windsurf')?.code || '').trim().toLowerCase()
+  return code === 'banned' || code === 'forbidden' || code === 'quarantined'
+}
+
+function getPositiveQuotaNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+function windsurfCooldownHasPositiveReset(key: EndpointAPIKey): boolean {
+  const quota = getQuotaSnapshotForProvider(key, 'windsurf')
+  const rateLimit = quota?.rate_limit
+  if (rateLimit && typeof rateLimit === 'object') {
+    const retryAfterMs =
+      getPositiveQuotaNumber(rateLimit.retry_after_ms)
+      ?? getPositiveQuotaNumber(rateLimit.retryAfterMs)
+    if (retryAfterMs !== undefined) return true
+  }
+
+  const rateLimitWindow = getQuotaWindow(quota, 'rate_limit')
+  return (
+    getPositiveQuotaNumber(rateLimitWindow?.reset_seconds) !== undefined
+    || getPositiveQuotaNumber(rateLimitWindow?.reset_at) !== undefined
+  )
+}
+
+function isWindsurfExhaustedKey(key: EndpointAPIKey): boolean {
+  const code = String(getQuotaSnapshotForProvider(key, 'windsurf')?.code || '').trim().toLowerCase()
+  if (code === 'cooldown') return windsurfCooldownHasPositiveReset(key)
+  return code === 'exhausted' || code === 'rate_limited' || code === 'rate_limit'
+}
+
+function getWindsurfQuotaStatusLabel(key: EndpointAPIKey): string {
+  const quota = getQuotaSnapshotForProvider(key, 'windsurf')
+  const label = quota?.label?.trim()
+  if (label) return label
+  const code = String(quota?.code || '').trim().toLowerCase()
+  if (code === 'cooldown') return '冷却中'
+  return code === 'rate_limited' || code === 'rate_limit' ? '速率受限' : '额度耗尽'
+}
+
+function getWindsurfModelPreview(key: EndpointAPIKey): string | null {
+  const models = getWindsurfQuotaDisplay(key)?.models
+  if (!Array.isArray(models) || models.length === 0) return null
+  return models
+    .slice(0, 3)
+    .map(model => (model.label || model.model_uid || '').trim())
+    .filter(Boolean)
+    .join(' / ') || null
+}
+
+function hasFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function hasWindsurfPromptQuota(key: EndpointAPIKey): boolean {
+  return hasFiniteNumber(getWindsurfQuotaDisplay(key)?.prompt_limit)
+}
+
+function hasWindsurfFlexQuota(key: EndpointAPIKey): boolean {
+  return hasFiniteNumber(getWindsurfQuotaDisplay(key)?.flex_limit)
+}
+
+function hasWindsurfModelCount(key: EndpointAPIKey): boolean {
+  return hasFiniteNumber(getWindsurfQuotaDisplay(key)?.allowed_models_count)
+}
+
+function hasWindsurfModelPreview(key: EndpointAPIKey): boolean {
+  return !!getWindsurfModelPreview(key)
 }
 
 type ChatGPTWebQuotaDisplay = ChatGPTWebUpstreamMetadata & {
@@ -2351,13 +2634,10 @@ const formatKiroUpdatedAt = formatUpdatedAt
 // 格式化 Kiro 使用量（带单位）
 function formatKiroUsage(value: number | undefined): string {
   if (value === undefined || value === null) return '-'
-  if (value >= 1000000) {
-    return `${(value / 1000000).toFixed(1)}M`
-  }
-  if (value >= 1000) {
-    return `${(value / 1000).toFixed(1)}K`
-  }
-  return value.toFixed(1)
+  const normalized = Number(value)
+  if (!Number.isFinite(normalized)) return '-'
+  if (normalized >= 1000) return formatCompactNumber(normalized, { fractionDigits: 1 })
+  return normalized.toFixed(1)
 }
 
 // 格式化 Kiro 重置时间
@@ -2442,7 +2722,7 @@ function shouldAutoRefreshCodexQuota(): boolean {
   return false
 }
 
-// 检查 OAuth Token 是否即将过期（Codex / Antigravity / Kiro / ChatGPT Web）
+// 检查 OAuth Token 是否即将过期（Codex / Antigravity / Kiro / Windsurf / ChatGPT Web）
 function isTokenExpiringSoon(key: EndpointAPIKey, now: number): boolean {
   const oauthCode = String(key.status_snapshot?.oauth?.code || '').trim().toLowerCase()
   if (oauthCode && oauthCode !== 'valid' && oauthCode !== 'expiring') {
@@ -2511,6 +2791,28 @@ function shouldAutoRefreshGrokQuota(): boolean {
     }
 
     const updatedAt = getGrokQuotaDisplay(key)?.updated_at
+    if (typeof updatedAt !== 'number' || (now - updatedAt) > AUTO_QUOTA_REFRESH_STALE_SECONDS) {
+      return true
+    }
+  }
+
+  return false
+}
+
+function shouldAutoRefreshWindsurfQuota(): boolean {
+  if (provider.value?.provider_type !== 'windsurf') return false
+  const now = Math.floor(Date.now() / 1000)
+
+  for (const { key } of allKeys.value) {
+    if (!key.is_active) continue
+
+    if (isTokenExpiringSoon(key, now)) return true
+
+    if (!hasWindsurfQuotaDisplayData(key)) {
+      return true
+    }
+
+    const updatedAt = getWindsurfQuotaDisplay(key)?.updated_at
     if (typeof updatedAt !== 'number' || (now - updatedAt) > AUTO_QUOTA_REFRESH_STALE_SECONDS) {
       return true
     }
@@ -2618,14 +2920,14 @@ function applyQuotaResults(
   return applied
 }
 
-// 通用的自动刷新配额函数（支持 Codex、Antigravity、Kiro 和 ChatGPT Web）
+// 通用的自动刷新配额函数（支持 Codex、Antigravity、Kiro、Windsurf 和 ChatGPT Web）
 async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean } = {}) {
   const providerId = props.providerId
   if (!providerId) return
   if (refreshingQuota.value) return
 
   const providerType = provider.value?.provider_type
-  if (providerType !== 'codex' && providerType !== 'antigravity' && providerType !== 'kiro' && providerType !== 'chatgpt_web' && providerType !== 'grok') return
+  if (providerType !== 'codex' && providerType !== 'antigravity' && providerType !== 'kiro' && providerType !== 'windsurf' && providerType !== 'chatgpt_web' && providerType !== 'grok') return
 
   // 检查是否需要刷新
   let shouldRefresh = false
@@ -2637,6 +2939,8 @@ async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean 
     shouldRefresh = shouldAutoRefreshKiroQuota()
   } else if (providerType === 'grok') {
     shouldRefresh = shouldAutoRefreshGrokQuota()
+  } else if (providerType === 'windsurf') {
+    shouldRefresh = shouldAutoRefreshWindsurfQuota()
   } else if (providerType === 'chatgpt_web') {
     shouldRefresh = shouldAutoRefreshChatGPTWebQuota()
   }
@@ -2652,6 +2956,8 @@ async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean 
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasKiroQuotaDisplayData(key))
   } else if (providerType === 'grok') {
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasGrokQuotaDisplayData(key))
+  } else if (providerType === 'windsurf') {
+    hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasWindsurfQuotaDisplayData(key))
   } else if (providerType === 'chatgpt_web') {
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasChatGPTWebQuotaDisplayData(key))
   }

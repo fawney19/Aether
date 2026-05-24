@@ -44,14 +44,16 @@ use super::error::{
 #[path = "execution_failures.rs"]
 mod execution_failures;
 use self::execution_failures::{
-    build_stream_failure_from_execution_error, build_stream_failure_report,
+    build_stream_failure_from_execution_error, build_stream_failure_from_provider_error_body,
+    build_stream_failure_report, handle_prefetch_provider_private_stream_error,
     handle_prefetch_stream_failure, submit_midstream_stream_failure, StreamFailureReport,
 };
 use crate::ai_serving::api::{
-    maybe_bridge_standard_sync_json_to_stream, maybe_build_provider_private_stream_normalizer,
-    maybe_build_stream_response_rewriter, normalize_provider_private_report_context,
-    StreamingStandardTerminalObserver,
+    extract_provider_private_stream_error_body, maybe_bridge_standard_sync_json_to_stream,
+    maybe_build_provider_private_stream_normalizer, maybe_build_stream_response_rewriter,
+    normalize_provider_private_report_context, StreamingStandardTerminalObserver,
 };
+use crate::ai_serving::is_openai_responses_family_format;
 use crate::api::response::{
     attach_control_metadata_headers, build_client_response, build_client_response_from_parts,
 };
@@ -73,14 +75,15 @@ use crate::execution_runtime::oauth_retry::refresh_oauth_plan_auth_for_retry;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::post_stream_plan_to_remote_execution_runtime;
 use crate::execution_runtime::submission::{
-    resolve_core_error_background_report_kind, strip_utf8_bom_and_ws,
-    submit_local_core_error_or_sync_finalize,
+    resolve_core_error_background_report_kind, resolve_local_sync_error_status_code,
+    strip_utf8_bom_and_ws, submit_local_core_error_or_sync_finalize,
 };
 use crate::execution_runtime::transport::{
     execute_stream_plan_via_local_tunnel, record_manual_proxy_request_failure,
     record_manual_proxy_request_success, record_manual_proxy_stream_error,
     DirectSyncExecutionRuntime, DirectUpstreamStreamExecution, ExecutionRuntimeTransportError,
 };
+use crate::execution_runtime::windsurf::maybe_execute_windsurf_stream;
 use crate::execution_runtime::{
     apply_endpoint_response_header_rules, attach_provider_response_headers_to_report_context,
     local_failover_response_text, resolve_core_stream_direct_finalize_report_kind,
@@ -113,6 +116,7 @@ use crate::{
 const OPENAI_IMAGE_STREAM_PLAN_KIND: &str = "openai_image_stream";
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const SSE_KEEPALIVE_BYTES: &[u8] = b": aether-keepalive\n\n";
+const SSE_CONTROL_FILTER_MAX_BUFFER_BYTES: usize = 1024 * 1024;
 const STREAM_IDLE_LOG_INTERVAL: Duration = Duration::from_secs(60);
 const STREAM_IDLE_LOG_INTERVAL_MS: u64 = 60_000;
 const REWRITTEN_STREAM_PREFETCH_TIMEOUT: Duration = Duration::from_millis(750);
@@ -699,6 +703,84 @@ fn should_replace_stream_usage(
     observed.is_more_complete_than(current)
 }
 
+fn stream_terminal_summary_missing_observed_finish(
+    summary: Option<&ExecutionStreamTerminalSummary>,
+) -> bool {
+    summary.is_some_and(|summary| {
+        !summary.observed_finish
+            && !summary
+                .standardized_usage
+                .as_ref()
+                .is_some_and(StandardizedUsage::has_token_signal)
+    })
+}
+
+fn stream_report_context_format_field<'a>(
+    report_context: Option<&'a Value>,
+    field: &str,
+) -> Option<&'a str> {
+    report_context
+        .and_then(Value::as_object)
+        .and_then(|object| object.get(field))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn stream_requires_observed_terminal_event(
+    provider_api_format: &str,
+    report_context: Option<&Value>,
+) -> bool {
+    is_openai_responses_family_format(provider_api_format)
+        || [
+            "provider_stream_event_api_format",
+            "provider_stream_api_format",
+            "provider_api_format",
+        ]
+        .into_iter()
+        .filter_map(|field| stream_report_context_format_field(report_context, field))
+        .any(is_openai_responses_family_format)
+}
+
+fn stream_terminal_summary_missing_observed_finish_with_requirement(
+    summary: Option<&ExecutionStreamTerminalSummary>,
+    requires_observed_terminal_event: bool,
+) -> bool {
+    if !requires_observed_terminal_event {
+        return stream_terminal_summary_missing_observed_finish(summary);
+    }
+
+    summary.is_some_and(|summary| !summary.observed_finish)
+}
+
+fn ensure_stream_terminal_summary_for_missing_observed_finish(
+    summary: &mut Option<ExecutionStreamTerminalSummary>,
+    requires_observed_terminal_event: bool,
+) {
+    if !requires_observed_terminal_event {
+        return;
+    }
+
+    let summary = summary.get_or_insert_with(ExecutionStreamTerminalSummary::default);
+    if !summary.observed_finish && summary.parser_error.is_none() {
+        summary.parser_error =
+            Some("execution runtime stream ended before provider terminal event".to_string());
+    }
+}
+
+fn stream_terminal_summary_represents_failure_with_requirement(
+    summary: Option<&ExecutionStreamTerminalSummary>,
+    requires_observed_terminal_event: bool,
+) -> bool {
+    summary.is_some_and(|summary| {
+        summary.parser_error.is_some()
+            || stream_terminal_summary_missing_observed_finish_with_requirement(
+                Some(summary),
+                requires_observed_terminal_event,
+            )
+    })
+}
+
 async fn execute_in_process_stream(
     state: &AppState,
     plan: &ExecutionPlan,
@@ -839,6 +921,58 @@ pub(crate) async fn execute_execution_runtime_stream(
                     status_code: None,
                     error_type: Some("grok_execution_unavailable".to_string()),
                     error_message: Some(format!("{err:?}")),
+                    latency_ms: None,
+                    started_at_unix_ms: Some(candidate_started_unix_secs),
+                    finished_at_unix_ms: Some(terminal_unix_secs),
+                },
+            )
+            .await;
+            return Ok(None);
+        }
+    }
+    match maybe_execute_windsurf_stream(state, &plan, report_context.as_ref()).await {
+        Ok(Some(windsurf_stream)) => {
+            return execute_stream_from_frame_stream(
+                state,
+                plan,
+                trace_id,
+                decision,
+                plan_kind,
+                report_kind,
+                windsurf_stream.report_context.or(report_context),
+                candidate_started_unix_secs,
+                stream_started_at,
+                windsurf_stream.frame_stream,
+                provider_pool_in_flight_guard.take(),
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            info!(
+                event_name = "windsurf_native_execution_unavailable",
+                log_type = "ops",
+                trace_id = %trace_id,
+                request_id = %plan_request_id_for_log,
+                candidate_id = ?plan.candidate_id,
+                provider_name = provider_name.as_str(),
+                endpoint_id = %endpoint_id,
+                key_id = %key_id,
+                model_name = model_name.as_str(),
+                candidate_index = candidate_index.as_str(),
+                error = %err,
+                "gateway native Windsurf stream execution unavailable"
+            );
+            let terminal_unix_secs = current_request_candidate_unix_ms();
+            record_local_request_candidate_status(
+                state,
+                &plan,
+                report_context.as_ref(),
+                SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Failed,
+                    status_code: None,
+                    error_type: Some("windsurf_native_execution_unavailable".to_string()),
+                    error_message: Some(err.to_string()),
                     latency_ms: None,
                     started_at_unix_ms: Some(candidate_started_unix_secs),
                     finished_at_unix_ms: Some(terminal_unix_secs),
@@ -1196,13 +1330,13 @@ fn encode_terminal_sse_error_event(failure: &StreamFailureReport) -> Result<Byte
     let payload = failure
         .to_json_string()
         .map_err(|err| IoError::other(err.to_string()))?;
-    let mut event = String::from("event: aether.error\n");
+    let mut event = String::new();
     for line in payload.lines() {
         event.push_str("data: ");
         event.push_str(line);
         event.push('\n');
     }
-    event.push('\n');
+    event.push_str("\ndata: [DONE]\n\n");
     Ok(Bytes::from(event))
 }
 
@@ -1279,10 +1413,13 @@ fn build_sse_body_stream(
     keepalive_interval: Duration,
 ) -> impl futures_util::Stream<Item = Result<Bytes, IoError>> + Send + 'static {
     stream! {
+        let mut upstream_control_filter = emit_keepalive.then(SseControlBlockFilter::default);
         let mut sent_prefetched_chunk = false;
         for chunk in prefetched_chunks_for_body {
-            sent_prefetched_chunk = true;
-            yield Ok(chunk);
+            if let Some(chunk) = filter_upstream_sse_control_chunk(&mut upstream_control_filter, chunk) {
+                sent_prefetched_chunk = true;
+                yield Ok(chunk);
+            }
         }
 
         if emit_keepalive {
@@ -1299,12 +1436,22 @@ fn build_sse_body_stream(
                         let Some(item) = item else {
                             break;
                         };
-                        yield item;
+                        match item {
+                            Ok(chunk) => {
+                                if let Some(chunk) = filter_upstream_sse_control_chunk(&mut upstream_control_filter, chunk) {
+                                    yield Ok(chunk);
+                                }
+                            }
+                            Err(err) => yield Err(err),
+                        }
                     }
                     _ = keepalive.tick() => {
                         yield Ok(Bytes::from_static(SSE_KEEPALIVE_BYTES));
                     }
                 }
+            }
+            if let Some(chunk) = flush_upstream_sse_control_filter(&mut upstream_control_filter) {
+                yield Ok(chunk);
             }
         } else {
             while let Some(item) = rx.recv().await {
@@ -1314,10 +1461,169 @@ fn build_sse_body_stream(
     }
 }
 
+#[derive(Default)]
+struct SseControlBlockFilter {
+    buffered: Vec<u8>,
+    emitted_len: usize,
+    passthrough_current_block: bool,
+}
+
+impl SseControlBlockFilter {
+    fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
+        if chunk.is_empty() {
+            return Vec::new();
+        }
+
+        self.buffered.extend_from_slice(chunk);
+        let mut output = Vec::new();
+        while let Some((block_end, separator_len)) = find_sse_block_boundary(&self.buffered) {
+            let block_len = block_end + separator_len;
+            let block = self.buffered.drain(..block_len).collect::<Vec<_>>();
+            if self.passthrough_current_block {
+                let emitted_len = self.emitted_len.min(block.len());
+                output.extend_from_slice(&block[emitted_len..]);
+            } else if sse_block_has_data_line(&block) {
+                output.extend_from_slice(&block);
+            }
+            self.emitted_len = 0;
+            self.passthrough_current_block = false;
+        }
+
+        if self.passthrough_current_block {
+            if self.buffered.len() > self.emitted_len {
+                output.extend_from_slice(&self.buffered[self.emitted_len..]);
+                self.emitted_len = self.buffered.len();
+            }
+        } else if sse_buffer_has_data_line(&self.buffered) {
+            self.passthrough_current_block = true;
+            output.extend_from_slice(&self.buffered);
+            self.emitted_len = self.buffered.len();
+        }
+
+        if self.buffered.len() > SSE_CONTROL_FILTER_MAX_BUFFER_BYTES {
+            let buffered = std::mem::take(&mut self.buffered);
+            if self.passthrough_current_block {
+                let emitted_len = self.emitted_len.min(buffered.len());
+                output.extend_from_slice(&buffered[emitted_len..]);
+            } else {
+                output.extend(buffered);
+            }
+            self.emitted_len = 0;
+            self.passthrough_current_block = false;
+        }
+
+        output
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        if self.buffered.is_empty() {
+            return Vec::new();
+        }
+
+        let block = std::mem::take(&mut self.buffered);
+        let emitted_len = self.emitted_len.min(block.len());
+        let passthrough_current_block = self.passthrough_current_block;
+        self.emitted_len = 0;
+        self.passthrough_current_block = false;
+        if passthrough_current_block {
+            block[emitted_len..].to_vec()
+        } else if sse_block_has_data_line(&block) {
+            block
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+fn filter_upstream_sse_control_chunk(
+    filter: &mut Option<SseControlBlockFilter>,
+    chunk: Bytes,
+) -> Option<Bytes> {
+    let Some(filter) = filter.as_mut() else {
+        return Some(chunk);
+    };
+
+    let filtered = filter.push_chunk(chunk.as_ref());
+    (!filtered.is_empty()).then(|| Bytes::from(filtered))
+}
+
+fn flush_upstream_sse_control_filter(filter: &mut Option<SseControlBlockFilter>) -> Option<Bytes> {
+    let filtered = filter.as_mut()?.finish();
+    (!filtered.is_empty()).then(|| Bytes::from(filtered))
+}
+
+fn find_sse_block_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
+    let lf = buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| (index, 2));
+    let crlf = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| (index, 4));
+
+    match (lf, crlf) {
+        (Some(lf), Some(crlf)) => Some(if lf.0 <= crlf.0 { lf } else { crlf }),
+        (Some(lf), None) => Some(lf),
+        (None, Some(crlf)) => Some(crlf),
+        (None, None) => None,
+    }
+}
+
+fn sse_block_has_data_line(block: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(block) else {
+        return true;
+    };
+
+    text.lines()
+        .any(|line| line.trim_start().starts_with("data:"))
+}
+
+fn sse_buffer_has_data_line(buffer: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(buffer) else {
+        return true;
+    };
+
+    text.lines()
+        .any(|line| line.trim_start().starts_with("data:"))
+}
+
 fn stream_chunk_contains_sse_done(chunk: &[u8]) -> bool {
-    std::str::from_utf8(chunk)
-        .ok()
-        .is_some_and(|text| text.lines().any(|line| line.trim() == "data: [DONE]"))
+    std::str::from_utf8(chunk).ok().is_some_and(|text| {
+        text.lines().any(|line| {
+            let line = line.trim();
+            if matches!(
+                line,
+                "data: [DONE]"
+                    | "event: message_stop"
+                    | "event: response.completed"
+                    | "event: response.failed"
+                    | "event: response.incomplete"
+                    | "event: error"
+            ) {
+                return true;
+            }
+            let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+                return false;
+            };
+            data == "[DONE]"
+                || serde_json::from_str::<serde_json::Value>(data).is_ok_and(|value| {
+                    value
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|event_type| {
+                            matches!(
+                                event_type,
+                                "message_stop"
+                                    | "response.completed"
+                                    | "response.failed"
+                                    | "response.incomplete"
+                                    | "error"
+                            )
+                        })
+                })
+        })
+    })
 }
 
 async fn next_stream_frame<R>(
@@ -1331,24 +1637,6 @@ where
         return Ok(Some(frame));
     }
     read_next_frame(lines).await
-}
-
-async fn next_stream_frame_until_downstream_closed<R>(
-    buffered_frames: &mut VecDeque<StreamFrame>,
-    lines: &mut FramedRead<R, LinesCodec>,
-    tx: &mpsc::Sender<Result<Bytes, IoError>>,
-) -> Result<Option<StreamFrame>, GatewayError>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    if let Some(frame) = buffered_frames.pop_front() {
-        return Ok(Some(frame));
-    }
-
-    tokio::select! {
-        frame = read_next_frame(lines) => frame,
-        () = tx.closed() => Ok(None),
-    }
 }
 
 fn should_refresh_stream_usage_telemetry(
@@ -1571,24 +1859,46 @@ async fn execute_stream_from_frame_stream(
 
     if !(200..300).contains(&status_code) {
         let provider_error_body = collect_error_body(&mut lines).await?;
-        let synthetic_body_json =
-            should_synthesize_non_success_stream_error_body(status_code, &provider_error_body)
-                .then(|| build_synthetic_non_success_stream_error_body(status_code, &headers));
-        let (provider_body_json, provider_body_base64) =
-            decode_stream_error_body(&headers, &provider_error_body);
-        let client_status_code = stream_client_error_status_code_for_upstream_status(status_code);
-        let wrapped_binary_body_json = wrap_non_json_binary_stream_error_for_client(
-            plan_kind,
-            &headers,
+        let private_error_body_json = extract_provider_private_stream_error_body(
+            report_context.as_ref(),
             &provider_error_body,
-        )?;
-        let (client_body_json, client_error_body) =
+        );
+        let provider_private_error_decoded = private_error_body_json.is_some();
+        let synthetic_body_json = (!provider_private_error_decoded
+            && should_synthesize_non_success_stream_error_body(status_code, &provider_error_body))
+        .then(|| build_synthetic_non_success_stream_error_body(status_code, &headers));
+        let (provider_body_json, provider_body_base64) =
+            if let Some(error_body_json) = private_error_body_json {
+                (Some(error_body_json), None)
+            } else {
+                decode_stream_error_body(&headers, &provider_error_body)
+            };
+        let client_status_code = stream_client_error_status_code_for_upstream_status(status_code);
+        let wrapped_binary_body_json = if provider_private_error_decoded {
+            None
+        } else {
+            wrap_non_json_binary_stream_error_for_client(plan_kind, &headers, &provider_error_body)?
+        };
+        let (client_body_json, client_error_body, payload_client_body_json) =
             if let Some(body_json) = synthetic_body_json.or(wrapped_binary_body_json) {
                 let body_bytes = serde_json::to_vec(&body_json)
                     .map_err(|err| GatewayError::Internal(err.to_string()))?;
-                (Some(body_json), body_bytes)
+                (Some(body_json.clone()), body_bytes, Some(body_json))
+            } else if provider_private_error_decoded {
+                let body_json = provider_body_json.clone().ok_or_else(|| {
+                    GatewayError::Internal(
+                        "decoded provider private stream error body is missing".to_string(),
+                    )
+                })?;
+                let body_bytes = serde_json::to_vec(&body_json)
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                (Some(body_json), body_bytes, None)
             } else {
-                (provider_body_json.clone(), provider_error_body.clone())
+                (
+                    provider_body_json.clone(),
+                    provider_error_body.clone(),
+                    provider_body_json.clone(),
+                )
             };
         let error_response_text =
             local_failover_response_text(client_body_json.as_ref(), &client_error_body, None);
@@ -1775,6 +2085,11 @@ async fn execute_stream_from_frame_stream(
         } else {
             headers.clone()
         };
+        if provider_private_error_decoded {
+            client_headers.remove("content-encoding");
+            client_headers.remove("content-length");
+            client_headers.insert("content-type".to_string(), "application/json".to_string());
+        }
         apply_endpoint_response_header_rules(
             state,
             &plan,
@@ -1806,7 +2121,7 @@ async fn execute_stream_from_frame_stream(
             provider_body_json,
             provider_body_base64,
             client_headers,
-            client_body_json,
+            payload_client_body_json,
             None,
         );
         record_sync_terminal_usage(state, &plan, payload.report_context.as_ref(), &payload);
@@ -2004,6 +2319,30 @@ async fn execute_stream_from_frame_stream(
 
                     provider_prefetched_body.extend_from_slice(&chunk);
                     prefetched_inspection_body.extend_from_slice(&chunk);
+
+                    if let Some(error_body_json) = extract_provider_private_stream_error_body(
+                        report_context.as_ref(),
+                        &prefetched_inspection_body,
+                    ) {
+                        let error_status_code =
+                            resolve_local_sync_error_status_code(status_code, &error_body_json);
+                        return handle_prefetch_provider_private_stream_error(
+                            state,
+                            trace_id,
+                            decision,
+                            &plan,
+                            report_context,
+                            request_id,
+                            candidate_id,
+                            report_kind,
+                            headers,
+                            prefetched_telemetry,
+                            &provider_prefetched_body,
+                            error_status_code,
+                            error_body_json,
+                        )
+                        .await;
+                    }
 
                     let inspection = inspect_prefetched_stream_body(
                         &upstream_headers,
@@ -2551,15 +2890,12 @@ async fn execute_stream_from_frame_stream(
                     image_stream_total_timeout.as_mut()
                 {
                     tokio::select! {
-                        result = next_stream_frame_until_downstream_closed(
-                            &mut buffered_frames,
-                            &mut lines,
-                            &tx,
-                        ) => result,
-                        () = tx.closed() => {
+                        biased;
+                        _ = tx.closed(), if client_visible_stream_completed => {
                             downstream_dropped = true;
                             break;
                         }
+                        result = next_stream_frame(&mut buffered_frames, &mut lines) => result,
                         _ = timeout_sleep.as_mut() => {
                             let timeout_ms = openai_image_stream_total_timeout_ms
                                 .unwrap_or(OPENAI_IMAGE_STREAM_DEFAULT_TOTAL_TIMEOUT_MS);
@@ -2610,8 +2946,14 @@ async fn execute_stream_from_frame_stream(
                         }
                     }
                 } else {
-                    next_stream_frame_until_downstream_closed(&mut buffered_frames, &mut lines, &tx)
-                        .await
+                    tokio::select! {
+                        biased;
+                        _ = tx.closed(), if client_visible_stream_completed => {
+                            downstream_dropped = true;
+                            break;
+                        }
+                        result = next_stream_frame(&mut buffered_frames, &mut lines) => result,
+                    }
                 };
                 let next_frame = match next_frame_result {
                     Ok(frame) => frame,
@@ -2713,6 +3055,11 @@ async fn execute_stream_from_frame_stream(
                         } else {
                             chunk
                         };
+                        let provider_private_error_body_json =
+                            extract_provider_private_stream_error_body(
+                                stream_usage_report_context.as_ref(),
+                                &normalized_chunk,
+                            );
                         if let (Some(observer), Some(report_context)) = (
                             stream_usage_observer.as_mut(),
                             stream_usage_report_context.as_ref(),
@@ -2751,6 +3098,18 @@ async fn execute_stream_from_frame_stream(
                         };
 
                         if rewritten_chunk.is_empty() {
+                            if let Some(error_body_json) = provider_private_error_body_json {
+                                let error_status_code = resolve_local_sync_error_status_code(
+                                    status_code,
+                                    &error_body_json,
+                                );
+                                terminal_failure =
+                                    Some(build_stream_failure_from_provider_error_body(
+                                        error_status_code,
+                                        &error_body_json,
+                                    ));
+                                break;
+                            }
                             continue;
                         }
 
@@ -2790,6 +3149,9 @@ async fn execute_stream_from_frame_stream(
                             u64::try_from(rewritten_chunk.len()).unwrap_or(u64::MAX);
                         let chunk_completed_stream =
                             stream_chunk_contains_sse_done(&rewritten_chunk);
+                        if downstream_dropped {
+                            continue;
+                        }
                         if tx.send(Ok(Bytes::from(rewritten_chunk))).await.is_err() {
                             warn!(
                                 event_name = "stream_execution_downstream_disconnected",
@@ -2797,10 +3159,9 @@ async fn execute_stream_from_frame_stream(
                                 trace_id = %trace_id_owned,
                                 request_id = %request_id_for_report_log,
                                 candidate_id = ?candidate_id_for_report.as_deref(),
-                                "gateway stream downstream dropped; stopping execution runtime stream forwarding"
+                                "gateway stream downstream dropped; continuing to drain execution runtime stream"
                             );
                             downstream_dropped = true;
-                            break;
                         } else {
                             client_visible_stream_completed |= chunk_completed_stream;
                             client_stream_bytes.fetch_add(rewritten_chunk_len, Ordering::Relaxed);
@@ -2812,6 +3173,15 @@ async fn execute_stream_from_frame_stream(
                                     as u64,
                                 Ordering::Relaxed,
                             );
+                        }
+                        if let Some(error_body_json) = provider_private_error_body_json {
+                            let error_status_code =
+                                resolve_local_sync_error_status_code(status_code, &error_body_json);
+                            terminal_failure = Some(build_stream_failure_from_provider_error_body(
+                                error_status_code,
+                                &error_body_json,
+                            ));
+                            break;
                         }
                     }
                     StreamFramePayload::Telemetry {
@@ -2857,30 +3227,35 @@ async fn execute_stream_from_frame_stream(
         }
 
         if downstream_dropped {
-            drop(lines);
             debug!(
-                event_name = "execution_runtime_stream_flush_skipped",
+                event_name = "execution_runtime_stream_client_flush_skipped",
                 log_type = "debug",
                 debug_context = "redacted",
                 stream_status = "downstream_disconnected",
                 trace_id = %trace_id_owned,
-                "gateway skipped local stream flush after downstream disconnect"
+                "gateway skipped client stream flush after downstream disconnect"
             );
-        } else {
-            if let Some(normalizer) = private_stream_normalizer.as_mut() {
-                match normalizer.finish() {
-                    Ok(normalized_chunk) if !normalized_chunk.is_empty() => {
-                        if let (Some(observer), Some(report_context)) = (
-                            stream_usage_observer.as_mut(),
+        }
+        if let Some(normalizer) = private_stream_normalizer.as_mut() {
+            match normalizer.finish() {
+                Ok(normalized_chunk) if !normalized_chunk.is_empty() => {
+                    let provider_private_error_body_json =
+                        extract_provider_private_stream_error_body(
                             stream_usage_report_context.as_ref(),
-                        ) {
-                            observe_stream_usage_bytes(
-                                observer,
-                                report_context,
-                                &mut stream_usage_observer_buffered,
-                                &normalized_chunk,
-                            );
-                        }
+                            &normalized_chunk,
+                        );
+                    if let (Some(observer), Some(report_context)) = (
+                        stream_usage_observer.as_mut(),
+                        stream_usage_report_context.as_ref(),
+                    ) {
+                        observe_stream_usage_bytes(
+                            observer,
+                            report_context,
+                            &mut stream_usage_observer_buffered,
+                            &normalized_chunk,
+                        );
+                    }
+                    if !downstream_dropped {
                         let rewritten_chunk = if let Some(rewriter) = local_stream_rewriter.as_mut()
                         {
                             match rewriter.push_chunk(&normalized_chunk) {
@@ -2943,84 +3318,93 @@ async fn execute_stream_from_frame_stream(
                                 );
                             }
                         }
+                        if let Some(error_body_json) = provider_private_error_body_json {
+                            let error_status_code =
+                                resolve_local_sync_error_status_code(status_code, &error_body_json);
+                            terminal_failure.get_or_insert_with(|| {
+                                build_stream_failure_from_provider_error_body(
+                                    error_status_code,
+                                    &error_body_json,
+                                )
+                            });
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    warn!(
+                        event_name = "stream_execution_normalization_flush_failed",
+                        log_type = "ops",
+                        trace_id = %trace_id_owned,
+                        request_id = %request_id_for_report_log,
+                        candidate_id = ?candidate_id_for_report.as_deref(),
+                        error = ?err,
+                        "gateway failed to flush private stream normalization"
+                    );
+                    terminal_failure.get_or_insert_with(|| {
+                        build_stream_failure_report(
+                            "execution_runtime_stream_rewrite_flush_error",
+                            format!("failed to flush private stream normalization: {err:?}"),
+                            502,
+                        )
+                    });
+                }
+            }
+        }
+        if !downstream_dropped {
+            if let Some(rewriter) = local_stream_rewriter.as_mut() {
+                match rewriter.finish() {
+                    Ok(flushed_chunk) if !flushed_chunk.is_empty() => {
+                        append_stream_capture_bytes(
+                            &mut buffered_body,
+                            &flushed_chunk,
+                            max_stream_body_buffer_bytes,
+                            &mut client_body_truncated,
+                        );
+                        let flushed_chunk_len =
+                            u64::try_from(flushed_chunk.len()).unwrap_or(u64::MAX);
+                        let chunk_completed_stream = stream_chunk_contains_sse_done(&flushed_chunk);
+                        if tx.send(Ok(Bytes::from(flushed_chunk))).await.is_err() {
+                            warn!(
+                                event_name = "stream_execution_downstream_rewrite_flush_disconnected",
+                                log_type = "ops",
+                                trace_id = %trace_id_owned,
+                                request_id = %request_id_for_report_log,
+                            candidate_id = ?candidate_id_for_report.as_deref(),
+                            "gateway stream downstream dropped while flushing local stream rewrite"
+                            );
+                            downstream_dropped = true;
+                        } else {
+                            client_visible_stream_completed |= chunk_completed_stream;
+                            client_stream_bytes.fetch_add(flushed_chunk_len, Ordering::Relaxed);
+                            last_client_chunk_elapsed_ms.store(
+                                stream_started_at_for_report
+                                    .elapsed()
+                                    .as_millis()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                                Ordering::Relaxed,
+                            );
+                        }
                     }
                     Ok(_) => {}
                     Err(err) => {
                         warn!(
-                            event_name = "stream_execution_normalization_flush_failed",
+                            event_name = "stream_execution_rewrite_flush_failed",
                             log_type = "ops",
                             trace_id = %trace_id_owned,
                             request_id = %request_id_for_report_log,
                             candidate_id = ?candidate_id_for_report.as_deref(),
                             error = ?err,
-                            "gateway failed to flush private stream normalization"
+                            "gateway failed to flush local stream rewrite"
                         );
                         terminal_failure.get_or_insert_with(|| {
                             build_stream_failure_report(
                                 "execution_runtime_stream_rewrite_flush_error",
-                                format!("failed to flush private stream normalization: {err:?}"),
+                                format!("failed to flush local stream rewrite: {err:?}"),
                                 502,
                             )
                         });
-                    }
-                }
-            }
-            if !downstream_dropped {
-                if let Some(rewriter) = local_stream_rewriter.as_mut() {
-                    match rewriter.finish() {
-                        Ok(flushed_chunk) if !flushed_chunk.is_empty() => {
-                            append_stream_capture_bytes(
-                                &mut buffered_body,
-                                &flushed_chunk,
-                                max_stream_body_buffer_bytes,
-                                &mut client_body_truncated,
-                            );
-                            let flushed_chunk_len =
-                                u64::try_from(flushed_chunk.len()).unwrap_or(u64::MAX);
-                            let chunk_completed_stream =
-                                stream_chunk_contains_sse_done(&flushed_chunk);
-                            if tx.send(Ok(Bytes::from(flushed_chunk))).await.is_err() {
-                                warn!(
-                                    event_name = "stream_execution_downstream_rewrite_flush_disconnected",
-                                    log_type = "ops",
-                                    trace_id = %trace_id_owned,
-                                    request_id = %request_id_for_report_log,
-                                candidate_id = ?candidate_id_for_report.as_deref(),
-                                "gateway stream downstream dropped while flushing local stream rewrite"
-                                );
-                                downstream_dropped = true;
-                            } else {
-                                client_visible_stream_completed |= chunk_completed_stream;
-                                client_stream_bytes.fetch_add(flushed_chunk_len, Ordering::Relaxed);
-                                last_client_chunk_elapsed_ms.store(
-                                    stream_started_at_for_report
-                                        .elapsed()
-                                        .as_millis()
-                                        .min(u128::from(u64::MAX))
-                                        as u64,
-                                    Ordering::Relaxed,
-                                );
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(err) => {
-                            warn!(
-                                event_name = "stream_execution_rewrite_flush_failed",
-                                log_type = "ops",
-                                trace_id = %trace_id_owned,
-                                request_id = %request_id_for_report_log,
-                                candidate_id = ?candidate_id_for_report.as_deref(),
-                                error = ?err,
-                                "gateway failed to flush local stream rewrite"
-                            );
-                            terminal_failure.get_or_insert_with(|| {
-                                build_stream_failure_report(
-                                    "execution_runtime_stream_rewrite_flush_error",
-                                    format!("failed to flush local stream rewrite: {err:?}"),
-                                    502,
-                                )
-                            });
-                        }
                     }
                 }
             }
@@ -3198,6 +3582,19 @@ async fn execute_stream_from_frame_stream(
             report_context_owned.as_ref(),
             &mut stream_terminal_summary,
         );
+        let requires_observed_terminal_event = stream_requires_observed_terminal_event(
+            plan_for_report.provider_api_format.as_str(),
+            stream_usage_report_context.as_ref(),
+        );
+        ensure_stream_terminal_summary_for_missing_observed_finish(
+            &mut stream_terminal_summary,
+            requires_observed_terminal_event,
+        );
+        let missing_observed_finish =
+            stream_terminal_summary_missing_observed_finish_with_requirement(
+                stream_terminal_summary.as_ref(),
+                requires_observed_terminal_event,
+            );
 
         let should_submit_report = report_kind_owned.is_some();
         let terminal_telemetry = Some(build_terminal_stream_telemetry(
@@ -3206,6 +3603,18 @@ async fn execute_stream_from_frame_stream(
             usage_stream_telemetry.as_ref(),
             provider_stream_bytes.load(Ordering::Relaxed),
         ));
+        let stream_failed = stream_terminal_summary_represents_failure_with_requirement(
+            stream_terminal_summary.as_ref(),
+            requires_observed_terminal_event,
+        );
+        let stream_terminal_error_message = stream_terminal_summary
+            .as_ref()
+            .and_then(|summary| summary.parser_error.clone())
+            .or_else(|| {
+                missing_observed_finish.then(|| {
+                    "execution runtime stream ended before provider terminal event".to_string()
+                })
+            });
         let usage_payload = build_stream_usage_payload(
             trace_id_owned.clone(),
             report_kind_owned.unwrap_or_default(),
@@ -3219,35 +3628,48 @@ async fn execute_stream_from_frame_stream(
             stream_terminal_summary,
             terminal_telemetry,
         );
-        apply_local_execution_effect(
-            &state_for_report,
-            LocalExecutionEffectContext {
-                plan: &plan_for_report,
-                report_context: usage_payload.report_context.as_ref(),
-            },
-            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
-        )
-        .await;
-        apply_local_execution_effect(
-            &state_for_report,
-            LocalExecutionEffectContext {
-                plan: &plan_for_report,
-                report_context: usage_payload.report_context.as_ref(),
-            },
-            LocalExecutionEffect::AdaptiveSuccess(LocalAdaptiveSuccessEffect),
-        )
-        .await;
-        apply_local_execution_effect(
-            &state_for_report,
-            LocalExecutionEffectContext {
-                plan: &plan_for_report,
-                report_context: usage_payload.report_context.as_ref(),
-            },
-            LocalExecutionEffect::PoolSuccessStream {
-                payload: &usage_payload,
-            },
-        )
-        .await;
+        if stream_failed {
+            warn!(
+                event_name = "execution_runtime_stream_missing_terminal_event",
+                log_type = "ops",
+                trace_id = %trace_id_owned,
+                request_id = %request_id_for_report_log,
+                candidate_id = ?candidate_id_for_report.as_deref(),
+                status_code,
+                error_message = stream_terminal_error_message.as_deref().unwrap_or_default(),
+                "gateway stream ended with a failed terminal state"
+            );
+        } else {
+            apply_local_execution_effect(
+                &state_for_report,
+                LocalExecutionEffectContext {
+                    plan: &plan_for_report,
+                    report_context: usage_payload.report_context.as_ref(),
+                },
+                LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+            )
+            .await;
+            apply_local_execution_effect(
+                &state_for_report,
+                LocalExecutionEffectContext {
+                    plan: &plan_for_report,
+                    report_context: usage_payload.report_context.as_ref(),
+                },
+                LocalExecutionEffect::AdaptiveSuccess(LocalAdaptiveSuccessEffect),
+            )
+            .await;
+            apply_local_execution_effect(
+                &state_for_report,
+                LocalExecutionEffectContext {
+                    plan: &plan_for_report,
+                    report_context: usage_payload.report_context.as_ref(),
+                },
+                LocalExecutionEffect::PoolSuccessStream {
+                    payload: &usage_payload,
+                },
+            )
+            .await;
+        }
         record_stream_terminal_usage(
             &state_for_report,
             &plan_for_report,
@@ -3260,10 +3682,24 @@ async fn execute_stream_from_frame_stream(
             &plan_for_report,
             usage_payload.report_context.as_ref(),
             SchedulerRequestCandidateStatusUpdate {
-                status: RequestCandidateStatus::Success,
+                status: if stream_failed {
+                    RequestCandidateStatus::Failed
+                } else {
+                    RequestCandidateStatus::Success
+                },
                 status_code: Some(status_code),
-                error_type: None,
-                error_message: None,
+                error_type: if stream_failed {
+                    if missing_observed_finish {
+                        Some("stream_missing_terminal_event".to_string())
+                    } else {
+                        Some("stream_terminal_error".to_string())
+                    }
+                } else {
+                    None
+                },
+                error_message: stream_failed
+                    .then_some(stream_terminal_error_message)
+                    .flatten(),
                 latency_ms: usage_payload
                     .telemetry
                     .as_ref()
@@ -3356,15 +3792,20 @@ mod tests {
     use axum::extract::Request;
     use axum::routing::any;
     use axum::{http::header, http::HeaderValue, Router};
+    use base64::Engine as _;
     use futures_util::StreamExt as _;
     use serde_json::{json, Value};
     use tokio::sync::{mpsc, watch, Notify};
 
     use super::{
-        build_sse_body_stream, execute_execution_runtime_stream, execute_stream_from_frame_stream,
+        build_sse_body_stream, ensure_stream_terminal_summary_for_missing_observed_finish,
+        execute_execution_runtime_stream, execute_stream_from_frame_stream,
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary, merge_stream_terminal_summary,
         should_limit_direct_finalize_prefetch, should_probe_success_failover_before_stream,
-        should_skip_direct_finalize_prefetch,
+        should_skip_direct_finalize_prefetch, stream_chunk_contains_sse_done,
+        stream_requires_observed_terminal_event, stream_terminal_summary_missing_observed_finish,
+        stream_terminal_summary_missing_observed_finish_with_requirement,
+        stream_terminal_summary_represents_failure_with_requirement,
     };
     use crate::control::GatewayControlDecision;
     use crate::tunnel::{tunnel_protocol, TunnelProxyConn};
@@ -3381,6 +3822,23 @@ mod tests {
         .with_execution_runtime_candidate(true)
     }
 
+    #[test]
+    fn detects_client_visible_sse_terminal_events() {
+        assert!(stream_chunk_contains_sse_done(b"data: [DONE]\n\n"));
+        assert!(stream_chunk_contains_sse_done(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        ));
+        assert!(stream_chunk_contains_sse_done(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+        ));
+        assert!(stream_chunk_contains_sse_done(
+            b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n"
+        ));
+        assert!(!stream_chunk_contains_sse_done(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n"
+        ));
+    }
+
     fn tunnel_proxy_snapshot(base_url: String) -> aether_contracts::ProxySnapshot {
         aether_contracts::ProxySnapshot {
             enabled: Some(true),
@@ -3390,6 +3848,14 @@ mod tests {
             url: None,
             extra: Some(json!({"tunnel_base_url": base_url})),
         }
+    }
+
+    fn connect_json_frame(flags: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(5 + payload.len());
+        out.push(flags);
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+        out
     }
 
     #[test]
@@ -3426,6 +3892,98 @@ mod tests {
         assert_eq!(merged.response_id.as_deref(), Some("resp_123"));
         assert!(merged.observed_finish);
         assert_eq!(merged.unknown_event_count, 3);
+    }
+
+    #[test]
+    fn detects_missing_observed_finish_only_without_usage_signal() {
+        assert!(stream_terminal_summary_missing_observed_finish(Some(
+            &ExecutionStreamTerminalSummary {
+                response_id: Some("resp_missing_finish".to_string()),
+                model: Some("gpt-5.5".to_string()),
+                observed_finish: false,
+                ..ExecutionStreamTerminalSummary::default()
+            }
+        )));
+
+        let mut usage = StandardizedUsage::new();
+        usage.output_tokens = 12;
+        assert!(!stream_terminal_summary_missing_observed_finish(Some(
+            &ExecutionStreamTerminalSummary {
+                standardized_usage: Some(usage),
+                observed_finish: false,
+                ..ExecutionStreamTerminalSummary::default()
+            }
+        )));
+        assert!(!stream_terminal_summary_missing_observed_finish(Some(
+            &ExecutionStreamTerminalSummary {
+                observed_finish: true,
+                ..ExecutionStreamTerminalSummary::default()
+            }
+        )));
+        assert!(!stream_terminal_summary_missing_observed_finish(None));
+    }
+
+    #[test]
+    fn requires_terminal_event_for_openai_responses_streams() {
+        assert!(stream_requires_observed_terminal_event(
+            "openai:responses",
+            None
+        ));
+        assert!(stream_requires_observed_terminal_event(
+            "openai:responses:compact",
+            None
+        ));
+        assert!(!stream_requires_observed_terminal_event(
+            "openai:chat",
+            None
+        ));
+        assert!(stream_requires_observed_terminal_event(
+            "openai:chat",
+            Some(&json!({
+                "provider_stream_event_api_format": "openai:responses"
+            }))
+        ));
+    }
+
+    #[test]
+    fn synthesizes_missing_terminal_summary_for_openai_responses_empty_stream() {
+        let mut summary = None;
+        ensure_stream_terminal_summary_for_missing_observed_finish(&mut summary, true);
+
+        let summary = summary.expect("summary should be synthesized");
+        assert!(!summary.observed_finish);
+        assert_eq!(
+            summary.parser_error.as_deref(),
+            Some("execution runtime stream ended before provider terminal event")
+        );
+        assert!(
+            stream_terminal_summary_missing_observed_finish_with_requirement(Some(&summary), true)
+        );
+        assert!(stream_terminal_summary_represents_failure_with_requirement(
+            Some(&summary),
+            true
+        ));
+    }
+
+    #[test]
+    fn terminal_required_stream_fails_even_with_usage_without_finish() {
+        let mut usage = StandardizedUsage::new();
+        usage.output_tokens = 12;
+        let mut summary = Some(ExecutionStreamTerminalSummary {
+            standardized_usage: Some(usage),
+            observed_finish: false,
+            ..ExecutionStreamTerminalSummary::default()
+        });
+
+        ensure_stream_terminal_summary_for_missing_observed_finish(&mut summary, true);
+        let summary = summary.as_ref().expect("summary should remain present");
+        assert!(
+            stream_terminal_summary_missing_observed_finish_with_requirement(Some(summary), true)
+        );
+        assert!(stream_terminal_summary_represents_failure_with_requirement(
+            Some(summary),
+            true
+        ));
     }
 
     #[test]
@@ -4117,6 +4675,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sse_body_stream_drops_upstream_control_only_blocks() {
+        let (_tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+        let mut body_stream = Box::pin(build_sse_body_stream(
+            vec![
+                Bytes::from_static(b": upstream-keepalive\n\n"),
+                Bytes::from_static(b"event: ping\nid: 1\nretry: 1000\n\n"),
+                Bytes::from_static(
+                    b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+                ),
+            ],
+            rx,
+            true,
+            Duration::from_secs(60),
+        ));
+
+        let chunk = tokio::time::timeout(Duration::from_millis(50), body_stream.next())
+            .await
+            .expect("business chunk should arrive")
+            .expect("stream should yield business chunk")
+            .expect("business chunk should be ok");
+        let text = std::str::from_utf8(chunk.as_ref()).expect("chunk should be utf8");
+        assert!(text.contains("event: response.output_text.delta"));
+        assert!(text.contains("data: {\"type\":\"response.output_text.delta\""));
+        assert!(!text.contains("upstream-keepalive"));
+        assert!(!text.contains("event: ping"));
+        assert!(!text.contains("retry: 1000"));
+    }
+
+    #[tokio::test]
+    async fn sse_body_stream_filters_control_blocks_across_chunk_boundaries() {
+        let (_tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+        let mut body_stream = Box::pin(build_sse_body_stream(
+            vec![
+                Bytes::from_static(b": upstream-keepalive\n"),
+                Bytes::from_static(b"\n"),
+                Bytes::from_static(b"event: response.created\n"),
+                Bytes::from_static(b"data: {\"type\":\"response.created\"}\n\n"),
+            ],
+            rx,
+            true,
+            Duration::from_secs(60),
+        ));
+
+        let chunk = tokio::time::timeout(Duration::from_millis(50), body_stream.next())
+            .await
+            .expect("business chunk should arrive")
+            .expect("stream should yield business chunk")
+            .expect("business chunk should be ok");
+        let text = std::str::from_utf8(chunk.as_ref()).expect("chunk should be utf8");
+        assert_eq!(
+            text,
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_body_stream_forwards_data_line_before_block_boundary() {
+        let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+        let mut body_stream = Box::pin(build_sse_body_stream(
+            Vec::new(),
+            rx,
+            true,
+            Duration::from_secs(60),
+        ));
+
+        let keepalive = tokio::time::timeout(Duration::from_millis(50), body_stream.next())
+            .await
+            .expect("initial keepalive should be immediate")
+            .expect("stream should yield initial keepalive")
+            .expect("initial keepalive should be ok");
+        assert_eq!(keepalive.as_ref(), b": aether-keepalive\n\n");
+
+        tx.send(Ok(Bytes::from_static(
+            b"event: response.output_text.delta\n",
+        )))
+        .await
+        .expect("event line should send");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), body_stream.next())
+                .await
+                .is_err(),
+            "event-only partial block should remain buffered"
+        );
+
+        tx.send(Ok(Bytes::from_static(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n",
+        )))
+        .await
+        .expect("data line should send");
+        let data_chunk = tokio::time::timeout(Duration::from_millis(50), body_stream.next())
+            .await
+            .expect("data-bearing block should stream before terminator")
+            .expect("stream should yield data-bearing block")
+            .expect("data-bearing block should be ok");
+        assert_eq!(
+            data_chunk.as_ref(),
+            b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n"
+        );
+
+        tx.send(Ok(Bytes::from_static(b"\n")))
+            .await
+            .expect("terminator should send");
+        let terminator = tokio::time::timeout(Duration::from_millis(50), body_stream.next())
+            .await
+            .expect("terminator should stream")
+            .expect("stream should yield terminator")
+            .expect("terminator should be ok");
+        assert_eq!(terminator.as_ref(), b"\n");
+    }
+
+    #[tokio::test]
+    async fn sse_body_stream_uses_local_keepalive_when_prefetched_blocks_are_control_only() {
+        let (_tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+        let mut body_stream = Box::pin(build_sse_body_stream(
+            vec![Bytes::from_static(b": upstream-keepalive\n\n")],
+            rx,
+            true,
+            Duration::from_secs(60),
+        ));
+
+        let first = tokio::time::timeout(Duration::from_millis(50), body_stream.next())
+            .await
+            .expect("local keepalive should arrive")
+            .expect("stream should yield local keepalive")
+            .expect("local keepalive should be ok");
+        assert_eq!(first.as_ref(), b": aether-keepalive\n\n");
+    }
+
+    #[tokio::test]
     async fn openai_image_stream_total_timeout_emits_image_failed_event() {
         let state = AppState::new().expect("app state should build");
         let plan = ExecutionPlan {
@@ -4203,7 +4890,269 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_stream_from_frame_stream_stops_upstream_when_client_drops_body() {
+    async fn execute_stream_from_frame_stream_treats_windsurf_connect_trailer_error_as_failure() {
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                    Arc::clone(&request_candidate_repository),
+                    Arc::clone(&usage_repository),
+                ),
+            )
+            .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                enabled: true,
+                ..UsageRuntimeConfig::default()
+            });
+        let plan = ExecutionPlan {
+            request_id: "req-windsurf-connect-error".into(),
+            candidate_id: Some("cand-windsurf-connect-error".into()),
+            provider_name: Some("windsurf".into()),
+            provider_id: "provider-windsurf".into(),
+            endpoint_id: "endpoint-windsurf-chat".into(),
+            key_id: "key-windsurf".into(),
+            method: "POST".into(),
+            url: "https://server.codeium.com/exa.api_server_pb.ApiServerService/GetChatMessage?beta=true".into(),
+            headers: BTreeMap::from([
+                ("content-type".into(), "application/connect+json".into()),
+                ("accept".into(), "application/connect+json".into()),
+            ]),
+            content_type: Some("application/connect+json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "claude-sonnet-4",
+                "messages": [],
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "claude:messages".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("claude-sonnet-4".into()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let trailer_error = connect_json_frame(
+            2,
+            br#"{"error":{"code":"resource_exhausted","message":"an internal error occurred"}}"#,
+        );
+        let trailer_error_b64 = base64::engine::general_purpose::STANDARD.encode(trailer_error);
+        let frame = format!(
+            "{{\"type\":\"data\",\"payload\":{{\"kind\":\"data\",\"chunk_b64\":\"{trailer_error_b64}\"}}}}\n"
+        );
+        let frame_stream = stream! {
+            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                b"{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"application/connect+json\"}}}\n",
+            ));
+            yield Ok::<Bytes, std::io::Error>(Bytes::from(frame));
+            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                b"{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n",
+            ));
+        }
+        .boxed();
+
+        let response = execute_stream_from_frame_stream(
+            &state,
+            plan,
+            "trace-windsurf-connect-error",
+            &test_decision(),
+            "claude_chat_stream",
+            Some("claude_chat_stream_success".to_string()),
+            Some(json!({
+                "request_id": "req-windsurf-connect-error",
+                "candidate_id": "cand-windsurf-connect-error",
+                "candidate_index": 0,
+                "retry_index": 0,
+                "provider_api_format": "openai:chat",
+                "client_api_format": "claude:messages",
+                "needs_conversion": true,
+                "has_envelope": true,
+                "envelope_name": "windsurf:GetChatMessage",
+                "local_failover_policy": {
+                    "stop_status_codes": [429]
+                }
+            })),
+            crate::clock::current_unix_ms(),
+            Instant::now(),
+            frame_stream,
+            None,
+        )
+        .await
+        .expect("execution should succeed")
+        .expect("execution should return a client response");
+
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let body_json: Value =
+            serde_json::from_slice(&body).expect("response body should decode as json");
+        assert_eq!(status.as_u16(), 429);
+        assert_eq!(body_json["type"], json!("error"));
+        assert_eq!(body_json["error"]["type"], json!("rate_limit_error"));
+        assert_eq!(body_json["error"]["code"], json!("resource_exhausted"));
+        assert_eq!(
+            body_json["error"]["message"],
+            json!("an internal error occurred")
+        );
+
+        let candidates = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let candidates = request_candidate_repository
+                    .list_by_request_id("req-windsurf-connect-error")
+                    .await
+                    .expect("request candidates should read");
+                if candidates
+                    .first()
+                    .is_some_and(|candidate| candidate.status == RequestCandidateStatus::Failed)
+                {
+                    break candidates;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("candidate should be marked failed");
+        assert_eq!(candidates[0].status_code, Some(429));
+        assert_eq!(
+            candidates[0].error_type.as_deref(),
+            Some("resource_exhausted")
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_stream_from_frame_stream_decodes_non_success_windsurf_connect_error_body() {
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                    Arc::clone(&request_candidate_repository),
+                    Arc::clone(&usage_repository),
+                ),
+            )
+            .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                enabled: true,
+                ..UsageRuntimeConfig::default()
+            });
+        let plan = ExecutionPlan {
+            request_id: "req-windsurf-connect-429".into(),
+            candidate_id: Some("cand-windsurf-connect-429".into()),
+            provider_name: Some("windsurf".into()),
+            provider_id: "provider-windsurf".into(),
+            endpoint_id: "endpoint-windsurf-chat".into(),
+            key_id: "key-windsurf".into(),
+            method: "POST".into(),
+            url: "https://server.codeium.com/exa.api_server_pb.ApiServerService/GetChatMessage?beta=true".into(),
+            headers: BTreeMap::from([
+                ("content-type".into(), "application/connect+json".into()),
+                ("accept".into(), "application/connect+json".into()),
+            ]),
+            content_type: Some("application/connect+json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "claude-sonnet-4",
+                "messages": [],
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "claude:messages".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("claude-sonnet-4".into()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let connect_error = connect_json_frame(
+            2,
+            br#"{"error":{"code":"resource_exhausted","message":"quota exhausted"}}"#,
+        );
+        let connect_error_b64 = base64::engine::general_purpose::STANDARD.encode(connect_error);
+        let frame_stream = stream! {
+            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                b"{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":429,\"headers\":{\"content-type\":\"application/connect+json\"}}}\n",
+            ));
+            yield Ok::<Bytes, std::io::Error>(Bytes::from(format!(
+                "{{\"type\":\"data\",\"payload\":{{\"kind\":\"data\",\"chunk_b64\":\"{connect_error_b64}\"}}}}\n"
+            )));
+            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                b"{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n",
+            ));
+        }
+        .boxed();
+
+        let response = execute_stream_from_frame_stream(
+            &state,
+            plan,
+            "trace-windsurf-connect-429",
+            &test_decision(),
+            "claude_chat_stream",
+            Some("claude_chat_stream_success".to_string()),
+            Some(json!({
+                "request_id": "req-windsurf-connect-429",
+                "candidate_id": "cand-windsurf-connect-429",
+                "candidate_index": 0,
+                "retry_index": 0,
+                "provider_api_format": "openai:chat",
+                "client_api_format": "claude:messages",
+                "needs_conversion": true,
+                "has_envelope": true,
+                "envelope_name": "windsurf:GetChatMessage",
+                "local_failover_policy": {
+                    "stop_status_codes": [429]
+                }
+            })),
+            crate::clock::current_unix_ms(),
+            Instant::now(),
+            frame_stream,
+            None,
+        )
+        .await
+        .expect("execution should succeed")
+        .expect("execution should return a client response");
+
+        assert_eq!(response.status().as_u16(), 429);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let body_json: Value =
+            serde_json::from_slice(&body).expect("response body should decode as json");
+        assert_eq!(body_json["type"], json!("error"));
+        assert_eq!(body_json["error"]["type"], json!("rate_limit_error"));
+        assert_eq!(body_json["error"]["code"], json!("resource_exhausted"));
+        assert_eq!(body_json["error"]["message"], json!("quota exhausted"));
+
+        let record = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(usage) = usage_repository
+                    .find_by_request_id("req-windsurf-connect-429")
+                    .await
+                    .expect("usage should read")
+                    .filter(|usage| usage.status == "failed")
+                {
+                    break usage;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("usage should be written");
+        assert_eq!(record.status_code, Some(429));
+        assert_eq!(
+            record
+                .response_body
+                .as_ref()
+                .and_then(|body| body.get("error"))
+                .and_then(|error| error.get("code")),
+            Some(&json!("resource_exhausted"))
+        );
+        assert!(record.response_body_ref.is_none());
+    }
+
+    #[tokio::test]
+    async fn execute_stream_from_frame_stream_drains_upstream_when_client_drops_body() {
         let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
         let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
         let state = AppState::new()
@@ -4246,24 +5195,22 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         };
-        let frame_stream_dropped = Arc::new(Notify::new());
-        let frame_stream_dropped_for_stream = Arc::clone(&frame_stream_dropped);
+        let release_terminal = Arc::new(Notify::new());
+        let terminal_frame_drained = Arc::new(Notify::new());
+        let release_terminal_for_stream = Arc::clone(&release_terminal);
+        let terminal_frame_drained_for_stream = Arc::clone(&terminal_frame_drained);
         let frame_stream = stream! {
-            struct NotifyOnDrop(Arc<Notify>);
-            impl Drop for NotifyOnDrop {
-                fn drop(&mut self) {
-                    self.0.notify_waiters();
-                }
-            }
-
-            let _drop_guard = NotifyOnDrop(frame_stream_dropped_for_stream);
             yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
                 b"{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
             ));
             yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
                 b"{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"id\\\":\\\"first\\\"}\\n\\n\"}}\n",
             ));
-            std::future::pending::<()>().await;
+            release_terminal_for_stream.notified().await;
+            yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                b"{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"id\\\":\\\"terminal\\\",\\\"object\\\":\\\"chat.completion.chunk\\\",\\\"model\\\":\\\"gpt-5.4\\\",\\\"choices\\\":[{\\\"index\\\":0,\\\"delta\\\":{},\\\"finish_reason\\\":\\\"stop\\\"}],\\\"usage\\\":{\\\"prompt_tokens\\\":7,\\\"completion_tokens\\\":11,\\\"total_tokens\\\":18}}\\n\\ndata: [DONE]\\n\\n\"}}\n",
+            ));
+            terminal_frame_drained_for_stream.notify_one();
         }
         .boxed();
 
@@ -4309,10 +5256,11 @@ mod tests {
         assert_eq!(first.as_ref(), b"data: {\"id\":\"first\"}\n\n");
         tokio::time::sleep(Duration::from_millis(30)).await;
         drop(body_stream);
+        release_terminal.notify_one();
 
-        tokio::time::timeout(Duration::from_secs(1), frame_stream_dropped.notified())
+        tokio::time::timeout(Duration::from_secs(1), terminal_frame_drained.notified())
             .await
-            .expect("upstream frame stream should be dropped after client disconnect");
+            .expect("upstream frame stream should be drained after client disconnect");
         let candidates = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let candidates = request_candidate_repository
@@ -4355,6 +5303,9 @@ mod tests {
         .expect("usage should be marked cancelled");
         assert_eq!(stored_usage.billing_status, "pending");
         assert_eq!(stored_usage.status_code, Some(499));
+        assert_eq!(stored_usage.input_tokens, 7);
+        assert_eq!(stored_usage.output_tokens, 11);
+        assert_eq!(stored_usage.total_tokens, 18);
         let first_byte_time_ms = stored_usage
             .first_byte_time_ms
             .expect("cancelled stream should retain first byte time");
@@ -5350,8 +6301,9 @@ mod tests {
 
         let body = body_task.await.expect("body task should complete");
         assert!(body.contains("data: hello\n\n"));
-        assert!(body.contains("event: aether.error\n"));
+        assert!(body.contains("data: {\"error\":"));
         assert!(body.contains(original_error));
+        assert!(body.contains("data: [DONE]\n\n"));
         assert!(
             !body.contains("unexpected EOF during chunk size line"),
             "same-format SSE path should surface the original terminal error event"

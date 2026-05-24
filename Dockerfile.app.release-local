@@ -1,0 +1,150 @@
+# syntax=docker.m.daocloud.io/docker/dockerfile:1
+# Aether 本地发布版联调镜像
+# 作用：用当前源码构建一个 release-layout 容器，专门测试管理后台在线更新流程。
+
+ARG RUST_VERSION=1.95.0
+ARG NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:22-slim
+ARG RUST_BASE_IMAGE=docker.m.daocloud.io/library/rust:${RUST_VERSION}-slim
+
+# ==================== 前端构建 ====================
+FROM ${NODE_BASE_IMAGE} AS frontend-builder
+ARG AETHER_BUILD_VERSION
+ENV AETHER_BUILD_VERSION=${AETHER_BUILD_VERSION} \
+    AETHER_VERSION=${AETHER_BUILD_VERSION}
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN --mount=type=cache,id=aether-npm-cache,target=/root/.npm,sharing=locked \
+    npm config set registry https://registry.npmmirror.com && \
+    npm ci --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run build
+
+# ==================== Rust gateway 构建 ====================
+FROM ${RUST_BASE_IMAGE} AS gateway-base
+WORKDIR /build
+
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    CARGO_PROFILE_RELEASE_LTO=thin \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    git \
+    libclang-dev \
+    libssl-dev \
+    pkg-config \
+    perl
+
+RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    cargo install cargo-chef --locked
+
+FROM gateway-base AS gateway-planner
+COPY Cargo.toml Cargo.lock ./
+COPY apps/ ./apps/
+COPY crates/ ./crates/
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM gateway-base AS gateway-builder
+ARG AETHER_BUILD_VERSION
+ARG AETHER_BUILD_TYPE=release
+ENV AETHER_BUILD_VERSION=${AETHER_BUILD_VERSION} \
+    AETHER_VERSION=${AETHER_BUILD_VERSION} \
+    AETHER_BUILD_TYPE=${AETHER_BUILD_TYPE}
+COPY --from=gateway-planner /build/recipe.json ./recipe.json
+RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=aether-cargo-target-release-local,target=/build/target,sharing=locked \
+    cargo chef cook --release --locked --package aether-gateway --bin aether-gateway --recipe-path recipe.json
+
+COPY Cargo.toml Cargo.lock ./
+COPY apps/ ./apps/
+COPY crates/ ./crates/
+RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=aether-cargo-target-release-local,target=/build/target,sharing=locked \
+    cargo build --release --locked -p aether-gateway && \
+    cp target/release/aether-gateway /tmp/aether-gateway
+
+# ==================== 最小运行时打包 ====================
+FROM gateway-builder AS runtime-prep
+RUN set -eux; \
+    mkdir -p \
+    /runtime-root/app/data \
+    /runtime-root/etc \
+    /runtime-root/etc/ssl \
+    /runtime-root/lib \
+    /runtime-root/lib64 \
+    /runtime-root/usr/lib \
+    /runtime-root/opt/aether/logs \
+    /runtime-root/opt/aether/releases/image/bin \
+    /runtime-root/opt/aether/releases/image/frontend; \
+    cp /tmp/aether-gateway /runtime-root/opt/aether/releases/image/bin/aether-gateway; \
+    ln -s /opt/aether/releases/image /runtime-root/opt/aether/current; \
+    : > /tmp/runtime-libs.txt; \
+    : > /tmp/runtime-scan-queue.txt; \
+    printf '%s\n' /tmp/aether-gateway >> /tmp/runtime-scan-queue.txt; \
+    while [ -s /tmp/runtime-scan-queue.txt ]; do \
+        current="$(head -n1 /tmp/runtime-scan-queue.txt)"; \
+        sed -i '1d' /tmp/runtime-scan-queue.txt; \
+        ldd "$current" | awk '/=>/ { print $3 } $1 ~ /^\// { print $1 }' | while read -r lib; do \
+            [ -n "$lib" ]; \
+            if ! grep -Fxq "$lib" /tmp/runtime-libs.txt; then \
+                printf '%s\n' "$lib" >> /tmp/runtime-libs.txt; \
+                printf '%s\n' "$lib" >> /tmp/runtime-scan-queue.txt; \
+            fi; \
+        done; \
+    done; \
+    sort -u /tmp/runtime-libs.txt -o /tmp/runtime-libs.txt; \
+    while read -r lib; do \
+        [ -n "$lib" ]; \
+        dest="/runtime-root$(dirname "$lib")"; \
+        mkdir -p "$dest"; \
+        cp -L "$lib" "$dest/"; \
+    done < /tmp/runtime-libs.txt; \
+    for lib in \
+        /lib/x86_64-linux-gnu/libnss_dns.so.2 \
+        /lib/x86_64-linux-gnu/libnss_files.so.2 \
+        /lib/x86_64-linux-gnu/libresolv.so.2; do \
+        if [ -f "$lib" ]; then \
+            dest="/runtime-root$(dirname "$lib")"; \
+            mkdir -p "$dest"; \
+            cp -L "$lib" "$dest/"; \
+        fi; \
+    done; \
+    cp -a /usr/lib/ssl /runtime-root/usr/lib/; \
+    cp -a /etc/ssl/certs /runtime-root/etc/ssl/; \
+    if [ -f /etc/ssl/openssl.cnf ]; then \
+        cp /etc/ssl/openssl.cnf /runtime-root/etc/ssl/openssl.cnf; \
+    fi; \
+    if [ -f /etc/nsswitch.conf ]; then \
+        cp /etc/nsswitch.conf /runtime-root/etc/nsswitch.conf; \
+    fi
+COPY --from=frontend-builder /app/frontend/dist /runtime-root/opt/aether/releases/image/frontend
+
+# ==================== 运行时镜像 ====================
+FROM scratch
+
+COPY --from=runtime-prep /runtime-root/ /
+
+WORKDIR /app
+
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    RUST_LOG=aether_gateway=info \
+    APP_PORT=8084 \
+    AETHER_BASE_DIR=/opt/aether \
+    AETHER_UPDATE_STRATEGY=self \
+    AETHER_GATEWAY_STATIC_DIR=/opt/aether/current/frontend
+
+EXPOSE 8084
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD ["/opt/aether/current/bin/aether-gateway", "--healthcheck"]
+
+ENTRYPOINT ["/opt/aether/current/bin/aether-gateway"]

@@ -5,7 +5,12 @@ use aether_crypto::{
     decrypt_python_fernet_ciphertext, encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY,
 };
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
-use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
+use aether_data_contracts::repository::provider_catalog::{
+    ProviderCatalogKeyListQuery, ProviderCatalogReadRepository, StoredProviderCatalogEndpoint,
+    StoredProviderCatalogKey, StoredProviderCatalogKeyMaintenanceSummary,
+    StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
+};
+use aether_data_contracts::DataLayerError;
 use axum::body::Body;
 use axum::routing::any;
 use axum::{extract::Request, Json, Router};
@@ -21,6 +26,112 @@ use crate::constants::{
     TRUSTED_ADMIN_USER_ROLE_HEADER,
 };
 use crate::data::GatewayDataState;
+
+struct SummaryNullingProviderCatalogReadRepository {
+    inner: InMemoryProviderCatalogReadRepository,
+}
+
+impl SummaryNullingProviderCatalogReadRepository {
+    fn seed(
+        providers: Vec<StoredProviderCatalogProvider>,
+        endpoints: Vec<StoredProviderCatalogEndpoint>,
+        keys: Vec<StoredProviderCatalogKey>,
+    ) -> Self {
+        Self {
+            inner: InMemoryProviderCatalogReadRepository::seed(providers, endpoints, keys),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderCatalogReadRepository for SummaryNullingProviderCatalogReadRepository {
+    async fn list_providers(
+        &self,
+        active_only: bool,
+    ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
+        self.inner.list_providers(active_only).await
+    }
+
+    async fn list_providers_by_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
+        self.inner.list_providers_by_ids(provider_ids).await
+    }
+
+    async fn list_endpoints_by_ids(
+        &self,
+        endpoint_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
+        self.inner.list_endpoints_by_ids(endpoint_ids).await
+    }
+
+    async fn list_endpoints_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
+        self.inner
+            .list_endpoints_by_provider_ids(provider_ids)
+            .await
+    }
+
+    async fn list_keys_by_ids(
+        &self,
+        key_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        self.inner.list_keys_by_ids(key_ids).await
+    }
+
+    async fn list_keys_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        self.inner.list_keys_by_provider_ids(provider_ids).await
+    }
+
+    async fn list_key_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        let mut keys = self.inner.list_keys_by_provider_ids(provider_ids).await?;
+        for key in &mut keys {
+            key.internal_priority = 50;
+            key.global_priority_by_format = None;
+            key.rate_multipliers = None;
+            key.request_count = None;
+            key.success_count = None;
+            key.error_count = None;
+            key.total_response_time_ms = None;
+            key.circuit_breaker_by_format = None;
+        }
+        Ok(keys)
+    }
+
+    async fn list_key_maintenance_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKeyMaintenanceSummary>, DataLayerError> {
+        self.inner
+            .list_key_maintenance_summaries_by_provider_ids(provider_ids)
+            .await
+    }
+
+    async fn list_keys_page(
+        &self,
+        query: &ProviderCatalogKeyListQuery,
+    ) -> Result<StoredProviderCatalogKeyPage, DataLayerError> {
+        self.inner.list_keys_page(query).await
+    }
+
+    async fn list_key_stats_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKeyStats>, DataLayerError> {
+        self.inner
+            .list_key_stats_by_provider_ids(provider_ids)
+            .await
+    }
+}
 
 #[tokio::test]
 async fn gateway_handles_admin_provider_keys_locally_with_trusted_admin_principal() {
@@ -130,8 +241,8 @@ async fn gateway_provider_keys_expose_circuit_breaker_and_recover_clears_it() {
             "open": true,
             "open_at": "2026-03-26T12:00:00+00:00",
             "reason": "consecutive_failures_8",
-            "next_probe_at": "2026-03-26T12:01:00+00:00",
-            "next_probe_at_unix_secs": 1774526460u64,
+            "next_probe_at": "2099-03-26T12:01:00+00:00",
+            "next_probe_at_unix_secs": 4078209660u64,
             "probe_interval_minutes": 1,
             "max_probe_interval_minutes": 32,
             "half_open_until": null,
@@ -2195,7 +2306,7 @@ async fn gateway_handles_admin_keys_grouped_by_format_locally_with_trusted_admin
     key_b.created_at_unix_ms = Some(1_711_100_000);
     key_b.updated_at_unix_secs = Some(1_711_100_100);
 
-    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+    let provider_catalog_repository = Arc::new(SummaryNullingProviderCatalogReadRepository::seed(
         vec![
             sample_provider("provider-openai", "openai", 10),
             sample_provider("provider-claude", "claude", 20)
@@ -2252,6 +2363,12 @@ async fn gateway_handles_admin_keys_grouped_by_format_locally_with_trusted_admin
         "https://api.openai.example"
     );
     assert_eq!(payload["openai:chat"][0]["capabilities"], json!(["1h缓存"]));
+    assert_eq!(payload["openai:chat"][0]["format_priority"], 3);
+    assert_eq!(
+        payload["openai:chat"][0]["global_priority_by_format"]["openai:chat"],
+        3
+    );
+    assert_eq!(payload["openai:chat"][0]["internal_priority"], 10);
     assert_eq!(payload["claude:messages"][0]["provider_active"], false);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 

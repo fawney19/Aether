@@ -14,9 +14,9 @@ use self::parse::{
 use self::plan::{build_codex_quota_request_spec, execute_codex_quota_plan};
 use super::shared::{
     build_quota_snapshot_payload, extract_execution_error_message,
-    persist_provider_quota_refresh_state, provider_auto_remove_banned_keys,
-    quota_refresh_success_invalid_state, should_auto_remove_oauth_invalid_key,
-    ProviderQuotaExecutionOutcome,
+    oauth_refresh_auto_removed_result, persist_provider_quota_refresh_state,
+    provider_auto_remove_banned_keys, quota_key_auto_removed, quota_refresh_success_invalid_state,
+    should_auto_remove_structured_reason, ProviderQuotaExecutionOutcome,
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::provider_key_auth::provider_key_is_oauth_managed;
@@ -44,6 +44,15 @@ fn merge_codex_quota_metadata(
     serde_json::Value::Object(merged)
 }
 
+fn codex_oauth_refresh_issue_reason(reason: Option<&str>) -> bool {
+    reason.is_some_and(|reason| {
+        reason
+            .lines()
+            .map(str::trim)
+            .any(|line| line.starts_with("[OAUTH_EXPIRED]") || line.starts_with("[REFRESH_FAILED]"))
+    })
+}
+
 pub(crate) async fn refresh_codex_provider_quota_locally(
     state: &AdminAppState<'_>,
     provider: &StoredProviderCatalogProvider,
@@ -56,8 +65,13 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
     let mut success_count = 0usize;
     let mut failed_count = 0usize;
     let mut auto_removed_count = 0usize;
+    let mut refresh_fixed_count = 0usize;
+    let mut refresh_failed_retained_count = 0usize;
+    let mut auto_removed_hard_banned_count = 0usize;
 
     for key in keys {
+        let had_oauth_refresh_issue =
+            codex_oauth_refresh_issue_reason(key.oauth_invalid_reason.as_deref());
         let transport = match state
             .read_provider_transport_snapshot(&provider.id, &endpoint.id, &key.id)
             .await?
@@ -75,12 +89,27 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
             }
         };
 
-        let resolved_oauth_auth =
-            if provider_key_is_oauth_managed(&key, provider.provider_type.as_str()) {
-                state.resolve_local_oauth_header_auth(&transport).await?
-            } else {
-                None
-            };
+        let is_oauth_managed = provider_key_is_oauth_managed(&key, provider.provider_type.as_str());
+        let resolved_oauth_auth = if is_oauth_managed {
+            state.resolve_local_oauth_header_auth(&transport).await?
+        } else {
+            None
+        };
+        if is_oauth_managed && quota_key_auto_removed(state, &key.id).await? {
+            auto_removed_count += 1;
+            results.push(oauth_refresh_auto_removed_result(&key));
+            continue;
+        }
+        if is_oauth_managed && resolved_oauth_auth.is_none() {
+            failed_count += 1;
+            results.push(json!({
+                "key_id": key.id,
+                "key_name": key.name,
+                "status": "error",
+                "message": "缺少 Codex OAuth 认证信息，请先重新授权/刷新 Token",
+            }));
+            continue;
+        }
 
         let request_spec = match build_codex_quota_request_spec(&transport, resolved_oauth_auth) {
             Ok(request_spec) => request_spec,
@@ -261,27 +290,9 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
             }
         }
 
-        let auto_remove_key = if auto_remove_abnormal_keys {
-            state
-                .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key.id))
-                .await?
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| key.clone())
-        } else {
-            key.clone()
-        };
-        let auto_removed = auto_remove_abnormal_keys
-            && should_auto_remove_oauth_invalid_key(
-                &auto_remove_key,
-                oauth_invalid_reason.as_deref(),
-                now_unix_secs,
-            );
-        if auto_removed {
-            if state.delete_provider_catalog_key(&key.id).await? {
-                auto_removed_count += 1;
-            }
-        } else if !persist_provider_quota_refresh_state(
+        let auto_remove_candidate = auto_remove_abnormal_keys
+            && should_auto_remove_structured_reason(oauth_invalid_reason.as_deref());
+        let persisted = persist_provider_quota_refresh_state(
             state,
             &key.id,
             metadata_update.as_ref(),
@@ -289,8 +300,8 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
             oauth_invalid_reason.clone(),
             None,
         )
-        .await?
-        {
+        .await?;
+        if !persisted {
             failed_count += 1;
             results.push(json!({
                 "key_id": key.id,
@@ -299,6 +310,29 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
                 "message": "Key 状态写入失败",
             }));
             continue;
+        }
+        let auto_removed = if auto_remove_candidate {
+            state
+                .cleanup_provider_catalog_key_if_current(provider, &key.id, |latest_key| {
+                    should_auto_remove_structured_reason(latest_key.oauth_invalid_reason.as_deref())
+                })
+                .await?
+        } else {
+            false
+        };
+        if auto_removed {
+            auto_removed_count += 1;
+            auto_removed_hard_banned_count += 1;
+        }
+        let refresh_fixed =
+            status == "success" && had_oauth_refresh_issue && oauth_invalid_reason.is_none();
+        if refresh_fixed {
+            refresh_fixed_count += 1;
+        }
+        let refresh_failed_retained =
+            status != "success" && oauth_invalid_reason.is_some() && !auto_removed;
+        if refresh_failed_retained {
+            refresh_failed_retained_count += 1;
         }
 
         if status == "success" {
@@ -335,6 +369,13 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
         }
         if auto_removed {
             payload.insert("auto_removed".to_string(), json!(true));
+            payload.insert("auto_removed_hard_banned".to_string(), json!(true));
+        }
+        if refresh_fixed {
+            payload.insert("refresh_fixed".to_string(), json!(true));
+        }
+        if refresh_failed_retained {
+            payload.insert("refresh_failed_retained".to_string(), json!(true));
         }
         results.push(serde_json::Value::Object(payload));
     }
@@ -345,5 +386,8 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
         "total": results.len(),
         "results": results,
         "auto_removed": auto_removed_count,
+        "refresh_fixed": refresh_fixed_count,
+        "refresh_failed_retained": refresh_failed_retained_count,
+        "auto_removed_hard_banned": auto_removed_hard_banned_count,
     })))
 }

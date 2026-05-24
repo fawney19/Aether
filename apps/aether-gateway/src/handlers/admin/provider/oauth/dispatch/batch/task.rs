@@ -10,7 +10,7 @@ use super::progress::{
 };
 use crate::handlers::admin::provider::oauth::errors::build_internal_control_error_response;
 use crate::handlers::admin::provider::oauth::state::{
-    build_admin_provider_oauth_backend_unavailable_response,
+    admin_provider_oauth_template, build_admin_provider_oauth_backend_unavailable_response,
     is_fixed_provider_type_for_provider_oauth,
 };
 use crate::handlers::admin::provider::shared::paths::admin_provider_oauth_batch_import_task_provider_id;
@@ -124,6 +124,13 @@ pub(in super::super) async fn handle_admin_provider_oauth_start_batch_import_tas
             "该 Provider 不是固定类型，无法使用 provider-oauth",
         ));
     }
+    if provider_type != "kiro"
+        && provider_type != "windsurf"
+        && admin_provider_oauth_template(&provider_type).is_none()
+    {
+        return Ok(build_admin_provider_oauth_backend_unavailable_response());
+    }
+
     let total = estimate_admin_provider_oauth_batch_import_total(
         &provider_type,
         payload.credentials.as_str(),

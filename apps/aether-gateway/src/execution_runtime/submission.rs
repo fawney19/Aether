@@ -1,9 +1,7 @@
-#[cfg(test)]
-use crate::ai_serving::api::core_success_background_report_kind;
 use crate::ai_serving::api::{
     build_core_error_body_for_client_format, core_error_background_report_kind,
-    core_error_default_client_api_format, is_core_error_finalize_kind,
-    maybe_compile_sync_finalize_response,
+    core_error_default_client_api_format, core_success_background_report_kind,
+    is_core_error_finalize_kind, maybe_compile_sync_finalize_response,
     normalize_provider_private_response_value as unwrap_local_finalize_response_value,
     LocalCoreSyncErrorKind,
 };
@@ -36,6 +34,12 @@ pub(super) fn maybe_build_local_core_error_response(
         return Ok(None);
     };
     let status_source_json = resolve_local_sync_source_body_json(payload)?;
+    if payload.status_code < 400
+        && !has_nested_error(&response_body_json)
+        && !status_source_json.as_ref().is_some_and(has_nested_error)
+    {
+        return Ok(None);
+    }
 
     let mut response_headers = payload.headers.clone();
     response_headers.remove("content-encoding");
@@ -81,8 +85,9 @@ fn build_local_sync_response_from_json(
     payload: &GatewaySyncReportRequest,
     body_json: serde_json::Value,
 ) -> Result<Response<Body>, GatewayError> {
-    let status_code = if is_core_error_finalize_kind(payload.report_kind.as_str())
-        || has_nested_error(&body_json)
+    let body_has_error = has_nested_error(&body_json);
+    let status_code = if body_has_error
+        || (payload.status_code >= 400 && is_core_error_finalize_kind(payload.report_kind.as_str()))
     {
         resolve_local_sync_error_status_code(payload.status_code, &body_json)
     } else {
@@ -367,7 +372,10 @@ pub(crate) fn resolve_core_success_background_report_kind(report_kind: &str) -> 
     core_success_background_report_kind(report_kind).map(ToOwned::to_owned)
 }
 
-fn resolve_local_sync_error_status_code(status_code: u16, body_json: &serde_json::Value) -> u16 {
+pub(crate) fn resolve_local_sync_error_status_code(
+    status_code: u16,
+    body_json: &serde_json::Value,
+) -> u16 {
     if (400..600).contains(&status_code) {
         return status_code;
     }
@@ -621,11 +629,30 @@ pub(crate) async fn submit_local_core_error_or_sync_finalize(
         build_local_core_sync_finalize_fallback_response(trace_id, decision, &payload)?
     };
 
-    if let Some(error_report_kind) =
+    let response_status = response.status();
+    if response_status.is_success() {
+        if let Some(success_report_kind) =
+            core_success_background_report_kind(payload.report_kind.as_str())
+        {
+            let mut report_payload = payload.clone();
+            report_payload.report_kind = success_report_kind.to_string();
+            report_payload.status_code = response_status.as_u16();
+            spawn_sync_report(state.clone(), report_payload);
+        } else {
+            warn!(
+                event_name = "local_core_finalize_missing_success_report_mapping",
+                log_type = "event",
+                trace_id = %trace_id,
+                report_kind = %payload.report_kind,
+                "gateway built local core finalize success response without background success report mapping"
+            );
+        }
+    } else if let Some(error_report_kind) =
         resolve_core_error_background_report_kind(payload.report_kind.as_str())
     {
         let mut report_payload = payload.clone();
         report_payload.report_kind = error_report_kind;
+        report_payload.status_code = response_status.as_u16();
         spawn_sync_report(state.clone(), report_payload);
     } else {
         warn!(
@@ -818,5 +845,40 @@ mod tests {
             message.contains("visible model output"),
             "unexpected message: {message}"
         );
+    }
+
+    #[tokio::test]
+    async fn submit_local_core_finalize_keeps_http_200_for_success_image_body() {
+        let payload = core_finalize_payload(
+            "openai_image_sync_finalize",
+            "openai:image",
+            "openai:image",
+            200,
+            json!({
+                "created": 1779273523,
+                "data": [{
+                    "b64_json": "aGVsbG8="
+                }]
+            }),
+        );
+
+        let state = AppState::new().expect("state should build");
+        let response = submit_local_core_error_or_sync_finalize(
+            &state,
+            "trace-image-success-200",
+            &test_decision(),
+            payload,
+        )
+        .await
+        .expect("response should build");
+
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body should read"),
+        )
+        .expect("body should decode");
+        assert_eq!(body["data"][0]["b64_json"], "aGVsbG8=");
     }
 }

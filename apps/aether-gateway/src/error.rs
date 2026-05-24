@@ -11,10 +11,40 @@ use crate::insert_header_if_missing;
 
 #[derive(Debug)]
 pub(crate) enum GatewayError {
-    UpstreamUnavailable { trace_id: String, message: String },
-    ControlUnavailable { trace_id: String, message: String },
-    Client { status: StatusCode, message: String },
+    UpstreamUnavailable {
+        trace_id: String,
+        message: String,
+    },
+    ControlUnavailable {
+        trace_id: String,
+        message: String,
+    },
+    LocalExecutionPlanningTimeout {
+        trace_id: String,
+        phase: &'static str,
+        timeout_ms: u64,
+    },
+    Client {
+        status: StatusCode,
+        message: String,
+    },
     Internal(String),
+}
+
+impl GatewayError {
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::UpstreamUnavailable { message, .. }
+            | Self::ControlUnavailable { message, .. }
+            | Self::Client { message, .. }
+            | Self::Internal(message) => message,
+            Self::LocalExecutionPlanningTimeout {
+                phase, timeout_ms, ..
+            } => {
+                format!("local execution planning timed out in {phase} after {timeout_ms}ms")
+            }
+        }
+    }
 }
 
 impl IntoResponse for GatewayError {
@@ -47,6 +77,33 @@ impl IntoResponse for GatewayError {
                     }
                 }));
                 let mut response = (StatusCode::BAD_GATEWAY, body).into_response();
+                let _ =
+                    insert_header_if_missing(response.headers_mut(), TRACE_ID_HEADER, &trace_id);
+                let _ = insert_header_if_missing(
+                    response.headers_mut(),
+                    GATEWAY_HEADER,
+                    "rust-phase3b",
+                );
+                response
+            }
+            Self::LocalExecutionPlanningTimeout {
+                trace_id,
+                phase,
+                timeout_ms,
+            } => {
+                warn!(
+                    trace_id = %trace_id,
+                    phase,
+                    timeout_ms,
+                    "gateway local execution planning timed out"
+                );
+                let body = Json(json!({
+                    "error": {
+                        "message": "gateway local execution planning timed out",
+                        "trace_id": trace_id,
+                    }
+                }));
+                let mut response = (StatusCode::GATEWAY_TIMEOUT, body).into_response();
                 let _ =
                     insert_header_if_missing(response.headers_mut(), TRACE_ID_HEADER, &trace_id);
                 let _ = insert_header_if_missing(

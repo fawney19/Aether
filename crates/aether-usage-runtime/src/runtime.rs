@@ -104,7 +104,10 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
-        self.is_enabled() && data.has_usage_writer() && data.has_usage_worker_queue()
+        self.is_enabled()
+            && self.config.queue_terminal_events
+            && data.has_usage_writer()
+            && data.has_usage_worker_queue()
     }
 
     pub fn spawn_worker<T>(&self, data: Arc<T>) -> Option<tokio::task::JoinHandle<()>>
@@ -352,30 +355,32 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
-        if let Some(runner) = data.usage_worker_queue() {
-            match UsageQueue::new(runner, self.config.clone()) {
-                Ok(queue) => match queue.enqueue(&event).await {
-                    Ok(_) => return,
+        if self.config.queue_terminal_events {
+            if let Some(runner) = data.usage_worker_queue() {
+                match UsageQueue::new(runner, self.config.clone()) {
+                    Ok(queue) => match queue.enqueue(&event).await {
+                        Ok(_) => return,
+                        Err(err) => {
+                            warn!(
+                                event_name = "usage_terminal_enqueue_failed",
+                                log_type = "event",
+                                request_id = %event.request_id,
+                                fallback = "direct_write",
+                                error = %err,
+                                "usage runtime failed to enqueue terminal usage event; falling back to direct write"
+                            )
+                        }
+                    },
                     Err(err) => {
                         warn!(
-                            event_name = "usage_terminal_enqueue_failed",
+                            event_name = "usage_terminal_queue_init_failed",
                             log_type = "event",
                             request_id = %event.request_id,
                             fallback = "direct_write",
                             error = %err,
-                            "usage runtime failed to enqueue terminal usage event; falling back to direct write"
+                            "usage runtime failed to build queue; falling back to direct write"
                         )
                     }
-                },
-                Err(err) => {
-                    warn!(
-                        event_name = "usage_terminal_queue_init_failed",
-                        log_type = "event",
-                        request_id = %event.request_id,
-                        fallback = "direct_write",
-                        error = %err,
-                        "usage runtime failed to build queue; falling back to direct write"
-                    )
                 }
             }
         }

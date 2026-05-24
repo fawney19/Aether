@@ -114,14 +114,14 @@
                 <Select v-model="selectedChannel">
                   <SelectTrigger>
                     <SelectValue
-                      :placeholder="epayOptions.length ? '选择支付通道' : '暂无可用支付通道'"
+                      :placeholder="checkoutOptions.length ? '选择支付通道' : '暂无可用支付通道'"
                     />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem
-                      v-for="option in epayOptions"
-                      :key="`${option.payment_channel}-${option.display_name}`"
-                      :value="option.payment_channel || ''"
+                      v-for="option in checkoutOptions"
+                      :key="option.key"
+                      :value="option.key"
                     >
                       {{ option.display_name }}
                     </SelectItem>
@@ -131,7 +131,7 @@
                   class="w-full"
                   :disabled="
                     checkoutLoadingPlanId === plan.id
-                      || epayOptions.length === 0
+                      || checkoutOptions.length === 0
                       || !selectedChannel
                   "
                   @click="checkoutPlan(plan)"
@@ -168,16 +168,25 @@
               </div>
             </div>
             <Button
-              v-if="latestPaymentUrl"
+              v-if="latestCheckoutActionLabel"
               variant="outline"
-              @click="openPaymentUrl(latestPaymentUrl)"
+              @click="openLatestPayment"
             >
-              打开支付链接
+              {{ latestCheckoutActionLabel }}
             </Button>
           </div>
         </Card>
       </template>
     </div>
+
+    <StripePaymentDialog
+      v-model:open="stripeDialogOpen"
+      :instructions="stripePaymentInstructions"
+      title="套餐 Stripe 支付"
+      description="完成支付后，套餐权益会由 Stripe Webhook 自动发放。"
+      confirm-text="支付套餐"
+      @success="handleStripePaymentSuccess"
+    />
   </PageContainer>
 </template>
 
@@ -203,11 +212,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui'
-import { EmptyState, LoadingState } from '@/components/common'
+import { EmptyState, LoadingState, StripePaymentDialog } from '@/components/common'
 import { CardSection, PageContainer, PageHeader } from '@/components/layout'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
+import {
+  getPaymentInstructionString,
+  getStripePaymentInstructions,
+  type PaymentInstructionMap,
+} from '@/utils/paymentInstructions'
 
 const { success, error: showError } = useToast()
 
@@ -218,13 +232,28 @@ const rechargeOptions = ref<WalletRechargeOption[]>([])
 const selectedChannel = ref('')
 const checkoutLoadingPlanId = ref<string | null>(null)
 const latestCheckout = ref<BillingCheckoutResponse | null>(null)
+const stripeDialogOpen = ref(false)
+const stripePaymentInstructions = ref<PaymentInstructionMap | null>(null)
 
-const epayOptions = computed(() =>
-  rechargeOptions.value.filter((option) =>
-    (option.payment_provider === 'epay' || option.payment_method === 'epay')
-    && Boolean(option.payment_channel)
-  )
+const checkoutOptions = computed(() =>
+  rechargeOptions.value
+    .filter((option) => Boolean(paymentOptionProvider(option)) && Boolean(option.payment_channel))
+    .map((option, index) => ({
+      ...option,
+      key: [
+        paymentOptionProvider(option),
+        option.payment_method,
+        option.payment_channel || '',
+        index,
+      ].join(':'),
+    }))
 )
+
+const selectedCheckoutOption = computed(() => {
+  if (checkoutOptions.value.length === 0) return null
+  return checkoutOptions.value.find(option => option.key === selectedChannel.value)
+    || checkoutOptions.value[0]
+})
 
 const activeEntitlements = computed(() =>
   entitlements.value.filter((item) =>
@@ -243,12 +272,17 @@ const latestPaymentUrl = computed(() => {
   return typeof value === 'string' && value ? value : ''
 })
 
-watch(epayOptions, (options) => {
-  const channels = options
-    .map(option => option.payment_channel || '')
-    .filter(Boolean)
-  if (!channels.includes(selectedChannel.value)) {
-    selectedChannel.value = channels[0] || ''
+const latestCheckoutActionLabel = computed(() => {
+  const instructions = latestCheckout.value?.payment_instructions
+  if (getStripePaymentInstructions(instructions)) return '打开 Stripe 支付'
+  if (latestPaymentUrl.value) return '打开支付链接'
+  return ''
+})
+
+watch(checkoutOptions, (options) => {
+  const keys = options.map(option => option.key)
+  if (!keys.includes(selectedChannel.value)) {
+    selectedChannel.value = keys[0] || ''
   }
 }, { immediate: true })
 
@@ -285,8 +319,8 @@ async function loadRechargeOptions() {
   try {
     const response = await walletApi.listRechargeOptions()
     rechargeOptions.value = response.items
-    if (!selectedChannel.value && epayOptions.value.length > 0) {
-      selectedChannel.value = epayOptions.value[0].payment_channel || ''
+    if (!selectedChannel.value && checkoutOptions.value.length > 0) {
+      selectedChannel.value = checkoutOptions.value[0].key
     }
   } catch (err) {
     log.error('加载支付通道失败:', err)
@@ -299,12 +333,22 @@ async function checkoutPlan(plan: BillingPlan) {
     const confirmed = window.confirm('购买成功后，同类旧套餐会自动失效。确定继续购买吗？')
     if (!confirmed) return
   }
+  const option = selectedCheckoutOption.value
+  if (!option) {
+    showError('请选择支付方式')
+    return
+  }
+  const provider = paymentOptionProvider(option)
+  if (!provider) {
+    showError('支付方式配置无效')
+    return
+  }
   checkoutLoadingPlanId.value = plan.id
   try {
     const response = await billingApi.checkout(plan.id, {
-      payment_method: 'epay',
-      payment_provider: 'epay',
-      payment_channel: selectedChannel.value,
+      payment_method: option.payment_method || provider,
+      payment_provider: provider,
+      payment_channel: option.payment_channel,
     })
     latestCheckout.value = response
     success('套餐订单已创建')
@@ -317,14 +361,20 @@ async function checkoutPlan(plan: BillingPlan) {
   }
 }
 
-function openPaymentUrl(url: string) {
-  submitPaymentInstructions(latestCheckout.value?.payment_instructions || { payment_url: url })
+function openLatestPayment() {
+  submitPaymentInstructions(latestCheckout.value?.payment_instructions || { payment_url: latestPaymentUrl.value })
 }
 
 function submitPaymentInstructions(instructions: Record<string, unknown> | null | undefined) {
   if (!instructions) return
-  const paymentUrl = instructions.payment_url
-  if (typeof paymentUrl !== 'string' || !paymentUrl) return
+  const stripeInstructions = getStripePaymentInstructions(instructions)
+  if (stripeInstructions) {
+    stripePaymentInstructions.value = instructions
+    stripeDialogOpen.value = true
+    return
+  }
+  const paymentUrl = getPaymentInstructionString(instructions, 'payment_url')
+  if (!paymentUrl) return
   const paymentParams = instructions.payment_params
   if (paymentParams && typeof paymentParams === 'object' && !Array.isArray(paymentParams)) {
     submitPaymentForm(paymentUrl, paymentParams as Record<string, unknown>)
@@ -358,6 +408,15 @@ function submitPaymentForm(url: string, params: Record<string, unknown>) {
 
 function isSafariBrowser(): boolean {
   return navigator.userAgent.includes('Safari') && !navigator.userAgent.includes('Chrome')
+}
+
+async function handleStripePaymentSuccess() {
+  success('支付已完成，正在刷新套餐状态')
+  await Promise.all([loadEntitlements(), loadPlans()])
+}
+
+function paymentOptionProvider(option: WalletRechargeOption): string {
+  return (option.payment_provider || option.provider || option.payment_method || '').trim()
 }
 
 function planTitle(planId: string): string {

@@ -1,6 +1,9 @@
 use crate::handlers::admin::request::AdminAppState;
 use crate::provider_key_auth::provider_key_effective_api_formats;
-use aether_scheduler_core::count_recent_rpm_requests_for_provider_key_since;
+use aether_scheduler_core::{
+    count_recent_rpm_requests_for_provider_key_since,
+    provider_key_circuit_payload_is_active_open_at,
+};
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,6 +21,10 @@ pub(crate) async fn build_admin_key_health_payload(
         .await
         .ok()
         .and_then(|mut keys| keys.drain(..).next())?;
+    let now_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
     let provider = state
         .read_provider_catalog_providers_by_ids(std::slice::from_ref(&key.provider_id))
         .await
@@ -81,10 +88,10 @@ pub(crate) async fn build_admin_key_health_payload(
             .and_then(|value| value.get("last_failure_at"))
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        payload["circuit_breaker_open"] = json!(circuit_data
-            .and_then(|value| value.get("open"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false));
+        payload["circuit_breaker_open"] =
+            json!(circuit_data.is_some_and(
+                |value| provider_key_circuit_payload_is_active_open_at(value, now_unix_secs)
+            ));
         payload["circuit_breaker_open_at"] = circuit_data
             .and_then(|value| value.get("open_at"))
             .cloned()
@@ -107,15 +114,16 @@ pub(crate) async fn build_admin_key_health_payload(
             .unwrap_or(0));
     } else {
         let mut formats_payload = serde_json::Map::new();
+        let mut any_circuit_open = false;
         for format_name in
             provider_key_effective_api_formats(&key, &provider.provider_type, &endpoints)
         {
             let health_data = health_by_format.and_then(|formats| formats.get(&format_name));
             let circuit_data = circuit_by_format.and_then(|formats| formats.get(&format_name));
-            let is_open = circuit_data
-                .and_then(|value| value.get("open"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
+            let active_open = circuit_data.is_some_and(|value| {
+                provider_key_circuit_payload_is_active_open_at(value, now_unix_secs)
+            });
+            any_circuit_open |= active_open;
             formats_payload.insert(
                 format_name.clone(),
                 json!({
@@ -134,8 +142,8 @@ pub(crate) async fn build_admin_key_health_payload(
                         .cloned()
                         .unwrap_or(serde_json::Value::Null),
                     "circuit_breaker": {
-                        "state": if is_open { "open" } else { "closed" },
-                        "open": is_open,
+                        "state": if active_open { "open" } else { "closed" },
+                        "open": active_open,
                         "open_at": circuit_data
                             .and_then(|value| value.get("open_at"))
                             .cloned()
@@ -167,13 +175,6 @@ pub(crate) async fn build_admin_key_health_payload(
             .filter_map(serde_json::Value::as_f64)
             .reduce(f64::min)
             .unwrap_or(1.0);
-        let any_circuit_open = formats_payload.values().any(|value| {
-            value
-                .get("circuit_breaker")
-                .and_then(|circuit| circuit.get("open"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-        });
 
         payload["key_health_score"] = json!(key_health_score);
         payload["any_circuit_open"] = json!(any_circuit_open);

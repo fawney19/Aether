@@ -146,6 +146,7 @@ jobs:
       - name: Build
         env:
           AETHER_VERSION: ${{ needs.preflight.outputs.version_tag }}
+          AETHER_BUILD_TYPE: release
           CARGO_TERM_COLOR: always
         shell: bash
         run: |
@@ -260,8 +261,7 @@ jobs:
               root="package/${bundle}"
               mkdir -p \
                 "${root}/bin" \
-                "${root}/frontend" \
-                "${root}/scripts"
+                "${root}/frontend"
 
               install -m 0755 "artifacts/aether-gateway-${platform}-${arch}/aether-gateway" "${root}/bin/aether-gateway"
               cp -R artifacts/frontend-dist/. "${root}/frontend/"
@@ -270,10 +270,9 @@ jobs:
                 -e "s/^VERSION=\"\${AETHER_VERSION:-}\"/VERSION=\"\${AETHER_VERSION:-${VERSION}}\"/" \
                 install.sh > "${root}/install.sh"
               chmod 0755 "${root}/install.sh"
+              install -m 0755 update.sh "${root}/update.sh"
               install -m 0644 docker-compose.yml "${root}/docker-compose.yml"
               install -m 0644 docker-compose.single-node.yml "${root}/docker-compose.single-node.yml"
-              install -m 0755 scripts/migrate-pg-compose-to-single-node.sh "${root}/scripts/migrate-pg-compose-to-single-node.sh"
-              install -m 0755 scripts/migrate-pg-to-single-node.sh "${root}/scripts/migrate-pg-to-single-node.sh"
               install -m 0644 .env.example "${root}/.env.example"
               install -m 0755 generate_keys.sh "${root}/generate_keys.sh"
               install -m 0644 README.md "${root}/README.md"

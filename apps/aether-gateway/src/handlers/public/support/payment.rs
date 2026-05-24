@@ -4,6 +4,8 @@ pub(super) use super::{
     build_auth_error_response, build_auth_json_response, AppState, GatewayPublicRequestContext,
 };
 
+#[path = "payment/alipay.rs"]
+mod payment_alipay;
 #[path = "payment/epay.rs"]
 pub(super) mod payment_epay;
 #[path = "payment/gateway.rs"]
@@ -14,11 +16,19 @@ mod payment_repository;
 mod payment_route;
 #[path = "payment/shared.rs"]
 mod payment_shared;
+#[path = "payment/stripe.rs"]
+mod payment_stripe;
 #[cfg(test)]
 #[path = "payment/test_support.rs"]
 mod payment_test_support;
+#[path = "payment/wxpay.rs"]
+mod payment_wxpay;
 
-use self::payment_repository::handle_payment_callback_with_wallet_repository;
+use self::payment_repository::{
+    handle_payment_callback_input_with_wallet_repository,
+    handle_payment_callback_with_wallet_repository,
+    process_payment_callback_input_with_wallet_repository,
+};
 use self::payment_shared::NormalizedPaymentCallbackRequest;
 
 const PAYMENT_CALLBACK_STORAGE_UNAVAILABLE_DETAIL: &str = "支付回调存储暂不可用";

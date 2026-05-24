@@ -317,6 +317,11 @@ fn classifies_wallet_routes_as_public_support_route() {
             "/api/wallet/refunds?limit=20",
             "list_refunds",
         ),
+        (
+            http::Method::GET,
+            "/api/wallet/refunds/eligible-providers",
+            "refund_eligible_providers",
+        ),
         (http::Method::POST, "/api/wallet/refunds", "create_refund"),
         (
             http::Method::GET,

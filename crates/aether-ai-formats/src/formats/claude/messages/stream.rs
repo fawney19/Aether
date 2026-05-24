@@ -753,13 +753,7 @@ impl ClaudeClientEmitter {
                     }),
                 );
                 let usage = usage.unwrap_or_default();
-                payload.insert(
-                    "usage".to_string(),
-                    json!({
-                        "input_tokens": usage.input_tokens,
-                        "output_tokens": usage.output_tokens,
-                    }),
-                );
+                payload.insert("usage".to_string(), claude_usage_from_usage(&usage));
                 out.extend(encode_json_sse(
                     Some("message_delta"),
                     &Value::Object(payload),
@@ -1287,6 +1281,32 @@ mod tests {
         assert!(sse.contains("event: message_delta"));
         assert!(sse.contains("\"stop_reason\":\"end_turn\""));
         assert!(sse.contains("\"usage\":{\"input_tokens\":0,\"output_tokens\":0}"));
+    }
+
+    #[test]
+    fn claude_client_emitter_includes_cache_usage_in_finish_events() {
+        let mut emitter = ClaudeClientEmitter::default();
+        let bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "msg_cache".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+                event: CanonicalStreamEvent::Finish {
+                    finish_reason: Some("stop".to_string()),
+                    usage: Some(CanonicalUsage {
+                        input_tokens: 10,
+                        output_tokens: 2,
+                        total_tokens: 12,
+                        cache_creation_tokens: 5,
+                        cache_read_tokens: 4,
+                        ..CanonicalUsage::default()
+                    }),
+                },
+            })
+            .expect("finish should encode");
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        assert!(sse.contains("\"cache_creation_input_tokens\":5"));
+        assert!(sse.contains("\"cache_read_input_tokens\":4"));
     }
 
     #[test]

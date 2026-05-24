@@ -33,9 +33,9 @@ pub(super) async fn maybe_build_local_admin_payments_response(
         || (matches!(
             request_context.method(),
             &http::Method::GET | &http::Method::PUT
-        ) && path == "/api/admin/payments/gateways/epay")
+        ) && admin_payment_gateway_path_matches(path))
         || (request_context.method() == http::Method::POST
-            && path == "/api/admin/payments/gateways/epay/test")
+            && admin_payment_gateway_test_path_matches(path))
         || (request_context.method() == http::Method::GET
             && path.starts_with("/api/admin/payments/orders/")
             && path.matches('/').count() == 5)
@@ -120,4 +120,21 @@ pub(super) async fn maybe_build_local_admin_payments_response(
     }
 
     Ok(Some(build_admin_payments_data_unavailable_response()))
+}
+
+fn admin_payment_gateway_path_matches(path: &str) -> bool {
+    let Some(provider) = path.strip_prefix("/api/admin/payments/gateways/") else {
+        return false;
+    };
+    !provider.is_empty() && !provider.contains('/')
+}
+
+fn admin_payment_gateway_test_path_matches(path: &str) -> bool {
+    let Some(provider) = path
+        .strip_prefix("/api/admin/payments/gateways/")
+        .and_then(|value| value.strip_suffix("/test"))
+    else {
+        return false;
+    };
+    !provider.is_empty() && !provider.contains('/')
 }

@@ -124,6 +124,25 @@
           </div>
         </Card>
 
+        <Card
+          v-if="featureSettingsForm.notificationPushServiceEnabled"
+          class="p-6"
+        >
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <h3 class="text-lg font-medium text-foreground">
+                通知推送服务
+              </h3>
+              <p class="mt-1 text-sm text-muted-foreground">
+                管理员已允许你配置自己的第三方推送渠道
+              </p>
+            </div>
+            <Badge variant="success">
+              已开放
+            </Badge>
+          </div>
+        </Card>
+
         <!-- 密码设置（LDAP 用户不显示） -->
         <Card
           v-if="profile?.auth_source !== 'ldap'"
@@ -499,7 +518,7 @@
                       邮件通知
                     </Label>
                     <p class="text-xs text-muted-foreground mt-1">
-                      接收系统重要通知
+                      接收系统通知邮件
                     </p>
                   </div>
                   <Switch
@@ -671,6 +690,7 @@ import { log } from '@/utils/logger'
 import { getErrorMessage, getErrorStatus } from '@/types/api-error'
 import {
   mergeChatPiiRedactionFeatureSettings,
+  readNotificationPushServiceFeatureSettings,
   readChatPiiRedactionFeatureSettings,
 } from '@/utils/featureSettings'
 
@@ -715,6 +735,7 @@ const preferencesForm = ref({
 const featureSettingsForm = ref({
   chatPiiRedactionEnabled: false,
   chatPiiRedactionInjectNotice: true,
+  notificationPushServiceEnabled: false,
 })
 
 const savingProfile = ref(false)
@@ -819,9 +840,11 @@ async function loadProfile() {
       username: profile.value.username
     }
     const redactionFeature = readChatPiiRedactionFeatureSettings(profile.value.feature_settings)
+    const notificationPushFeature = readNotificationPushServiceFeatureSettings(profile.value.feature_settings)
     featureSettingsForm.value = {
       chatPiiRedactionEnabled: redactionFeature.enabled,
       chatPiiRedactionInjectNotice: redactionFeature.inject_model_instruction,
+      notificationPushServiceEnabled: notificationPushFeature.enabled,
     }
     // 保存原始值
     originalProfileForm.value = { ...profileForm.value }

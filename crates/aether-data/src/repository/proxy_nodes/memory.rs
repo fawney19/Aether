@@ -9,11 +9,12 @@ use uuid::Uuid;
 use super::types::{
     bucket_start_unix_secs, build_tunnel_error_event_detail, build_tunnel_metrics_sample,
     log_reported_tunnel_error_event, normalize_proxy_metadata,
-    reconcile_remote_config_after_heartbeat, ProxyNodeEventQuery, ProxyNodeHeartbeatMutation,
-    ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation, ProxyNodeMetricsCleanupSummary,
-    ProxyNodeMetricsStep, ProxyNodeReadRepository, ProxyNodeRegistrationMutation,
-    ProxyNodeRemoteConfigMutation, ProxyNodeTrafficMutation, ProxyNodeTunnelStatusMutation,
-    ProxyNodeWriteRepository, StoredProxyFleetMetricsBucket, StoredProxyNode, StoredProxyNodeEvent,
+    preserve_proxy_metadata_tunnel_security, reconcile_remote_config_after_heartbeat,
+    ProxyNodeEventQuery, ProxyNodeHeartbeatMutation, ProxyNodeManualCreateMutation,
+    ProxyNodeManualUpdateMutation, ProxyNodeMetricsCleanupSummary, ProxyNodeMetricsStep,
+    ProxyNodeReadRepository, ProxyNodeRegistrationMutation, ProxyNodeRemoteConfigMutation,
+    ProxyNodeTrafficMutation, ProxyNodeTunnelStatusMutation, ProxyNodeWriteRepository,
+    StoredProxyFleetMetricsBucket, StoredProxyNode, StoredProxyNodeEvent,
     StoredProxyNodeMetricsBucket, TunnelMetricsSample, PROXY_NODE_EVENT_TYPE_TUNNEL_ERROR,
 };
 use crate::DataLayerError;
@@ -589,6 +590,10 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
             let normalized_proxy_metadata = normalize_proxy_metadata(
                 mutation.proxy_metadata.as_ref(),
                 mutation.proxy_version.as_deref(),
+            );
+            let normalized_proxy_metadata = preserve_proxy_metadata_tunnel_security(
+                previous_proxy_metadata.as_ref(),
+                normalized_proxy_metadata,
             );
             if let Some(value) = normalized_proxy_metadata {
                 node.proxy_metadata = Some(value);

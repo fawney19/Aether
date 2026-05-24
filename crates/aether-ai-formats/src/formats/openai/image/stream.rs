@@ -8,7 +8,8 @@ use crate::contracts::OPENAI_IMAGE_SYNC_FINALIZE_REPORT_KIND;
 use crate::formats::openai::responses::codex::CODEX_OPENAI_IMAGE_DEFAULT_OUTPUT_FORMAT;
 use crate::formats::shared::sse::{encode_done_sse, encode_json_sse};
 use crate::formats::shared::stream_core::common::{
-    build_openai_chat_chunk, build_openai_chat_finish_chunk, build_openai_chat_usage_chunk,
+    build_openai_chat_chunk, build_openai_chat_finish_chunk,
+    build_openai_chat_usage_chunk_with_cache,
 };
 use crate::formats::shared::AiSurfaceFinalizeError;
 
@@ -501,18 +502,26 @@ impl OpenAiImageChatStreamState {
             None,
             &build_openai_chat_finish_chunk(&response_id, &model, Some("stop")),
         )?);
-        if let Some((input_tokens, output_tokens, total_tokens, reasoning_tokens)) =
-            openai_image_chat_usage_counts(usage)
+        if let Some((
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            reasoning_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
+        )) = openai_image_chat_usage_counts(usage)
         {
             output.extend(encode_json_sse(
                 None,
-                &build_openai_chat_usage_chunk(
+                &build_openai_chat_usage_chunk_with_cache(
                     &response_id,
                     &model,
                     input_tokens,
                     output_tokens,
                     total_tokens,
                     reasoning_tokens,
+                    cache_creation_tokens,
+                    cache_read_tokens,
                 ),
             )?);
         }
@@ -900,7 +909,7 @@ fn image_chat_markdown(frame: &OpenAiImageChatFrame) -> String {
     )
 }
 
-fn openai_image_chat_usage_counts(usage: Option<&Value>) -> Option<(u64, u64, u64, u64)> {
+fn openai_image_chat_usage_counts(usage: Option<&Value>) -> Option<(u64, u64, u64, u64, u64, u64)> {
     let usage = usage.and_then(Value::as_object)?;
     let mut input_tokens = usage
         .get("input_tokens")
@@ -912,6 +921,30 @@ fn openai_image_chat_usage_counts(usage: Option<&Value>) -> Option<(u64, u64, u6
         .or_else(|| usage.get("completion_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let cache_creation_tokens = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            usage
+                .get("input_tokens_details")
+                .or_else(|| usage.get("prompt_tokens_details"))
+                .and_then(Value::as_object)
+                .and_then(|details| details.get("cached_creation_tokens"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0);
+    let cache_read_tokens = usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            usage
+                .get("input_tokens_details")
+                .or_else(|| usage.get("prompt_tokens_details"))
+                .and_then(Value::as_object)
+                .and_then(|details| details.get("cached_tokens"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0);
     let total_tokens = usage
         .get("total_tokens")
         .and_then(Value::as_u64)
@@ -919,7 +952,14 @@ fn openai_image_chat_usage_counts(usage: Option<&Value>) -> Option<(u64, u64, u6
     if input_tokens == 0 && total_tokens > output_tokens {
         input_tokens = total_tokens.saturating_sub(output_tokens);
     }
-    (total_tokens > 0).then_some((input_tokens, output_tokens, total_tokens, 0))
+    (total_tokens > 0).then_some((
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        0,
+        cache_creation_tokens,
+        cache_read_tokens,
+    ))
 }
 
 fn image_failure_error(event: &Value) -> Value {
@@ -1146,6 +1186,12 @@ pub fn maybe_build_openai_image_sync_finalize_product(
         return Ok(None);
     }
     if let Some(provider_body_json) = body_json {
+        if openai_image_response_has_standard_data(provider_body_json) {
+            return Ok(Some(OpenAiImageSyncFinalizeProduct {
+                client_body_json: provider_body_json.clone(),
+                provider_body_json: provider_body_json.clone(),
+            }));
+        }
         if provider_body_json.get("output").is_some() && provider_body_json.get("data").is_none() {
             let Some(client_body_json) = crate::formats::shared::image_bridge::build_openai_image_response_from_response_stream_sync_body(
                 provider_body_json,
@@ -1277,6 +1323,25 @@ pub fn maybe_build_openai_image_sync_finalize_product(
         client_body_json,
         provider_body_json,
     }))
+}
+
+fn openai_image_response_has_standard_data(body_json: &Value) -> bool {
+    body_json
+        .get("data")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.as_object().is_some_and(|object| {
+                    ["b64_json", "url"].iter().any(|field| {
+                        object
+                            .get(*field)
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .is_some_and(|value| !value.is_empty())
+                    })
+                })
+            })
+        })
 }
 
 #[cfg(test)]
@@ -1486,5 +1551,36 @@ mod tests {
             product.provider_body_json["output"][0]["revised_prompt"],
             "revised history prompt"
         );
+    }
+
+    #[test]
+    fn sync_finalize_accepts_standard_openai_image_response() {
+        let provider_body = json!({
+            "created": 1779273523,
+            "data": [{
+                "b64_json": "aGVsbG8=",
+                "revised_prompt": "draw a small cat"
+            }]
+        });
+        let product = maybe_build_openai_image_sync_finalize_product(
+            "openai_image_sync_finalize",
+            200,
+            Some(&json!({
+                "client_api_format": "openai:image",
+                "provider_api_format": "openai:image",
+                "image_request": {
+                    "operation": "generate",
+                    "response_format": "b64_json"
+                }
+            })),
+            Some(&provider_body),
+            None,
+        )
+        .expect("standard image response should finalize")
+        .expect("standard image response should match");
+
+        assert_eq!(product.client_body_json["created"], 1779273523);
+        assert_eq!(product.client_body_json["data"][0]["b64_json"], "aGVsbG8=");
+        assert_eq!(product.provider_body_json, provider_body);
     }
 }

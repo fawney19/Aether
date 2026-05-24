@@ -1,10 +1,15 @@
 use futures_util::TryStreamExt;
 use sqlx::Row;
+use std::collections::BTreeMap;
 
 use super::{MysqlBackend, PostgresBackend, SqliteBackend};
 use crate::error::{SqlResultExt, SqlxResultExt};
 use crate::repository::system::{
-    AdminSystemPurgeSummary, AdminSystemPurgeTarget, AdminSystemStats, StoredSystemConfigEntry,
+    AdminSystemPurgeSummary, AdminSystemPurgeTarget, AdminSystemStats,
+    AdminSystemStatsDailyAggregate, AdminSystemStatsDailyApiKeyAggregate,
+    AdminSystemStatsUserDailyAggregate, AdminSystemUsageAggregateImportMode,
+    AdminSystemUsageAggregateImportSummary, AdminSystemUsageAggregateSnapshot,
+    StoredSystemConfigEntry,
 };
 use crate::DataLayerError;
 
@@ -195,6 +200,29 @@ impl PostgresBackend {
             .map_postgres_err()?;
         postgres_admin_system_stats(row)
     }
+
+    pub async fn export_admin_system_usage_aggregates(
+        &self,
+    ) -> Result<AdminSystemUsageAggregateSnapshot, DataLayerError> {
+        export_postgres_admin_system_usage_aggregates(self.pool()).await
+    }
+
+    pub async fn import_admin_system_usage_aggregates(
+        &self,
+        snapshot: &AdminSystemUsageAggregateSnapshot,
+        user_id_map: &BTreeMap<String, String>,
+        api_key_id_map: &BTreeMap<String, String>,
+        mode: AdminSystemUsageAggregateImportMode,
+    ) -> Result<AdminSystemUsageAggregateImportSummary, DataLayerError> {
+        import_postgres_admin_system_usage_aggregates(
+            self.pool(),
+            snapshot,
+            user_id_map,
+            api_key_id_map,
+            mode,
+        )
+        .await
+    }
 }
 
 impl MysqlBackend {
@@ -348,6 +376,29 @@ WHERE `key` = ?
             .await
             .map_sql_err()?;
         mysql_admin_system_stats(row)
+    }
+
+    pub async fn export_admin_system_usage_aggregates(
+        &self,
+    ) -> Result<AdminSystemUsageAggregateSnapshot, DataLayerError> {
+        export_mysql_admin_system_usage_aggregates(self.pool()).await
+    }
+
+    pub async fn import_admin_system_usage_aggregates(
+        &self,
+        snapshot: &AdminSystemUsageAggregateSnapshot,
+        user_id_map: &BTreeMap<String, String>,
+        api_key_id_map: &BTreeMap<String, String>,
+        mode: AdminSystemUsageAggregateImportMode,
+    ) -> Result<AdminSystemUsageAggregateImportSummary, DataLayerError> {
+        import_mysql_admin_system_usage_aggregates(
+            self.pool(),
+            snapshot,
+            user_id_map,
+            api_key_id_map,
+            mode,
+        )
+        .await
     }
 }
 
@@ -503,6 +554,1171 @@ WHERE key = ?
             .map_sql_err()?;
         sqlite_admin_system_stats(row)
     }
+
+    pub async fn export_admin_system_usage_aggregates(
+        &self,
+    ) -> Result<AdminSystemUsageAggregateSnapshot, DataLayerError> {
+        export_sqlite_admin_system_usage_aggregates(self.pool()).await
+    }
+
+    pub async fn import_admin_system_usage_aggregates(
+        &self,
+        snapshot: &AdminSystemUsageAggregateSnapshot,
+        user_id_map: &BTreeMap<String, String>,
+        api_key_id_map: &BTreeMap<String, String>,
+        mode: AdminSystemUsageAggregateImportMode,
+    ) -> Result<AdminSystemUsageAggregateImportSummary, DataLayerError> {
+        import_sqlite_admin_system_usage_aggregates(
+            self.pool(),
+            snapshot,
+            user_id_map,
+            api_key_id_map,
+            mode,
+        )
+        .await
+    }
+}
+
+async fn export_postgres_admin_system_usage_aggregates(
+    pool: &sqlx::PgPool,
+) -> Result<AdminSystemUsageAggregateSnapshot, DataLayerError> {
+    let mut snapshot = AdminSystemUsageAggregateSnapshot::default();
+
+    let mut daily_rows = sqlx::query(
+        r#"
+SELECT
+    CAST(EXTRACT(EPOCH FROM date) AS BIGINT) AS date_unix_secs,
+    COALESCE(total_requests, 0)::BIGINT AS total_requests,
+    COALESCE(success_requests, 0)::BIGINT AS success_requests,
+    COALESCE(error_requests, 0)::BIGINT AS error_requests,
+    COALESCE(input_tokens, 0)::BIGINT AS input_tokens,
+    COALESCE(output_tokens, 0)::BIGINT AS output_tokens,
+    COALESCE(cache_creation_tokens, 0)::BIGINT AS cache_creation_tokens,
+    COALESCE(cache_read_tokens, 0)::BIGINT AS cache_read_tokens,
+    COALESCE(CAST(total_cost AS DOUBLE PRECISION), 0) AS total_cost,
+    COALESCE(CAST(actual_total_cost AS DOUBLE PRECISION), 0) AS actual_total_cost,
+    COALESCE(is_complete, FALSE) AS is_complete,
+    CAST(EXTRACT(EPOCH FROM aggregated_at) AS BIGINT) AS aggregated_at_unix_secs
+FROM stats_daily
+WHERE total_requests <> 0
+   OR input_tokens <> 0
+   OR output_tokens <> 0
+   OR cache_creation_tokens <> 0
+   OR cache_read_tokens <> 0
+   OR total_cost <> 0
+ORDER BY date ASC
+"#,
+    )
+    .fetch(pool);
+    while let Some(row) = daily_rows.try_next().await.map_postgres_err()? {
+        snapshot
+            .stats_daily
+            .push(map_postgres_stats_daily_aggregate(&row)?);
+    }
+
+    let mut user_daily_rows = sqlx::query(
+        r#"
+SELECT
+    user_id,
+    username,
+    CAST(EXTRACT(EPOCH FROM date) AS BIGINT) AS date_unix_secs,
+    COALESCE(total_requests, 0)::BIGINT AS total_requests,
+    COALESCE(success_requests, 0)::BIGINT AS success_requests,
+    COALESCE(error_requests, 0)::BIGINT AS error_requests,
+    COALESCE(input_tokens, 0)::BIGINT AS input_tokens,
+    COALESCE(output_tokens, 0)::BIGINT AS output_tokens,
+    COALESCE(cache_creation_tokens, 0)::BIGINT AS cache_creation_tokens,
+    COALESCE(cache_read_tokens, 0)::BIGINT AS cache_read_tokens,
+    COALESCE(CAST(total_cost AS DOUBLE PRECISION), 0) AS total_cost
+FROM stats_user_daily
+WHERE user_id IS NOT NULL
+  AND (total_requests <> 0
+    OR input_tokens <> 0
+    OR output_tokens <> 0
+    OR cache_creation_tokens <> 0
+    OR cache_read_tokens <> 0
+    OR total_cost <> 0)
+ORDER BY user_id ASC, date ASC
+"#,
+    )
+    .fetch(pool);
+    while let Some(row) = user_daily_rows.try_next().await.map_postgres_err()? {
+        snapshot
+            .stats_user_daily
+            .push(map_postgres_stats_user_daily_aggregate(&row)?);
+    }
+
+    let mut api_key_daily_rows = sqlx::query(
+        r#"
+SELECT
+    api_key_id,
+    api_key_name,
+    CAST(EXTRACT(EPOCH FROM date) AS BIGINT) AS date_unix_secs,
+    COALESCE(total_requests, 0)::BIGINT AS total_requests,
+    COALESCE(success_requests, 0)::BIGINT AS success_requests,
+    COALESCE(error_requests, 0)::BIGINT AS error_requests,
+    COALESCE(input_tokens, 0)::BIGINT AS input_tokens,
+    COALESCE(output_tokens, 0)::BIGINT AS output_tokens,
+    COALESCE(cache_creation_tokens, 0)::BIGINT AS cache_creation_tokens,
+    COALESCE(cache_read_tokens, 0)::BIGINT AS cache_read_tokens,
+    COALESCE(CAST(total_cost AS DOUBLE PRECISION), 0) AS total_cost
+FROM stats_daily_api_key
+WHERE api_key_id IS NOT NULL
+  AND (total_requests <> 0
+    OR input_tokens <> 0
+    OR output_tokens <> 0
+    OR cache_creation_tokens <> 0
+    OR cache_read_tokens <> 0
+    OR total_cost <> 0)
+ORDER BY api_key_id ASC, date ASC
+"#,
+    )
+    .fetch(pool);
+    while let Some(row) = api_key_daily_rows.try_next().await.map_postgres_err()? {
+        snapshot
+            .stats_daily_api_key
+            .push(map_postgres_stats_daily_api_key_aggregate(&row)?);
+    }
+
+    Ok(snapshot)
+}
+
+async fn export_mysql_admin_system_usage_aggregates(
+    pool: &sqlx::MySqlPool,
+) -> Result<AdminSystemUsageAggregateSnapshot, DataLayerError> {
+    let mut snapshot = AdminSystemUsageAggregateSnapshot::default();
+
+    let daily_rows = sqlx::query(
+        r#"
+SELECT
+    `date` AS date_unix_secs,
+    total_requests,
+    success_requests,
+    error_requests,
+    input_tokens,
+    output_tokens,
+    cache_creation_tokens,
+    cache_read_tokens,
+    total_cost,
+    actual_total_cost,
+    is_complete,
+    aggregated_at AS aggregated_at_unix_secs
+FROM stats_daily
+WHERE total_requests <> 0
+   OR input_tokens <> 0
+   OR output_tokens <> 0
+   OR cache_creation_tokens <> 0
+   OR cache_read_tokens <> 0
+   OR total_cost <> 0
+ORDER BY `date` ASC
+"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_sql_err()?;
+    for row in daily_rows {
+        snapshot
+            .stats_daily
+            .push(map_mysql_stats_daily_aggregate(&row)?);
+    }
+
+    let user_daily_rows = sqlx::query(
+        r#"
+SELECT
+    user_id,
+    username,
+    `date` AS date_unix_secs,
+    total_requests,
+    success_requests,
+    error_requests,
+    input_tokens,
+    output_tokens,
+    cache_creation_tokens,
+    cache_read_tokens,
+    total_cost
+FROM stats_user_daily
+WHERE total_requests <> 0
+   OR input_tokens <> 0
+   OR output_tokens <> 0
+   OR cache_creation_tokens <> 0
+   OR cache_read_tokens <> 0
+   OR total_cost <> 0
+ORDER BY user_id ASC, `date` ASC
+"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_sql_err()?;
+    for row in user_daily_rows {
+        snapshot
+            .stats_user_daily
+            .push(map_mysql_stats_user_daily_aggregate(&row)?);
+    }
+
+    let api_key_daily_rows = sqlx::query(
+        r#"
+SELECT
+    api_key_id,
+    api_key_name,
+    `date` AS date_unix_secs,
+    total_requests,
+    success_requests,
+    error_requests,
+    input_tokens,
+    output_tokens,
+    cache_creation_tokens,
+    cache_read_tokens,
+    total_cost
+FROM stats_daily_api_key
+WHERE total_requests <> 0
+   OR input_tokens <> 0
+   OR output_tokens <> 0
+   OR cache_creation_tokens <> 0
+   OR cache_read_tokens <> 0
+   OR total_cost <> 0
+ORDER BY api_key_id ASC, `date` ASC
+"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_sql_err()?;
+    for row in api_key_daily_rows {
+        snapshot
+            .stats_daily_api_key
+            .push(map_mysql_stats_daily_api_key_aggregate(&row)?);
+    }
+
+    Ok(snapshot)
+}
+
+async fn export_sqlite_admin_system_usage_aggregates(
+    pool: &sqlx::SqlitePool,
+) -> Result<AdminSystemUsageAggregateSnapshot, DataLayerError> {
+    let mut snapshot = AdminSystemUsageAggregateSnapshot::default();
+
+    let daily_rows = sqlx::query(
+        r#"
+SELECT
+    "date" AS date_unix_secs,
+    total_requests,
+    success_requests,
+    error_requests,
+    input_tokens,
+    output_tokens,
+    cache_creation_tokens,
+    cache_read_tokens,
+    total_cost,
+    actual_total_cost,
+    is_complete,
+    aggregated_at AS aggregated_at_unix_secs
+FROM stats_daily
+WHERE total_requests <> 0
+   OR input_tokens <> 0
+   OR output_tokens <> 0
+   OR cache_creation_tokens <> 0
+   OR cache_read_tokens <> 0
+   OR total_cost <> 0
+ORDER BY "date" ASC
+"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_sql_err()?;
+    for row in daily_rows {
+        snapshot
+            .stats_daily
+            .push(map_sqlite_stats_daily_aggregate(&row)?);
+    }
+
+    let user_daily_rows = sqlx::query(
+        r#"
+SELECT
+    user_id,
+    username,
+    "date" AS date_unix_secs,
+    total_requests,
+    success_requests,
+    error_requests,
+    input_tokens,
+    output_tokens,
+    cache_creation_tokens,
+    cache_read_tokens,
+    total_cost
+FROM stats_user_daily
+WHERE total_requests <> 0
+   OR input_tokens <> 0
+   OR output_tokens <> 0
+   OR cache_creation_tokens <> 0
+   OR cache_read_tokens <> 0
+   OR total_cost <> 0
+ORDER BY user_id ASC, "date" ASC
+"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_sql_err()?;
+    for row in user_daily_rows {
+        snapshot
+            .stats_user_daily
+            .push(map_sqlite_stats_user_daily_aggregate(&row)?);
+    }
+
+    let api_key_daily_rows = sqlx::query(
+        r#"
+SELECT
+    api_key_id,
+    api_key_name,
+    "date" AS date_unix_secs,
+    total_requests,
+    success_requests,
+    error_requests,
+    input_tokens,
+    output_tokens,
+    cache_creation_tokens,
+    cache_read_tokens,
+    total_cost
+FROM stats_daily_api_key
+WHERE total_requests <> 0
+   OR input_tokens <> 0
+   OR output_tokens <> 0
+   OR cache_creation_tokens <> 0
+   OR cache_read_tokens <> 0
+   OR total_cost <> 0
+ORDER BY api_key_id ASC, "date" ASC
+"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_sql_err()?;
+    for row in api_key_daily_rows {
+        snapshot
+            .stats_daily_api_key
+            .push(map_sqlite_stats_daily_api_key_aggregate(&row)?);
+    }
+
+    Ok(snapshot)
+}
+
+async fn import_postgres_admin_system_usage_aggregates(
+    pool: &sqlx::PgPool,
+    snapshot: &AdminSystemUsageAggregateSnapshot,
+    user_id_map: &BTreeMap<String, String>,
+    api_key_id_map: &BTreeMap<String, String>,
+    mode: AdminSystemUsageAggregateImportMode,
+) -> Result<AdminSystemUsageAggregateImportSummary, DataLayerError> {
+    let mut tx = pool.begin().await.map_postgres_err()?;
+    let mut summary = AdminSystemUsageAggregateImportSummary::default();
+
+    for row in &snapshot.stats_daily {
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM stats_daily WHERE date = TO_TIMESTAMP($1::double precision) LIMIT 1",
+        )
+        .bind(i64_from_u64(row.date_unix_secs, "stats_daily.date")?)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if should_skip_imported_aggregate(
+            existing.is_some(),
+            mode,
+            "stats_daily",
+            row.date_unix_secs,
+        )? {
+            summary.stats_daily.skipped += 1;
+            continue;
+        }
+        sqlx::query(
+            r#"
+INSERT INTO stats_daily (
+    id, date, total_requests, success_requests, error_requests,
+    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+    total_cost, actual_total_cost, is_complete, aggregated_at, created_at, updated_at
+)
+VALUES (
+    $1, TO_TIMESTAMP($2::double precision), $3, $4, $5,
+    $6, $7, $8, $9, $10, $11, $12,
+    CASE WHEN $13::BIGINT IS NULL THEN NULL ELSE TO_TIMESTAMP($13::double precision) END,
+    NOW(), NOW()
+)
+ON CONFLICT (date) DO UPDATE
+SET total_requests = EXCLUDED.total_requests,
+    success_requests = EXCLUDED.success_requests,
+    error_requests = EXCLUDED.error_requests,
+    input_tokens = EXCLUDED.input_tokens,
+    output_tokens = EXCLUDED.output_tokens,
+    cache_creation_tokens = EXCLUDED.cache_creation_tokens,
+    cache_read_tokens = EXCLUDED.cache_read_tokens,
+    total_cost = EXCLUDED.total_cost,
+    actual_total_cost = EXCLUDED.actual_total_cost,
+    is_complete = EXCLUDED.is_complete,
+    aggregated_at = EXCLUDED.aggregated_at,
+    updated_at = NOW()
+"#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(i64_from_u64(row.date_unix_secs, "stats_daily.date")?)
+        .bind(i64_from_u64(
+            row.total_requests,
+            "stats_daily.total_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.success_requests,
+            "stats_daily.success_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.error_requests,
+            "stats_daily.error_requests",
+        )?)
+        .bind(i64_from_u64(row.input_tokens, "stats_daily.input_tokens")?)
+        .bind(i64_from_u64(
+            row.output_tokens,
+            "stats_daily.output_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_creation_tokens,
+            "stats_daily.cache_creation_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_read_tokens,
+            "stats_daily.cache_read_tokens",
+        )?)
+        .bind(row.total_cost)
+        .bind(row.actual_total_cost)
+        .bind(row.is_complete || row.total_requests > 0)
+        .bind(optional_i64_from_u64(
+            row.aggregated_at_unix_secs,
+            "stats_daily.aggregated_at",
+        )?)
+        .execute(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        add_aggregate_import_count(&mut summary.stats_daily, existing.is_some());
+    }
+
+    for row in &snapshot.stats_user_daily {
+        let Some(target_user_id) = user_id_map.get(&row.user_id) else {
+            summary.skipped_unmapped_user_daily += 1;
+            summary.stats_user_daily.skipped += 1;
+            continue;
+        };
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM stats_user_daily WHERE user_id = $1 AND date = TO_TIMESTAMP($2::double precision) LIMIT 1",
+        )
+        .bind(target_user_id)
+        .bind(i64_from_u64(row.date_unix_secs, "stats_user_daily.date")?)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if should_skip_imported_aggregate(
+            existing.is_some(),
+            mode,
+            "stats_user_daily",
+            row.date_unix_secs,
+        )? {
+            summary.stats_user_daily.skipped += 1;
+            continue;
+        }
+        sqlx::query(
+            r#"
+INSERT INTO stats_user_daily (
+    id, user_id, username, date, total_requests, success_requests, error_requests,
+    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+    total_cost, created_at, updated_at
+)
+VALUES (
+    $1, $2, $3, TO_TIMESTAMP($4::double precision), $5, $6, $7,
+    $8, $9, $10, $11, $12, NOW(), NOW()
+)
+ON CONFLICT (date, user_id) DO UPDATE
+SET username = EXCLUDED.username,
+    total_requests = EXCLUDED.total_requests,
+    success_requests = EXCLUDED.success_requests,
+    error_requests = EXCLUDED.error_requests,
+    input_tokens = EXCLUDED.input_tokens,
+    output_tokens = EXCLUDED.output_tokens,
+    cache_creation_tokens = EXCLUDED.cache_creation_tokens,
+    cache_read_tokens = EXCLUDED.cache_read_tokens,
+    total_cost = EXCLUDED.total_cost,
+    updated_at = NOW()
+"#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(target_user_id)
+        .bind(row.username.as_deref())
+        .bind(i64_from_u64(row.date_unix_secs, "stats_user_daily.date")?)
+        .bind(i64_from_u64(
+            row.total_requests,
+            "stats_user_daily.total_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.success_requests,
+            "stats_user_daily.success_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.error_requests,
+            "stats_user_daily.error_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.input_tokens,
+            "stats_user_daily.input_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.output_tokens,
+            "stats_user_daily.output_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_creation_tokens,
+            "stats_user_daily.cache_creation_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_read_tokens,
+            "stats_user_daily.cache_read_tokens",
+        )?)
+        .bind(row.total_cost)
+        .execute(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        add_aggregate_import_count(&mut summary.stats_user_daily, existing.is_some());
+    }
+
+    for row in &snapshot.stats_daily_api_key {
+        let Some(target_api_key_id) = api_key_id_map.get(&row.api_key_id) else {
+            summary.skipped_unmapped_api_key_daily += 1;
+            summary.stats_daily_api_key.skipped += 1;
+            continue;
+        };
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM stats_daily_api_key WHERE api_key_id = $1 AND date = TO_TIMESTAMP($2::double precision) LIMIT 1",
+        )
+        .bind(target_api_key_id)
+        .bind(i64_from_u64(row.date_unix_secs, "stats_daily_api_key.date")?)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        if should_skip_imported_aggregate(
+            existing.is_some(),
+            mode,
+            "stats_daily_api_key",
+            row.date_unix_secs,
+        )? {
+            summary.stats_daily_api_key.skipped += 1;
+            continue;
+        }
+        sqlx::query(
+            r#"
+INSERT INTO stats_daily_api_key (
+    id, api_key_id, api_key_name, date, total_requests, success_requests, error_requests,
+    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+    total_cost, created_at, updated_at
+)
+VALUES (
+    $1, $2, $3, TO_TIMESTAMP($4::double precision), $5, $6, $7,
+    $8, $9, $10, $11, $12, NOW(), NOW()
+)
+ON CONFLICT (date, api_key_id) DO UPDATE
+SET api_key_name = EXCLUDED.api_key_name,
+    total_requests = EXCLUDED.total_requests,
+    success_requests = EXCLUDED.success_requests,
+    error_requests = EXCLUDED.error_requests,
+    input_tokens = EXCLUDED.input_tokens,
+    output_tokens = EXCLUDED.output_tokens,
+    cache_creation_tokens = EXCLUDED.cache_creation_tokens,
+    cache_read_tokens = EXCLUDED.cache_read_tokens,
+    total_cost = EXCLUDED.total_cost,
+    updated_at = NOW()
+"#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(target_api_key_id)
+        .bind(row.api_key_name.as_deref())
+        .bind(i64_from_u64(
+            row.date_unix_secs,
+            "stats_daily_api_key.date",
+        )?)
+        .bind(i64_from_u64(
+            row.total_requests,
+            "stats_daily_api_key.total_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.success_requests,
+            "stats_daily_api_key.success_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.error_requests,
+            "stats_daily_api_key.error_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.input_tokens,
+            "stats_daily_api_key.input_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.output_tokens,
+            "stats_daily_api_key.output_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_creation_tokens,
+            "stats_daily_api_key.cache_creation_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_read_tokens,
+            "stats_daily_api_key.cache_read_tokens",
+        )?)
+        .bind(row.total_cost)
+        .execute(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        add_aggregate_import_count(&mut summary.stats_daily_api_key, existing.is_some());
+    }
+
+    tx.commit().await.map_postgres_err()?;
+    Ok(summary)
+}
+
+async fn import_mysql_admin_system_usage_aggregates(
+    pool: &sqlx::MySqlPool,
+    snapshot: &AdminSystemUsageAggregateSnapshot,
+    user_id_map: &BTreeMap<String, String>,
+    api_key_id_map: &BTreeMap<String, String>,
+    mode: AdminSystemUsageAggregateImportMode,
+) -> Result<AdminSystemUsageAggregateImportSummary, DataLayerError> {
+    let mut tx = pool.begin().await.map_sql_err()?;
+    let mut summary = AdminSystemUsageAggregateImportSummary::default();
+    let now = current_unix_secs();
+
+    for row in &snapshot.stats_daily {
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT id FROM stats_daily WHERE `date` = ? LIMIT 1")
+                .bind(i64_from_u64(row.date_unix_secs, "stats_daily.date")?)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_sql_err()?;
+        if should_skip_imported_aggregate(
+            existing.is_some(),
+            mode,
+            "stats_daily",
+            row.date_unix_secs,
+        )? {
+            summary.stats_daily.skipped += 1;
+            continue;
+        }
+        sqlx::query(
+            r#"
+INSERT INTO stats_daily (
+    id, `date`, total_requests, success_requests, error_requests,
+    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+    total_cost, actual_total_cost, is_complete, aggregated_at, created_at, updated_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+    total_requests = VALUES(total_requests),
+    success_requests = VALUES(success_requests),
+    error_requests = VALUES(error_requests),
+    input_tokens = VALUES(input_tokens),
+    output_tokens = VALUES(output_tokens),
+    cache_creation_tokens = VALUES(cache_creation_tokens),
+    cache_read_tokens = VALUES(cache_read_tokens),
+    total_cost = VALUES(total_cost),
+    actual_total_cost = VALUES(actual_total_cost),
+    is_complete = VALUES(is_complete),
+    aggregated_at = VALUES(aggregated_at),
+    updated_at = VALUES(updated_at)
+"#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(i64_from_u64(row.date_unix_secs, "stats_daily.date")?)
+        .bind(i64_from_u64(
+            row.total_requests,
+            "stats_daily.total_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.success_requests,
+            "stats_daily.success_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.error_requests,
+            "stats_daily.error_requests",
+        )?)
+        .bind(i64_from_u64(row.input_tokens, "stats_daily.input_tokens")?)
+        .bind(i64_from_u64(
+            row.output_tokens,
+            "stats_daily.output_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_creation_tokens,
+            "stats_daily.cache_creation_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_read_tokens,
+            "stats_daily.cache_read_tokens",
+        )?)
+        .bind(row.total_cost)
+        .bind(row.actual_total_cost)
+        .bind(row.is_complete || row.total_requests > 0)
+        .bind(optional_i64_from_u64(
+            row.aggregated_at_unix_secs,
+            "stats_daily.aggregated_at",
+        )?)
+        .bind(i64_from_u64(now, "stats_daily.created_at")?)
+        .bind(i64_from_u64(now, "stats_daily.updated_at")?)
+        .execute(&mut *tx)
+        .await
+        .map_sql_err()?;
+        add_aggregate_import_count(&mut summary.stats_daily, existing.is_some());
+    }
+
+    for row in &snapshot.stats_user_daily {
+        let Some(target_user_id) = user_id_map.get(&row.user_id) else {
+            summary.skipped_unmapped_user_daily += 1;
+            summary.stats_user_daily.skipped += 1;
+            continue;
+        };
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM stats_user_daily WHERE user_id = ? AND `date` = ? LIMIT 1",
+        )
+        .bind(target_user_id)
+        .bind(i64_from_u64(row.date_unix_secs, "stats_user_daily.date")?)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_sql_err()?;
+        if should_skip_imported_aggregate(
+            existing.is_some(),
+            mode,
+            "stats_user_daily",
+            row.date_unix_secs,
+        )? {
+            summary.stats_user_daily.skipped += 1;
+            continue;
+        }
+        sqlx::query(
+            r#"
+INSERT INTO stats_user_daily (
+    id, user_id, username, `date`, total_requests, success_requests, error_requests,
+    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+    total_cost, created_at, updated_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+    username = VALUES(username),
+    total_requests = VALUES(total_requests),
+    success_requests = VALUES(success_requests),
+    error_requests = VALUES(error_requests),
+    input_tokens = VALUES(input_tokens),
+    output_tokens = VALUES(output_tokens),
+    cache_creation_tokens = VALUES(cache_creation_tokens),
+    cache_read_tokens = VALUES(cache_read_tokens),
+    total_cost = VALUES(total_cost),
+    updated_at = VALUES(updated_at)
+"#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(target_user_id)
+        .bind(row.username.as_deref())
+        .bind(i64_from_u64(row.date_unix_secs, "stats_user_daily.date")?)
+        .bind(i64_from_u64(
+            row.total_requests,
+            "stats_user_daily.total_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.success_requests,
+            "stats_user_daily.success_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.error_requests,
+            "stats_user_daily.error_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.input_tokens,
+            "stats_user_daily.input_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.output_tokens,
+            "stats_user_daily.output_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_creation_tokens,
+            "stats_user_daily.cache_creation_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_read_tokens,
+            "stats_user_daily.cache_read_tokens",
+        )?)
+        .bind(row.total_cost)
+        .bind(i64_from_u64(now, "stats_user_daily.created_at")?)
+        .bind(i64_from_u64(now, "stats_user_daily.updated_at")?)
+        .execute(&mut *tx)
+        .await
+        .map_sql_err()?;
+        add_aggregate_import_count(&mut summary.stats_user_daily, existing.is_some());
+    }
+
+    for row in &snapshot.stats_daily_api_key {
+        let Some(target_api_key_id) = api_key_id_map.get(&row.api_key_id) else {
+            summary.skipped_unmapped_api_key_daily += 1;
+            summary.stats_daily_api_key.skipped += 1;
+            continue;
+        };
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM stats_daily_api_key WHERE api_key_id = ? AND `date` = ? LIMIT 1",
+        )
+        .bind(target_api_key_id)
+        .bind(i64_from_u64(
+            row.date_unix_secs,
+            "stats_daily_api_key.date",
+        )?)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_sql_err()?;
+        if should_skip_imported_aggregate(
+            existing.is_some(),
+            mode,
+            "stats_daily_api_key",
+            row.date_unix_secs,
+        )? {
+            summary.stats_daily_api_key.skipped += 1;
+            continue;
+        }
+        sqlx::query(
+            r#"
+INSERT INTO stats_daily_api_key (
+    id, api_key_id, api_key_name, `date`, total_requests, success_requests, error_requests,
+    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+    total_cost, created_at, updated_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+    api_key_name = VALUES(api_key_name),
+    total_requests = VALUES(total_requests),
+    success_requests = VALUES(success_requests),
+    error_requests = VALUES(error_requests),
+    input_tokens = VALUES(input_tokens),
+    output_tokens = VALUES(output_tokens),
+    cache_creation_tokens = VALUES(cache_creation_tokens),
+    cache_read_tokens = VALUES(cache_read_tokens),
+    total_cost = VALUES(total_cost),
+    updated_at = VALUES(updated_at)
+"#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(target_api_key_id)
+        .bind(row.api_key_name.as_deref())
+        .bind(i64_from_u64(
+            row.date_unix_secs,
+            "stats_daily_api_key.date",
+        )?)
+        .bind(i64_from_u64(
+            row.total_requests,
+            "stats_daily_api_key.total_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.success_requests,
+            "stats_daily_api_key.success_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.error_requests,
+            "stats_daily_api_key.error_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.input_tokens,
+            "stats_daily_api_key.input_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.output_tokens,
+            "stats_daily_api_key.output_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_creation_tokens,
+            "stats_daily_api_key.cache_creation_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_read_tokens,
+            "stats_daily_api_key.cache_read_tokens",
+        )?)
+        .bind(row.total_cost)
+        .bind(i64_from_u64(now, "stats_daily_api_key.created_at")?)
+        .bind(i64_from_u64(now, "stats_daily_api_key.updated_at")?)
+        .execute(&mut *tx)
+        .await
+        .map_sql_err()?;
+        add_aggregate_import_count(&mut summary.stats_daily_api_key, existing.is_some());
+    }
+
+    tx.commit().await.map_sql_err()?;
+    Ok(summary)
+}
+
+async fn import_sqlite_admin_system_usage_aggregates(
+    pool: &sqlx::SqlitePool,
+    snapshot: &AdminSystemUsageAggregateSnapshot,
+    user_id_map: &BTreeMap<String, String>,
+    api_key_id_map: &BTreeMap<String, String>,
+    mode: AdminSystemUsageAggregateImportMode,
+) -> Result<AdminSystemUsageAggregateImportSummary, DataLayerError> {
+    let mut tx = pool.begin().await.map_sql_err()?;
+    let mut summary = AdminSystemUsageAggregateImportSummary::default();
+    let now = current_unix_secs();
+
+    for row in &snapshot.stats_daily {
+        let existing: Option<String> =
+            sqlx::query_scalar(r#"SELECT id FROM stats_daily WHERE "date" = ? LIMIT 1"#)
+                .bind(i64_from_u64(row.date_unix_secs, "stats_daily.date")?)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_sql_err()?;
+        if should_skip_imported_aggregate(
+            existing.is_some(),
+            mode,
+            "stats_daily",
+            row.date_unix_secs,
+        )? {
+            summary.stats_daily.skipped += 1;
+            continue;
+        }
+        sqlx::query(
+            r#"
+INSERT INTO stats_daily (
+    id, "date", total_requests, success_requests, error_requests,
+    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+    total_cost, actual_total_cost, is_complete, aggregated_at, created_at, updated_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT ("date") DO UPDATE
+SET total_requests = excluded.total_requests,
+    success_requests = excluded.success_requests,
+    error_requests = excluded.error_requests,
+    input_tokens = excluded.input_tokens,
+    output_tokens = excluded.output_tokens,
+    cache_creation_tokens = excluded.cache_creation_tokens,
+    cache_read_tokens = excluded.cache_read_tokens,
+    total_cost = excluded.total_cost,
+    actual_total_cost = excluded.actual_total_cost,
+    is_complete = excluded.is_complete,
+    aggregated_at = excluded.aggregated_at,
+    updated_at = excluded.updated_at
+"#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(i64_from_u64(row.date_unix_secs, "stats_daily.date")?)
+        .bind(i64_from_u64(
+            row.total_requests,
+            "stats_daily.total_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.success_requests,
+            "stats_daily.success_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.error_requests,
+            "stats_daily.error_requests",
+        )?)
+        .bind(i64_from_u64(row.input_tokens, "stats_daily.input_tokens")?)
+        .bind(i64_from_u64(
+            row.output_tokens,
+            "stats_daily.output_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_creation_tokens,
+            "stats_daily.cache_creation_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_read_tokens,
+            "stats_daily.cache_read_tokens",
+        )?)
+        .bind(row.total_cost)
+        .bind(row.actual_total_cost)
+        .bind(if row.is_complete || row.total_requests > 0 {
+            1_i64
+        } else {
+            0_i64
+        })
+        .bind(optional_i64_from_u64(
+            row.aggregated_at_unix_secs,
+            "stats_daily.aggregated_at",
+        )?)
+        .bind(i64_from_u64(now, "stats_daily.created_at")?)
+        .bind(i64_from_u64(now, "stats_daily.updated_at")?)
+        .execute(&mut *tx)
+        .await
+        .map_sql_err()?;
+        add_aggregate_import_count(&mut summary.stats_daily, existing.is_some());
+    }
+
+    for row in &snapshot.stats_user_daily {
+        let Some(target_user_id) = user_id_map.get(&row.user_id) else {
+            summary.skipped_unmapped_user_daily += 1;
+            summary.stats_user_daily.skipped += 1;
+            continue;
+        };
+        let existing: Option<String> = sqlx::query_scalar(
+            r#"SELECT id FROM stats_user_daily WHERE user_id = ? AND "date" = ? LIMIT 1"#,
+        )
+        .bind(target_user_id)
+        .bind(i64_from_u64(row.date_unix_secs, "stats_user_daily.date")?)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_sql_err()?;
+        if should_skip_imported_aggregate(
+            existing.is_some(),
+            mode,
+            "stats_user_daily",
+            row.date_unix_secs,
+        )? {
+            summary.stats_user_daily.skipped += 1;
+            continue;
+        }
+        sqlx::query(
+            r#"
+INSERT INTO stats_user_daily (
+    id, user_id, username, "date", total_requests, success_requests, error_requests,
+    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+    total_cost, created_at, updated_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT ("date", user_id) DO UPDATE
+SET username = excluded.username,
+    total_requests = excluded.total_requests,
+    success_requests = excluded.success_requests,
+    error_requests = excluded.error_requests,
+    input_tokens = excluded.input_tokens,
+    output_tokens = excluded.output_tokens,
+    cache_creation_tokens = excluded.cache_creation_tokens,
+    cache_read_tokens = excluded.cache_read_tokens,
+    total_cost = excluded.total_cost,
+    updated_at = excluded.updated_at
+"#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(target_user_id)
+        .bind(row.username.as_deref())
+        .bind(i64_from_u64(row.date_unix_secs, "stats_user_daily.date")?)
+        .bind(i64_from_u64(
+            row.total_requests,
+            "stats_user_daily.total_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.success_requests,
+            "stats_user_daily.success_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.error_requests,
+            "stats_user_daily.error_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.input_tokens,
+            "stats_user_daily.input_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.output_tokens,
+            "stats_user_daily.output_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_creation_tokens,
+            "stats_user_daily.cache_creation_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_read_tokens,
+            "stats_user_daily.cache_read_tokens",
+        )?)
+        .bind(row.total_cost)
+        .bind(i64_from_u64(now, "stats_user_daily.created_at")?)
+        .bind(i64_from_u64(now, "stats_user_daily.updated_at")?)
+        .execute(&mut *tx)
+        .await
+        .map_sql_err()?;
+        add_aggregate_import_count(&mut summary.stats_user_daily, existing.is_some());
+    }
+
+    for row in &snapshot.stats_daily_api_key {
+        let Some(target_api_key_id) = api_key_id_map.get(&row.api_key_id) else {
+            summary.skipped_unmapped_api_key_daily += 1;
+            summary.stats_daily_api_key.skipped += 1;
+            continue;
+        };
+        let existing: Option<String> = sqlx::query_scalar(
+            r#"SELECT id FROM stats_daily_api_key WHERE api_key_id = ? AND "date" = ? LIMIT 1"#,
+        )
+        .bind(target_api_key_id)
+        .bind(i64_from_u64(
+            row.date_unix_secs,
+            "stats_daily_api_key.date",
+        )?)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_sql_err()?;
+        if should_skip_imported_aggregate(
+            existing.is_some(),
+            mode,
+            "stats_daily_api_key",
+            row.date_unix_secs,
+        )? {
+            summary.stats_daily_api_key.skipped += 1;
+            continue;
+        }
+        sqlx::query(
+            r#"
+INSERT INTO stats_daily_api_key (
+    id, api_key_id, api_key_name, "date", total_requests, success_requests, error_requests,
+    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+    total_cost, created_at, updated_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT ("date", api_key_id) DO UPDATE
+SET api_key_name = excluded.api_key_name,
+    total_requests = excluded.total_requests,
+    success_requests = excluded.success_requests,
+    error_requests = excluded.error_requests,
+    input_tokens = excluded.input_tokens,
+    output_tokens = excluded.output_tokens,
+    cache_creation_tokens = excluded.cache_creation_tokens,
+    cache_read_tokens = excluded.cache_read_tokens,
+    total_cost = excluded.total_cost,
+    updated_at = excluded.updated_at
+"#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(target_api_key_id)
+        .bind(row.api_key_name.as_deref())
+        .bind(i64_from_u64(
+            row.date_unix_secs,
+            "stats_daily_api_key.date",
+        )?)
+        .bind(i64_from_u64(
+            row.total_requests,
+            "stats_daily_api_key.total_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.success_requests,
+            "stats_daily_api_key.success_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.error_requests,
+            "stats_daily_api_key.error_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.input_tokens,
+            "stats_daily_api_key.input_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.output_tokens,
+            "stats_daily_api_key.output_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_creation_tokens,
+            "stats_daily_api_key.cache_creation_tokens",
+        )?)
+        .bind(i64_from_u64(
+            row.cache_read_tokens,
+            "stats_daily_api_key.cache_read_tokens",
+        )?)
+        .bind(row.total_cost)
+        .bind(i64_from_u64(now, "stats_daily_api_key.created_at")?)
+        .bind(i64_from_u64(now, "stats_daily_api_key.updated_at")?)
+        .execute(&mut *tx)
+        .await
+        .map_sql_err()?;
+        add_aggregate_import_count(&mut summary.stats_daily_api_key, existing.is_some());
+    }
+
+    tx.commit().await.map_sql_err()?;
+    Ok(summary)
 }
 
 const ADMIN_CONFIG_PURGE_TABLES: &[&str] = &[
@@ -2471,6 +3687,233 @@ async fn sqlite_table_has_columns(
 
 fn current_unix_secs() -> u64 {
     chrono::Utc::now().timestamp().max(0) as u64
+}
+
+fn i64_from_u64(value: u64, field_name: &str) -> Result<i64, DataLayerError> {
+    i64::try_from(value)
+        .map_err(|_| DataLayerError::InvalidInput(format!("{field_name} exceeds i64 range")))
+}
+
+fn optional_i64_from_u64(
+    value: Option<u64>,
+    field_name: &str,
+) -> Result<Option<i64>, DataLayerError> {
+    value
+        .map(|value| i64_from_u64(value, field_name))
+        .transpose()
+}
+
+fn u64_from_i64(value: i64) -> u64 {
+    value.max(0) as u64
+}
+
+fn add_aggregate_import_count(
+    counter: &mut crate::repository::system::AdminSystemUsageAggregateImportCounter,
+    existed: bool,
+) {
+    if existed {
+        counter.updated += 1;
+    } else {
+        counter.created += 1;
+    }
+}
+
+fn should_skip_imported_aggregate(
+    exists: bool,
+    mode: AdminSystemUsageAggregateImportMode,
+    table: &str,
+    date_unix_secs: u64,
+) -> Result<bool, DataLayerError> {
+    if !exists {
+        return Ok(false);
+    }
+    match mode {
+        AdminSystemUsageAggregateImportMode::Skip => Ok(true),
+        AdminSystemUsageAggregateImportMode::Overwrite => Ok(false),
+        AdminSystemUsageAggregateImportMode::Error => Err(DataLayerError::InvalidInput(format!(
+            "{table} aggregate already exists for date_unix_secs={date_unix_secs}"
+        ))),
+    }
+}
+
+fn map_postgres_stats_daily_aggregate(
+    row: &sqlx::postgres::PgRow,
+) -> Result<AdminSystemStatsDailyAggregate, DataLayerError> {
+    Ok(AdminSystemStatsDailyAggregate {
+        date_unix_secs: u64_from_i64(row.try_get("date_unix_secs").map_postgres_err()?),
+        total_requests: u64_from_i64(row.try_get("total_requests").map_postgres_err()?),
+        success_requests: u64_from_i64(row.try_get("success_requests").map_postgres_err()?),
+        error_requests: u64_from_i64(row.try_get("error_requests").map_postgres_err()?),
+        input_tokens: u64_from_i64(row.try_get("input_tokens").map_postgres_err()?),
+        output_tokens: u64_from_i64(row.try_get("output_tokens").map_postgres_err()?),
+        cache_creation_tokens: u64_from_i64(
+            row.try_get("cache_creation_tokens").map_postgres_err()?,
+        ),
+        cache_read_tokens: u64_from_i64(row.try_get("cache_read_tokens").map_postgres_err()?),
+        total_cost: row.try_get("total_cost").map_postgres_err()?,
+        actual_total_cost: row.try_get("actual_total_cost").map_postgres_err()?,
+        is_complete: row.try_get("is_complete").map_postgres_err()?,
+        aggregated_at_unix_secs: row
+            .try_get::<Option<i64>, _>("aggregated_at_unix_secs")
+            .map_postgres_err()?
+            .map(u64_from_i64),
+    })
+}
+
+fn map_postgres_stats_user_daily_aggregate(
+    row: &sqlx::postgres::PgRow,
+) -> Result<AdminSystemStatsUserDailyAggregate, DataLayerError> {
+    Ok(AdminSystemStatsUserDailyAggregate {
+        user_id: row.try_get("user_id").map_postgres_err()?,
+        username: row.try_get("username").map_postgres_err()?,
+        date_unix_secs: u64_from_i64(row.try_get("date_unix_secs").map_postgres_err()?),
+        total_requests: u64_from_i64(row.try_get("total_requests").map_postgres_err()?),
+        success_requests: u64_from_i64(row.try_get("success_requests").map_postgres_err()?),
+        error_requests: u64_from_i64(row.try_get("error_requests").map_postgres_err()?),
+        input_tokens: u64_from_i64(row.try_get("input_tokens").map_postgres_err()?),
+        output_tokens: u64_from_i64(row.try_get("output_tokens").map_postgres_err()?),
+        cache_creation_tokens: u64_from_i64(
+            row.try_get("cache_creation_tokens").map_postgres_err()?,
+        ),
+        cache_read_tokens: u64_from_i64(row.try_get("cache_read_tokens").map_postgres_err()?),
+        total_cost: row.try_get("total_cost").map_postgres_err()?,
+    })
+}
+
+fn map_postgres_stats_daily_api_key_aggregate(
+    row: &sqlx::postgres::PgRow,
+) -> Result<AdminSystemStatsDailyApiKeyAggregate, DataLayerError> {
+    Ok(AdminSystemStatsDailyApiKeyAggregate {
+        api_key_id: row.try_get("api_key_id").map_postgres_err()?,
+        api_key_name: row.try_get("api_key_name").map_postgres_err()?,
+        date_unix_secs: u64_from_i64(row.try_get("date_unix_secs").map_postgres_err()?),
+        total_requests: u64_from_i64(row.try_get("total_requests").map_postgres_err()?),
+        success_requests: u64_from_i64(row.try_get("success_requests").map_postgres_err()?),
+        error_requests: u64_from_i64(row.try_get("error_requests").map_postgres_err()?),
+        input_tokens: u64_from_i64(row.try_get("input_tokens").map_postgres_err()?),
+        output_tokens: u64_from_i64(row.try_get("output_tokens").map_postgres_err()?),
+        cache_creation_tokens: u64_from_i64(
+            row.try_get("cache_creation_tokens").map_postgres_err()?,
+        ),
+        cache_read_tokens: u64_from_i64(row.try_get("cache_read_tokens").map_postgres_err()?),
+        total_cost: row.try_get("total_cost").map_postgres_err()?,
+    })
+}
+
+fn map_mysql_stats_daily_aggregate(
+    row: &sqlx::mysql::MySqlRow,
+) -> Result<AdminSystemStatsDailyAggregate, DataLayerError> {
+    Ok(AdminSystemStatsDailyAggregate {
+        date_unix_secs: u64_from_i64(row.try_get("date_unix_secs").map_sql_err()?),
+        total_requests: u64_from_i64(row.try_get("total_requests").map_sql_err()?),
+        success_requests: u64_from_i64(row.try_get("success_requests").map_sql_err()?),
+        error_requests: u64_from_i64(row.try_get("error_requests").map_sql_err()?),
+        input_tokens: u64_from_i64(row.try_get("input_tokens").map_sql_err()?),
+        output_tokens: u64_from_i64(row.try_get("output_tokens").map_sql_err()?),
+        cache_creation_tokens: u64_from_i64(row.try_get("cache_creation_tokens").map_sql_err()?),
+        cache_read_tokens: u64_from_i64(row.try_get("cache_read_tokens").map_sql_err()?),
+        total_cost: row.try_get("total_cost").map_sql_err()?,
+        actual_total_cost: row.try_get("actual_total_cost").map_sql_err()?,
+        is_complete: row.try_get("is_complete").map_sql_err()?,
+        aggregated_at_unix_secs: row
+            .try_get::<Option<i64>, _>("aggregated_at_unix_secs")
+            .map_sql_err()?
+            .map(u64_from_i64),
+    })
+}
+
+fn map_mysql_stats_user_daily_aggregate(
+    row: &sqlx::mysql::MySqlRow,
+) -> Result<AdminSystemStatsUserDailyAggregate, DataLayerError> {
+    Ok(AdminSystemStatsUserDailyAggregate {
+        user_id: row.try_get("user_id").map_sql_err()?,
+        username: row.try_get("username").map_sql_err()?,
+        date_unix_secs: u64_from_i64(row.try_get("date_unix_secs").map_sql_err()?),
+        total_requests: u64_from_i64(row.try_get("total_requests").map_sql_err()?),
+        success_requests: u64_from_i64(row.try_get("success_requests").map_sql_err()?),
+        error_requests: u64_from_i64(row.try_get("error_requests").map_sql_err()?),
+        input_tokens: u64_from_i64(row.try_get("input_tokens").map_sql_err()?),
+        output_tokens: u64_from_i64(row.try_get("output_tokens").map_sql_err()?),
+        cache_creation_tokens: u64_from_i64(row.try_get("cache_creation_tokens").map_sql_err()?),
+        cache_read_tokens: u64_from_i64(row.try_get("cache_read_tokens").map_sql_err()?),
+        total_cost: row.try_get("total_cost").map_sql_err()?,
+    })
+}
+
+fn map_mysql_stats_daily_api_key_aggregate(
+    row: &sqlx::mysql::MySqlRow,
+) -> Result<AdminSystemStatsDailyApiKeyAggregate, DataLayerError> {
+    Ok(AdminSystemStatsDailyApiKeyAggregate {
+        api_key_id: row.try_get("api_key_id").map_sql_err()?,
+        api_key_name: row.try_get("api_key_name").map_sql_err()?,
+        date_unix_secs: u64_from_i64(row.try_get("date_unix_secs").map_sql_err()?),
+        total_requests: u64_from_i64(row.try_get("total_requests").map_sql_err()?),
+        success_requests: u64_from_i64(row.try_get("success_requests").map_sql_err()?),
+        error_requests: u64_from_i64(row.try_get("error_requests").map_sql_err()?),
+        input_tokens: u64_from_i64(row.try_get("input_tokens").map_sql_err()?),
+        output_tokens: u64_from_i64(row.try_get("output_tokens").map_sql_err()?),
+        cache_creation_tokens: u64_from_i64(row.try_get("cache_creation_tokens").map_sql_err()?),
+        cache_read_tokens: u64_from_i64(row.try_get("cache_read_tokens").map_sql_err()?),
+        total_cost: row.try_get("total_cost").map_sql_err()?,
+    })
+}
+
+fn map_sqlite_stats_daily_aggregate(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<AdminSystemStatsDailyAggregate, DataLayerError> {
+    Ok(AdminSystemStatsDailyAggregate {
+        date_unix_secs: u64_from_i64(row.try_get("date_unix_secs").map_sql_err()?),
+        total_requests: u64_from_i64(row.try_get("total_requests").map_sql_err()?),
+        success_requests: u64_from_i64(row.try_get("success_requests").map_sql_err()?),
+        error_requests: u64_from_i64(row.try_get("error_requests").map_sql_err()?),
+        input_tokens: u64_from_i64(row.try_get("input_tokens").map_sql_err()?),
+        output_tokens: u64_from_i64(row.try_get("output_tokens").map_sql_err()?),
+        cache_creation_tokens: u64_from_i64(row.try_get("cache_creation_tokens").map_sql_err()?),
+        cache_read_tokens: u64_from_i64(row.try_get("cache_read_tokens").map_sql_err()?),
+        total_cost: row.try_get("total_cost").map_sql_err()?,
+        actual_total_cost: row.try_get("actual_total_cost").map_sql_err()?,
+        is_complete: row.try_get::<i64, _>("is_complete").map_sql_err()? != 0,
+        aggregated_at_unix_secs: row
+            .try_get::<Option<i64>, _>("aggregated_at_unix_secs")
+            .map_sql_err()?
+            .map(u64_from_i64),
+    })
+}
+
+fn map_sqlite_stats_user_daily_aggregate(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<AdminSystemStatsUserDailyAggregate, DataLayerError> {
+    Ok(AdminSystemStatsUserDailyAggregate {
+        user_id: row.try_get("user_id").map_sql_err()?,
+        username: row.try_get("username").map_sql_err()?,
+        date_unix_secs: u64_from_i64(row.try_get("date_unix_secs").map_sql_err()?),
+        total_requests: u64_from_i64(row.try_get("total_requests").map_sql_err()?),
+        success_requests: u64_from_i64(row.try_get("success_requests").map_sql_err()?),
+        error_requests: u64_from_i64(row.try_get("error_requests").map_sql_err()?),
+        input_tokens: u64_from_i64(row.try_get("input_tokens").map_sql_err()?),
+        output_tokens: u64_from_i64(row.try_get("output_tokens").map_sql_err()?),
+        cache_creation_tokens: u64_from_i64(row.try_get("cache_creation_tokens").map_sql_err()?),
+        cache_read_tokens: u64_from_i64(row.try_get("cache_read_tokens").map_sql_err()?),
+        total_cost: row.try_get("total_cost").map_sql_err()?,
+    })
+}
+
+fn map_sqlite_stats_daily_api_key_aggregate(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<AdminSystemStatsDailyApiKeyAggregate, DataLayerError> {
+    Ok(AdminSystemStatsDailyApiKeyAggregate {
+        api_key_id: row.try_get("api_key_id").map_sql_err()?,
+        api_key_name: row.try_get("api_key_name").map_sql_err()?,
+        date_unix_secs: u64_from_i64(row.try_get("date_unix_secs").map_sql_err()?),
+        total_requests: u64_from_i64(row.try_get("total_requests").map_sql_err()?),
+        success_requests: u64_from_i64(row.try_get("success_requests").map_sql_err()?),
+        error_requests: u64_from_i64(row.try_get("error_requests").map_sql_err()?),
+        input_tokens: u64_from_i64(row.try_get("input_tokens").map_sql_err()?),
+        output_tokens: u64_from_i64(row.try_get("output_tokens").map_sql_err()?),
+        cache_creation_tokens: u64_from_i64(row.try_get("cache_creation_tokens").map_sql_err()?),
+        cache_read_tokens: u64_from_i64(row.try_get("cache_read_tokens").map_sql_err()?),
+        total_cost: row.try_get("total_cost").map_sql_err()?,
+    })
 }
 
 fn serialize_json_value(value: &serde_json::Value) -> Result<String, DataLayerError> {

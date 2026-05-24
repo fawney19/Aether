@@ -8,6 +8,19 @@ use serde_json::Value;
 
 pub const GEMINI_FILE_MAPPING_TTL_SECONDS: u64 = 60 * 60 * 48;
 const GEMINI_FILE_MAPPING_CACHE_PREFIX: &str = "gemini_files:key";
+pub const STREAM_MISSING_TERMINAL_EVENT_CATEGORY: &str = "stream_missing_terminal_event";
+pub const STREAM_TERMINAL_ERROR_CATEGORY: &str = "stream_terminal_error";
+pub const STREAM_MISSING_TERMINAL_EVENT_MESSAGE: &str =
+    "execution runtime stream ended before provider terminal event";
+pub const STREAM_TERMINAL_ERROR_MESSAGE: &str =
+    "execution runtime stream ended with a terminal error";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamCapturedTerminalState {
+    Completed,
+    Failed,
+    Missing,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GatewaySyncReportRequest {
@@ -292,6 +305,382 @@ pub fn sync_report_represents_failure(
             .is_some_and(|value| !value.is_null())
 }
 
+fn stream_terminal_summary_missing_observed_finish(
+    summary: &ExecutionStreamTerminalSummary,
+    requires_observed_terminal_event: bool,
+) -> bool {
+    !summary.observed_finish
+        && (requires_observed_terminal_event
+            || !summary
+                .standardized_usage
+                .as_ref()
+                .is_some_and(aether_contracts::StandardizedUsage::has_token_signal))
+}
+
+fn stream_terminal_summary_represents_failure(
+    summary: &ExecutionStreamTerminalSummary,
+    requires_observed_terminal_event: bool,
+) -> bool {
+    summary.parser_error.is_some()
+        || stream_terminal_summary_missing_observed_finish(
+            summary,
+            requires_observed_terminal_event,
+        )
+}
+
+pub fn stream_report_represents_failure(payload: &GatewayStreamReportRequest) -> bool {
+    let requires_observed_terminal_event = stream_report_requires_observed_terminal_event(
+        payload.report_kind.as_str(),
+        payload.report_context.as_ref(),
+    );
+    payload.status_code >= 400
+        || payload.report_kind.contains("error")
+        || payload.terminal_summary.as_ref().is_some_and(|summary| {
+            stream_terminal_summary_represents_failure(summary, requires_observed_terminal_event)
+        })
+        || stream_report_captured_terminal_failure(payload)
+        || stream_report_missing_terminal_event(payload)
+}
+
+pub fn stream_report_missing_terminal_event(payload: &GatewayStreamReportRequest) -> bool {
+    let requires_observed_terminal_event = stream_report_requires_observed_terminal_event(
+        payload.report_kind.as_str(),
+        payload.report_context.as_ref(),
+    );
+    if !requires_observed_terminal_event {
+        return false;
+    }
+
+    if let Some(summary) = payload.terminal_summary.as_ref() {
+        if stream_terminal_summary_missing_observed_finish(summary, true) {
+            return true;
+        }
+        if summary.observed_finish {
+            return false;
+        }
+    }
+
+    matches!(
+        stream_report_captured_terminal_state(payload),
+        Some(StreamCapturedTerminalState::Missing)
+    )
+}
+
+pub fn stream_report_captured_terminal_failure(payload: &GatewayStreamReportRequest) -> bool {
+    matches!(
+        stream_report_captured_terminal_state(payload),
+        Some(StreamCapturedTerminalState::Failed)
+    )
+}
+
+pub fn stream_report_requires_observed_terminal_event(
+    report_kind: &str,
+    report_context: Option<&Value>,
+) -> bool {
+    let report_kind = report_kind.trim().to_ascii_lowercase();
+    if report_kind.starts_with("openai_responses_")
+        || report_kind.starts_with("openai_compact_")
+        || report_kind.starts_with("openai_cli_")
+    {
+        return true;
+    }
+
+    let Some(context) = report_context.and_then(Value::as_object) else {
+        return false;
+    };
+    [
+        "provider_stream_event_api_format",
+        "provider_stream_api_format",
+        "provider_api_format",
+        "client_api_format",
+    ]
+    .into_iter()
+    .filter_map(|field| context.get(field).and_then(Value::as_str))
+    .any(is_openai_responses_family_format_alias)
+}
+
+fn is_openai_responses_family_format_alias(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', ":");
+    aether_ai_formats::is_openai_responses_family_format(normalized.as_str())
+}
+
+fn stream_report_captured_terminal_state(
+    payload: &GatewayStreamReportRequest,
+) -> Option<StreamCapturedTerminalState> {
+    let provider_state = stream_report_provider_capture_requires_terminal_event(payload)
+        .then(|| {
+            stream_capture_terminal_state_from_base64(
+                payload.provider_body_base64.as_deref(),
+                payload.provider_body_state,
+            )
+        })
+        .flatten();
+    let client_state = stream_report_client_capture_requires_terminal_event(payload)
+        .then(|| {
+            stream_capture_terminal_state_from_base64(
+                payload.client_body_base64.as_deref(),
+                payload.client_body_state,
+            )
+        })
+        .flatten();
+    combine_stream_terminal_states(provider_state, client_state)
+}
+
+fn stream_report_provider_capture_requires_terminal_event(
+    payload: &GatewayStreamReportRequest,
+) -> bool {
+    let context = payload.report_context.as_ref();
+    stream_report_context_has_openai_responses_format(
+        context,
+        &[
+            "provider_stream_event_api_format",
+            "provider_stream_api_format",
+            "provider_api_format",
+        ],
+    ) || (stream_report_kind_requires_observed_terminal_event(payload.report_kind.as_str())
+        && !stream_report_context_has_any_format(context))
+}
+
+fn stream_report_client_capture_requires_terminal_event(
+    payload: &GatewayStreamReportRequest,
+) -> bool {
+    let context = payload.report_context.as_ref();
+    stream_report_context_has_openai_responses_format(context, &["client_api_format"])
+        || (stream_report_kind_requires_observed_terminal_event(payload.report_kind.as_str())
+            && !stream_report_context_has_any_format(context))
+}
+
+fn stream_report_context_has_openai_responses_format(
+    report_context: Option<&Value>,
+    fields: &[&str],
+) -> bool {
+    fields
+        .iter()
+        .filter_map(|field| {
+            report_context
+                .and_then(Value::as_object)
+                .and_then(|context| context.get(*field))
+                .and_then(Value::as_str)
+        })
+        .any(is_openai_responses_family_format_alias)
+}
+
+fn stream_report_context_has_any_format(report_context: Option<&Value>) -> bool {
+    [
+        "provider_stream_event_api_format",
+        "provider_stream_api_format",
+        "provider_api_format",
+        "client_api_format",
+    ]
+    .into_iter()
+    .any(|field| {
+        report_context
+            .and_then(Value::as_object)
+            .and_then(|context| context.get(field))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+    })
+}
+
+fn stream_report_kind_requires_observed_terminal_event(report_kind: &str) -> bool {
+    let report_kind = report_kind.trim().to_ascii_lowercase();
+    report_kind.starts_with("openai_responses_")
+        || report_kind.starts_with("openai_compact_")
+        || report_kind.starts_with("openai_cli_")
+}
+
+fn stream_capture_terminal_state_from_base64(
+    body_base64: Option<&str>,
+    body_state: Option<UsageBodyCaptureState>,
+) -> Option<StreamCapturedTerminalState> {
+    let body_base64 = body_base64?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(body_base64)
+        .ok()?;
+    let state = if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+        stream_capture_terminal_state(&value)
+    } else {
+        let text = String::from_utf8(bytes).ok()?;
+        stream_capture_terminal_state_from_sse_text(text.as_str())
+    };
+    filter_incomplete_capture_terminal_state(state, body_state)
+}
+
+fn filter_incomplete_capture_terminal_state(
+    state: Option<StreamCapturedTerminalState>,
+    body_state: Option<UsageBodyCaptureState>,
+) -> Option<StreamCapturedTerminalState> {
+    match state {
+        Some(StreamCapturedTerminalState::Missing)
+            if !stream_body_capture_can_prove_missing_terminal(body_state) =>
+        {
+            None
+        }
+        other => other,
+    }
+}
+
+fn stream_body_capture_can_prove_missing_terminal(
+    body_state: Option<UsageBodyCaptureState>,
+) -> bool {
+    matches!(body_state, None | Some(UsageBodyCaptureState::Inline))
+}
+
+pub fn stream_capture_terminal_state(value: &Value) -> Option<StreamCapturedTerminalState> {
+    if let Some(chunks) = value.get("chunks").and_then(Value::as_array) {
+        let mut state = None;
+        for chunk in chunks {
+            state = combine_stream_terminal_states(state, openai_response_terminal_state(chunk));
+        }
+        return state.or_else(|| {
+            stream_capture_looks_like_stream(value).then_some(StreamCapturedTerminalState::Missing)
+        });
+    }
+
+    openai_response_terminal_state(value)
+}
+
+fn stream_capture_looks_like_stream(value: &Value) -> bool {
+    value
+        .get("metadata")
+        .and_then(|metadata| metadata.get("stream"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || value.get("chunks").and_then(Value::as_array).is_some()
+}
+
+fn openai_response_terminal_state(value: &Value) -> Option<StreamCapturedTerminalState> {
+    if value.get("error").is_some_and(|error| !error.is_null()) {
+        return Some(StreamCapturedTerminalState::Failed);
+    }
+
+    let event_type = value
+        .get("type")
+        .or_else(|| value.get("event"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    match event_type {
+        "response.completed" => return Some(StreamCapturedTerminalState::Completed),
+        "response.failed" | "response.incomplete" | "error" => {
+            return Some(StreamCapturedTerminalState::Failed);
+        }
+        _ => {}
+    }
+
+    let response = value.get("response");
+    if response
+        .and_then(|response| response.get("error"))
+        .is_some_and(|error| !error.is_null())
+        || response
+            .and_then(|response| response.get("incomplete_details"))
+            .is_some_and(|details| !details.is_null())
+    {
+        return Some(StreamCapturedTerminalState::Failed);
+    }
+
+    match response
+        .and_then(|response| response.get("status"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        Some("completed") => Some(StreamCapturedTerminalState::Completed),
+        Some("failed" | "incomplete" | "cancelled") => Some(StreamCapturedTerminalState::Failed),
+        _ => None,
+    }
+}
+
+fn combine_stream_terminal_states(
+    current: Option<StreamCapturedTerminalState>,
+    next: Option<StreamCapturedTerminalState>,
+) -> Option<StreamCapturedTerminalState> {
+    match (current, next) {
+        (Some(StreamCapturedTerminalState::Failed), _)
+        | (_, Some(StreamCapturedTerminalState::Failed)) => {
+            Some(StreamCapturedTerminalState::Failed)
+        }
+        (Some(StreamCapturedTerminalState::Missing), _)
+        | (_, Some(StreamCapturedTerminalState::Missing)) => {
+            Some(StreamCapturedTerminalState::Missing)
+        }
+        (Some(StreamCapturedTerminalState::Completed), _)
+        | (_, Some(StreamCapturedTerminalState::Completed)) => {
+            Some(StreamCapturedTerminalState::Completed)
+        }
+        (None, None) => None,
+    }
+}
+
+fn stream_capture_terminal_state_from_sse_text(text: &str) -> Option<StreamCapturedTerminalState> {
+    let mut state = None;
+    let mut saw_stream_payload = false;
+    for_each_sse_payload(text, |payload| {
+        saw_stream_payload = true;
+        if payload == "[DONE]" {
+            return;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(payload) {
+            state = combine_stream_terminal_states(state, openai_response_terminal_state(&value));
+        }
+    });
+    state.or_else(|| saw_stream_payload.then_some(StreamCapturedTerminalState::Missing))
+}
+
+fn flush_sse_payload<F>(payload: &mut String, has_payload: &mut bool, on_payload: &mut F)
+where
+    F: FnMut(&str),
+{
+    if !*has_payload {
+        return;
+    }
+    on_payload(payload);
+    payload.clear();
+    *has_payload = false;
+}
+
+fn for_each_sse_payload<F>(text: &str, mut on_payload: F)
+where
+    F: FnMut(&str),
+{
+    let mut payload = String::new();
+    let mut has_payload = false;
+    let bytes = text.as_bytes();
+    let mut line_start = 0usize;
+    let mut cursor = 0usize;
+
+    while cursor <= bytes.len() {
+        if cursor < bytes.len() && bytes[cursor] != b'\n' && bytes[cursor] != b'\r' {
+            cursor += 1;
+            continue;
+        }
+
+        let line = text[line_start..cursor].trim();
+        if line.is_empty() {
+            flush_sse_payload(&mut payload, &mut has_payload, &mut on_payload);
+        } else if let Some(data) = line.strip_prefix("data:").map(str::trim) {
+            if !data.is_empty() {
+                if has_payload {
+                    payload.push('\n');
+                }
+                payload.push_str(data);
+                has_payload = true;
+            }
+        }
+
+        if cursor == bytes.len() {
+            break;
+        }
+        if bytes[cursor] == b'\r' && bytes.get(cursor + 1) == Some(&b'\n') {
+            cursor += 2;
+        } else {
+            cursor += 1;
+        }
+        line_start = cursor;
+    }
+    flush_sse_payload(&mut payload, &mut has_payload, &mut on_payload);
+}
+
 pub fn should_handle_local_sync_report(
     report_context: Option<&serde_json::Value>,
     report_kind: &str,
@@ -373,6 +762,8 @@ fn content_type_starts_with(headers: &BTreeMap<String, String>, expected_prefix:
 mod tests {
     use std::collections::BTreeMap;
 
+    use aether_contracts::ExecutionStreamTerminalSummary;
+    use aether_data_contracts::repository::usage::UsageBodyCaptureState;
     use base64::Engine as _;
     use serde_json::json;
 
@@ -381,7 +772,8 @@ mod tests {
         infer_internal_finalize_signature, is_local_ai_stream_report_kind,
         is_local_ai_sync_report_kind, normalize_gemini_file_name, report_request_id,
         resolve_internal_finalize_route, should_handle_local_stream_report,
-        should_handle_local_sync_report, sync_report_represents_failure, GatewaySyncReportRequest,
+        should_handle_local_sync_report, stream_report_represents_failure,
+        sync_report_represents_failure, GatewayStreamReportRequest, GatewaySyncReportRequest,
         GeminiFileMappingEntry, InternalFinalizeRoute,
     };
 
@@ -412,6 +804,22 @@ mod tests {
             body_json: None,
             client_body_json: None,
             body_base64: None,
+            telemetry: None,
+        }
+    }
+
+    fn sample_stream_report(report_kind: &str, status_code: u16) -> GatewayStreamReportRequest {
+        GatewayStreamReportRequest {
+            trace_id: "trace-stream-123".to_string(),
+            report_kind: report_kind.to_string(),
+            report_context: None,
+            status_code,
+            headers: BTreeMap::new(),
+            provider_body_base64: None,
+            provider_body_state: None,
+            client_body_base64: None,
+            client_body_state: None,
+            terminal_summary: None,
             telemetry: None,
         }
     }
@@ -479,6 +887,131 @@ mod tests {
 
         let success_payload = sample_sync_report("openai_chat_sync_success", 200);
         assert!(!sync_report_represents_failure(&success_payload, None));
+    }
+
+    #[test]
+    fn detects_stream_report_failure_from_terminal_summary_error() {
+        let mut payload = sample_stream_report("openai_responses_stream_success", 200);
+        payload.terminal_summary = Some(ExecutionStreamTerminalSummary {
+            observed_finish: true,
+            parser_error: Some("policy failure".to_string()),
+            ..ExecutionStreamTerminalSummary::default()
+        });
+
+        assert!(stream_report_represents_failure(&payload));
+    }
+
+    #[test]
+    fn detects_openai_responses_stream_missing_terminal_from_captured_sse() {
+        let provider_sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
+        );
+        let mut payload = sample_stream_report("openai_responses_stream_success", 200);
+        payload.report_context = Some(json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses"
+        }));
+        payload.provider_body_base64 =
+            Some(base64::engine::general_purpose::STANDARD.encode(provider_sse.as_bytes()));
+        payload.provider_body_state = Some(UsageBodyCaptureState::Inline);
+
+        assert!(stream_report_represents_failure(&payload));
+        assert!(super::stream_report_missing_terminal_event(&payload));
+    }
+
+    #[test]
+    fn accepts_openai_responses_stream_completed_from_captured_sse() {
+        let provider_sse = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+        );
+        let mut payload = sample_stream_report("openai_responses_stream_success", 200);
+        payload.report_context = Some(json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses"
+        }));
+        payload.provider_body_base64 =
+            Some(base64::engine::general_purpose::STANDARD.encode(provider_sse.as_bytes()));
+        payload.provider_body_state = Some(UsageBodyCaptureState::Inline);
+
+        assert!(!stream_report_represents_failure(&payload));
+        assert!(!super::stream_report_missing_terminal_event(&payload));
+    }
+
+    #[test]
+    fn accepts_terminal_summary_completion_when_captured_sse_is_truncated_before_terminal() {
+        let provider_sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
+        );
+        let mut payload = sample_stream_report("openai_responses_stream_success", 200);
+        payload.report_context = Some(json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses"
+        }));
+        payload.provider_body_base64 =
+            Some(base64::engine::general_purpose::STANDARD.encode(provider_sse.as_bytes()));
+        payload.provider_body_state = Some(UsageBodyCaptureState::Truncated);
+        payload.terminal_summary = Some(ExecutionStreamTerminalSummary {
+            observed_finish: true,
+            ..ExecutionStreamTerminalSummary::default()
+        });
+
+        assert!(!stream_report_represents_failure(&payload));
+        assert!(!super::stream_report_missing_terminal_event(&payload));
+    }
+
+    #[test]
+    fn ignores_missing_terminal_from_truncated_captured_sse_without_summary() {
+        let provider_sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
+        );
+        let mut payload = sample_stream_report("openai_responses_stream_success", 200);
+        payload.report_context = Some(json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses"
+        }));
+        payload.provider_body_base64 =
+            Some(base64::engine::general_purpose::STANDARD.encode(provider_sse.as_bytes()));
+        payload.provider_body_state = Some(UsageBodyCaptureState::Truncated);
+
+        assert!(!stream_report_represents_failure(&payload));
+        assert!(!super::stream_report_missing_terminal_event(&payload));
+    }
+
+    #[test]
+    fn accepts_completed_openai_responses_provider_with_rewritten_openai_chat_client_stream() {
+        let provider_sse = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+        );
+        let client_sse = concat!(
+            "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut payload = sample_stream_report("openai_chat_stream_success", 200);
+        payload.report_context = Some(json!({
+            "client_api_format": "openai:chat",
+            "provider_api_format": "openai:responses",
+            "provider_stream_event_api_format": "openai:responses"
+        }));
+        payload.provider_body_base64 =
+            Some(base64::engine::general_purpose::STANDARD.encode(provider_sse.as_bytes()));
+        payload.provider_body_state = Some(UsageBodyCaptureState::Inline);
+        payload.client_body_base64 =
+            Some(base64::engine::general_purpose::STANDARD.encode(client_sse.as_bytes()));
+        payload.client_body_state = Some(UsageBodyCaptureState::Inline);
+
+        assert!(!stream_report_represents_failure(&payload));
+        assert!(!super::stream_report_missing_terminal_event(&payload));
     }
 
     #[test]

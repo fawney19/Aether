@@ -191,7 +191,7 @@ pub(crate) fn snapshot_local_request_candidate_status(
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
     let metadata = parse_request_candidate_report_context(report_context)?;
-    let candidate_index = metadata.candidate_index?;
+    let candidate_index = metadata.candidate_index.unwrap_or(0);
 
     Some(LocalRequestCandidateStatusSnapshot {
         candidate_id: candidate_id.to_string(),

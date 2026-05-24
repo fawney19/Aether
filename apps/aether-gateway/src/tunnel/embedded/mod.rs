@@ -17,6 +17,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
 use axum::Router;
+use dashmap::DashMap;
 use tracing::warn;
 
 use crate::{data::GatewayDataState, middleware};
@@ -34,6 +35,7 @@ pub struct AppState {
     data: Arc<GatewayDataState>,
     request_gate: Option<Arc<ConcurrencyGate>>,
     distributed_request_gate: Option<Arc<RuntimeSemaphore>>,
+    secure_tunnel_keys: Arc<DashMap<String, String>>,
 }
 
 #[derive(Debug)]
@@ -55,7 +57,46 @@ impl AppState {
             data: Arc::new(GatewayDataState::disabled()),
             request_gate: None,
             distributed_request_gate: None,
+            secure_tunnel_keys: Arc::new(DashMap::new()),
         }
+    }
+
+    pub(crate) fn register_secure_tunnel_key(
+        &self,
+        node_id: impl Into<String>,
+        key: impl Into<String>,
+    ) {
+        self.secure_tunnel_keys.insert(node_id.into(), key.into());
+    }
+
+    pub(crate) fn secure_tunnel_key(&self, node_id: &str) -> Option<String> {
+        self.secure_tunnel_keys
+            .get(node_id)
+            .map(|entry| entry.value().clone())
+    }
+
+    async fn secure_tunnel_key_for_node(&self, node_id: &str) -> Option<String> {
+        if let Some(key) = self.secure_tunnel_key(node_id) {
+            return Some(key);
+        }
+        let key = self
+            .data
+            .find_proxy_node(node_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|node| {
+                node.proxy_metadata.and_then(|metadata| {
+                    metadata
+                        .pointer("/tunnel_security/encryption_key")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+            });
+        if let Some(key) = key.as_ref() {
+            self.register_secure_tunnel_key(node_id.to_string(), key.clone());
+        }
+        key
     }
 
     pub(crate) fn with_data(mut self, data: Arc<GatewayDataState>) -> Self {
@@ -212,11 +253,47 @@ pub async fn ws_proxy(
 
     let max_streams = resolve_proxy_max_streams(&headers, state.max_streams);
     let protocol_version = resolve_proxy_protocol_version(&headers);
+    let tunnel_security = headers
+        .get(aether_contracts::tunnel_security::TUNNEL_SECURITY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let security_session = headers
+        .get(aether_contracts::tunnel_security::TUNNEL_SECURITY_SESSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     if node_id.is_empty() {
         warn!("proxy connection rejected: missing X-Node-ID header");
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
+    let stored_security_key = state.secure_tunnel_key_for_node(&node_id).await;
+    let (security_key, security_session) = match tunnel_security.as_deref() {
+        Some(aether_contracts::tunnel_security::TUNNEL_SECURITY_NON_TLS_REQUIRED) => {
+            match stored_security_key {
+                Some(key) => {
+                    let Some(session) = security_session else {
+                        warn!(node_id = %node_id, "secure tunnel requested without a security session");
+                        return axum::http::StatusCode::BAD_REQUEST.into_response();
+                    };
+                    (Some(key), session)
+                }
+                None => {
+                    warn!(node_id = %node_id, "secure tunnel requested but no PSK is registered");
+                    return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                }
+            }
+        }
+        Some(_) => return axum::http::StatusCode::BAD_REQUEST.into_response(),
+        None if stored_security_key.is_some() => {
+            warn!(node_id = %node_id, "proxy connection rejected: stored secure tunnel key requires encrypted frames");
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
+        None => (None, String::new()),
+    };
 
     let request_permit = match state.try_acquire_request_permit().await {
         Ok(permit) => permit,
@@ -253,6 +330,8 @@ pub async fn ws_proxy(
                     node_name,
                     max_streams,
                     protocol_version,
+                    security_key,
+                    security_session,
                     state.proxy_conn_cfg,
                 )
                 .await

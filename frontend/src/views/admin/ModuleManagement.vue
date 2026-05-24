@@ -79,9 +79,25 @@
       </div>
 
       <!-- 扩展模块 -->
-      <h3 class="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-4">
-        扩展模块
-      </h3>
+      <div class="mb-4 flex items-center justify-between gap-3">
+        <h3 class="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+          扩展模块
+        </h3>
+        <Button
+          v-if="hasCustomModuleOrder"
+          variant="outline"
+          size="sm"
+          class="gap-1.5"
+          :disabled="loading || orderSaving"
+          @click="resetModuleOrder"
+        >
+          <RotateCcw
+            class="w-3.5 h-3.5"
+            :class="{ 'animate-spin': orderSaving }"
+          />
+          恢复默认
+        </Button>
+      </div>
 
       <!-- 模块卡片网格 -->
       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
@@ -89,11 +105,23 @@
           v-for="module in filteredModules"
           :key="module.name"
           class="group relative border rounded-2xl p-6 transition-all duration-200 hover:shadow-lg"
-          :class="{
-            'bg-muted/40 border-muted': !module.available,
-            'border-primary/40 bg-gradient-to-br from-primary/5 to-primary/10 shadow-sm': module.active,
-            'border-border bg-card hover:border-primary/20': !module.active && module.available
-          }"
+          :class="[
+            {
+              'bg-muted/40 border-muted': !module.available,
+              'border-primary/40 bg-gradient-to-br from-primary/5 to-primary/10 shadow-sm': module.active,
+              'border-border bg-card hover:border-primary/20': !module.active && module.available
+            },
+            draggedModuleName === module.name ? 'opacity-70 ring-2 ring-primary/30' : '',
+            dragOverModuleName === module.name ? 'ring-2 ring-primary/40 border-primary/50' : '',
+            canReorderModules ? 'cursor-grab active:cursor-grabbing' : ''
+          ]"
+          :draggable="canReorderModules"
+          :title="orderSaving ? '正在保存排序' : '拖拽卡片调整顺序'"
+          @dragstart="handleModuleDragStart(module.name, $event)"
+          @dragend="handleModuleDragEnd"
+          @dragover.prevent="handleModuleDragOver(module.name)"
+          @dragleave="handleModuleDragLeave(module.name)"
+          @drop.prevent="handleModuleDrop(module.name)"
         >
           <!-- 状态指示器 -->
           <div class="absolute top-5 right-5">
@@ -121,7 +149,7 @@
                 class="w-5 h-5"
               />
             </div>
-            <div class="flex-1 min-w-0 pt-1">
+            <div class="flex-1 min-w-0 pt-1 pr-8">
               <h4 class="font-semibold text-base truncate">
                 {{ module.display_name }}
               </h4>
@@ -214,7 +242,17 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { RefreshCw, Puzzle, Users, Shield, Gauge, Link, Search, Settings } from 'lucide-vue-next'
+import {
+  RefreshCw,
+  Puzzle,
+  Users,
+  Shield,
+  Gauge,
+  Link,
+  Search,
+  Settings,
+  RotateCcw,
+} from 'lucide-vue-next'
 import Button from '@/components/ui/button.vue'
 import Switch from '@/components/ui/switch.vue'
 import Input from '@/components/ui/input.vue'
@@ -224,6 +262,7 @@ import { useModuleStore } from '@/stores/modules'
 import { BUILTIN_TOOLS } from '@/config/builtin-tools'
 import { log } from '@/utils/logger'
 import { getErrorMessage } from '@/types/api-error'
+import { modulesApi, type ModuleStatus } from '@/api/modules'
 
 const router = useRouter()
 const { success, error } = useToast()
@@ -232,6 +271,11 @@ const moduleStore = useModuleStore()
 const loading = ref(false)
 const toggling = ref<Record<string, boolean>>({})
 const searchQuery = ref('')
+const moduleOrder = ref<string[]>([])
+const orderSaving = ref(false)
+const draggedModuleName = ref<string | null>(null)
+const dragOverModuleName = ref<string | null>(null)
+const BUILTIN_BACKING_MODULES = new Set(['important_notification'])
 
 // 过滤后的内置工具
 const filteredBuiltinTools = computed(() => {
@@ -262,11 +306,64 @@ function getModuleStatusCopy(module: { name: string; enabled: boolean; active: b
   return '已开启'
 }
 
-// 所有模块列表（按 admin_menu_order 排序）
-const allModules = computed(() => {
+function compareModuleDefaultOrder(a: ModuleStatus, b: ModuleStatus) {
+  return a.admin_menu_order - b.admin_menu_order ||
+    a.display_name.localeCompare(b.display_name, 'zh-Hans') ||
+    a.name.localeCompare(b.name)
+}
+
+function applySavedModuleOrder(modules: ModuleStatus[], order: string[]) {
+  if (order.length === 0) return modules
+  const modulesByName = new Map(modules.map(module => [module.name, module]))
+  const seen = new Set<string>()
+  const ordered: ModuleStatus[] = []
+
+  for (const moduleName of order) {
+    const module = modulesByName.get(moduleName)
+    if (!module || seen.has(moduleName)) continue
+    seen.add(moduleName)
+    ordered.push(module)
+  }
+
+  for (const module of modules) {
+    if (!seen.has(module.name)) {
+      ordered.push(module)
+    }
+  }
+
+  return ordered
+}
+
+function normalizeOrderForCurrentModules(order: string[]) {
+  const availableNames = new Set(defaultOrderedModules.value.map(module => module.name))
+  return order.filter(moduleName => availableNames.has(moduleName))
+}
+
+function moveNameToTargetIndex(names: string[], draggedName: string, targetName: string) {
+  const fromIndex = names.indexOf(draggedName)
+  const targetIndex = names.indexOf(targetName)
+  if (fromIndex === -1 || targetIndex === -1 || fromIndex === targetIndex) return names
+
+  const next = [...names]
+  const [dragged] = next.splice(fromIndex, 1)
+  next.splice(targetIndex, 0, dragged)
+  return next
+}
+
+// 后端默认顺序
+const defaultOrderedModules = computed(() => {
   return Object.values(moduleStore.modules)
-    .sort((a, b) => a.admin_menu_order - b.admin_menu_order)
+    .filter(module => !BUILTIN_BACKING_MODULES.has(module.name))
+    .sort(compareModuleDefaultOrder)
 })
+
+// 所有模块列表（应用自定义展示顺序）
+const allModules = computed(() => {
+  return applySavedModuleOrder(defaultOrderedModules.value, moduleOrder.value)
+})
+
+const hasCustomModuleOrder = computed(() => moduleOrder.value.length > 0)
+const canReorderModules = computed(() => !orderSaving.value && allModules.value.length > 1)
 
 // 过滤后的模块列表
 const filteredModules = computed(() => {
@@ -286,7 +383,11 @@ const filteredModules = computed(() => {
 async function fetchModules() {
   loading.value = true
   try {
-    await moduleStore.fetchModules()
+    const [, savedOrder] = await Promise.all([
+      moduleStore.fetchModules(),
+      modulesApi.getModuleManagementOrder(),
+    ])
+    moduleOrder.value = normalizeOrderForCurrentModules(savedOrder)
   } catch (err) {
     error('获取模块列表失败')
     log.error('获取模块列表失败:', err)
@@ -307,6 +408,76 @@ async function toggleModule(moduleName: string, enabled: boolean) {
   } finally {
     toggling.value[moduleName] = false
   }
+}
+
+async function saveModuleOrder(nextOrder: string[]) {
+  if (orderSaving.value) return
+  const previousOrder = [...moduleOrder.value]
+  moduleOrder.value = normalizeOrderForCurrentModules(nextOrder)
+  orderSaving.value = true
+  try {
+    await modulesApi.updateModuleManagementOrder(moduleOrder.value)
+    success('模块顺序已保存')
+  } catch (err) {
+    moduleOrder.value = previousOrder
+    error(getErrorMessage(err, '保存模块顺序失败'))
+    log.error('保存模块顺序失败:', err)
+  } finally {
+    orderSaving.value = false
+  }
+}
+
+function resetModuleOrder() {
+  saveModuleOrder([])
+}
+
+function isInteractiveDragTarget(target: EventTarget | null) {
+  return target instanceof HTMLElement &&
+    target.closest('button, a, input, textarea, select, [role="switch"]') !== null
+}
+
+function handleModuleDragStart(moduleName: string, event: DragEvent) {
+  if (!canReorderModules.value || isInteractiveDragTarget(event.target)) {
+    event.preventDefault()
+    return
+  }
+  draggedModuleName.value = moduleName
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', moduleName)
+  }
+}
+
+function handleModuleDragEnd() {
+  draggedModuleName.value = null
+  dragOverModuleName.value = null
+}
+
+function handleModuleDragOver(moduleName: string) {
+  if (!canReorderModules.value || !draggedModuleName.value || draggedModuleName.value === moduleName) {
+    dragOverModuleName.value = null
+    return
+  }
+  dragOverModuleName.value = moduleName
+}
+
+function handleModuleDragLeave(moduleName: string) {
+  if (dragOverModuleName.value === moduleName) {
+    dragOverModuleName.value = null
+  }
+}
+
+function handleModuleDrop(targetModuleName: string) {
+  const draggedName = draggedModuleName.value
+  handleModuleDragEnd()
+  if (!canReorderModules.value || !draggedName || draggedName === targetModuleName) return
+
+  const nextOrder = moveNameToTargetIndex(
+    allModules.value.map(module => module.name),
+    draggedName,
+    targetModuleName,
+  )
+  saveModuleOrder(nextOrder)
 }
 
 onMounted(() => {

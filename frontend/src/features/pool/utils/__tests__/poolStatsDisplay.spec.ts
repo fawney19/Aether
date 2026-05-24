@@ -112,4 +112,16 @@ describe('poolStatsDisplay', () => {
       total_cost_usd: '$12.35',
     })
   })
+
+  it('promotes large token totals above M', () => {
+    const display = buildPoolStatsDisplay(
+      createCodexKey({ total_tokens: 1_500_000_000 }),
+      'openai',
+      'account_total',
+    )
+
+    expect(display.kind).toBe('account_total')
+    if (display.kind !== 'account_total') throw new Error('expected account total display')
+    expect(metricValues(display.metrics).total_tokens).toBe('1.5B')
+  })
 })

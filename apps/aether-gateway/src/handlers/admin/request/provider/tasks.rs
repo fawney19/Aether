@@ -1,4 +1,7 @@
 use super::*;
+use aether_data_contracts::repository::provider_catalog::{
+    StoredProviderCatalogKey, StoredProviderCatalogProvider,
+};
 use axum::{
     body::Body,
     http,
@@ -193,8 +196,6 @@ impl<'a> AdminAppState<'a> {
         &self,
         provider_id: &str,
     ) -> Result<Response<Body>, GatewayError> {
-        use aether_admin::provider::pool as admin_provider_pool_pure;
-
         let Some(provider) = self
             .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id.to_string()))
             .await?
@@ -208,6 +209,30 @@ impl<'a> AdminAppState<'a> {
                 .into_response());
         };
 
+        let affected = self
+            .cleanup_known_banned_provider_catalog_keys(&provider)
+            .await?;
+        if affected == 0 {
+            return Ok(Json(
+                aether_admin::provider::pool::build_admin_pool_cleanup_empty_payload(
+                    "未发现可清理的异常账号",
+                ),
+            )
+            .into_response());
+        }
+
+        Ok(
+            Json(aether_admin::provider::pool::build_admin_pool_cleanup_result_payload(affected))
+                .into_response(),
+        )
+    }
+
+    pub(crate) async fn cleanup_known_banned_provider_catalog_keys(
+        &self,
+        provider: &StoredProviderCatalogProvider,
+    ) -> Result<usize, GatewayError> {
+        use aether_admin::provider::pool as admin_provider_pool_pure;
+
         let banned_keys = self
             .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
             .await?
@@ -215,12 +240,7 @@ impl<'a> AdminAppState<'a> {
             .filter(admin_provider_pool_pure::admin_pool_key_is_known_banned)
             .collect::<Vec<_>>();
         if banned_keys.is_empty() {
-            return Ok(Json(
-                admin_provider_pool_pure::build_admin_pool_cleanup_empty_payload(
-                    "未发现可清理的异常账号",
-                ),
-            )
-            .into_response());
+            return Ok(0);
         }
 
         let deleted_key_ids = banned_keys
@@ -243,10 +263,42 @@ impl<'a> AdminAppState<'a> {
         self.cleanup_deleted_provider_catalog_refs(&provider.id, &[], &deleted_key_ids)
             .await?;
 
-        Ok(
-            Json(admin_provider_pool_pure::build_admin_pool_cleanup_result_payload(affected))
-                .into_response(),
-        )
+        Ok(affected)
+    }
+
+    pub(crate) async fn cleanup_provider_catalog_key_if_current<F>(
+        &self,
+        provider: &StoredProviderCatalogProvider,
+        key_id: &str,
+        should_delete: F,
+    ) -> Result<bool, GatewayError>
+    where
+        F: FnOnce(&StoredProviderCatalogKey) -> bool,
+    {
+        let key_ids = [key_id.to_string()];
+        let Some(key) = self
+            .read_provider_catalog_keys_by_ids(&key_ids)
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(false);
+        };
+        if key.provider_id != provider.id || !should_delete(&key) {
+            return Ok(false);
+        }
+
+        self.clear_admin_provider_pool_cooldown(&provider.id, &key.id)
+            .await;
+        self.reset_admin_provider_pool_cost(&provider.id, &key.id)
+            .await;
+        let deleted = self.delete_provider_catalog_key(&key.id).await?;
+        if deleted {
+            let deleted_key_ids = [key.id.clone()];
+            self.cleanup_deleted_provider_catalog_refs(&provider.id, &[], &deleted_key_ids)
+                .await?;
+        }
+        Ok(deleted)
     }
 
     pub(crate) async fn build_admin_pool_batch_action_response(

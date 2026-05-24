@@ -16,7 +16,7 @@ const INSTALL_SESSION_TTL_SECS: u64 = 15 * 60;
 const INSTALL_SESSION_KEY_PREFIX: &str = "install:session:";
 const TUNNEL_INSTALL_SESSION_KEY_PREFIX: &str = "tunnel-install:session:";
 const TUNNEL_INSTALL_UNIX_SCRIPT_URL: &str =
-    "https://raw.githubusercontent.com/fawney19/Aether/main/apps/aether-tunnel/install.sh";
+    "https://raw.githubusercontent.com/fawney19/Aether/refs/heads/main/apps/aether-tunnel/install.sh";
 const TUNNEL_INSTALL_POWERSHELL_SCRIPT_URL: &str =
     "https://raw.githubusercontent.com/fawney19/Aether/main/apps/aether-tunnel/install.ps1";
 
@@ -59,6 +59,8 @@ struct StoredTunnelInstallSession {
     aether_url: String,
     management_token: String,
     node_name: String,
+    tunnel_security: String,
+    tunnel_encryption_key: String,
     expires_at_unix_secs: u64,
 }
 
@@ -93,8 +95,7 @@ fn install_code_from_path(request_path: &str) -> Option<(String, bool)> {
 
 fn tunnel_install_code_from_path(request_path: &str) -> Option<(String, bool)> {
     let raw = request_path
-        .strip_prefix("/install-tunnel/")
-        .or_else(|| request_path.strip_prefix("/install-proxy/"))?
+        .strip_prefix("/install-tunnel/")?
         .trim()
         .trim_matches('/');
     if raw.is_empty() || raw.contains('/') {
@@ -120,6 +121,17 @@ fn generate_install_code() -> String {
         .chars()
         .take(24)
         .collect()
+}
+
+fn generate_tunnel_encryption_key() -> String {
+    use base64::Engine;
+
+    let first = uuid::Uuid::new_v4();
+    let second = uuid::Uuid::new_v4();
+    let mut key = [0_u8; 32];
+    key[..16].copy_from_slice(first.as_bytes());
+    key[16..].copy_from_slice(second.as_bytes());
+    base64::engine::general_purpose::STANDARD.encode(key)
 }
 
 fn unix_secs_now() -> u64 {
@@ -172,6 +184,8 @@ set -eu
 export AETHER_TUNNEL_AETHER_URL={aether_url}
 export AETHER_TUNNEL_MANAGEMENT_TOKEN={management_token}
 export AETHER_TUNNEL_NODE_NAME={node_name}
+export AETHER_TUNNEL_SECURITY={tunnel_security}
+export AETHER_TUNNEL_ENCRYPTION_KEY={tunnel_encryption_key}
 
 if command -v curl >/dev/null 2>&1; then
   curl -fsSL {script_url} | sh
@@ -185,6 +199,8 @@ fi
         aether_url = shell_single_quote(&session.aether_url),
         management_token = shell_single_quote(&session.management_token),
         node_name = shell_single_quote(&session.node_name),
+        tunnel_security = shell_single_quote(&session.tunnel_security),
+        tunnel_encryption_key = shell_single_quote(&session.tunnel_encryption_key),
         script_url = shell_single_quote(TUNNEL_INSTALL_UNIX_SCRIPT_URL),
     )
 }
@@ -195,11 +211,15 @@ fn build_tunnel_powershell_script(session: &StoredTunnelInstallSession) -> Strin
 $env:AETHER_TUNNEL_AETHER_URL = {aether_url}
 $env:AETHER_TUNNEL_MANAGEMENT_TOKEN = {management_token}
 $env:AETHER_TUNNEL_NODE_NAME = {node_name}
+$env:AETHER_TUNNEL_SECURITY = {tunnel_security}
+$env:AETHER_TUNNEL_ENCRYPTION_KEY = {tunnel_encryption_key}
 irm {script_url} | iex
 "###,
         aether_url = powershell_single_quote(&session.aether_url),
         management_token = powershell_single_quote(&session.management_token),
         node_name = powershell_single_quote(&session.node_name),
+        tunnel_security = powershell_single_quote(&session.tunnel_security),
+        tunnel_encryption_key = powershell_single_quote(&session.tunnel_encryption_key),
         script_url = powershell_single_quote(TUNNEL_INSTALL_POWERSHELL_SCRIPT_URL),
     )
 }
@@ -664,6 +684,8 @@ pub(crate) async fn build_proxy_node_install_session_response(
         aether_url: base_url_from_request(headers, request_context),
         management_token,
         node_name,
+        tunnel_security: "non_tls_required".to_string(),
+        tunnel_encryption_key: generate_tunnel_encryption_key(),
         expires_at_unix_secs,
     };
     let serialized = match serde_json::to_string(&session) {
@@ -712,9 +734,7 @@ pub(super) async fn maybe_build_local_install_response(
     if decision.route_family.as_deref() != Some("install") {
         return None;
     }
-    if request_context.request_path.starts_with("/install-tunnel/")
-        || request_context.request_path.starts_with("/install-proxy/")
-    {
+    if request_context.request_path.starts_with("/install-tunnel/") {
         return Some(maybe_build_local_tunnel_install_response(state, request_context).await);
     }
     let Some((code, wants_powershell)) = install_code_from_path(&request_context.request_path)
@@ -893,6 +913,8 @@ mod tests {
             aether_url: "https://aether.example".to_string(),
             management_token: "ae-test-token".to_string(),
             node_name: "jp-proxy-01".to_string(),
+            tunnel_security: "non_tls_required".to_string(),
+            tunnel_encryption_key: "base64-32-bytes".to_string(),
             expires_at_unix_secs: u64::MAX,
         }
     }
@@ -907,10 +929,6 @@ mod tests {
             tunnel_install_code_from_path("/install-tunnel/abc123.ps1"),
             Some(("abc123".to_string(), true))
         );
-        assert_eq!(
-            tunnel_install_code_from_path("/install-proxy/abc123"),
-            Some(("abc123".to_string(), false))
-        );
         assert_eq!(tunnel_install_code_from_path("/install-tunnel/a/b"), None);
     }
 
@@ -921,8 +939,10 @@ mod tests {
         assert!(script.contains("export AETHER_TUNNEL_AETHER_URL='https://aether.example'"));
         assert!(script.contains("export AETHER_TUNNEL_MANAGEMENT_TOKEN='ae-test-token'"));
         assert!(script.contains("export AETHER_TUNNEL_NODE_NAME='jp-proxy-01'"));
+        assert!(script.contains("export AETHER_TUNNEL_SECURITY='non_tls_required'"));
+        assert!(script.contains("export AETHER_TUNNEL_ENCRYPTION_KEY='base64-32-bytes'"));
         assert!(script.contains(
-            "https://raw.githubusercontent.com/fawney19/Aether/main/apps/aether-tunnel/install.sh"
+            "https://raw.githubusercontent.com/fawney19/Aether/refs/heads/main/apps/aether-tunnel/install.sh"
         ));
         assert!(!script.contains("aether-rust-pioneer"));
         assert!(!script.contains("[[servers]]"));
@@ -935,6 +955,8 @@ mod tests {
         assert!(script.contains("$env:AETHER_TUNNEL_AETHER_URL = 'https://aether.example'"));
         assert!(script.contains("$env:AETHER_TUNNEL_MANAGEMENT_TOKEN = 'ae-test-token'"));
         assert!(script.contains("$env:AETHER_TUNNEL_NODE_NAME = 'jp-proxy-01'"));
+        assert!(script.contains("$env:AETHER_TUNNEL_SECURITY = 'non_tls_required'"));
+        assert!(script.contains("$env:AETHER_TUNNEL_ENCRYPTION_KEY = 'base64-32-bytes'"));
         assert!(script.contains(
             "https://raw.githubusercontent.com/fawney19/Aether/main/apps/aether-tunnel/install.ps1"
         ));

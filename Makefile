@@ -335,6 +335,11 @@ if ! command -v curl >/dev/null 2>&1; then
 	exit 1
 fi
 
+if [ -z "$${RUSTC_WRAPPER:-}" ] && command -v sccache >/dev/null 2>&1; then
+	export RUSTC_WRAPPER="$$(command -v sccache)"
+	echo "=> 启用 Rust 编译缓存: $${RUSTC_WRAPPER}"
+fi
+
 if ! ensure_dev_infra; then
 	exit 1
 fi

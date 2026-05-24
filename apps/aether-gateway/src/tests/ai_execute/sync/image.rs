@@ -712,7 +712,7 @@ async fn gateway_converts_gemini_image_sync_to_openai_image_provider() {
     );
     assert_eq!(
         seen_execution_runtime_request.url,
-        "https://api.openai.com/v1/responses"
+        "https://api.openai.com/v1/images/generations"
     );
     assert_eq!(
         seen_execution_runtime_request.authorization,

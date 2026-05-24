@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use crate::contracts::core_success_background_report_kind;
+use crate::formats::shared::request::UPSTREAM_IS_STREAM_KEY;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalSyncReportParts {
@@ -66,7 +67,7 @@ fn should_capture_client_sync_success_body(payload: &LocalSyncReportParts) -> bo
         .report_context
         .as_ref()
         .and_then(Value::as_object)
-        .and_then(|context| context.get("upstream_is_stream"))
+        .and_then(|context| context.get(UPSTREAM_IS_STREAM_KEY))
         .and_then(Value::as_bool)
         .unwrap_or(false)
 }

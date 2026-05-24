@@ -258,9 +258,15 @@ impl SqliteBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::SqliteBackend;
     use crate::lifecycle::migrate::run_sqlite_migrations;
-    use crate::repository::system::AdminSystemPurgeTarget;
+    use crate::repository::system::{
+        AdminSystemPurgeTarget, AdminSystemStatsDailyAggregate,
+        AdminSystemStatsDailyApiKeyAggregate, AdminSystemStatsUserDailyAggregate,
+        AdminSystemUsageAggregateImportMode, AdminSystemUsageAggregateSnapshot,
+    };
     use crate::{
         DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig, StatsDailyAggregationInput,
         StatsHourlyAggregationInput, WalletDailyUsageAggregationInput,
@@ -454,6 +460,115 @@ VALUES
                 .await
                 .expect("admin count should load");
         assert_eq!(admin_exists, 1);
+    }
+
+    #[tokio::test]
+    async fn admin_system_usage_aggregates_round_trip_after_sqlite_migrations() {
+        let config = SqlDatabaseConfig {
+            driver: DatabaseDriver::Sqlite,
+            url: "sqlite::memory:".to_string(),
+            pool: SqlPoolConfig {
+                max_connections: 1,
+                ..SqlPoolConfig::default()
+            },
+        };
+        let backend = SqliteBackend::from_config(config).expect("backend should build");
+        run_sqlite_migrations(backend.pool())
+            .await
+            .expect("sqlite migrations should run");
+
+        sqlx::query(
+            r#"
+INSERT INTO users (id, email, username, role, created_at, updated_at)
+VALUES ('target-user-1', 'target@example.com', 'target', 'user', 1, 1)
+"#,
+        )
+        .execute(backend.pool())
+        .await
+        .expect("target user should insert");
+        sqlx::query(
+            r#"
+INSERT INTO api_keys (id, user_id, key_hash, name, created_at, updated_at)
+VALUES ('target-key-1', 'target-user-1', 'hash-target-key', 'target key', 1, 1)
+"#,
+        )
+        .execute(backend.pool())
+        .await
+        .expect("target key should insert");
+
+        let snapshot = AdminSystemUsageAggregateSnapshot {
+            stats_daily: vec![AdminSystemStatsDailyAggregate {
+                date_unix_secs: 86_400,
+                total_requests: 9,
+                success_requests: 8,
+                error_requests: 1,
+                input_tokens: 100,
+                output_tokens: 200,
+                cache_creation_tokens: 3,
+                cache_read_tokens: 4,
+                total_cost: 1.25,
+                actual_total_cost: 1.0,
+                is_complete: true,
+                aggregated_at_unix_secs: Some(90_000),
+            }],
+            stats_user_daily: vec![AdminSystemStatsUserDailyAggregate {
+                user_id: "source-user-1".to_string(),
+                username: Some("source".to_string()),
+                date_unix_secs: 86_400,
+                total_requests: 5,
+                success_requests: 5,
+                error_requests: 0,
+                input_tokens: 50,
+                output_tokens: 60,
+                cache_creation_tokens: 1,
+                cache_read_tokens: 2,
+                total_cost: 0.5,
+            }],
+            stats_daily_api_key: vec![AdminSystemStatsDailyApiKeyAggregate {
+                api_key_id: "source-key-1".to_string(),
+                api_key_name: Some("source key".to_string()),
+                date_unix_secs: 86_400,
+                total_requests: 4,
+                success_requests: 3,
+                error_requests: 1,
+                input_tokens: 40,
+                output_tokens: 30,
+                cache_creation_tokens: 2,
+                cache_read_tokens: 1,
+                total_cost: 0.75,
+            }],
+        };
+        let user_id_map =
+            BTreeMap::from([("source-user-1".to_string(), "target-user-1".to_string())]);
+        let api_key_id_map =
+            BTreeMap::from([("source-key-1".to_string(), "target-key-1".to_string())]);
+
+        let summary = backend
+            .import_admin_system_usage_aggregates(
+                &snapshot,
+                &user_id_map,
+                &api_key_id_map,
+                AdminSystemUsageAggregateImportMode::Overwrite,
+            )
+            .await
+            .expect("usage aggregates should import");
+        assert_eq!(summary.stats_daily.created, 1);
+        assert_eq!(summary.stats_user_daily.created, 1);
+        assert_eq!(summary.stats_daily_api_key.created, 1);
+
+        let exported = backend
+            .export_admin_system_usage_aggregates()
+            .await
+            .expect("usage aggregates should export");
+        assert_eq!(exported.stats_daily.len(), 1);
+        assert_eq!(exported.stats_daily[0].total_requests, 9);
+        assert_eq!(exported.stats_daily[0].actual_total_cost, 1.0);
+        assert_eq!(exported.stats_user_daily.len(), 1);
+        assert_eq!(exported.stats_user_daily[0].user_id, "target-user-1");
+        assert_eq!(exported.stats_user_daily[0].total_requests, 5);
+        assert_eq!(exported.stats_daily_api_key.len(), 1);
+        assert_eq!(exported.stats_daily_api_key[0].api_key_id, "target-key-1");
+        assert_eq!(exported.stats_daily_api_key[0].total_requests, 4);
     }
 
     #[tokio::test]

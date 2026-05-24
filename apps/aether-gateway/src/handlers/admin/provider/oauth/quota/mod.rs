@@ -5,3 +5,4 @@ pub(crate) mod dispatch;
 pub(crate) mod grok;
 pub(crate) mod kiro;
 pub(crate) mod shared;
+pub(crate) mod windsurf;

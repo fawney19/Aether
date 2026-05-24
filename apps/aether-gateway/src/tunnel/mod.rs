@@ -455,6 +455,14 @@ impl EmbeddedTunnelState {
         self.inner.clone()
     }
 
+    pub(crate) fn register_secure_tunnel_key(
+        &self,
+        node_id: impl Into<String>,
+        key: impl Into<String>,
+    ) {
+        self.inner.register_secure_tunnel_key(node_id, key);
+    }
+
     pub(crate) fn has_local_proxy(&self, node_id: &str) -> bool {
         self.inner.hub.has_local_proxy(node_id)
     }
@@ -511,6 +519,9 @@ impl EmbeddedTunnelState {
             method: "GET".to_string(),
             url: url.trim().to_string(),
             headers: HashMap::new(),
+            stream: false,
+            request_timeout_ms: None,
+            stream_first_byte_timeout_ms: None,
             timeout: timeout_secs,
             follow_redirects: Some(false),
             http1_only: false,

@@ -18,7 +18,10 @@ use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::config::{Config, ServerEntry, TunnelPoolSizing};
+use crate::config::{
+    effective_tunnel_security, validate_tunnel_encryption_key, Config, ServerEntry,
+    TunnelPoolSizing,
+};
 use crate::net;
 use crate::registration::client::AetherClient;
 use crate::runtime::{self, DynamicConfig};
@@ -212,8 +215,31 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
             &entry.aether_url,
             &entry.management_token,
         ));
+        let tunnel_security = effective_tunnel_security(
+            &entry.aether_url,
+            entry.tunnel_security,
+            entry.tunnel_encryption_key.as_deref(),
+        );
+        if tunnel_security == crate::config::TunnelSecurity::NonTlsRequired {
+            if entry.aether_url.trim_start().starts_with("http://") {
+                warn!(
+                    server = %label,
+                    url = %entry.aether_url,
+                    "secure tunnel frame encryption starts after registration; deliver install and registration credentials over HTTPS or another trusted bootstrap channel"
+                );
+            }
+            let key = entry
+                .tunnel_encryption_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("tunnel_encryption_key must be set for secure non-TLS tunnel")
+                })?;
+            validate_tunnel_encryption_key(key)?;
+        }
         match client
-            .register(&config, &node_name, &public_ip, Some(&hw_info))
+            .register(&config, entry, &node_name, &public_ip, Some(&hw_info))
             .await
         {
             Ok(node_id) => {
@@ -603,7 +629,13 @@ async fn retry_failed_registration(
         }
 
         match client
-            .register(&state.config, &node_name, &public_ip, Some(&hw_info))
+            .register(
+                &state.config,
+                &entry,
+                &node_name,
+                &public_ip,
+                Some(&hw_info),
+            )
             .await
         {
             Ok(node_id) => {
@@ -681,6 +713,12 @@ fn build_server_context(
         server_label: label.to_string(),
         aether_url: entry.aether_url.clone(),
         management_token: entry.management_token.clone(),
+        tunnel_security: effective_tunnel_security(
+            &entry.aether_url,
+            entry.tunnel_security,
+            entry.tunnel_encryption_key.as_deref(),
+        ),
+        tunnel_encryption_key: entry.tunnel_encryption_key.clone(),
         node_name: node_name.to_string(),
         node_id: Arc::new(RwLock::new(node_id)),
         aether_client: client,
@@ -987,6 +1025,8 @@ mod tests {
                 aether_url: gateway_base_url.clone(),
                 management_token: "token".to_string(),
                 node_name: Some("node-recovery".to_string()),
+                tunnel_security: None,
+                tunnel_encryption_key: None,
             },
         )];
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -1289,6 +1329,8 @@ mod tests {
             aether_url: state.config.aether_url.clone(),
             management_token: state.config.management_token.clone(),
             node_name: Some(state.config.node_name.clone()),
+            tunnel_security: Some(state.config.tunnel_security),
+            tunnel_encryption_key: state.config.tunnel_encryption_key.clone(),
         };
         let client = Arc::new(AetherClient::new(
             &state.config,
@@ -1311,6 +1353,8 @@ mod tests {
             management_token: "token".to_string(),
             public_ip: None,
             node_name: "tunnel-test".to_string(),
+            tunnel_security: crate::config::TunnelSecurity::Off,
+            tunnel_encryption_key: None,
             node_region: None,
             heartbeat_interval: 1,
             allowed_ports: vec![80, 443],
@@ -1356,6 +1400,8 @@ mod tests {
             tunnel_ping_interval_ms: 1_000,
             tunnel_max_streams: Some(8),
             tunnel_connect_timeout_ms: 2_000,
+            tunnel_ipv4_only: false,
+            tunnel_ipv6_only: false,
             tunnel_tcp_keepalive_secs: 30,
             tunnel_tcp_nodelay: true,
             tunnel_stale_timeout_ms: 5_000,

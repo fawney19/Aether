@@ -281,6 +281,7 @@ impl Service<Uri> for InstrumentedConnector {
                 connect_timeout: self.connect_timeout,
                 tcp_nodelay: self.tcp_nodelay,
                 tcp_keepalive: self.tcp_keepalive,
+                ip_family: crate::egress_proxy::IpFamily::Any,
             };
             let connect_start = std::time::Instant::now();
             return Box::pin(async move {
@@ -347,6 +348,7 @@ async fn connect_via_proxy(
         options.connect_timeout,
         options.tcp_nodelay,
         options.tcp_keepalive,
+        options.ip_family,
     )
     .await?;
 

@@ -157,16 +157,37 @@ fn admin_pool_health_score(key: &StoredProviderCatalogKey) -> f64 {
 }
 
 fn admin_pool_circuit_breaker_open(key: &StoredProviderCatalogKey) -> bool {
+    let now_unix_secs = Utc::now().timestamp().max(0) as u64;
     key.circuit_breaker_by_format
         .as_ref()
         .and_then(Value::as_object)
         .map(|formats| {
             formats
                 .values()
-                .filter_map(Value::as_object)
-                .any(|item| item.get("open").and_then(Value::as_bool).unwrap_or(false))
+                .any(|item| admin_pool_circuit_payload_active_open_at(item, now_unix_secs))
         })
         .unwrap_or(false)
+}
+
+fn admin_pool_circuit_payload_active_open_at(value: &Value, now_unix_secs: u64) -> bool {
+    let Some(item) = value.as_object() else {
+        return false;
+    };
+    if !item.get("open").and_then(Value::as_bool).unwrap_or(false) {
+        return false;
+    }
+    if let Some(next_probe_at) = item.get("next_probe_at_unix_secs").and_then(Value::as_u64) {
+        return now_unix_secs < next_probe_at;
+    }
+    if let Some(next_probe_at) = item
+        .get("next_probe_at")
+        .and_then(Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .and_then(|value| u64::try_from(value.timestamp()).ok())
+    {
+        return now_unix_secs < next_probe_at;
+    }
+    true
 }
 
 fn unix_secs_to_rfc3339(unix_secs: u64) -> Option<String> {

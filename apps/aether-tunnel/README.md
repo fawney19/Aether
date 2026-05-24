@@ -15,13 +15,13 @@ Tunnel 模式下代理节点**无需对外监听端口**，仅需出站连接到
 <!-- DOWNLOAD_TABLE_START -->
 | Platform | Download |
 |----------|----------|
-| Linux x86_64 (GNU) | [aether-tunnel-linux-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.12/aether-tunnel-linux-amd64.tar.gz) |
-| Linux ARM64 (GNU) | [aether-tunnel-linux-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.12/aether-tunnel-linux-arm64.tar.gz) |
-| Linux x86_64 (musl) | [aether-tunnel-linux-musl-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.12/aether-tunnel-linux-musl-amd64.tar.gz) |
-| Linux ARM64 (musl) | [aether-tunnel-linux-musl-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.12/aether-tunnel-linux-musl-arm64.tar.gz) |
-| macOS x86_64 | [aether-tunnel-macos-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.12/aether-tunnel-macos-amd64.tar.gz) |
-| macOS ARM64 | [aether-tunnel-macos-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.12/aether-tunnel-macos-arm64.tar.gz) |
-| Windows x86_64 | [aether-tunnel-windows-amd64.zip](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.12/aether-tunnel-windows-amd64.zip) |
+| Linux x86_64 (GNU) | [aether-tunnel-linux-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.13/aether-tunnel-linux-amd64.tar.gz) |
+| Linux ARM64 (GNU) | [aether-tunnel-linux-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.13/aether-tunnel-linux-arm64.tar.gz) |
+| Linux x86_64 (musl) | [aether-tunnel-linux-musl-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.13/aether-tunnel-linux-musl-amd64.tar.gz) |
+| Linux ARM64 (musl) | [aether-tunnel-linux-musl-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.13/aether-tunnel-linux-musl-arm64.tar.gz) |
+| macOS x86_64 | [aether-tunnel-macos-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.13/aether-tunnel-macos-amd64.tar.gz) |
+| macOS ARM64 | [aether-tunnel-macos-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.13/aether-tunnel-macos-arm64.tar.gz) |
+| Windows x86_64 | [aether-tunnel-windows-amd64.zip](https://github.com/fawney19/Aether/releases/download/tunnel-v0.3.13/aether-tunnel-windows-amd64.zip) |
 <!-- DOWNLOAD_TABLE_END -->
 
 上表展示的是最新已发布版本的下载链接。从下一次 `tunnel-v*` 发布开始，表格会自动补上 `Linux x86_64 (musl)` / `Linux ARM64 (musl)` 包，供 Alpine 等 musl 系统直接使用。
@@ -53,6 +53,7 @@ curl -fsSL https://raw.githubusercontent.com/fawney19/Aether/main/apps/aether-tu
   AETHER_TUNNEL_AETHER_URL="https://aether.example.com" \
   AETHER_TUNNEL_MANAGEMENT_TOKEN="ae_xxx" \
   AETHER_TUNNEL_NODE_NAME="jp-proxy-01" \
+  AETHER_TUNNEL_SECURITY="off" \
   sh
 ```
 
@@ -60,6 +61,7 @@ curl -fsSL https://raw.githubusercontent.com/fawney19/Aether/main/apps/aether-tu
 $env:AETHER_TUNNEL_AETHER_URL = "https://aether.example.com"
 $env:AETHER_TUNNEL_MANAGEMENT_TOKEN = "ae_xxx"
 $env:AETHER_TUNNEL_NODE_NAME = "jp-proxy-01"
+$env:AETHER_TUNNEL_SECURITY = "off"
 irm https://raw.githubusercontent.com/fawney19/Aether/main/apps/aether-tunnel/install.ps1 | iex
 ```
 
@@ -111,6 +113,8 @@ sudo aether-tunnel uninstall
 | `--aether-url` | `AETHER_TUNNEL_AETHER_URL` | **必填** | Aether 服务器地址 |
 | `--management-token` | `AETHER_TUNNEL_MANAGEMENT_TOKEN` | **必填** | 管理员 Token（`ae_xxx` 格式） |
 | `--node-name` | `AETHER_TUNNEL_NODE_NAME` | **必填** | 节点名称标识 |
+| `--tunnel-security` | `AETHER_TUNNEL_SECURITY` | `off` | Aether ↔ tunnel 通道安全模式；支持 `off` / `non_tls_required`；在 `[[servers]]` 中省略该字段且 `http://` 提供 key 时会自动按 `non_tls_required` 生效 |
+| `--tunnel-encryption-key` | `AETHER_TUNNEL_ENCRYPTION_KEY` | 空 | secure tunnel 使用的长期 PSK（base64 32-byte），每个 `[[servers]]` 节点独立配置 |
 | `--public-ip` | `AETHER_TUNNEL_PUBLIC_IP` | 自动检测 | 公网 IP |
 | `--node-region` | `AETHER_TUNNEL_NODE_REGION` | 自动检测 | 地区标识 |
 | `--heartbeat-interval` | `AETHER_TUNNEL_HEARTBEAT_INTERVAL` | `5` | 心跳间隔（秒） |
@@ -126,6 +130,8 @@ sudo aether-tunnel uninstall
 | `--tunnel-max-streams` | `AETHER_TUNNEL_MAX_STREAMS` | 自动（硬件估算） | 单连接最大并发 stream 数 |
 | `--tunnel-ping-interval-ms` | `AETHER_TUNNEL_PING_INTERVAL_MS` | `10000` | WebSocket ping 周期（毫秒） |
 | `--tunnel-connect-timeout-ms` | `AETHER_TUNNEL_CONNECT_TIMEOUT_MS` | `3000` | tunnel 建连超时（毫秒） |
+| `--tunnel-ipv4-only` | `AETHER_TUNNEL_IPV4_ONLY` | `false` | 仅使用 IPv4 地址建立直连 WebSocket tunnel；配置 `aether_outbound_proxy_url` 时仅限制代理端点解析 |
+| `--tunnel-ipv6-only` | `AETHER_TUNNEL_IPV6_ONLY` | `false` | 仅使用 IPv6 地址建立直连 WebSocket tunnel；配置 `aether_outbound_proxy_url` 时仅限制代理端点解析 |
 | `--tunnel-stale-timeout-ms` | `AETHER_TUNNEL_STALE_TIMEOUT_MS` | `30000` | 无入站数据断连阈值（毫秒） |
 | `--tunnel-scale-check-interval-ms` | `AETHER_TUNNEL_SCALE_CHECK_INTERVAL_MS` | `1000` | autoscale 采样周期（毫秒） |
 | `--tunnel-scale-up-threshold-percent` | `AETHER_TUNNEL_SCALE_UP_THRESHOLD_PERCENT` | `50` | 单 tunnel 占用率超过该值时扩容 |
@@ -137,6 +143,8 @@ sudo aether-tunnel uninstall
 | `--tunnel-reconnect-max-ms` | `AETHER_TUNNEL_RECONNECT_MAX_MS` | `250` | 指数退避上限（毫秒） |
 
 省略 `tunnel_connections` 时，tunnel 会按设备能力自动计算一个基线值和偏单机上限的扩容上限：默认至少保留 2 条常驻 tunnel，并会更早触发扩容；如果显式设置了 `tunnel_connections` 但没有设置 `tunnel_connections_max`，则保持固定连接池，不自动扩缩。
+
+`tunnel_ipv4_only` / `tunnel_ipv6_only` 只能二选一。它们只改变 WebSocket tunnel 回连的 TCP 地址选择：直连 Aether 时过滤 Aether 域名的 DNS 结果；配置 `aether_outbound_proxy_url` 时过滤代理服务器端点的 DNS 结果，Host/SNI 仍使用原始 WebSocket URL。该选项不会影响 provider 上游请求；如需限制 provider 上游流量，请在 `upstream_proxy_url` 或系统网络层处理。对于 Cloudflare 等边缘 IP 会变化的域名，优先使用该选项而不是固定 `/etc/hosts`。
 
 #### 上游 HTTP 请求
 
@@ -212,12 +220,18 @@ tunnel 会在心跳兼容字段 `proxy_metadata` 中主动上报隧道稳定性�
 aether_url = "https://aether-1.example.com"
 management_token = "ae_xxx"
 node_name = "jp-proxy-01"
+tunnel_security = "off"
 
 [[servers]]
-aether_url = "https://aether-2.example.com"
+aether_url = "http://aether-2.example.com"
 management_token = "ae_yyy"
 node_name = "jp-proxy-02"
+tunnel_encryption_key = "base64-32-bytes"
 ```
+
+`tunnel_security = "non_tls_required"` 是非 TLS secure tunnel 的 MVP 配置面：它要求同时提供当前 `[[servers]]` 条目的 `tunnel_encryption_key`，后续握手使用 `node_name` / `X-Node-Id` 查找对应 PSK，不引入 `tunnel_encryption_key_id`。`wss://` 仍是推荐方案；`ws:// + secure tunnel` 只加密注册完成后的 WebSocket tunnel frame，不保护安装脚本、注册请求、`management_token` 或 PSK 的首次分发；这些 bootstrap 凭据仍必须通过 HTTPS 或其他可信通道交付。它不等价于 HTTPS 伪装，也不覆盖 tunnel ↔ origin/provider 这段链路。
+
+如果 `aether_url` 使用 `http://` 且当前 `[[servers]]` 条目提供了 `tunnel_encryption_key`，省略 `tunnel_security` 时运行时会自动按 `non_tls_required` 生效；显式配置 `tunnel_security = "off"` 会关闭该自动推断。secure tunnel 会在 WebSocket tunnel 上加密所有二进制 tunnel frame；未配置 key 或显式关闭的旧节点仍按原明文协议工作。
 
 ## 发布新版本
 

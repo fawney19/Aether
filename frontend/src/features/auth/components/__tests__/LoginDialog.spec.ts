@@ -11,6 +11,9 @@ const authStoreMock = vi.hoisted(() => ({
 }))
 
 const routerPushMock = vi.hoisted(() => vi.fn())
+const routeMock = vi.hoisted(() => ({
+  query: {},
+}))
 const toastMocks = vi.hoisted(() => ({
   success: vi.fn(),
   warning: vi.fn(),
@@ -27,6 +30,7 @@ const oauthApiMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('vue-router', () => ({
+  useRoute: () => routeMock,
   useRouter: () => ({
     push: routerPushMock,
   }),
@@ -157,6 +161,7 @@ beforeEach(() => {
   authStoreMock.error = ''
   authStoreMock.canAccessAdmin = false
   authStoreMock.login.mockReset()
+  routeMock.query = {}
   routerPushMock.mockReset()
   toastMocks.success.mockReset()
   toastMocks.warning.mockReset()

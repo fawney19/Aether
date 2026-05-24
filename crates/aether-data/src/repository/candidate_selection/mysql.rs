@@ -452,6 +452,10 @@ fn key_auth_channel_matches(row: &CandidateSelectionRow, api_format: &str) -> bo
                     "openai:chat" | "openai:responses" | "claude:messages" | "openai:image"
                 )
         }
+        "windsurf" => {
+            matches!(auth_type.as_str(), "oauth" | "api_key" | "bearer")
+                && api_format == "openai:chat"
+        }
         "vertex_ai" => {
             (auth_type == "api_key"
                 && matches!(

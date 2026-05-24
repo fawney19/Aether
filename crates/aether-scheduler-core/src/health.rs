@@ -294,8 +294,31 @@ pub fn is_provider_key_circuit_open_at(
         .as_ref()
         .and_then(serde_json::Value::as_object)
         .and_then(|values| values.get(api_format))
-        .and_then(serde_json::Value::as_object)
     else {
+        return false;
+    };
+    provider_key_circuit_payload_is_active_open_at(payload, now_unix_secs)
+}
+
+pub fn any_provider_key_circuit_open_at(
+    key: &StoredProviderCatalogKey,
+    now_unix_secs: u64,
+) -> bool {
+    key.circuit_breaker_by_format
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|values| {
+            values.values().any(|payload| {
+                provider_key_circuit_payload_is_active_open_at(payload, now_unix_secs)
+            })
+        })
+}
+
+pub fn provider_key_circuit_payload_is_active_open_at(
+    payload: &serde_json::Value,
+    now_unix_secs: u64,
+) -> bool {
+    let Some(payload) = payload.as_object() else {
         return false;
     };
     if !payload
@@ -305,10 +328,26 @@ pub fn is_provider_key_circuit_open_at(
     {
         return false;
     }
-    payload
+    if let Some(next_probe_at) = payload
         .get("next_probe_at_unix_secs")
         .and_then(serde_json::Value::as_u64)
-        .is_none_or(|next_probe_at| now_unix_secs < next_probe_at)
+    {
+        return now_unix_secs < next_probe_at;
+    }
+    if let Some(next_probe_at) = payload
+        .get("next_probe_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(rfc3339_to_unix_secs)
+    {
+        return now_unix_secs < next_probe_at;
+    }
+    true
+}
+
+fn rfc3339_to_unix_secs(value: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .and_then(|value| u64::try_from(value.timestamp()).ok())
 }
 
 fn available_provider_key_rpm_slots_for_new_user(
@@ -641,9 +680,9 @@ mod tests {
         count_recent_rpm_requests_for_provider_key,
         count_recent_rpm_requests_for_provider_key_since, effective_provider_key_health_score,
         effective_provider_key_rpm_limit, is_candidate_in_recent_failure_cooldown,
-        is_provider_key_circuit_open, provider_key_health_bucket, provider_key_health_score,
-        provider_key_rpm_allows_request, provider_key_rpm_allows_request_since,
-        ProviderKeyHealthBucket,
+        is_provider_key_circuit_open, is_provider_key_circuit_open_at, provider_key_health_bucket,
+        provider_key_health_score, provider_key_rpm_allows_request,
+        provider_key_rpm_allows_request_since, ProviderKeyHealthBucket,
     };
 
     fn stored_candidate(
@@ -1332,6 +1371,30 @@ mod tests {
         );
         assert!(is_provider_key_circuit_open(&key, "openai:chat"));
         assert!(!is_provider_key_circuit_open(&key, "openai:responses"));
+    }
+
+    #[test]
+    fn provider_key_circuit_open_at_allows_probe_after_rfc3339_deadline() {
+        let key = provider_catalog_key("key-a").with_health_fields(
+            None,
+            Some(serde_json::json!({
+                "openai:chat": {
+                    "open": true,
+                    "next_probe_at": "2026-05-24T14:45:27Z"
+                }
+            })),
+        );
+
+        assert!(is_provider_key_circuit_open_at(
+            &key,
+            "openai:chat",
+            1_779_633_926
+        ));
+        assert!(!is_provider_key_circuit_open_at(
+            &key,
+            "openai:chat",
+            1_779_633_927
+        ));
     }
 
     #[test]

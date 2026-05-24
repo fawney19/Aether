@@ -19,9 +19,10 @@ use crate::ai_serving::{
     apply_codex_openai_responses_special_body_edits, apply_codex_openai_responses_special_headers,
     build_chatgpt_web_image_request_body,
     build_gemini_image_request_body_from_openai_image_request,
-    build_openai_image_provider_request_body, default_model_for_openai_image_operation,
-    normalize_openai_image_request, request_conversion_direct_auth, CandidateFailureDiagnostic,
-    GatewayProviderTransportSnapshot, PlannerAppState, RequestConversionKind,
+    build_openai_image_api_provider_request_body, build_openai_image_provider_request_body,
+    default_model_for_openai_image_operation, normalize_openai_image_request,
+    request_conversion_direct_auth, CandidateFailureDiagnostic, GatewayProviderTransportSnapshot,
+    PlannerAppState, RequestConversionKind,
 };
 use crate::image_capabilities::openai_image_normalize_options_for_provider;
 use crate::AppState;
@@ -160,21 +161,31 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
         .provider_type
         .trim()
         .eq_ignore_ascii_case("grok");
+    let is_codex = transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("codex");
     let transport_profile = crate::ai_serving::transport::resolve_transport_profile(transport);
     let upstream_url = if is_chatgpt_web {
         chatgpt_web_image_internal_url(&transport.endpoint.base_url)
     } else if is_grok {
         build_grok_upstream_url(transport, GROK_CHAT_PATH)
     } else {
-        build_openai_image_upstream_url(transport, parts.uri.query())
+        build_openai_image_upstream_url(transport, Some(parts.uri.path()), parts.uri.query())
     };
     let mut provider_request_body = if is_chatgpt_web {
         match build_chatgpt_web_image_request_body(parts, body_json, body_base64) {
             Ok(body) => body,
             Err(err) => err.to_error_json(),
         }
-    } else {
+    } else if is_codex || is_grok {
         build_openai_image_provider_request_body(&normalized_request)
+    } else {
+        build_openai_image_api_provider_request_body(
+            &normalized_request,
+            Some(prepared_candidate.mapped_model.as_str()),
+        )
     };
     if !is_chatgpt_web {
         apply_codex_openai_responses_special_body_edits(

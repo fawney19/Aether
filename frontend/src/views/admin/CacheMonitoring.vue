@@ -33,6 +33,7 @@ import {
 } from '@/composables/useTTLAnalysis'
 import { log } from '@/utils/logger'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
+import { formatClientFamily } from '@/features/usage/utils/clientFamily'
 
 // ==================== 缓存统计与亲和性列表 ====================
 
@@ -262,27 +263,6 @@ function affinityModelSubtitle(item: UserAffinity): string {
     return ''
   }
   return item.model_name
-}
-
-function formatClientFamily(family?: string | null): string {
-  switch (family) {
-    case 'codex':
-      return 'Codex'
-    case 'opencode':
-      return 'OpenCode'
-    case 'claude_code':
-      return 'Claude Code'
-    case 'openai_js_sdk':
-      return 'OpenAI JS SDK'
-    case 'generic':
-      return '通用'
-    case undefined:
-    case null:
-    case '':
-      return '未知'
-    default:
-      return family
-  }
 }
 
 function providerKeyLabel(item: UserAffinity): string {

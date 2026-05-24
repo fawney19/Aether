@@ -310,6 +310,10 @@ fn empty_database_snapshot_covers_current_cutoff_versions() {
             20260519000000,
             20260519120000,
             20260519130000,
+            20260520000000,
+            20260520010000,
+            20260522000000,
+            20260524000000,
         ]
     );
 }
@@ -386,9 +390,41 @@ fn empty_database_snapshot_sql_includes_usage_body_blobs_and_audit_admin_role() 
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("ix_usage_counter_deltas_unprocessed"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("idx_entitlement_usage_entitlement_date"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("idx_provider_api_keys_provider_default_sort"));
+    assert!(
+        EMPTY_DATABASE_SNAPSHOT_SQL.contains("idx_provider_api_keys_provider_active_priority_id")
+    );
+    assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("pool_member_scores_scheduler_account_rank_idx"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("idx_video_tasks_due_poll"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("request_count bigint DEFAULT 0"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("usage_count bigint DEFAULT 0 NOT NULL"));
+}
+
+#[test]
+fn usage_identity_foreign_keys_are_decoupled_for_historical_ingestion() {
+    let migration = POSTGRES_MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 20260522000000)
+        .expect("usage identity foreign key decoupling migration should be embedded");
+
+    for constraint in [
+        "usage_provider_id_fkey",
+        "usage_provider_endpoint_id_fkey",
+        "usage_provider_api_key_id_fkey",
+        "usage_api_key_id_fkey",
+        "usage_user_id_fkey",
+        "usage_wallet_id_fkey",
+    ] {
+        assert!(
+            migration
+                .sql
+                .contains(format!("DROP CONSTRAINT IF EXISTS {constraint}").as_str()),
+            "migration should drop {constraint}"
+        );
+        assert!(
+            !EMPTY_DATABASE_SNAPSHOT_SQL.contains(format!("ADD CONSTRAINT {constraint}").as_str()),
+            "fresh bootstrap snapshot should not recreate {constraint}"
+        );
+    }
 }
 
 #[test]
@@ -467,6 +503,30 @@ fn management_tokens_json_columns_are_normalized_to_jsonb_in_postgres_schema_pat
         include_str!("../../../schema/generated/postgres/baseline/001_identity.sql");
     assert!(generated_identity.contains("allowed_ips jsonb,"));
     assert!(generated_identity.contains("permissions jsonb,"));
+}
+
+#[test]
+fn api_key_ip_rules_is_jsonb_in_postgres_schema_paths() {
+    let api_key_ip_rules_migration = POSTGRES_MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 20260520000000)
+        .expect("api key IP rules migration should be embedded");
+    assert!(api_key_ip_rules_migration
+        .sql
+        .contains("ADD COLUMN IF NOT EXISTS ip_rules jsonb NULL"));
+    assert!(api_key_ip_rules_migration
+        .sql
+        .contains("ALTER COLUMN ip_rules TYPE jsonb USING ip_rules::jsonb"));
+
+    assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("ip_rules jsonb,"));
+
+    let bootstrap_schema =
+        include_str!("../../../schema/bootstrap/postgres/001_types_and_tables.sql");
+    assert!(bootstrap_schema.contains("ip_rules jsonb,"));
+
+    let generated_identity =
+        include_str!("../../../schema/generated/postgres/baseline/001_identity.sql");
+    assert!(generated_identity.contains("ip_rules jsonb,"));
 }
 
 #[test]
@@ -605,6 +665,9 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260519000000,
             20260519120000,
             20260519130000,
+            20260520000000,
+            20260520010000,
+            20260524000000,
         ]
     );
     assert_eq!(
@@ -626,6 +689,9 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260519000000,
             20260519120000,
             20260519130000,
+            20260520000000,
+            20260520010000,
+            20260524000000,
         ]
     );
 }
@@ -1147,6 +1213,10 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20260519000000,
             20260519120000,
             20260519130000,
+            20260520000000,
+            20260520010000,
+            20260522000000,
+            20260524000000,
         ]
     );
 }

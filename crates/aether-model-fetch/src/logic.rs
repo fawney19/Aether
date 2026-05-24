@@ -166,6 +166,107 @@ pub fn parse_models_response_page(
     })
 }
 
+pub fn parse_windsurf_model_configs_response(
+    body: &Value,
+    updated_at_unix_secs: u64,
+) -> Result<(ModelsFetchSuccess, Value), String> {
+    let configs = body
+        .get("clientModelConfigs")
+        .or_else(|| body.get("client_model_configs"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            "windsurf model configs response is missing clientModelConfigs".to_string()
+        })?;
+
+    let mut cached_models = Vec::new();
+    let mut metadata_models = Vec::new();
+    let mut seen = BTreeSet::new();
+    for config in configs {
+        let Some(model_id) =
+            windsurf_model_config_string(config, &["modelUid", "model_uid", "id", "name"])
+        else {
+            continue;
+        };
+        if !seen.insert(model_id.clone()) {
+            continue;
+        }
+
+        let label = windsurf_model_config_string(config, &["label", "displayName", "display_name"]);
+        let provider = windsurf_model_config_string(config, &["provider"]);
+        let supports_images = config
+            .get("supportsImages")
+            .or_else(|| config.get("supports_images"))
+            .and_then(windsurf_json_bool);
+        let credit_multiplier = config
+            .get("creditMultiplier")
+            .or_else(|| config.get("credit_multiplier"))
+            .and_then(windsurf_json_f64);
+
+        let mut model = serde_json::Map::new();
+        model.insert("id".to_string(), json!(model_id.clone()));
+        model.insert("object".to_string(), json!("model"));
+        model.insert("model_uid".to_string(), json!(model_id.clone()));
+        model.insert(
+            "display_name".to_string(),
+            json!(label.as_deref().unwrap_or(model_id.as_str())),
+        );
+        model.insert(
+            "owned_by".to_string(),
+            json!(provider.as_deref().unwrap_or("windsurf")),
+        );
+        model.insert(
+            "api_formats".to_string(),
+            json!(["openai:chat", "openai:responses", "claude:messages"]),
+        );
+        if let Some(supports_images) = supports_images {
+            model.insert("supports_images".to_string(), json!(supports_images));
+        }
+        if let Some(credit_multiplier) = credit_multiplier {
+            model.insert("credit_multiplier".to_string(), json!(credit_multiplier));
+        }
+        cached_models.push(Value::Object(model));
+
+        let mut metadata_model = serde_json::Map::new();
+        metadata_model.insert("model_uid".to_string(), json!(model_id));
+        if let Some(label) = label {
+            metadata_model.insert("label".to_string(), json!(label));
+        }
+        if let Some(provider) = provider {
+            metadata_model.insert("provider".to_string(), json!(provider));
+        }
+        if let Some(supports_images) = supports_images {
+            metadata_model.insert("supports_images".to_string(), json!(supports_images));
+        }
+        if let Some(credit_multiplier) = credit_multiplier {
+            metadata_model.insert("credit_multiplier".to_string(), json!(credit_multiplier));
+        }
+        metadata_models.push(Value::Object(metadata_model));
+    }
+
+    let mut windsurf_metadata = serde_json::Map::new();
+    windsurf_metadata.insert("updated_at".to_string(), json!(updated_at_unix_secs));
+    windsurf_metadata.insert(
+        "allowed_models_count".to_string(),
+        json!(metadata_models.len() as u64),
+    );
+    windsurf_metadata.insert("models".to_string(), Value::Array(metadata_models));
+    if let Some(default_model_uid) = body
+        .get("defaultOverrideModelConfig")
+        .or_else(|| body.get("default_override_model_config"))
+        .and_then(|config| windsurf_model_config_string(config, &["modelUid", "model_uid"]))
+    {
+        windsurf_metadata.insert("default_model_uid".to_string(), json!(default_model_uid));
+    }
+
+    Ok((
+        ModelsFetchSuccess {
+            fetched_model_ids: collect_cached_model_ids(&cached_models),
+            cached_models,
+        },
+        json!({ "windsurf": windsurf_metadata }),
+    ))
+}
+
 pub fn selected_models_fetch_endpoints(
     endpoints: &[StoredProviderCatalogEndpoint],
     key: &StoredProviderCatalogKey,
@@ -395,6 +496,31 @@ pub fn json_string_list(value: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn api_format_priority(api_format: &str) -> Option<(usize, usize)> {
+    MODEL_FETCH_FORMAT_PRIORITY
+        .iter()
+        .enumerate()
+        .find_map(|(group_index, group)| {
+            group
+                .iter()
+                .position(|candidate| candidate.eq_ignore_ascii_case(api_format))
+                .map(|format_index| (group_index, format_index))
+        })
+}
+
+fn sorted_api_formats(formats: BTreeSet<String>) -> Vec<String> {
+    let mut formats = formats.into_iter().collect::<Vec<_>>();
+    formats.sort_by(
+        |left, right| match (api_format_priority(left), api_format_priority(right)) {
+            (Some(left_priority), Some(right_priority)) => left_priority.cmp(&right_priority),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.cmp(right),
+        },
+    );
+    formats
+}
+
 pub fn aggregate_models_for_cache(models: &[Value]) -> Vec<Value> {
     let mut aggregated = BTreeMap::<String, serde_json::Map<String, Value>>::new();
 
@@ -456,7 +582,7 @@ pub fn aggregate_models_for_cache(models: &[Value]) -> Vec<Value> {
         if let Some(api_format) = legacy_api_format {
             merged_formats.insert(api_format);
         }
-        let merged_formats = merged_formats
+        let merged_formats = sorted_api_formats(merged_formats)
             .into_iter()
             .map(Value::String)
             .collect::<Vec<_>>();
@@ -559,6 +685,53 @@ fn model_id_from_openai_like_item(item: &Value) -> Option<String> {
             .filter(|value| !value.is_empty())
             .map(|value| value.trim_start_matches("models/").to_string())
     })
+}
+
+fn windsurf_model_config_string(value: &Value, fields: &[&str]) -> Option<String> {
+    fields.iter().find_map(|field| {
+        value
+            .get(*field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn windsurf_json_bool(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(value) => Some(*value),
+        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn windsurf_json_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn collect_cached_model_ids(models: &[Value]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for model in models {
+        let Some(model_id) = model
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        ids.push(model_id.to_string());
+    }
+    ids
 }
 
 fn split_url_query(base_url: &str) -> (&str, Option<&str>) {
@@ -726,6 +899,20 @@ mod tests {
         assert_eq!(
             aggregated[0]["api_formats"],
             json!(["openai:chat", "openai:responses"])
+        );
+    }
+
+    #[test]
+    fn aggregate_models_for_cache_orders_api_formats_by_canonical_priority() {
+        let aggregated = aggregate_models_for_cache(&[
+            json!({"id":"claude-sonnet-4-6","api_formats":["claude:messages"]}),
+            json!({"id":"claude-sonnet-4-6","api_formats":["openai:responses"]}),
+            json!({"id":"claude-sonnet-4-6","api_formats":["openai:chat"]}),
+        ]);
+        assert_eq!(aggregated.len(), 1);
+        assert_eq!(
+            aggregated[0]["api_formats"],
+            json!(["openai:chat", "openai:responses", "claude:messages"])
         );
     }
 

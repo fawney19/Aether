@@ -20,6 +20,7 @@ use tracing::{debug, error, trace};
 use crate::state::TunnelMetrics;
 
 use super::protocol::Frame;
+use aether_contracts::tunnel_security::SecureFrameCodec;
 
 const HIGH_PRIORITY_QUEUE_CAPACITY: usize = 64;
 const NORMAL_PRIORITY_QUEUE_CAPACITY: usize = 256;
@@ -89,10 +90,23 @@ where
 }
 
 /// Spawn the writer task with optional tunnel metrics instrumentation.
+#[allow(dead_code)]
 pub fn spawn_writer_with_metrics<S>(
+    sink: S,
+    ping_interval: Duration,
+    tunnel_metrics: Option<Arc<TunnelMetrics>>,
+) -> (FrameSender, JoinHandle<()>)
+where
+    S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin + Send + 'static,
+{
+    spawn_writer_with_metrics_and_security(sink, ping_interval, tunnel_metrics, None)
+}
+
+pub fn spawn_writer_with_metrics_and_security<S>(
     mut sink: S,
     ping_interval: Duration,
     tunnel_metrics: Option<Arc<TunnelMetrics>>,
+    security: Option<Arc<SecureFrameCodec>>,
 ) -> (FrameSender, JoinHandle<()>)
 where
     S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin + Send + 'static,
@@ -109,7 +123,14 @@ where
 
         loop {
             if let Ok(frame) = high_rx.try_recv() {
-                if !write_frame(&mut sink, frame, tunnel_metrics.as_deref()).await {
+                if !write_frame(
+                    &mut sink,
+                    frame,
+                    tunnel_metrics.as_deref(),
+                    security.as_deref(),
+                )
+                .await
+                {
                     break;
                 }
                 continue;
@@ -123,7 +144,7 @@ where
                 frame = high_rx.recv(), if high_open => {
                     match frame {
                         Some(frame) => {
-                            if !write_frame(&mut sink, frame, tunnel_metrics.as_deref()).await {
+                            if !write_frame(&mut sink, frame, tunnel_metrics.as_deref(), security.as_deref()).await {
                                 break;
                             }
                         }
@@ -143,7 +164,7 @@ where
                 frame = normal_rx.recv(), if normal_open => {
                     match frame {
                         Some(frame) => {
-                            if !write_frame(&mut sink, frame, tunnel_metrics.as_deref()).await {
+                            if !write_frame(&mut sink, frame, tunnel_metrics.as_deref(), security.as_deref()).await {
                                 break;
                             }
                         }
@@ -175,14 +196,31 @@ fn classify_frame_priority(frame: &Frame) -> FramePriority {
     }
 }
 
-async fn write_frame<S>(sink: &mut S, frame: Frame, tunnel_metrics: Option<&TunnelMetrics>) -> bool
+async fn write_frame<S>(
+    sink: &mut S,
+    frame: Frame,
+    tunnel_metrics: Option<&TunnelMetrics>,
+    security: Option<&SecureFrameCodec>,
+) -> bool
 where
     S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin + Send + 'static,
 {
     let stream_id = frame.stream_id;
     let msg_type = frame.msg_type;
     let flags = frame.flags;
-    let data = frame.encode();
+    let data = match security {
+        Some(codec) => match codec.encrypt_frame(frame) {
+            Ok(data) => data,
+            Err(e) => {
+                error!(error = %e, "failed to encrypt tunnel frame");
+                if let Some(metrics) = tunnel_metrics {
+                    metrics.record_error("secure_frame_encrypt_error", &e.to_string());
+                }
+                return false;
+            }
+        },
+        None => frame.encode(),
+    };
     let wire_len = data.len().max(HEADER_SIZE);
     if let Err(e) = sink.send(Message::Binary(data.into())).await {
         error!(

@@ -14,7 +14,7 @@ pub enum SchemaError {
     #[error("failed to parse schema file {path}: {source}")]
     Parse {
         path: PathBuf,
-        source: toml::de::Error,
+        source: Box<toml::de::Error>,
     },
     #[error("failed to write generated schema file {path}: {source}")]
     Write {
@@ -221,7 +221,7 @@ pub fn load_schema_sources(root: impl AsRef<Path>) -> Result<LoadedSchema, Schem
         })?;
         let file: SchemaFile = toml::from_str(&text).map_err(|source| SchemaError::Parse {
             path: path.clone(),
-            source,
+            source: Box::new(source),
         })?;
         let mut source_tables = Vec::new();
         for (name, table) in file.table {

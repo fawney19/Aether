@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::auth::{
@@ -49,6 +50,65 @@ fn disabled_gateway_data_state_has_no_backends() {
     assert!(!state.has_proxy_node_writer());
     assert!(!state.has_usage_reader());
     assert!(!state.has_video_task_reader());
+}
+
+#[test]
+fn maintenance_pool_pressure_keeps_idle_reserve_for_foreground_work() {
+    let pressured = aether_data::DatabasePoolSummary {
+        driver: DatabaseDriver::Postgres,
+        checked_out: 6,
+        pool_size: 6,
+        idle: 0,
+        max_connections: 20,
+        usage_rate: 30.0,
+    };
+    assert!(GatewayDataState::database_pool_summary_under_maintenance_pressure(&pressured));
+
+    let one_idle_left = aether_data::DatabasePoolSummary {
+        driver: DatabaseDriver::Postgres,
+        checked_out: 5,
+        pool_size: 6,
+        idle: 1,
+        max_connections: 20,
+        usage_rate: 25.0,
+    };
+    assert!(GatewayDataState::database_pool_summary_under_maintenance_pressure(&one_idle_left));
+
+    let idle = aether_data::DatabasePoolSummary {
+        driver: DatabaseDriver::Postgres,
+        checked_out: 0,
+        pool_size: 4,
+        idle: 4,
+        max_connections: 20,
+        usage_rate: 0.0,
+    };
+    assert!(!GatewayDataState::database_pool_summary_under_maintenance_pressure(&idle));
+}
+
+#[test]
+fn maintenance_pool_pressure_deferral_has_timeout() {
+    let mut deferred_since = None;
+    assert!(
+        GatewayDataState::should_defer_maintenance_for_pool_pressure_state(
+            true,
+            &mut deferred_since
+        )
+    );
+    assert!(deferred_since.is_some());
+
+    assert!(
+        !GatewayDataState::should_defer_maintenance_for_pool_pressure_state(
+            false,
+            &mut deferred_since
+        )
+    );
+    assert!(deferred_since.is_none());
+
+    let mut stale_defer = Some(Instant::now() - Duration::from_secs(31));
+    assert!(
+        !GatewayDataState::should_defer_maintenance_for_pool_pressure_state(true, &mut stale_defer)
+    );
+    assert!(stale_defer.is_none());
 }
 
 #[tokio::test]

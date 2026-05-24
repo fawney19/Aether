@@ -5,8 +5,11 @@ use super::local_monitoring_response;
 use crate::data::GatewayDataState;
 use crate::AppState;
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
-use aether_data_contracts::repository::candidates::RequestCandidateStatus;
+use aether_data_contracts::repository::{
+    candidates::RequestCandidateStatus, usage::UsageBodyCaptureState,
+};
 use axum::body::to_bytes;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -76,6 +79,133 @@ async fn admin_monitoring_trace_request_returns_local_payload() {
     assert_eq!(payload["candidates"][0]["key_auth_type"], json!("api_key"));
     assert_eq!(payload["candidates"][0]["latency_ms"], json!(33));
     assert_eq!(payload["candidates"][0]["status_code"], json!(502));
+}
+
+#[tokio::test]
+async fn admin_monitoring_trace_request_resolves_usage_id_to_header_trace_id() {
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(vec![
+        sample_candidate(
+            "cand-used",
+            "trace-1",
+            0,
+            RequestCandidateStatus::Success,
+            Some(101),
+            Some(33),
+            Some(200),
+        ),
+    ]));
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider()],
+        vec![sample_endpoint()],
+        vec![sample_key()],
+    ));
+    let mut usage = sample_usage(
+        "usage-request-1",
+        "provider-1",
+        "OpenAI",
+        40,
+        0.02,
+        "completed",
+        Some(200),
+        100,
+    );
+    usage.id = "usage-row-1".to_string();
+    usage.candidate_id = Some("cand-used".to_string());
+    usage.request_headers = Some(json!({
+        "x-trace-id": "trace-1"
+    }));
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![usage]));
+    let data_state =
+        crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+            request_candidates,
+            usage_repository,
+        )
+        .with_provider_catalog_reader(provider_catalog);
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(data_state);
+    let context = request_context(
+        http::Method::GET,
+        "/api/admin/monitoring/trace/usage-row-1?attempted_only=true",
+    );
+
+    let response = local_monitoring_response(&state, &context)
+        .await
+        .expect("handler should not error")
+        .expect("route should be handled locally");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    assert_eq!(payload["request_id"], json!("trace-1"));
+    assert_eq!(payload["candidates"][0]["id"], json!("cand-used"));
+    assert_eq!(
+        payload["candidates"][0]["extra_data"]["first_byte_time_ms"],
+        json!(30)
+    );
+}
+
+#[tokio::test]
+async fn admin_monitoring_trace_request_resolves_usage_request_id_to_metadata_trace_id() {
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(vec![
+        sample_candidate(
+            "cand-used",
+            "trace-2",
+            0,
+            RequestCandidateStatus::Success,
+            Some(101),
+            Some(33),
+            Some(200),
+        ),
+    ]));
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider()],
+        vec![sample_endpoint()],
+        vec![sample_key()],
+    ));
+    let mut usage = sample_usage(
+        "usage-request-2",
+        "provider-1",
+        "OpenAI",
+        40,
+        0.02,
+        "completed",
+        Some(200),
+        100,
+    );
+    usage.candidate_id = Some("cand-used".to_string());
+    usage.request_metadata = Some(json!({
+        "trace_id": "trace-2"
+    }));
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![usage]));
+    let data_state =
+        crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+            request_candidates,
+            usage_repository,
+        )
+        .with_provider_catalog_reader(provider_catalog);
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(data_state);
+    let context = request_context(
+        http::Method::GET,
+        "/api/admin/monitoring/trace/usage-request-2",
+    );
+
+    let response = local_monitoring_response(&state, &context)
+        .await
+        .expect("handler should not error")
+        .expect("route should be handled locally");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    assert_eq!(payload["request_id"], json!("trace-2"));
+    assert_eq!(payload["candidates"][0]["id"], json!("cand-used"));
 }
 
 #[tokio::test]
@@ -528,6 +658,89 @@ async fn admin_monitoring_trace_request_exposes_failed_candidate_upstream_respon
     );
     assert!(extra.get("client_response").is_none());
     assert!(extra.get("provider_response").is_none());
+}
+
+#[tokio::test]
+async fn admin_monitoring_trace_request_decodes_connect_json_response_body_refs() {
+    let mut candidate = sample_candidate(
+        "cand-used",
+        "request-connect",
+        0,
+        RequestCandidateStatus::Failed,
+        Some(101),
+        Some(33),
+        Some(429),
+    );
+    candidate.extra_data = Some(json!({"cache_1h": true}));
+
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(vec![candidate]));
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider()],
+        vec![sample_endpoint()],
+        vec![sample_key()],
+    ));
+    let mut usage = sample_usage(
+        "request-connect",
+        "provider-1",
+        "Windsurf",
+        0,
+        0.0,
+        "failed",
+        Some(429),
+        100,
+    );
+    usage.candidate_id = Some("cand-used".to_string());
+    usage.response_headers = Some(json!({
+        "content-type": "application/connect+json"
+    }));
+    let mut framed = Vec::new();
+    framed.push(2);
+    let payload = br#"{"error":{"code":"resource_exhausted","message":"quota exhausted"}}"#;
+    framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    framed.extend_from_slice(payload);
+    usage.response_body = Some(json!(BASE64_STANDARD.encode(framed)));
+    usage.response_body_ref = Some("usage://request/request-connect/response_body".to_string());
+    usage.response_body_state = Some(UsageBodyCaptureState::Inline);
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![usage]));
+    let data_state =
+        crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+            request_candidates,
+            usage_repository,
+        )
+        .with_provider_catalog_reader(provider_catalog);
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(data_state);
+    let context = request_context(
+        http::Method::GET,
+        "/api/admin/monitoring/trace/request-connect",
+    );
+
+    let response = local_monitoring_response(&state, &context)
+        .await
+        .expect("handler should not error")
+        .expect("route should be handled locally");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    let upstream_response = &payload["candidates"][0]["extra_data"]["upstream_response"];
+    assert_eq!(upstream_response["status_code"], json!(429));
+    assert_eq!(
+        upstream_response["body"]["error"]["code"],
+        json!("resource_exhausted")
+    );
+    assert_eq!(
+        upstream_response["body"]["error"]["message"],
+        json!("quota exhausted")
+    );
+    assert_eq!(
+        upstream_response["body_ref"],
+        json!("usage://request/request-connect/response_body")
+    );
+    assert_eq!(upstream_response["body_state"], json!("inline"));
 }
 
 #[tokio::test]

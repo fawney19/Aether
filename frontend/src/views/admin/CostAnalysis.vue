@@ -111,6 +111,7 @@ import { adminApi, type CostForecastResponse, type CostSavingsResponse, type Lea
 import { usageApi } from '@/api/usage'
 import { formatCurrency, formatTokens } from '@/utils/format'
 import { getDateRangeFromPeriod } from '@/features/usage/composables'
+import { normalizeUsageProviderStats } from '@/features/usage/utils/providerStats'
 import type { DateRangeParams } from '@/features/usage/types'
 import type { ProviderStatsItem } from '@/features/usage/types'
 
@@ -196,7 +197,7 @@ async function loadProviderStats() {
     limit: 8
   })
   if (requestId !== providerStatsRequestId) return
-  providerStats.value = stats
+  providerStats.value = normalizeUsageProviderStats(stats)
 }
 
 async function loadApiKeyLeaderboard() {

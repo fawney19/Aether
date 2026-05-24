@@ -16,11 +16,15 @@ use rsa::RsaPrivateKey;
 use serde_json::{json, Value};
 use sha2::Sha256;
 
-use crate::logic::{extract_error_message, parse_models_response_page, preset_models_for_provider};
+use crate::logic::{
+    extract_error_message, parse_models_response_page, parse_windsurf_model_configs_response,
+    preset_models_for_provider,
+};
 use crate::transport::{
     build_antigravity_fetch_available_models_plan, build_gemini_cli_load_code_assist_plan,
     build_kiro_list_available_models_plan, build_standard_models_fetch_execution_plan,
-    build_vertex_models_fetch_execution_plan, ModelFetchTransportRuntime,
+    build_vertex_models_fetch_execution_plan, build_windsurf_model_configs_execution_plan,
+    ModelFetchTransportRuntime,
 };
 
 const ANTIGRAVITY_SANDBOX_BASE_URL: &str = "https://daily-cloudcode-pa.sandbox.googleapis.com";
@@ -51,6 +55,7 @@ pub enum ModelFetchStrategyKind {
     Antigravity,
     GeminiCliPreset,
     Kiro,
+    Windsurf,
 }
 
 pub trait ModelFetchStrategy {
@@ -136,6 +141,7 @@ fn select_model_fetch_strategy(
     let kind = match provider_type.as_str() {
         "antigravity" => ModelFetchStrategyKind::Antigravity,
         "vertex_ai" => ModelFetchStrategyKind::Vertex,
+        "windsurf" => ModelFetchStrategyKind::Windsurf,
         _ => ModelFetchStrategyKind::StandardTransport,
     };
     Ok(SelectedModelFetchStrategy {
@@ -176,6 +182,7 @@ async fn execute_model_fetch_strategy(
             .await
         }
         ModelFetchStrategyKind::Kiro => fetch_kiro_models(runtime, first_transport).await,
+        ModelFetchStrategyKind::Windsurf => fetch_windsurf_models(runtime, first_transport).await,
     }
 }
 
@@ -364,6 +371,25 @@ async fn fetch_kiro_models(
     let body_json = execution_result_json_body_allow_empty(&result)?;
     let (models, metadata) = parse_kiro_available_models_response(&body_json)?;
     Ok(build_success_outcome(models, metadata, true))
+}
+
+async fn fetch_windsurf_models(
+    runtime: &(impl ModelFetchTransportRuntime + ?Sized),
+    transport: &GatewayProviderTransportSnapshot,
+) -> Result<ModelsFetchOutcome, String> {
+    let plan = build_windsurf_model_configs_execution_plan(runtime, transport).await?;
+    let result = runtime.execute_model_fetch_execution_plan(&plan).await?;
+    if !(200..300).contains(&result.status_code) {
+        return Err(execution_result_error_message(&result));
+    }
+
+    let body_json = execution_result_json_body_allow_empty(&result)?;
+    let (models, metadata) = parse_windsurf_model_configs_response(&body_json, now_unix_secs())?;
+    Ok(build_success_outcome(
+        models.cached_models,
+        Some(metadata),
+        true,
+    ))
 }
 
 async fn fetch_vertex_models(
@@ -1413,6 +1439,22 @@ mod tests {
         transport
     }
 
+    fn sample_windsurf_transport() -> GatewayProviderTransportSnapshot {
+        let mut transport = sample_custom_aiplatform_transport();
+        transport.provider.provider_type = "windsurf".to_string();
+        transport.provider.name = "Windsurf".to_string();
+        transport.endpoint.api_format = "openai:chat".to_string();
+        transport.endpoint.api_family = Some("openai".to_string());
+        transport.endpoint.endpoint_kind = Some("chat".to_string());
+        transport.endpoint.base_url = "https://server.codeium.com".to_string();
+        transport.endpoint.custom_path = None;
+        transport.key.auth_type = "oauth".to_string();
+        transport.key.api_formats = Some(vec!["openai:chat".to_string()]);
+        transport.key.decrypted_api_key = "devin-session-token$abc".to_string();
+        transport.key.decrypted_auth_config = Some(r#"{"provider_type":"windsurf"}"#.to_string());
+        transport
+    }
+
     #[test]
     fn strategy_selection_keeps_codex_on_standard_transport_fetch() {
         let strategy = select_model_fetch_strategy(&[sample_codex_transport()])
@@ -1441,6 +1483,15 @@ mod tests {
 
         assert_eq!(strategy.provider_id(), "kiro");
         assert_eq!(strategy.kind(), ModelFetchStrategyKind::Kiro);
+    }
+
+    #[test]
+    fn strategy_selection_uses_windsurf_model_configs_fetch() {
+        let strategy = select_model_fetch_strategy(&[sample_windsurf_transport()])
+            .expect("strategy should select");
+
+        assert_eq!(strategy.provider_id(), "windsurf");
+        assert_eq!(strategy.kind(), ModelFetchStrategyKind::Windsurf);
     }
 
     #[tokio::test]
@@ -1627,6 +1678,60 @@ mod tests {
                     .and_then(|value| value.get("model_id"))
             }),
             Some(&json!("auto"))
+        );
+    }
+
+    #[tokio::test]
+    async fn windsurf_transport_fetches_cascade_model_configs() {
+        let executed_urls = Arc::new(Mutex::new(Vec::new()));
+        let runtime = TestRuntime {
+            executed_urls: Arc::clone(&executed_urls),
+            response_body: json!({
+                "clientModelConfigs": [
+                    {
+                        "modelUid": "claude-sonnet-4-6",
+                        "label": "Claude Sonnet 4.6",
+                        "provider": "anthropic",
+                        "supportsImages": true,
+                        "creditMultiplier": 4
+                    },
+                    {
+                        "modelUid": "gpt-5.4",
+                        "label": "GPT-5.4",
+                        "provider": "openai"
+                    }
+                ],
+                "defaultOverrideModelConfig": {
+                    "modelUid": "claude-sonnet-4-6"
+                }
+            }),
+            status_code: 200,
+        };
+        let outcome = fetch_models_from_transports(&runtime, &[sample_windsurf_transport()])
+            .await
+            .expect("models fetch should succeed");
+
+        let urls = executed_urls.lock().expect("executed_urls lock");
+        assert_eq!(
+            urls.as_slice(),
+            &["https://server.codeium.com/exa.api_server_pb.ApiServerService/GetCascadeModelConfigs"]
+        );
+        assert_eq!(
+            outcome.fetched_model_ids,
+            vec!["claude-sonnet-4-6".to_string(), "gpt-5.4".to_string()]
+        );
+        assert_eq!(outcome.cached_models.len(), 2);
+        assert_eq!(
+            outcome.cached_models[0]["api_formats"],
+            json!(["openai:chat", "openai:responses", "claude:messages"])
+        );
+        assert_eq!(
+            outcome.upstream_metadata.as_ref().and_then(|value| {
+                value
+                    .get("windsurf")
+                    .and_then(|value| value.get("allowed_models_count"))
+            }),
+            Some(&json!(2))
         );
     }
 }

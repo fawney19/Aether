@@ -308,7 +308,9 @@ fn usage_sql_rebuild_matches_online_provider_key_usage_semantics() {
     assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL
         .contains("AND BTRIM(provider_api_key_id) <> ''"));
     assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL
-        .contains("AND status NOT IN ('pending', 'streaming')"));
+        .contains("WHEN status NOT IN ('pending', 'streaming')"));
+    assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL
+        .contains("WHEN status IN ('pending', 'streaming') THEN 0"));
 }
 
 #[test]
@@ -437,6 +439,30 @@ fn usage_sql_summarize_usage_daily_heatmap_supports_daily_aggregates() {
 }
 
 #[test]
+fn usage_sql_daily_cutoff_falls_back_to_imported_stats_daily() {
+    let source = include_str!("mod.rs");
+    assert!(source.contains("FROM stats_summary"));
+    assert!(source.contains("SELECT MAX(date) AS latest_date"));
+    assert!(source.contains("FROM stats_daily"));
+    assert!(source.contains("FROM stats_user_daily"));
+    assert!(source.contains("FROM stats_daily_api_key"));
+    assert!(source.contains("value + chrono::Duration::days(1)"));
+}
+
+#[test]
+fn usage_sql_dashboard_daily_breakdown_falls_back_to_daily_totals() {
+    let source = include_str!("mod.rs");
+    assert!(source.contains("list_dashboard_daily_breakdown_aggregate_segments"));
+    assert!(source.contains("list_dashboard_daily_breakdown_from_daily_totals"));
+    assert!(source.contains("'aggregate'::TEXT AS model"));
+    assert!(source.contains("FROM stats_daily"));
+    assert!(source.contains("FROM stats_user_daily"));
+    assert!(source.contains("detailed_dates.contains(&item.date)"));
+    assert!(source.contains("query.tz_offset_minutes != 0"));
+    assert!(source.contains("aggregate_dates.insert(item.date.clone())"));
+}
+
+#[test]
 fn usage_sql_summarize_usage_leaderboard_supports_daily_aggregates() {
     let source = include_str!("mod.rs");
     assert!(source.contains("summarize_usage_leaderboard_from_daily_aggregates"));
@@ -464,16 +490,24 @@ fn usage_sql_aggregate_usage_audits_supports_daily_model_and_provider_aggregates
 #[test]
 fn usage_sql_provider_aggregation_excludes_unknown_provider_labels() {
     let source = include_str!("mod.rs");
-    assert!(source.contains(
-        r#"const USAGE_PROVIDER_IDENTITY_FILTER_SQL: &str = " AND BTRIM(COALESCE(\"usage\".provider_id, '')) <> ''"#
-    ));
+    assert!(source.contains("const USAGE_PROVIDER_IDENTITY_FILTER_SQL"));
+    assert!(source.contains("const USAGE_PROVIDER_IDENTITY_SOURCE_SQL"));
+    assert!(source.contains(r#"BTRIM(COALESCE("usage".provider_id, '')) <> ''"#));
+    assert!(source.contains(r#"BTRIM(COALESCE("usage".provider_name, '')) <> ''"#));
     assert!(source.contains("LEFT JOIN providers AS provider_by_id"));
     assert!(source.contains("provider_by_id.id = BTRIM(\"usage\".provider_id)"));
+    assert!(source.contains("COALESCE(\n      provider_by_id.id,\n      CASE"));
     assert!(
-        source.contains("COALESCE(\n      provider_by_id.id,\n      BTRIM(\"usage\".provider_id)")
+        source.contains(
+            "ELSE BTRIM(\"usage\".provider_id)\n      END,\n      CASE\n        WHEN BTRIM(COALESCE(\"usage\".provider_name, ''))"
+        )
     );
     assert!(source.contains("COALESCE(\n      provider_by_id.name,"));
     assert!(!source.contains("provider_by_name.name = BTRIM(\"usage\".provider_name)"));
+    assert!(source.contains("{provider_identity_source_expr} AS provider_identity_source"));
+    assert!(source.contains(r#"secondary_name_expr: "provider_identity_source""#));
+    assert!(source
+        .contains("COUNT(*) FILTER (WHERE secondary_name = 'provider_id') > 0 THEN 'provider_id'"));
     assert!(source.contains(
         "if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider) {\n            return self.aggregate_usage_audits_raw(query).await;"
     ));
@@ -493,10 +527,41 @@ fn usage_sql_summarize_total_tokens_by_api_key_ids_supports_daily_aggregates() {
 }
 
 #[test]
+fn dashboard_aggregate_schema_mismatch_detector_matches_legacy_schema_failures() {
+    assert!(super::dashboard_aggregate_schema_mismatch_message(
+        "postgres error: error occurred while decoding column \"cutoff_date\": \
+         mismatched types; Rust type `chrono::DateTime<Utc>` (as SQL type `TIMESTAMPTZ`) \
+         is not compatible with SQL type `INT8`"
+    ));
+    assert!(super::dashboard_aggregate_schema_mismatch_message(
+        "postgres error: db error: ERROR: relation \"stats_daily_model_provider\" does not exist"
+    ));
+    assert!(super::dashboard_aggregate_schema_mismatch_message(
+        "postgres error: db error: ERROR: column \"effective_input_tokens\" does not exist"
+    ));
+    assert!(!super::dashboard_aggregate_schema_mismatch_message(
+        "postgres error: db error: ERROR: permission denied for relation stats_daily"
+    ));
+}
+
+#[test]
+fn dashboard_aggregate_reads_fallback_to_raw_on_schema_mismatch() {
+    let source = include_str!("mod.rs");
+    assert!(source.contains("dashboard_should_fallback_to_raw_on_aggregate_error"));
+    assert!(
+        source.contains("Err(err) if dashboard_should_fallback_to_raw_on_aggregate_error(&err)")
+    );
+    assert!(source.contains("return self.list_dashboard_daily_breakdown_raw(query).await;"));
+}
+
+#[test]
 fn usage_sql_summarize_usage_totals_by_user_ids_supports_user_summary_aggregates() {
     let source = include_str!("mod.rs");
     assert!(source.contains("FROM stats_user_summary"));
     assert!(source.contains("all_time_input_tokens"));
+    assert!(source.contains("FROM stats_user_daily"));
+    assert!(source.contains("date < $2"));
+    assert!(source.contains("summary_user_ids.contains(&user_id)"));
 }
 
 #[test]
@@ -815,6 +880,14 @@ fn usage_sql_clears_stale_failure_fields_for_non_failed_status_updates() {
     assert!(super::UPSERT_SQL.contains(
             "WHEN EXCLUDED.status IN ('pending', 'streaming', 'completed', 'cancelled') THEN EXCLUDED.error_category"
         ));
+}
+
+#[test]
+fn stale_cleanup_failed_candidate_sql_orders_by_effective_timestamp() {
+    let sql = super::SELECT_LATEST_FAILED_CANDIDATE_FOR_STALE_REQUESTS_SQL;
+    assert!(sql.contains("COALESCE(finished_at, started_at, created_at) DESC"));
+    assert!(!sql.contains("finished_at DESC NULLS LAST"));
+    assert!(!sql.contains("started_at DESC NULLS LAST"));
 }
 
 #[test]

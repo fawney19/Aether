@@ -404,27 +404,10 @@ impl GeminiClientEmitter {
             Value::Array(vec![Value::Object(candidate)]),
         );
         if let Some(usage) = usage {
-            let visible_output_tokens = usage.output_tokens.saturating_sub(usage.reasoning_tokens);
-            let mut usage_metadata = Map::new();
-            usage_metadata.insert(
-                "promptTokenCount".to_string(),
-                Value::from(usage.input_tokens),
+            response.insert(
+                "usageMetadata".to_string(),
+                gemini_usage_metadata_from_usage(&usage),
             );
-            usage_metadata.insert(
-                "candidatesTokenCount".to_string(),
-                Value::from(visible_output_tokens),
-            );
-            usage_metadata.insert(
-                "totalTokenCount".to_string(),
-                Value::from(usage.total_tokens),
-            );
-            if usage.reasoning_tokens > 0 {
-                usage_metadata.insert(
-                    "thoughtsTokenCount".to_string(),
-                    Value::from(usage.reasoning_tokens),
-                );
-            }
-            response.insert("usageMetadata".to_string(), Value::Object(usage_metadata));
         }
         encode_json_sse(None, &Value::Object(response))
     }
@@ -1000,6 +983,7 @@ mod tests {
                             output_tokens: 3,
                             reasoning_tokens: 1,
                             total_tokens: 4,
+                            cache_read_tokens: 5,
                             ..CanonicalUsage::default()
                         }),
                     },
@@ -1012,6 +996,7 @@ mod tests {
         assert!(sse.contains("\"thoughtSignature\":\"sig_123\""));
         assert!(sse.contains("\"thoughtsTokenCount\":1"));
         assert!(sse.contains("\"candidatesTokenCount\":2"));
+        assert!(sse.contains("\"cachedContentTokenCount\":5"));
         assert!(sse.contains("\"finishReason\":\"STOP\""));
     }
 

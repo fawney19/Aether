@@ -4,8 +4,8 @@ use sqlx::{mysql::MySqlRow, Row};
 use super::{
     InMemoryProviderCatalogReadRepository, ProviderCatalogKeyListQuery,
     ProviderCatalogReadRepository, ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint,
-    StoredProviderCatalogKey, StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats,
-    StoredProviderCatalogProvider,
+    StoredProviderCatalogKey, StoredProviderCatalogKeyMaintenanceSummary,
+    StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
 use crate::driver::mysql::MysqlPool;
 use crate::error::SqlResultExt;
@@ -925,6 +925,16 @@ impl ProviderCatalogReadRepository for MysqlProviderCatalogReadRepository {
         self.load_memory()
             .await?
             .list_key_summaries_by_provider_ids(provider_ids)
+            .await
+    }
+
+    async fn list_key_maintenance_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKeyMaintenanceSummary>, DataLayerError> {
+        self.load_memory()
+            .await?
+            .list_key_maintenance_summaries_by_provider_ids(provider_ids)
             .await
     }
 

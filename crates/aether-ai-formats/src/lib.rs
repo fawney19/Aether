@@ -29,7 +29,7 @@ pub use formats::shared::model_directives::{
 };
 pub use formats::shared::request::{
     endpoint_config_forces_upstream_stream_policy, enforce_request_body_stream_field,
-    resolve_upstream_is_stream_from_endpoint_config,
+    resolve_upstream_is_stream_from_endpoint_config, UPSTREAM_IS_STREAM_KEY,
 };
 pub use protocol::canonical::{
     canonical_request_unknown_block_count, canonical_response_unknown_block_count,

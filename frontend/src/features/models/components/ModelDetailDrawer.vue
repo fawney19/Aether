@@ -559,6 +559,7 @@ import RoutingTab from './RoutingTab.vue'
 import ModelMappingsTab from './ModelMappingsTab.vue'
 import { sortResolutionEntries } from '@/utils/form'
 import { parseApiError } from '@/utils/errorParser'
+import { formatCompactNumber, formatTokens } from '@/utils/format'
 import { getGlobalModelRoutingPreview } from '@/api/global-models'
 
 // 使用外部类型定义
@@ -734,13 +735,7 @@ function formatPixelLimit(value: number | null): string {
 }
 
 function formatPixels(value: number): string {
-  if (value >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(value % 1_000_000 === 0 ? 0 : 2)}M px`
-  }
-  if (value >= 1_000) {
-    return `${(value / 1_000).toFixed(0)}K px`
-  }
-  return `${value} px`
+  return `${formatCompactNumber(value)} px`
 }
 
 const detailTab = ref('basic')
@@ -790,12 +785,7 @@ function getTierCount(tieredPricing: TieredPricingConfig | undefined | null): nu
 // 格式化阶梯上限（tokens 数量简化显示）
 function formatTierLimit(limit: number | null | undefined): string {
   if (limit == null) return ''
-  if (limit >= 1000000) {
-    return `${(limit / 1000000).toFixed(1)}M`
-  } else if (limit >= 1000) {
-    return `${(limit / 1000).toFixed(0)}K`
-  }
-  return limit.toString()
+  return formatTokens(limit)
 }
 
 // 获取 1h 缓存价格

@@ -189,7 +189,7 @@ export function isUsageRecordFailed(record: UsageFailureSignal & Pick<UsageRecor
       return false
     }
     if (status === 'failed') {
-      return !hasTerminalSuccessStatusCode(record)
+      return true
     }
   }
   if (hasTerminalSuccessStatusCode(record)) {
@@ -208,7 +208,7 @@ export function isUsageRecordSuccessful(record: UsageFailureSignal & Pick<UsageR
       return true
     }
     if (status === 'failed') {
-      return hasTerminalSuccessStatusCode(record)
+      return false
     }
     return false
   }

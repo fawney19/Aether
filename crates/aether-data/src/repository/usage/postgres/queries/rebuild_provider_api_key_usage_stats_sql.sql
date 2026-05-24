@@ -24,15 +24,23 @@ WITH aggregated AS (
       END
     ), 0)::BIGINT AS error_count,
     COALESCE(SUM(
-      GREATEST(
-        COALESCE(
-          total_tokens,
-          COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
-        ),
-        0
-      )::BIGINT
+      CASE
+        WHEN status IN ('pending', 'streaming') THEN 0
+        ELSE GREATEST(
+          COALESCE(
+            total_tokens,
+            COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
+          ),
+          0
+        )::BIGINT
+      END
     ), 0)::BIGINT AS total_tokens,
-    COALESCE(SUM(COALESCE(total_cost_usd, 0)), 0)::NUMERIC(20,8) AS total_cost_usd,
+    COALESCE(SUM(
+      CASE
+        WHEN status IN ('pending', 'streaming') THEN 0
+        ELSE COALESCE(total_cost_usd, 0)
+      END
+    ), 0)::NUMERIC(20,8) AS total_cost_usd,
     COALESCE(SUM(
       CASE
         WHEN status IN ('completed', 'success', 'ok', 'billed', 'settled')
@@ -47,7 +55,6 @@ WITH aggregated AS (
   FROM usage_billing_facts AS "usage"
   WHERE provider_api_key_id IS NOT NULL
     AND BTRIM(provider_api_key_id) <> ''
-    AND status NOT IN ('pending', 'streaming')
   GROUP BY provider_api_key_id
 )
 UPDATE provider_api_keys

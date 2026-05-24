@@ -9,6 +9,31 @@ use tokio::net::TcpStream;
 use url::Url;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IpFamily {
+    Any,
+    Ipv4Only,
+    Ipv6Only,
+}
+
+impl IpFamily {
+    pub(crate) fn allows(self, addr: SocketAddr) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Ipv4Only => addr.is_ipv4(),
+            Self::Ipv6Only => addr.is_ipv6(),
+        }
+    }
+
+    pub(crate) fn no_address_message(self, context: &str) -> String {
+        match self {
+            Self::Any => format!("{context} DNS returned no addresses"),
+            Self::Ipv4Only => format!("{context} DNS returned no IPv4 addresses"),
+            Self::Ipv6Only => format!("{context} DNS returned no IPv6 addresses"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UpstreamProxyScheme {
     Http,
     Socks5,
@@ -126,6 +151,7 @@ pub(crate) struct ProxyConnectOptions {
     pub connect_timeout: Duration,
     pub tcp_nodelay: bool,
     pub tcp_keepalive: Option<Duration>,
+    pub ip_family: IpFamily,
 }
 
 pub(crate) async fn connect_target_via_proxy(
@@ -139,6 +165,7 @@ pub(crate) async fn connect_target_via_proxy(
         options.connect_timeout,
         options.tcp_nodelay,
         options.tcp_keepalive,
+        options.ip_family,
     )
     .await?;
 
@@ -159,6 +186,7 @@ pub(crate) async fn connect_proxy_tcp(
     connect_timeout: Duration,
     tcp_nodelay: bool,
     tcp_keepalive: Option<Duration>,
+    ip_family: IpFamily,
 ) -> io::Result<TcpStream> {
     let resolved = tokio::time::timeout(
         connect_timeout,
@@ -169,7 +197,7 @@ pub(crate) async fn connect_proxy_tcp(
     .map_err(|err| io::Error::other(format!("proxy DNS failed: {err}")))?;
 
     let mut last_error = None;
-    for addr in resolved {
+    for addr in resolved.filter(|addr| ip_family.allows(*addr)) {
         match tokio::time::timeout(connect_timeout, TcpStream::connect(addr)).await {
             Ok(Ok(stream)) => {
                 configure_tcp_stream(&stream, tcp_nodelay, tcp_keepalive)?;
@@ -185,7 +213,7 @@ pub(crate) async fn connect_proxy_tcp(
         }
     }
 
-    Err(last_error.unwrap_or_else(|| io::Error::other("proxy DNS returned no addresses")))
+    Err(last_error.unwrap_or_else(|| io::Error::other(ip_family.no_address_message("proxy"))))
 }
 
 fn configure_tcp_stream(

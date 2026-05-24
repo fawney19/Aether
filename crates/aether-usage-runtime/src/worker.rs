@@ -193,14 +193,81 @@ impl UsageQueueWorker {
         let event = match UsageEvent::from_stream_fields(&entry.fields) {
             Ok(event) => event,
             Err(err) => {
+                warn!(
+                    event_name = "usage_worker_entry_decode_dead_lettered",
+                    log_type = "ops",
+                    worker_consumer = %self.consumer,
+                    worker_group = %self.config.consumer_group,
+                    entry_id = %entry.id,
+                    error = %err,
+                    "usage worker moved malformed queue entry to dead letter"
+                );
                 self.queue.push_dead_letter(entry, &err.to_string()).await?;
                 return Ok(true);
             }
         };
 
-        self.recorder.record_usage_event(&event).await?;
-        Ok(true)
+        match self.recorder.record_usage_event(&event).await {
+            Ok(()) => Ok(true),
+            Err(err) if usage_event_record_error_is_permanent(&err) => {
+                warn!(
+                    event_name = "usage_worker_entry_record_dead_lettered",
+                    log_type = "ops",
+                    worker_consumer = %self.consumer,
+                    worker_group = %self.config.consumer_group,
+                    entry_id = %entry.id,
+                    request_id = %event.request_id,
+                    event_type = ?event.event_type,
+                    provider_name = %event.data.provider_name,
+                    model = %event.data.model,
+                    api_format = event.data.api_format.as_deref().unwrap_or(""),
+                    provider_id = event.data.provider_id.as_deref().unwrap_or(""),
+                    provider_endpoint_id = event.data.provider_endpoint_id.as_deref().unwrap_or(""),
+                    provider_api_key_id = event.data.provider_api_key_id.as_deref().unwrap_or(""),
+                    error = %err,
+                    "usage worker moved non-retryable usage event to dead letter"
+                );
+                self.queue.push_dead_letter(entry, &err.to_string()).await?;
+                Ok(true)
+            }
+            Err(err) => {
+                warn!(
+                    event_name = "usage_worker_entry_record_retryable_failed",
+                    log_type = "ops",
+                    worker_consumer = %self.consumer,
+                    worker_group = %self.config.consumer_group,
+                    entry_id = %entry.id,
+                    request_id = %event.request_id,
+                    event_type = ?event.event_type,
+                    provider_name = %event.data.provider_name,
+                    model = %event.data.model,
+                    api_format = event.data.api_format.as_deref().unwrap_or(""),
+                    provider_id = event.data.provider_id.as_deref().unwrap_or(""),
+                    provider_endpoint_id = event.data.provider_endpoint_id.as_deref().unwrap_or(""),
+                    provider_api_key_id = event.data.provider_api_key_id.as_deref().unwrap_or(""),
+                    error = %err,
+                    "usage worker will retry usage event after record failure"
+                );
+                Err(err)
+            }
+        }
     }
+}
+
+fn usage_event_record_error_is_permanent(err: &DataLayerError) -> bool {
+    match err {
+        DataLayerError::InvalidConfiguration(_)
+        | DataLayerError::InvalidInput(_)
+        | DataLayerError::UnexpectedValue(_) => true,
+        DataLayerError::Postgres(message) | DataLayerError::Sql(message) => {
+            database_error_is_known_permanent(message)
+        }
+        DataLayerError::Redis(_) | DataLayerError::TimedOut(_) => false,
+    }
+}
+
+fn database_error_is_known_permanent(message: &str) -> bool {
+    message.contains("SQLSTATE 23503") || message.contains("violates foreign key constraint")
 }
 
 pub fn build_usage_queue_worker<T>(
@@ -287,21 +354,33 @@ fn consumer_name() -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use aether_data_contracts::repository::settlement::{
         StoredUsageSettlement, UsageSettlementInput,
     };
     use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UpsertUsageRecord};
+    use aether_data_contracts::DataLayerError;
+    use aether_runtime_state::{MemoryRuntimeStateConfig, RuntimeQueueStore, RuntimeState};
     use async_trait::async_trait;
 
-    use super::{write_event_record, ManualProxyNodeCounter, UsageRecordWriter};
-    use crate::{UsageEvent, UsageEventData, UsageEventType, UsageSettlementWriter};
+    use super::{
+        usage_event_record_error_is_permanent, write_event_record, ManualProxyNodeCounter,
+        UsageEventRecorder, UsageQueueWorker, UsageRecordWriter,
+    };
+    use crate::{
+        UsageEvent, UsageEventData, UsageEventType, UsageRuntimeConfig, UsageSettlementWriter,
+    };
 
     #[derive(Default)]
     struct TestUsageStore {
         records: Mutex<Vec<UpsertUsageRecord>>,
         settlements: Mutex<Vec<UsageSettlementInput>>,
+    }
+
+    #[derive(Default)]
+    struct SelectiveFailingRecorder {
+        calls: Mutex<Vec<String>>,
     }
 
     #[async_trait]
@@ -392,6 +471,22 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl UsageEventRecorder for SelectiveFailingRecorder {
+        async fn record_usage_event(&self, event: &UsageEvent) -> Result<(), DataLayerError> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(event.request_id.clone());
+            if event.request_id == "req-worker-poison" {
+                return Err(DataLayerError::UnexpectedValue(
+                    "permanent test error".to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
     fn sample_event() -> UsageEvent {
         UsageEvent::new(
             UsageEventType::Completed,
@@ -435,5 +530,105 @@ mod tests {
         let settlements = store.settlements.lock().expect("settlements lock");
         assert_eq!(settlements.len(), 1);
         assert_eq!(settlements[0].request_id, "req-worker-123");
+    }
+
+    #[test]
+    fn usage_event_record_error_classifies_permanent_failures() {
+        assert!(usage_event_record_error_is_permanent(
+            &DataLayerError::UnexpectedValue("bad payload".to_string())
+        ));
+        assert!(usage_event_record_error_is_permanent(
+            &DataLayerError::Postgres(
+                "error returned from database: violates foreign key constraint (SQLSTATE 23503)"
+                    .to_string()
+            )
+        ));
+        assert!(!usage_event_record_error_is_permanent(
+            &DataLayerError::Redis("connection refused".to_string())
+        ));
+        assert!(!usage_event_record_error_is_permanent(
+            &DataLayerError::TimedOut("postgres acquire".to_string())
+        ));
+    }
+
+    #[tokio::test]
+    async fn process_entries_dead_letters_permanent_record_error_and_continues() {
+        let runner = Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let queue_runner: Arc<dyn RuntimeQueueStore> = runner.clone();
+        let recorder = Arc::new(SelectiveFailingRecorder::default());
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            stream_key: "usage:test:worker:events".to_string(),
+            consumer_group: "usage:test:worker:group".to_string(),
+            dlq_stream_key: "usage:test:worker:dlq".to_string(),
+            consumer_batch_size: 10,
+            consumer_block_ms: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let worker = UsageQueueWorker::new(queue_runner, recorder.clone(), config)
+            .expect("worker should build");
+        worker
+            .queue
+            .ensure_consumer_group()
+            .await
+            .expect("group should initialize");
+
+        let mut poison = sample_event();
+        poison.request_id = "req-worker-poison".to_string();
+        let mut ok = sample_event();
+        ok.request_id = "req-worker-ok".to_string();
+        worker
+            .queue
+            .enqueue(&poison)
+            .await
+            .expect("poison event should enqueue");
+        worker
+            .queue
+            .enqueue(&ok)
+            .await
+            .expect("ok event should enqueue");
+
+        let entries = worker
+            .queue
+            .read_group(&worker.consumer)
+            .await
+            .expect("events should read");
+        assert_eq!(entries.len(), 2);
+
+        worker
+            .process_entries(entries)
+            .await
+            .expect("permanent failure should not block batch");
+
+        assert_eq!(
+            recorder.calls.lock().expect("calls lock").as_slice(),
+            ["req-worker-poison", "req-worker-ok"]
+        );
+
+        runner
+            .ensure_consumer_group(
+                "usage:test:worker:dlq",
+                "usage:test:worker:dlq-group",
+                "0-0",
+            )
+            .await
+            .expect("dlq group should initialize");
+        let dlq_entries = runner
+            .read_group(
+                "usage:test:worker:dlq",
+                "usage:test:worker:dlq-group",
+                "usage-test-dlq-consumer",
+                10,
+                Some(1),
+            )
+            .await
+            .expect("dlq should read");
+        assert_eq!(dlq_entries.len(), 1);
+        let payload = dlq_entries[0]
+            .fields
+            .get("payload")
+            .expect("dlq payload should exist");
+        assert!(payload.contains("req-worker-poison"));
+        assert!(payload.contains("permanent test error"));
     }
 }

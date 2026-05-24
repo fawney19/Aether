@@ -1,5 +1,7 @@
 //! WebSocket tunnel client: connect, authenticate, and run the tunnel.
 
+use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,9 +12,15 @@ use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tracing::{debug, info, warn};
 
-use crate::egress_proxy::{connect_target_via_proxy, ProxyConnectOptions, UpstreamProxyConfig};
+use crate::egress_proxy::{
+    connect_target_via_proxy, IpFamily, ProxyConnectOptions, UpstreamProxyConfig,
+};
 use crate::state::{AppState, ServerContext};
 use aether_contracts::tunnel::{CURRENT_TUNNEL_PROTOCOL_VERSION, TUNNEL_PROTOCOL_VERSION_HEADER};
+use aether_contracts::tunnel_security::{
+    SecureFrameCodec, TunnelSecurityRole, TUNNEL_SECURITY_HEADER, TUNNEL_SECURITY_NON_TLS_REQUIRED,
+    TUNNEL_SECURITY_SESSION_HEADER,
+};
 
 use super::{dispatcher, heartbeat, writer};
 
@@ -41,16 +49,29 @@ pub async fn connect_and_run(
     // Build WebSocket request with auth headers
     let mut request = ws_url.clone().into_client_request()?;
     let headers = request.headers_mut();
-    headers.insert(
-        "Authorization",
-        http::HeaderValue::from_str(&format!("Bearer {}", server.management_token))?,
-    );
+    if server.tunnel_security != crate::config::TunnelSecurity::NonTlsRequired {
+        headers.insert(
+            "Authorization",
+            http::HeaderValue::from_str(&format!("Bearer {}", server.management_token))?,
+        );
+    }
     headers.insert(
         TUNNEL_PROTOCOL_VERSION_HEADER,
         http::HeaderValue::from_str(&CURRENT_TUNNEL_PROTOCOL_VERSION.to_string())?,
     );
     let node_id = server.node_id.read().unwrap().clone();
     headers.insert("X-Node-Id", http::HeaderValue::from_str(&node_id)?);
+    let security_session = uuid::Uuid::new_v4().simple().to_string();
+    if server.tunnel_security == crate::config::TunnelSecurity::NonTlsRequired {
+        headers.insert(
+            TUNNEL_SECURITY_HEADER,
+            http::HeaderValue::from_static(TUNNEL_SECURITY_NON_TLS_REQUIRED),
+        );
+        headers.insert(
+            TUNNEL_SECURITY_SESSION_HEADER,
+            http::HeaderValue::from_str(&security_session)?,
+        );
+    }
     // Use dynamic node_name (may be updated by remote config) instead of
     // the static server.node_name, so that remote name changes take effect
     // on the next reconnect.
@@ -115,6 +136,19 @@ pub async fn connect_and_run(
             handshake_timeout.as_millis()
         )
     })??;
+    let security = if server.tunnel_security == crate::config::TunnelSecurity::NonTlsRequired {
+        let key = server
+            .tunnel_encryption_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("secure tunnel requires tunnel_encryption_key"))?;
+        Some(Arc::new(SecureFrameCodec::new(
+            key,
+            &security_session,
+            TunnelSecurityRole::Client,
+        )?))
+    } else {
+        None
+    };
     let stale_timeout = state
         .config
         .tunnel_stale_timeout()
@@ -142,10 +176,11 @@ pub async fn connect_and_run(
     let (ws_sink, ws_read) = futures_util::StreamExt::split(ws_stream);
 
     // Spawn writer task (with WebSocket ping keepalive)
-    let (frame_tx, mut writer_handle) = writer::spawn_writer_with_metrics(
+    let (frame_tx, mut writer_handle) = writer::spawn_writer_with_metrics_and_security(
         ws_sink,
         ping_interval,
         Some(Arc::clone(&server.tunnel_metrics)),
+        security.clone(),
     );
     let drain_signal = spawn_drain_signal(conn_idx, frame_tx.clone(), drain.clone());
 
@@ -170,13 +205,14 @@ pub async fn connect_and_run(
     let state_clone = Arc::clone(state);
     let server_clone = Arc::clone(server);
     let outcome = tokio::select! {
-        result = dispatcher::run(
+        result = dispatcher::run_with_security(
             state_clone,
             server_clone,
             ws_read,
             frame_tx.clone(),
             hb_handle,
             drain.clone(),
+            security.clone(),
         ) => {
             match result {
                 Ok(()) => Ok(TunnelOutcome::Disconnected),
@@ -325,6 +361,7 @@ async fn connect_tunnel_tcp(
                     tcp_nodelay: state.config.tunnel_tcp_nodelay,
                     tcp_keepalive: (state.config.tunnel_tcp_keepalive_secs > 0)
                         .then(|| Duration::from_secs(state.config.tunnel_tcp_keepalive_secs)),
+                    ip_family: state.config.tunnel_ip_family(),
                 },
             ),
         )
@@ -338,15 +375,54 @@ async fn connect_tunnel_tcp(
         .map_err(anyhow::Error::from);
     }
 
-    tokio::time::timeout(connect_timeout, TcpStream::connect((host, port)))
+    let ip_family = state.config.tunnel_ip_family();
+    tokio::time::timeout(
+        connect_timeout,
+        connect_direct_tunnel_tcp(host, port, ip_family),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "tunnel TCP connect timeout ({}ms)",
+            connect_timeout.as_millis()
+        )
+    })?
+    .map_err(anyhow::Error::from)
+}
+
+async fn connect_direct_tunnel_tcp(
+    host: &str,
+    port: u16,
+    ip_family: IpFamily,
+) -> io::Result<TcpStream> {
+    let resolved = tokio::net::lookup_host((host, port))
         .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "tunnel TCP connect timeout ({}ms)",
-                connect_timeout.as_millis()
-            )
-        })?
-        .map_err(anyhow::Error::from)
+        .map_err(|err| io::Error::other(format!("tunnel DNS failed: {err}")))?;
+    let addrs = filter_socket_addrs(resolved, ip_family);
+
+    if addrs.is_empty() {
+        return Err(io::Error::other(ip_family.no_address_message("tunnel")));
+    }
+
+    let mut last_error = None;
+    for addr in addrs {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| io::Error::other("tunnel DNS returned no addresses")))
+}
+
+fn filter_socket_addrs(
+    addrs: impl IntoIterator<Item = SocketAddr>,
+    ip_family: IpFamily,
+) -> Vec<SocketAddr> {
+    addrs
+        .into_iter()
+        .filter(|addr| ip_family.allows(*addr))
+        .collect()
 }
 
 /// Configure TCP keepalive and NODELAY on an established socket.
@@ -391,4 +467,41 @@ fn build_tunnel_url(server: &ServerContext) -> String {
         format!("wss://{}", base)
     };
     format!("{}/api/internal/proxy-tunnel", ws_base)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use super::*;
+
+    fn mixed_addrs() -> Vec<SocketAddr> {
+        vec![
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 443)),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 443)),
+        ]
+    }
+
+    #[test]
+    fn filter_socket_addrs_keeps_all_addresses_by_default() {
+        let addrs = filter_socket_addrs(mixed_addrs(), IpFamily::Any);
+
+        assert_eq!(addrs.len(), 2);
+        assert!(addrs[0].is_ipv6());
+        assert!(addrs[1].is_ipv4());
+    }
+
+    #[test]
+    fn filter_socket_addrs_keeps_only_ipv4_addresses() {
+        let addrs = filter_socket_addrs(mixed_addrs(), IpFamily::Ipv4Only);
+
+        assert_eq!(addrs, vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 443))]);
+    }
+
+    #[test]
+    fn filter_socket_addrs_keeps_only_ipv6_addresses() {
+        let addrs = filter_socket_addrs(mixed_addrs(), IpFamily::Ipv6Only);
+
+        assert_eq!(addrs, vec![SocketAddr::from((Ipv6Addr::LOCALHOST, 443))]);
+    }
 }

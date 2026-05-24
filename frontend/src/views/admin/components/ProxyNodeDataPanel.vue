@@ -234,6 +234,7 @@
 import { computed } from 'vue'
 import { AlertTriangle, Loader2, RefreshCw } from 'lucide-vue-next'
 import { Badge, Button } from '@/components/ui'
+import { formatCompactNumber } from '@/utils/format'
 import type {
   ProxyNode,
   ProxyNodeEvent,
@@ -456,9 +457,7 @@ function formatTunnelNumber(key: string) {
 
 function formatNumber(value: number) {
   if (!Number.isFinite(value)) return '-'
-  if (Math.abs(value) >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
-  if (Math.abs(value) >= 1_000) return `${(value / 1_000).toFixed(1)}K`
-  return String(Math.round(value))
+  return formatCompactNumber(Math.round(value), { fractionDigits: 1 })
 }
 
 function formatOptionalNumber(value: number | null) {

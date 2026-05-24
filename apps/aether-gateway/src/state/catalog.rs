@@ -429,6 +429,17 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn list_provider_catalog_key_maintenance_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<provider_catalog::StoredProviderCatalogKeyMaintenanceSummary>, GatewayError>
+    {
+        self.data
+            .list_provider_catalog_key_maintenance_summaries_by_provider_ids(provider_ids)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn list_provider_catalog_keys_by_ids(
         &self,
         key_ids: &[String],
@@ -611,6 +622,21 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.is_some() {
             self.invalidate_provider_routing_caches();
+        }
+        Ok(updated)
+    }
+
+    pub(crate) async fn update_provider_catalog_key_runtime_state(
+        &self,
+        key: &provider_catalog::StoredProviderCatalogKey,
+    ) -> Result<Option<provider_catalog::StoredProviderCatalogKey>, GatewayError> {
+        let updated = self
+            .data
+            .update_provider_catalog_key(key)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if updated.is_some() {
+            self.invalidate_provider_health_routing_caches();
         }
         Ok(updated)
     }
@@ -806,7 +832,7 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated {
-            self.invalidate_provider_routing_caches();
+            self.invalidate_provider_health_routing_caches();
         }
         Ok(updated)
     }
@@ -929,5 +955,48 @@ mod tests {
             .expect("provider transport should read after update")
             .expect("provider transport should exist after update");
         assert!(snapshot.provider.keep_priority_on_conversion);
+    }
+
+    #[tokio::test]
+    async fn provider_catalog_health_update_keeps_scheduler_affinity_cache() {
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider()],
+            vec![sample_endpoint()],
+            vec![sample_key()],
+        ));
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(repository)
+                    .with_encryption_key_for_tests("test-encryption-key"),
+            );
+
+        let cache_key = "scheduler_affinity:api-key-1:openai:chat:gpt-5";
+        let ttl = Duration::from_secs(300);
+        let target = SchedulerAffinityTarget {
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+        };
+        state.remember_scheduler_affinity_target(cache_key, target.clone(), ttl, 128);
+        let initial_epoch = state.scheduler_affinity_epoch();
+
+        let health_by_format = serde_json::json!({
+            "openai:chat": {
+                "last_success_at_unix_secs": 1,
+                "consecutive_failures": 0
+            }
+        });
+        let updated = state
+            .update_provider_catalog_key_health_state("key-1", true, Some(&health_by_format), None)
+            .await
+            .expect("key health update should succeed");
+
+        assert!(updated);
+        assert_eq!(state.scheduler_affinity_epoch(), initial_epoch);
+        assert_eq!(
+            state.read_scheduler_affinity_target(cache_key, ttl),
+            Some(target)
+        );
     }
 }

@@ -1,10 +1,8 @@
 use async_trait::async_trait;
 use tracing::warn;
 
-use super::super::super::openai_request_is_image_generation_intent;
 use super::super::{
     build_lazy_local_openai_chat_candidate_attempt_source,
-    build_local_openai_chat_image_candidate_attempt_source,
     maybe_build_local_openai_chat_decision_payload_for_candidate, AppState, GatewayControlDecision,
     GatewayError, LocalOpenAiChatCandidateAttempt, LocalOpenAiChatCandidateAttemptSource,
     LocalOpenAiChatDecisionInput,
@@ -51,53 +49,14 @@ pub(crate) async fn build_local_openai_chat_stream_attempt_source<'a>(
     };
     let effective_body_json = input.effective_body_json(body_json).clone();
 
-    let image_generation_intent =
-        openai_request_is_image_generation_intent(&input.requested_model, body_json);
-    let (mut candidates, mut candidate_count) = if image_generation_intent {
-        let (image_candidates, image_candidate_count) =
-            build_local_openai_chat_image_candidate_attempt_source(
-                state,
-                trace_id,
-                &input,
-                &effective_body_json,
-            )
-            .await?;
-        if image_candidate_count > 0 {
-            (image_candidates, image_candidate_count)
-        } else {
-            build_lazy_local_openai_chat_candidate_attempt_source(
-                state,
-                trace_id,
-                &input,
-                &effective_body_json,
-                true,
-            )
-            .await
-        }
-    } else {
-        build_lazy_local_openai_chat_candidate_attempt_source(
-            state,
-            trace_id,
-            &input,
-            &effective_body_json,
-            true,
-        )
-        .await
-    };
-    if !image_generation_intent && candidate_count == 0 {
-        let (image_candidates, image_candidate_count) =
-            build_local_openai_chat_image_candidate_attempt_source(
-                state,
-                trace_id,
-                &input,
-                &effective_body_json,
-            )
-            .await?;
-        if image_candidate_count > 0 {
-            candidates = image_candidates;
-            candidate_count = image_candidate_count;
-        }
-    }
+    let (candidates, candidate_count) = build_lazy_local_openai_chat_candidate_attempt_source(
+        state,
+        trace_id,
+        &input,
+        &effective_body_json,
+        true,
+    )
+    .await;
     if candidate_count == 0 {
         set_local_openai_chat_candidate_evaluation_diagnostic(
             state,

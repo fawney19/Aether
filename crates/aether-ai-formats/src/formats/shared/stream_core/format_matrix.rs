@@ -14,7 +14,8 @@ use crate::formats::shared::error_body::{
 };
 use crate::formats::shared::sse::encode_json_sse;
 use crate::formats::shared::stream_core::common::{
-    decode_json_data_line, CanonicalStreamEvent, CanonicalStreamFrame, CanonicalUsage,
+    decode_json_data_line, openai_stream_terminal_error_body, openai_stream_terminal_error_message,
+    CanonicalStreamEvent, CanonicalStreamFrame, CanonicalUsage,
 };
 use crate::formats::shared::AiSurfaceFinalizeError;
 
@@ -197,6 +198,14 @@ impl StreamingStandardTerminalObserver {
             summary.model = Some(model);
         }
         match event {
+            CanonicalStreamEvent::UnknownEvent(payload)
+                if openai_stream_terminal_error_body(&payload).is_some() =>
+            {
+                summary.unknown_event_count = summary.unknown_event_count.saturating_add(1);
+                summary.observed_finish = true;
+                summary.finish_reason = Some("error".to_string());
+                summary.parser_error = openai_stream_terminal_error_message(&payload);
+            }
             CanonicalStreamEvent::UnknownEvent(_) => {
                 summary.unknown_event_count = summary.unknown_event_count.saturating_add(1);
             }
@@ -410,7 +419,8 @@ fn parse_provider_error(
 }
 
 fn parse_openai_error(payload: &Value) -> Option<(String, Option<String>, LocalCoreSyncErrorKind)> {
-    let error = payload.get("error")?.as_object()?;
+    let error_body = openai_stream_terminal_error_body(payload)?;
+    let error = error_body.get("error")?.as_object()?;
     let message = error.get("message").and_then(Value::as_str)?.to_string();
     let code = error
         .get("code")
@@ -971,6 +981,41 @@ mod tests {
         assert_eq!(summary.model.as_deref(), Some("gpt-5.4"));
         assert_eq!(summary.unknown_event_count, 1);
         assert!(!summary.observed_finish);
+    }
+
+    #[test]
+    fn terminal_observer_marks_openai_responses_failed_event_as_terminal_error() {
+        let mut report_context = report_context("openai:chat", "openai:responses");
+        report_context["provider_stream_event_api_format"] = json!("openai:responses");
+        let mut observer = StreamingStandardTerminalObserver::default();
+
+        observer
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_failed_123",
+                        "model": "gpt-5.4",
+                        "status": "failed",
+                        "error": {
+                            "message": "policy failure",
+                            "type": "invalid_request_error",
+                            "code": "cyber_policy"
+                        }
+                    }
+                })),
+            )
+            .expect("failed event should be observed");
+
+        let summary = observer
+            .latest_summary()
+            .cloned()
+            .expect("summary should exist");
+        assert!(summary.observed_finish);
+        assert_eq!(summary.finish_reason.as_deref(), Some("error"));
+        assert_eq!(summary.parser_error.as_deref(), Some("policy failure"));
+        assert_eq!(summary.unknown_event_count, 1);
     }
 
     #[test]

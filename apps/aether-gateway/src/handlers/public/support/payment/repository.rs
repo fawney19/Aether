@@ -2,6 +2,7 @@ use super::payment_shared::{
     payment_callback_mark_failed_response, payment_callback_payload_hash,
     NormalizedPaymentCallbackRequest,
 };
+use aether_data::repository::wallet::{ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome};
 use axum::{body::Body, http, response::Response};
 use serde_json::json;
 
@@ -29,35 +30,37 @@ pub(super) async fn handle_payment_callback_with_wallet_repository(
             return build_auth_error_response(http::StatusCode::INTERNAL_SERVER_ERROR, err, false)
         }
     };
-    let outcome = match state
-        .process_payment_callback(
-            aether_data::repository::wallet::ProcessPaymentCallbackInput {
-                payment_method: payment_method.to_string(),
-                payment_provider: None,
-                payment_channel: None,
-                callback_key: payload.callback_key.clone(),
-                order_no: payload.order_no.clone(),
-                gateway_order_id: payload.gateway_order_id.clone(),
-                amount_usd: payload.amount_usd,
-                pay_amount: payload.pay_amount,
-                pay_currency: payload.pay_currency.clone(),
-                exchange_rate: payload.exchange_rate,
-                payload_hash: callback_payload_hash,
-                payload: payload.payload.clone(),
-                signature_valid,
-            },
-        )
-        .await
-    {
-        Ok(Some(value)) => value,
-        Ok(None) => return build_payment_callback_storage_unavailable_response(),
-        Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("payment callback failed: {err:?}"),
-                false,
-            )
-        }
+    handle_payment_callback_input_with_wallet_repository(
+        state,
+        request_context,
+        ProcessPaymentCallbackInput {
+            payment_method: payment_method.to_string(),
+            payment_provider: None,
+            payment_channel: None,
+            callback_key: payload.callback_key.clone(),
+            order_no: payload.order_no.clone(),
+            gateway_order_id: payload.gateway_order_id.clone(),
+            amount_usd: payload.amount_usd,
+            pay_amount: payload.pay_amount,
+            pay_currency: payload.pay_currency.clone(),
+            exchange_rate: payload.exchange_rate,
+            payload_hash: callback_payload_hash,
+            payload: payload.payload.clone(),
+            signature_valid,
+        },
+    )
+    .await
+}
+
+pub(super) async fn handle_payment_callback_input_with_wallet_repository(
+    state: &AppState,
+    request_context: &GatewayPublicRequestContext,
+    input: ProcessPaymentCallbackInput,
+) -> Response<Body> {
+    let payment_method = input.payment_method.clone();
+    let outcome = match process_payment_callback_input_with_wallet_repository(state, input).await {
+        Ok(value) => value,
+        Err(response) => return response,
     };
 
     match outcome {
@@ -81,7 +84,7 @@ pub(super) async fn handle_payment_callback_with_wallet_repository(
         } => payment_callback_mark_failed_response(
             duplicate,
             &error,
-            payment_method,
+            &payment_method,
             &request_context.request_path,
         ),
         aether_data::repository::wallet::ProcessPaymentCallbackOutcome::AlreadyCredited {
@@ -134,6 +137,25 @@ pub(super) async fn handle_payment_callback_with_wallet_repository(
                 None,
             )
         }
+    }
+}
+
+pub(super) async fn process_payment_callback_input_with_wallet_repository(
+    state: &AppState,
+    input: ProcessPaymentCallbackInput,
+) -> Result<ProcessPaymentCallbackOutcome, Response<Body>> {
+    if !state.has_database_wallet_data_writer() {
+        return Err(build_payment_callback_storage_unavailable_response());
+    }
+
+    match state.process_payment_callback(input).await {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) => Err(build_payment_callback_storage_unavailable_response()),
+        Err(err) => Err(build_auth_error_response(
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("payment callback failed: {err:?}"),
+            false,
+        )),
     }
 }
 

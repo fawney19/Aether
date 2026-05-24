@@ -301,12 +301,7 @@ fn admin_provider_ops_decode_response_bytes(
 }
 
 fn admin_provider_ops_gateway_error_message(error: GatewayError) -> String {
-    match error {
-        GatewayError::UpstreamUnavailable { message, .. }
-        | GatewayError::ControlUnavailable { message, .. }
-        | GatewayError::Client { message, .. }
-        | GatewayError::Internal(message) => message,
-    }
+    error.into_message()
 }
 
 pub(super) fn admin_provider_ops_verify_execution_error_message(error: &str) -> String {

@@ -19,10 +19,11 @@ pub(crate) struct EpayMerchantConfig {
     pub(crate) channels: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EpayChannelConfig {
     pub(crate) channel: String,
     pub(crate) display_name: String,
+    pub(crate) fee_rate: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -35,8 +36,22 @@ pub(crate) struct EpayCheckoutInput {
     pub(crate) return_url: String,
 }
 
+fn epay_channel_fee_rate(value: Option<&serde_json::Value>) -> f64 {
+    let fee_rate = match value {
+        Some(serde_json::Value::Number(number)) => number.as_f64().unwrap_or(0.0),
+        Some(serde_json::Value::String(value)) => value.trim().parse::<f64>().unwrap_or(0.0),
+        _ => 0.0,
+    };
+    if fee_rate.is_finite() && fee_rate >= 0.0 {
+        fee_rate
+    } else {
+        0.0
+    }
+}
+
 pub(crate) fn configured_epay_channels(config: &EpayMerchantConfig) -> Vec<EpayChannelConfig> {
-    let Some(channels) = config.channels.as_array() else {
+    let channels_value = crate::handlers::shared::payment_gateway_channels_json(&config.channels);
+    let Some(channels) = channels_value.as_array() else {
         return Vec::new();
     };
     channels
@@ -58,6 +73,7 @@ pub(crate) fn configured_epay_channels(config: &EpayMerchantConfig) -> Vec<EpayC
             Some(EpayChannelConfig {
                 channel: channel_id.to_string(),
                 display_name,
+                fee_rate: epay_channel_fee_rate(channel.get("fee_rate")),
             })
         })
         .collect()
@@ -66,7 +82,7 @@ pub(crate) fn configured_epay_channels(config: &EpayMerchantConfig) -> Vec<EpayC
 pub(crate) fn resolve_epay_channel(
     config: &EpayMerchantConfig,
     requested_channel: Option<&str>,
-) -> Result<String, &'static str> {
+) -> Result<EpayChannelConfig, &'static str> {
     let channels = configured_epay_channels(config);
     if channels.is_empty() {
         return Err("支付网关未配置可用通道");
@@ -79,11 +95,11 @@ pub(crate) fn resolve_epay_channel(
             .iter()
             .find(|channel| channel.channel.eq_ignore_ascii_case(&requested_channel))
         {
-            return Ok(channel.channel.clone());
+            return Ok(channel.clone());
         }
         return Err("支付通道未配置或已停用");
     }
-    Ok(channels[0].channel.clone())
+    Ok(channels[0].clone())
 }
 
 pub(crate) fn epay_sign(params: &BTreeMap<String, String>, merchant_key: &str) -> String {
@@ -444,8 +460,8 @@ mod tests {
     #[test]
     fn configured_epay_channels_do_not_invent_defaults() {
         let mut config = test_epay_config(json!([
-            {"channel": " Alipay ", "display_name": "支付宝"},
-            {"type": "wxpay", "display_name": ""},
+            {"channel": " Alipay ", "display_name": "支付宝", "fee_rate": 2.5},
+            {"type": "wxpay", "display_name": "", "fee_rate": "1.2"},
             {"display_name": "缺少通道值"}
         ]));
 
@@ -453,14 +469,16 @@ mod tests {
         assert_eq!(channels.len(), 2);
         assert_eq!(channels[0].channel, "Alipay");
         assert_eq!(channels[0].display_name, "支付宝");
+        assert_eq!(channels[0].fee_rate, 2.5);
         assert_eq!(channels[1].channel, "wxpay");
         assert_eq!(channels[1].display_name, "wxpay");
+        assert_eq!(channels[1].fee_rate, 1.2);
         assert_eq!(
-            resolve_epay_channel(&config, None),
+            resolve_epay_channel(&config, None).map(|channel| channel.channel),
             Ok("Alipay".to_string())
         );
         assert_eq!(
-            resolve_epay_channel(&config, Some("WXPAY")),
+            resolve_epay_channel(&config, Some("WXPAY")).map(|channel| channel.channel),
             Ok("wxpay".to_string())
         );
         assert_eq!(

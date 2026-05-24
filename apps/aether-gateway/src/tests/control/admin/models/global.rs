@@ -789,7 +789,7 @@ async fn gateway_handles_admin_global_model_routing_locally_with_trusted_admin_p
                 "openai:chat": {"health_score": 0.66}
             }));
             primary_key.circuit_breaker_by_format = Some(json!({
-                "openai:chat": {"open": true, "next_probe_at": "2026-03-27T15:00:00Z"}
+                "openai:chat": {"open": true, "next_probe_at": "2099-03-27T15:00:00Z"}
             }));
 
             let mut mapped_key = sample_key(
@@ -907,7 +907,7 @@ async fn gateway_handles_admin_global_model_routing_locally_with_trusted_admin_p
         openai_keys[0]["circuit_breaker_formats"],
         json!(["openai:chat"])
     );
-    assert_eq!(openai_keys[0]["next_probe_at"], "2026-03-27T15:00:00Z");
+    assert_eq!(openai_keys[0]["next_probe_at"], "2099-03-27T15:00:00Z");
 
     let alt_endpoints = providers[1]["endpoints"]
         .as_array()

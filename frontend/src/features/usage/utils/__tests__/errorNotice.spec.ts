@@ -91,6 +91,27 @@ describe('request failure notice', () => {
     })
   })
 
+  it('does not present HTTP 200 as the cause of stream terminal failures', () => {
+    const notice = resolveRequestFailureNotice(buildRequestDetail({
+      status_code: 200,
+      status: 'failed',
+      error_message: 'This content was flagged for possible cybersecurity risk',
+      failure_summary: {
+        source: 'client_response',
+        status_code: 200,
+        type: 'stream_terminal_error',
+        message: 'This content was flagged for possible cybersecurity risk',
+      },
+    }))
+
+    expect(notice).toEqual({
+      title: '执行失败原因',
+      message: 'This content was flagged for possible cybersecurity risk',
+      isSchedulingFailure: false,
+      meta: ['stream_terminal_error', 'client_response'],
+    })
+  })
+
   it('does not show a stale notice when the refreshed detail has no error fields', () => {
     const notice = resolveRequestFailureNotice(buildRequestDetail({
       status_code: 200,

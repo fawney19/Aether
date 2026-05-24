@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use aether_ai_formats::api::ExecutionRuntimeAuthContext;
+use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
 use aether_scheduler_core::SchedulerRankingOutcome;
 use serde_json::{Map, Value};
 
@@ -140,7 +141,7 @@ pub fn build_ai_execution_report_context(parts: AiExecutionReportContextParts<'_
         Value::Bool(parts.client_requested_stream),
     );
     object.insert(
-        "upstream_is_stream".to_string(),
+        UPSTREAM_IS_STREAM_KEY.to_string(),
         Value::Bool(parts.upstream_is_stream),
     );
     object.insert("has_envelope".to_string(), Value::Bool(parts.has_envelope));

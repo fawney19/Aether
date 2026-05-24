@@ -2,32 +2,30 @@ services:
   app:
     image: ${APP_IMAGE:-ghcr.io/fawney19/aether:latest}
     container_name: aether-app
+    user: "0:0"
     env_file:
       - ${AETHER_ENV_FILE:-.env}
     environment:
       TZ: Asia/Shanghai
+      AETHER_BASE_DIR: /opt/aether
+      AETHER_UPDATE_STRATEGY: docker
+      AETHER_DOCKER_UPDATE_COMMAND: ${AETHER_DOCKER_UPDATE_COMMAND:-./update.sh}
       AETHER_DATABASE_DRIVER: sqlite
-      AETHER_DATABASE_URL: sqlite://./data/aether.db
+      AETHER_DATABASE_URL: sqlite:///opt/aether/data/aether.db
       AETHER_RUNTIME_BACKEND: memory
       AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY: single-node
       AETHER_GATEWAY_NODE_ROLE: all
-      AETHER_LOG_DESTINATION: ${AETHER_LOG_DESTINATION:-both}
+      AETHER_LOG_DESTINATION: stdout
       AETHER_LOG_FORMAT: ${AETHER_LOG_FORMAT:-pretty}
-      AETHER_LOG_DIR: ${AETHER_LOG_DIR:-/app/logs}
-      AETHER_LOG_ROTATION: ${AETHER_LOG_ROTATION:-daily}
-      AETHER_LOG_RETENTION_DAYS: ${AETHER_LOG_RETENTION_DAYS:-7}
-      AETHER_LOG_MAX_FILES: ${AETHER_LOG_MAX_FILES:-30}
       APP_PORT: ${APP_PORT:-8084}
       AETHER_GATEWAY_AUTO_PREPARE_DATABASE: ${AETHER_GATEWAY_AUTO_PREPARE_DATABASE:-true}
     ports:
       - "${APP_PORT:-8084}:${APP_PORT:-8084}"
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-    healthcheck:
-      test: ["CMD", "aether-gateway", "--healthcheck"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
+      - ./data:/opt/aether/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "10"
     restart: unless-stopped

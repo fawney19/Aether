@@ -14,7 +14,7 @@ use super::{provider_query_key_display_name, provider_query_provider_payload};
 use crate::ai_serving::{
     maybe_build_sync_finalize_outcome, GatewayControlDecision,
     ANTIGRAVITY_V1INTERNAL_ENVELOPE_NAME, GEMINI_CHAT_SYNC_FINALIZE_REPORT_KIND,
-    OPENAI_IMAGE_SYNC_FINALIZE_REPORT_KIND,
+    OPENAI_CHAT_SYNC_FINALIZE_REPORT_KIND, OPENAI_IMAGE_SYNC_FINALIZE_REPORT_KIND,
 };
 use crate::clock::current_unix_ms;
 use crate::execution_runtime;
@@ -68,6 +68,7 @@ use aether_model_fetch::{
     aggregate_models_for_cache, fetch_models_from_transports, json_string_list,
     preset_models_for_provider, selected_models_fetch_endpoints,
 };
+use aether_scheduler_core::provider_key_circuit_payload_is_active_open_at;
 use axum::{
     body::{to_bytes, Body},
     http::{self, HeaderMap, HeaderName, HeaderValue},
@@ -564,6 +565,29 @@ fn provider_query_build_test_request_body_for_api_format(
                     client_api_format.as_str(),
                     payload,
                 );
+            } else if matches!(
+                client_api_format.as_str(),
+                "openai:responses" | "openai:responses:compact"
+            ) && !value_has_non_empty_text(object.get("input"))
+            {
+                if let Some(prompt) = object
+                    .remove("prompt")
+                    .filter(|value| value_has_non_empty_text(Some(value)))
+                {
+                    object.insert("input".to_string(), prompt);
+                }
+            }
+            if matches!(
+                client_api_format.as_str(),
+                "openai:responses" | "openai:responses:compact"
+            ) && value_has_non_empty_text(object.get("input"))
+            {
+                object.remove("prompt");
+            }
+            if client_api_format == "openai:responses:compact"
+                && value_has_non_empty_text(object.get("input"))
+            {
+                object.remove("messages");
             }
         }
         return body;
@@ -897,6 +921,7 @@ fn provider_query_test_key_sort_key(
     provider_type: &str,
     key: &StoredProviderCatalogKey,
     endpoint_api_format: &str,
+    now_unix_secs: u64,
 ) -> (u8, u8, i32, u64, i32) {
     let quota_exhausted =
         admin_provider_pool_pure::admin_pool_key_account_quota_exhausted(key, provider_type);
@@ -905,10 +930,7 @@ fn provider_query_test_key_sort_key(
         .as_ref()
         .and_then(Value::as_object)
         .and_then(|value| value.get(endpoint_api_format))
-        .and_then(Value::as_object)
-        .and_then(|value| value.get("open"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+        .is_some_and(|value| provider_key_circuit_payload_is_active_open_at(value, now_unix_secs));
     let health_score = key
         .health_by_format
         .as_ref()
@@ -1367,6 +1389,7 @@ async fn provider_query_build_kiro_test_candidates(
             provider_query_key_supports_endpoint(key, &provider.provider_type, &endpoint.api_format)
         })
         .collect::<Vec<_>>();
+    let now_unix_secs = current_unix_ms() / 1000;
 
     let candidates = if test_mode.eq_ignore_ascii_case("pool") {
         if let Some(pool_config) =
@@ -1388,6 +1411,7 @@ async fn provider_query_build_kiro_test_candidates(
                     provider.provider_type.as_str(),
                     key,
                     &endpoint.api_format,
+                    now_unix_secs,
                 )
             });
             keys.into_iter()
@@ -1405,6 +1429,7 @@ async fn provider_query_build_kiro_test_candidates(
                 provider.provider_type.as_str(),
                 key,
                 &endpoint.api_format,
+                now_unix_secs,
             )
         });
         keys.into_iter()
@@ -1463,6 +1488,17 @@ fn provider_query_decode_execution_body(
         .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
 }
 
+fn provider_query_execution_json_body(result: &aether_contracts::ExecutionResult) -> Option<Value> {
+    result
+        .body
+        .as_ref()
+        .and_then(|body| body.json_body.clone())
+        .or_else(|| {
+            provider_query_decode_execution_body(result)
+                .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+        })
+}
+
 fn provider_query_aggregate_standard_stream_sync_response(
     provider_api_format: &str,
     body: &[u8],
@@ -1482,15 +1518,11 @@ fn provider_query_standard_execution_response_body(
     provider_api_format: &str,
     result: &aether_contracts::ExecutionResult,
 ) -> Option<Value> {
-    let body = result
-        .body
-        .as_ref()
-        .and_then(|body| body.json_body.clone())
-        .or_else(|| {
-            provider_query_decode_execution_body(result).and_then(|body| {
-                provider_query_aggregate_standard_stream_sync_response(provider_api_format, &body)
-            })
-        })?;
+    let body = provider_query_execution_json_body(result).or_else(|| {
+        provider_query_decode_execution_body(result).and_then(|body| {
+            provider_query_aggregate_standard_stream_sync_response(provider_api_format, &body)
+        })
+    })?;
     if result.status_code < 400
         && provider_query_normalize_api_format_alias(provider_api_format)
             == "gemini:generate_content"
@@ -1504,10 +1536,8 @@ fn provider_query_standard_execution_response_body(
 fn provider_query_extract_error_message(
     result: &aether_contracts::ExecutionResult,
 ) -> Option<String> {
-    result
-        .body
+    provider_query_execution_json_body(result)
         .as_ref()
-        .and_then(|body| body.json_body.as_ref())
         .and_then(Value::as_object)
         .and_then(|value| {
             value
@@ -1566,7 +1596,7 @@ async fn provider_query_finalize_kiro_result(
         })),
         status_code: result.status_code,
         headers: result.headers.clone(),
-        body_json: result.body.as_ref().and_then(|body| body.json_body.clone()),
+        body_json: provider_query_execution_json_body(result),
         client_body_json: None,
         body_base64: result
             .body
@@ -1758,6 +1788,56 @@ async fn provider_query_execute_kiro_test_candidate(
     })
 }
 
+async fn provider_query_finalize_windsurf_result(
+    route_path: &str,
+    trace_id: &str,
+    requested_model: &str,
+    mapped_model: &str,
+    original_request_body: &Value,
+    result: &aether_contracts::ExecutionResult,
+) -> Result<Option<Value>, GatewayError> {
+    let decision = GatewayControlDecision::synthetic(
+        route_path,
+        Some("admin_proxy".to_string()),
+        Some("provider_query_manage".to_string()),
+        Some("test_model_failover".to_string()),
+        Some("openai:chat".to_string()),
+    );
+    let payload = GatewaySyncReportRequest {
+        trace_id: trace_id.to_string(),
+        report_kind: OPENAI_CHAT_SYNC_FINALIZE_REPORT_KIND.to_string(),
+        report_context: Some(json!({
+            "client_api_format": "openai:chat",
+            "provider_api_format": "openai:chat",
+            "model": requested_model,
+            "mapped_model": mapped_model,
+            "needs_conversion": false,
+            "has_envelope": true,
+            "envelope_name": crate::provider_transport::windsurf::WINDSURF_ENVELOPE_NAME,
+            "original_request_body": original_request_body,
+        })),
+        status_code: result.status_code,
+        headers: result.headers.clone(),
+        body_json: result.body.as_ref().and_then(|body| body.json_body.clone()),
+        client_body_json: None,
+        body_base64: result
+            .body
+            .as_ref()
+            .and_then(|body| body.body_bytes_b64.clone()),
+        telemetry: result.telemetry.clone(),
+    };
+
+    let Some(outcome) = maybe_build_sync_finalize_outcome(trace_id, &decision, &payload)? else {
+        return Ok(None);
+    };
+    let bytes = to_bytes(outcome.response.into_body(), usize::MAX)
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    serde_json::from_slice::<Value>(&bytes)
+        .map(Some)
+        .map_err(|err| GatewayError::Internal(err.to_string()))
+}
+
 fn provider_query_build_openai_image_test_request_body_for_route(
     payload: &Value,
     model: &str,
@@ -1798,6 +1878,7 @@ fn provider_query_chatgpt_web_image_internal_url(base_url: &str) -> String {
 
 fn provider_query_openai_image_test_upstream_url(
     transport: &AdminGatewayProviderTransportSnapshot,
+    request_path: Option<&str>,
     request_query: Option<&str>,
 ) -> String {
     if transport
@@ -1818,7 +1899,11 @@ fn provider_query_openai_image_test_upstream_url(
             crate::provider_transport::GROK_CHAT_PATH,
         )
     } else {
-        crate::provider_transport::build_openai_image_upstream_url(transport, request_query)
+        crate::provider_transport::build_openai_image_upstream_url(
+            transport,
+            request_path,
+            request_query,
+        )
     }
 }
 
@@ -1851,7 +1936,7 @@ async fn provider_query_finalize_openai_image_result(
         })),
         status_code: result.status_code,
         headers: result.headers.clone(),
-        body_json: result.body.as_ref().and_then(|body| body.json_body.clone()),
+        body_json: provider_query_execution_json_body(result),
         client_body_json: None,
         body_base64: result
             .body
@@ -1944,13 +2029,23 @@ async fn provider_query_execute_openai_image_test_candidate(
         .provider_type
         .trim()
         .eq_ignore_ascii_case("grok");
+    let is_codex = transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("codex");
     let mut provider_request_body = if is_chatgpt_web {
         match crate::ai_serving::build_chatgpt_web_image_request_body(&parts, &request_body, None) {
             Ok(body) => body,
             Err(err) => err.to_error_json(),
         }
-    } else {
+    } else if is_codex || is_grok {
         crate::ai_serving::build_openai_image_provider_request_body(&normalized_request)
+    } else {
+        crate::ai_serving::build_openai_image_api_provider_request_body(
+            &normalized_request,
+            Some(candidate.effective_model.as_str()),
+        )
     };
     if !is_chatgpt_web {
         crate::ai_serving::apply_codex_openai_responses_special_body_edits(
@@ -2052,7 +2147,11 @@ async fn provider_query_execute_openai_image_test_candidate(
     } else {
         normalized_request.summary_json.clone()
     };
-    let request_url = provider_query_openai_image_test_upstream_url(&transport, parts.uri.query());
+    let request_url = provider_query_openai_image_test_upstream_url(
+        &transport,
+        Some(parts.uri.path()),
+        parts.uri.query(),
+    );
     let upstream_is_stream = provider_request_body
         .get("stream")
         .and_then(Value::as_bool)
@@ -2135,9 +2234,9 @@ async fn provider_query_execute_openai_image_test_candidate(
             &result,
         )
         .await?
-        .or_else(|| result.body.as_ref().and_then(|body| body.json_body.clone()))
+        .or_else(|| provider_query_execution_json_body(&result))
     } else {
-        result.body.as_ref().and_then(|body| body.json_body.clone())
+        provider_query_execution_json_body(&result)
     };
     let did_fail = result.status_code >= 400;
     let error_message = if did_fail {
@@ -2612,6 +2711,22 @@ async fn provider_query_execute_standard_test_candidate(
         route_path,
         client_api_format,
     );
+    if crate::provider_transport::is_windsurf_provider_transport(&transport)
+        && provider_query_normalize_api_format_alias(candidate.endpoint.api_format.as_str())
+            == "openai:chat"
+    {
+        return provider_query_execute_windsurf_test_candidate(
+            state,
+            provider,
+            candidate,
+            payload,
+            route_path,
+            trace_id,
+            transport,
+            original_request_body,
+        )
+        .await;
+    }
     if !provider_query_transport_supports_model_test_execution(
         state,
         &transport,
@@ -2987,6 +3102,182 @@ async fn provider_query_execute_standard_test_candidate(
         .await?;
     let response_body = if result.status_code < 400 {
         provider_query_standard_execution_response_body(provider_api_format, &result)
+    } else {
+        result.body.as_ref().and_then(|body| body.json_body.clone())
+    };
+    let missing_success_body = result.status_code < 400 && response_body.is_none();
+    let did_fail = result.status_code >= 400 || missing_success_body;
+    let error_message = if did_fail {
+        provider_query_extract_error_message(&result).or_else(|| {
+            missing_success_body.then(|| {
+                format!(
+                    "Provider returned HTTP {} without a model-test response body",
+                    result.status_code
+                )
+            })
+        })
+    } else {
+        None
+    };
+
+    Ok(ProviderQueryExecutionOutcome {
+        status: if did_fail { "failed" } else { "success" },
+        skip_reason: None,
+        error_message,
+        status_code: Some(result.status_code),
+        latency_ms: result.telemetry.as_ref().and_then(|value| value.elapsed_ms),
+        request_url,
+        request_headers,
+        request_body: provider_request_body,
+        response_headers: result.headers,
+        response_body,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn provider_query_execute_windsurf_test_candidate(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    candidate: &ProviderQueryTestCandidate,
+    payload: &Value,
+    route_path: &str,
+    trace_id: &str,
+    transport: AdminGatewayProviderTransportSnapshot,
+    original_request_body: Value,
+) -> Result<ProviderQueryExecutionOutcome, GatewayError> {
+    if let Some(_reason) =
+        crate::provider_transport::local_windsurf_request_transport_unsupported_reason_with_network(
+            &transport,
+        )
+    {
+        return Ok(provider_query_skipped_execution_outcome(
+            original_request_body,
+            provider_query_standard_test_unsupported_reason(
+                &transport,
+                candidate.endpoint.api_format.as_str(),
+            ),
+        ));
+    }
+
+    let incoming_request_headers = provider_query_extract_request_headers(payload);
+    let request_body = original_request_body.clone();
+    let request_model =
+        provider_query_request_body_model(&request_body, &candidate.effective_model);
+    let client_is_stream = request_body
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let hard_requires_streaming = crate::ai_serving::force_upstream_streaming_for_provider(
+        transport.provider.provider_type.as_str(),
+        candidate.endpoint.api_format.as_str(),
+    );
+    let upstream_is_stream = crate::ai_serving::resolve_upstream_is_stream_from_endpoint_config(
+        transport.endpoint.config.as_ref(),
+        client_is_stream,
+        hard_requires_streaming,
+    );
+    let Some((auth_header, auth_value)) =
+        crate::provider_transport::windsurf::resolve_windsurf_cascade_auth(&transport).or_else(
+            || crate::provider_transport::auth::resolve_local_openai_bearer_auth(&transport),
+        )
+    else {
+        return Ok(provider_query_skipped_execution_outcome(
+            request_body,
+            "Provider auth is unavailable for windsurf".to_string(),
+        ));
+    };
+
+    let mut synthetic_request = http::Request::builder()
+        .uri(route_path)
+        .body(())
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    *synthetic_request.headers_mut() = incoming_request_headers;
+    let (parts, _) = synthetic_request.into_parts();
+
+    let Some(provider_request_body) =
+        crate::provider_transport::build_windsurf_cascade_request_body(
+            &request_body,
+            request_model,
+            &auth_value,
+            transport.endpoint.body_rules.as_ref(),
+            Some(&parts.headers),
+            upstream_is_stream,
+        )
+    else {
+        return Ok(provider_query_skipped_execution_outcome(
+            request_body,
+            "Provider request body could not be built for windsurf".to_string(),
+        ));
+    };
+    let Some(request_url) = crate::provider_transport::build_windsurf_cascade_upstream_url(
+        transport.endpoint.base_url.as_str(),
+        parts.uri.query(),
+    ) else {
+        return Ok(provider_query_skipped_execution_outcome(
+            provider_request_body,
+            "Provider request URL is unavailable for windsurf".to_string(),
+        ));
+    };
+    let Some(request_headers) = crate::provider_transport::build_windsurf_cascade_headers(
+        &parts.headers,
+        &provider_request_body,
+        &request_body,
+        transport.endpoint.header_rules.as_ref(),
+        &auth_header,
+        &auth_value,
+        upstream_is_stream,
+    ) else {
+        return Ok(ProviderQueryExecutionOutcome {
+            status: "failed",
+            skip_reason: None,
+            error_message: Some("provider request headers build failed".to_string()),
+            status_code: None,
+            latency_ms: None,
+            request_url,
+            request_headers: BTreeMap::new(),
+            request_body: provider_request_body,
+            response_headers: BTreeMap::new(),
+            response_body: None,
+        });
+    };
+
+    let plan = ExecutionPlan {
+        request_id: trace_id.to_string(),
+        candidate_id: Some(format!("provider-query-{}", candidate.key.id)),
+        provider_name: Some(provider.name.clone()),
+        provider_id: provider.id.clone(),
+        endpoint_id: candidate.endpoint.id.clone(),
+        key_id: candidate.key.id.clone(),
+        method: "POST".to_string(),
+        url: request_url.clone(),
+        headers: request_headers.clone(),
+        content_type: Some("application/connect+json".to_string()),
+        content_encoding: None,
+        body: RequestBody::from_json(provider_request_body.clone()),
+        stream: upstream_is_stream,
+        client_api_format: "openai:chat".to_string(),
+        provider_api_format: candidate.endpoint.api_format.clone(),
+        model_name: Some(request_model.to_string()),
+        proxy: state
+            .resolve_transport_proxy_snapshot_with_tunnel_affinity(&transport)
+            .await,
+        transport_profile: state.resolve_transport_profile(&transport),
+        timeouts: state.resolve_transport_execution_timeouts(&transport),
+    };
+
+    let result = state
+        .execute_execution_runtime_sync_plan(Some(trace_id), &plan)
+        .await?;
+    let response_body = if result.status_code < 400 {
+        provider_query_finalize_windsurf_result(
+            route_path,
+            trace_id,
+            request_model,
+            request_model,
+            &request_body,
+            &result,
+        )
+        .await?
     } else {
         result.body.as_ref().and_then(|body| body.json_body.clone())
     };
