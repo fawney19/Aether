@@ -1508,7 +1508,7 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "backup_s3_prefix" => Some(json!("aether/backups/")),
         "backup_s3_access_key_id" => Some(serde_json::Value::Null),
         "backup_s3_secret_access_key" => Some(serde_json::Value::Null),
-        "backup_s3_path_style" => Some(json!(false)),
+        "backup_s3_path_style" => Some(json!(true)),
         "backup_s3_compression" => Some(json!("zstd")),
         "backup_s3_schedule_unit" => Some(json!("days")),
         "backup_s3_schedule_interval" => Some(json!(1)),
@@ -2882,6 +2882,10 @@ mod tests {
         assert_eq!(
             admin_system_config_default_value("backup_s3_retention_count"),
             Some(json!(7))
+        );
+        assert_eq!(
+            admin_system_config_default_value("backup_s3_path_style"),
+            Some(json!(true))
         );
     }
 

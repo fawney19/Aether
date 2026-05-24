@@ -109,7 +109,7 @@ impl S3BackupConfig {
                 .unwrap_or_else(|| "aether/backups/".to_string()),
             access_key_id,
             secret_access_key,
-            path_style: optional_bool(entries, "backup_s3_path_style")?.unwrap_or(false),
+            path_style: optional_bool(entries, "backup_s3_path_style")?.unwrap_or(true),
             compression: optional_string(entries, "backup_s3_compression")?
                 .unwrap_or_else(|| "zstd".to_string()),
             schedule,
@@ -298,7 +298,7 @@ mod tests {
             "backup_s3_prefix": "aether/backups/",
             "backup_s3_access_key_id": null,
             "backup_s3_secret_access_key": null,
-            "backup_s3_path_style": false,
+            "backup_s3_path_style": true,
             "backup_s3_compression": "zstd",
             "backup_s3_schedule_unit": "days",
             "backup_s3_schedule_interval": 1,
@@ -385,7 +385,7 @@ mod tests {
         assert_eq!(config.scope, BackupScope::Data);
         assert_eq!(config.region, "auto");
         assert_eq!(config.prefix, "aether/backups/");
-        assert_eq!(config.path_style, false);
+        assert_eq!(config.path_style, true);
         assert_eq!(config.compression, "zstd");
         assert_eq!(config.schedule.unit, BackupScheduleUnit::Days);
         assert_eq!(config.schedule.interval, 1);

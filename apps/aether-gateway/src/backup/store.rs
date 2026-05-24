@@ -60,12 +60,13 @@ impl BackupObjectStore for FakeBackupObjectStore {
     }
 
     async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, BackupStoreError> {
+        let prefix = directory_list_prefix(prefix);
         Ok(self
             .objects
             .read()
             .await
             .keys()
-            .filter(|key| key.starts_with(prefix))
+            .filter(|key| key.starts_with(&prefix))
             .cloned()
             .collect())
     }
@@ -112,11 +113,7 @@ impl BackupObjectStore for ObjectStoreS3BackupStore {
     }
 
     async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, BackupStoreError> {
-        let prefix_path = if prefix.is_empty() {
-            None
-        } else {
-            Some(Path::from(prefix))
-        };
+        let prefix_path = list_prefix_path(prefix);
         let mut keys = self
             .store
             .list(prefix_path.as_ref())
@@ -136,9 +133,27 @@ impl BackupObjectStore for ObjectStoreS3BackupStore {
     }
 }
 
+fn directory_list_prefix(prefix: &str) -> String {
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}/")
+    }
+}
+
+fn list_prefix_path(prefix: &str) -> Option<Path> {
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        None
+    } else {
+        Some(Path::from(prefix))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BackupObjectStore, FakeBackupObjectStore};
+    use super::{list_prefix_path, BackupObjectStore, FakeBackupObjectStore};
 
     #[tokio::test]
     async fn fake_backup_object_store_puts_lists_and_deletes() {
@@ -170,5 +185,43 @@ mod tests {
             keys,
             vec!["prod/aether-data-backup-20260524-020000.json.zst"]
         );
+    }
+
+    #[tokio::test]
+    async fn fake_backup_object_store_lists_normalized_directory_prefixes() {
+        let store = FakeBackupObjectStore::default();
+        store
+            .put_object(
+                "prod/aether-data-backup-20260524-010000.json.zst",
+                bytes::Bytes::from_static(b"one"),
+            )
+            .await
+            .unwrap();
+        store
+            .put_object(
+                "prod-backups/aether-data-backup-20260524-010000.json.zst",
+                bytes::Bytes::from_static(b"two"),
+            )
+            .await
+            .unwrap();
+
+        let keys = store.list_keys("prod").await.unwrap();
+
+        assert_eq!(
+            keys,
+            vec!["prod/aether-data-backup-20260524-010000.json.zst"]
+        );
+    }
+
+    #[test]
+    fn s3_list_prefix_path_lets_object_store_add_directory_delimiter() {
+        assert_eq!(
+            list_prefix_path("prod/")
+                .as_ref()
+                .map(std::string::ToString::to_string)
+                .as_deref(),
+            Some("prod")
+        );
+        assert!(list_prefix_path("").is_none());
     }
 }
