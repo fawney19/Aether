@@ -29,7 +29,10 @@ pub fn canonicalize_tool_arguments(value: Option<Value>) -> String {
     }
 }
 
-pub fn remove_empty_pages_from_tool_arguments(arguments: &str) -> String {
+pub fn remove_empty_pages_from_tool_arguments(tool_name: &str, arguments: &str) -> String {
+    if tool_name != "Read" {
+        return arguments.to_string();
+    }
     let Ok(mut value) = serde_json::from_str::<Value>(arguments) else {
         return arguments.to_string();
     };
@@ -153,16 +156,21 @@ mod tests {
     fn removes_empty_pages_from_tool_arguments() {
         assert_eq!(
             remove_empty_pages_from_tool_arguments(
+                "Read",
                 r#"{"file_path":"/tmp/a.txt","offset":1,"limit":20,"pages":""}"#
             ),
             r#"{"file_path":"/tmp/a.txt","offset":1,"limit":20}"#
         );
         assert_eq!(
-            remove_empty_pages_from_tool_arguments(r#"{"pages":"1-2"}"#),
+            remove_empty_pages_from_tool_arguments("Search", r#"{"query":"","pages":""}"#),
+            r#"{"query":"","pages":""}"#
+        );
+        assert_eq!(
+            remove_empty_pages_from_tool_arguments("Read", r#"{"pages":"1-2"}"#),
             r#"{"pages":"1-2"}"#
         );
         assert_eq!(
-            remove_empty_pages_from_tool_arguments(r#"{"pages":"#),
+            remove_empty_pages_from_tool_arguments("Read", r#"{"pages":"#),
             r#"{"pages":"#
         );
     }

@@ -2531,7 +2531,12 @@ pub fn aggregate_claude_stream_sync_response(body: &[u8]) -> Option<Value> {
             }
             "tool_use" => {
                 if !state.partial_json.is_empty() {
-                    let arguments = remove_empty_pages_from_tool_arguments(&state.partial_json);
+                    let tool_name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let arguments =
+                        remove_empty_pages_from_tool_arguments(tool_name, &state.partial_json);
                     let input = serde_json::from_str::<Value>(&arguments)
                         .unwrap_or(Value::String(arguments));
                     block.insert("input".to_string(), input);
@@ -3110,6 +3115,34 @@ mod tests {
                 "file_path": "/tmp/a.txt",
                 "offset": 1,
                 "limit": 20,
+            })
+        );
+    }
+
+    #[test]
+    fn aggregates_claude_stream_preserves_empty_pages_for_non_read_tool_input() {
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_search\",\"name\":\"Search\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\":\\\"\\\",\\\"pages\\\":\\\"\\\"}\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+
+        let aggregated =
+            aggregate_claude_stream_sync_response(body.as_bytes()).expect("body should aggregate");
+
+        assert_eq!(aggregated["content"][0]["type"], "tool_use");
+        assert_eq!(
+            aggregated["content"][0]["input"],
+            json!({
+                "query": "",
+                "pages": "",
             })
         );
     }
