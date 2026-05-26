@@ -530,7 +530,7 @@ fn push_key_auth_channel_sql_filter(
       )
     )
     OR (
-      LOWER(TRIM(p.provider_type)) IN ('gemini_cli', 'antigravity')
+      LOWER(TRIM(p.provider_type)) IN ('gemini_cli', 'antigravity', 'antigravity_cli')
       AND LOWER(TRIM(pak.auth_type)) = 'oauth'
       AND "#,
     );
@@ -586,6 +586,7 @@ fn push_key_auth_channel_sql_filter(
         'grok',
         'vertex_ai',
         'antigravity',
+        'antigravity_cli',
         'kiro',
         'windsurf'
       )
@@ -841,7 +842,7 @@ fn key_auth_channel_matches(row: &CandidateSelectionRow, api_format: &str) -> bo
                             .as_deref()
                             .is_some_and(|value| !value.trim().is_empty())))
         }
-        "gemini_cli" | "antigravity" => {
+        "gemini_cli" | "antigravity" | "antigravity_cli" => {
             auth_type == "oauth" && api_format == "gemini:generate_content"
         }
         "grok" => {

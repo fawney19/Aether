@@ -241,7 +241,7 @@ pub(crate) async fn refresh_antigravity_provider_quota_locally(
             payload.insert("metadata".to_string(), metadata);
         }
         if let Some(quota_snapshot) = build_quota_snapshot_payload(
-            "antigravity",
+            &provider.provider_type,
             key.status_snapshot.as_ref(),
             metadata_update.as_ref(),
         ) {

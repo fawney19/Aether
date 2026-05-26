@@ -4,7 +4,9 @@ mod generic;
 mod kiro;
 mod windsurf;
 
-pub use antigravity::AntigravityProviderOAuthAdapter;
+pub use antigravity::{
+    AntigravityProviderOAuthAdapter, ANTIGRAVITY_CLI_PROVIDER_TYPE, ANTIGRAVITY_PROVIDER_TYPE,
+};
 pub use codex::CodexProviderOAuthAdapter;
 pub use generic::{
     GenericProviderOAuthAdapter, GenericProviderOAuthTemplate, GENERIC_PROVIDER_OAUTH_TEMPLATES,

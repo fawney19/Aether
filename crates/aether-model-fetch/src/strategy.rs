@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_contracts::{ExecutionPlan, ExecutionResult, RequestBody};
+use aether_provider_transport::antigravity::is_antigravity_runtime_provider_type;
 use aether_provider_transport::{
     is_vertex_api_key_transport_context, resolve_transport_execution_timeouts,
     resolve_transport_profile, GatewayProviderTransportSnapshot,
@@ -139,7 +140,9 @@ fn select_model_fetch_strategy(
     }
 
     let kind = match provider_type.as_str() {
-        "antigravity" => ModelFetchStrategyKind::Antigravity,
+        provider_type if is_antigravity_runtime_provider_type(provider_type) => {
+            ModelFetchStrategyKind::Antigravity
+        }
         "vertex_ai" => ModelFetchStrategyKind::Vertex,
         "windsurf" => ModelFetchStrategyKind::Windsurf,
         _ => ModelFetchStrategyKind::StandardTransport,
@@ -1529,6 +1532,23 @@ mod tests {
         transport
     }
 
+    fn sample_antigravity_transport(provider_type: &str) -> GatewayProviderTransportSnapshot {
+        let mut transport = sample_custom_aiplatform_transport();
+        transport.provider.provider_type = provider_type.to_string();
+        transport.provider.name = "Antigravity".to_string();
+        transport.endpoint.api_format = "gemini:generate_content".to_string();
+        transport.endpoint.api_family = Some("gemini".to_string());
+        transport.endpoint.endpoint_kind = Some("generate_content".to_string());
+        transport.endpoint.base_url = "https://cloudcode-pa.googleapis.com".to_string();
+        transport.endpoint.custom_path = None;
+        transport.key.auth_type = "oauth".to_string();
+        transport.key.api_formats = Some(vec!["gemini:generate_content".to_string()]);
+        transport.key.decrypted_api_key = "access-token".to_string();
+        transport.key.decrypted_auth_config =
+            Some(r#"{"project_id":"project-1","refresh_token":"refresh-token"}"#.to_string());
+        transport
+    }
+
     fn sample_openai_transport(
         endpoint_id: &str,
         api_format: &str,
@@ -1587,6 +1607,16 @@ mod tests {
 
         assert_eq!(strategy.provider_id(), "windsurf");
         assert_eq!(strategy.kind(), ModelFetchStrategyKind::Windsurf);
+    }
+
+    #[test]
+    fn strategy_selection_uses_antigravity_fetch_for_antigravity_cli() {
+        let strategy =
+            select_model_fetch_strategy(&[sample_antigravity_transport("antigravity_cli")])
+                .expect("strategy should select");
+
+        assert_eq!(strategy.provider_id(), "antigravity_cli");
+        assert_eq!(strategy.kind(), ModelFetchStrategyKind::Antigravity);
     }
 
     #[tokio::test]

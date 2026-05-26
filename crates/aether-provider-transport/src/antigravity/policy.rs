@@ -2,8 +2,8 @@ use serde_json::Value;
 
 use super::super::snapshot::GatewayProviderTransportSnapshot;
 use super::auth::{
-    resolve_local_antigravity_request_auth, AntigravityRequestAuth, AntigravityRequestAuthSupport,
-    AntigravityRequestAuthUnsupportedReason, ANTIGRAVITY_PROVIDER_TYPE,
+    is_antigravity_runtime_provider_type, resolve_local_antigravity_request_auth,
+    AntigravityRequestAuth, AntigravityRequestAuthSupport, AntigravityRequestAuthUnsupportedReason,
 };
 use super::request::{
     classify_antigravity_safe_request_body, AntigravityEnvelopeRequestType,
@@ -37,11 +37,7 @@ pub enum AntigravityRequestSideUnsupportedReason {
 }
 
 pub fn is_antigravity_provider_transport(transport: &GatewayProviderTransportSnapshot) -> bool {
-    transport
-        .provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case(ANTIGRAVITY_PROVIDER_TYPE)
+    is_antigravity_runtime_provider_type(&transport.provider.provider_type)
 }
 
 pub fn classify_local_antigravity_request_support(

@@ -3,6 +3,9 @@ use super::generic::{
 };
 use crate::provider::ProviderOAuthAdapter;
 
+pub const ANTIGRAVITY_PROVIDER_TYPE: &str = "antigravity";
+pub const ANTIGRAVITY_CLI_PROVIDER_TYPE: &str = "antigravity_cli";
+
 #[derive(Debug, Clone)]
 pub struct AntigravityProviderOAuthAdapter {
     inner: GenericProviderOAuthAdapter,
@@ -10,9 +13,15 @@ pub struct AntigravityProviderOAuthAdapter {
 
 impl Default for AntigravityProviderOAuthAdapter {
     fn default() -> Self {
+        Self::for_provider_type(ANTIGRAVITY_PROVIDER_TYPE)
+    }
+}
+
+impl AntigravityProviderOAuthAdapter {
+    pub fn for_provider_type(provider_type: &'static str) -> Self {
         Self {
             inner: GenericProviderOAuthAdapter::new(
-                template_for_provider_type("antigravity")
+                template_for_provider_type(provider_type)
                     .expect("antigravity template should exist"),
             ),
         }
@@ -93,7 +102,7 @@ impl ProviderOAuthAdapter for AntigravityProviderOAuthAdapter {
         account: &crate::provider::ProviderOAuthAccount,
     ) -> Result<Option<crate::provider::ProviderOAuthProbeResult>, crate::core::OAuthError> {
         Ok(Some(provider_account_state_from_metadata(
-            "antigravity",
+            self.provider_type(),
             account,
         )))
     }
@@ -109,6 +118,7 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
 
     struct UnusedExecutor;
 
@@ -122,10 +132,37 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn antigravity_probe_marks_forbidden_metadata_invalid() {
-        let adapter = AntigravityProviderOAuthAdapter::default();
-        let ctx = ProviderOAuthTransportContext {
+    #[derive(Clone, Default)]
+    struct CapturingExecutor {
+        requests: Arc<Mutex<Vec<OAuthHttpRequest>>>,
+    }
+
+    #[async_trait]
+    impl OAuthHttpExecutor for CapturingExecutor {
+        async fn execute(
+            &self,
+            request: OAuthHttpRequest,
+        ) -> Result<OAuthHttpResponse, crate::core::OAuthError> {
+            self.requests
+                .lock()
+                .expect("requests should lock")
+                .push(request);
+            Ok(OAuthHttpResponse {
+                status_code: 200,
+                body_text: json!({
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                })
+                .to_string(),
+                json_body: None,
+            })
+        }
+    }
+
+    fn sample_context() -> ProviderOAuthTransportContext {
+        ProviderOAuthTransportContext {
             provider_id: String::new(),
             provider_type: "antigravity".to_string(),
             endpoint_id: None,
@@ -137,7 +174,179 @@ mod tests {
             endpoint_config: None,
             key_config: None,
             network: crate::network::OAuthNetworkContext::provider_operation(None),
-        };
+        }
+    }
+
+    #[test]
+    fn antigravity_authorize_url_preserves_existing_antigravity_contract() {
+        let adapter = AntigravityProviderOAuthAdapter::default();
+        let response = adapter
+            .build_authorize_url(&sample_context(), "state-1", Some("challenge-1"))
+            .expect("authorize url should build");
+
+        let parsed = url::Url::parse(&response.authorize_url).expect("authorize url should parse");
+        let params = parsed
+            .query_pairs()
+            .into_owned()
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            parsed.as_str().split('?').next(),
+            Some("https://accounts.google.com/o/oauth2/v2/auth")
+        );
+        assert_eq!(
+            params.get("client_id").map(String::as_str),
+            Some("1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com")
+        );
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some("http://localhost:51121/oauth2callback")
+        );
+        assert!(!params.contains_key("access_type"));
+        assert!(!params.contains_key("prompt"));
+        assert_eq!(params.get("state").map(String::as_str), Some("state-1"));
+        assert_eq!(
+            params.get("code_challenge").map(String::as_str),
+            Some("challenge-1")
+        );
+        assert_eq!(
+            params.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+
+        let scope = params.get("scope").expect("scope should exist");
+        assert!(!scope.split_whitespace().any(|item| item == "openid"));
+        for expected in [
+            "https://www.googleapis.com/auth/cloud-platform",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+            "https://www.googleapis.com/auth/cclog",
+            "https://www.googleapis.com/auth/experimentsandconfigs",
+        ] {
+            assert!(
+                scope.split_whitespace().any(|item| item == expected),
+                "scope should include {expected}; got {scope}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn antigravity_exchange_preserves_existing_redirect_and_scope_replay() {
+        let adapter = AntigravityProviderOAuthAdapter::default();
+        let executor = CapturingExecutor::default();
+
+        adapter
+            .exchange_code(
+                &executor,
+                &sample_context(),
+                "code-1",
+                "state-1",
+                Some("verifier-1"),
+            )
+            .await
+            .expect("exchange should succeed");
+
+        let requests = executor.requests.lock().expect("requests should lock");
+        assert_eq!(requests.len(), 1);
+        let body = std::str::from_utf8(
+            requests[0]
+                .body_bytes
+                .as_deref()
+                .expect("form body should exist"),
+        )
+        .expect("form body should be utf8");
+        let params = url::form_urlencoded::parse(body.as_bytes())
+            .into_owned()
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some("http://localhost:51121/oauth2callback")
+        );
+        assert_eq!(
+            params.get("code_verifier").map(String::as_str),
+            Some("verifier-1")
+        );
+        assert!(params.contains_key("scope"));
+    }
+
+    #[test]
+    fn antigravity_cli_authorize_url_matches_cli_oauth_contract() {
+        let adapter = AntigravityProviderOAuthAdapter::for_provider_type("antigravity_cli");
+        let mut ctx = sample_context();
+        ctx.provider_type = "antigravity_cli".to_string();
+        let response = adapter
+            .build_authorize_url(&ctx, "state-1", Some("challenge-1"))
+            .expect("authorize url should build");
+
+        let parsed = url::Url::parse(&response.authorize_url).expect("authorize url should parse");
+        let params = parsed
+            .query_pairs()
+            .into_owned()
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            parsed.as_str().split('?').next(),
+            Some("https://accounts.google.com/o/oauth2/auth")
+        );
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some("https://antigravity.google/oauth-callback")
+        );
+        assert_eq!(
+            params.get("access_type").map(String::as_str),
+            Some("offline")
+        );
+        assert_eq!(params.get("prompt").map(String::as_str), Some("consent"));
+        assert_eq!(
+            params.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+        assert!(params
+            .get("scope")
+            .is_some_and(|scope| scope.split_whitespace().any(|item| item == "openid")));
+    }
+
+    #[tokio::test]
+    async fn antigravity_cli_exchange_uses_cli_redirect_uri_without_scope_replay() {
+        let adapter = AntigravityProviderOAuthAdapter::for_provider_type("antigravity_cli");
+        let executor = CapturingExecutor::default();
+        let mut ctx = sample_context();
+        ctx.provider_type = "antigravity_cli".to_string();
+
+        adapter
+            .exchange_code(&executor, &ctx, "code-1", "state-1", Some("verifier-1"))
+            .await
+            .expect("exchange should succeed");
+
+        let requests = executor.requests.lock().expect("requests should lock");
+        assert_eq!(requests.len(), 1);
+        let body = std::str::from_utf8(
+            requests[0]
+                .body_bytes
+                .as_deref()
+                .expect("form body should exist"),
+        )
+        .expect("form body should be utf8");
+        let params = url::form_urlencoded::parse(body.as_bytes())
+            .into_owned()
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some("https://antigravity.google/oauth-callback")
+        );
+        assert_eq!(
+            params.get("code_verifier").map(String::as_str),
+            Some("verifier-1")
+        );
+        assert!(!params.contains_key("scope"));
+    }
+
+    #[tokio::test]
+    async fn antigravity_probe_marks_forbidden_metadata_invalid() {
+        let adapter = AntigravityProviderOAuthAdapter::default();
+        let ctx = sample_context();
         let account = ProviderOAuthAccount {
             provider_type: "antigravity".to_string(),
             access_token: "access-token".to_string(),

@@ -9,7 +9,8 @@ pub mod windsurf;
 
 pub use antigravity::AntigravityProviderPoolAdapter;
 pub use antigravity::{
-    build_antigravity_pool_quota_request, ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH,
+    build_antigravity_pool_quota_request, ANTIGRAVITY_CLI_PROVIDER_TYPE,
+    ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH, ANTIGRAVITY_PROVIDER_TYPE,
 };
 pub use chatgpt_web::ChatGptWebProviderPoolAdapter;
 pub use chatgpt_web::{

@@ -853,6 +853,7 @@ const AUTH_TYPE_PROVIDER_LABEL_MAP: Record<string, string> = {
   codex: 'Codex',
   kiro: 'Kiro',
   antigravity: 'Antigravity',
+  antigravity_cli: 'Antigravity CLI',
   claude_code: 'Claude Code',
   gemini_cli: 'Gemini CLI',
 }
@@ -1486,6 +1487,7 @@ const formatAuthTypeWithPlan = (authType: string, planType?: string): string => 
     'kiro': 'Kiro',
     'codex': 'Codex',
     'antigravity': 'Antigravity',
+    'antigravity_cli': 'Antigravity CLI',
     'claude_code': 'Claude Code',
     'gemini_cli': 'Gemini CLI',
   }

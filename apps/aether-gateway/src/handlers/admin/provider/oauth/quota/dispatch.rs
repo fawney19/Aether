@@ -31,6 +31,10 @@ const PROVIDER_QUOTA_REFRESH_HANDLERS: &[(&str, ProviderQuotaRefreshHandler)] = 
         refresh_antigravity_provider_quota_locally_boxed,
     ),
     (
+        "antigravity_cli",
+        refresh_antigravity_provider_quota_locally_boxed,
+    ),
+    (
         "chatgpt_web",
         refresh_chatgpt_web_provider_quota_locally_boxed,
     ),

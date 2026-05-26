@@ -24,6 +24,8 @@ pub struct GenericProviderOAuthTemplate {
     pub redirect_uri: &'static str,
     pub use_pkce: bool,
     pub uses_json_payload: bool,
+    pub authorize_params: &'static [(&'static str, &'static str)],
+    pub include_scope_in_token_request: bool,
 }
 
 pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
@@ -38,6 +40,8 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         redirect_uri: "http://localhost:54545/callback",
         use_pkce: true,
         uses_json_payload: true,
+        authorize_params: &[],
+        include_scope_in_token_request: true,
     },
     GenericProviderOAuthTemplate {
         provider_type: "codex",
@@ -50,6 +54,8 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         redirect_uri: "http://localhost:1455/auth/callback",
         use_pkce: true,
         uses_json_payload: false,
+        authorize_params: &[],
+        include_scope_in_token_request: true,
     },
     GenericProviderOAuthTemplate {
         provider_type: "chatgpt_web",
@@ -62,6 +68,8 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         redirect_uri: "http://localhost:1455/auth/callback",
         use_pkce: true,
         uses_json_payload: false,
+        authorize_params: &[],
+        include_scope_in_token_request: true,
     },
     GenericProviderOAuthTemplate {
         provider_type: "gemini_cli",
@@ -78,6 +86,8 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         redirect_uri: "http://localhost:8085/oauth2callback",
         use_pkce: false,
         uses_json_payload: false,
+        authorize_params: &[],
+        include_scope_in_token_request: true,
     },
     GenericProviderOAuthTemplate {
         provider_type: "antigravity",
@@ -96,6 +106,29 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         redirect_uri: "http://localhost:51121/oauth2callback",
         use_pkce: true,
         uses_json_payload: false,
+        authorize_params: &[],
+        include_scope_in_token_request: true,
+    },
+    GenericProviderOAuthTemplate {
+        provider_type: "antigravity_cli",
+        display_name: "Antigravity CLI",
+        authorize_url: "https://accounts.google.com/o/oauth2/auth",
+        token_url: "https://oauth2.googleapis.com/token",
+        client_id: "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
+        client_secret: "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",
+        scopes: &[
+            "openid",
+            "https://www.googleapis.com/auth/cloud-platform",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+            "https://www.googleapis.com/auth/cclog",
+            "https://www.googleapis.com/auth/experimentsandconfigs",
+        ],
+        redirect_uri: "https://antigravity.google/oauth-callback",
+        use_pkce: true,
+        uses_json_payload: false,
+        authorize_params: &[("access_type", "offline"), ("prompt", "consent")],
+        include_scope_in_token_request: false,
     },
 ];
 
@@ -141,7 +174,9 @@ impl GenericProviderOAuthAdapter {
         state: Option<&str>,
         pkce_verifier: Option<&str>,
     ) -> Result<ProviderOAuthTokenSet, OAuthError> {
-        let scope = (!self.template.scopes.is_empty()).then(|| self.template.scopes.join(" "));
+        let scope = (self.template.include_scope_in_token_request
+            && !self.template.scopes.is_empty())
+        .then(|| self.template.scopes.join(" "));
         let request_id = match grant_type {
             "authorization_code" => "provider-oauth:exchange-code".to_string(),
             "refresh_token" => "provider-oauth:refresh-token".to_string(),
@@ -303,6 +338,9 @@ impl ProviderOAuthAdapter for GenericProviderOAuthAdapter {
             query.append_pair("state", state);
             if !self.template.scopes.is_empty() {
                 query.append_pair("scope", &self.template.scopes.join(" "));
+            }
+            for (name, value) in self.template.authorize_params {
+                query.append_pair(name, value);
             }
             if let Some(challenge) = code_challenge {
                 query.append_pair("code_challenge", challenge);

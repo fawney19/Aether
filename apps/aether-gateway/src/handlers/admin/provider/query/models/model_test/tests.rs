@@ -627,6 +627,13 @@ fn provider_query_test_adapter_routes_fixed_provider_endpoint_types() {
         Some(ProviderQueryTestAdapter::Antigravity)
     );
     assert_eq!(
+        provider_query_test_adapter_for_provider_api_format(
+            "antigravity_cli",
+            "gemini:generate_content"
+        ),
+        Some(ProviderQueryTestAdapter::Antigravity)
+    );
+    assert_eq!(
         provider_query_test_adapter_for_provider_api_format("grok", "openai:chat"),
         Some(ProviderQueryTestAdapter::Grok)
     );
@@ -692,6 +699,10 @@ fn provider_query_endpoint_priority_prefers_text_before_cli_and_image() {
     );
     assert_eq!(
         provider_query_model_test_endpoint_priority("antigravity", "gemini:generate_content"),
+        Some(1)
+    );
+    assert_eq!(
+        provider_query_model_test_endpoint_priority("antigravity_cli", "gemini:generate_content"),
         Some(1)
     );
 }

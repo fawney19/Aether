@@ -553,6 +553,20 @@ mod tests {
         assert!(behavior.is_antigravity);
         assert!(behavior.upstream_is_stream);
         assert_eq!(behavior.report_kind, "gemini_chat_sync_finalize");
+
+        let antigravity_cli = sample_transport("antigravity_cli");
+        let behavior = classify_same_format_provider_request_behavior(
+            &antigravity_cli,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: false,
+                provider_api_format: "gemini:generate_content",
+                report_kind: "gemini_chat_sync_success",
+            },
+        );
+
+        assert!(behavior.is_antigravity);
+        assert!(behavior.upstream_is_stream);
+        assert_eq!(behavior.report_kind, "gemini_chat_sync_finalize");
     }
 
     #[test]

@@ -1386,6 +1386,7 @@ fn build_windsurf_quota_status_snapshot(
 }
 
 fn build_antigravity_quota_status_snapshot(
+    provider_type: &str,
     upstream_metadata: Option<&Value>,
     source: &str,
 ) -> Option<Value> {
@@ -1448,7 +1449,7 @@ fn build_antigravity_quota_status_snapshot(
 
     Some(json!({
         "version": 2,
-        "provider_type": "antigravity",
+        "provider_type": provider_type,
         "code": code,
         "label": label,
         "reason": reason,
@@ -1633,7 +1634,11 @@ pub(crate) fn sync_provider_key_quota_status_snapshot(
         "kiro" => build_kiro_quota_status_snapshot(upstream_metadata, source),
         "chatgpt_web" => build_chatgpt_web_quota_status_snapshot(upstream_metadata, source),
         "windsurf" => build_windsurf_quota_status_snapshot(upstream_metadata, source),
-        "antigravity" => build_antigravity_quota_status_snapshot(upstream_metadata, source),
+        "antigravity" | "antigravity_cli" => build_antigravity_quota_status_snapshot(
+            &normalized_provider_type,
+            upstream_metadata,
+            source,
+        ),
         "grok" => build_grok_quota_status_snapshot(upstream_metadata, source),
         "gemini_cli" => build_gemini_cli_quota_status_snapshot(upstream_metadata, source),
         _ => None,
@@ -3282,6 +3287,32 @@ mod tests {
         assert_eq!(
             quota.get("windows").and_then(Value::as_array).map(Vec::len),
             Some(2usize)
+        );
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_uses_antigravity_cli_provider_type_with_antigravity_metadata(
+    ) {
+        let mut key = sample_catalog_key();
+        key.upstream_metadata = Some(json!({
+            "antigravity": {
+                "updated_at": 1_775_553_285u64,
+                "quota_by_model": {
+                    "gemini-3.1-flash-lite": { "used_percent": 10.0 }
+                }
+            }
+        }));
+
+        let payload = provider_key_status_snapshot_payload(&key, "antigravity_cli");
+        let quota = payload
+            .get("quota")
+            .and_then(Value::as_object)
+            .expect("quota snapshot should be object");
+
+        assert_eq!(quota.get("provider_type"), Some(&json!("antigravity_cli")));
+        assert_eq!(
+            quota.get("windows").and_then(Value::as_array).map(Vec::len),
+            Some(1usize)
         );
     }
 

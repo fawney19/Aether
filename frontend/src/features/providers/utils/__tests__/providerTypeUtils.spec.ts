@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { normalizeBatchImportCredentials } from '@/api/endpoints/provider_oauth'
-import { isKeyManagedProviderType, isOAuthAccountProviderType } from '../providerTypeUtils'
+import { getProviderTypeDisplayName, isKeyManagedProviderType, isOAuthAccountProviderType } from '../providerTypeUtils'
 
 describe('providerTypeUtils', () => {
   it('treats ChatGPT-Web as an OAuth account provider', () => {
@@ -20,6 +20,16 @@ describe('providerTypeUtils', () => {
     expect(isOAuthAccountProviderType('windsurf')).toBe(true)
     expect(isOAuthAccountProviderType('Windsurf')).toBe(true)
     expect(isKeyManagedProviderType('windsurf')).toBe(false)
+  })
+
+  it('keeps Antigravity separate from Antigravity CLI in user-facing UI', () => {
+    expect(isOAuthAccountProviderType('antigravity')).toBe(true)
+    expect(isOAuthAccountProviderType('antigravity_cli')).toBe(true)
+    expect(isKeyManagedProviderType('antigravity_cli')).toBe(false)
+    expect(getProviderTypeDisplayName('antigravity')).toBe('Antigravity')
+    expect(getProviderTypeDisplayName('Antigravity')).toBe('Antigravity')
+    expect(getProviderTypeDisplayName('antigravity_cli')).toBe('Antigravity CLI')
+    expect(getProviderTypeDisplayName('Antigravity_CLI')).toBe('Antigravity CLI')
   })
 })
 

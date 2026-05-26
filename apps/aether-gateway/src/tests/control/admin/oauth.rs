@@ -298,13 +298,14 @@ async fn gateway_handles_admin_provider_oauth_supported_types_locally_with_trust
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     let items = payload.as_array().expect("items should be array");
-    assert_eq!(items.len(), 6);
+    assert_eq!(items.len(), 7);
     assert_eq!(items[0]["provider_type"], "claude_code");
     assert_eq!(items[1]["provider_type"], "codex");
     assert_eq!(items[2]["provider_type"], "chatgpt_web");
     assert_eq!(items[3]["provider_type"], "gemini_cli");
     assert_eq!(items[4]["provider_type"], "antigravity");
-    assert_eq!(items[5]["provider_type"], "windsurf");
+    assert_eq!(items[5]["provider_type"], "antigravity_cli");
+    assert_eq!(items[6]["provider_type"], "windsurf");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1985,6 +1986,135 @@ async fn gateway_handles_admin_provider_oauth_start_provider_locally_with_truste
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_starts_antigravity_oauth_with_existing_antigravity_authorization_url() {
+    let mut provider = sample_provider("provider-antigravity", "Antigravity", 10);
+    provider.provider_type = "antigravity".to_string();
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![],
+        vec![],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            provider_catalog_repository,
+        ));
+
+    let response = local_admin_provider_oauth_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/provider-oauth/providers/provider-antigravity/start",
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    assert_eq!(payload["provider_type"], "antigravity");
+    assert_eq!(
+        payload["redirect_uri"],
+        "http://localhost:51121/oauth2callback"
+    );
+
+    let authorization_url = payload["authorization_url"]
+        .as_str()
+        .expect("authorization_url should exist");
+    let parsed = url::Url::parse(authorization_url).expect("authorization url should parse");
+    let params = parsed
+        .query_pairs()
+        .into_owned()
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    assert_eq!(
+        parsed.as_str().split('?').next(),
+        Some("https://accounts.google.com/o/oauth2/v2/auth")
+    );
+    assert_eq!(
+        params.get("redirect_uri").map(String::as_str),
+        Some("http://localhost:51121/oauth2callback")
+    );
+    assert!(!params.contains_key("access_type"));
+    assert!(!params.contains_key("prompt"));
+    assert_eq!(
+        params.get("code_challenge_method").map(String::as_str),
+        Some("S256")
+    );
+    assert!(!params
+        .get("scope")
+        .is_some_and(|scope| scope.split_whitespace().any(|item| item == "openid")));
+}
+
+#[tokio::test]
+async fn gateway_starts_antigravity_cli_oauth_with_precise_cli_authorization_url() {
+    let mut provider = sample_provider("provider-antigravity-cli", "Antigravity CLI", 10);
+    provider.provider_type = "antigravity_cli".to_string();
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![],
+        vec![],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            provider_catalog_repository,
+        ));
+
+    let response = local_admin_provider_oauth_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/provider-oauth/providers/provider-antigravity-cli/start",
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    assert_eq!(payload["provider_type"], "antigravity_cli");
+    assert_eq!(
+        payload["redirect_uri"],
+        "https://antigravity.google/oauth-callback"
+    );
+
+    let authorization_url = payload["authorization_url"]
+        .as_str()
+        .expect("authorization_url should exist");
+    let parsed = url::Url::parse(authorization_url).expect("authorization url should parse");
+    let params = parsed
+        .query_pairs()
+        .into_owned()
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    assert_eq!(
+        parsed.as_str().split('?').next(),
+        Some("https://accounts.google.com/o/oauth2/auth")
+    );
+    assert_eq!(
+        params.get("redirect_uri").map(String::as_str),
+        Some("https://antigravity.google/oauth-callback")
+    );
+    assert_eq!(
+        params.get("access_type").map(String::as_str),
+        Some("offline")
+    );
+    assert_eq!(params.get("prompt").map(String::as_str), Some("consent"));
+    assert_eq!(
+        params.get("code_challenge_method").map(String::as_str),
+        Some("S256")
+    );
+    assert!(params
+        .get("scope")
+        .is_some_and(|scope| scope.split_whitespace().any(|item| item == "openid")));
 }
 
 #[tokio::test]

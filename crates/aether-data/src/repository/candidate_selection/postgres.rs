@@ -101,7 +101,7 @@ INNER JOIN LATERAL (
         AND LOWER($3) IN ('openai:chat', 'openai:responses', 'claude:messages', 'openai:image')
       )
       OR (
-        LOWER(BTRIM(p.provider_type)) IN ('gemini_cli', 'antigravity')
+        LOWER(BTRIM(p.provider_type)) IN ('gemini_cli', 'antigravity', 'antigravity_cli')
         AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
         AND LOWER($3) = 'gemini:generate_content'
       )
@@ -132,6 +132,7 @@ INNER JOIN LATERAL (
           'grok',
           'vertex_ai',
           'antigravity',
+          'antigravity_cli',
           'kiro',
           'windsurf'
         )
@@ -194,7 +195,7 @@ WHERE p.is_active = TRUE
       AND LOWER($3) IN ('openai:chat', 'openai:responses', 'claude:messages', 'openai:image')
     )
     OR (
-      LOWER(BTRIM(p.provider_type)) IN ('gemini_cli', 'antigravity')
+      LOWER(BTRIM(p.provider_type)) IN ('gemini_cli', 'antigravity', 'antigravity_cli')
       AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
       AND LOWER($3) = 'gemini:generate_content'
     )
@@ -225,6 +226,7 @@ WHERE p.is_active = TRUE
         'grok',
         'vertex_ai',
         'antigravity',
+        'antigravity_cli',
         'kiro',
         'windsurf'
       )
@@ -380,7 +382,7 @@ INNER JOIN LATERAL (
         AND LOWER($4) IN ('openai:chat', 'openai:responses', 'claude:messages', 'openai:image')
       )
       OR (
-        LOWER(BTRIM(p.provider_type)) IN ('gemini_cli', 'antigravity')
+        LOWER(BTRIM(p.provider_type)) IN ('gemini_cli', 'antigravity', 'antigravity_cli')
         AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
         AND LOWER($4) = 'gemini:generate_content'
       )
@@ -411,6 +413,7 @@ INNER JOIN LATERAL (
           'grok',
           'vertex_ai',
           'antigravity',
+          'antigravity_cli',
           'kiro',
           'windsurf'
         )
@@ -474,7 +477,7 @@ WHERE p.is_active = TRUE
       AND LOWER($4) IN ('openai:chat', 'openai:responses', 'claude:messages', 'openai:image')
     )
     OR (
-      LOWER(BTRIM(p.provider_type)) IN ('gemini_cli', 'antigravity')
+      LOWER(BTRIM(p.provider_type)) IN ('gemini_cli', 'antigravity', 'antigravity_cli')
       AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
       AND LOWER($4) = 'gemini:generate_content'
     )
@@ -505,6 +508,7 @@ WHERE p.is_active = TRUE
         'grok',
         'vertex_ai',
         'antigravity',
+        'antigravity_cli',
         'kiro',
         'windsurf'
       )
@@ -668,7 +672,7 @@ WHERE p.is_active = TRUE
       AND LOWER($6) IN ('openai:chat', 'openai:responses', 'claude:messages', 'openai:image')
     )
     OR (
-      LOWER(BTRIM(p.provider_type)) IN ('gemini_cli', 'antigravity')
+      LOWER(BTRIM(p.provider_type)) IN ('gemini_cli', 'antigravity', 'antigravity_cli')
       AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
       AND LOWER($6) = 'gemini:generate_content'
     )
@@ -699,6 +703,7 @@ WHERE p.is_active = TRUE
         'grok',
         'vertex_ai',
         'antigravity',
+        'antigravity_cli',
         'kiro',
         'windsurf'
       )

@@ -5,6 +5,7 @@ use serde_json::Value;
 use super::super::snapshot::GatewayProviderTransportSnapshot;
 
 pub const ANTIGRAVITY_PROVIDER_TYPE: &str = "antigravity";
+pub const ANTIGRAVITY_CLI_PROVIDER_TYPE: &str = "antigravity_cli";
 pub const ANTIGRAVITY_REQUEST_USER_AGENT: &str = "antigravity";
 const ANTIGRAVITY_CLIENT_NAME: &str = "antigravity";
 const ANTIGRAVITY_GOOG_API_CLIENT: &str = "gl-node/18.18.2 fire/0.8.6 grpc/1.10.x";
@@ -31,15 +32,15 @@ pub enum AntigravityRequestAuthUnsupportedReason {
     MissingProjectId,
 }
 
+pub fn is_antigravity_runtime_provider_type(provider_type: &str) -> bool {
+    let normalized = provider_type.trim().to_ascii_lowercase();
+    normalized == ANTIGRAVITY_PROVIDER_TYPE || normalized == ANTIGRAVITY_CLI_PROVIDER_TYPE
+}
+
 pub fn resolve_local_antigravity_request_auth(
     transport: &GatewayProviderTransportSnapshot,
 ) -> AntigravityRequestAuthSupport {
-    if !transport
-        .provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case(ANTIGRAVITY_PROVIDER_TYPE)
-    {
+    if !is_antigravity_runtime_provider_type(&transport.provider.provider_type) {
         return AntigravityRequestAuthSupport::Unsupported(
             AntigravityRequestAuthUnsupportedReason::WrongProviderType,
         );

@@ -25,11 +25,11 @@ pub use providers::{
     grok_supported_quota_windows_for_tier, normalize_chatgpt_web_image_quota_limit,
     AntigravityProviderPoolAdapter, ChatGptWebProviderPoolAdapter, CodexProviderPoolAdapter,
     DefaultProviderPoolAdapter, GrokProviderPoolAdapter, KiroPoolQuotaAuthInput,
-    KiroProviderPoolAdapter, UnsupportedQuotaProviderPoolAdapter,
-    ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH, CHATGPT_WEB_CONVERSATION_INIT_PATH,
-    CHATGPT_WEB_DEFAULT_BASE_URL, CODEX_WHAM_USAGE_URL, KIRO_USAGE_LIMITS_PATH,
-    KIRO_USAGE_SDK_VERSION, WINDSURF_MODEL_CONFIGS_PATH, WINDSURF_RATE_LIMIT_PATH,
-    WINDSURF_USER_STATUS_PATH,
+    KiroProviderPoolAdapter, UnsupportedQuotaProviderPoolAdapter, ANTIGRAVITY_CLI_PROVIDER_TYPE,
+    ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH, ANTIGRAVITY_PROVIDER_TYPE,
+    CHATGPT_WEB_CONVERSATION_INIT_PATH, CHATGPT_WEB_DEFAULT_BASE_URL, CODEX_WHAM_USAGE_URL,
+    KIRO_USAGE_LIMITS_PATH, KIRO_USAGE_SDK_VERSION, WINDSURF_MODEL_CONFIGS_PATH,
+    WINDSURF_RATE_LIMIT_PATH, WINDSURF_USER_STATUS_PATH,
 };
 pub use quota::{
     provider_pool_key_account_quota_exhausted, provider_pool_key_scheduling_label,
@@ -68,6 +68,7 @@ mod tests {
             service.provider_types().collect::<Vec<_>>(),
             [
                 "antigravity",
+                "antigravity_cli",
                 "chatgpt_web",
                 "claude_code",
                 "codex",
@@ -93,6 +94,7 @@ mod tests {
             service.provider_types_for_capability(ProviderPoolCapability::QuotaRefresh),
             [
                 "antigravity",
+                "antigravity_cli",
                 "chatgpt_web",
                 "codex",
                 "grok",
@@ -102,6 +104,7 @@ mod tests {
         );
         assert!(service.supports_quota_refresh("codex"));
         assert!(service.supports_quota_refresh("antigravity"));
+        assert!(service.supports_quota_refresh("antigravity_cli"));
         assert!(service.supports_quota_refresh("grok"));
         assert!(service.supports_quota_refresh("windsurf"));
         assert!(!service.supports_quota_refresh("gemini_cli"));

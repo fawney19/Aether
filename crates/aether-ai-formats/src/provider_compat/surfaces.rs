@@ -1,4 +1,5 @@
 pub const ANTIGRAVITY_PROVIDER_TYPE: &str = "antigravity";
+pub const ANTIGRAVITY_CLI_PROVIDER_TYPE: &str = "antigravity_cli";
 pub const KIRO_PROVIDER_TYPE: &str = "kiro";
 pub const WINDSURF_PROVIDER_TYPE: &str = "windsurf";
 pub const KIRO_ENVELOPE_NAME: &str = "kiro:generateAssistantResponse";
@@ -86,6 +87,20 @@ const PROVIDER_ADAPTATION_SURFACES: &[ProviderAdaptationDescriptor] = &[
     },
 ];
 
+fn provider_type_matches_descriptor(
+    descriptor_provider_type: Option<&str>,
+    provider_type: &str,
+) -> bool {
+    let Some(descriptor_provider_type) = descriptor_provider_type else {
+        return false;
+    };
+    if descriptor_provider_type.eq_ignore_ascii_case(provider_type) {
+        return true;
+    }
+    descriptor_provider_type.eq_ignore_ascii_case(ANTIGRAVITY_PROVIDER_TYPE)
+        && provider_type.eq_ignore_ascii_case(ANTIGRAVITY_CLI_PROVIDER_TYPE)
+}
+
 pub fn provider_adaptation_descriptor_for_envelope(
     envelope_name: &str,
     provider_api_format: &str,
@@ -107,9 +122,7 @@ pub fn provider_adaptation_descriptor_for_provider_type(
     let provider_type = provider_type.trim();
     let provider_api_format = provider_api_format.trim().to_ascii_lowercase();
     PROVIDER_ADAPTATION_SURFACES.iter().find(|descriptor| {
-        descriptor
-            .provider_type
-            .is_some_and(|value| value.eq_ignore_ascii_case(provider_type))
+        provider_type_matches_descriptor(descriptor.provider_type, provider_type)
             && descriptor
                 .anchor_api_format
                 .eq_ignore_ascii_case(provider_api_format.as_str())
@@ -153,6 +166,7 @@ pub fn provider_adaptation_should_unwrap_stream_envelope(
 mod tests {
     use super::{
         provider_adaptation_allows_sync_finalize_envelope, provider_adaptation_anchor_api_format,
+        provider_adaptation_descriptor_for_provider_type,
         provider_adaptation_requires_eventstream_accept,
         provider_adaptation_should_unwrap_stream_envelope, ANTIGRAVITY_V1INTERNAL_ENVELOPE_NAME,
         GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME, KIRO_ENVELOPE_NAME, WINDSURF_ENVELOPE_NAME,
@@ -206,5 +220,26 @@ mod tests {
             WINDSURF_ENVELOPE_NAME,
             "openai:chat"
         ));
+    }
+
+    #[test]
+    fn antigravity_cli_uses_antigravity_runtime_surface_without_renaming_antigravity() {
+        let antigravity = provider_adaptation_descriptor_for_provider_type(
+            "antigravity",
+            "gemini:generate_content",
+        )
+        .expect("antigravity descriptor should resolve");
+        let antigravity_cli = provider_adaptation_descriptor_for_provider_type(
+            "antigravity_cli",
+            "gemini:generate_content",
+        )
+        .expect("antigravity cli descriptor should resolve");
+
+        assert_eq!(antigravity.provider_type, Some("antigravity"));
+        assert_eq!(antigravity_cli.provider_type, Some("antigravity"));
+        assert_eq!(
+            antigravity_cli.envelope_name,
+            ANTIGRAVITY_V1INTERNAL_ENVELOPE_NAME
+        );
     }
 }

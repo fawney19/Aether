@@ -4,8 +4,9 @@ mod request;
 mod url;
 
 pub use auth::{
-    build_antigravity_static_identity_headers, resolve_local_antigravity_request_auth,
-    AntigravityRequestAuth, AntigravityRequestAuthSupport, AntigravityRequestAuthUnsupportedReason,
+    build_antigravity_static_identity_headers, is_antigravity_runtime_provider_type,
+    resolve_local_antigravity_request_auth, AntigravityRequestAuth, AntigravityRequestAuthSupport,
+    AntigravityRequestAuthUnsupportedReason, ANTIGRAVITY_CLI_PROVIDER_TYPE,
     ANTIGRAVITY_PROVIDER_TYPE, ANTIGRAVITY_REQUEST_USER_AGENT,
 };
 pub use policy::{

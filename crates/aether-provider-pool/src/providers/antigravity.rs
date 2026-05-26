@@ -9,14 +9,30 @@ use crate::provider::{
 };
 use crate::quota_refresh::ProviderPoolQuotaRequestSpec;
 
+pub const ANTIGRAVITY_PROVIDER_TYPE: &str = "antigravity";
+pub const ANTIGRAVITY_CLI_PROVIDER_TYPE: &str = "antigravity_cli";
 pub const ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH: &str = "/v1internal:fetchAvailableModels";
 
-#[derive(Debug, Clone, Default)]
-pub struct AntigravityProviderPoolAdapter;
+#[derive(Debug, Clone)]
+pub struct AntigravityProviderPoolAdapter {
+    provider_type: &'static str,
+}
+
+impl Default for AntigravityProviderPoolAdapter {
+    fn default() -> Self {
+        Self::for_provider_type(ANTIGRAVITY_PROVIDER_TYPE)
+    }
+}
+
+impl AntigravityProviderPoolAdapter {
+    pub const fn for_provider_type(provider_type: &'static str) -> Self {
+        Self { provider_type }
+    }
+}
 
 impl ProviderPoolAdapter for AntigravityProviderPoolAdapter {
     fn provider_type(&self) -> &'static str {
-        "antigravity"
+        self.provider_type
     }
 
     fn capabilities(&self) -> ProviderPoolCapabilities {

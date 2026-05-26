@@ -16,6 +16,8 @@ const PROVIDER_TYPE_LIKE_NAMES = new Set<string>([
   'codex',
   'kiro',
   'antigravity',
+  'antigravity_cli',
+  'antigravity cli',
   'claude_code',
   'claude code',
   'gemini_cli',

@@ -442,7 +442,7 @@ fn key_auth_channel_matches(row: &CandidateSelectionRow, api_format: &str) -> bo
                             .as_deref()
                             .is_some_and(|value| !value.trim().is_empty())))
         }
-        "gemini_cli" | "antigravity" => {
+        "gemini_cli" | "antigravity" | "antigravity_cli" => {
             auth_type == "oauth" && api_format == "gemini:generate_content"
         }
         "grok" => {

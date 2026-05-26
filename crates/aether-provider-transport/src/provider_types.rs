@@ -370,16 +370,27 @@ const VERTEX_AI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTe
     runtime_policy: VERTEX_AI_RUNTIME_POLICY,
 };
 
-const ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
-    provider_type: "antigravity",
-    version: 1,
-    base_url: "https://cloudcode-pa.googleapis.com",
-    endpoints: &[FixedProviderEndpointTemplate {
+const ANTIGRAVITY_FIXED_PROVIDER_ENDPOINTS: &[FixedProviderEndpointTemplate] =
+    &[FixedProviderEndpointTemplate {
         item_key: "gemini:generate_content",
         api_format: "gemini:generate_content",
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
-    }],
+    }];
+
+const ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
+    provider_type: "antigravity",
+    version: 1,
+    base_url: "https://cloudcode-pa.googleapis.com",
+    endpoints: ANTIGRAVITY_FIXED_PROVIDER_ENDPOINTS,
+    runtime_policy: ANTIGRAVITY_RUNTIME_POLICY,
+};
+
+const ANTIGRAVITY_CLI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
+    provider_type: "antigravity_cli",
+    version: 1,
+    base_url: "https://cloudcode-pa.googleapis.com",
+    endpoints: ANTIGRAVITY_FIXED_PROVIDER_ENDPOINTS,
     runtime_policy: ANTIGRAVITY_RUNTIME_POLICY,
 };
 
@@ -479,6 +490,7 @@ pub fn fixed_provider_template(provider_type: &str) -> Option<&'static FixedProv
         "gemini_cli" => Some(&GEMINI_CLI_FIXED_PROVIDER_TEMPLATE),
         "vertex_ai" => Some(&VERTEX_AI_FIXED_PROVIDER_TEMPLATE),
         "antigravity" => Some(&ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE),
+        "antigravity_cli" => Some(&ANTIGRAVITY_CLI_FIXED_PROVIDER_TEMPLATE),
         "windsurf" => Some(&WINDSURF_FIXED_PROVIDER_TEMPLATE),
         _ => None,
     }
@@ -523,73 +535,32 @@ pub fn provider_type_is_fixed_for_admin_oauth(provider_type: &str) -> bool {
     provider_type_is_fixed(provider_type)
 }
 
+fn provider_oauth_template_from_generic_provider_type(
+    provider_type: &str,
+) -> Option<ProviderOAuthTemplate> {
+    let normalized = provider_type.trim();
+    let template = aether_oauth::provider::providers::GENERIC_PROVIDER_OAUTH_TEMPLATES
+        .iter()
+        .find(|template| normalized.eq_ignore_ascii_case(template.provider_type))?;
+    Some(ProviderOAuthTemplate {
+        provider_type: template.provider_type,
+        display_name: template.display_name,
+        authorize_url: template.authorize_url,
+        token_url: template.token_url,
+        client_id: template.client_id,
+        client_secret: template.client_secret,
+        scopes: template.scopes,
+        redirect_uri: template.redirect_uri,
+        use_pkce: template.use_pkce,
+    })
+}
+
 pub fn provider_type_admin_oauth_template(provider_type: &str) -> Option<ProviderOAuthTemplate> {
+    if let Some(template) = provider_oauth_template_from_generic_provider_type(provider_type) {
+        return Some(template);
+    }
+
     match provider_type.trim().to_ascii_lowercase().as_str() {
-        "claude_code" => Some(ProviderOAuthTemplate {
-            provider_type: "claude_code",
-            display_name: "ClaudeCode",
-            authorize_url: "https://claude.ai/oauth/authorize",
-            token_url: "https://console.anthropic.com/v1/oauth/token",
-            client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-            client_secret: "",
-            scopes: &["org:create_api_key", "user:profile", "user:inference"],
-            redirect_uri: "http://localhost:54545/callback",
-            use_pkce: true,
-        }),
-        "codex" => Some(ProviderOAuthTemplate {
-            provider_type: "codex",
-            display_name: "Codex",
-            authorize_url: "https://auth.openai.com/oauth/authorize",
-            token_url: "https://auth.openai.com/oauth/token",
-            client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
-            client_secret: "",
-            scopes: &["openid", "email", "profile", "offline_access"],
-            redirect_uri: "http://localhost:1455/auth/callback",
-            use_pkce: true,
-        }),
-        "chatgpt_web" => Some(ProviderOAuthTemplate {
-            provider_type: "chatgpt_web",
-            display_name: "ChatGPT Web",
-            authorize_url: "https://auth.openai.com/oauth/authorize",
-            token_url: "https://auth.openai.com/oauth/token",
-            client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
-            client_secret: "",
-            scopes: &["openid", "email", "profile", "offline_access"],
-            redirect_uri: "http://localhost:1455/auth/callback",
-            use_pkce: true,
-        }),
-        "gemini_cli" => Some(ProviderOAuthTemplate {
-            provider_type: "gemini_cli",
-            display_name: "GeminiCli",
-            authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
-            token_url: "https://oauth2.googleapis.com/token",
-            client_id: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
-            client_secret: "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",
-            scopes: &[
-                "https://www.googleapis.com/auth/cloud-platform",
-                "https://www.googleapis.com/auth/userinfo.email",
-                "https://www.googleapis.com/auth/userinfo.profile",
-            ],
-            redirect_uri: "http://localhost:8085/oauth2callback",
-            use_pkce: false,
-        }),
-        "antigravity" => Some(ProviderOAuthTemplate {
-            provider_type: "antigravity",
-            display_name: "Antigravity",
-            authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
-            token_url: "https://oauth2.googleapis.com/token",
-            client_id: "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
-            client_secret: "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",
-            scopes: &[
-                "https://www.googleapis.com/auth/cloud-platform",
-                "https://www.googleapis.com/auth/userinfo.email",
-                "https://www.googleapis.com/auth/userinfo.profile",
-                "https://www.googleapis.com/auth/cclog",
-                "https://www.googleapis.com/auth/experimentsandconfigs",
-            ],
-            redirect_uri: "http://localhost:51121/oauth2callback",
-            use_pkce: true,
-        }),
         "windsurf" => Some(ProviderOAuthTemplate {
             provider_type: "windsurf",
             display_name: "Windsurf",
@@ -611,6 +582,7 @@ pub const ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES: &[&str] = &[
     "chatgpt_web",
     "gemini_cli",
     "antigravity",
+    "antigravity_cli",
     "windsurf",
 ];
 
@@ -752,6 +724,92 @@ mod tests {
         );
         assert_eq!(template.redirect_uri, "show-auth-token");
         assert!(ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES.contains(&"windsurf"));
+    }
+
+    #[test]
+    fn antigravity_admin_oauth_template_preserves_existing_antigravity_contract() {
+        let template =
+            provider_type_admin_oauth_template("antigravity").expect("antigravity oauth template");
+
+        assert_eq!(template.provider_type, "antigravity");
+        assert_eq!(template.display_name, "Antigravity");
+        assert_eq!(
+            template.authorize_url,
+            "https://accounts.google.com/o/oauth2/v2/auth"
+        );
+        assert_eq!(template.token_url, "https://oauth2.googleapis.com/token");
+        assert_eq!(
+            template.client_id,
+            "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+        );
+        assert_eq!(
+            template.redirect_uri,
+            "http://localhost:51121/oauth2callback"
+        );
+        assert!(template.use_pkce);
+        assert!(!template.scopes.contains(&"openid"));
+        assert!(template
+            .scopes
+            .contains(&"https://www.googleapis.com/auth/cclog"));
+        assert!(template
+            .scopes
+            .contains(&"https://www.googleapis.com/auth/experimentsandconfigs"));
+        assert!(ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES.contains(&"antigravity"));
+    }
+
+    #[test]
+    fn antigravity_cli_admin_oauth_template_matches_cli_oauth_contract() {
+        let template = provider_type_admin_oauth_template("antigravity_cli")
+            .expect("antigravity cli oauth template");
+
+        assert_eq!(template.provider_type, "antigravity_cli");
+        assert_eq!(template.display_name, "Antigravity CLI");
+        assert_eq!(
+            template.authorize_url,
+            "https://accounts.google.com/o/oauth2/auth"
+        );
+        assert_eq!(template.token_url, "https://oauth2.googleapis.com/token");
+        assert_eq!(
+            template.client_id,
+            "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+        );
+        assert_eq!(
+            template.redirect_uri,
+            "https://antigravity.google/oauth-callback"
+        );
+        assert!(template.use_pkce);
+        assert!(template.scopes.contains(&"openid"));
+        assert!(template
+            .scopes
+            .contains(&"https://www.googleapis.com/auth/cclog"));
+        assert!(template
+            .scopes
+            .contains(&"https://www.googleapis.com/auth/experimentsandconfigs"));
+        assert!(ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES.contains(&"antigravity_cli"));
+    }
+
+    #[test]
+    fn antigravity_and_antigravity_cli_fixed_provider_templates_are_separate_entries() {
+        let antigravity =
+            fixed_provider_template("antigravity").expect("antigravity fixed provider template");
+        let antigravity_cli = fixed_provider_template("antigravity_cli")
+            .expect("antigravity cli fixed provider template");
+
+        assert_eq!(antigravity.provider_type, "antigravity");
+        assert_eq!(antigravity_cli.provider_type, "antigravity_cli");
+        assert_eq!(antigravity.base_url, antigravity_cli.base_url);
+        assert_eq!(
+            antigravity
+                .endpoints
+                .iter()
+                .map(|item| item.api_format)
+                .collect::<Vec<_>>(),
+            antigravity_cli
+                .endpoints
+                .iter()
+                .map(|item| item.api_format)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

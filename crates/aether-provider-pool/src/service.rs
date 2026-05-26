@@ -13,7 +13,7 @@ use crate::provider::{ProviderPoolAdapter, ProviderPoolMemberInput};
 use crate::providers::{
     AntigravityProviderPoolAdapter, ChatGptWebProviderPoolAdapter, CodexProviderPoolAdapter,
     DefaultProviderPoolAdapter, GrokProviderPoolAdapter, KiroProviderPoolAdapter,
-    WindsurfProviderPoolAdapter, CLAUDE_CODE_PROVIDER_POOL_ADAPTER,
+    WindsurfProviderPoolAdapter, ANTIGRAVITY_CLI_PROVIDER_TYPE, CLAUDE_CODE_PROVIDER_POOL_ADAPTER,
     GEMINI_CLI_PROVIDER_POOL_ADAPTER, VERTEX_AI_PROVIDER_POOL_ADAPTER,
 };
 
@@ -47,7 +47,10 @@ impl ProviderPoolService {
 
     pub fn with_builtin_adapters() -> Self {
         Self::new()
-            .with_adapter(Arc::new(AntigravityProviderPoolAdapter))
+            .with_adapter(Arc::new(AntigravityProviderPoolAdapter::default()))
+            .with_adapter(Arc::new(AntigravityProviderPoolAdapter::for_provider_type(
+                ANTIGRAVITY_CLI_PROVIDER_TYPE,
+            )))
             .with_adapter(Arc::new(CLAUDE_CODE_PROVIDER_POOL_ADAPTER))
             .with_adapter(Arc::new(CodexProviderPoolAdapter))
             .with_adapter(Arc::new(GEMINI_CLI_PROVIDER_POOL_ADAPTER))

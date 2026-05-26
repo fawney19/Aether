@@ -20,12 +20,16 @@ impl ProviderOAuthService {
         use super::providers::{
             AntigravityProviderOAuthAdapter, CodexProviderOAuthAdapter,
             GenericProviderOAuthAdapter, KiroProviderOAuthAdapter, WindsurfProviderOAuthAdapter,
+            ANTIGRAVITY_CLI_PROVIDER_TYPE,
         };
 
         let mut service = Self::new()
             .with_adapter(Arc::new(KiroProviderOAuthAdapter::default()))
             .with_adapter(Arc::new(CodexProviderOAuthAdapter::default()))
             .with_adapter(Arc::new(AntigravityProviderOAuthAdapter::default()))
+            .with_adapter(Arc::new(
+                AntigravityProviderOAuthAdapter::for_provider_type(ANTIGRAVITY_CLI_PROVIDER_TYPE),
+            ))
             .with_adapter(Arc::new(WindsurfProviderOAuthAdapter));
         for provider_type in ["claude_code", "chatgpt_web", "gemini_cli"] {
             if let Some(adapter) = GenericProviderOAuthAdapter::for_provider_type(provider_type) {
@@ -128,6 +132,7 @@ mod tests {
             "chatgpt_web",
             "gemini_cli",
             "antigravity",
+            "antigravity_cli",
             "kiro",
             "windsurf",
         ] {

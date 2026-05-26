@@ -1,8 +1,9 @@
 use super::DEFAULT_PROVIDER_QUERY_TEST_MESSAGE;
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::provider_transport::antigravity::{
-    classify_local_antigravity_request_support, AntigravityEnvelopeRequestType,
-    AntigravityRequestSideSupport, AntigravityRequestSideUnsupportedReason,
+    classify_local_antigravity_request_support, is_antigravity_runtime_provider_type,
+    AntigravityEnvelopeRequestType, AntigravityRequestSideSupport,
+    AntigravityRequestSideUnsupportedReason,
 };
 use crate::provider_transport::kiro::supports_local_kiro_request_transport_with_network;
 use serde_json::{json, Value};
@@ -237,7 +238,7 @@ pub(super) fn provider_query_test_adapter_for_provider_api_format(
     if normalized_api_format == "openai:image" {
         return Some(ProviderQueryTestAdapter::OpenAiImage);
     }
-    if provider_type.trim().eq_ignore_ascii_case("antigravity")
+    if is_antigravity_runtime_provider_type(provider_type)
         && normalized_api_format == "gemini:generate_content"
     {
         return Some(ProviderQueryTestAdapter::Antigravity);

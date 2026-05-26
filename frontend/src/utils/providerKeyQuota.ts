@@ -381,6 +381,7 @@ export function getQuotaSnapshotFallbackText(
     case 'windsurf':
       return getWindsurfQuotaText(quota)
     case 'antigravity':
+    case 'antigravity_cli':
       return getAntigravityQuotaText(quota)
     case 'gemini_cli':
       return getGeminiCliQuotaText(quota)

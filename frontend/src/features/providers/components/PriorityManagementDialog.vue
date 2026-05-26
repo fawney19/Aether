@@ -857,6 +857,7 @@ const PROVIDER_TYPE_LABELS: Record<string, string> = {
   chatgpt_web: 'ChatGPT Web',
   gemini_cli: 'Gemini CLI',
   antigravity: 'Antigravity',
+  antigravity_cli: 'Antigravity CLI',
   kiro: 'Kiro',
   grok: 'Grok',
 }

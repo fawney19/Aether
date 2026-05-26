@@ -33,6 +33,7 @@ const MODEL_TEST_OAUTH_INHERITS_PROVIDER_FORMATS = new Set([
   'gemini_cli',
   'vertex_ai',
   'antigravity',
+  'antigravity_cli',
   'kiro',
 ])
 

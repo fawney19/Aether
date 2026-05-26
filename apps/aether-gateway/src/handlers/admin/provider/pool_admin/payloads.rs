@@ -207,6 +207,13 @@ fn admin_pool_quota_snapshot_matches_provider(
     }
 }
 
+fn admin_pool_provider_type_uses_antigravity_quota(provider_type: &str) -> bool {
+    matches!(
+        provider_type.trim().to_ascii_lowercase().as_str(),
+        "antigravity" | "antigravity_cli"
+    )
+}
+
 fn admin_pool_quota_window<'a>(
     quota_snapshot: &'a serde_json::Map<String, serde_json::Value>,
     code: &str,
@@ -874,7 +881,7 @@ fn admin_pool_build_account_quota(
                 return Some(account_quota);
             }
         }
-        "antigravity" => {
+        provider_type if admin_pool_provider_type_uses_antigravity_quota(provider_type) => {
             if let Some(account_quota) =
                 admin_pool_build_antigravity_account_quota_from_snapshot(quota_snapshot)
             {

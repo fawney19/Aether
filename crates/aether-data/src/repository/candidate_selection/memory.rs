@@ -313,7 +313,7 @@ fn key_auth_channel_matches(row: &StoredMinimalCandidateSelectionRow, api_format
         "kiro" => {
             matches!(auth_type.as_str(), "oauth" | "bearer") && api_format == "claude:messages"
         }
-        "gemini_cli" | "antigravity" => {
+        "gemini_cli" | "antigravity" | "antigravity_cli" => {
             auth_type == "oauth" && api_format == "gemini:generate_content"
         }
         "grok" => {

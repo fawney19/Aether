@@ -36,9 +36,9 @@ use crate::provider_key_auth::{
 };
 use crate::provider_transport::antigravity::{
     build_antigravity_safe_v1internal_request, build_antigravity_static_identity_headers,
-    classify_local_antigravity_request_support, AntigravityEnvelopeRequestType,
-    AntigravityRequestEnvelopeSupport, AntigravityRequestSideSupport,
-    AntigravityRequestSideUnsupportedReason,
+    classify_local_antigravity_request_support, is_antigravity_runtime_provider_type,
+    AntigravityEnvelopeRequestType, AntigravityRequestEnvelopeSupport,
+    AntigravityRequestSideSupport, AntigravityRequestSideUnsupportedReason,
 };
 use crate::provider_transport::kiro::{
     build_kiro_generate_assistant_response_url, build_kiro_provider_headers,
@@ -621,12 +621,7 @@ pub(crate) async fn build_admin_provider_query_models_response(
     }
     let active_key_count = active_keys.len();
 
-    if provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case("antigravity")
-        && !force_refresh
-    {
+    if is_antigravity_runtime_provider_type(&provider.provider_type) && !force_refresh {
         if let Some(models) = provider_query_read_provider_cached_models(state, &provider.id).await
         {
             let models = provider_query_attach_model_test_capabilities(&provider, models);
@@ -647,11 +642,7 @@ pub(crate) async fn build_admin_provider_query_models_response(
         }
     }
 
-    let ordered_keys = if provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case("antigravity")
-    {
+    let ordered_keys = if is_antigravity_runtime_provider_type(&provider.provider_type) {
         provider_query_sort_antigravity_keys(state, &provider, &endpoints, active_keys).await?
     } else {
         active_keys
@@ -686,23 +677,13 @@ pub(crate) async fn build_admin_provider_query_models_response(
         } else {
             fetch_count += 1;
         }
-        if provider
-            .provider_type
-            .trim()
-            .eq_ignore_ascii_case("antigravity")
-            && result.has_success
-        {
+        if is_antigravity_runtime_provider_type(&provider.provider_type) && result.has_success {
             break;
         }
     }
 
     let models = aggregate_models_for_cache(&all_models);
-    if provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case("antigravity")
-        && !models.is_empty()
-    {
+    if is_antigravity_runtime_provider_type(&provider.provider_type) && !models.is_empty() {
         provider_query_write_provider_cached_models(state, &provider.id, &models).await;
     }
     let success = !models.is_empty();

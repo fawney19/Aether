@@ -17,7 +17,7 @@ pub(crate) fn build_provider_oauth_start_response(
         "authorization_url": authorization_url,
         "redirect_uri": template.redirect_uri,
         "provider_type": template.provider_type,
-        "instructions": "1) 打开 authorization_url 完成授权\n2) 授权后会跳转到 redirect_uri（localhost）\n3) 复制浏览器地址栏完整 URL，调用 complete 接口粘贴 callback_url",
+        "instructions": "1) 打开 authorization_url 完成授权\n2) 授权后会跳转到 redirect_uri\n3) 复制浏览器地址栏完整 URL，调用 complete 接口粘贴 callback_url",
     })
 }
 

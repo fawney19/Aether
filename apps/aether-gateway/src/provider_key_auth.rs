@@ -114,15 +114,12 @@ fn key_has_auth_type_overrides(key: &StoredProviderCatalogKey) -> bool {
 }
 
 fn provider_uses_bearer_oauth_runtime(provider_type: &str) -> bool {
+    if aether_provider_transport::antigravity::is_antigravity_runtime_provider_type(provider_type) {
+        return true;
+    }
     matches!(
         provider_type.trim().to_ascii_lowercase().as_str(),
-        "claude_code"
-            | "codex"
-            | "chatgpt_web"
-            | "gemini_cli"
-            | "antigravity"
-            | "kiro"
-            | "windsurf"
+        "claude_code" | "codex" | "chatgpt_web" | "gemini_cli" | "kiro" | "windsurf"
     )
 }
 

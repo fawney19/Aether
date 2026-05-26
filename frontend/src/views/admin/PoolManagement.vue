@@ -1625,6 +1625,7 @@ import {
   getLegacyAccountQuotaText,
   getQuotaDisplayText,
 } from '@/utils/providerKeyQuota'
+import { isAntigravityRuntimeProviderType } from '@/features/providers/utils/providerTypeUtils'
 
 type PoolKeyScore = NonNullable<PoolKeyDetail['pool_score']>
 
@@ -2077,7 +2078,7 @@ const showAccountQuotaColumn = computed(() => {
     || selectedProviderType.value === 'gemini_cli'
     || selectedProviderType.value === 'kiro'
     || selectedProviderType.value === 'windsurf'
-    || selectedProviderType.value === 'antigravity'
+    || isAntigravityRuntimeProviderType(selectedProviderType.value)
     || selectedProviderType.value === 'grok'
     || selectedProviderType.value === 'chatgpt_web'
 })
@@ -2477,7 +2478,7 @@ const quotaRefreshSupported = computed(() => {
   return selectedProviderType.value === 'codex'
     || selectedProviderType.value === 'kiro'
     || selectedProviderType.value === 'windsurf'
-    || selectedProviderType.value === 'antigravity'
+    || isAntigravityRuntimeProviderType(selectedProviderType.value)
     || selectedProviderType.value === 'grok'
     || selectedProviderType.value === 'chatgpt_web'
 })
@@ -4061,7 +4062,7 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
     return items
   }
 
-  if (providerType === 'antigravity') {
+  if (isAntigravityRuntimeProviderType(providerType)) {
     const windows = getQuotaSnapshotWindowsByScope(quota, 'model')
     if (windows.length === 0) return []
 

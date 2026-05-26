@@ -409,7 +409,7 @@
                             </template>
                             <!-- Antigravity 账号未激活提示 -->
                             <span
-                              v-if="provider.provider_type === 'antigravity' && key.is_active && isOAuthManagedCredential(key) && !hasAntigravityQuotaDisplayData(key)"
+                              v-if="isAntigravityRuntimeProviderType(provider.provider_type) && key.is_active && isOAuthManagedCredential(key) && !hasAntigravityQuotaDisplayData(key)"
                               class="text-[10px] text-orange-500 dark:text-orange-400"
                               title="该账号尚未完成 Gemini Code Assist 激活，无法获取配额和使用模型"
                             >
@@ -525,7 +525,7 @@
                           <Edit class="w-3.5 h-3.5" />
                         </Button>
                         <Button
-                          v-if="provider.provider_type === 'antigravity'"
+                          v-if="isAntigravityRuntimeProviderType(provider.provider_type)"
                           variant="ghost"
                           size="icon"
                           class="h-7 w-7"
@@ -740,7 +740,7 @@
                     </div>
                     <!-- Antigravity 上游额度摘要（按家族分组展示关键配额） -->
                     <div
-                      v-if="provider.provider_type === 'antigravity' && (hasAntigravityQuotaDisplayData(key) || isAntigravityForbiddenKey(key))"
+                      v-if="isAntigravityRuntimeProviderType(provider.provider_type) && (hasAntigravityQuotaDisplayData(key) || isAntigravityForbiddenKey(key))"
                       class="mt-2 p-2 rounded-md"
                       :class="isAntigravityForbiddenKey(key) ? 'bg-destructive/10 border border-destructive/30' : 'bg-muted/30'"
                     >
@@ -1433,7 +1433,11 @@ import type {
   QuotaWindowSnapshot,
 } from '@/api/endpoints/types'
 import { formatApiFormat, formatApiFormatShort } from '@/api/endpoints/types/api-format'
-import { isOAuthAccountProviderType, isKeyManagedProviderType } from '../utils/providerTypeUtils'
+import {
+  isAntigravityRuntimeProviderType,
+  isKeyManagedProviderType,
+  isOAuthAccountProviderType,
+} from '../utils/providerTypeUtils'
 import {
   isProviderQuotaAutoRefreshCoolingDown,
   markProviderQuotaAutoRefreshAttempt,
@@ -2100,13 +2104,19 @@ function quotaSnapshotHasDisplayData(quota: QuotaStatusSnapshot | null | undefin
 
 function getQuotaSnapshotForProvider(
   key: EndpointAPIKey,
-  providerType: 'codex' | 'kiro' | 'windsurf' | 'antigravity' | 'chatgpt_web' | 'gemini_cli' | 'grok',
+  providerType: 'codex' | 'kiro' | 'windsurf' | 'antigravity' | 'antigravity_cli' | 'chatgpt_web' | 'gemini_cli' | 'grok',
 ): QuotaStatusSnapshot | null {
   const quota = key.status_snapshot?.quota
   if (!quota) return null
 
   const snapshotProviderType = quota.provider_type?.trim().toLowerCase()
   if (snapshotProviderType) {
+    if (
+      isAntigravityRuntimeProviderType(providerType)
+      && isAntigravityRuntimeProviderType(snapshotProviderType)
+    ) {
+      return quota
+    }
     return snapshotProviderType === providerType ? quota : null
   }
 
@@ -2733,7 +2743,7 @@ function isTokenExpiringSoon(key: EndpointAPIKey, now: number): boolean {
 }
 
 function shouldAutoRefreshAntigravityQuota(): boolean {
-  if (provider.value?.provider_type !== 'antigravity') return false
+  if (!isAntigravityRuntimeProviderType(provider.value?.provider_type)) return false
   const now = Math.floor(Date.now() / 1000)
 
   for (const { key } of allKeys.value) {
@@ -2859,6 +2869,12 @@ function wrapQuotaMetadataForProvider(
   metadata: Record<string, unknown> | undefined,
 ): UpstreamMetadata | null {
   if (!metadata) return null
+  if (isAntigravityRuntimeProviderType(providerType)) {
+    if ('antigravity' in metadata) {
+      return metadata as UpstreamMetadata
+    }
+    return { antigravity: metadata } as UpstreamMetadata
+  }
   if (providerType in metadata) {
     return metadata as UpstreamMetadata
   }
@@ -2927,13 +2943,20 @@ async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean 
   if (refreshingQuota.value) return
 
   const providerType = provider.value?.provider_type
-  if (providerType !== 'codex' && providerType !== 'antigravity' && providerType !== 'kiro' && providerType !== 'windsurf' && providerType !== 'chatgpt_web' && providerType !== 'grok') return
+  if (
+    providerType !== 'codex'
+    && !isAntigravityRuntimeProviderType(providerType)
+    && providerType !== 'kiro'
+    && providerType !== 'windsurf'
+    && providerType !== 'chatgpt_web'
+    && providerType !== 'grok'
+  ) return
 
   // 检查是否需要刷新
   let shouldRefresh = false
   if (providerType === 'codex') {
     shouldRefresh = shouldAutoRefreshCodexQuota()
-  } else if (providerType === 'antigravity') {
+  } else if (isAntigravityRuntimeProviderType(providerType)) {
     shouldRefresh = shouldAutoRefreshAntigravityQuota()
   } else if (providerType === 'kiro') {
     shouldRefresh = shouldAutoRefreshKiroQuota()
@@ -2950,7 +2973,7 @@ async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean 
   let hadCachedQuota = false
   if (providerType === 'codex') {
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasCodexQuotaDisplayData(key))
-  } else if (providerType === 'antigravity') {
+  } else if (isAntigravityRuntimeProviderType(providerType)) {
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasAntigravityQuotaDisplayData(key))
   } else if (providerType === 'kiro') {
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasKiroQuotaDisplayData(key))
@@ -2967,11 +2990,11 @@ async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean 
   try {
     const result = await refreshProviderQuota(providerId)
     const applied = applyQuotaResults(result.results)
-    if (result.success <= 0 && applied === 0 && !hadCachedQuota && providerType === 'antigravity') {
+    if (result.success <= 0 && applied === 0 && !hadCachedQuota && isAntigravityRuntimeProviderType(providerType)) {
       showError('没有获取到配额信息（请检查账号是否已授权、project_id 是否存在）', '提示')
     }
   } catch (err: unknown) {
-    if (!hadCachedQuota && providerType === 'antigravity') {
+    if (!hadCachedQuota && isAntigravityRuntimeProviderType(providerType)) {
       showError(parseApiError(err, '后台刷新配额失败'), '错误')
     }
   } finally {

@@ -169,7 +169,7 @@ function buildItemsFromQuotaSnapshot(quota: QuotaStatusSnapshot | null | undefin
   if (!quota) return []
 
   const providerType = String(quota.provider_type || '').trim().toLowerCase()
-  if (providerType && providerType !== 'antigravity') return []
+  if (providerType && providerType !== 'antigravity' && providerType !== 'antigravity_cli') return []
 
   const windows = Array.isArray(quota.windows)
     ? quota.windows.filter(window => String(window?.scope || '').trim().toLowerCase() === 'model')

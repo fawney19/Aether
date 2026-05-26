@@ -70,12 +70,18 @@ fn select_provider_oauth_runtime_endpoint(
                 .eq_ignore_ascii_case("openai:chat")
         })
         .or_else(|| matching_endpoint(endpoints, include_inactive, |_| true)),
-        "antigravity" => matching_endpoint(endpoints, include_inactive, |endpoint| {
-            endpoint
-                .api_format
-                .trim()
-                .eq_ignore_ascii_case("gemini:generate_content")
-        }),
+        provider_type
+            if crate::provider_transport::antigravity::is_antigravity_runtime_provider_type(
+                provider_type,
+            ) =>
+        {
+            matching_endpoint(endpoints, include_inactive, |endpoint| {
+                endpoint
+                    .api_format
+                    .trim()
+                    .eq_ignore_ascii_case("gemini:generate_content")
+            })
+        }
         "kiro" => matching_endpoint(endpoints, include_inactive, |endpoint| {
             endpoint
                 .api_format
