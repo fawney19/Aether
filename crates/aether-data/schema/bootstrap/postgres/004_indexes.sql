@@ -1484,5 +1484,54 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_billing_rules_model_task ON public.billing_
 CREATE UNIQUE INDEX IF NOT EXISTS uq_dimension_collectors_enabled ON public.dimension_collectors USING btree (api_format, task_type, dimension_name, priority) WHERE (is_enabled = true);
 
 
+--
+-- Name: idx_risk_control_logs_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS idx_risk_control_logs_created_at ON public.risk_control_logs USING btree (created_at DESC);
+
+
+--
+-- Name: idx_risk_control_logs_flagged_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS idx_risk_control_logs_flagged_created_at ON public.risk_control_logs USING btree (flagged, created_at DESC);
+
+
+--
+-- Name: idx_risk_control_logs_user_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS idx_risk_control_logs_user_created_at ON public.risk_control_logs USING btree (user_id, created_at DESC);
+
+
+--
+-- Name: idx_risk_control_logs_api_key_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS idx_risk_control_logs_api_key_created_at ON public.risk_control_logs USING btree (api_key_id, created_at DESC);
+
+
+--
+-- Name: idx_risk_control_logs_endpoint_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS idx_risk_control_logs_endpoint_created_at ON public.risk_control_logs USING btree (endpoint, created_at DESC);
+
+
+--
+-- Name: idx_risk_control_logs_input_hash; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS idx_risk_control_logs_input_hash ON public.risk_control_logs USING btree (input_hash);
+
+
+--
+-- Name: idx_risk_control_hashes_last_seen_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS idx_risk_control_hashes_last_seen_at ON public.risk_control_flagged_hashes USING btree (last_seen_at DESC);
+
+
 
 --

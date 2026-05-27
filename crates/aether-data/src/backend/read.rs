@@ -18,6 +18,7 @@ use crate::repository::pool_scores::PoolScoreReadRepository;
 use crate::repository::provider_catalog::ProviderCatalogReadRepository;
 use crate::repository::proxy_nodes::ProxyNodeReadRepository;
 use crate::repository::quota::ProviderQuotaReadRepository;
+use crate::repository::risk_control::RiskControlReadRepository;
 use crate::repository::routing_profiles::RoutingGroupReadRepository;
 use crate::repository::usage::UsageReadRepository;
 use crate::repository::users::UserReadRepository;
@@ -42,6 +43,7 @@ pub struct DataReadRepositories {
     request_candidates: Option<Arc<dyn RequestCandidateReadRepository>>,
     provider_catalog: Option<Arc<dyn ProviderCatalogReadRepository>>,
     provider_quotas: Option<Arc<dyn ProviderQuotaReadRepository>>,
+    risk_control: Option<Arc<dyn RiskControlReadRepository>>,
     routing_groups: Option<Arc<dyn RoutingGroupReadRepository>>,
     usage: Option<Arc<dyn UsageReadRepository>>,
     users: Option<Arc<dyn UserReadRepository>>,
@@ -74,6 +76,7 @@ impl fmt::Debug for DataReadRepositories {
             .field("has_request_candidates", &self.request_candidates.is_some())
             .field("has_provider_catalog", &self.provider_catalog.is_some())
             .field("has_provider_quotas", &self.provider_quotas.is_some())
+            .field("has_risk_control", &self.risk_control.is_some())
             .field("has_routing_groups", &self.routing_groups.is_some())
             .field("has_usage", &self.usage.is_some())
             .field("has_users", &self.users.is_some())
@@ -154,6 +157,10 @@ impl DataReadRepositories {
                 .map(PostgresBackend::provider_quota_read_repository)
                 .or_else(|| mysql.map(MysqlBackend::provider_quota_read_repository))
                 .or_else(|| sqlite.map(SqliteBackend::provider_quota_read_repository)),
+            risk_control: postgres
+                .map(PostgresBackend::risk_control_read_repository)
+                .or_else(|| mysql.map(MysqlBackend::risk_control_read_repository))
+                .or_else(|| sqlite.map(SqliteBackend::risk_control_read_repository)),
             routing_groups: postgres
                 .map(PostgresBackend::routing_group_read_repository)
                 .or_else(|| mysql.map(MysqlBackend::routing_group_read_repository))
@@ -248,6 +255,10 @@ impl DataReadRepositories {
         self.provider_quotas.clone()
     }
 
+    pub fn risk_control(&self) -> Option<Arc<dyn RiskControlReadRepository>> {
+        self.risk_control.clone()
+    }
+
     pub fn routing_groups(&self) -> Option<Arc<dyn RoutingGroupReadRepository>> {
         self.routing_groups.clone()
     }
@@ -285,6 +296,7 @@ impl DataReadRepositories {
             || self.request_candidates.is_some()
             || self.provider_catalog.is_some()
             || self.provider_quotas.is_some()
+            || self.risk_control.is_some()
             || self.routing_groups.is_some()
             || self.usage.is_some()
             || self.users.is_some()

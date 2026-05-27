@@ -50,6 +50,9 @@ use crate::repository::proxy_nodes::{
 use crate::repository::quota::{
     MysqlProviderQuotaRepository, ProviderQuotaReadRepository, ProviderQuotaWriteRepository,
 };
+use crate::repository::risk_control::{
+    MysqlRiskControlRepository, RiskControlReadRepository, RiskControlWriteRepository,
+};
 use crate::repository::routing_profiles::{
     MysqlRoutingGroupRepository, RoutingGroupReadRepository, RoutingGroupWriteRepository,
 };
@@ -220,6 +223,14 @@ impl MysqlBackend {
 
     pub fn provider_quota_write_repository(&self) -> Arc<dyn ProviderQuotaWriteRepository> {
         Arc::new(MysqlProviderQuotaRepository::new(self.pool_clone()))
+    }
+
+    pub fn risk_control_read_repository(&self) -> Arc<dyn RiskControlReadRepository> {
+        Arc::new(MysqlRiskControlRepository::new(self.pool_clone()))
+    }
+
+    pub fn risk_control_write_repository(&self) -> Arc<dyn RiskControlWriteRepository> {
+        Arc::new(MysqlRiskControlRepository::new(self.pool_clone()))
     }
 
     pub fn settlement_write_repository(&self) -> Arc<dyn SettlementWriteRepository> {

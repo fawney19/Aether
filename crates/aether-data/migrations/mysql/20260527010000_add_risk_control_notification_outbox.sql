@@ -1,0 +1,23 @@
+CREATE TABLE IF NOT EXISTS risk_control_notification_outbox (
+    `id` VARCHAR(36) NOT NULL,
+    `log_id` VARCHAR(36) NOT NULL,
+    `item_key` VARCHAR(120) NOT NULL,
+    `title` VARCHAR(255) NOT NULL,
+    `markdown_body` LONGTEXT NOT NULL,
+    `text_body` LONGTEXT NOT NULL,
+    `variables_json` JSON NOT NULL,
+    `status` VARCHAR(32) NOT NULL,
+    `attempt_count` BIGINT NOT NULL DEFAULT 0,
+    `max_attempts` BIGINT NOT NULL DEFAULT 10,
+    `next_attempt_at` BIGINT,
+    `lease_until` BIGINT,
+    `last_error` LONGTEXT,
+    `created_at` BIGINT NOT NULL,
+    `updated_at` BIGINT NOT NULL,
+    `sent_at` BIGINT,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY uq_risk_control_notification_outbox_log_item (`log_id`, `item_key`),
+    KEY idx_risk_control_notification_outbox_due (`status`, `next_attempt_at`),
+    KEY idx_risk_control_notification_outbox_lease (`status`, `lease_until`),
+    KEY idx_risk_control_notification_outbox_updated (`updated_at`)
+);

@@ -1151,6 +1151,67 @@ CREATE TABLE IF NOT EXISTS public.system_configs (
 
 
 --
+-- Name: risk_control_logs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS public.risk_control_logs (
+    id character varying(36) NOT NULL,
+    trace_id character varying(100) NOT NULL,
+    request_id character varying(100),
+    user_id character varying(36),
+    username character varying(100),
+    user_email character varying(255),
+    api_key_id character varying(36),
+    api_key_name character varying(255),
+    route_family character varying(80),
+    route_kind character varying(80),
+    api_format character varying(80),
+    endpoint character varying(255) NOT NULL,
+    model character varying(255),
+    mode character varying(32) NOT NULL,
+    action character varying(32) NOT NULL,
+    decision_source character varying(32) NOT NULL,
+    flagged boolean DEFAULT false NOT NULL,
+    highest_category character varying(100),
+    highest_score double precision DEFAULT 0 NOT NULL,
+    category_scores json,
+    thresholds json,
+    matched_keywords json,
+    input_hash character varying(64),
+    excerpt text,
+    latency_ms bigint,
+    queue_delay_ms bigint,
+    violation_count bigint DEFAULT 0 NOT NULL,
+    auto_action character varying(64),
+    notification_sent boolean DEFAULT false NOT NULL,
+    notification_attempts bigint DEFAULT 0 NOT NULL,
+    notification_last_error text,
+    notification_last_attempt_at bigint,
+    error_message text,
+    created_at bigint NOT NULL,
+    CONSTRAINT risk_control_logs_pkey PRIMARY KEY (id)
+);
+
+
+--
+-- Name: risk_control_flagged_hashes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS public.risk_control_flagged_hashes (
+    input_hash character varying(64) NOT NULL,
+    source_log_id character varying(36),
+    reason character varying(255),
+    highest_category character varying(100),
+    highest_score double precision DEFAULT 0 NOT NULL,
+    excerpt text,
+    first_seen_at bigint NOT NULL,
+    last_seen_at bigint NOT NULL,
+    hit_count bigint DEFAULT 1 NOT NULL,
+    CONSTRAINT risk_control_flagged_hashes_pkey PRIMARY KEY (input_hash)
+);
+
+
+--
 -- Name: auth_modules; Type: TABLE; Schema: public; Owner: -
 --
 

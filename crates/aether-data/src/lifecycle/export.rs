@@ -2951,7 +2951,7 @@ VALUES ('request-1', 'request-1', 'user-1', 'Provider One', 'gpt-test', 'complet
         let imported = import_sqlite_jsonl(&target_pool, &encoded)
             .await
             .expect("sqlite import should load exported rows");
-        assert_eq!(imported, 16);
+        assert_eq!(imported, 18);
 
         let imported_api_key = sqlx::query_as::<_, (String,)>(
             "SELECT key_encrypted FROM api_keys WHERE id = 'api-key-1'",
@@ -3011,7 +3011,7 @@ VALUES ('request-1', 'request-1', 'user-1', 'Provider One', 'gpt-test', 'complet
             let imported = import_postgres_jsonl(&postgres_pool, &encoded)
                 .await
                 .expect("postgres import should load exported rows");
-            assert_eq!(imported, 16);
+            assert_eq!(imported, 18);
 
             let imported_api_key = sqlx::query_as::<_, (String,)>(
                 "SELECT key_encrypted FROM api_keys WHERE id = 'api-key-1'",

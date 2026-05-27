@@ -1,0 +1,361 @@
+[table.risk_control_logs]
+domain = "risk_control"
+order = 10
+primary_key = ["id"]
+
+[[table.risk_control_logs.columns]]
+name = "id"
+type = "text_id"
+length = 36
+
+[[table.risk_control_logs.columns]]
+name = "trace_id"
+type = "text"
+length = 100
+
+[[table.risk_control_logs.columns]]
+name = "request_id"
+type = "text"
+length = 100
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "user_id"
+type = "text_id"
+length = 36
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "username"
+type = "text"
+length = 100
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "user_email"
+type = "text"
+length = 255
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "api_key_id"
+type = "text_id"
+length = 36
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "api_key_name"
+type = "text"
+length = 255
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "route_family"
+type = "text"
+length = 80
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "route_kind"
+type = "text"
+length = 80
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "api_format"
+type = "text"
+length = 80
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "endpoint"
+type = "text"
+length = 255
+
+[[table.risk_control_logs.columns]]
+name = "model"
+type = "text"
+length = 255
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "mode"
+type = "text"
+length = 32
+
+[[table.risk_control_logs.columns]]
+name = "action"
+type = "text"
+length = 32
+
+[[table.risk_control_logs.columns]]
+name = "decision_source"
+type = "text"
+length = 32
+
+[[table.risk_control_logs.columns]]
+name = "flagged"
+type = "bool"
+default = false
+
+[[table.risk_control_logs.columns]]
+name = "highest_category"
+type = "text"
+length = 100
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "highest_score"
+type = "float64"
+default = 0
+
+[[table.risk_control_logs.columns]]
+name = "category_scores"
+type = "json"
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "thresholds"
+type = "json"
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "matched_keywords"
+type = "json"
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "input_hash"
+type = "text"
+length = 64
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "excerpt"
+type = "long_text"
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "latency_ms"
+type = "int64"
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "queue_delay_ms"
+type = "int64"
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "violation_count"
+type = "int64"
+default = 0
+
+[[table.risk_control_logs.columns]]
+name = "auto_action"
+type = "text"
+length = 64
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "notification_sent"
+type = "bool"
+default = false
+
+[[table.risk_control_logs.columns]]
+name = "notification_attempts"
+type = "int64"
+default = 0
+
+[[table.risk_control_logs.columns]]
+name = "notification_last_error"
+type = "long_text"
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "notification_last_attempt_at"
+type = "unix_seconds"
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "error_message"
+type = "long_text"
+nullable = true
+
+[[table.risk_control_logs.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.risk_control_logs.indexes]]
+name = "idx_risk_control_logs_created_at"
+columns = ["created_at"]
+
+[[table.risk_control_logs.indexes]]
+name = "idx_risk_control_logs_flagged_created_at"
+columns = ["flagged", "created_at"]
+
+[[table.risk_control_logs.indexes]]
+name = "idx_risk_control_logs_user_created_at"
+columns = ["user_id", "created_at"]
+
+[[table.risk_control_logs.indexes]]
+name = "idx_risk_control_logs_api_key_created_at"
+columns = ["api_key_id", "created_at"]
+
+[[table.risk_control_logs.indexes]]
+name = "idx_risk_control_logs_endpoint_created_at"
+columns = ["endpoint", "created_at"]
+
+[[table.risk_control_logs.indexes]]
+name = "idx_risk_control_logs_input_hash"
+columns = ["input_hash"]
+
+[table.risk_control_flagged_hashes]
+domain = "risk_control"
+order = 20
+primary_key = ["input_hash"]
+
+[[table.risk_control_flagged_hashes.columns]]
+name = "input_hash"
+type = "text"
+length = 64
+
+[[table.risk_control_flagged_hashes.columns]]
+name = "source_log_id"
+type = "text_id"
+length = 36
+nullable = true
+
+[[table.risk_control_flagged_hashes.columns]]
+name = "reason"
+type = "text"
+length = 255
+nullable = true
+
+[[table.risk_control_flagged_hashes.columns]]
+name = "highest_category"
+type = "text"
+length = 100
+nullable = true
+
+[[table.risk_control_flagged_hashes.columns]]
+name = "highest_score"
+type = "float64"
+default = 0
+
+[[table.risk_control_flagged_hashes.columns]]
+name = "excerpt"
+type = "long_text"
+nullable = true
+
+[[table.risk_control_flagged_hashes.columns]]
+name = "first_seen_at"
+type = "unix_seconds"
+
+[[table.risk_control_flagged_hashes.columns]]
+name = "last_seen_at"
+type = "unix_seconds"
+
+[[table.risk_control_flagged_hashes.columns]]
+name = "hit_count"
+type = "int64"
+default = 1
+
+[[table.risk_control_flagged_hashes.indexes]]
+name = "idx_risk_control_hashes_last_seen_at"
+columns = ["last_seen_at"]
+
+[table.risk_control_notification_outbox]
+domain = "risk_control"
+order = 30
+primary_key = ["id"]
+
+[[table.risk_control_notification_outbox.columns]]
+name = "id"
+type = "text_id"
+length = 36
+
+[[table.risk_control_notification_outbox.columns]]
+name = "log_id"
+type = "text_id"
+length = 36
+
+[[table.risk_control_notification_outbox.columns]]
+name = "item_key"
+type = "text"
+length = 120
+
+[[table.risk_control_notification_outbox.columns]]
+name = "title"
+type = "text"
+length = 255
+
+[[table.risk_control_notification_outbox.columns]]
+name = "markdown_body"
+type = "long_text"
+
+[[table.risk_control_notification_outbox.columns]]
+name = "text_body"
+type = "long_text"
+
+[[table.risk_control_notification_outbox.columns]]
+name = "variables_json"
+type = "json"
+
+[[table.risk_control_notification_outbox.columns]]
+name = "status"
+type = "text"
+length = 32
+
+[[table.risk_control_notification_outbox.columns]]
+name = "attempt_count"
+type = "int64"
+default = 0
+
+[[table.risk_control_notification_outbox.columns]]
+name = "max_attempts"
+type = "int64"
+default = 10
+
+[[table.risk_control_notification_outbox.columns]]
+name = "next_attempt_at"
+type = "unix_seconds"
+nullable = true
+
+[[table.risk_control_notification_outbox.columns]]
+name = "lease_until"
+type = "unix_seconds"
+nullable = true
+
+[[table.risk_control_notification_outbox.columns]]
+name = "last_error"
+type = "long_text"
+nullable = true
+
+[[table.risk_control_notification_outbox.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.risk_control_notification_outbox.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.risk_control_notification_outbox.columns]]
+name = "sent_at"
+type = "unix_seconds"
+nullable = true
+
+[[table.risk_control_notification_outbox.uniques]]
+name = "uq_risk_control_notification_outbox_log_item"
+columns = ["log_id", "item_key"]
+
+[[table.risk_control_notification_outbox.indexes]]
+name = "idx_risk_control_notification_outbox_due"
+columns = ["status", "next_attempt_at"]
+
+[[table.risk_control_notification_outbox.indexes]]
+name = "idx_risk_control_notification_outbox_lease"
+columns = ["status", "lease_until"]
+
+[[table.risk_control_notification_outbox.indexes]]
+name = "idx_risk_control_notification_outbox_updated"
+columns = ["updated_at"]

@@ -33,6 +33,12 @@ VALUES (
 )
 ON CONFLICT (key) DO NOTHING;
 
+INSERT INTO public.system_configs (id, key, value, description)
+VALUES
+    ('risk-control-enabled', 'module.risk_control.enabled', 'false'::json, '风控中心总开关'),
+    ('risk-control-config', 'module.risk_control.config', '{}'::json, '风控中心配置')
+ON CONFLICT (key) DO NOTHING;
+
 INSERT INTO public.user_group_members (group_id, user_id)
 SELECT '00000000-0000-0000-0000-000000000001', id
 FROM public.users
