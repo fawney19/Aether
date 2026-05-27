@@ -5,11 +5,12 @@
 </template>
 
 <script setup lang="ts">
-import { provide, ref, watch } from 'vue'
+import { provide, ref, useId, watch } from 'vue'
 
 interface Props {
   defaultValue?: string
   modelValue?: string
+  id?: string
 }
 
 const props = defineProps<Props>()
@@ -18,6 +19,8 @@ const emit = defineEmits<{
 }>()
 
 const activeTab = ref(props.modelValue || props.defaultValue || '')
+const generatedId = useId()
+const tabsBaseId = props.id || `tabs-${generatedId.replace(/[^A-Za-z0-9_-]/g, '-')}`
 
 watch(() => props.modelValue, (newValue) => {
   if (newValue !== undefined) {
@@ -32,4 +35,5 @@ const setActiveTab = (value: string) => {
 
 provide('activeTab', activeTab)
 provide('setActiveTab', setActiveTab)
+provide('tabsBaseId', tabsBaseId)
 </script>

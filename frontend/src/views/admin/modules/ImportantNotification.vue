@@ -486,6 +486,42 @@ const DEFAULT_ITEMS: NotificationItem[] = [
     user_email_enabled: true,
     system: true,
   },
+  {
+    local_id: 'risk_control_flagged',
+    key: 'risk_control_flagged',
+    name: '风控命中告警',
+    enabled: true,
+    channel: 'global',
+    title_template: '风控命中：{decision_source}',
+    markdown_template: '风控命中事件\n\n- 来源：`{decision_source}`\n- 动作：`{action}`\n- 用户：`{user_label}`\n- 模型：`{model}`\n- 端点：`{endpoint}`\n- trace：`{trace_id}`\n- 命中关键词：{matched_keywords}\n- 摘要：{excerpt}',
+    text_template: '风控命中：source={decision_source} action={action} user={user_label} model={model} endpoint={endpoint} trace={trace_id} keywords={matched_keywords}',
+    user_email_enabled: false,
+    system: true,
+  },
+  {
+    local_id: 'risk_control_auto_action',
+    key: 'risk_control_auto_action',
+    name: '风控自动处置',
+    enabled: true,
+    channel: 'global',
+    title_template: '风控自动处置：{auto_action}',
+    markdown_template: '已对用户 `{user_label}` 执行 `{auto_action}`，累计违规 {violation_count} 次。\n\n- 来源：`{decision_source}`\n- 命中关键词：{matched_keywords}\n- 摘要：{excerpt}',
+    text_template: '风控自动处置：action={auto_action} user={user_label} violations={violation_count} source={decision_source}',
+    user_email_enabled: false,
+    system: true,
+  },
+  {
+    local_id: 'risk_control_user_action_notice',
+    key: 'risk_control_user_action_notice',
+    name: '风控用户处置通知',
+    enabled: true,
+    channel: 'global',
+    title_template: '风控用户处置通知：{auto_action}',
+    markdown_template: '风控中心已触发用户处置。\n\n- 处置：`{auto_action}`\n- 用户：`{user_label}`\n- 用户 ID：`{user_id}`\n- 邮箱：`{user_email}`\n- 累计违规：{violation_count}\n- 来源：`{decision_source}`\n- trace：`{trace_id}`',
+    text_template: '风控用户处置通知：action={auto_action} user={user_label} user_id={user_id} violations={violation_count} source={decision_source} trace={trace_id}',
+    user_email_enabled: false,
+    system: true,
+  },
 ]
 
 const { success, error } = useToast()
@@ -681,7 +717,17 @@ function normalizeItems(value: unknown): NotificationItem[] {
   const items = value
     .map((item, index) => normalizeItem(item, index))
     .filter((item): item is NotificationItem => item !== null)
-  return items.length > 0 ? items : cloneDefaultItems()
+  return mergeDefaultItems(items.length > 0 ? items : cloneDefaultItems())
+}
+
+function mergeDefaultItems(items: NotificationItem[]): NotificationItem[] {
+  const merged = [...items]
+  for (const defaultItem of cloneDefaultItems()) {
+    if (!merged.some(item => item.key === defaultItem.key)) {
+      merged.push(defaultItem)
+    }
+  }
+  return merged
 }
 
 function normalizeItem(value: unknown, index: number): NotificationItem | null {

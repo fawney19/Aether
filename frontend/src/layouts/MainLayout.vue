@@ -1104,7 +1104,21 @@ function isNavActive(href: string) {
   if (href === '/dashboard' || href === '/admin/dashboard') {
     return route.path === href
   }
-  return route.path === href || route.path.startsWith(`${href}/`)
+  if (!isRouteUnderNavHref(route.path, href)) {
+    return false
+  }
+
+  const longerActiveHref = navigation.value
+    .flatMap(group => group.items)
+    .map(item => item.href)
+    .filter(candidate => candidate !== href && candidate.length > href.length)
+    .find(candidate => isRouteUnderNavHref(route.path, candidate))
+
+  return !longerActiveHref
+}
+
+function isRouteUnderNavHref(path: string, href: string) {
+  return path === href || path.startsWith(`${href}/`)
 }
 
 function prefetchNavigationItem(href: string) {

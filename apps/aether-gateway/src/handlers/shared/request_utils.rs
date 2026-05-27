@@ -224,6 +224,12 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                 | (Some("endpoints_manage"), http::Method::PUT, Some("update_key"))
                 | (Some("endpoints_manage"), http::Method::PUT, Some("update_endpoint"))
                 | (Some("modules_manage"), http::Method::PUT, Some("set_enabled"))
+                | (Some("risk_control_manage"), http::Method::PUT, Some("config"))
+                | (
+                    Some("risk_control_manage"),
+                    http::Method::POST,
+                    Some("test" | "provider_keys_test"),
+                )
                 | (Some("management_tokens_manage"), http::Method::POST, Some("create_token"))
                 | (Some("management_tokens_manage"), http::Method::PUT, Some("update_token"))
                 | (Some("oauth_manage"), http::Method::PUT, Some("upsert_provider"))
@@ -511,4 +517,43 @@ pub(crate) fn local_proxy_route_requires_buffered_body(
     admin_proxy_local_requires_buffered_body(request_context)
         || internal_proxy_local_requires_buffered_body(request_context)
         || public_support_local_requires_buffered_body(request_context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn admin_context(
+        method: http::Method,
+        family: &str,
+        kind: &str,
+    ) -> GatewayPublicRequestContext {
+        GatewayPublicRequestContext {
+            trace_id: "test-trace".to_string(),
+            request_method: method,
+            request_path: format!("/api/admin/{kind}"),
+            request_query_string: None,
+            request_content_type: Some("application/json".to_string()),
+            host_header: None,
+            control_decision: Some(GatewayControlDecision::synthetic(
+                "/api/admin/test",
+                Some("admin_proxy".to_string()),
+                Some(family.to_string()),
+                Some(kind.to_string()),
+                Some("admin:test".to_string()),
+            )),
+        }
+    }
+
+    #[test]
+    fn risk_control_mutating_test_routes_buffer_body() {
+        for (method, kind) in [
+            (http::Method::PUT, "config"),
+            (http::Method::POST, "test"),
+            (http::Method::POST, "provider_keys_test"),
+        ] {
+            let context = admin_context(method, "risk_control_manage", kind);
+            assert!(admin_proxy_local_requires_buffered_body(&context));
+        }
+    }
 }

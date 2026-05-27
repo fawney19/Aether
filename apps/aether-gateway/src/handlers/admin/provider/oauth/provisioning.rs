@@ -208,6 +208,7 @@ pub(crate) async fn update_existing_provider_oauth_catalog_key(
     updated.expires_at_unix_secs = expires_at_unix_secs;
     updated.oauth_invalid_at_unix_secs = None;
     updated.oauth_invalid_reason = None;
+    updated.is_active = true;
     if updated.fingerprint.is_none() {
         updated.fingerprint = grok_oauth_catalog_key_fingerprint(provider_type, auth_config);
     }

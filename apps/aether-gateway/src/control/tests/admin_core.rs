@@ -81,6 +81,56 @@ fn classifies_admin_modules_set_enabled_as_admin_proxy_route() {
 }
 
 #[test]
+fn classifies_admin_risk_control_unlock_user_api_key_as_admin_proxy_route() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/admin/risk-control/users/user-1/api-keys/key-1/unlock"
+        .parse()
+        .expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::POST, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(
+        decision.route_family.as_deref(),
+        Some("risk_control_manage")
+    );
+    assert_eq!(decision.route_kind.as_deref(), Some("unlock_user_api_key"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("admin:risk_control")
+    );
+    assert_eq!(
+        management_token_required_permission(&http::Method::POST, &decision).as_deref(),
+        Some("admin:risk_control:write")
+    );
+}
+
+#[test]
+fn classifies_admin_risk_control_notification_retry_as_admin_proxy_route() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/admin/risk-control/logs/log-1/notification/retry"
+        .parse()
+        .expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::POST, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(
+        decision.route_family.as_deref(),
+        Some("risk_control_manage")
+    );
+    assert_eq!(decision.route_kind.as_deref(), Some("retry_notification"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("admin:risk_control")
+    );
+    assert_eq!(
+        management_token_required_permission(&http::Method::POST, &decision).as_deref(),
+        Some("admin:risk_control:write")
+    );
+}
+
+#[test]
 fn classifies_admin_system_version_as_admin_proxy_route() {
     let headers = headers(&[]);
     let uri: Uri = "/api/admin/system/version"

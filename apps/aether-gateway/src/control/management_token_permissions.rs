@@ -143,6 +143,11 @@ const PERMISSION_GROUPS: &[PermissionGroup] = &[
         assignable: true,
     },
     PermissionGroup {
+        scope: "risk_control",
+        label: "风控中心",
+        assignable: true,
+    },
+    PermissionGroup {
         scope: "security",
         label: "安全",
         assignable: true,
@@ -454,6 +459,9 @@ fn permission_key(scope: &str, access: &str) -> &'static str {
         ("routing_profiles", "read") => "admin:routing_profiles:read",
         ("routing_profiles", "write") => "admin:routing_profiles:write",
         ("routing_profiles", "admin") => "admin:routing_profiles:admin",
+        ("risk_control", "read") => "admin:risk_control:read",
+        ("risk_control", "write") => "admin:risk_control:write",
+        ("risk_control", "admin") => "admin:risk_control:admin",
         ("security", "read") => "admin:security:read",
         ("security", "write") => "admin:security:write",
         ("security", "admin") => "admin:security:admin",
@@ -533,6 +541,7 @@ mod tests {
             "provider_strategy",
             "providers",
             "proxy_nodes",
+            "risk_control",
             "security",
             "stats",
             "system",
@@ -593,6 +602,10 @@ mod tests {
             (
                 "route/admin/provider_ops_routes.rs",
                 include_str!("route/admin/provider_ops_routes.rs"),
+            ),
+            (
+                "route/admin/risk_control_families.rs",
+                include_str!("route/admin/risk_control_families.rs"),
             ),
             (
                 "route/admin/system_families.rs",

@@ -1,6 +1,11 @@
 <template>
   <div
     v-show="isActive"
+    :id="panelId"
+    role="tabpanel"
+    :aria-labelledby="tabId"
+    :hidden="!isActive"
+    tabindex="0"
     :class="contentClass"
   >
     <slot />
@@ -19,8 +24,12 @@ interface Props {
 const props = defineProps<Props>()
 
 const activeTab = inject<Ref<string>>('activeTab')
+const tabsBaseId = inject<string>('tabsBaseId', 'tabs')
 
 const isActive = computed(() => activeTab?.value === props.value)
+const valueId = computed(() => props.value.replace(/[^A-Za-z0-9_-]/g, '-'))
+const tabId = computed(() => `${tabsBaseId}-tab-${valueId.value}`)
+const panelId = computed(() => `${tabsBaseId}-panel-${valueId.value}`)
 
 const contentClass = computed(() => {
   return cn(

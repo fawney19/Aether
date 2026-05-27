@@ -20,6 +20,7 @@ use aether_data_contracts::repository::pool_scores::{
 };
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogReadRepository, ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint,
+    StoredProviderCatalogKey,
 };
 use axum::body::{to_bytes, Body, Bytes};
 use axum::response::{IntoResponse, Response};
@@ -116,6 +117,34 @@ async fn local_admin_provider_oauth_response(
     .await
     .expect("local provider oauth response should build")
     .expect("provider oauth route should resolve locally")
+}
+
+async fn wait_for_provider_catalog_key_state(
+    repository: &InMemoryProviderCatalogReadRepository,
+    key_id: &str,
+    timeout_ms: u64,
+    predicate: impl Fn(&StoredProviderCatalogKey) -> bool,
+) -> StoredProviderCatalogKey {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let mut latest = None;
+    loop {
+        let key = repository
+            .list_keys_by_ids(&[key_id.to_string()])
+            .await
+            .expect("keys should load")
+            .into_iter()
+            .next()
+            .expect("persisted key should exist");
+        if predicate(&key) {
+            return key;
+        }
+        latest = Some(key);
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "provider catalog key {key_id} did not reach expected state within {timeout_ms}ms; latest={latest:?}",
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 fn sample_kiro_device_access_token(email: &str) -> String {
@@ -4532,13 +4561,13 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_locally_with_trusted_ad
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*refresh_hits.lock().expect("mutex should lock"), 1);
 
-    let stored_key = provider_catalog_repository
-        .list_keys_by_ids(&["key-kiro-batch-duplicate".to_string()])
-        .await
-        .expect("keys should load")
-        .into_iter()
-        .next()
-        .expect("persisted key should exist");
+    let stored_key = wait_for_provider_catalog_key_state(
+        provider_catalog_repository.as_ref(),
+        "key-kiro-batch-duplicate",
+        500,
+        |key| key.is_active,
+    )
+    .await;
     assert!(stored_key.is_active);
     assert_eq!(
         stored_key.proxy,

@@ -24,10 +24,11 @@ use crate::constants::{
     EXECUTION_PATH_LOCAL_EXECUTION_PLANNING_TIMEOUT, EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS,
     EXECUTION_PATH_LOCAL_INVALID_REQUEST, EXECUTION_PATH_LOCAL_OVERLOADED,
     EXECUTION_PATH_LOCAL_PROXY_PASSTHROUGH_REMOVED, EXECUTION_PATH_LOCAL_RATE_LIMITED,
-    EXECUTION_PATH_LOCAL_ROUTE_NOT_FOUND, EXECUTION_PATH_PUBLIC_PROXY_PASSTHROUGH,
-    EXECUTION_RUNTIME_LOOP_GUARD_HEADER, FORWARDED_FOR_HEADER, FORWARDED_HOST_HEADER,
-    FORWARDED_PROTO_HEADER, GATEWAY_HEADER, LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER,
-    TRACE_ID_HEADER, TRUSTED_AUTH_ACCESS_ALLOWED_HEADER, TRUSTED_AUTH_API_KEY_ID_HEADER,
+    EXECUTION_PATH_LOCAL_RISK_CONTROL_BLOCKED, EXECUTION_PATH_LOCAL_ROUTE_NOT_FOUND,
+    EXECUTION_PATH_PUBLIC_PROXY_PASSTHROUGH, EXECUTION_RUNTIME_LOOP_GUARD_HEADER,
+    FORWARDED_FOR_HEADER, FORWARDED_HOST_HEADER, FORWARDED_PROTO_HEADER, GATEWAY_HEADER,
+    LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER, TRACE_ID_HEADER,
+    TRUSTED_AUTH_ACCESS_ALLOWED_HEADER, TRUSTED_AUTH_API_KEY_ID_HEADER,
     TRUSTED_AUTH_BALANCE_HEADER, TRUSTED_AUTH_USER_ID_HEADER, TUNNEL_AFFINITY_FORWARDED_BY_HEADER,
     TUNNEL_AFFINITY_OWNER_INSTANCE_HEADER,
 };
@@ -946,6 +947,52 @@ fn build_stream_sse_proxy_response(
     )
 }
 
+fn build_risk_control_block_response(
+    trace_id: &str,
+    decision: Option<&GatewayControlDecision>,
+    block: &crate::risk_control::RiskControlBlockDecision,
+    stream_request: bool,
+) -> Result<Response<Body>, GatewayError> {
+    let status_code = http::StatusCode::from_u16(block.status_code)
+        .unwrap_or(http::StatusCode::BAD_REQUEST)
+        .as_u16();
+    let payload = serde_json::json!({
+        "error": {
+            "type": "risk_control_blocked",
+            "message": block.message,
+            "details": {
+                "action": block.action,
+                "decision_source": block.decision_source,
+                "input_hash": block.input_hash,
+            }
+        }
+    });
+    if stream_request {
+        let data = serde_json::to_string(&payload)
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        let body = format!("event: error\ndata: {data}\n\n");
+        let headers = BTreeMap::from([
+            ("content-type".to_string(), "text/event-stream".to_string()),
+            ("content-length".to_string(), body.len().to_string()),
+        ]);
+        return build_client_response_from_parts(
+            status_code,
+            &headers,
+            Body::from(body),
+            trace_id,
+            decision,
+        );
+    }
+
+    let body =
+        serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let headers = BTreeMap::from([
+        ("content-type".to_string(), "application/json".to_string()),
+        ("content-length".to_string(), body.len().to_string()),
+    ]);
+    build_client_response_from_parts(status_code, &headers, Body::from(body), trace_id, decision)
+}
+
 async fn build_sync_aware_affinity_forward_response(
     request_context: &GatewayPublicRequestContext,
     request_headers: &http::HeaderMap,
@@ -1374,9 +1421,12 @@ pub(crate) async fn proxy_request(
         super::public::ai_public_local_requires_buffered_body(&request_context);
     let should_buffer_for_local_auth =
         should_buffer_request_for_local_auth(control_decision, &parts.headers);
+    let should_buffer_for_risk_control =
+        crate::risk_control::risk_control_should_buffer_body(&state, &request_context).await?;
     let should_buffer_body = should_try_control_execute
         || should_buffer_for_local_auth
-        || should_buffer_for_local_ai_public;
+        || should_buffer_for_local_ai_public
+        || should_buffer_for_risk_control;
 
     let allow_control_execute_fallback = should_try_control_execute
         && control_decision.is_some_and(allows_control_execute_emergency)
@@ -1508,6 +1558,45 @@ pub(crate) async fn proxy_request(
             &started_at,
             request_permit.take(),
         ));
+    }
+
+    if let Some(buffered_body) = buffered_body.as_ref() {
+        if let Some(block) = crate::risk_control::maybe_inspect_gateway_request(
+            &state,
+            &request_context,
+            &parts.headers,
+            buffered_body,
+        )
+        .await?
+        {
+            let stream_request =
+                request_wants_stream(&request_context, &parts.headers, buffered_body);
+            warn!(
+                event_name = "risk_control_blocked_request",
+                log_type = "security",
+                trace_id = %trace_id,
+                path = %request_context.request_path_and_query(),
+                action = block.action.as_str(),
+                decision_source = block.decision_source.as_str(),
+                input_hash = block.input_hash.as_str(),
+                "gateway blocked ai request at risk control"
+            );
+            let response = build_risk_control_block_response(
+                &trace_id,
+                control_decision,
+                &block,
+                stream_request,
+            )?;
+            return Ok(finalize_gateway_response_with_context(
+                &state,
+                response,
+                &remote_addr,
+                &request_context,
+                EXECUTION_PATH_LOCAL_RISK_CONTROL_BLOCKED,
+                &started_at,
+                request_permit.take(),
+            ));
+        }
     }
 
     if let Some(response) = super::public::maybe_build_local_ai_public_response(

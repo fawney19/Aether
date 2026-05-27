@@ -214,6 +214,50 @@ fn notification_service_default_items() -> serde_json::Value {
     ])
 }
 
+fn risk_control_default_config() -> serde_json::Value {
+    json!({
+        "enabled": false,
+        "mode": "observe",
+        "keyword_mode": "keyword_and_api",
+        "keywords": [],
+        "thresholds": {},
+        "model_filter": {
+            "mode": "all",
+            "models": []
+        },
+        "provider": {
+            "base_url": "https://api.openai.com",
+            "model": "omni-moderation-latest",
+            "api_keys": [],
+            "timeout_ms": 8000,
+            "max_retries": 2,
+            "key_freeze_seconds": 300,
+            "fail_closed": false
+        },
+        "hash_block": {
+            "enabled": true,
+            "learn_from_flagged": true
+        },
+        "auto_action": {
+            "enabled": false,
+            "violation_threshold": 3,
+            "window_seconds": 86400,
+            "disable_user": true,
+            "lock_api_key": false
+        },
+        "retention": {
+            "hit_days": 90,
+            "non_hit_days": 14
+        },
+        "sample_rate": 1.0,
+        "max_text_chars": 65536,
+        "excerpt_chars": 512,
+        "log_all": false,
+        "block_status": 400,
+        "block_message": "请求触发风控策略，已拒绝转发。"
+    })
+}
+
 fn normalize_chat_pii_redaction_placeholder_prefix(raw: &str) -> Option<String> {
     let value = raw.trim();
     if value.is_empty() || value.len() > 32 {
@@ -739,6 +783,7 @@ const SENSITIVE_SYSTEM_CONFIG_KEYS: &[&str] = &[
     "module.server_chan_push.send_key",
     "module.important_notification.server_chan_send_key",
     "module.bark_push.device_key",
+    "module.risk_control.config",
 ];
 const ADMIN_API_FORMAT_DEFINITIONS: &[AdminApiFormatDefinition] = &[
     AdminApiFormatDefinition {
@@ -1417,6 +1462,7 @@ pub fn build_admin_module_validation_result(
             }
         }
         "management_tokens" | "model_directives" | "proxy_nodes" => (true, None),
+        "risk_control" => (true, None),
         _ => (true, None),
     }
 }
@@ -1432,6 +1478,7 @@ pub fn build_admin_module_health(
         | "important_notification"
         | "bark_push"
         | "server_chan_push"
+        | "risk_control"
         | "s3_backup" => "healthy",
         "gemini_files" => {
             if gemini_files_has_capable_key {
@@ -1804,6 +1851,8 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "module.chat_pii_redaction.rules" => Some(chat_pii_redaction_default_rules()),
         "module.chat_pii_redaction.cache_ttl_seconds" => Some(json!(300)),
         "module.chat_pii_redaction.placeholder_prefix" => Some(json!("AETHER")),
+        "module.risk_control.enabled" => Some(json!(false)),
+        "module.risk_control.config" => Some(risk_control_default_config()),
         _ => None,
     }
 }

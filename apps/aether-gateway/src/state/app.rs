@@ -15,6 +15,7 @@ use super::super::cache::{
 use super::super::data::GatewayDataState;
 use super::super::fallback_metrics;
 use super::super::rate_limit::FrontdoorUserRpmLimiter;
+use super::super::risk_control::RiskControlObserveQueue;
 use super::super::{provider_transport, usage};
 use super::{
     AdminBillingCollectorRecord, AdminBillingRuleRecord, AdminPaymentCallbackRecord,
@@ -123,6 +124,7 @@ pub struct AppState {
     pub(crate) scheduler_affinity_epoch: Arc<AtomicU64>,
     pub(crate) dashboard_response_cache: Arc<DashboardResponseCache>,
     pub(crate) system_config_cache: Arc<SystemConfigCache>,
+    pub(crate) risk_control_observe_queue: Arc<RiskControlObserveQueue>,
     pub(crate) fallback_metrics: Arc<fallback_metrics::GatewayFallbackMetrics>,
     pub(crate) frontdoor_cors: Option<Arc<FrontdoorCorsConfig>>,
     pub(crate) frontdoor_user_rpm: Arc<FrontdoorUserRpmLimiter>,

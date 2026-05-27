@@ -23,6 +23,9 @@ pub(crate) const IMPORTANT_NOTIFICATION_DEFAULT_CHANNEL_KEY: &str =
     "module.important_notification.default_channel";
 pub(crate) const IMPORTANT_NOTIFICATION_ITEMS_KEY: &str = "module.important_notification.items";
 pub(crate) const PROVIDER_QUOTA_ALERT_ITEM_KEY: &str = "provider_quota_alert";
+pub(crate) const RISK_CONTROL_FLAGGED_ITEM_KEY: &str = "risk_control_flagged";
+pub(crate) const RISK_CONTROL_AUTO_ACTION_ITEM_KEY: &str = "risk_control_auto_action";
+pub(crate) const RISK_CONTROL_USER_ACTION_NOTICE_ITEM_KEY: &str = "risk_control_user_action_notice";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ImportantNotification {
@@ -356,6 +359,17 @@ pub(crate) async fn build_important_notification_test_payload(
         ("total_available", "8.0000".to_string()),
         ("threshold_amount", "10.0000".to_string()),
         ("user_email", "user@example.com".to_string()),
+        ("user_label", "示例用户".to_string()),
+        ("user_id", "user-demo".to_string()),
+        ("decision_source", "keyword".to_string()),
+        ("action", "block".to_string()),
+        ("model", "gpt-5".to_string()),
+        ("endpoint", "openai:chat".to_string()),
+        ("trace_id", "trace-demo".to_string()),
+        ("matched_keywords", "risk".to_string()),
+        ("excerpt", "(已隐藏)".to_string()),
+        ("violation_count", "3".to_string()),
+        ("auto_action", "disable_user".to_string()),
         ("balance", "1.0000".to_string()),
     ];
     let report = dispatch_important_notification(
@@ -428,10 +442,16 @@ fn parse_notification_items(value: Option<&Value>) -> Vec<ImportantNotificationI
     let Some(Value::Array(items)) = value else {
         return default_notification_items();
     };
-    items
+    let mut parsed = items
         .iter()
         .filter_map(parse_notification_item)
-        .collect::<Vec<_>>()
+        .collect::<Vec<_>>();
+    for default_item in default_notification_items() {
+        if !parsed.iter().any(|item| item.key == default_item.key) {
+            parsed.push(default_item);
+        }
+    }
+    parsed
 }
 
 fn parse_notification_item(value: &Value) -> Option<ImportantNotificationItemConfig> {
@@ -497,6 +517,54 @@ fn default_notification_items() -> Vec<ImportantNotificationItemConfig> {
             markdown_template: Some("你的账户余额已低于提醒阈值，请及时处理。".to_string()),
             text_template: Some("你的账户余额已低于提醒阈值，请及时处理。".to_string()),
             user_email_enabled: true,
+        },
+        ImportantNotificationItemConfig {
+            key: RISK_CONTROL_FLAGGED_ITEM_KEY.to_string(),
+            name: "风控命中告警".to_string(),
+            enabled: true,
+            channel: None,
+            title_template: Some("风控命中：{decision_source}".to_string()),
+            markdown_template: Some(
+                "风控命中事件\n\n- 来源：`{decision_source}`\n- 动作：`{action}`\n- 用户：`{user_label}`\n- 模型：`{model}`\n- 端点：`{endpoint}`\n- trace：`{trace_id}`\n- 命中关键词：{matched_keywords}\n- 摘要：{excerpt}"
+                    .to_string(),
+            ),
+            text_template: Some(
+                "风控命中：source={decision_source} action={action} user={user_label} model={model} endpoint={endpoint} trace={trace_id} keywords={matched_keywords}"
+                    .to_string(),
+            ),
+            user_email_enabled: false,
+        },
+        ImportantNotificationItemConfig {
+            key: RISK_CONTROL_AUTO_ACTION_ITEM_KEY.to_string(),
+            name: "风控自动处置".to_string(),
+            enabled: true,
+            channel: None,
+            title_template: Some("风控自动处置：{auto_action}".to_string()),
+            markdown_template: Some(
+                "已对用户 `{user_label}` 执行 `{auto_action}`，累计违规 {violation_count} 次。\n\n- 来源：`{decision_source}`\n- 命中关键词：{matched_keywords}\n- 摘要：{excerpt}"
+                    .to_string(),
+            ),
+            text_template: Some(
+                "风控自动处置：action={auto_action} user={user_label} violations={violation_count} source={decision_source}"
+                    .to_string(),
+            ),
+            user_email_enabled: false,
+        },
+        ImportantNotificationItemConfig {
+            key: RISK_CONTROL_USER_ACTION_NOTICE_ITEM_KEY.to_string(),
+            name: "风控用户处置通知".to_string(),
+            enabled: true,
+            channel: None,
+            title_template: Some("风控用户处置通知：{auto_action}".to_string()),
+            markdown_template: Some(
+                "风控中心已触发用户处置。\n\n- 处置：`{auto_action}`\n- 用户：`{user_label}`\n- 用户 ID：`{user_id}`\n- 邮箱：`{user_email}`\n- 累计违规：{violation_count}\n- 来源：`{decision_source}`\n- trace：`{trace_id}`"
+                    .to_string(),
+            ),
+            text_template: Some(
+                "风控用户处置通知：action={auto_action} user={user_label} user_id={user_id} violations={violation_count} source={decision_source} trace={trace_id}"
+                    .to_string(),
+            ),
+            user_email_enabled: false,
         },
     ]
 }

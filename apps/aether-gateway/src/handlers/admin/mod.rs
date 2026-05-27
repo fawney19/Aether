@@ -7,6 +7,7 @@ mod model;
 pub(super) mod observability;
 pub(super) mod provider;
 mod referrals;
+mod risk_control;
 mod routing;
 mod system;
 mod users;

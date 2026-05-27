@@ -31,6 +31,10 @@ pub(crate) const TASK_KEY_AUDIT_CLEANUP: &str = "maintenance.audit.cleanup";
 pub(crate) const TASK_KEY_DB_MAINTENANCE: &str = "maintenance.database";
 pub(crate) const TASK_KEY_PENDING_CLEANUP: &str = "maintenance.pending.cleanup";
 pub(crate) const TASK_KEY_REQUEST_CANDIDATE_CLEANUP: &str = "maintenance.request.candidate.cleanup";
+pub(crate) const TASK_KEY_RISK_CONTROL_RETENTION: &str = "maintenance.risk_control.retention";
+pub(crate) const TASK_KEY_RISK_CONTROL_OBSERVE_WORKER: &str = "risk_control.observe.worker";
+pub(crate) const TASK_KEY_RISK_CONTROL_NOTIFICATION_OUTBOX: &str =
+    "risk_control.notification.outbox";
 pub(crate) const TASK_KEY_GEMINI_FILES_CLEANUP: &str = "maintenance.gemini.files.cleanup";
 pub(crate) const TASK_KEY_OAUTH_TOKEN_REFRESH: &str = "maintenance.oauth.token.refresh";
 pub(crate) const TASK_KEY_PROXY_NODE_STALE_CLEANUP: &str = "maintenance.proxy.node.stale.cleanup";
@@ -172,6 +176,30 @@ const TASK_DEFINITIONS: &[TaskDefinition] = &[
     ),
     TaskDefinition::new(
         TASK_KEY_REQUEST_CANDIDATE_CLEANUP,
+        TaskKind::Scheduled,
+        "interval",
+        true,
+        true,
+        RETRY_ONCE,
+    ),
+    TaskDefinition::new(
+        TASK_KEY_RISK_CONTROL_OBSERVE_WORKER,
+        TaskKind::Daemon,
+        "daemon",
+        true,
+        true,
+        RETRY_ONCE,
+    ),
+    TaskDefinition::new(
+        TASK_KEY_RISK_CONTROL_NOTIFICATION_OUTBOX,
+        TaskKind::Daemon,
+        "daemon",
+        true,
+        true,
+        RETRY_ONCE,
+    ),
+    TaskDefinition::new(
+        TASK_KEY_RISK_CONTROL_RETENTION,
         TaskKind::Scheduled,
         "interval",
         true,
