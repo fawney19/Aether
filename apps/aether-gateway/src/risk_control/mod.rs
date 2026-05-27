@@ -830,7 +830,7 @@ async fn write_decision_log(
         input,
         violation_count,
         enforce_auto_action
-            .then(|| auto_action.as_deref())
+            .then_some(auto_action.as_deref())
             .flatten(),
     )
     .await

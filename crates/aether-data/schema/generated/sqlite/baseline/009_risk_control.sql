@@ -79,3 +79,4 @@ CREATE TABLE IF NOT EXISTS risk_control_notification_outbox (
 CREATE INDEX IF NOT EXISTS idx_risk_control_notification_outbox_due ON risk_control_notification_outbox (status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_risk_control_notification_outbox_lease ON risk_control_notification_outbox (status, lease_until);
 CREATE INDEX IF NOT EXISTS idx_risk_control_notification_outbox_updated ON risk_control_notification_outbox (updated_at);
+

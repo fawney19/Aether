@@ -296,7 +296,7 @@ async fn status_payload(state: &AdminAppState<'_>) -> Result<serde_json::Value, 
         .await
         .map_err(|err| GatewayError::Internal(err.to_string()))?;
     let (config_validated, config_error) = validate_config(&config);
-    let (notification_ready, notification_warning) = notification_status(&state, &config).await;
+    let (notification_ready, notification_warning) = notification_status(state, &config).await;
     let notification_outbox = state
         .app()
         .data

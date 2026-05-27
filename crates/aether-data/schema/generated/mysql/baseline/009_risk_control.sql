@@ -82,3 +82,4 @@ CREATE TABLE IF NOT EXISTS risk_control_notification_outbox (
     KEY idx_risk_control_notification_outbox_lease (`status`, `lease_until`),
     KEY idx_risk_control_notification_outbox_updated (`updated_at`)
 );
+

@@ -85,3 +85,4 @@ ALTER TABLE ONLY public.risk_control_notification_outbox ADD CONSTRAINT uq_risk_
 CREATE INDEX IF NOT EXISTS idx_risk_control_notification_outbox_due ON public.risk_control_notification_outbox USING btree (status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_risk_control_notification_outbox_lease ON public.risk_control_notification_outbox USING btree (status, lease_until);
 CREATE INDEX IF NOT EXISTS idx_risk_control_notification_outbox_updated ON public.risk_control_notification_outbox USING btree (updated_at);
+

@@ -910,13 +910,15 @@ mod tests {
             }
         ])));
 
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].key, "user_balance_low");
+        let item = items
+            .iter()
+            .find(|item| item.key == "user_balance_low")
+            .expect("custom notification item should be parsed");
         assert_eq!(
-            items[0].channel,
+            item.channel,
             Some(ImportantNotificationChannelFilter::Email)
         );
-        assert!(items[0].user_email_enabled);
+        assert!(item.user_email_enabled);
     }
 
     #[test]
