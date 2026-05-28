@@ -128,13 +128,7 @@ pub fn classify_same_format_provider_request_behavior(
     );
     let report_kind = if is_kiro && !params.require_streaming {
         "claude_cli_sync_finalize"
-    } else if is_gemini_cli && !params.require_streaming {
-        match params.report_kind {
-            "gemini_chat_sync_success" => "gemini_chat_sync_finalize",
-            "gemini_cli_sync_success" => "gemini_cli_sync_finalize",
-            _ => params.report_kind,
-        }
-    } else if is_antigravity && !params.require_streaming {
+    } else if (is_gemini_cli || is_antigravity) && !params.require_streaming {
         match params.report_kind {
             "gemini_chat_sync_success" => "gemini_chat_sync_finalize",
             "gemini_cli_sync_success" => "gemini_cli_sync_finalize",

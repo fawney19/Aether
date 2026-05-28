@@ -21,6 +21,7 @@ use crate::ai_serving::planner::{
 };
 use crate::ai_serving::transport::{
     resolve_transport_execution_timeouts, resolve_transport_profile,
+    GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME,
 };
 use crate::{
     append_execution_contract_fields_to_value, append_local_failover_policy_to_value,
@@ -94,7 +95,7 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
     } else if resolved.is_gemini_cli {
         extra_fields.insert(
             "envelope_name".to_string(),
-            json!(aether_ai_formats::api::GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME),
+            json!(GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME),
         );
     } else if resolved.is_antigravity {
         extra_fields.insert(
@@ -105,11 +106,6 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
             &mut extra_fields,
             super::super::ANTIGRAVITY_ENVELOPE_NAME,
             parts.uri.path(),
-        );
-    } else if resolved.is_gemini_cli {
-        extra_fields.insert(
-            "envelope_name".to_string(),
-            json!(crate::ai_serving::transport::GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME),
         );
     }
     let provider_api_format = resolved.provider_api_format.clone();
