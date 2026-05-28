@@ -39,6 +39,23 @@ function schedulingFailureMessage(
     ?? nonEmptyString(failure.reason)
 }
 
+function schedulingFailureTitle(failure: RequestSchedulingFailure): string {
+  const summary = failure.candidate_failure_summary
+  if (!summary) return nonEmptyString(failure.title) ?? '本地调度失败'
+  const total = typeof summary.total === 'number' ? summary.total : null
+  const failed = typeof summary.failed === 'number' ? summary.failed : 0
+  const skipped = typeof summary.skipped === 'number' ? summary.skipped : 0
+  if (total === 0) return nonEmptyString(failure.title) ?? '没有找到可调度候选'
+  if (failed === 1 && total === 1) return nonEmptyString(failure.title) ?? '唯一候选执行失败，已无可重试上游'
+  if (total != null && failed > 0 && failed + skipped >= total) {
+    return nonEmptyString(failure.title) ?? '所有候选已完成重试，但全部执行失败'
+  }
+  if (total != null && total > 0 && skipped === total) {
+    return nonEmptyString(failure.title) ?? '所有候选都被调度规则跳过'
+  }
+  return nonEmptyString(failure.title) ?? '本地调度失败'
+}
+
 export function resolveRequestFailureNotice(detail: RequestDetail | null | undefined): RequestFailureNotice | null {
   if (!detail) return null
 
@@ -50,10 +67,30 @@ export function resolveRequestFailureNotice(detail: RequestDetail | null | undef
   const schedulingFailure = detail.scheduling_failure ?? null
 
   if (schedulingFailure) {
+    const upstreamFailure = schedulingFailure.upstream_failure ?? null
+    const upstreamMessage = nonEmptyString(upstreamFailure?.user_message)
+      ?? nonEmptyString(schedulingFailure.message)
+      ?? nonEmptyString(upstreamFailure?.message)
+    if (upstreamFailure && upstreamMessage) {
+      return {
+        title: schedulingFailureTitle(schedulingFailure),
+        message: upstreamMessage,
+        isSchedulingFailure: true,
+        meta: uniqueMeta([
+          formatHttpStatus(upstreamFailure.status_code ?? schedulingFailure.status_code ?? detail.status_code),
+          nonEmptyString(upstreamFailure.type),
+          nonEmptyString(upstreamFailure.param),
+          nonEmptyString(upstreamFailure.provider_name),
+          nonEmptyString(upstreamFailure.model),
+          schedulingFailure.no_upstream_attempt ? '未进入上游执行' : null,
+        ]),
+      }
+    }
+
     const message = schedulingFailureMessage(schedulingFailure, fallbackDomain, fallbackErrorMessage)
     if (message) {
       return {
-        title: nonEmptyString(schedulingFailure.title) ?? '本地调度失败',
+        title: schedulingFailureTitle(schedulingFailure),
         message,
         isSchedulingFailure: true,
         meta: uniqueMeta([

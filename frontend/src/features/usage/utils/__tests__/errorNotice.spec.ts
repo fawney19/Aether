@@ -91,6 +91,45 @@ describe('request failure notice', () => {
     })
   })
 
+  it('prefers structured upstream failure details when scheduling failure includes them', () => {
+    const notice = resolveRequestFailureNotice(buildRequestDetail({
+      scheduling_failure: {
+        source: 'local_execution_runtime_miss',
+        reason: 'execution_runtime_candidates_exhausted',
+        reason_label: '候选执行失败且已耗尽',
+        title: '唯一候选执行失败，已无可重试上游',
+        message: 'gpustack 返回 HTTP 400',
+        reason_summary: '候选 1 个',
+        status_code: 503,
+        no_upstream_attempt: false,
+        upstream_failure: {
+          provider_name: 'gpustack',
+          endpoint_id: 'endpoint-1',
+          key_name: 'key-1',
+          model: 'qwen3.6-27b',
+          status_code: 400,
+          type: 'BadRequestError',
+          param: 'input_tokens',
+          message: 'This model\'s maximum context length is 131072 tokens.',
+          user_message: '输入上下文超过模型 qwen3.6-27b 的最大长度限制。',
+        },
+        candidate_failure_summary: {
+          total: 1,
+          failed: 1,
+          skipped: 0,
+          retried: 1,
+        },
+      },
+    }))
+
+    expect(notice).toEqual({
+      title: '唯一候选执行失败，已无可重试上游',
+      message: '输入上下文超过模型 qwen3.6-27b 的最大长度限制。',
+      isSchedulingFailure: true,
+      meta: ['HTTP 400', 'BadRequestError', 'input_tokens', 'gpustack', 'qwen3.6-27b'],
+    })
+  })
+
   it('does not present HTTP 200 as the cause of stream terminal failures', () => {
     const notice = resolveRequestFailureNotice(buildRequestDetail({
       status_code: 200,
