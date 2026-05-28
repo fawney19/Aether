@@ -180,7 +180,7 @@ export function isUsageRecordFailed(record: UsageFailureSignal & Pick<UsageRecor
   const status = typeof record.status === 'string' ? record.status.trim().toLowerCase() : ''
   if (status) {
     if (status === 'pending' || status === 'streaming') {
-      return !hasTerminalSuccessStatusCode(record) && hasAnyFailureSignal(record)
+      return hasAnyFailureSignal(record)
     }
     if (status === 'cancelled') {
       return false
@@ -234,9 +234,7 @@ export function normalizeRequestStatus(status: RequestStatusLike): RequestStatus
 
 export function resolveDisplayRequestStatus(record: UsageDisplayStatusRecord): RequestStatus | undefined {
   const status = normalizeRequestStatus(record.status)
-  if ((status === 'pending' || status === 'streaming') &&
-    !hasTerminalSuccessStatusCode(record) &&
-    hasAnyFailureSignal(record)) {
+  if ((status === 'pending' || status === 'streaming') && hasAnyFailureSignal(record)) {
     return 'failed'
   }
   if (status === 'streaming' && record.first_byte_time_ms == null) {
@@ -289,6 +287,7 @@ export function resolveTimelineFinalStatus(params: {
     : undefined
 
   const requestStatus = mapRequestStatusToTimelineStatus(params.requestStatus)
+  const traceStatus = normalizeTimelineFinalStatus(params.traceFinalStatus)
   if (requestStatus === 'success' || requestStatus === 'failed' || requestStatus === 'cancelled') {
     if (requestStatus === 'success' && hasTerminalSuccessStatusCode === false) {
       return 'failed'
@@ -296,10 +295,15 @@ export function resolveTimelineFinalStatus(params: {
     return requestStatus
   }
   if (requestStatus === 'pending' || requestStatus === 'streaming') {
+    if (traceStatus === 'failed' || traceStatus === 'cancelled') {
+      return traceStatus
+    }
+    if (hasTerminalSuccessStatusCode === false) {
+      return 'failed'
+    }
     return requestStatus
   }
 
-  const traceStatus = normalizeTimelineFinalStatus(params.traceFinalStatus)
   if (traceStatus === 'success' || traceStatus === 'failed' || traceStatus === 'cancelled') {
     if (traceStatus === 'success' && hasTerminalSuccessStatusCode === false) {
       return 'failed'
