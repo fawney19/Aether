@@ -62,6 +62,80 @@
           </p>
         </div>
 
+        <div
+          v-if="loadingUpdatePreflight || updatePreflight || updatePreflightError"
+          class="w-full rounded-xl border border-border/60 bg-muted/20 px-4 py-3 text-left"
+        >
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <div class="text-xs font-semibold text-foreground">
+                升级前检查
+              </div>
+              <div class="mt-0.5 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                Preflight
+              </div>
+            </div>
+            <div class="flex items-center gap-2 text-[11px] text-muted-foreground">
+              <span>通过 {{ preflightOkCount }}</span>
+              <span v-if="preflightWarningCount">警告 {{ preflightWarningCount }}</span>
+              <span v-if="preflightBlockedCount" class="text-destructive">阻塞 {{ preflightBlockedCount }}</span>
+            </div>
+          </div>
+
+          <div
+            v-if="loadingUpdatePreflight"
+            class="mt-3 flex items-center gap-2 text-xs text-muted-foreground"
+          >
+            <Loader2 class="h-4 w-4 animate-spin" />
+            正在检查安装目录、磁盘空间和数据库状态...
+          </div>
+
+          <div
+            v-else-if="updatePreflightError"
+            class="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-amber-600 dark:text-amber-400"
+          >
+            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+            <div class="space-y-1 text-xs leading-5">
+              <div class="font-medium text-foreground">
+                无法完成升级前检查
+              </div>
+              <p class="text-muted-foreground">
+                {{ updatePreflightError }}
+              </p>
+            </div>
+          </div>
+
+          <div
+            v-else-if="updatePreflight && updatePreflight.checks.length > 0"
+            class="mt-3 space-y-2"
+          >
+            <div
+              v-for="check in updatePreflight.checks"
+              :key="check.key"
+              class="flex flex-col gap-2 rounded-lg border px-3 py-2 sm:flex-row sm:items-start sm:justify-between"
+              :class="preflightStatusClass(check.status)"
+            >
+              <div class="min-w-0 space-y-1">
+                <div class="flex items-center gap-2">
+                  <component
+                    :is="preflightStatusIcon(check.status)"
+                    class="h-4 w-4 shrink-0"
+                  />
+                  <span class="text-sm font-medium text-foreground">
+                    {{ check.label }}
+                  </span>
+                </div>
+                <p class="text-xs leading-5 text-muted-foreground">
+                  {{ check.message }}
+                </p>
+              </div>
+              <span class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
+                {{ check.status }}
+              </span>
+            </div>
+          </div>
+        </div>
+
         <!-- Release Notes -->
         <div
           v-if="displayReleaseNotes"
@@ -175,7 +249,7 @@
         <Button
           v-if="updateSupported"
           class="flex-1"
-          :disabled="updating || rollingBack || !canApplyUpdate"
+          :disabled="updating || rollingBack || !canApplyUpdate || loadingUpdatePreflight || preflightBlocking"
           @click="handleApplyUpdate"
         >
           {{ actionButtonLabel }}
@@ -194,6 +268,9 @@ import { formatDisplayVersion } from '@/utils/version'
 import { normalizeReleaseNotesForDisplay } from '@/utils/releaseNotes'
 import { sanitizeMarkdown } from '@/utils/sanitize'
 import { marked } from 'marked'
+import type { SystemUpdatePreflightResponse } from '@/api/admin'
+import { isPreflightBlocking } from './updateDialogLogic'
+import { AlertTriangle, CheckCircle2, Loader2, XCircle } from 'lucide-vue-next'
 
 const props = defineProps<{
   modelValue: boolean
@@ -215,6 +292,9 @@ const props = defineProps<{
   reconnectMessage?: string
   rollbackAvailable?: boolean
   rollingBack?: boolean
+  updatePreflight?: SystemUpdatePreflightResponse | null
+  loadingUpdatePreflight?: boolean
+  updatePreflightError?: string | null
   downloadProgressText?: string | null
   downloadProgressPercent?: number | null
 }>()
@@ -233,6 +313,9 @@ const updatePhase = computed(() => props.updatePhase ?? 'download')
 const updateSupported = computed(() => props.updateSupported ?? true)
 const updatable = computed(() => props.updatable ?? true)
 const canApplyUpdate = computed(() => updateSupported.value && updatable.value)
+const updatePreflight = computed(() => props.updatePreflight ?? null)
+const loadingUpdatePreflight = computed(() => props.loadingUpdatePreflight ?? false)
+const updatePreflightError = computed(() => props.updatePreflightError ?? null)
 const updateStrategy = computed(() => props.updateStrategy ?? 'manual')
 const isDockerUpdate = computed(() => updateStrategy.value === 'docker' && !canApplyUpdate.value)
 const dockerUpdateCommand = computed(() => props.dockerUpdateCommand || '')
@@ -310,6 +393,29 @@ const renderedReleaseNotes = computed(() => {
   }
 })
 
+const preflightOkCount = computed(() => {
+  return updatePreflight.value?.checks.filter(item => item.status === 'ok').length ?? 0
+})
+const preflightWarningCount = computed(() => {
+  return updatePreflight.value?.checks.filter(item => item.status === 'warning').length ?? 0
+})
+const preflightBlockedCount = computed(() => {
+  return updatePreflight.value?.checks.filter(item => item.status === 'blocked').length ?? 0
+})
+const preflightBlocking = computed(() => isPreflightBlocking(updatePreflight.value))
+
+function preflightStatusClass(status: 'ok' | 'warning' | 'blocked'): string {
+  if (status === 'ok') return 'border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+  if (status === 'warning') return 'border-amber-500/20 bg-amber-500/10 text-amber-600 dark:text-amber-400'
+  return 'border-destructive/20 bg-destructive/10 text-destructive'
+}
+
+function preflightStatusIcon(status: 'ok' | 'warning' | 'blocked') {
+  if (status === 'ok') return CheckCircle2
+  if (status === 'warning') return AlertTriangle
+  return XCircle
+}
+
 function handleLater() {
   const ignoreKey = 'aether_update_ignore'
   const ignoreData = {
@@ -329,6 +435,7 @@ function handleViewRelease() {
 
 function handleApplyUpdate() {
   if (!canApplyUpdate.value) return
+  if (loadingUpdatePreflight.value || preflightBlocking.value) return
   emit('applyUpdate')
 }
 

@@ -480,6 +480,36 @@ export interface SystemUpdateCapabilityResponse {
   message: string
 }
 
+export interface SystemUpdatePreflightCheck {
+  key: string
+  label: string
+  status: 'ok' | 'warning' | 'blocked'
+  message: string
+  detail?: Record<string, unknown> | unknown[] | null
+}
+
+export interface SystemUpdatePreflightResponse {
+  overall_status: 'ok' | 'warning' | 'blocked'
+  can_apply_update: boolean
+  generated_at: string
+  current_version: string
+  target_version?: string | null
+  build_type: string
+  update_strategy?: 'self' | 'docker' | 'manual' | string
+  strategy?: 'self' | 'docker' | 'manual' | string
+  deployment_topology?: 'single-node' | 'multi-node' | string
+  topology?: 'single-node' | 'multi-node' | string
+  install_root?: string
+  base_dir?: string
+  releases_dir?: string
+  data_dir?: string
+  logs_dir?: string
+  required_disk_bytes?: number
+  blockers?: number
+  warnings?: number
+  checks: SystemUpdatePreflightCheck[]
+}
+
 export interface UpdateTaskStatusResponse {
   phase: string
   error: string | null
@@ -1175,6 +1205,15 @@ export const adminApi = {
   async getSystemUpdateCapability(): Promise<SystemUpdateCapabilityResponse> {
     const response = await apiClient.get<SystemUpdateCapabilityResponse>(
       '/api/admin/system/update-capability'
+    )
+    return response.data
+  },
+
+  // 一键更新前置检查
+  async getSystemUpdatePreflight(version?: string | null): Promise<SystemUpdatePreflightResponse> {
+    const response = await apiClient.get<SystemUpdatePreflightResponse>(
+      '/api/admin/system/update-preflight',
+      version ? { params: { version } } : undefined
     )
     return response.data
   },

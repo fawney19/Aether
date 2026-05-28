@@ -13,11 +13,12 @@ cd Aether
 cp .env.example .env
 ./generate_keys.sh # 生成密钥, 并将生成的密钥填入 .env
 
-# 3. 部署 / 更新（自动执行数据库迁移）
+# 3. 首次部署（自动执行数据库迁移）
 docker compose pull && docker compose up -d
 
-# 4. 升级前备份
-docker compose exec postgres pg_dump -U postgres aether | gzip > backup_$(date +%Y%m%d_%H%M%S).sql.gz
+# 4. 后续升级（自动 pg_dump 备份 + 失败回滚）
+./update.sh
+# 加 --dry-run 可预览，--no-backup / --no-rollback 跳过对应步骤
 ```
 
 ### 2. 本地开发

@@ -41,6 +41,15 @@ pub(super) fn classify_admin_system_family_route(
             "admin:system",
             false,
         ))
+    } else if method == http::Method::GET && normalized_path == "/api/admin/system/update-preflight"
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "update_preflight",
+            "admin:system",
+            false,
+        ))
     } else if method == http::Method::POST && normalized_path == "/api/admin/system/prepare-update"
     {
         Some(classified(

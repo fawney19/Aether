@@ -19,9 +19,10 @@ use crate::handlers::admin::system::shared::settings::{
 };
 use crate::handlers::admin::system::shared::smtp::build_admin_smtp_test_payload;
 use crate::handlers::admin::system::shared::update::{
-    build_admin_system_update_capability_payload, current_self_update_blocker,
-    prepare_admin_system_update_task, read_update_history, read_update_task_status,
-    self_update_supported, start_admin_system_rollback_task, start_admin_system_update_task,
+    build_admin_system_update_capability_payload, build_admin_system_update_preflight_payload,
+    current_self_update_blocker, prepare_admin_system_update_task, read_update_history,
+    read_update_task_status, self_update_supported, start_admin_system_rollback_task,
+    start_admin_system_update_task,
 };
 use crate::important_notification::build_important_notification_test_payload;
 use crate::maintenance::{ManualUsageCleanupMode, ManualUsageCleanupOptions};
@@ -92,6 +93,18 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
     {
         return Ok(Some(
             Json(build_admin_system_update_capability_payload()).into_response(),
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("update_preflight")
+        && request_method == http::Method::GET
+        && request_path == "/api/admin/system/update-preflight"
+    {
+        let target_version = query_param(request_context.query_string(), "version");
+
+        return Ok(Some(
+            Json(build_admin_system_update_preflight_payload(state, target_version).await?)
+                .into_response(),
         ));
     }
 

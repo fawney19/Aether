@@ -1,13 +1,17 @@
+use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::system::shared::update_client::build_update_http_client;
 use crate::GatewayError;
 use axum::http;
 use futures_util::StreamExt;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+use sysinfo::Disks;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct SystemUpdateTaskStatus {
@@ -111,11 +115,12 @@ const RESTART_EXIT_CODE: i32 = 75;
 const MAX_RELEASE_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SHA256SUMS_DOWNLOAD_BYTES: u64 = 1024 * 1024;
 const MAX_EXTRACTED_RELEASE_BYTES: u64 = 1024 * 1024 * 1024;
+const UPDATE_PREFLIGHT_DISK_BUFFER_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_UPDATE_DOWNLOAD_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_UPDATE_DOWNLOAD_IDLE_TIMEOUT_SECS: u64 = 30;
 const SOURCE_BUILD_UPDATE_BLOCKER: &str = "当前为源码构建，请使用 git pull 后重新编译。";
 const DOCKER_UPDATE_BLOCKER: &str =
-    "Docker 部署请使用镜像更新：进入 docker-compose.yml 所在目录执行 ./update.sh。";
+    "Docker 部署请使用镜像更新：进入 docker-compose.yml 所在目录执行 ./update.sh（默认自动 pg_dump 备份并在失败时回滚到上一镜像；支持 --dry-run 预览、--no-backup / --no-rollback 跳过、--project-name 指定 compose 项目名）。";
 const MANUAL_UPDATE_BLOCKER: &str =
     "当前部署策略不支持在线自更新，请手动下载 Release 或使用安装脚本更新。";
 const MULTI_NODE_UPDATE_BLOCKER: &str =
@@ -417,6 +422,410 @@ pub(crate) fn build_admin_system_update_capability_payload() -> serde_json::Valu
             current_self_update_blocker()
         },
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SystemUpdatePreflightStatus {
+    Ok,
+    Warning,
+    Blocked,
+}
+
+impl SystemUpdatePreflightStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warning => "warning",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SystemUpdatePreflightCheck {
+    key: &'static str,
+    label: &'static str,
+    status: SystemUpdatePreflightStatus,
+    message: String,
+    detail: Option<serde_json::Value>,
+}
+
+impl SystemUpdatePreflightCheck {
+    fn ok(key: &'static str, label: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            key,
+            label,
+            status: SystemUpdatePreflightStatus::Ok,
+            message: message.into(),
+            detail: None,
+        }
+    }
+
+    fn warning(key: &'static str, label: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            key,
+            label,
+            status: SystemUpdatePreflightStatus::Warning,
+            message: message.into(),
+            detail: None,
+        }
+    }
+
+    fn blocked(key: &'static str, label: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            key,
+            label,
+            status: SystemUpdatePreflightStatus::Blocked,
+            message: message.into(),
+            detail: None,
+        }
+    }
+
+    fn with_detail(mut self, detail: serde_json::Value) -> Self {
+        self.detail = Some(detail);
+        self
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        json!({
+            "key": self.key,
+            "label": self.label,
+            "status": self.status.as_str(),
+            "message": self.message,
+            "detail": self.detail,
+        })
+    }
+}
+
+pub(crate) async fn build_admin_system_update_preflight_payload(
+    state: &AdminAppState<'_>,
+    target_version: Option<String>,
+) -> Result<serde_json::Value, GatewayError> {
+    let build_type = current_build_type();
+    let update_strategy = current_update_strategy();
+    let deployment_topology = current_deployment_topology();
+    let supported =
+        self_update_supported_for(is_release_build(), update_strategy, deployment_topology);
+    let base_dir = aether_base_dir();
+    let releases_dir = releases_base_dir();
+    let data_dir = base_dir.join("data");
+    let logs_dir = update_logs_dir();
+    let checks = vec![
+        build_preflight_strategy_check(supported, update_strategy, deployment_topology),
+        build_preflight_task_check(),
+        build_preflight_paths_check(&base_dir, &releases_dir, &logs_dir),
+        build_preflight_disk_check(&releases_dir),
+        build_preflight_database_migration_check(state).await,
+    ];
+    let overall_status = preflight_overall_status(&checks);
+    let generated_at = chrono::Utc::now().to_rfc3339();
+    let pending_blockers = checks
+        .iter()
+        .filter(|check| check.status == SystemUpdatePreflightStatus::Blocked)
+        .count();
+    let warnings = checks
+        .iter()
+        .filter(|check| check.status == SystemUpdatePreflightStatus::Warning)
+        .count();
+
+    Ok(json!({
+        "overall_status": overall_status.as_str(),
+        "can_apply_update": overall_status != SystemUpdatePreflightStatus::Blocked,
+        "generated_at": generated_at,
+        "current_version": option_env!("AETHER_BUILD_VERSION")
+            .filter(|version| !version.is_empty())
+            .unwrap_or(env!("CARGO_PKG_VERSION")),
+        "target_version": target_version.filter(|value| !value.trim().is_empty()),
+        "build_type": build_type,
+        "update_strategy": update_strategy.as_str(),
+        "strategy": update_strategy.as_str(),
+        "deployment_topology": deployment_topology.as_str(),
+        "topology": deployment_topology.as_str(),
+        "install_root": base_dir,
+        "base_dir": aether_base_dir(),
+        "releases_dir": releases_dir,
+        "data_dir": data_dir,
+        "logs_dir": logs_dir,
+        "required_disk_bytes": update_preflight_required_disk_bytes(),
+        "blockers": pending_blockers,
+        "warnings": warnings,
+        "checks": checks.iter().map(SystemUpdatePreflightCheck::to_json).collect::<Vec<_>>(),
+    }))
+}
+
+fn build_preflight_strategy_check(
+    supported: bool,
+    update_strategy: UpdateStrategy,
+    deployment_topology: DeploymentTopology,
+) -> SystemUpdatePreflightCheck {
+    if supported {
+        return SystemUpdatePreflightCheck::ok("strategy", "部署策略", "当前部署支持后台一键更新")
+            .with_detail(json!({
+                "update_strategy": update_strategy.as_str(),
+                "deployment_topology": deployment_topology.as_str(),
+            }));
+    }
+
+    SystemUpdatePreflightCheck::blocked("strategy", "部署策略", current_self_update_blocker())
+        .with_detail(json!({
+            "update_strategy": update_strategy.as_str(),
+            "deployment_topology": deployment_topology.as_str(),
+        }))
+}
+
+fn build_preflight_task_check() -> SystemUpdatePreflightCheck {
+    let task_status = read_update_task_status();
+    match task_status.phase {
+        "idle" | "prepared" => {
+            SystemUpdatePreflightCheck::ok("task_state", "更新任务", "当前没有冲突中的更新任务")
+        }
+        "failed" => SystemUpdatePreflightCheck::warning(
+            "task_state",
+            "更新任务",
+            task_status
+                .error
+                .unwrap_or_else(|| "上次更新任务失败，建议先查看更新历史".to_string()),
+        ),
+        phase => SystemUpdatePreflightCheck::blocked(
+            "task_state",
+            "更新任务",
+            format!("已有更新任务正在执行: {phase}"),
+        ),
+    }
+}
+
+fn build_preflight_paths_check(
+    base_dir: &Path,
+    releases_dir: &Path,
+    logs_dir: &Path,
+) -> SystemUpdatePreflightCheck {
+    if !base_dir.is_dir() {
+        return SystemUpdatePreflightCheck::blocked(
+            "paths",
+            "目录权限",
+            format!("安装目录不存在或不是目录: {}", base_dir.display()),
+        )
+        .with_detail(json!({
+            "base_dir": base_dir,
+            "releases_dir": releases_dir,
+            "logs_dir": logs_dir,
+        }));
+    }
+
+    let mut warnings = Vec::new();
+    let mut blockers = Vec::new();
+    if let Err(err) = check_directory_writable(base_dir) {
+        blockers.push(format!("安装目录不可写: {err}"));
+    }
+    if releases_dir.exists() {
+        if !releases_dir.is_dir() {
+            blockers.push(format!(
+                "releases 路径存在但不是目录: {}",
+                releases_dir.display()
+            ));
+        } else if let Err(err) = check_directory_writable(releases_dir) {
+            blockers.push(format!("releases 目录不可写: {err}"));
+        }
+    } else {
+        warnings.push(format!(
+            "releases 目录尚未创建，更新准备阶段会尝试创建: {}",
+            releases_dir.display()
+        ));
+    }
+    if logs_dir.exists() && !logs_dir.is_dir() {
+        warnings.push(format!("日志路径存在但不是目录: {}", logs_dir.display()));
+    }
+
+    let detail = json!({
+        "base_dir": base_dir,
+        "releases_dir": releases_dir,
+        "logs_dir": logs_dir,
+        "issues": blockers,
+        "warnings": warnings,
+    });
+    if blockers.is_empty() && warnings.is_empty() {
+        SystemUpdatePreflightCheck::ok("paths", "目录权限", "安装目录和 releases 目录可写")
+            .with_detail(detail)
+    } else if blockers.is_empty() {
+        SystemUpdatePreflightCheck::warning("paths", "目录权限", warnings.join("；"))
+            .with_detail(detail)
+    } else {
+        SystemUpdatePreflightCheck::blocked("paths", "目录权限", blockers.join("；"))
+            .with_detail(detail)
+    }
+}
+
+fn build_preflight_disk_check(path: &Path) -> SystemUpdatePreflightCheck {
+    let required_bytes = update_preflight_required_disk_bytes();
+    let Some(disk) = disk_space_for_path(path) else {
+        return SystemUpdatePreflightCheck::warning(
+            "disk_space",
+            "磁盘空间",
+            "无法识别安装目录所在磁盘，更新时仍会执行下载大小限制",
+        )
+        .with_detail(json!({
+            "path": path,
+            "required_bytes": required_bytes,
+        }));
+    };
+
+    let detail = json!({
+        "path": path,
+        "mount_point": disk.mount_point,
+        "available_bytes": disk.available_bytes,
+        "required_bytes": required_bytes,
+    });
+    if disk.available_bytes < required_bytes {
+        return SystemUpdatePreflightCheck::blocked(
+            "disk_space",
+            "磁盘空间",
+            format!(
+                "可用空间不足，至少需要 {}，当前可用 {}",
+                format_bytes(required_bytes),
+                format_bytes(disk.available_bytes)
+            ),
+        )
+        .with_detail(detail);
+    }
+
+    SystemUpdatePreflightCheck::ok(
+        "disk_space",
+        "磁盘空间",
+        format!("可用空间 {}", format_bytes(disk.available_bytes)),
+    )
+    .with_detail(detail)
+}
+
+async fn build_preflight_database_migration_check(
+    state: &AdminAppState<'_>,
+) -> SystemUpdatePreflightCheck {
+    match state.as_ref().pending_database_migrations().await {
+        Ok(Some(pending)) if pending.is_empty() => {
+            SystemUpdatePreflightCheck::ok("database", "数据库迁移", "当前数据库迁移已是最新")
+                .with_detail(json!({
+                    "pending_migrations": [],
+                    "pending_count": 0,
+                }))
+        }
+        Ok(Some(pending)) => {
+            let next = pending.first();
+            SystemUpdatePreflightCheck::blocked(
+                "database",
+                "数据库迁移",
+                match next {
+                    Some(next) => format!(
+                        "当前数据库仍有 {} 个待执行迁移，下一个是 {} ({})",
+                        pending.len(),
+                        next.version,
+                        next.description
+                    ),
+                    None => "当前数据库仍有待执行迁移".to_string(),
+                },
+            )
+            .with_detail(json!({
+                "pending_count": pending.len(),
+                "pending_migrations": pending
+                    .iter()
+                    .map(|migration| json!({
+                        "version": migration.version,
+                        "description": migration.description,
+                    }))
+                    .collect::<Vec<_>>(),
+            }))
+        }
+        Ok(None) => SystemUpdatePreflightCheck::warning(
+            "database",
+            "数据库迁移",
+            "当前运行未启用 SQL 数据后端，无法检查迁移状态",
+        ),
+        Err(err) => SystemUpdatePreflightCheck::blocked(
+            "database",
+            "数据库迁移",
+            format!("无法检查数据库迁移状态: {err}"),
+        ),
+    }
+}
+
+fn preflight_overall_status(checks: &[SystemUpdatePreflightCheck]) -> SystemUpdatePreflightStatus {
+    if checks
+        .iter()
+        .any(|check| check.status == SystemUpdatePreflightStatus::Blocked)
+    {
+        SystemUpdatePreflightStatus::Blocked
+    } else if checks
+        .iter()
+        .any(|check| check.status == SystemUpdatePreflightStatus::Warning)
+    {
+        SystemUpdatePreflightStatus::Warning
+    } else {
+        SystemUpdatePreflightStatus::Ok
+    }
+}
+
+fn update_preflight_required_disk_bytes() -> u64 {
+    MAX_RELEASE_DOWNLOAD_BYTES
+        .saturating_add(MAX_EXTRACTED_RELEASE_BYTES)
+        .saturating_add(UPDATE_PREFLIGHT_DISK_BUFFER_BYTES)
+}
+
+fn check_directory_writable(path: &Path) -> Result<(), String> {
+    let metadata =
+        std::fs::metadata(path).map_err(|err| format!("读取 {} 失败: {err}", path.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!("{} 不是目录", path.display()));
+    }
+    let probe = path.join(format!(
+        ".aether-preflight-write-test-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&probe, b"ok").map_err(|err| format!("写入 {} 失败: {err}", probe.display()))?;
+    std::fs::remove_file(&probe).map_err(|err| format!("删除 {} 失败: {err}", probe.display()))?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiskSpaceSnapshot {
+    mount_point: PathBuf,
+    available_bytes: u64,
+}
+
+fn disk_space_for_path(path: &Path) -> Option<DiskSpaceSnapshot> {
+    let probe_path = nearest_existing_ancestor(path)?;
+    let disks = Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .filter(|disk| probe_path.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().components().count())
+        .map(|disk| DiskSpaceSnapshot {
+            mount_point: disk.mount_point().to_path_buf(),
+            available_bytes: disk.available_space(),
+        })
+}
+
+fn nearest_existing_ancestor(path: &Path) -> Option<Cow<'_, Path>> {
+    if path.exists() {
+        return Some(Cow::Borrowed(path));
+    }
+    path.ancestors()
+        .find(|ancestor| ancestor.exists())
+        .map(Cow::Borrowed)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GiB", bytes as f64 / GIB)
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 fn find_rollback_target() -> Option<String> {
@@ -1093,6 +1502,30 @@ mod tests {
             UpdateStrategy::SelfManaged,
             DeploymentTopology::MultiNode,
         ));
+    }
+
+    #[test]
+    fn update_preflight_overall_status_prefers_blockers_over_warnings() {
+        let checks = vec![
+            SystemUpdatePreflightCheck::ok("strategy", "部署策略", "ok"),
+            SystemUpdatePreflightCheck::warning("database", "数据库迁移", "warning"),
+            SystemUpdatePreflightCheck::blocked("disk_space", "磁盘空间", "blocked"),
+        ];
+
+        assert_eq!(
+            preflight_overall_status(&checks),
+            SystemUpdatePreflightStatus::Blocked
+        );
+    }
+
+    #[test]
+    fn update_preflight_disk_budget_covers_download_extract_and_buffer() {
+        assert_eq!(
+            update_preflight_required_disk_bytes(),
+            MAX_RELEASE_DOWNLOAD_BYTES
+                + MAX_EXTRACTED_RELEASE_BYTES
+                + UPDATE_PREFLIGHT_DISK_BUFFER_BYTES
+        );
     }
 
     #[test]

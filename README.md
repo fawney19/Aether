@@ -63,7 +63,7 @@ Docker Compose 部署后，可在部署目录直接执行：
 ./update.sh
 ```
 
-`update.sh` 会拉取最新 `app` 镜像并重建 `app` 容器，Docker named volumes、`./data` 和 `./logs` 不会被删除。Single Node 部署也可显式指定：
+`update.sh` 会拉取最新 `app` 镜像并重建 `app` 容器，Docker named volumes、`./data` 和 `./logs` 不会被删除。默认会先 `pg_dump | gzip` 备份 Postgres 到 `./backups/`，并在 `compose up` 失败时自动 `docker tag` 上一镜像并重建以回滚；支持 `--dry-run` 预览、`--no-backup` / `--no-rollback` 跳过对应步骤、`--prepare` 仅拉镜像不重建、`--project-name NAME` 适配自定义 compose project。Single Node 部署也可显式指定：
 
 ```bash
 ./update.sh --mode single-node

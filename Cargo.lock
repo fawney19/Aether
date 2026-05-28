@@ -271,6 +271,7 @@ dependencies = [
  "sha1",
  "sha2",
  "sqlx",
+ "sysinfo",
  "tar",
  "thiserror 2.0.18",
  "tikv-jemallocator",

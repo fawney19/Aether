@@ -418,6 +418,9 @@
       :reconnect-message="reconnectMessage"
       :rollback-available="rollbackAvailable"
       :rolling-back="rollingBack"
+      :update-preflight="updatePreflight"
+      :loading-update-preflight="loadingUpdatePreflight"
+      :update-preflight-error="updatePreflightError"
       :download-progress-text="updateProgressText"
       :download-progress-percent="updateProgressPercent"
       @apply-update="handleApplySystemUpdate"
@@ -436,7 +439,7 @@ import { useDarkMode } from '@/composables/useDarkMode'
 import { useSiteInfo } from '@/composables/useSiteInfo'
 import { useToast } from '@/composables/useToast'
 import { isDemoMode } from '@/config/demo'
-import { adminApi, type CheckUpdateResponse, type ReleaseEntry, type SystemUpdateCapabilityResponse, type UpdateTaskStatusResponse } from '@/api/admin'
+import { adminApi, type CheckUpdateResponse, type ReleaseEntry, type SystemUpdateCapabilityResponse, type SystemUpdatePreflightResponse, type UpdateTaskStatusResponse } from '@/api/admin'
 import { announcementApi, type Announcement } from '@/api/announcements'
 import { parseApiError } from '@/utils/errorParser'
 import Button from '@/components/ui/button.vue'
@@ -526,6 +529,9 @@ const dockerUpdateCommand = ref<string | null>(null)
 const reconnectMessage = ref('等待服务恢复...')
 const rollbackAvailable = ref(false)
 const rollingBack = ref(false)
+const updatePreflight = ref<SystemUpdatePreflightResponse | null>(null)
+const loadingUpdatePreflight = ref(false)
+const updatePreflightError = ref<string | null>(null)
 const updateTaskStatus = ref<UpdateTaskStatusResponse | null>(null)
 const updateDialogMode = ref<'latest' | 'selected'>('latest')
 const systemUpdatePhase = ref<SystemUpdatePhase>(readStoredSystemUpdatePhase())
@@ -729,6 +735,23 @@ async function loadVersionStatus(force = false) {
   return versionStatusLoadPromise
 }
 
+async function loadSystemUpdatePreflight(targetVersion?: string | null): Promise<SystemUpdatePreflightResponse | null> {
+  if (!authStore.canOperateAdmin) return null
+  loadingUpdatePreflight.value = true
+  updatePreflightError.value = null
+  try {
+    const response = await adminApi.getSystemUpdatePreflight(targetVersion)
+    updatePreflight.value = response
+    return response
+  } catch (error) {
+    updatePreflight.value = null
+    updatePreflightError.value = parseApiError(error, '无法完成升级前检查，请稍后重试')
+    return null
+  } finally {
+    loadingUpdatePreflight.value = false
+  }
+}
+
 function applyUpdateCapability(capability: SystemUpdateCapabilityResponse) {
   updateSupported.value = capability.supported
   rollbackAvailable.value = capability.supported && capability.rollback_available
@@ -792,11 +815,14 @@ function buildUpdateInfoFromRelease(release: ReleaseEntry): CheckUpdateResponse 
 function openReleaseUpdateDialog(release: ReleaseEntry) {
   updateDialogMode.value = 'selected'
   updateInfo.value = buildUpdateInfoFromRelease(release)
+  updatePreflight.value = null
+  updatePreflightError.value = null
   if (systemUpdatePhase.value !== 'reconnecting') {
     systemUpdatePhase.value = 'download'
     preparedUpdateVersion.value = null
   }
   showUpdateDialog.value = true
+  void loadSystemUpdatePreflight(release.version)
 }
 
 async function handleApplySystemUpdate() {
@@ -815,6 +841,7 @@ async function handleApplySystemUpdate() {
 
     if (systemUpdatePhase.value === 'download') {
       const targetStatus = updateInfo.value || versionStatus.value
+      const targetVersion = updateInfo.value?.latest_version || versionStatus.value?.latest_version || null
       if (targetStatus?.has_update && targetStatus.updatable === false) {
         showError(
           targetStatus.update_blocker || '当前版本暂不支持在线更新',
@@ -822,7 +849,16 @@ async function handleApplySystemUpdate() {
         )
         return
       }
-      const targetVersion = updateInfo.value?.latest_version || versionStatus.value?.latest_version || null
+      const preflight = await loadSystemUpdatePreflight(targetVersion)
+      if (!preflight) {
+        showError('升级前检查失败，请稍后重试', '无法更新')
+        return
+      }
+      if (preflight.overall_status === 'blocked') {
+        const blocker = preflight.checks.find(item => item.status === 'blocked')?.message
+        showError(blocker || '升级前检查未通过', '无法更新')
+        return
+      }
       updateTaskStatus.value = null
       startUpdateStatusPolling()
       try {
@@ -947,6 +983,8 @@ function showDebugUpdateDialog() {
   }
   systemUpdatePhase.value = 'download'
   preparedUpdateVersion.value = null
+  updatePreflight.value = null
+  updatePreflightError.value = null
   showUpdateDialog.value = true
 }
 
@@ -989,7 +1027,10 @@ async function checkForUpdate() {
     if (shouldShowUpdatePrompt(result.latest_version)) {
       updateDialogMode.value = 'latest'
       updateInfo.value = result
+      updatePreflight.value = null
+      updatePreflightError.value = null
       showUpdateDialog.value = true
+      void loadSystemUpdatePreflight(result.latest_version)
     }
   }
 }
