@@ -1,5 +1,6 @@
 pub mod dialect;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -786,12 +787,20 @@ fn assert_file_contents(path: PathBuf, expected: &str) -> Result<(), SchemaError
         path: path.clone(),
         source,
     })?;
-    if actual == expected {
+    if normalize_line_endings(&actual) == expected {
         Ok(())
     } else {
         Err(SchemaError::Validation(format!(
             "generated schema file is stale: {path:?}"
         )))
+    }
+}
+
+fn normalize_line_endings(contents: &str) -> Cow<'_, str> {
+    if contents.contains('\r') {
+        Cow::Owned(contents.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(contents)
     }
 }
 

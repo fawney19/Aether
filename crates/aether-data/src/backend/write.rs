@@ -20,6 +20,7 @@ use crate::repository::settlement::SettlementWriteRepository;
 use crate::repository::usage::UsageWriteRepository;
 use crate::repository::video_tasks::VideoTaskWriteRepository;
 use crate::repository::wallet::WalletWriteRepository;
+use crate::repository::webhook_notifications::WebhookNotificationWriteRepository;
 
 #[derive(Clone, Default)]
 pub struct DataWriteRepositories {
@@ -41,6 +42,7 @@ pub struct DataWriteRepositories {
     usage: Option<Arc<dyn UsageWriteRepository>>,
     video_tasks: Option<Arc<dyn VideoTaskWriteRepository>>,
     wallets: Option<Arc<dyn WalletWriteRepository>>,
+    webhook_notifications: Option<Arc<dyn WebhookNotificationWriteRepository>>,
 }
 
 impl fmt::Debug for DataWriteRepositories {
@@ -67,6 +69,10 @@ impl fmt::Debug for DataWriteRepositories {
             .field("has_usage", &self.usage.is_some())
             .field("has_video_tasks", &self.video_tasks.is_some())
             .field("has_wallets", &self.wallets.is_some())
+            .field(
+                "has_webhook_notifications",
+                &self.webhook_notifications.is_some(),
+            )
             .finish()
     }
 }
@@ -150,6 +156,10 @@ impl DataWriteRepositories {
                 .map(PostgresBackend::wallet_write_repository)
                 .or_else(|| mysql.map(MysqlBackend::wallet_write_repository))
                 .or_else(|| sqlite.map(SqliteBackend::wallet_write_repository)),
+            webhook_notifications: postgres
+                .map(PostgresBackend::webhook_notification_write_repository)
+                .or_else(|| mysql.map(MysqlBackend::webhook_notification_write_repository))
+                .or_else(|| sqlite.map(SqliteBackend::webhook_notification_write_repository)),
         }
     }
 
@@ -230,6 +240,10 @@ impl DataWriteRepositories {
         self.wallets.clone()
     }
 
+    pub fn webhook_notifications(&self) -> Option<Arc<dyn WebhookNotificationWriteRepository>> {
+        self.webhook_notifications.clone()
+    }
+
     pub fn has_any(&self) -> bool {
         self.announcements.is_some()
             || self.auth_api_keys.is_some()
@@ -249,6 +263,7 @@ impl DataWriteRepositories {
             || self.usage.is_some()
             || self.video_tasks.is_some()
             || self.wallets.is_some()
+            || self.webhook_notifications.is_some()
     }
 }
 
@@ -290,5 +305,6 @@ mod tests {
         assert!(write.usage().is_some());
         assert!(write.video_tasks().is_some());
         assert!(write.wallets().is_some());
+        assert!(write.webhook_notifications().is_some());
     }
 }

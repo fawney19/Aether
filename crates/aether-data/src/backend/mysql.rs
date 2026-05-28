@@ -64,6 +64,10 @@ use crate::repository::video_tasks::{
 use crate::repository::wallet::{
     MysqlWalletReadRepository, WalletReadRepository, WalletWriteRepository,
 };
+use crate::repository::webhook_notifications::{
+    MysqlWebhookNotificationRepository, WebhookNotificationReadRepository,
+    WebhookNotificationWriteRepository,
+};
 use crate::DataLayerError;
 
 #[derive(Debug, Clone)]
@@ -138,6 +142,18 @@ impl MysqlBackend {
 
     pub fn background_task_write_repository(&self) -> Arc<dyn BackgroundTaskWriteRepository> {
         Arc::new(MysqlBackgroundTaskRepository::new(self.pool_clone()))
+    }
+
+    pub fn webhook_notification_read_repository(
+        &self,
+    ) -> Arc<dyn WebhookNotificationReadRepository> {
+        Arc::new(MysqlWebhookNotificationRepository::new(self.pool_clone()))
+    }
+
+    pub fn webhook_notification_write_repository(
+        &self,
+    ) -> Arc<dyn WebhookNotificationWriteRepository> {
+        Arc::new(MysqlWebhookNotificationRepository::new(self.pool_clone()))
     }
 
     pub fn request_candidate_read_repository(&self) -> Arc<dyn RequestCandidateReadRepository> {

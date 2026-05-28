@@ -36,7 +36,10 @@ use crate::handlers::shared::provider_pool::{
 use crate::orchestration::local_execution_candidate_metadata_from_report_context;
 use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
 use crate::scheduler::config::{read_scheduler_ordering_config, SchedulerSchedulingMode};
+use crate::webhook_outbound::enqueue_outbound_webhook_event_best_effort;
 use crate::AppState;
+
+const PROVIDER_ERROR_WEBHOOK_THROTTLE_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LocalExecutionEffectContext<'a> {
@@ -722,12 +725,22 @@ async fn record_pool_error_effect(
         return;
     }
 
+    spawn_provider_error_webhook_event(
+        state.clone(),
+        context,
+        Some(effect.status_code),
+        Some(effect.classification),
+        "pool_error",
+        effect.error_body,
+        circuit_reason.as_deref(),
+    );
+
     let Some(pool_context) = resolve_pool_feedback_context(state, context).await else {
         return;
     };
 
-    if let Some(reason) = circuit_reason {
-        open_pool_key_circuit_breaker(state, context, &reason).await;
+    if let Some(reason) = circuit_reason.as_deref() {
+        open_pool_key_circuit_breaker(state, context, reason).await;
     }
 
     record_admin_provider_pool_error(
@@ -917,6 +930,16 @@ async fn record_pool_stream_timeout_effect(
     state: &AppState,
     context: LocalExecutionEffectContext<'_>,
 ) {
+    spawn_provider_error_webhook_event(
+        state.clone(),
+        context,
+        Some(504),
+        None,
+        "stream_timeout",
+        None,
+        None,
+    );
+
     let Some(pool_context) = resolve_pool_feedback_context(state, context).await else {
         return;
     };
@@ -941,6 +964,151 @@ async fn record_pool_stream_timeout_effect(
         }),
     )
     .await;
+}
+
+fn spawn_provider_error_webhook_event(
+    state: AppState,
+    context: LocalExecutionEffectContext<'_>,
+    status_code: Option<u16>,
+    classification: Option<LocalFailoverClassification>,
+    source: &'static str,
+    error_body: Option<&str>,
+    circuit_reason: Option<&str>,
+) {
+    let provider_id = context.plan.provider_id.trim();
+    let endpoint_id = context.plan.endpoint_id.trim();
+    let key_id = context.plan.key_id.trim();
+    if provider_id.is_empty() || endpoint_id.is_empty() || key_id.is_empty() {
+        return;
+    }
+
+    let throttle_key = format!(
+        "webhook_outbound:provider_error:{provider_id}:{endpoint_id}:{key_id}:{}:{source}",
+        status_code
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "stream_timeout".to_string())
+    );
+    let payload = build_provider_error_webhook_payload(
+        context,
+        status_code,
+        classification,
+        source,
+        error_body,
+        circuit_reason,
+    );
+
+    tokio::spawn(async move {
+        let should_emit = match state.runtime_kv_get(&throttle_key).await {
+            Ok(Some(_)) => false,
+            Ok(None) => {
+                if let Err(err) = state
+                    .runtime_kv_setex(&throttle_key, "1", PROVIDER_ERROR_WEBHOOK_THROTTLE_SECS)
+                    .await
+                {
+                    warn!(
+                        event_name = "provider_error_webhook_throttle_failed",
+                        log_type = "ops",
+                        error = ?err,
+                        "failed to set provider error webhook throttle"
+                    );
+                }
+                true
+            }
+            Err(err) => {
+                warn!(
+                    event_name = "provider_error_webhook_throttle_read_failed",
+                    log_type = "ops",
+                    error = ?err,
+                    "failed to read provider error webhook throttle"
+                );
+                true
+            }
+        };
+        if !should_emit {
+            return;
+        }
+        enqueue_outbound_webhook_event_best_effort(&state, "provider.error", payload).await;
+    });
+}
+
+fn build_provider_error_webhook_payload(
+    context: LocalExecutionEffectContext<'_>,
+    status_code: Option<u16>,
+    classification: Option<LocalFailoverClassification>,
+    source: &'static str,
+    error_body: Option<&str>,
+    circuit_reason: Option<&str>,
+) -> serde_json::Value {
+    let error_message = provider_error_webhook_error_message(error_body);
+
+    serde_json::json!({
+        "request_id": context.plan.request_id.as_str(),
+        "provider_name": context.plan.provider_name.as_deref(),
+        "provider_id": context.plan.provider_id.as_str(),
+        "endpoint_id": context.plan.endpoint_id.as_str(),
+        "key_id": context.plan.key_id.as_str(),
+        "model_name": context.plan.model_name.as_deref(),
+        "client_api_format": context.plan.client_api_format.as_str(),
+        "provider_api_format": context.plan.provider_api_format.as_str(),
+        "status_code": status_code,
+        "classification": classification.map(|value| value.as_str()),
+        "circuit_reason": circuit_reason,
+        "error_message": error_message,
+        "source": source,
+    })
+}
+
+fn provider_error_webhook_error_message(error_body: Option<&str>) -> Option<String> {
+    local_failover_error_message(error_body)
+        .map(|value| redact_provider_error_excerpt(&value, 512))
+        .filter(|value| !value.is_empty())
+}
+
+fn redact_provider_error_excerpt(value: &str, limit: usize) -> String {
+    let mut out = String::new();
+    for token in value.split_whitespace() {
+        let token = if looks_sensitive_error_token(token) {
+            "<redacted>"
+        } else {
+            token
+        };
+        let next_len = out
+            .len()
+            .saturating_add(if out.is_empty() { 0 } else { 1 })
+            .saturating_add(token.len());
+        if next_len > limit {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(token);
+    }
+    out
+}
+
+fn looks_sensitive_error_token(token: &str) -> bool {
+    let token = token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '"' | '\'' | '`' | ',' | ';' | ':' | ')' | '(' | '[' | ']' | '{' | '}'
+        )
+    });
+    let lower = token.to_ascii_lowercase();
+    if lower.starts_with("sk-")
+        || lower.starts_with("ak-")
+        || lower.starts_with("rk-")
+        || lower.starts_with("xox")
+        || lower.starts_with("bearer.")
+    {
+        return true;
+    }
+    token.len() >= 48
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '='))
+        && token.chars().any(|ch| ch.is_ascii_digit())
+        && token.chars().any(|ch| ch.is_ascii_alphabetic())
 }
 
 async fn record_pool_score_schedule_feedback(
@@ -1035,10 +1203,11 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        apply_local_execution_effect, local_candidate_failure_should_record_pool_error,
-        LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
-        LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
-        LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
+        apply_local_execution_effect, build_provider_error_webhook_payload,
+        local_candidate_failure_should_record_pool_error, LocalAdaptiveRateLimitEffect,
+        LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
+        LocalExecutionEffectContext, LocalHealthFailureEffect, LocalHealthSuccessEffect,
+        LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
     };
     use crate::data::{GatewayDataConfig, GatewayDataState};
     use crate::orchestration::LocalFailoverClassification;
@@ -1941,6 +2110,28 @@ mod tests {
             LocalFailoverClassification::RetryUpstreamFailure,
             429,
         ));
+    }
+
+    #[test]
+    fn provider_error_webhook_payload_redacts_sensitive_excerpt() {
+        let plan = sample_plan();
+        let payload = build_provider_error_webhook_payload(
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            Some(502),
+            Some(LocalFailoverClassification::RetryUpstreamFailure),
+            "pool_error",
+            Some(
+                r#"{"error":{"message":"Bearer sk-test-1234567890abcdef1234567890abcdef12345678 failed"}}"#,
+            ),
+            Some("rule:quota"),
+        );
+
+        assert_eq!(payload["status_code"], json!(502));
+        assert_eq!(payload["source"], json!("pool_error"));
+        assert_eq!(payload["error_message"], json!("Bearer <redacted> failed"));
     }
 
     #[tokio::test]

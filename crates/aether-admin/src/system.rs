@@ -1326,6 +1326,7 @@ pub struct AdminModuleValidationInput<'a> {
     pub bark_push_configured: bool,
     pub s3_backup_configured: bool,
     pub external_integrations_configured: bool,
+    pub webhook_outbound_configured: bool,
 }
 
 pub fn build_admin_module_validation_result(
@@ -1341,6 +1342,7 @@ pub fn build_admin_module_validation_result(
         bark_push_configured,
         s3_backup_configured,
         external_integrations_configured,
+        webhook_outbound_configured,
     } = input;
 
     match module_name {
@@ -1450,6 +1452,16 @@ pub fn build_admin_module_validation_result(
                 )
             }
         }
+        "webhook_outbound" => {
+            if webhook_outbound_configured {
+                (true, None)
+            } else {
+                (
+                    false,
+                    Some("Webhook 投递存储不可用，请确认数据库迁移已完成".to_string()),
+                )
+            }
+        }
         "gemini_files" => {
             if gemini_files_has_capable_key {
                 (true, None)
@@ -1477,7 +1489,8 @@ pub fn build_admin_module_health(
         | "bark_push"
         | "server_chan_push"
         | "s3_backup"
-        | "external_integrations" => "healthy",
+        | "external_integrations"
+        | "webhook_outbound" => "healthy",
         "gemini_files" => {
             if gemini_files_has_capable_key {
                 "healthy"
@@ -1763,6 +1776,7 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "email_suffix_list" => Some(json!([])),
         "enable_format_conversion" => Some(json!(false)),
         "enable_model_directives" => Some(json!(false)),
+        "module.webhook_outbound.enabled" => Some(json!(true)),
         "model_directives" => Some(json!({
             "reasoning_effort": {
                 "enabled": true,
@@ -2502,7 +2516,8 @@ pub fn parse_admin_system_config_update(
         | "module.important_notification.email_enabled"
         | "module.server_chan_push.enabled"
         | "module.bark_push.enabled"
-        | EXTERNAL_INTEGRATIONS_ENABLED_CONFIG_KEY => match value.as_bool() {
+        | EXTERNAL_INTEGRATIONS_ENABLED_CONFIG_KEY
+        | "module.webhook_outbound.enabled" => match value.as_bool() {
             Some(enabled) => value = json!(enabled),
             None if value.is_null() => {
                 value = admin_system_config_default_value(&normalized_key).unwrap_or(json!(false));
@@ -4010,5 +4025,48 @@ mod tests {
             .unwrap()
             .iter()
             .any(|item| item["id"] == "user_only"));
+    }
+
+    #[test]
+    fn webhook_outbound_module_validation_depends_on_storage_availability() {
+        assert_eq!(
+            admin_system_config_default_value("module.webhook_outbound.enabled"),
+            Some(json!(true))
+        );
+
+        let (valid, error) = build_admin_module_validation_result(AdminModuleValidationInput {
+            module_name: "webhook_outbound",
+            oauth_providers: &[],
+            ldap_config: None,
+            gemini_files_has_capable_key: false,
+            important_notification_configured: false,
+            server_chan_push_configured: false,
+            bark_push_configured: false,
+            s3_backup_configured: false,
+            external_integrations_configured: false,
+            webhook_outbound_configured: true,
+        });
+
+        assert!(valid);
+        assert_eq!(error, None);
+
+        let (valid, error) = build_admin_module_validation_result(AdminModuleValidationInput {
+            module_name: "webhook_outbound",
+            oauth_providers: &[],
+            ldap_config: None,
+            gemini_files_has_capable_key: false,
+            important_notification_configured: false,
+            server_chan_push_configured: false,
+            bark_push_configured: false,
+            s3_backup_configured: false,
+            external_integrations_configured: false,
+            webhook_outbound_configured: false,
+        });
+
+        assert!(!valid);
+        assert_eq!(
+            error.as_deref(),
+            Some("Webhook 投递存储不可用，请确认数据库迁移已完成")
+        );
     }
 }

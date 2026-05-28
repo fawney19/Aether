@@ -25,6 +25,14 @@ use crate::handlers::admin::system::shared::update::{
 };
 use crate::important_notification::build_important_notification_test_payload;
 use crate::maintenance::{ManualUsageCleanupMode, ManualUsageCleanupOptions};
+use crate::webhook_outbound::{
+    apply_admin_outbound_webhook_config_update, build_admin_outbound_webhook_config_payload,
+    build_admin_outbound_webhook_deliveries_payload,
+    build_admin_outbound_webhook_endpoint_test_payload,
+    build_admin_outbound_webhook_endpoints_payload, build_admin_outbound_webhook_test_payload,
+    create_admin_outbound_webhook_endpoint_payload, delete_admin_outbound_webhook_endpoint_payload,
+    retry_outbound_webhook_delivery_payload, update_admin_outbound_webhook_endpoint_payload,
+};
 use crate::GatewayError;
 use aether_data_contracts::repository::usage::UsageCleanupTargets;
 use axum::{
@@ -416,6 +424,188 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
         return Ok(Some(
             Json(build_important_notification_test_payload(state, request_body).await?)
                 .into_response(),
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("outbound_webhooks_get")
+        && request_method == http::Method::GET
+        && is_admin_system_outbound_webhooks_root(request_path)
+    {
+        return Ok(Some(
+            Json(build_admin_outbound_webhook_config_payload(state).await?).into_response(),
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("outbound_webhooks_set")
+        && request_method == http::Method::PUT
+        && is_admin_system_outbound_webhooks_root(request_path)
+    {
+        return Ok(Some(
+            match apply_admin_outbound_webhook_config_update(state, request_body).await? {
+                Ok(payload) => attach_admin_audit_response(
+                    Json(payload).into_response(),
+                    "admin_outbound_webhooks_updated",
+                    "update_outbound_webhooks",
+                    "outbound_webhook_config",
+                    "global",
+                ),
+                Err((status, payload)) => (status, Json(payload)).into_response(),
+            },
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("outbound_webhook_endpoints")
+        && request_method == http::Method::GET
+        && is_admin_system_outbound_webhook_endpoints_root(request_path)
+    {
+        return Ok(Some(
+            Json(build_admin_outbound_webhook_endpoints_payload(state).await?).into_response(),
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("outbound_webhook_endpoint_create")
+        && request_method == http::Method::POST
+        && is_admin_system_outbound_webhook_endpoints_root(request_path)
+    {
+        return Ok(Some(match create_admin_outbound_webhook_endpoint_payload(
+            state,
+            request_context,
+            request_body,
+        )
+        .await?
+        {
+            Ok(payload) => attach_admin_audit_response(
+                Json(payload).into_response(),
+                "admin_outbound_webhook_endpoint_created",
+                "create_outbound_webhook_endpoint",
+                "outbound_webhook_endpoint",
+                "new",
+            ),
+            Err((status, payload)) => (status, Json(payload)).into_response(),
+        }));
+    }
+
+    if let Some(endpoint_id) = outbound_webhook_endpoint_id_from_path(request_path) {
+        if decision.route_kind.as_deref() == Some("outbound_webhook_endpoint_update")
+            && request_method == http::Method::PUT
+        {
+            return Ok(Some(match update_admin_outbound_webhook_endpoint_payload(
+                state,
+                endpoint_id,
+                request_body,
+            )
+            .await?
+            {
+                Ok(payload) => attach_admin_audit_response(
+                    Json(payload).into_response(),
+                    "admin_outbound_webhook_endpoint_updated",
+                    "update_outbound_webhook_endpoint",
+                    "outbound_webhook_endpoint",
+                    endpoint_id,
+                ),
+                Err((status, payload)) => (status, Json(payload)).into_response(),
+            }));
+        }
+
+        if decision.route_kind.as_deref() == Some("outbound_webhook_endpoint_delete")
+            && request_method == http::Method::DELETE
+        {
+            return Ok(Some(
+                match delete_admin_outbound_webhook_endpoint_payload(state, endpoint_id).await? {
+                    Ok(payload) => attach_admin_audit_response(
+                        Json(payload).into_response(),
+                        "admin_outbound_webhook_endpoint_deleted",
+                        "delete_outbound_webhook_endpoint",
+                        "outbound_webhook_endpoint",
+                        endpoint_id,
+                    ),
+                    Err((status, payload)) => (status, Json(payload)).into_response(),
+                },
+            ));
+        }
+    }
+
+    if decision.route_kind.as_deref() == Some("outbound_webhook_endpoint_test")
+        && request_method == http::Method::POST
+    {
+        let Some(endpoint_id) = outbound_webhook_endpoint_id_from_test_path(request_path) else {
+            return Ok(Some(build_proxy_error_response(
+                http::StatusCode::NOT_FOUND,
+                "not_found",
+                "Webhook Endpoint 不存在",
+                None,
+            )));
+        };
+        return Ok(Some(
+            match build_admin_outbound_webhook_endpoint_test_payload(
+                state,
+                endpoint_id,
+                request_body,
+            )
+            .await?
+            {
+                Ok(payload) => attach_admin_audit_response(
+                    Json(payload).into_response(),
+                    "admin_outbound_webhook_endpoint_test_sent",
+                    "test_outbound_webhook_endpoint",
+                    "outbound_webhook_endpoint",
+                    endpoint_id,
+                ),
+                Err((status, payload)) => (status, Json(payload)).into_response(),
+            },
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("outbound_webhook_deliveries")
+        && request_method == http::Method::GET
+        && is_admin_system_outbound_webhook_deliveries_root(request_path)
+    {
+        return Ok(Some(
+            Json(build_admin_outbound_webhook_deliveries_payload(state, request_context).await?)
+                .into_response(),
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("outbound_webhook_test")
+        && request_method == http::Method::POST
+        && request_path == "/api/admin/system/webhooks/outbound/test"
+    {
+        return Ok(Some(
+            match build_admin_outbound_webhook_test_payload(state, request_body).await? {
+                Ok(payload) => attach_admin_audit_response(
+                    Json(payload).into_response(),
+                    "admin_outbound_webhook_test_sent",
+                    "test_outbound_webhook",
+                    "outbound_webhook",
+                    "global",
+                ),
+                Err((status, payload)) => (status, Json(payload)).into_response(),
+            },
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("outbound_webhook_retry")
+        && request_method == http::Method::POST
+    {
+        let Some(delivery_id) = outbound_webhook_delivery_id_from_retry_path(request_path) else {
+            return Ok(Some(build_proxy_error_response(
+                http::StatusCode::NOT_FOUND,
+                "not_found",
+                "投递记录不存在",
+                None,
+            )));
+        };
+        return Ok(Some(
+            match retry_outbound_webhook_delivery_payload(state, delivery_id).await? {
+                Ok(payload) => attach_admin_audit_response(
+                    Json(payload).into_response(),
+                    "admin_outbound_webhook_delivery_retry_queued",
+                    "retry_outbound_webhook_delivery",
+                    "outbound_webhook_delivery",
+                    delivery_id,
+                ),
+                Err((status, payload)) => (status, Json(payload)).into_response(),
+            },
         ));
     }
 
@@ -1101,6 +1291,49 @@ fn bad_manual_cleanup_request(detail: impl Into<String>) -> Response<Body> {
         Json(json!({ "detail": detail.into() })),
     )
         .into_response()
+}
+
+fn is_admin_system_outbound_webhooks_root(request_path: &str) -> bool {
+    matches!(
+        request_path,
+        "/api/admin/system/webhooks/outbound" | "/api/admin/system/webhooks/outbound/"
+    )
+}
+
+fn is_admin_system_outbound_webhook_deliveries_root(request_path: &str) -> bool {
+    matches!(
+        request_path,
+        "/api/admin/system/webhooks/outbound/deliveries"
+            | "/api/admin/system/webhooks/outbound/deliveries/"
+    )
+}
+
+fn is_admin_system_outbound_webhook_endpoints_root(request_path: &str) -> bool {
+    matches!(
+        request_path,
+        "/api/admin/system/webhooks/outbound/endpoints"
+            | "/api/admin/system/webhooks/outbound/endpoints/"
+    )
+}
+
+fn outbound_webhook_endpoint_id_from_path(request_path: &str) -> Option<&str> {
+    let prefix = "/api/admin/system/webhooks/outbound/endpoints/";
+    let endpoint_id = request_path.strip_prefix(prefix)?.trim_end_matches('/');
+    (!endpoint_id.is_empty() && !endpoint_id.contains('/')).then_some(endpoint_id)
+}
+
+fn outbound_webhook_endpoint_id_from_test_path(request_path: &str) -> Option<&str> {
+    let prefix = "/api/admin/system/webhooks/outbound/endpoints/";
+    let path = request_path.strip_prefix(prefix)?;
+    let endpoint_id = path.strip_suffix("/test")?;
+    (!endpoint_id.is_empty() && !endpoint_id.contains('/')).then_some(endpoint_id)
+}
+
+fn outbound_webhook_delivery_id_from_retry_path(request_path: &str) -> Option<&str> {
+    let prefix = "/api/admin/system/webhooks/outbound/deliveries/";
+    let path = request_path.strip_prefix(prefix)?;
+    let delivery_id = path.strip_suffix("/retry")?;
+    (!delivery_id.is_empty() && !delivery_id.contains('/')).then_some(delivery_id)
 }
 
 fn query_param(query_string: Option<&str>, name: &str) -> Option<String> {

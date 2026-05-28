@@ -141,6 +141,14 @@ async fn balance_capacity_rejection(
         return Ok(None);
     };
     if available_usd <= DAILY_QUOTA_EPSILON_USD {
+        emit_balance_low_webhook(
+            state,
+            auth_context,
+            requested_model,
+            Some(0.0),
+            None,
+            "exhausted",
+        );
         return Ok(Some(GatewayLocalAuthRejection::BalanceDenied {
             remaining: Some(0.0),
         }));
@@ -155,11 +163,45 @@ async fn balance_capacity_rejection(
         return Ok(None);
     };
     if estimated_cost_usd > available_usd + DAILY_QUOTA_EPSILON_USD {
+        emit_balance_low_webhook(
+            state,
+            auth_context,
+            Some(requested_model),
+            Some(available_usd),
+            Some(estimated_cost_usd),
+            "estimated_cost_exceeds_balance",
+        );
         return Ok(Some(GatewayLocalAuthRejection::BalanceDenied {
             remaining: Some(available_usd),
         }));
     }
     Ok(None)
+}
+
+fn emit_balance_low_webhook(
+    state: &AppState,
+    auth_context: &GatewayControlAuthContext,
+    requested_model: Option<&str>,
+    remaining_usd: Option<f64>,
+    estimated_cost_usd: Option<f64>,
+    reason: &str,
+) {
+    let requested_model = requested_model.map(str::to_string);
+    crate::webhook_outbound::spawn_outbound_webhook_event_best_effort(
+        state.clone(),
+        "balance.low",
+        serde_json::json!({
+            "user_id": auth_context.user_id.as_str(),
+            "api_key_id": auth_context.api_key_id.as_str(),
+            "username": auth_context.username.as_deref(),
+            "api_key_name": auth_context.api_key_name.as_deref(),
+            "api_key_is_standalone": auth_context.api_key_is_standalone,
+            "requested_model": requested_model,
+            "remaining_usd": remaining_usd,
+            "estimated_cost_usd": estimated_cost_usd,
+            "reason": reason,
+        }),
+    );
 }
 
 fn wallet_finite_available_usd(

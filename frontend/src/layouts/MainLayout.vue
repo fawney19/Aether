@@ -499,6 +499,7 @@ import {
   Server,
   SlidersHorizontal,
   ExternalLink,
+  Webhook,
   type LucideIcon,
 } from 'lucide-vue-next'
 
@@ -1173,6 +1174,7 @@ const navigation = computed(() => {
     Send,
     SlidersHorizontal,
     ExternalLink,
+    Webhook,
     CreditCard,
     BookOpen,
     FileText,
@@ -1221,6 +1223,10 @@ const navigation = computed(() => {
     { name: '公告管理', href: '/admin/announcements', icon: Megaphone },
     { name: '缓存监控', href: '/admin/cache-monitoring', icon: Gauge },
   ]
+
+  if (!moduleStore.modules.webhook_outbound) {
+    systemItems.push({ name: 'Webhook 出站', href: '/admin/modules/webhook-outbound', icon: Webhook })
+  }
 
   // 动态添加已激活模块的菜单项
   const activeModuleItems = (group: string) =>

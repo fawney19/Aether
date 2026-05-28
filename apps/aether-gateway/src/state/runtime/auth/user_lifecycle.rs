@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::constants::{BUILTIN_DEFAULT_USER_GROUP_ID, DEFAULT_USER_GROUP_CONFIG_KEY};
 use crate::{AppState, GatewayError};
+use serde_json::json;
 
 impl AppState {
     pub(crate) async fn assign_default_group_to_self_registered_user(
@@ -852,10 +853,12 @@ impl AppState {
                 .lock()
                 .expect("auth wallet store should lock")
                 .insert(wallet.id.clone(), wallet.clone());
+            emit_local_user_registered_webhook(self.clone(), &user, &wallet);
             return Ok(Some((user, wallet)));
         }
 
-        self.data
+        let result = self
+            .data
             .register_local_auth_user(
                 email,
                 email_verified,
@@ -865,8 +868,34 @@ impl AppState {
                 unlimited,
             )
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if let Some((user, wallet)) = result.as_ref() {
+            emit_local_user_registered_webhook(self.clone(), user, wallet);
+        }
+        Ok(result)
     }
+}
+
+fn emit_local_user_registered_webhook(
+    state: AppState,
+    user: &aether_data::repository::users::StoredUserAuthRecord,
+    wallet: &aether_data::repository::wallet::StoredWalletSnapshot,
+) {
+    crate::webhook_outbound::spawn_outbound_webhook_event_best_effort(
+        state,
+        "user.registered",
+        json!({
+            "user_id": user.id.as_str(),
+            "username": user.username.as_str(),
+            "email": user.email.as_deref(),
+            "email_verified": user.email_verified,
+            "auth_source": user.auth_source.as_str(),
+            "wallet_id": wallet.id.as_str(),
+            "wallet_limit_mode": wallet.limit_mode.as_str(),
+            "initial_gift_usd": wallet.gift_balance,
+            "currency": wallet.currency.as_str(),
+        }),
+    );
 }
 
 fn normalized_user_group_ids(group_ids: &[String]) -> BTreeSet<String> {

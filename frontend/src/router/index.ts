@@ -293,6 +293,12 @@ const routes: RouteRecordRaw[] = [
         meta: { module: 'external_integrations' }
       },
       {
+        path: 'modules/webhook-outbound',
+        name: 'WebhookOutboundModule',
+        component: () => importWithRetry(() => import('@/views/admin/modules/WebhookOutbound.vue')),
+        meta: { module: 'webhook_outbound' }
+      },
+      {
         path: 'modules/important-notification',
         redirect: '/admin/notification-service'
       },

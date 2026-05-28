@@ -239,6 +239,78 @@ fn classifies_admin_system_maintenance_write_routes_as_admin_proxy_route() {
 }
 
 #[test]
+fn classifies_admin_system_outbound_webhook_routes_as_admin_proxy_routes() {
+    let headers = headers(&[]);
+    let cases = [
+        (
+            http::Method::GET,
+            "/api/admin/system/webhooks/outbound",
+            "outbound_webhooks_get",
+        ),
+        (
+            http::Method::PUT,
+            "/api/admin/system/webhooks/outbound",
+            "outbound_webhooks_set",
+        ),
+        (
+            http::Method::GET,
+            "/api/admin/system/webhooks/outbound/endpoints",
+            "outbound_webhook_endpoints",
+        ),
+        (
+            http::Method::POST,
+            "/api/admin/system/webhooks/outbound/endpoints",
+            "outbound_webhook_endpoint_create",
+        ),
+        (
+            http::Method::PUT,
+            "/api/admin/system/webhooks/outbound/endpoints/endpoint-1",
+            "outbound_webhook_endpoint_update",
+        ),
+        (
+            http::Method::DELETE,
+            "/api/admin/system/webhooks/outbound/endpoints/endpoint-1",
+            "outbound_webhook_endpoint_delete",
+        ),
+        (
+            http::Method::POST,
+            "/api/admin/system/webhooks/outbound/endpoints/endpoint-1/test",
+            "outbound_webhook_endpoint_test",
+        ),
+        (
+            http::Method::GET,
+            "/api/admin/system/webhooks/outbound/deliveries",
+            "outbound_webhook_deliveries",
+        ),
+        (
+            http::Method::POST,
+            "/api/admin/system/webhooks/outbound/test",
+            "outbound_webhook_test",
+        ),
+        (
+            http::Method::POST,
+            "/api/admin/system/webhooks/outbound/deliveries/delivery-1/retry",
+            "outbound_webhook_retry",
+        ),
+    ];
+
+    for (method, path, expected_kind) in cases {
+        let uri: Uri = path.parse().expect("uri should parse");
+        let decision =
+            classify_control_route(&method, &uri, &headers).expect("route should classify");
+
+        assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+        assert_eq!(decision.route_family.as_deref(), Some("system_manage"));
+        assert_eq!(decision.route_kind.as_deref(), Some(expected_kind));
+        assert_eq!(
+            decision.auth_endpoint_signature.as_deref(),
+            Some("admin:system")
+        );
+        assert!(!decision.is_execution_runtime_candidate());
+    }
+}
+
+#[test]
 fn classifies_admin_system_check_update_as_admin_proxy_route() {
     let headers = headers(&[]);
     let uri: Uri = "/api/admin/system/check-update"

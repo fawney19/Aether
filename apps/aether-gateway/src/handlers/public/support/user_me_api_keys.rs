@@ -627,6 +627,21 @@ pub(super) async fn handle_users_me_api_key_create(
         created
     };
 
+    crate::webhook_outbound::spawn_outbound_webhook_event_best_effort(
+        state.clone(),
+        "api_key.created",
+        json!({
+            "api_key_id": created.api_key_id.as_str(),
+            "user_id": auth.user.id.as_str(),
+            "name": created.name.as_deref(),
+            "created_by": "user",
+            "rate_limit": created.rate_limit,
+            "concurrent_limit": created.concurrent_limit,
+            "expires_at_unix_secs": created.expires_at_unix_secs,
+            "is_standalone": false,
+        }),
+    );
+
     Json(json!({
         "id": created.api_key_id,
         "name": created.name,

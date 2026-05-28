@@ -2,10 +2,11 @@
   <PageContainer>
     <PageHeader
       title="外部系统集成"
-      description="把工单、状态页、知识库等外部系统作为受控入口嵌入 Aether。"
+      description="把工单、状态页、知识库和 Webhook 出站统一收口到 Aether。"
       :icon="ExternalLink"
     >
       <template #actions>
+        <template v-if="activeTab === 'entries'">
           <Button
             variant="outline"
             :disabled="loading || saving"
@@ -24,10 +25,45 @@
             <Save class="mr-2 h-4 w-4" />
             {{ saving ? '保存中...' : '保存配置' }}
           </Button>
+        </template>
+        <template v-else>
+          <Button
+            variant="outline"
+            @click="webhookSectionRef?.loadAll()"
+          >
+            <RefreshCw class="mr-2 h-4 w-4" />
+            刷新
+          </Button>
+          <Button
+            class="whitespace-nowrap"
+            @click="webhookSectionRef?.openCreateEndpointDialog()"
+          >
+            <Plus class="mr-2 h-4 w-4" />
+            <span class="sm:hidden">新增</span>
+            <span class="hidden sm:inline">新增 Webhook</span>
+          </Button>
+        </template>
       </template>
     </PageHeader>
 
-    <div class="mt-6 space-y-6">
+    <div class="mt-6">
+      <Tabs
+        v-model="activeTab"
+        default-value="entries"
+      >
+        <TabsList class="grid w-full max-w-2xl grid-cols-2">
+          <TabsTrigger value="entries">
+            入口集成
+          </TabsTrigger>
+          <TabsTrigger value="webhooks">
+            Webhook 出站
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent
+          value="entries"
+          class="mt-6 space-y-6"
+        >
       <CardSection
         title="模块开关"
         description="启用后，符合可见范围的入口会出现在用户或管理员侧导航中。"
@@ -311,6 +347,15 @@
           </p>
         </section>
       </div>
+        </TabsContent>
+
+        <TabsContent
+          value="webhooks"
+          class="mt-6"
+        >
+          <WebhookOutboundSection ref="webhookSectionRef" />
+        </TabsContent>
+      </Tabs>
     </div>
   </PageContainer>
 </template>
@@ -345,6 +390,10 @@ import {
   Input,
   Label,
   Switch,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
   Textarea,
 } from '@/components/ui'
 import {
@@ -365,11 +414,17 @@ import {
   validateExternalIntegrationIconSvg,
 } from '@/utils/externalIntegrationIcons'
 import { log } from '@/utils/logger'
+import WebhookOutboundSection from './WebhookOutboundSection.vue'
 
 const maxItems = 20
 const router = useRouter()
 const moduleStore = useModuleStore()
 const { success, error } = useToast()
+const activeTab = ref<'entries' | 'webhooks'>('entries')
+const webhookSectionRef = ref<{
+  loadAll: () => Promise<void>
+  openCreateEndpointDialog: () => void
+} | null>(null)
 
 const visibilityOptions: Array<{ value: ExternalIntegrationVisibility; label: string }> = [
   { value: 'admin', label: '管理员' },

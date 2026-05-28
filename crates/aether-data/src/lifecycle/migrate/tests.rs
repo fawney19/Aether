@@ -315,12 +315,15 @@ fn empty_database_snapshot_covers_current_cutoff_versions() {
             20260522000000,
             20260524000000,
             20260527000000,
+            20260527010000,
         ]
     );
 }
 
 #[test]
 fn empty_database_snapshot_sql_includes_usage_body_blobs_and_audit_admin_role() {
+    let empty_database_snapshot_sql = EMPTY_DATABASE_SNAPSHOT_SQL.replace("\r\n", "\n");
+
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("'audit_admin'"));
     assert!(
         EMPTY_DATABASE_SNAPSHOT_SQL.contains("CREATE TABLE IF NOT EXISTS public.usage_body_blobs")
@@ -383,7 +386,7 @@ fn empty_database_snapshot_sql_includes_usage_body_blobs_and_audit_admin_role() 
     assert!(
         EMPTY_DATABASE_SNAPSHOT_SQL.contains("cache_hit_total_requests bigint DEFAULT 0 NOT NULL")
     );
-    assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains(
+    assert!(empty_database_snapshot_sql.contains(
             "ALTER TABLE public.stats_daily_model\n    ADD COLUMN IF NOT EXISTS cache_creation_ephemeral_5m_tokens bigint DEFAULT '0'::bigint NOT NULL,"
         ));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL
@@ -671,6 +674,7 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260520010000,
             20260524000000,
             20260527000000,
+            20260527010000,
         ]
     );
     assert_eq!(
@@ -696,6 +700,7 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260520010000,
             20260524000000,
             20260527000000,
+            20260527010000,
         ]
     );
 }
@@ -1222,6 +1227,7 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20260522000000,
             20260524000000,
             20260527000000,
+            20260527010000,
         ]
     );
 }

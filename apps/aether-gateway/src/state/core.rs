@@ -447,6 +447,14 @@ impl AppState {
         self.data.has_proxy_node_writer()
     }
 
+    pub(crate) fn has_webhook_notification_data_reader(&self) -> bool {
+        self.data.has_webhook_notification_reader()
+    }
+
+    pub(crate) fn has_webhook_notification_data_writer(&self) -> bool {
+        self.data.has_webhook_notification_writer()
+    }
+
     pub(crate) fn frontdoor_cors(&self) -> Option<Arc<FrontdoorCorsConfig>> {
         self.frontdoor_cors.clone()
     }
@@ -1265,6 +1273,10 @@ impl AppState {
         supervise_worker(
             crate::task_runtime::TASK_KEY_MODEL_FETCH_WORKER,
             spawn_model_fetch_worker(self.clone()),
+        );
+        supervise_worker(
+            crate::task_runtime::TASK_KEY_OUTBOUND_WEBHOOK_WORKER,
+            crate::webhook_outbound::spawn_outbound_webhook_worker(self.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_VIDEO_TASK_POLLER,
