@@ -464,7 +464,7 @@
 
                 <!-- 错误信息：真实上游响应合并在此处展示 -->
                 <div
-                  v-if="currentAttempt.status === 'failed' && currentAttemptRequestError"
+                  v-if="currentAttemptDisplayStatus === 'failed' && currentAttemptRequestError"
                   class="error-block"
                 >
                   <div class="error-heading">
@@ -559,6 +559,7 @@ import { formatTokens } from '@/utils/format'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { resolveTimelineFinalStatus } from '../utils/status'
+import { isHttpLikeErrorCode, normalizeFailureMessage } from '../utils/failureDisplay'
 import {
   buildPoolGroupVisibleAttempts,
   buildPoolParticipatedCandidates,
@@ -1246,7 +1247,6 @@ const normalizeUpstreamResponseDisplay = (value: unknown): Record<string, unknow
   const statusCode = readNumberField(raw, 'status_code') ?? readNumberField(raw, 'statusCode')
   const headers = raw.headers
   const body = raw.body
-  const bodyRef = readStringField(raw, 'body_ref') ?? readStringField(raw, 'bodyRef')
   const bodyState = readStringField(raw, 'body_state') ?? readStringField(raw, 'bodyState')
   const meaningfulBodyState = bodyState && bodyState.toLowerCase() !== 'none'
     ? bodyState
@@ -1256,7 +1256,6 @@ const normalizeUpstreamResponseDisplay = (value: unknown): Record<string, unknow
     statusCode == null &&
     !hasRenderableValue(headers) &&
     !hasRenderableValue(body) &&
-    !bodyRef &&
     !meaningfulBodyState
   ) {
     return null
@@ -1266,7 +1265,6 @@ const normalizeUpstreamResponseDisplay = (value: unknown): Record<string, unknow
   if (statusCode != null) data.status_code = statusCode
   if (hasRenderableValue(headers)) data.headers = headers
   if (hasRenderableValue(body)) data.body = body
-  if (bodyRef) data.body_ref = bodyRef
   if (meaningfulBodyState) data.body_state = meaningfulBodyState
 
   return data
@@ -1441,12 +1439,7 @@ const currentAttemptFailureDiagnostic = computed<{
 })
 
 const formatAttemptErrorMessage = (message: string, statusCode?: number): string => {
-  const normalized = message.trim()
-  if (!normalized) return ''
-  if (/execution runtime (stream )?returned non-success status \d+/i.test(normalized)) {
-    return statusCode != null ? `上游返回非成功状态 ${statusCode}` : '上游返回非成功状态'
-  }
-  return normalized
+  return normalizeFailureMessage(message, statusCode) ?? ''
 }
 
 const buildCurrentAttemptErrorFields = (
@@ -1460,25 +1453,22 @@ const buildCurrentAttemptErrorFields = (
 ): Array<{ label: string, value: string }> => {
   const providerName = attempt.provider_name
   const keyName = attempt.key_name || attempt.key_account_label || attempt.key_preview
+  const bodyState = readStringField(upstreamResponse ?? {}, 'body_state')
+    ?? readStringField(upstreamResponse ?? {}, 'bodyState')
+  const meaningfulBodyState = bodyState && bodyState.toLowerCase() !== 'none'
   const fields = [
     providerName ? { label: '供应商', value: providerName } : null,
     keyName ? { label: 'Key', value: keyName } : null,
-    statusCode != null ? { label: 'HTTP 状态', value: String(statusCode) } : null,
     errorType ? { label: '错误类型', value: errorType } : null,
     errorParam ? { label: '错误参数', value: errorParam } : null,
-    readStringField(upstreamResponse ?? {}, 'body_ref')
-      ? { label: '响应 Body', value: readStringField(upstreamResponse ?? {}, 'body_ref') as string }
-      : null,
     readStringField(errorFlow ?? {}, 'source') ? { label: '错误来源', value: readStringField(errorFlow ?? {}, 'source') as string } : null,
   ].filter((field): field is { label: string, value: string } => Boolean(field))
 
-  const bodyState = readStringField(upstreamResponse ?? {}, 'body_state')
-    ?? readStringField(upstreamResponse ?? {}, 'bodyState')
-  if (bodyState && bodyState.toLowerCase() !== 'none') {
+  if (meaningfulBodyState) {
     fields.push({ label: 'Body 状态', value: bodyState })
   }
   const bodyErrorCode = readNestedValue(upstreamBody, 'error', 'code')
-  if (bodyErrorCode != null && typeof bodyErrorCode !== 'object') {
+  if (bodyErrorCode != null && typeof bodyErrorCode !== 'object' && !isHttpLikeErrorCode(bodyErrorCode)) {
     fields.push({ label: '错误代码', value: String(bodyErrorCode) })
   }
   return fields
@@ -1491,7 +1481,7 @@ const currentAttemptRequestError = computed<{
   upstreamResponse: Record<string, unknown> | null
 } | null>(() => {
   const attempt = currentAttempt.value
-  if (!attempt || attempt.status !== 'failed') return null
+  if (!attempt || getDisplayStatus(attempt) !== 'failed') return null
 
   const extra = extractObject(attempt.extra_data)
   const upstreamResponse = extractObject(extra?.upstream_response)
@@ -1906,11 +1896,31 @@ const getStatusColorClass = (status: string) => {
   return classes[status] || 'status-available'
 }
 
-// 展示状态：进行中态优先（包括 started 但未 finished 的中间态），再按 HTTP 状态码兜底
+// 展示状态：错误信号优先，其次进行中态，再按 HTTP 状态码兜底
+function readImageProgressPhase(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+  const phase = (value as { phase?: unknown }).phase
+  return typeof phase === 'string' ? phase.trim().toLowerCase() : ''
+}
+
+function hasCandidateFailureSignal(attempt: CandidateRecord): boolean {
+  if (typeof attempt.status_code === 'number' && attempt.status_code >= 300) return true
+  if (typeof attempt.error_message === 'string' && attempt.error_message.trim()) return true
+  const extraData = attempt.extra_data
+  const extraProgress = extraData && typeof extraData === 'object' && !Array.isArray(extraData)
+    ? (extraData as { image_progress?: unknown }).image_progress
+    : null
+  return readImageProgressPhase(attempt.image_progress) === 'failed' ||
+    readImageProgressPhase(extraProgress) === 'failed'
+}
+
 function getDisplayStatus(attempt: CandidateRecord | null | undefined): string {
   if (!attempt) return 'available'
   const code = attempt.status_code
   const isTerminalSuccessCode = typeof code === 'number' && code >= 200 && code < 300
+  if ((attempt.status === 'pending' || attempt.status === 'streaming') && hasCandidateFailureSignal(attempt)) {
+    return 'failed'
+  }
 
   if (attempt.status === 'success') {
     if (typeof code === 'number' && !isTerminalSuccessCode) {

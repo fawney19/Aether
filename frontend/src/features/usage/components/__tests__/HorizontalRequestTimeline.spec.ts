@@ -350,7 +350,7 @@ describe('HorizontalRequestTimeline', () => {
     expect(nodeDot?.classList.contains('status-success')).toBe(false)
   })
 
-  it('keeps emitted trace state active while the request lifecycle is still streaming', async () => {
+  it('emits failed trace state when a streaming lifecycle already has terminal failure evidence', async () => {
     const onTraceState = vi.fn()
     const trace = buildTrace([
       buildCandidate({
@@ -375,8 +375,34 @@ describe('HorizontalRequestTimeline', () => {
 
     const lastCall = onTraceState.mock.calls[onTraceState.mock.calls.length - 1]?.[0]
     expect(lastCall).toMatchObject({
-      finalStatus: 'streaming',
+      finalStatus: 'failed',
     })
+  })
+
+  it('shows active streaming candidate error signals as failed on the node and detail panel', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-active-timeout',
+        provider_id: 'provider-active-timeout',
+        provider_name: 'Provider Active Timeout',
+        key_id: 'key-active-timeout',
+        key_name: 'Active Timeout Key',
+        candidate_index: 0,
+        status: 'streaming',
+        status_code: 200,
+        error_message: 'UpstreamRequest("provider stream first byte timeout after 10000 ms")',
+        finished_at: undefined,
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    const nodeDot = root.querySelector<HTMLElement>('.node-dot')
+    expect(nodeDot?.classList.contains('status-failed')).toBe(true)
+    expect(root.textContent).toContain('错误信息')
+    expect(root.textContent).toContain('请求超时（10秒）')
+    expect(root.textContent).not.toContain('传输中')
   })
 
   it('shows request path from request metadata', async () => {
@@ -473,7 +499,7 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).toContain('Provider Upstream')
     expect(root.textContent).toContain('Key')
     expect(root.textContent).toContain('Upstream Key')
-    expect(root.textContent).toContain('HTTP 状态')
+    expect(root.textContent).not.toContain('HTTP 状态')
     expect(root.querySelector('.error-block .error-json')?.textContent).toContain('"status_code":302')
     expect(root.querySelector('.error-block .error-json')?.textContent).toContain('"headers"')
     expect(root.textContent).not.toContain('上游真实响应')
@@ -553,5 +579,72 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).toContain('execution runtime stream ended before provider terminal event')
     expect(root.querySelector('.error-block .error-json')).toBeNull()
     expect(root.textContent).not.toContain('"body_state":"none"')
+  })
+
+  it('normalizes stream first byte timeout errors and hides empty body refs', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-timeout-body-ref',
+        provider_id: 'provider-timeout',
+        provider_name: 'Provider Timeout',
+        key_id: 'key-timeout',
+        key_name: 'Timeout Key',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 503,
+        error_message: 'UpstreamRequest("provider stream first byte timeout after 10000 ms")',
+        extra_data: {
+          upstream_response: {
+            body_ref: 'usage://request/c676f8a0-3185-46a0-af06-e7c6f5873c39/response_body',
+            body_state: 'none',
+          },
+        },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    expect(root.textContent).toContain('请求超时（10秒）')
+    expect(root.textContent).not.toContain('UpstreamRequest')
+    expect(root.textContent).not.toContain('响应 Body')
+    expect(root.textContent).not.toContain('usage://request/c676f8a0')
+    expect(root.querySelector('.error-block .error-json')).toBeNull()
+  })
+
+  it('does not show numeric upstream body error codes as a competing HTTP status', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-wrapper-503-provider-404',
+        provider_id: 'provider-mixed-status',
+        provider_name: 'Provider Mixed Status',
+        key_id: 'key-mixed-status',
+        key_name: 'Mixed Status Key',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 503,
+        extra_data: {
+          upstream_response: {
+            status_code: 503,
+            body: {
+              error: {
+                code: 404,
+                type: 'not_found',
+                message: 'model not found',
+              },
+            },
+          },
+        },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    expect(root.textContent).toContain('HTTP 503')
+    expect(root.textContent).toContain('model not found')
+    expect(root.textContent).toContain('错误类型')
+    expect(root.textContent).toContain('not_found')
+    expect(root.textContent).not.toContain('错误代码')
   })
 })
