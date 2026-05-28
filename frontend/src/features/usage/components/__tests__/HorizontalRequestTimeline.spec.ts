@@ -553,7 +553,7 @@ describe('HorizontalRequestTimeline', () => {
     expect(errorBlockText).not.toContain('Key')
     expect(errorBlockText).not.toContain('GPUStack')
     expect(errorBlockText).not.toContain('key1')
-    expect(root.querySelector('.error-block .error-json')?.textContent).toContain('"status_code":400')
+    expect(root.querySelector('.error-block .error-json')).toBeNull()
   })
 
   it('localizes internal error types and keeps repeated provider context out of the error block', async () => {
@@ -680,6 +680,55 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).toContain('错误类型')
     expect(root.textContent).toContain('资源不存在')
     expect(root.textContent).not.toContain('错误代码')
+  })
+
+  it('summarizes context length errors without machine tags or body refs', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'c4220779-9f86-4fb0-a18e-389c8c131bf5',
+        provider_id: 'provider-aether-public',
+        provider_name: 'aether 公益',
+        key_id: 'key-aether-public',
+        key_name: 'key',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 400,
+        extra_data: {
+          upstream_response: {
+            status_code: 400,
+            body_ref: 'usage://request/c4220779-9f86-4fb0-a18e-389c8c131bf5/response_body',
+            body_state: 'inline',
+            body: {
+              error: {
+                type: 'invalid_request_error',
+                code: 'context_length_exceeded',
+                message: 'Input exceeds the context window.',
+              },
+            },
+          },
+        },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+    const errorBlockText = root.querySelector('.error-block')?.textContent ?? ''
+
+    expect(errorBlockText).toContain('HTTP 400')
+    expect(errorBlockText).toContain('上下文长度超出限制')
+    expect(errorBlockText).not.toContain('供应商')
+    expect(errorBlockText).not.toContain('aether 公益')
+    expect(errorBlockText).not.toContain('Key')
+    expect(errorBlockText).not.toContain('key')
+    expect(errorBlockText).not.toContain('错误类型')
+    expect(errorBlockText).not.toContain('invalid_request_error')
+    expect(errorBlockText).not.toContain('错误代码')
+    expect(errorBlockText).not.toContain('context_length_exceeded')
+    expect(errorBlockText).not.toContain('响应 Body')
+    expect(errorBlockText).not.toContain('usage://request/c4220779')
+    expect(errorBlockText).not.toContain('Body 状态')
+    expect(errorBlockText).not.toContain('inline')
+    expect(root.querySelector('.error-block .error-json')).toBeNull()
   })
 
 })

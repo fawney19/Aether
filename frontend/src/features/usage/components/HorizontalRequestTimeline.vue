@@ -559,7 +559,7 @@ import { formatTokens } from '@/utils/format'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { resolveTimelineFinalStatus } from '../utils/status'
-import { formatFailureTypeLabel, isHttpLikeErrorCode, normalizeFailureMessage } from '../utils/failureDisplay'
+import { formatFailureCodeLabel, formatFailureTypeLabel, resolveFailureReason } from '../utils/failureDisplay'
 import {
   buildPoolGroupVisibleAttempts,
   buildPoolParticipatedCandidates,
@@ -1241,22 +1241,46 @@ watch(
   { immediate: true },
 )
 
+const normalizeUpstreamBodyDisplay = (value: unknown): unknown => {
+  if (!hasRenderableValue(value)) return null
+
+  const body = extractObject(value)
+  if (!body) return value
+
+  const display: Record<string, unknown> = { ...body }
+  const error = extractObject(display.error)
+  if (error) {
+    const errorDisplay: Record<string, unknown> = { ...error }
+    delete errorDisplay.code
+    delete errorDisplay.type
+    delete errorDisplay.message
+    delete errorDisplay.param
+    if (Object.keys(errorDisplay).length > 0) {
+      display.error = errorDisplay
+    } else {
+      delete display.error
+    }
+  }
+
+  delete display.code
+  delete display.type
+  delete display.message
+  delete display.detail
+  delete display.param
+
+  return Object.keys(display).length > 0 ? display : null
+}
+
 const normalizeUpstreamResponseDisplay = (value: unknown): Record<string, unknown> | null => {
   const raw = extractObject(value)
   if (!raw) return null
   const statusCode = readNumberField(raw, 'status_code') ?? readNumberField(raw, 'statusCode')
   const headers = raw.headers
-  const body = raw.body
-  const bodyState = readStringField(raw, 'body_state') ?? readStringField(raw, 'bodyState')
-  const meaningfulBodyState = bodyState && bodyState.toLowerCase() !== 'none'
-    ? bodyState
-    : ''
+  const body = normalizeUpstreamBodyDisplay(raw.body)
 
   if (
-    statusCode == null &&
     !hasRenderableValue(headers) &&
-    !hasRenderableValue(body) &&
-    !meaningfulBodyState
+    !hasRenderableValue(body)
   ) {
     return null
   }
@@ -1265,7 +1289,6 @@ const normalizeUpstreamResponseDisplay = (value: unknown): Record<string, unknow
   if (statusCode != null) data.status_code = statusCode
   if (hasRenderableValue(headers)) data.headers = headers
   if (hasRenderableValue(body)) data.body = body
-  if (meaningfulBodyState) data.body_state = meaningfulBodyState
 
   return data
 }
@@ -1438,36 +1461,18 @@ const currentAttemptFailureDiagnostic = computed<{
   }
 })
 
-const formatAttemptErrorMessage = (message: string, statusCode?: number): string => {
-  return normalizeFailureMessage(message, statusCode) ?? ''
-}
-
 const buildCurrentAttemptErrorFields = (
-  attempt: CandidateRecord,
-  upstreamResponse: Record<string, unknown> | null,
-  upstreamBody: unknown,
   errorFlow: Record<string, unknown> | null,
   errorType?: string,
   errorParam?: string,
-  statusCode?: number,
+  hideErrorType = false,
 ): Array<{ label: string, value: string }> => {
-  const bodyState = readStringField(upstreamResponse ?? {}, 'body_state')
-    ?? readStringField(upstreamResponse ?? {}, 'bodyState')
-  const meaningfulBodyState = bodyState && bodyState.toLowerCase() !== 'none'
   const errorTypeLabel = formatFailureTypeLabel(errorType)
   const fields = [
-    errorTypeLabel ? { label: '错误类型', value: errorTypeLabel } : null,
+    errorTypeLabel && !hideErrorType ? { label: '错误类型', value: errorTypeLabel } : null,
     errorParam ? { label: '错误参数', value: errorParam } : null,
     readStringField(errorFlow ?? {}, 'source') ? { label: '错误来源', value: readStringField(errorFlow ?? {}, 'source') as string } : null,
   ].filter((field): field is { label: string, value: string } => Boolean(field))
-
-  if (meaningfulBodyState) {
-    fields.push({ label: 'Body 状态', value: bodyState })
-  }
-  const bodyErrorCode = readNestedValue(upstreamBody, 'error', 'code')
-  if (bodyErrorCode != null && typeof bodyErrorCode !== 'object' && !isHttpLikeErrorCode(bodyErrorCode)) {
-    fields.push({ label: '错误代码', value: String(bodyErrorCode) })
-  }
   return fields
 }
 
@@ -1499,24 +1504,29 @@ const currentAttemptRequestError = computed<{
     ?? readNestedString(upstreamBody, 'type')
     ?? readStringField(errorFlow ?? {}, 'type')
     ?? (typeof attempt.error_type === 'string' && attempt.error_type.trim() ? attempt.error_type.trim() : undefined)
+  const upstreamErrorCode = readNestedValue(upstreamBody, 'error', 'code')
+    ?? readNestedValue(upstreamBody, 'code')
+    ?? readNestedValue(errorFlow, 'code')
+  const upstreamErrorCodeLabel = formatFailureCodeLabel(upstreamErrorCode)
   const upstreamErrorParam = readNestedString(upstreamBody, 'error', 'param')
     ?? readNestedString(upstreamBody, 'param')
     ?? readStringField(errorFlow ?? {}, 'param')
   const fallbackMessage = typeof attempt.error_message === 'string' && attempt.error_message.trim()
     ? attempt.error_message.trim()
     : ''
-  const message = formatAttemptErrorMessage(flowMessage || upstreamErrorMessage || fallbackMessage, statusCode)
-    || formatFailureTypeLabel(upstreamErrorType)
+  const message = resolveFailureReason({
+    message: flowMessage || upstreamErrorMessage || fallbackMessage,
+    type: upstreamErrorType,
+    code: upstreamErrorCode,
+    statusCode,
+  })
     || ''
   const upstreamResponseDisplay = normalizeUpstreamResponseDisplay(extra?.upstream_response)
   const fields = buildCurrentAttemptErrorFields(
-    attempt,
-    upstreamResponse,
-    upstreamBody,
     errorFlow,
     upstreamErrorType,
     upstreamErrorParam,
-    statusCode,
+    Boolean(upstreamErrorCodeLabel),
   )
   if (!message && statusCode == null && !upstreamResponseDisplay && fields.length === 0) return null
 
