@@ -208,7 +208,6 @@ const CODEX_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     api_format_inheritance: ProviderApiFormatInheritance::OAuth,
     enable_format_conversion_by_default: true,
     supports_model_fetch: false,
-    supports_local_openai_chat_transport: false,
     ..STANDARD_RUNTIME_POLICY
 };
 const CHATGPT_WEB_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
@@ -284,9 +283,15 @@ const CLAUDE_CODE_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProvider
 
 const CODEX_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
     provider_type: "codex",
-    version: 1,
+    version: 2,
     base_url: "https://chatgpt.com/backend-api/codex",
     endpoints: &[
+        FixedProviderEndpointTemplate {
+            item_key: "openai:chat",
+            api_format: "openai:chat",
+            custom_path: None,
+            config_defaults: FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS,
+        },
         FixedProviderEndpointTemplate {
             item_key: "openai:responses",
             api_format: "openai:responses",
@@ -626,15 +631,16 @@ mod tests {
         fixed_provider_template, provider_runtime_policy, provider_type_admin_oauth_template,
         provider_type_allows_auth_channel_mismatch_by_default, provider_type_oauth_is_bearer_like,
         provider_type_supports_local_embedding_transport,
+        provider_type_supports_local_openai_chat_transport,
         provider_type_supports_local_same_format_transport, FixedProviderEndpointConfigValue,
         ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES,
     };
 
     #[test]
-    fn codex_fixed_provider_template_includes_openai_image() {
+    fn codex_fixed_provider_template_exposes_openai_chat_responses_and_image() {
         let template = fixed_provider_template("codex").expect("codex template should exist");
         assert_eq!(template.base_url, "https://chatgpt.com/backend-api/codex");
-        assert_eq!(template.version, 1);
+        assert_eq!(template.version, 2);
         assert_eq!(
             template
                 .endpoints
@@ -642,10 +648,25 @@ mod tests {
                 .map(|item| item.api_format)
                 .collect::<Vec<_>>(),
             vec![
+                "openai:chat",
                 "openai:responses",
                 "openai:responses:compact",
                 "openai:image"
             ]
+        );
+
+        let chat_template = fixed_provider_endpoint_template_by_api_format("codex", "openai:chat")
+            .expect("codex chat endpoint should exist");
+        assert_eq!(
+            chat_template
+                .config_defaults
+                .iter()
+                .map(|item| (item.key, item.value))
+                .collect::<Vec<_>>(),
+            vec![(
+                "upstream_stream_policy",
+                FixedProviderEndpointConfigValue::String("force_stream")
+            )]
         );
 
         let image_template =
@@ -845,7 +866,8 @@ mod tests {
         assert!(codex.enable_format_conversion_by_default);
         assert!(!codex.oauth_is_bearer_like);
         assert!(!codex.supports_model_fetch);
-        assert!(!codex.supports_local_openai_chat_transport);
+        assert!(codex.supports_local_openai_chat_transport);
+        assert!(provider_type_supports_local_openai_chat_transport("codex"));
         assert!(codex.supports_local_same_format_transport);
 
         let gemini_cli = provider_runtime_policy("gemini_cli");

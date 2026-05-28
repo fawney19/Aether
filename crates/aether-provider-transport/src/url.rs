@@ -582,6 +582,21 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_url_preserves_codex_path_prefix() {
+        assert_eq!(
+            build_openai_chat_url("https://chatgpt.com/backend-api/codex", None),
+            "https://chatgpt.com/backend-api/codex/chat/completions"
+        );
+        assert_eq!(
+            build_openai_chat_url(
+                "https://tiger.bookapi.cc/codex?tenant=demo",
+                Some("trace=1")
+            ),
+            "https://tiger.bookapi.cc/codex/chat/completions?tenant=demo&trace=1"
+        );
+    }
+
+    #[test]
     fn openai_image_url_uses_images_surface() {
         assert_eq!(
             build_openai_image_url(

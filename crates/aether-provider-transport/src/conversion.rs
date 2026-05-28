@@ -667,6 +667,21 @@ mod tests {
     }
 
     #[test]
+    fn codex_openai_chat_anchor_supports_responses_conversion_by_default() {
+        let transport = transport_snapshot("codex", "openai:chat", "oauth", true, None);
+
+        assert!(request_pair_allowed_for_transport(
+            &transport,
+            "openai:responses",
+            "openai:chat"
+        ));
+        assert!(request_conversion_transport_supported(
+            &transport,
+            RequestConversionKind::ToOpenAIChat
+        ));
+    }
+
+    #[test]
     fn candidate_common_transport_policy_checks_active_state_format_and_allowed_models() {
         let mut transport = transport_snapshot("custom", "openai:chat", "bearer", true, None);
         transport.key.allowed_models = Some(vec!["gpt-4.1-mini".to_string()]);
