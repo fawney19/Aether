@@ -1,5 +1,5 @@
 import type { RequestDetail, RequestErrorDomain, RequestSchedulingFailure } from '@/api/dashboard'
-import { normalizeFailureMessage } from './failureDisplay'
+import { formatFailureTypeLabel, normalizeFailureMessage } from './failureDisplay'
 
 export interface RequestFailureNotice {
   title: string
@@ -83,7 +83,7 @@ export function resolveRequestFailureNotice(detail: RequestDetail | null | undef
         isSchedulingFailure: true,
         meta: uniqueMeta([
           formatHttpStatus(upstreamFailure.status_code ?? schedulingFailure.status_code ?? detail.status_code),
-          nonEmptyString(upstreamFailure.type),
+          formatFailureTypeLabel(upstreamFailure.type),
           nonEmptyString(upstreamFailure.param),
           nonEmptyString(upstreamFailure.provider_name),
           nonEmptyString(upstreamFailure.model),
@@ -119,7 +119,7 @@ export function resolveRequestFailureNotice(detail: RequestDetail | null | undef
     isSchedulingFailure: false,
     meta: uniqueMeta([
       formatHttpStatus(domain ? domain.status_code ?? detail.status_code : undefined),
-      nonEmptyString(domain?.type),
+      formatFailureTypeLabel(domain?.type),
       nonEmptyString(domain?.source),
     ]),
   }

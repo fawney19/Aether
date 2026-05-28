@@ -87,7 +87,43 @@ describe('request failure notice', () => {
       title: '执行失败原因',
       message: 'quota exceeded',
       isSchedulingFailure: false,
-      meta: ['HTTP 429', 'insufficient_quota', 'upstream_response'],
+      meta: ['HTTP 429', '额度不足', 'upstream_response'],
+    })
+  })
+
+  it('localizes internal request failure error types', () => {
+    const notice = resolveRequestFailureNotice(buildRequestDetail({
+      failure_summary: {
+        source: 'local_candidate',
+        status_code: 504,
+        type: 'local_stream_candidate_watchdog_timeout',
+        message: 'Stream first byte timeout',
+      },
+    }))
+
+    expect(notice).toEqual({
+      title: '执行失败原因',
+      message: '请求超时（等待上游首字超时）',
+      isSchedulingFailure: false,
+      meta: ['HTTP 504', '本地流式候选首字超时', 'local_candidate'],
+    })
+  })
+
+  it('localizes internal usage failure types in the notice metadata', () => {
+    const notice = resolveRequestFailureNotice(buildRequestDetail({
+      failure_summary: {
+        source: 'local_execution_runtime',
+        status_code: 504,
+        type: 'local_stream_candidate_watchdog_timeout',
+        message: 'Stream first byte timeout',
+      },
+    }))
+
+    expect(notice).toEqual({
+      title: '执行失败原因',
+      message: '请求超时（等待上游首字超时）',
+      isSchedulingFailure: false,
+      meta: ['HTTP 504', '本地流式候选首字超时', 'local_execution_runtime'],
     })
   })
 
@@ -147,7 +183,7 @@ describe('request failure notice', () => {
       title: '执行失败原因',
       message: 'This content was flagged for possible cybersecurity risk',
       isSchedulingFailure: false,
-      meta: ['stream_terminal_error', 'client_response'],
+      meta: ['流式响应结束异常', 'client_response'],
     })
   })
 

@@ -19,6 +19,59 @@ function unwrapRustErrorMessage(message: string): string {
     .trim()
 }
 
+const FAILURE_TYPE_LABELS: Record<string, string> = {
+  local_stream_candidate_watchdog_timeout: '本地流式候选首字超时',
+  stream_missing_terminal_event: '流式响应缺少结束事件',
+  stream_terminal_error: '流式响应结束异常',
+  stream_http_error: '流式上游 HTTP 错误',
+  stream_missing_terminal_event_after_usage: '流式响应计费后缺少结束事件',
+  execution_runtime_unavailable: '执行通道不可用',
+  execution_runtime_http_error: '执行通道 HTTP 错误',
+  execution_runtime_stream_non_success_status: '上游流式响应返回非成功状态',
+  downstream_disconnect: '客户端连接已断开',
+  success_failover_pattern: '成功响应触发备用路径',
+  retryable_upstream_status: '上游返回可重试错误',
+  control_fallback: '调度切换到备用通道',
+  upstream_timeout: '上游请求超时',
+  upstream_request_timeout: '上游请求超时',
+  stream_first_byte_timeout: '流式首字超时',
+  insufficient_quota: '额度不足',
+  rate_limit_exceeded: '请求频率超限',
+  invalid_request_error: '请求参数错误',
+  authentication_error: '认证失败',
+  permission_error: '权限不足',
+  model_not_found: '模型不存在',
+  not_found: '资源不存在',
+  server_error: '上游服务异常',
+  grok_execution_unavailable: 'Grok 执行通道不可用',
+  windsurf_native_execution_unavailable: 'Windsurf 原生执行通道不可用',
+  kiro_web_search_mcp_unavailable: 'Kiro Web Search MCP 不可用',
+  chatgpt_web_image_execution_unavailable: 'ChatGPT Web 图片执行通道不可用',
+}
+
+function looksInternalErrorType(value: string): boolean {
+  return /^[a-z][a-z0-9_]+$/.test(value)
+}
+
+function inferInternalFailureTypeLabel(value: string): string | null {
+  if (!looksInternalErrorType(value)) return null
+  if (value.includes('timeout')) return '请求超时'
+  if (value.includes('missing_terminal_event')) return '流式响应缺少结束事件'
+  if (value.includes('terminal_error')) return '流式响应结束异常'
+  if (value.includes('http_error') || value.includes('non_success_status')) return '上游 HTTP 错误'
+  if (value.includes('unavailable')) return '执行通道不可用'
+  if (value.includes('disconnect')) return '连接已断开'
+  if (value.includes('fallback')) return '触发备用通道'
+  return '内部执行错误'
+}
+
+export function formatFailureTypeLabel(value: string | null | undefined): string | null {
+  const normalized = nonEmptyString(value)
+  if (!normalized) return null
+  const key = normalized.toLowerCase()
+  return FAILURE_TYPE_LABELS[key] ?? inferInternalFailureTypeLabel(normalized) ?? normalized
+}
+
 export function normalizeFailureMessage(message: string | null | undefined, statusCode?: number | null): string | null {
   const normalized = nonEmptyString(message)
   const unwrapped = normalized ? unwrapRustErrorMessage(normalized) : null
