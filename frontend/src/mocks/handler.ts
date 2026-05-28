@@ -1295,6 +1295,7 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
   'GET /api/admin/modules/status': async () => {
     await delay()
     requireAdmin()
+    refreshMockExternalIntegrationsModuleStatus()
     return createMockResponse(MOCK_MODULE_STATUSES)
   },
 
@@ -1832,6 +1833,28 @@ function refreshMockS3BackupModuleStatus() {
   }
 }
 
+function mockExternalIntegrationsConfigured() {
+  const value = mockSystemConfigValue('module.external_integrations.items')
+  return Array.isArray(value) && value.some(item => {
+    if (!item || typeof item !== 'object') return false
+    return (item as { enabled?: unknown }).enabled !== false
+  })
+}
+
+function refreshMockExternalIntegrationsModuleStatus() {
+  const moduleStatus = MOCK_MODULE_STATUSES.external_integrations
+  if (!moduleStatus) return
+  const enabled = mockSystemConfigValue('module.external_integrations.enabled') === true
+  const configValidated = mockExternalIntegrationsConfigured()
+  MOCK_MODULE_STATUSES.external_integrations = {
+    ...moduleStatus,
+    enabled,
+    config_validated: configValidated,
+    config_error: configValidated ? null : '请先配置至少一个已启用的外部系统入口',
+    active: moduleStatus.available && enabled && configValidated,
+  }
+}
+
 // 系统配置详情
 registerDynamicRoute('GET', '/api/admin/system/configs/:configKey', async (_config, params) => {
   await delay()
@@ -1875,7 +1898,35 @@ registerDynamicRoute('PUT', '/api/admin/system/configs/:configKey', async (confi
   if (key.startsWith('backup_s3_')) {
     refreshMockS3BackupModuleStatus()
   }
+  if (key.startsWith('module.external_integrations.')) {
+    refreshMockExternalIntegrationsModuleStatus()
+  }
   return createMockResponse(entry)
+})
+
+registerDynamicRoute('GET', '/api/modules/external-integrations', async () => {
+  await delay()
+  if (!currentUserToken) {
+    throw { response: createMockResponse({ detail: '缺少用户凭证' }, 401) }
+  }
+  refreshMockExternalIntegrationsModuleStatus()
+  const enabled = mockSystemConfigValue('module.external_integrations.enabled') === true
+  const items = mockSystemConfigValue('module.external_integrations.items')
+  const role = isCurrentUserAdmin() ? 'admin' : 'user'
+  const visibleItems = Array.isArray(items)
+    ? items.filter(item => {
+        if (!item || typeof item !== 'object') return false
+        const typed = item as { enabled?: unknown; visibility?: unknown }
+        if (typed.enabled === false) return false
+        if (typed.visibility === 'all') return true
+        if (typed.visibility === 'admin') return role === 'admin'
+        return role === 'user'
+      })
+    : []
+  return createMockResponse({
+    enabled,
+    items: enabled ? visibleItems : [],
+  })
 })
 
 registerDynamicRoute('POST', '/api/admin/system/backups/s3/run', async () => {
@@ -1896,6 +1947,9 @@ registerDynamicRoute('POST', '/api/admin/system/backups/s3/run', async () => {
 registerDynamicRoute('GET', '/api/admin/modules/status/:moduleName', async (_config, params) => {
   await delay()
   requireAdmin()
+  if (params.moduleName === 'external_integrations') {
+    refreshMockExternalIntegrationsModuleStatus()
+  }
   const moduleStatus = MOCK_MODULE_STATUSES[params.moduleName]
   if (!moduleStatus) {
     throw { response: createMockResponse({ detail: '模块不存在' }, 404) }
@@ -1927,6 +1981,21 @@ registerDynamicRoute('PUT', '/api/admin/modules/status/:moduleName/enabled', asy
     }
     refreshMockS3BackupModuleStatus()
     return createMockResponse(MOCK_MODULE_STATUSES.s3_backup)
+  }
+  if (params.moduleName === 'external_integrations') {
+    const index = MOCK_SYSTEM_CONFIGS.findIndex(item => item.key === 'module.external_integrations.enabled')
+    const entry = {
+      key: 'module.external_integrations.enabled',
+      value: enabled,
+      description: '外部系统集成开关',
+    }
+    if (index === -1) {
+      MOCK_SYSTEM_CONFIGS.push(entry)
+    } else {
+      MOCK_SYSTEM_CONFIGS[index] = { ...MOCK_SYSTEM_CONFIGS[index], ...entry }
+    }
+    refreshMockExternalIntegrationsModuleStatus()
+    return createMockResponse(MOCK_MODULE_STATUSES.external_integrations)
   }
   const updated = {
     ...moduleStatus,

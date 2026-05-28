@@ -25,6 +25,27 @@ export interface AuthModuleInfo {
   active: boolean
 }
 
+export type ExternalIntegrationVisibility = 'admin' | 'user' | 'all'
+export type ExternalIntegrationOpenMode = 'embed' | 'new_tab'
+
+export interface ExternalIntegrationItem {
+  id: string
+  name: string
+  url: string
+  enabled: boolean
+  visibility: ExternalIntegrationVisibility
+  open_mode: ExternalIntegrationOpenMode
+  description: string
+  icon: string
+  icon_svg: string | null
+  color: string | null
+}
+
+export interface ExternalIntegrationsConfig {
+  enabled: boolean
+  items: ExternalIntegrationItem[]
+}
+
 export type ChatPiiRedactionTtlSeconds = 300 | 3600
 
 export interface ChatPiiRedactionRuleFeatures {
@@ -69,6 +90,13 @@ const CHAT_PII_REDACTION_CONFIG_KEYS = {
   cache_ttl_seconds: 'module.chat_pii_redaction.cache_ttl_seconds',
   placeholder_prefix: 'module.chat_pii_redaction.placeholder_prefix',
 } as const
+
+const EXTERNAL_INTEGRATIONS_CONFIG_KEYS = {
+  enabled: 'module.external_integrations.enabled',
+  items: 'module.external_integrations.items',
+} as const
+
+export const EXTERNAL_INTEGRATIONS_UPDATED_EVENT = 'aether:external-integrations-updated'
 
 const CHAT_PII_REDACTION_DEFAULT_CONFIG: ChatPiiRedactionConfig = {
   enabled: false,
@@ -149,6 +177,79 @@ function normalizeChatPiiRedactionConfig(values: {
     rules: normalizeChatPiiRedactionRules(values.rules),
     cache_ttl_seconds: values.cache_ttl_seconds === 3600 ? 3600 : 300,
     placeholder_prefix: normalizePlaceholderPrefix(values.placeholder_prefix),
+  }
+}
+
+function normalizeExternalIntegrationVisibility(value: unknown): ExternalIntegrationVisibility {
+  return value === 'user' || value === 'all' ? value : 'admin'
+}
+
+function normalizeExternalIntegrationOpenMode(value: unknown): ExternalIntegrationOpenMode {
+  return value === 'new_tab' ? 'new_tab' : 'embed'
+}
+
+function normalizeExternalIntegrationItem(value: unknown, index: number): ExternalIntegrationItem | null {
+  if (!value || typeof value !== 'object') return null
+  const item = value as Record<string, unknown>
+  const id = typeof item.id === 'string' && item.id.trim()
+    ? item.id.trim()
+    : `external_${index + 1}`
+  const name = typeof item.name === 'string' && item.name.trim()
+    ? item.name.trim()
+    : id
+  const url = typeof item.url === 'string' ? item.url.trim() : ''
+  if (!url) return null
+  const description = typeof item.description === 'string' ? item.description.trim() : ''
+  const icon = typeof item.icon === 'string' && item.icon.trim() ? item.icon.trim() : 'ExternalLink'
+  const iconSvg = typeof item.icon_svg === 'string' && item.icon_svg.trim() ? item.icon_svg.trim() : null
+  const color = typeof item.color === 'string' && item.color.trim() ? item.color.trim() : null
+  return {
+    id,
+    name,
+    url,
+    enabled: item.enabled !== false,
+    visibility: normalizeExternalIntegrationVisibility(item.visibility),
+    open_mode: normalizeExternalIntegrationOpenMode(item.open_mode),
+    description,
+    icon,
+    icon_svg: iconSvg,
+    color,
+  }
+}
+
+export function normalizeExternalIntegrationsConfig(values: {
+  enabled: unknown
+  items: unknown
+}): ExternalIntegrationsConfig {
+  const items = Array.isArray(values.items)
+    ? values.items
+        .map((item, index) => normalizeExternalIntegrationItem(item, index))
+        .filter((item): item is ExternalIntegrationItem => item !== null)
+    : []
+  return {
+    enabled: values.enabled === true,
+    items,
+  }
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase()
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]'
+}
+
+export function validateExternalIntegrationUrl(rawUrl: string): string | null {
+  const url = rawUrl.trim()
+  if (!url) return '请填写外部系统地址'
+  if (url.length > 2048) return '地址不能超过 2048 个字符'
+  if (url.startsWith('//')) return '请填写完整的 https 地址'
+  try {
+    const parsed = new URL(url)
+    if (parsed.username || parsed.password) return '地址不能包含用户名或密码'
+    if (parsed.protocol === 'https:') return null
+    if (parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname)) return null
+    return '仅允许 HTTPS 地址，开发环境可使用 localhost HTTP'
+  } catch {
+    return '请填写有效的完整 URL'
   }
 }
 
@@ -262,11 +363,44 @@ export const modulesApi = {
     })
   },
 
+  async getExternalIntegrationsConfig(): Promise<ExternalIntegrationsConfig> {
+    const [enabled, items] = await Promise.all([
+      getSystemConfigValue(EXTERNAL_INTEGRATIONS_CONFIG_KEYS.enabled),
+      getSystemConfigValue(EXTERNAL_INTEGRATIONS_CONFIG_KEYS.items),
+    ])
+
+    return normalizeExternalIntegrationsConfig({
+      enabled,
+      items,
+    })
+  },
+
+  async updateExternalIntegrationsConfig(config: ExternalIntegrationsConfig): Promise<ExternalIntegrationsConfig> {
+    const normalized = normalizeExternalIntegrationsConfig(config)
+    const [enabled, items] = await Promise.all([
+      updateSystemConfigValue(EXTERNAL_INTEGRATIONS_CONFIG_KEYS.enabled, normalized.enabled, '外部系统集成总开关'),
+      updateSystemConfigValue(EXTERNAL_INTEGRATIONS_CONFIG_KEYS.items, normalized.items, '外部系统入口配置'),
+    ])
+
+    return normalizeExternalIntegrationsConfig({
+      enabled,
+      items,
+    })
+  },
+
   /**
    * 获取认证模块状态（公开接口，供登录页使用）
    */
   async getAuthModulesStatus(): Promise<AuthModuleInfo[]> {
     const response = await apiClient.get<AuthModuleInfo[]>('/api/modules/auth-status')
     return response.data
+  },
+
+  async getVisibleExternalIntegrations(): Promise<ExternalIntegrationsConfig> {
+    const response = await apiClient.get<ExternalIntegrationsConfig>('/api/modules/external-integrations')
+    return normalizeExternalIntegrationsConfig({
+      enabled: response.data.enabled,
+      items: response.data.items,
+    })
   },
 }

@@ -514,6 +514,59 @@ pub(crate) async fn maybe_build_local_public_support_response(
     }
 
     if decision.route_family.as_deref() == Some("modules") {
+        if decision.route_kind.as_deref() == Some("external_integrations")
+            && request_context.request_path == "/api/modules/external-integrations"
+        {
+            let auth = match resolve_authenticated_local_user(state, request_context, headers).await
+            {
+                Ok(value) => value,
+                Err(response) => return Some(response),
+            };
+            let available = module_available_from_env("EXTERNAL_INTEGRATIONS_AVAILABLE", true);
+            if !available {
+                return Some(
+                    Json(json!({
+                        "enabled": false,
+                        "items": [],
+                    }))
+                    .into_response(),
+                );
+            }
+            let enabled = state
+                .read_system_config_json_value(
+                    aether_admin::system::EXTERNAL_INTEGRATIONS_ENABLED_CONFIG_KEY,
+                )
+                .await
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    aether_admin::system::admin_system_config_default_value(
+                        aether_admin::system::EXTERNAL_INTEGRATIONS_ENABLED_CONFIG_KEY,
+                    )
+                })
+                .as_ref()
+                .map(|value| system_config_bool(Some(value), false))
+                .unwrap_or(false);
+            let items = state
+                .read_system_config_json_value(
+                    aether_admin::system::EXTERNAL_INTEGRATIONS_ITEMS_CONFIG_KEY,
+                )
+                .await
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    aether_admin::system::admin_system_config_default_value(
+                        aether_admin::system::EXTERNAL_INTEGRATIONS_ITEMS_CONFIG_KEY,
+                    )
+                });
+            let payload = aether_admin::system::build_external_integrations_payload_for_role(
+                enabled,
+                items.as_ref(),
+                &auth.user.role,
+            );
+            return Some(Json(payload).into_response());
+        }
+
         if decision.route_kind.as_deref() == Some("auth_status")
             && request_context.request_path == "/api/modules/auth-status"
         {

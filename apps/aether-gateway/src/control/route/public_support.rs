@@ -766,6 +766,15 @@ pub(super) fn classify_public_support_route(
             "public:modules",
             false,
         ))
+    } else if method == http::Method::GET && normalized_path == "/api/modules/external-integrations"
+    {
+        Some(classified(
+            "public_support",
+            "modules",
+            "external_integrations",
+            "public:modules",
+            false,
+        ))
     } else if method == http::Method::GET
         && matches!(
             normalized_path,
