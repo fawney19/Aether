@@ -32,6 +32,18 @@ impl<'a> AdminAppState<'a> {
         self.app.read_recent_request_candidates(limit).await
     }
 
+    pub(crate) async fn read_request_candidates_by_request_id(
+        &self,
+        request_id: &str,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::candidates::StoredRequestCandidate>,
+        GatewayError,
+    > {
+        self.app
+            .read_request_candidates_by_request_id(request_id)
+            .await
+    }
+
     pub(crate) async fn list_usage_audits(
         &self,
         query: &aether_data_contracts::repository::usage::UsageAuditListQuery,

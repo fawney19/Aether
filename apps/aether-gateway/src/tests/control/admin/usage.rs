@@ -1926,6 +1926,138 @@ async fn gateway_handles_admin_usage_detail_locally_with_trusted_admin_principal
 }
 
 #[tokio::test]
+async fn gateway_usage_detail_includes_candidate_upstream_failure() {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/usage-candidate-failure").await;
+
+    let mut usage = sample_usage_row(
+        "usage-candidate-failure",
+        "req-candidate-failure",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "failed",
+        120,
+        0,
+        0.0,
+        0.0,
+        DAY_1_UNIX_SECS,
+    );
+    usage.error_message = Some(
+        "已尝试所有本地执行候选提供商，但没有任何候选成功完成请求（原因代码: execution_runtime_candidates_exhausted）"
+            .to_string(),
+    );
+    usage.request_metadata = Some(json!({
+        "trace_id": "trace-candidate-failure",
+        "candidate_id": "cand-candidate-failure",
+        "candidate_index": 0,
+        "key_name": "detail-key",
+        "execution_path": "local_execution_runtime_miss",
+        "local_execution_runtime_miss_reason": "execution_runtime_candidates_exhausted"
+    }));
+
+    let mut candidate = sample_request_candidate(
+        "cand-candidate-failure",
+        "req-candidate-failure",
+        0,
+        0,
+        RequestCandidateStatus::Failed,
+    );
+    candidate.extra_data = Some(json!({
+        "key_name": "detail-key",
+        "mapped_model": "gpt-5-target",
+        "upstream_response": {
+            "status_code": 400,
+            "body": {
+                "error": {
+                    "type": "BadRequestError",
+                    "param": "input_tokens",
+                    "message": "This model's maximum context length is 131072 tokens. However, your prompt contains at least 131073 input tokens."
+                }
+            }
+        }
+    }));
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![usage]));
+    let request_candidate_repository =
+        Arc::new(InMemoryRequestCandidateRepository::seed(vec![candidate]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                    request_candidate_repository,
+                    usage_repository,
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/usage-candidate-failure?include_bodies=false"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["id"], "usage-candidate-failure");
+    assert_eq!(payload["routing"]["candidate_id"], "cand-candidate-failure");
+    assert_eq!(
+        payload["scheduling_failure"]["reason_label"],
+        "候选执行失败且已耗尽"
+    );
+    assert_eq!(
+        payload["scheduling_failure"]["title"],
+        "唯一候选执行失败，已无可重试上游"
+    );
+    assert_eq!(payload["scheduling_failure"]["no_upstream_attempt"], false);
+    assert_eq!(
+        payload["scheduling_failure"]["candidate_failure_summary"]["total"],
+        1
+    );
+    assert_eq!(
+        payload["scheduling_failure"]["candidate_failure_summary"]["failed"],
+        1
+    );
+    assert_eq!(
+        payload["scheduling_failure"]["candidate_failure_summary"]["retried"],
+        1
+    );
+    assert_eq!(
+        payload["scheduling_failure"]["upstream_failure"]["key_name"],
+        "detail-key"
+    );
+    assert_eq!(
+        payload["scheduling_failure"]["upstream_failure"]["model"],
+        "gpt-5-target"
+    );
+    assert_eq!(
+        payload["scheduling_failure"]["upstream_failure"]["status_code"],
+        400
+    );
+    assert_eq!(
+        payload["scheduling_failure"]["upstream_failure"]["type"],
+        "BadRequestError"
+    );
+    assert_eq!(
+        payload["scheduling_failure"]["upstream_failure"]["param"],
+        "input_tokens"
+    );
+    assert_eq!(
+        payload["scheduling_failure"]["upstream_failure"]["user_message"],
+        "输入上下文超过模型 gpt-5-target 的最大长度限制。请减少输入内容、缩短历史上下文或调整客户端上下文裁剪策略。"
+    );
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_usage_detail_with_ref_backed_bodies() {
     let (_upstream_url, upstream_hits, upstream_handle) =
         start_usage_upstream("/api/admin/usage/usage-ref-detail").await;
