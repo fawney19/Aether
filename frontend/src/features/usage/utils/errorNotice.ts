@@ -1,4 +1,5 @@
 import type { RequestDetail, RequestErrorDomain, RequestSchedulingFailure } from '@/api/dashboard'
+import { normalizeFailureMessage } from './failureDisplay'
 
 export interface RequestFailureNotice {
   title: string
@@ -17,6 +18,10 @@ function normalizeErrorDomain(domain: RequestErrorDomain | null | undefined): Re
   return domain ?? null
 }
 
+function normalizeDomainMessage(domain: RequestErrorDomain | null | undefined): string | null {
+  return normalizeFailureMessage(domain?.message ?? null, domain?.status_code ?? null)
+}
+
 function formatHttpStatus(statusCode: number | null | undefined): string | null {
   return typeof statusCode === 'number' && (statusCode < 200 || statusCode >= 300)
     ? `HTTP ${statusCode}`
@@ -32,8 +37,8 @@ function schedulingFailureMessage(
   fallbackDomain: RequestErrorDomain | null,
   fallbackErrorMessage: string | null,
 ): string | null {
-  return nonEmptyString(failure.message)
-    ?? nonEmptyString(fallbackDomain?.message)
+  return normalizeFailureMessage(failure.message, failure.status_code)
+    ?? normalizeDomainMessage(fallbackDomain)
     ?? fallbackErrorMessage
     ?? nonEmptyString(failure.reason_label)
     ?? nonEmptyString(failure.reason)
@@ -63,14 +68,14 @@ export function resolveRequestFailureNotice(detail: RequestDetail | null | undef
     ?? normalizeErrorDomain(detail.client_error)
     ?? normalizeErrorDomain(detail.upstream_error)
     ?? normalizeErrorDomain(detail.request_error)
-  const fallbackErrorMessage = nonEmptyString(detail.error_message ?? null)
+  const fallbackErrorMessage = normalizeFailureMessage(detail.error_message ?? null, detail.status_code)
   const schedulingFailure = detail.scheduling_failure ?? null
 
   if (schedulingFailure) {
     const upstreamFailure = schedulingFailure.upstream_failure ?? null
-    const upstreamMessage = nonEmptyString(upstreamFailure?.user_message)
-      ?? nonEmptyString(schedulingFailure.message)
-      ?? nonEmptyString(upstreamFailure?.message)
+    const upstreamMessage = normalizeFailureMessage(upstreamFailure?.user_message, upstreamFailure?.status_code)
+      ?? normalizeFailureMessage(schedulingFailure.message, schedulingFailure.status_code)
+      ?? normalizeFailureMessage(upstreamFailure?.message, upstreamFailure?.status_code)
     if (upstreamFailure && upstreamMessage) {
       return {
         title: schedulingFailureTitle(schedulingFailure),
@@ -105,7 +110,7 @@ export function resolveRequestFailureNotice(detail: RequestDetail | null | undef
   }
 
   const domain = fallbackDomain
-  const message = nonEmptyString(domain?.message) ?? fallbackErrorMessage
+  const message = normalizeDomainMessage(domain) ?? fallbackErrorMessage
   if (!message) return null
 
   return {
@@ -113,7 +118,7 @@ export function resolveRequestFailureNotice(detail: RequestDetail | null | undef
     message,
     isSchedulingFailure: false,
     meta: uniqueMeta([
-      formatHttpStatus(domain?.status_code ?? detail.status_code),
+      formatHttpStatus(domain ? domain.status_code ?? detail.status_code : undefined),
       nonEmptyString(domain?.type),
       nonEmptyString(domain?.source),
     ]),

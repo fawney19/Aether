@@ -165,4 +165,15 @@ describe('request failure notice', () => {
 
     expect(notice).toBeNull()
   })
+
+  it('normalizes equivalent upstream timeout messages to Chinese wording', () => {
+    const notice = resolveRequestFailureNotice(buildRequestDetail({
+      status_code: 503,
+      status: 'failed',
+      error_message: 'UpstreamRequest("provider stream first byte timeout after 10000 ms")',
+    }))
+
+    expect(notice?.message).toBe('请求超时（10秒）')
+    expect(notice?.meta).toEqual([])
+  })
 })
