@@ -50,6 +50,9 @@ use crate::repository::proxy_nodes::{
 use crate::repository::quota::{
     ProviderQuotaReadRepository, ProviderQuotaWriteRepository, SqliteProviderQuotaRepository,
 };
+use crate::repository::risk_control::{
+    RiskControlReadRepository, RiskControlWriteRepository, SqliteRiskControlRepository,
+};
 use crate::repository::routing_profiles::{
     RoutingGroupReadRepository, RoutingGroupWriteRepository, SqliteRoutingGroupRepository,
 };
@@ -235,6 +238,14 @@ impl SqliteBackend {
         Arc::new(SqliteProviderQuotaRepository::new(self.pool_clone()))
     }
 
+    pub fn risk_control_read_repository(&self) -> Arc<dyn RiskControlReadRepository> {
+        Arc::new(SqliteRiskControlRepository::new(self.pool_clone()))
+    }
+
+    pub fn risk_control_write_repository(&self) -> Arc<dyn RiskControlWriteRepository> {
+        Arc::new(SqliteRiskControlRepository::new(self.pool_clone()))
+    }
+
     pub fn settlement_write_repository(&self) -> Arc<dyn SettlementWriteRepository> {
         Arc::new(SqliteSettlementRepository::new(self.pool_clone()))
     }
@@ -321,7 +332,7 @@ mod tests {
                 .await
                 .expect("system config should list")
                 .len(),
-            2
+            4
         );
         assert!(backend
             .delete_system_config_value("feature.local")

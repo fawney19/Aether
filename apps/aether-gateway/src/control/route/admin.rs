@@ -14,6 +14,8 @@ mod observability_families;
 mod operations_families;
 #[path = "admin/provider_ops_routes.rs"]
 mod provider_ops_routes;
+#[path = "admin/risk_control_families.rs"]
+mod risk_control_families;
 #[path = "admin/routing_families.rs"]
 mod routing_families;
 #[path = "admin/system_families.rs"]
@@ -25,6 +27,7 @@ use model_provider_families::classify_admin_model_provider_family_route;
 use observability_families::classify_admin_observability_family_route;
 use operations_families::classify_admin_operations_family_route;
 use provider_ops_routes::classify_admin_provider_ops_routes;
+use risk_control_families::classify_admin_risk_control_family_route;
 use routing_families::classify_admin_routing_family_route;
 use system_families::classify_admin_system_family_route;
 
@@ -65,6 +68,12 @@ pub(super) fn classify_admin_route(
     } else if let Some(route) =
         classify_admin_operations_family_route(method, normalized_path, normalized_path_no_trailing)
     {
+        Some(route)
+    } else if let Some(route) = classify_admin_risk_control_family_route(
+        method,
+        normalized_path,
+        normalized_path_no_trailing,
+    ) {
         Some(route)
     } else if let Some(route) =
         classify_admin_system_family_route(method, normalized_path, normalized_path_no_trailing)

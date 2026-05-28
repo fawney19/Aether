@@ -36,6 +36,8 @@ mod proxy_node_staleness;
 mod proxy_upgrade_rollout;
 #[path = "runtime/request_candidate_cleanup.rs"]
 mod request_candidate_cleanup;
+#[path = "runtime/risk_control_retention.rs"]
+mod risk_control_retention;
 #[path = "runtime/runners.rs"]
 mod runners;
 #[path = "runtime/schedule.rs"]
@@ -104,6 +106,10 @@ pub(crate) use proxy_upgrade_rollout::{
     ProxyUpgradeRolloutStatus, ProxyUpgradeRolloutSummary, ProxyUpgradeRolloutTrackedNodeState,
 };
 use request_candidate_cleanup::*;
+pub(crate) use risk_control_retention::{
+    read_risk_control_retention_status, run_risk_control_retention_once,
+    spawn_risk_control_retention_worker, RiskControlRetentionRunSummary,
+};
 use runners::*;
 pub(crate) use runners::{
     run_manual_usage_cleanup_once, start_manual_usage_cleanup_task, ManualUsageCleanupError,

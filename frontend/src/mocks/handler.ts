@@ -4,6 +4,20 @@
  */
 
 import type { AxiosRequestConfig, AxiosResponse } from 'axios'
+import type {
+  RiskControlConfig,
+  RiskControlHashItem,
+  RiskControlLogItem,
+  RiskControlProviderKeyStatus,
+  RiskControlStatus,
+} from '@/api/risk-control'
+import {
+  MAX_REGEX_KEYWORD_ITEMS,
+  MAX_REGEX_SCAN_WINDOW_CHARS,
+  MAX_REGEX_TOTAL_SCAN_BUDGET_CHARS,
+  validateRiskControlProviderBaseUrl,
+  validateRiskControlRegexConfig,
+} from '@/api/risk-control'
 import { isDemoMode, DEMO_ACCOUNTS } from '@/config/demo'
 import {
   MOCK_ADMIN_USER,
@@ -64,6 +78,529 @@ function getCurrentProfile() {
 function requireAdmin() {
   if (!isCurrentUserAdmin()) {
     throw { response: createMockResponse({ detail: '需要管理员权限' }, 403) }
+  }
+}
+
+const MOCK_RISK_CONTROL_NOW = Math.floor(Date.now() / 1000)
+
+let mockRiskControlEnabled = false
+let mockRiskControlConfig: RiskControlConfig = {
+  enabled: false,
+  mode: 'observe',
+  keyword_mode: 'keyword_and_api',
+  keyword_match_mode: 'contains',
+  keywords: ['blocked', '高风险'],
+  keyword_exemptions: ['demo-safe'],
+  thresholds: { violence: 0.9, self_harm: 0.85 },
+  model_filter: {
+    mode: 'all',
+    models: [],
+  },
+  scope: {
+    users: {
+      mode: 'all',
+      values: [],
+    },
+    user_groups: {
+      mode: 'all',
+      values: [],
+    },
+    api_keys: {
+      mode: 'all',
+      values: [],
+    },
+    route_families: {
+      mode: 'all',
+      values: [],
+    },
+    route_kinds: {
+      mode: 'all',
+      values: [],
+    },
+    endpoints: {
+      mode: 'all',
+      values: [],
+    },
+  },
+  provider: {
+    base_url: 'https://api.openai.com',
+    model: 'omni-moderation-latest',
+    api_keys: [],
+    timeout_ms: 8000,
+    max_retries: 2,
+    key_freeze_seconds: 300,
+    fail_closed: false,
+  },
+  hash_block: {
+    enabled: true,
+    learn_from_flagged: true,
+  },
+  auto_action: {
+    enabled: false,
+    violation_threshold: 3,
+    window_seconds: 86400,
+    disable_user: true,
+    lock_api_key: false,
+  },
+  retention: {
+    hit_days: 90,
+    non_hit_days: 14,
+    auto_run_interval_minutes: 60,
+  },
+  notification: {
+    enabled: false,
+    notify_on_flagged: true,
+    notify_on_auto_action: true,
+    notify_on_user_action_notice: false,
+    include_excerpt: false,
+  },
+  observe: {
+    queue_capacity: 1024,
+  },
+  sample_rate: 1,
+  max_text_chars: 65536,
+  excerpt_chars: 512,
+  log_all: false,
+  block_status: 400,
+  block_message: '请求触发风控策略，已拒绝转发。',
+}
+
+let mockRiskControlLogs: RiskControlLogItem[] = [
+  {
+    id: 'risk-log-demo-001',
+    trace_id: 'trace-risk-demo-001',
+    request_id: 'req-risk-demo-001',
+    user_id: 'demo-user-uuid-0002',
+    username: 'Demo User',
+    user_email: 'user@demo.aether.io',
+    api_key_id: 'api-key-demo-001',
+    api_key_name: 'Default Key',
+    route_family: 'ai_public',
+    route_kind: 'chat',
+    api_format: 'openai',
+    endpoint: 'openai:chat',
+    model: 'gpt-5',
+    mode: 'pre_block',
+    action: 'block',
+    decision_source: 'keyword',
+    flagged: true,
+    highest_category: null,
+    highest_score: 0,
+    category_scores: null,
+    thresholds: null,
+    matched_keywords: ['blocked'],
+    input_hash: 'demo-risk-hash-001',
+    excerpt: null,
+    excerpt_redacted: true,
+    excerpt_redaction_reason: 'sensitive_excerpt_hidden',
+    latency_ms: 12,
+    queue_delay_ms: null,
+    violation_count: 1,
+    auto_action: 'disable_user',
+    auto_action_enforced: true,
+    notification_sent: false,
+    notification_attempts: 1,
+    notification_last_error: '通知中心事件或渠道未就绪',
+    notification_last_attempt_at: new Date((MOCK_RISK_CONTROL_NOW - 590) * 1000).toISOString(),
+    notification_last_attempt_at_unix_secs: MOCK_RISK_CONTROL_NOW - 590,
+    notification_outbox: {
+      id: 'risk-notify-demo-001',
+      log_id: 'risk-log-demo-001',
+      item_key: 'risk_control_auto_action',
+      status: 'dead',
+      attempt_count: 10,
+      max_attempts: 10,
+      next_attempt_at: null,
+      next_attempt_at_unix_secs: null,
+      lease_until: null,
+      lease_until_unix_secs: null,
+      last_error: '通知中心事件或渠道未就绪',
+      created_at: new Date((MOCK_RISK_CONTROL_NOW - 600) * 1000).toISOString(),
+      created_at_unix_secs: MOCK_RISK_CONTROL_NOW - 600,
+      updated_at: new Date((MOCK_RISK_CONTROL_NOW - 590) * 1000).toISOString(),
+      updated_at_unix_secs: MOCK_RISK_CONTROL_NOW - 590,
+      sent_at: null,
+      sent_at_unix_secs: null,
+    },
+    notification_outboxes: [
+      {
+        id: 'risk-notify-demo-001',
+        log_id: 'risk-log-demo-001',
+        item_key: 'risk_control_auto_action',
+        status: 'dead',
+        attempt_count: 10,
+        max_attempts: 10,
+        next_attempt_at: null,
+        next_attempt_at_unix_secs: null,
+        lease_until: null,
+        lease_until_unix_secs: null,
+        last_error: '通知中心事件或渠道未就绪',
+        created_at: new Date((MOCK_RISK_CONTROL_NOW - 600) * 1000).toISOString(),
+        created_at_unix_secs: MOCK_RISK_CONTROL_NOW - 600,
+        updated_at: new Date((MOCK_RISK_CONTROL_NOW - 590) * 1000).toISOString(),
+        updated_at_unix_secs: MOCK_RISK_CONTROL_NOW - 590,
+        sent_at: null,
+        sent_at_unix_secs: null,
+      },
+      {
+        id: 'risk-notify-demo-001-user',
+        log_id: 'risk-log-demo-001',
+        item_key: 'risk_control_user_action_notice',
+        status: 'pending',
+        attempt_count: 0,
+        max_attempts: 10,
+        next_attempt_at: new Date((MOCK_RISK_CONTROL_NOW + 120) * 1000).toISOString(),
+        next_attempt_at_unix_secs: MOCK_RISK_CONTROL_NOW + 120,
+        lease_until: null,
+        lease_until_unix_secs: null,
+        last_error: null,
+        created_at: new Date((MOCK_RISK_CONTROL_NOW - 580) * 1000).toISOString(),
+        created_at_unix_secs: MOCK_RISK_CONTROL_NOW - 580,
+        updated_at: new Date((MOCK_RISK_CONTROL_NOW - 580) * 1000).toISOString(),
+        updated_at_unix_secs: MOCK_RISK_CONTROL_NOW - 580,
+        sent_at: null,
+        sent_at_unix_secs: null,
+      },
+    ],
+    error_message: null,
+    created_at: new Date((MOCK_RISK_CONTROL_NOW - 600) * 1000).toISOString(),
+    created_at_unix_secs: MOCK_RISK_CONTROL_NOW - 600,
+  },
+  {
+    id: 'risk-log-demo-002',
+    trace_id: 'trace-risk-demo-002',
+    request_id: 'req-risk-demo-002',
+    user_id: 'demo-user-uuid-0003',
+    username: 'Alice Chen',
+    user_email: 'alice@demo.aether.io',
+    api_key_id: 'api-key-demo-002',
+    api_key_name: 'Analytics Key',
+    route_family: 'ai_public',
+    route_kind: 'responses',
+    api_format: 'openai',
+    endpoint: 'openai:responses',
+    model: 'gpt-5-mini',
+    mode: 'observe',
+    action: 'allow',
+    decision_source: 'sample_skipped',
+    flagged: false,
+    highest_category: null,
+    highest_score: 0,
+    category_scores: null,
+    thresholds: null,
+    matched_keywords: null,
+    input_hash: null,
+    excerpt: null,
+    excerpt_redacted: true,
+    excerpt_redaction_reason: 'sensitive_excerpt_hidden',
+    latency_ms: 3,
+    queue_delay_ms: 18,
+    violation_count: 0,
+    auto_action: null,
+    auto_action_enforced: false,
+    notification_sent: false,
+    notification_attempts: 0,
+    notification_last_error: null,
+    notification_last_attempt_at: null,
+    notification_last_attempt_at_unix_secs: null,
+    notification_outbox: null,
+    notification_outboxes: [],
+    error_message: null,
+    created_at: new Date((MOCK_RISK_CONTROL_NOW - 1800) * 1000).toISOString(),
+    created_at_unix_secs: MOCK_RISK_CONTROL_NOW - 1800,
+  },
+]
+
+let mockRiskControlHashes: RiskControlHashItem[] = [
+  {
+    input_hash: 'demo-risk-hash-001',
+    source_log_id: 'risk-log-demo-001',
+    reason: 'keyword',
+    highest_category: null,
+    highest_score: 0,
+    excerpt: null,
+    excerpt_redacted: true,
+    excerpt_redaction_reason: 'sensitive_excerpt_hidden',
+    first_seen_at: new Date((MOCK_RISK_CONTROL_NOW - 600) * 1000).toISOString(),
+    first_seen_at_unix_secs: MOCK_RISK_CONTROL_NOW - 600,
+    last_seen_at: new Date((MOCK_RISK_CONTROL_NOW - 60) * 1000).toISOString(),
+    last_seen_at_unix_secs: MOCK_RISK_CONTROL_NOW - 60,
+    hit_count: 2,
+  },
+]
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
+function maskDemoSecret(value: string): string {
+  const chars = value.trim().split('')
+  if (chars.length === 0) return ''
+  if (chars.length <= 8) return '****'
+  return `${chars.slice(0, 4).join('')}****${chars.slice(-4).join('')}`
+}
+
+function riskControlConfigValidation(config = mockRiskControlConfig, enabled = mockRiskControlEnabled) {
+  let configError: string | null = null
+  if (config.model_filter.mode !== 'all' && config.model_filter.models.length === 0) {
+    configError = '模型范围选择包含或排除时，需要至少填写一个模型'
+  }
+  const scopeLabels: Record<keyof RiskControlConfig['scope'], string> = {
+    users: '用户 ID',
+    user_groups: '用户组',
+    api_keys: 'API Key ID',
+    route_families: 'Route Family',
+    route_kinds: 'Route Kind',
+    endpoints: '端点签名',
+  }
+  if (!configError) {
+    for (const [key, label] of Object.entries(scopeLabels) as [keyof RiskControlConfig['scope'], string][]) {
+      if (config.scope[key].mode !== 'all' && config.scope[key].values.length === 0) {
+        configError = `策略粒度「${label}」选择包含或排除时，需要至少填写一个值`
+        break
+      }
+    }
+  }
+  if (!configError && enabled && config.mode !== 'off') {
+    const needsProvider = config.keyword_mode !== 'keyword_only'
+    if (config.keyword_mode === 'keyword_only' && config.keywords.length === 0) {
+      configError = '关键词模式需要至少配置一个关键词'
+    } else {
+      configError = validateRiskControlRegexConfig(config)
+    }
+    if (!configError && needsProvider && config.provider.api_keys.length === 0) {
+      configError = 'API 审核模式需要至少配置一个 Provider API Key'
+    }
+    if (!configError && needsProvider) {
+      configError = validateRiskControlProviderBaseUrl(config.provider.base_url)
+    }
+  }
+  const valid = !configError
+  return {
+    config_validated: valid,
+    config_error: configError,
+  }
+}
+
+function updateRiskControlModuleStatus() {
+  const moduleStatus = MOCK_MODULE_STATUSES.risk_control
+  if (!moduleStatus) return
+  const validation = riskControlConfigValidation()
+  moduleStatus.enabled = mockRiskControlEnabled
+  moduleStatus.config_validated = validation.config_validated
+  moduleStatus.config_error = validation.config_error
+  moduleStatus.active = moduleStatus.available && moduleStatus.enabled && moduleStatus.config_validated
+}
+
+function riskControlProviderKeyStatuses(keys = mockRiskControlConfig.provider.api_keys): RiskControlProviderKeyStatus[] {
+  return keys.map((key, index) => ({
+    index,
+    key_hash: `demo-provider-key-${index + 1}`,
+    masked: maskDemoSecret(key),
+    status: 'unknown',
+    failure_count: 0,
+    success_count: 0,
+    last_error: null,
+    last_checked_at_unix_secs: null,
+    frozen_until_unix_secs: null,
+    last_latency_ms: null,
+    last_http_status: null,
+    last_tested: false,
+    configured: true,
+  }))
+}
+
+function currentRiskControlStatus(): RiskControlStatus {
+  const validation = riskControlConfigValidation()
+  const notificationTriggerSelected = mockRiskControlConfig.notification.notify_on_flagged
+    || mockRiskControlConfig.notification.notify_on_auto_action
+    || mockRiskControlConfig.notification.notify_on_user_action_notice
+  const notificationReady = mockRiskControlConfig.notification.enabled && notificationTriggerSelected
+  const notificationOutboxes = mockRiskControlLogs.flatMap(item => item.notification_outboxes?.length
+    ? item.notification_outboxes
+    : item.notification_outbox
+      ? [item.notification_outbox]
+      : [])
+  return {
+    enabled: mockRiskControlEnabled,
+    mode: mockRiskControlConfig.mode,
+    keyword_mode: mockRiskControlConfig.keyword_mode,
+    config_validated: validation.config_validated,
+    config_error: validation.config_error,
+    notification_ready: notificationReady,
+    notification_warning: mockRiskControlConfig.notification.enabled && !notificationTriggerSelected
+      ? '通知已启用，但未选择命中事件、自动处置或用户处置通知'
+      : null,
+    notification_outbox: {
+      pending: notificationOutboxes.filter(item => item.status === 'pending').length,
+      processing: notificationOutboxes.filter(item => item.status === 'processing').length,
+      sent: notificationOutboxes.filter(item => item.status === 'sent').length,
+      dead: notificationOutboxes.filter(item => item.status === 'dead').length,
+      oldest_pending_at_unix_secs: notificationOutboxes
+        .filter(item => item.status === 'pending')
+        .map(item => item.created_at_unix_secs ?? 0)
+        .filter(Boolean)
+        .sort((left, right) => left - right)[0] ?? null,
+      next_attempt_at_unix_secs: notificationOutboxes
+        .filter(item => item.status === 'pending')
+        .map(item => item.next_attempt_at_unix_secs ?? 0)
+        .filter(Boolean)
+        .sort((left, right) => left - right)[0] ?? null,
+      last_error: notificationOutboxes
+        .filter(item => item.status !== 'sent' && item.last_error)
+        .sort((left, right) => (right.updated_at_unix_secs ?? 0) - (left.updated_at_unix_secs ?? 0))[0]
+        ?.last_error ?? null,
+    },
+    retention_status: {
+      last_started_at_unix_secs: MOCK_RISK_CONTROL_NOW - 3600,
+      last_completed_at_unix_secs: MOCK_RISK_CONTROL_NOW - 3596,
+      last_success: true,
+      last_hit_deleted: 0,
+      last_non_hit_deleted: 3,
+      last_error: null,
+      next_run_at_unix_secs: mockRiskControlEnabled && mockRiskControlConfig.retention.auto_run_interval_minutes > 0
+        ? MOCK_RISK_CONTROL_NOW + mockRiskControlConfig.retention.auto_run_interval_minutes * 60
+        : null,
+    },
+    observe_queue: {
+      capacity: 1024,
+      queued: 0,
+      enqueued_total: 12,
+      dropped_total: 0,
+      processed_total: 12,
+      failed_total: 0,
+    },
+    logs_total: mockRiskControlLogs.length,
+    flagged_total: mockRiskControlLogs.filter(item => item.flagged).length,
+    flagged_hashes_total: mockRiskControlHashes.length,
+    provider_key_count: mockRiskControlConfig.provider.api_keys.length,
+    provider_key_statuses: riskControlProviderKeyStatuses(),
+    keyword_count: mockRiskControlConfig.keywords.length,
+  }
+}
+
+function pagedRiskControlResponse<T>(items: T[], config: AxiosRequestConfig) {
+  const searchParams = new URL(config.url ?? '', 'https://mock.local').searchParams
+  const page = Math.max(1, Number(searchParams.get('page')) || 1)
+  const pageSize = Math.max(1, Number(searchParams.get('page_size')) || 20)
+  const start = (page - 1) * pageSize
+  return {
+    items: items.slice(start, start + pageSize),
+    total: items.length,
+    page,
+    page_size: pageSize,
+    pages: Math.max(1, Math.ceil(items.length / pageSize)),
+  }
+}
+
+function prefixByCharBudget(text: string, maxChars: number) {
+  return Array.from(text).slice(0, maxChars).join('')
+}
+
+function regexScanBudget(config: RiskControlConfig, text: string) {
+  if (config.keyword_mode === 'api_only' || config.keyword_match_mode !== 'regex') {
+    return {
+      scanText: text,
+      regexPatterns: [] as string[],
+      regex_scan_limited: false,
+      regex_pattern_limited: false,
+      regex_invalid_pattern_count: 0,
+      regex_scan_chars: 0,
+      regex_pattern_count: 0,
+      regex_total_scan_budget_chars: 0,
+    }
+  }
+  const allRegexPatterns = config.keywords.map(keyword => keyword.trim()).filter(Boolean)
+  const regexPatterns = allRegexPatterns.slice(0, MAX_REGEX_KEYWORD_ITEMS)
+  const patternCount = regexPatterns.length
+  if (patternCount === 0) {
+    return {
+      scanText: '',
+      regexPatterns,
+      regex_scan_limited: false,
+      regex_pattern_limited: false,
+      regex_invalid_pattern_count: 0,
+      regex_scan_chars: 0,
+      regex_pattern_count: 0,
+      regex_total_scan_budget_chars: 0,
+    }
+  }
+  const perPatternBudget = Math.max(1, Math.floor(MAX_REGEX_TOTAL_SCAN_BUDGET_CHARS / patternCount))
+  const scanChars = Math.min(MAX_REGEX_SCAN_WINDOW_CHARS, perPatternBudget)
+  const invalidPatternCount = regexPatterns.filter(pattern => {
+    try {
+      return new RegExp(pattern, 'i').test('')
+    } catch {
+      return true
+    }
+  }).length
+  return {
+    scanText: prefixByCharBudget(text, scanChars),
+    regexPatterns,
+    regex_scan_limited: Array.from(text).length > scanChars,
+    regex_pattern_limited: allRegexPatterns.length > MAX_REGEX_KEYWORD_ITEMS,
+    regex_invalid_pattern_count: invalidPatternCount,
+    regex_scan_chars: scanChars,
+    regex_pattern_count: patternCount,
+    regex_total_scan_budget_chars: MAX_REGEX_TOTAL_SCAN_BUDGET_CHARS,
+  }
+}
+
+function mockRiskControlTest(text: string, config = mockRiskControlConfig) {
+  const normalized = text.toLowerCase()
+  const scanBudget = regexScanBudget(config, text)
+  const keywordCandidates = config.keyword_match_mode === 'regex'
+    ? scanBudget.regexPatterns
+    : config.keywords
+  const matchedKeywords = config.keyword_mode === 'api_only' ? [] : keywordCandidates.filter(keyword => {
+    const pattern = keyword.trim()
+    if (!pattern) return false
+    if (config.keyword_match_mode === 'exact') return text === pattern
+    if (config.keyword_match_mode === 'regex') {
+      try {
+        const regex = new RegExp(pattern, 'i')
+        return !regex.test('') && regex.test(scanBudget.scanText)
+      } catch {
+        return false
+      }
+    }
+    return normalized.includes(pattern.toLowerCase())
+  })
+  const regexBudgetFlagged = config.keyword_mode !== 'api_only'
+    && config.keyword_match_mode === 'regex'
+    && matchedKeywords.length === 0
+    && (
+      scanBudget.regex_scan_limited
+      || scanBudget.regex_pattern_limited
+      || scanBudget.regex_invalid_pattern_count > 0
+    )
+  const flagged = matchedKeywords.length > 0 || regexBudgetFlagged
+  const decisionSource = matchedKeywords.length > 0
+    ? 'keyword'
+    : scanBudget.regex_scan_limited || scanBudget.regex_pattern_limited
+      ? 'regex_budget_limited'
+      : scanBudget.regex_invalid_pattern_count > 0
+        ? 'regex_config_invalid'
+        : 'none'
+  return {
+    input_excerpt: text.slice(0, 256),
+    result: {
+      action: flagged && config.mode === 'pre_block' ? 'block' : flagged ? 'observe' : 'allow',
+      decision_source: decisionSource,
+      flagged,
+      highest_category: null,
+      highest_score: 0,
+      category_scores: null,
+      matched_keywords: matchedKeywords,
+      regex_scan_limited: scanBudget.regex_scan_limited,
+      regex_pattern_limited: scanBudget.regex_pattern_limited,
+      regex_invalid_pattern_count: scanBudget.regex_invalid_pattern_count,
+      regex_scan_chars: scanBudget.regex_scan_chars,
+      regex_pattern_count: scanBudget.regex_pattern_count,
+      regex_total_scan_budget_chars: scanBudget.regex_total_scan_budget_chars,
+      error_message: null,
+    },
+    provider_key_statuses: riskControlProviderKeyStatuses(),
   }
 }
 
@@ -1295,7 +1832,117 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
   'GET /api/admin/modules/status': async () => {
     await delay()
     requireAdmin()
+    updateRiskControlModuleStatus()
     return createMockResponse(MOCK_MODULE_STATUSES)
+  },
+
+  // ========== Admin: Risk Control ==========
+  'GET /api/admin/risk-control/status': async () => {
+    await delay()
+    requireAdmin()
+    updateRiskControlModuleStatus()
+    return createMockResponse(currentRiskControlStatus())
+  },
+
+  'GET /api/admin/risk-control/config': async () => {
+    await delay()
+    requireAdmin()
+    updateRiskControlModuleStatus()
+    return createMockResponse({
+      enabled: mockRiskControlEnabled,
+      config: cloneJson(mockRiskControlConfig),
+      ...riskControlConfigValidation(),
+    })
+  },
+
+  'PUT /api/admin/risk-control/config': async (config) => {
+    await delay()
+    requireAdmin()
+    const body = JSON.parse(config.data || '{}') as {
+      enabled?: boolean
+      config?: RiskControlConfig
+    }
+    const nextEnabled = body.enabled === true
+    const nextConfig = body.config && typeof body.config === 'object'
+      ? cloneJson(body.config)
+      : cloneJson(mockRiskControlConfig)
+    nextConfig.enabled = nextEnabled
+    const validation = riskControlConfigValidation(nextConfig, nextEnabled)
+    if (!validation.config_validated) {
+      throw { response: createMockResponse({ detail: validation.config_error || '风控配置无效' }, 400) }
+    }
+    mockRiskControlEnabled = nextEnabled
+    if (body.config && typeof body.config === 'object') {
+      mockRiskControlConfig = nextConfig
+    }
+    mockRiskControlConfig.enabled = mockRiskControlEnabled
+    updateRiskControlModuleStatus()
+    return createMockResponse({
+      enabled: mockRiskControlEnabled,
+      config: cloneJson(mockRiskControlConfig),
+      ...riskControlConfigValidation(),
+    })
+  },
+
+  'GET /api/admin/risk-control/logs': async (config) => {
+    await delay()
+    requireAdmin()
+    return createMockResponse(pagedRiskControlResponse(mockRiskControlLogs, config))
+  },
+
+  'GET /api/admin/risk-control/hashes': async (config) => {
+    await delay()
+    requireAdmin()
+    return createMockResponse(pagedRiskControlResponse(mockRiskControlHashes, config))
+  },
+
+  'DELETE /api/admin/risk-control/hashes': async () => {
+    await delay()
+    requireAdmin()
+    const deleted = mockRiskControlHashes.length
+    mockRiskControlHashes = []
+    return createMockResponse({ deleted })
+  },
+
+  'POST /api/admin/risk-control/test': async (config) => {
+    await delay()
+    requireAdmin()
+    const body = JSON.parse(config.data || '{}') as {
+      text?: string
+      config?: RiskControlConfig
+    }
+    return createMockResponse(mockRiskControlTest(body.text ?? '', body.config ?? mockRiskControlConfig))
+  },
+
+  'POST /api/admin/risk-control/provider-keys/test': async (config) => {
+    await delay()
+    requireAdmin()
+    const body = JSON.parse(config.data || '{}') as {
+      text?: string
+      api_keys?: string[]
+      config?: RiskControlConfig
+    }
+    const keys = Array.isArray(body.api_keys) && body.api_keys.length > 0
+      ? body.api_keys
+      : mockRiskControlConfig.provider.api_keys
+    return createMockResponse({
+      ...mockRiskControlTest(body.text ?? 'hello', body.config ?? mockRiskControlConfig),
+      provider_key_statuses: riskControlProviderKeyStatuses(keys).map(item => ({
+        ...item,
+        status: 'ok',
+        success_count: 1,
+        last_checked_at_unix_secs: Math.floor(Date.now() / 1000),
+        last_latency_ms: 86,
+        last_http_status: 200,
+        last_tested: true,
+      })),
+    })
+  },
+
+  'POST /api/admin/risk-control/retention/run': async () => {
+    await delay()
+    requireAdmin()
+    return createMockResponse({ hit_deleted: 0, non_hit_deleted: 0 })
   },
 
   // ========== Admin: System ==========
@@ -1935,6 +2582,92 @@ registerDynamicRoute('PUT', '/api/admin/modules/status/:moduleName/enabled', asy
   }
   MOCK_MODULE_STATUSES[params.moduleName] = updated
   return createMockResponse(updated)
+})
+
+// 风控哈希删除
+registerDynamicRoute('DELETE', '/api/admin/risk-control/hashes/:inputHash', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const inputHash = decodeURIComponent(params.inputHash)
+  const before = mockRiskControlHashes.length
+  mockRiskControlHashes = mockRiskControlHashes.filter(item => item.input_hash !== inputHash)
+  return createMockResponse({ deleted: mockRiskControlHashes.length !== before })
+})
+
+// 风控通知重试
+registerDynamicRoute('POST', '/api/admin/risk-control/logs/:logId/notification/retry', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const logId = decodeURIComponent(params.logId)
+  const item = mockRiskControlLogs.find(row => row.id === logId)
+  const retryableOutboxes = item
+    ? (item.notification_outboxes?.length
+        ? item.notification_outboxes
+        : item.notification_outbox
+          ? [item.notification_outbox]
+          : [])
+      .filter(outbox => outbox.status !== 'sent')
+    : []
+  if (!item || retryableOutboxes.length === 0) {
+    throw { response: createMockResponse({ detail: '没有可重试的通知任务' }, 404) }
+  }
+  const now = Math.floor(Date.now() / 1000)
+  const resetOutboxes = retryableOutboxes.map(outbox => ({
+    ...outbox,
+    status: 'pending',
+    attempt_count: 0,
+    next_attempt_at: new Date(now * 1000).toISOString(),
+    next_attempt_at_unix_secs: now,
+    lease_until: null,
+    lease_until_unix_secs: null,
+    last_error: null,
+    updated_at: new Date(now * 1000).toISOString(),
+    updated_at_unix_secs: now,
+    sent_at: null,
+    sent_at_unix_secs: null,
+  }))
+  item.notification_outboxes = [
+    ...resetOutboxes,
+    ...(item.notification_outboxes ?? []).filter(outbox => outbox.status === 'sent'),
+  ]
+  item.notification_outbox = item.notification_outboxes[0] ?? null
+  return createMockResponse({
+    queued: true,
+    notification: item.notification_outbox,
+    notifications: item.notification_outboxes,
+  })
+})
+
+// 风控用户解禁
+registerDynamicRoute('POST', '/api/admin/risk-control/users/:userId/unban', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const userId = decodeURIComponent(params.userId)
+  return createMockResponse({
+    updated: true,
+    user: {
+      id: userId,
+      username: 'Demo User',
+      email: 'user@demo.aether.io',
+      is_active: true,
+    },
+  })
+})
+
+// 风控 API Key 解锁
+registerDynamicRoute('POST', '/api/admin/risk-control/users/:userId/api-keys/:apiKeyId/unlock', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const userId = decodeURIComponent(params.userId)
+  const apiKeyId = decodeURIComponent(params.apiKeyId)
+  return createMockResponse({
+    updated: true,
+    api_key: {
+      id: apiKeyId,
+      user_id: userId,
+      is_locked: false,
+    },
+  })
 })
 
 // Provider 详情

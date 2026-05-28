@@ -2608,7 +2608,7 @@ mod tests {
             assert!(sql.contains("allow_auth_channel_mismatch_formats"));
         }
 
-        let source = include_str!("postgres.rs");
+        let source = include_str!("postgres.rs").replace("\r\n", "\n");
         assert!(
             source
                 .matches(
@@ -2624,7 +2624,7 @@ mod tests {
 
     #[test]
     fn provider_api_keys_create_key_insert_placeholders_match_bind_order() {
-        let source = include_str!("postgres.rs");
+        let source = include_str!("postgres.rs").replace("\r\n", "\n");
         assert!(source.contains(
             "  $24,\n  $25,\n  $26,\n  CASE\n    WHEN $27::double precision IS NULL THEN NULL"
         ));

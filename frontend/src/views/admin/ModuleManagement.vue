@@ -67,7 +67,7 @@
               <Button
                 variant="outline"
                 size="sm"
-                class="gap-1.5"
+                class="gap-1.5 whitespace-nowrap"
                 @click.stop="router.push(tool.href)"
               >
                 <Settings class="w-3.5 h-3.5" />
@@ -108,8 +108,8 @@
           :class="[
             {
               'bg-muted/40 border-muted': !module.available,
-              'border-primary/40 bg-gradient-to-br from-primary/5 to-primary/10 shadow-sm': module.active,
-              'border-border bg-card hover:border-primary/20': !module.active && module.available
+              'border-primary/40 bg-gradient-to-br from-primary/5 to-primary/10 shadow-sm': module.active && module.name !== 'risk_control',
+              'border-border bg-card hover:border-primary/20': module.available && (!module.active || module.name === 'risk_control')
             },
             draggedModuleName === module.name ? 'opacity-70 ring-2 ring-primary/30' : '',
             dragOverModuleName === module.name ? 'ring-2 ring-primary/40 border-primary/50' : '',
@@ -177,16 +177,17 @@
           </div>
 
           <!-- 操作区域 -->
-          <div class="mt-5 pt-4 border-t border-border/50 flex items-center justify-between">
-            <div class="flex items-center gap-3">
+          <div class="mt-5 flex items-center justify-between gap-3 border-t border-border/50 pt-4">
+            <div class="flex min-w-0 flex-1 items-center gap-3">
               <Switch
+                class="shrink-0"
                 :model-value="module.enabled"
                 :disabled="!module.available || !module.config_validated || toggling[module.name]"
                 @update:model-value="(val: boolean) => toggleModule(module.name, val)"
               />
-              <div class="flex flex-col">
+              <div class="flex min-w-0 flex-col">
                 <span
-                  class="text-sm"
+                  class="text-sm leading-5"
                   :class="module.enabled ? 'text-foreground' : 'text-muted-foreground'"
                 >
                   {{ module.enabled ? '启用' : '禁用' }}
@@ -194,7 +195,8 @@
                 <!-- 配置未验证提示（小字） -->
                 <span
                   v-if="module.available && !module.config_validated"
-                  class="text-xs text-muted-foreground"
+                  class="truncate text-xs text-muted-foreground"
+                  :title="module.config_error || '请先完成配置'"
                 >
                   {{ module.config_error || '请先完成配置' }}
                 </span>
@@ -204,7 +206,7 @@
               v-if="module.admin_route"
               variant="outline"
               size="sm"
-              class="gap-1.5"
+              class="min-w-[4.75rem] shrink-0 justify-center gap-1.5 whitespace-nowrap"
               @click="router.push(module.admin_route)"
             >
               <Settings class="w-3.5 h-3.5" />

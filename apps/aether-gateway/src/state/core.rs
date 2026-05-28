@@ -56,11 +56,15 @@ use crate::maintenance::spawn_proxy_node_metrics_cleanup_worker;
 use crate::maintenance::spawn_proxy_node_stale_cleanup_worker;
 use crate::maintenance::spawn_proxy_upgrade_rollout_worker;
 use crate::maintenance::spawn_request_candidate_cleanup_worker;
+use crate::maintenance::spawn_risk_control_retention_worker;
 use crate::maintenance::spawn_stats_aggregation_worker;
 use crate::maintenance::spawn_stats_hourly_aggregation_worker;
 use crate::maintenance::spawn_usage_cleanup_worker;
 use crate::maintenance::spawn_usage_counter_flush_worker;
 use crate::maintenance::spawn_wallet_daily_usage_aggregation_worker;
+use crate::risk_control::{
+    spawn_risk_control_notification_worker, spawn_risk_control_observe_worker,
+};
 
 const SYSTEM_CONFIG_CACHE_TTL: Duration = Duration::from_secs(3);
 const SCHEDULER_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &[
@@ -243,6 +247,9 @@ impl AppState {
             scheduler_affinity_epoch: Arc::new(AtomicU64::new(0)),
             dashboard_response_cache: Arc::new(DashboardResponseCache::default()),
             system_config_cache: Arc::new(SystemConfigCache::default()),
+            risk_control_observe_queue: Arc::new(
+                crate::risk_control::RiskControlObserveQueue::default(),
+            ),
             fallback_metrics: Arc::new(fallback_metrics::GatewayFallbackMetrics::default()),
             frontdoor_cors: None,
             frontdoor_user_rpm: Arc::new(FrontdoorUserRpmLimiter::new(
@@ -1261,6 +1268,18 @@ impl AppState {
         supervise_worker(
             crate::task_runtime::TASK_KEY_GEMINI_FILES_CLEANUP,
             spawn_gemini_file_mapping_cleanup_worker(self.data.clone()),
+        );
+        supervise_worker(
+            crate::task_runtime::TASK_KEY_RISK_CONTROL_OBSERVE_WORKER,
+            spawn_risk_control_observe_worker(self.clone()),
+        );
+        supervise_worker(
+            crate::task_runtime::TASK_KEY_RISK_CONTROL_NOTIFICATION_OUTBOX,
+            spawn_risk_control_notification_worker(self.clone()),
+        );
+        supervise_worker(
+            crate::task_runtime::TASK_KEY_RISK_CONTROL_RETENTION,
+            spawn_risk_control_retention_worker(self.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_MODEL_FETCH_WORKER,

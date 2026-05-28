@@ -29,6 +29,7 @@ WHERE table_schema = 'public'
     'oauth_providers',
     'provider_api_keys',
     'proxy_nodes',
+    'risk_control_logs',
     'routing_groups',
     'user_groups',
     'usage_routing_snapshots',

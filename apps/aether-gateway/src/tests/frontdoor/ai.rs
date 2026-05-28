@@ -1,8 +1,9 @@
 use super::{
-    hash_api_key, sample_models_candidate_row, unrestricted_models_snapshot,
-    InMemoryAuthApiKeySnapshotRepository, InMemoryMinimalCandidateSelectionReadRepository,
-    InMemoryVideoTaskRepository, UpsertVideoTask, VideoTaskLookupKey, VideoTaskReadRepository,
-    VideoTaskStatus, VideoTaskWriteRepository, DEVELOPMENT_ENCRYPTION_KEY,
+    explicit_user_limit_snapshot, hash_api_key, sample_models_candidate_row,
+    unrestricted_models_snapshot, InMemoryAuthApiKeySnapshotRepository,
+    InMemoryMinimalCandidateSelectionReadRepository, InMemoryVideoTaskRepository, UpsertVideoTask,
+    VideoTaskLookupKey, VideoTaskReadRepository, VideoTaskStatus, VideoTaskWriteRepository,
+    DEVELOPMENT_ENCRYPTION_KEY,
 };
 use crate::image_capabilities::openai_image_gateway_max_generation_count;
 use crate::tests::{
@@ -238,6 +239,86 @@ async fn gateway_handles_public_openai_models_without_hitting_fallback_probe() {
 
     gateway_handle.abort();
     fallback_probe_handle.abort();
+}
+
+#[tokio::test]
+async fn risk_control_blocked_requests_still_consume_frontdoor_rpm_before_next_attempt() {
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-risk-rpm-order")),
+        explicit_user_limit_snapshot("api-key-risk-rpm-order", "user-risk-rpm-order"),
+    )]));
+    let candidate_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_models_candidate_row(
+                "provider-risk-rpm-order",
+                "openai",
+                "openai:chat",
+                "gpt-5",
+                10,
+            ),
+        ]));
+    let data_state =
+        crate::data::GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
+            candidate_repository,
+            auth_repository,
+        )
+        .with_system_config_values_for_tests([
+            (
+                crate::risk_control::RISK_CONTROL_ENABLED_CONFIG_KEY.to_string(),
+                json!(true),
+            ),
+            (
+                crate::risk_control::RISK_CONTROL_CONFIG_KEY.to_string(),
+                json!({
+                    "mode": "pre_block",
+                    "keyword_mode": "keyword_only",
+                    "keywords": ["blocked"],
+                    "block_status": 400
+                }),
+            ),
+        ]);
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data_state),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let request_body = json!({
+        "model": "gpt-5",
+        "messages": [{"role": "user", "content": "blocked request"}]
+    });
+
+    let first = client
+        .post(format!("{gateway_url}/v1/chat/completions"))
+        .header("authorization", "Bearer sk-risk-rpm-order")
+        .json(&request_body)
+        .send()
+        .await
+        .expect("first request should complete");
+    assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+    let first_payload: serde_json::Value = first.json().await.expect("json body should parse");
+    assert_eq!(
+        first_payload["error"]["type"],
+        json!("risk_control_blocked")
+    );
+
+    let second = client
+        .post(format!("{gateway_url}/v1/chat/completions"))
+        .header("authorization", "Bearer sk-risk-rpm-order")
+        .json(&request_body)
+        .send()
+        .await
+        .expect("second request should complete");
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    let second_payload: serde_json::Value = second.json().await.expect("json body should parse");
+    assert_eq!(
+        second_payload["error"]["type"],
+        json!("rate_limit_exceeded")
+    );
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]

@@ -49,6 +49,13 @@ use aether_data::repository::proxy_nodes::{
     StoredProxyFleetMetricsBucket, StoredProxyNode, StoredProxyNodeEvent,
     StoredProxyNodeMetricsBucket,
 };
+use aether_data::repository::risk_control::{
+    InsertRiskControlLogRecord, InsertRiskControlNotificationOutboxRecord,
+    RiskControlHashListQuery, RiskControlLogListQuery, RiskControlNotificationOutboxSummary,
+    RiskControlReadRepository, RiskControlWriteRepository, StoredRiskControlFlaggedHash,
+    StoredRiskControlHashPage, StoredRiskControlLog, StoredRiskControlLogPage,
+    StoredRiskControlNotificationOutbox, UpsertRiskControlFlaggedHashRecord,
+};
 pub(crate) use aether_data::repository::system::{AdminSystemStats, StoredSystemConfigEntry};
 use aether_data::repository::users::{
     StoredUserAuthRecord, StoredUserExportRow, StoredUserOAuthLinkSummary, StoredUserSummary,
@@ -181,6 +188,8 @@ pub(crate) struct GatewayDataState {
     pool_score_writer: Option<Arc<dyn PoolMemberScoreWriteRepository>>,
     provider_quota_reader: Option<Arc<dyn ProviderQuotaReadRepository>>,
     provider_quota_writer: Option<Arc<dyn ProviderQuotaWriteRepository>>,
+    risk_control_reader: Option<Arc<dyn RiskControlReadRepository>>,
+    risk_control_writer: Option<Arc<dyn RiskControlWriteRepository>>,
     routing_group_reader: Option<Arc<dyn RoutingGroupReadRepository>>,
     routing_group_writer: Option<Arc<dyn RoutingGroupWriteRepository>>,
     usage_reader: Option<Arc<dyn UsageReadRepository>>,
@@ -293,6 +302,14 @@ impl fmt::Debug for GatewayDataState {
                 &self.provider_quota_writer.is_some(),
             )
             .field(
+                "has_risk_control_reader",
+                &self.risk_control_reader.is_some(),
+            )
+            .field(
+                "has_risk_control_writer",
+                &self.risk_control_writer.is_some(),
+            )
+            .field(
                 "has_routing_group_reader",
                 &self.routing_group_reader.is_some(),
             )
@@ -326,6 +343,7 @@ mod models;
 mod pool_scores;
 mod provider_catalog_cache;
 mod referrals;
+mod risk_control;
 mod routing_profiles;
 mod runtime;
 #[cfg(test)]

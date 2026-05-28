@@ -15,6 +15,9 @@ use super::{
 use crate::driver::postgres::{PostgresPoolConfig, PostgresPoolFactory};
 use crate::repository::usage::UpsertUsageRecord;
 use aether_data_contracts::repository::usage::UsageBodyField;
+fn normalize_newlines(s: &str) -> String {
+    s.replace("\r\n", "\n")
+}
 
 #[tokio::test]
 async fn repository_constructs_from_lazy_pool() {
@@ -216,8 +219,8 @@ fn dashboard_hourly_aggregate_split_keeps_partial_hours_raw() {
 fn usage_sql_does_not_require_updated_at_column() {
     assert!(!super::FIND_BY_REQUEST_ID_SQL.contains("COALESCE(updated_at, created_at)"));
     assert!(!super::LIST_USAGE_AUDITS_PREFIX.contains("COALESCE(updated_at, created_at)"));
-    assert!(!super::UPSERT_SQL.contains("\n  updated_at\n"));
-    assert!(!super::UPSERT_SQL.contains("updated_at = CASE"));
+    assert!(!normalize_newlines(super::UPSERT_SQL).contains("\n  updated_at\n"));
+    assert!(!normalize_newlines(super::UPSERT_SQL).contains("updated_at = CASE"));
 }
 
 #[test]
@@ -257,13 +260,13 @@ fn usage_sql_rebuilds_provider_key_window_usage_into_status_snapshot() {
 fn usage_sql_serializes_request_id_upserts_before_reading_previous_usage() {
     assert!(super::LOCK_USAGE_REQUEST_ID_SQL.contains("pg_advisory_xact_lock"));
     assert!(super::LOCK_USAGE_REQUEST_ID_SQL.contains("hashtext($1)::BIGINT"));
-    assert!(include_str!("mod.rs")
+    assert!(normalize_newlines(include_str!("mod.rs"))
         .contains("lock_usage_request_id_in_tx(tx, &usage.request_id).await?;"));
 }
 
 #[test]
 fn usage_sql_moves_shared_counter_updates_behind_outbox() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(super::INSERT_USAGE_COUNTER_DELTA_SQL.contains("usage_counter_deltas"));
     assert!(super::CLAIM_USAGE_COUNTER_DELTAS_SQL.contains("FOR UPDATE SKIP LOCKED"));
     assert!(super::MARK_USAGE_COUNTER_DELTAS_PROCESSED_SQL.contains("processed_at = NOW()"));
@@ -320,17 +323,19 @@ fn usage_sql_supports_recent_usage_audits_query() {
 
 #[test]
 fn usage_sql_cache_affinity_interval_query_coalesces_nullable_model_values() {
-    assert!(include_str!("mod.rs").contains("COALESCE(\"usage\".model, '') AS model"));
+    assert!(normalize_newlines(include_str!("mod.rs"))
+        .contains("COALESCE(\"usage\".model, '') AS model"));
 }
 
 #[test]
 fn usage_sql_cache_affinity_interval_query_casts_interval_minutes_to_double_precision() {
-    assert!(include_str!("mod.rs").contains("AS DOUBLE PRECISION) AS interval_minutes"));
+    assert!(normalize_newlines(include_str!("mod.rs"))
+        .contains("AS DOUBLE PRECISION) AS interval_minutes"));
 }
 
 #[test]
 fn usage_sql_summarize_usage_audits_supports_daily_aggregates() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("summarize_usage_audits_from_daily_aggregates"));
     assert!(source.contains("FROM stats_daily"));
     assert!(source.contains("FROM stats_user_daily"));
@@ -342,7 +347,7 @@ fn usage_sql_summarize_usage_audits_supports_daily_aggregates() {
 
 #[test]
 fn usage_sql_summarize_usage_cache_hit_summary_supports_global_aggregates() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("summarize_usage_cache_hit_summary_from_daily_aggregates"));
     assert!(source.contains("summarize_usage_cache_hit_summary_from_hourly_aggregates"));
     assert!(source.contains("FROM stats_daily"));
@@ -354,7 +359,7 @@ fn usage_sql_summarize_usage_cache_hit_summary_supports_global_aggregates() {
 
 #[test]
 fn usage_sql_summarize_usage_cache_affinity_hit_summary_supports_global_aggregates() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("summarize_usage_cache_affinity_hit_summary_from_daily_aggregates"));
     assert!(source.contains("summarize_usage_cache_affinity_hit_summary_from_hourly_aggregates"));
     assert!(source.contains("FROM stats_daily"));
@@ -367,7 +372,7 @@ fn usage_sql_summarize_usage_cache_affinity_hit_summary_supports_global_aggregat
 
 #[test]
 fn usage_sql_summarize_usage_settled_cost_supports_user_and_global_aggregates() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("summarize_usage_settled_cost_from_daily_aggregates"));
     assert!(source.contains("summarize_usage_settled_cost_from_hourly_aggregates"));
     assert!(source.contains("FROM stats_daily"));
@@ -382,7 +387,7 @@ fn usage_sql_summarize_usage_settled_cost_supports_user_and_global_aggregates() 
 
 #[test]
 fn usage_sql_summarize_usage_error_distribution_supports_daily_aggregates() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("summarize_usage_error_distribution_from_daily_aggregates"));
     assert!(source.contains("FROM stats_daily_error"));
     assert!(
@@ -392,7 +397,7 @@ fn usage_sql_summarize_usage_error_distribution_supports_daily_aggregates() {
 
 #[test]
 fn usage_sql_summarize_usage_performance_percentiles_supports_daily_aggregates() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("summarize_usage_performance_percentiles_from_daily_aggregates"));
     assert!(source.contains("FROM stats_daily"));
     assert!(source.contains("p50_response_time_ms"));
@@ -403,7 +408,7 @@ fn usage_sql_summarize_usage_performance_percentiles_supports_daily_aggregates()
 
 #[test]
 fn usage_sql_summarize_usage_cost_savings_supports_daily_aggregates() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("summarize_usage_cost_savings_from_daily_aggregates"));
     assert!(source.contains("FROM stats_daily_cost_savings"));
     assert!(source.contains("FROM stats_daily_cost_savings_model_provider"));
@@ -416,7 +421,7 @@ fn usage_sql_summarize_usage_cost_savings_supports_daily_aggregates() {
 
 #[test]
 fn usage_sql_summarize_usage_time_series_supports_global_aggregates() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("summarize_usage_time_series_from_daily_aggregates"));
     assert!(source.contains("summarize_usage_time_series_from_hourly_aggregates"));
     assert!(source.contains("FROM stats_hourly"));
@@ -427,7 +432,7 @@ fn usage_sql_summarize_usage_time_series_supports_global_aggregates() {
 
 #[test]
 fn usage_sql_summarize_usage_daily_heatmap_supports_daily_aggregates() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("summarize_usage_daily_heatmap_from_daily_aggregates"));
     assert!(source.contains("FROM stats_daily"));
     assert!(source.contains("FROM stats_user_daily"));
@@ -464,7 +469,7 @@ fn usage_sql_dashboard_daily_breakdown_falls_back_to_daily_totals() {
 
 #[test]
 fn usage_sql_summarize_usage_leaderboard_supports_daily_aggregates() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("summarize_usage_leaderboard_from_daily_aggregates"));
     assert!(source.contains("FROM stats_daily_model"));
     assert!(source.contains("FROM stats_user_daily"));
@@ -476,7 +481,7 @@ fn usage_sql_summarize_usage_leaderboard_supports_daily_aggregates() {
 
 #[test]
 fn usage_sql_aggregate_usage_audits_supports_daily_model_and_provider_aggregates() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("aggregate_usage_audits_from_daily_aggregates"));
     assert!(source.contains("stats_user_daily_model"));
     assert!(source.contains("stats_user_daily_provider"));
@@ -489,7 +494,7 @@ fn usage_sql_aggregate_usage_audits_supports_daily_model_and_provider_aggregates
 
 #[test]
 fn usage_sql_provider_aggregation_excludes_unknown_provider_labels() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("const USAGE_PROVIDER_IDENTITY_FILTER_SQL"));
     assert!(source.contains("const USAGE_PROVIDER_IDENTITY_SOURCE_SQL"));
     assert!(source.contains(r#"BTRIM(COALESCE("usage".provider_id, '')) <> ''"#));
@@ -521,7 +526,7 @@ fn usage_sql_provider_aggregation_excludes_unknown_provider_labels() {
 
 #[test]
 fn usage_sql_summarize_total_tokens_by_api_key_ids_supports_daily_aggregates() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("FROM stats_daily_api_key"));
     assert!(source.contains("read_stats_daily_cutoff_date().await?"));
 }
@@ -546,7 +551,7 @@ fn dashboard_aggregate_schema_mismatch_detector_matches_legacy_schema_failures()
 
 #[test]
 fn dashboard_aggregate_reads_fallback_to_raw_on_schema_mismatch() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("dashboard_should_fallback_to_raw_on_aggregate_error"));
     assert!(
         source.contains("Err(err) if dashboard_should_fallback_to_raw_on_aggregate_error(&err)")
@@ -556,7 +561,7 @@ fn dashboard_aggregate_reads_fallback_to_raw_on_schema_mismatch() {
 
 #[test]
 fn usage_sql_summarize_usage_totals_by_user_ids_supports_user_summary_aggregates() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("FROM stats_user_summary"));
     assert!(source.contains("all_time_input_tokens"));
     assert!(source.contains("FROM stats_user_daily"));
@@ -566,7 +571,7 @@ fn usage_sql_summarize_usage_totals_by_user_ids_supports_user_summary_aggregates
 
 #[test]
 fn usage_sql_raw_aggregates_use_canonical_billing_facts() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("FROM usage_billing_facts AS \"usage\""));
     assert!(
         super::REBUILD_API_KEY_USAGE_STATS_SQL.contains("FROM usage_billing_facts AS \"usage\"")
@@ -582,7 +587,7 @@ fn usage_sql_raw_aggregates_use_canonical_billing_facts() {
 
 #[test]
 fn usage_sql_provider_performance_reads_upstream_stream_from_billing_facts() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("\"usage\".upstream_is_stream"));
     assert!(
         !source.contains("usage_base.request_metadata->>'upstream_is_stream'"),
@@ -741,7 +746,8 @@ fn usage_sql_reads_list_output_price_from_settlement_snapshots_before_legacy_usa
 fn usage_sql_casts_json_payload_bind_parameters_explicitly() {
     for placeholder in [41, 42, 44, 45, 47, 48, 50, 51, 53] {
         assert!(
-            super::UPSERT_SQL.contains(format!("${placeholder}::json").as_str()),
+            normalize_newlines(super::UPSERT_SQL)
+                .contains(format!("${placeholder}::json").as_str()),
             "missing ::json cast for placeholder ${placeholder}"
         );
     }
@@ -749,32 +755,38 @@ fn usage_sql_casts_json_payload_bind_parameters_explicitly() {
 
 #[test]
 fn usage_sql_insert_values_aligns_request_metadata_and_timestamps() {
-    assert!(super::UPSERT_SQL.contains("\n  $51::json,\n  $52,\n  $53::json,\n  CASE"));
-    assert!(super::UPSERT_SQL.contains("WHEN $54 IS NULL THEN NULL"));
-    assert!(super::UPSERT_SQL.contains("TO_TIMESTAMP($55::double precision)"));
+    assert!(normalize_newlines(super::UPSERT_SQL)
+        .contains("\n  $51::json,\n  $52,\n  $53::json,\n  CASE"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("WHEN $54 IS NULL THEN NULL"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("TO_TIMESTAMP($55::double precision)"));
 }
 
 #[test]
 fn usage_sql_upsert_materializes_upstream_stream_mode() {
-    assert!(super::UPSERT_SQL.contains("upstream_is_stream,"));
-    assert!(super::UPSERT_SQL.contains("$53::json->>'upstream_is_stream'"));
-    assert!(super::UPSERT_SQL.contains("COALESCE($21, FALSE)"));
-    assert!(super::UPSERT_SQL.contains("upstream_is_stream = CASE"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("upstream_is_stream,"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("$53::json->>'upstream_is_stream'"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("COALESCE($21, FALSE)"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("upstream_is_stream = CASE"));
 }
 
 #[test]
 fn usage_sql_upsert_returning_includes_routing_placeholders() {
-    assert!(super::UPSERT_SQL.contains("NULL::varchar AS http_request_body_state"));
-    assert!(super::UPSERT_SQL.contains("NULL::varchar AS http_client_response_body_state"));
-    assert!(super::UPSERT_SQL.contains("NULL::varchar AS routing_candidate_id"));
-    assert!(super::UPSERT_SQL.contains("NULL::varchar AS routing_planner_kind"));
-    assert!(super::UPSERT_SQL.contains("NULL::varchar AS routing_execution_path"));
     assert!(
-        super::UPSERT_SQL.contains("NULL::varchar AS settlement_billing_snapshot_schema_version")
+        normalize_newlines(super::UPSERT_SQL).contains("NULL::varchar AS http_request_body_state")
     );
-    assert!(super::UPSERT_SQL.contains("NULL::double precision AS settlement_input_price_per_1m"));
-    assert!(super::UPSERT_SQL.contains("input_output_total_tokens"));
-    assert!(super::UPSERT_SQL.contains("input_context_tokens"));
+    assert!(normalize_newlines(super::UPSERT_SQL)
+        .contains("NULL::varchar AS http_client_response_body_state"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("NULL::varchar AS routing_candidate_id"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("NULL::varchar AS routing_planner_kind"));
+    assert!(
+        normalize_newlines(super::UPSERT_SQL).contains("NULL::varchar AS routing_execution_path")
+    );
+    assert!(normalize_newlines(super::UPSERT_SQL)
+        .contains("NULL::varchar AS settlement_billing_snapshot_schema_version"));
+    assert!(normalize_newlines(super::UPSERT_SQL)
+        .contains("NULL::double precision AS settlement_input_price_per_1m"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("input_output_total_tokens"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("input_context_tokens"));
 }
 
 #[test]
@@ -794,7 +806,7 @@ fn usage_sql_upsert_recovers_missing_provider_links_after_billing_finalizes() {
         "provider_api_key_id = CASE WHEN \"usage\".billing_status = 'pending' OR (\"usage\".provider_api_key_id IS NULL AND (\"usage\".provider_id IS NULL OR \"usage\".provider_id = EXCLUDED.provider_id) AND (\"usage\".provider_endpoint_id IS NULL OR \"usage\".provider_endpoint_id = EXCLUDED.provider_endpoint_id)) THEN COALESCE(EXCLUDED.provider_api_key_id, \"usage\".provider_api_key_id) ELSE \"usage\".provider_api_key_id END",
     ] {
         assert!(
-            super::UPSERT_SQL.contains(assignment),
+            normalize_newlines(super::UPSERT_SQL).contains(assignment),
             "missing provider link recovery assignment: {assignment}"
         );
     }
@@ -818,7 +830,7 @@ fn usage_sql_updates_usage_mirror_columns_from_terminal_events_only() {
         "actual_total_cost_usd = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".actual_total_cost_usd, EXCLUDED.actual_total_cost_usd) ELSE \"usage\".actual_total_cost_usd END",
     ] {
         assert!(
-            super::UPSERT_SQL.contains(assignment),
+            normalize_newlines(super::UPSERT_SQL).contains(assignment),
             "missing terminal mirror assignment: {assignment}"
         );
     }
@@ -826,7 +838,7 @@ fn usage_sql_updates_usage_mirror_columns_from_terminal_events_only() {
 
 #[test]
 fn usage_sql_binds_usage_mirror_values_for_terminal_upserts() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     for binding in [
         ".bind(usage.input_tokens.map(to_i32).transpose()?)",
         ".bind(usage.output_tokens.map(to_i32).transpose()?)",
@@ -847,39 +859,39 @@ fn usage_sql_binds_usage_mirror_values_for_terminal_upserts() {
 
 #[test]
 fn usage_sql_clears_legacy_output_price_column_on_upsert() {
-    assert!(super::UPSERT_SQL.contains("output_price_per_1m = NULL"));
-    assert!(include_str!("mod.rs").contains(".bind(None::<f64>)"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("output_price_per_1m = NULL"));
+    assert!(normalize_newlines(include_str!("mod.rs")).contains(".bind(None::<f64>)"));
 }
 
 #[test]
 fn usage_sql_clears_legacy_header_columns_on_upsert() {
-    assert!(super::UPSERT_SQL.contains("request_headers = NULL"));
-    assert!(super::UPSERT_SQL.contains("provider_request_headers = NULL"));
-    assert!(super::UPSERT_SQL.contains("response_headers = NULL"));
-    assert!(super::UPSERT_SQL.contains("client_response_headers = NULL"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("request_headers = NULL"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("provider_request_headers = NULL"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("response_headers = NULL"));
+    assert!(normalize_newlines(super::UPSERT_SQL).contains("client_response_headers = NULL"));
 }
 
 #[test]
 fn usage_sql_detached_body_flags_clear_inline_and_compressed_columns() {
-    assert!(super::UPSERT_SQL
+    assert!(normalize_newlines(super::UPSERT_SQL)
         .contains("WHEN EXCLUDED.request_body_compressed IS NOT NULL OR $56 THEN NULL"));
-    assert!(super::UPSERT_SQL
+    assert!(normalize_newlines(super::UPSERT_SQL)
         .contains("WHEN EXCLUDED.provider_request_body_compressed IS NOT NULL OR $57 THEN NULL"));
-    assert!(super::UPSERT_SQL
+    assert!(normalize_newlines(super::UPSERT_SQL)
         .contains("WHEN EXCLUDED.response_body_compressed IS NOT NULL OR $58 THEN NULL"));
-    assert!(super::UPSERT_SQL
+    assert!(normalize_newlines(super::UPSERT_SQL)
         .contains("WHEN EXCLUDED.client_response_body_compressed IS NOT NULL OR $59 THEN NULL"));
 }
 
 #[test]
 fn usage_sql_clears_stale_failure_fields_for_non_failed_status_updates() {
-    assert!(super::UPSERT_SQL.contains(
+    assert!(normalize_newlines(super::UPSERT_SQL).contains(
             "WHEN EXCLUDED.status IN ('pending', 'streaming', 'completed', 'cancelled') AND EXCLUDED.status_code IS NULL THEN NULL"
         ));
-    assert!(super::UPSERT_SQL.contains(
+    assert!(normalize_newlines(super::UPSERT_SQL).contains(
             "WHEN EXCLUDED.status IN ('pending', 'streaming', 'completed', 'cancelled') THEN EXCLUDED.error_message"
         ));
-    assert!(super::UPSERT_SQL.contains(
+    assert!(normalize_newlines(super::UPSERT_SQL).contains(
             "WHEN EXCLUDED.status IN ('pending', 'streaming', 'completed', 'cancelled') THEN EXCLUDED.error_category"
         ));
 }
@@ -894,13 +906,13 @@ fn stale_cleanup_failed_candidate_sql_orders_by_effective_timestamp() {
 
 #[test]
 fn usage_sql_does_not_allow_streaming_to_regress_back_to_pending() {
-    assert!(super::UPSERT_SQL.contains(
+    assert!(normalize_newlines(super::UPSERT_SQL).contains(
             "WHEN \"usage\".status = 'streaming' AND EXCLUDED.status = 'pending' THEN \"usage\".status_code"
         ));
-    assert!(super::UPSERT_SQL.contains(
+    assert!(normalize_newlines(super::UPSERT_SQL).contains(
             "WHEN \"usage\".status = 'streaming' AND EXCLUDED.status = 'pending' THEN \"usage\".error_message"
         ));
-    assert!(super::UPSERT_SQL.contains(
+    assert!(normalize_newlines(super::UPSERT_SQL).contains(
         "WHEN \"usage\".status = 'streaming' AND EXCLUDED.status = 'pending' THEN \"usage\".status"
     ));
 }

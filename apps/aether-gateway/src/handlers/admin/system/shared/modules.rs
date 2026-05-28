@@ -75,6 +75,18 @@ pub(crate) const ADMIN_MODULE_DEFINITIONS: &[AdminModuleDefinition] = &[
         admin_menu_order: 59,
     },
     AdminModuleDefinition {
+        name: "risk_control",
+        display_name: "风控中心",
+        description: "对 AI 请求执行关键词、Moderation API、命中哈希与自动处置策略。",
+        category: "security",
+        env_key: "RISK_CONTROL_AVAILABLE",
+        default_available: true,
+        admin_route: Some("/admin/modules/risk-control"),
+        admin_menu_icon: Some("ShieldAlert"),
+        admin_menu_group: Some("system"),
+        admin_menu_order: 60,
+    },
+    AdminModuleDefinition {
         name: "important_notification",
         display_name: "通知服务",
         description: "统一管理通知项、模板和推送服务选择，供后台任务和用户通知使用",

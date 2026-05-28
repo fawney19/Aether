@@ -1,10 +1,12 @@
 <template>
   <div
     ref="listRef"
+    role="tablist"
     :class="listClass"
   >
     <!-- 滑动指示器 - 放在按钮前面 -->
     <div
+      aria-hidden="true"
       class="tabs-indicator"
       :style="indicatorStyle"
     />
@@ -24,8 +26,9 @@ const props = defineProps<Props>()
 
 const listRef = ref<HTMLElement | null>(null)
 const indicatorStyle = ref<Record<string, string>>({
-  transform: 'translateX(0)',
+  transform: 'translate(0, 0)',
   width: '0px',
+  height: '0px',
   opacity: '0',
   transition: 'none'
 })
@@ -68,8 +71,9 @@ const updateIndicator = () => {
 
   if (newIndex === -1) {
     indicatorStyle.value = {
-      transform: 'translateX(0)',
+      transform: 'translate(0, 0)',
       width: '0px',
+      height: '0px',
       opacity: '0',
       transition: 'none'
     }
@@ -77,16 +81,15 @@ const updateIndicator = () => {
   }
 
   const activeButton = buttons[newIndex]
+  const listRect = listRef.value.getBoundingClientRect()
   const buttonRect = activeButton.getBoundingClientRect()
 
   // 确保按钮已渲染
   if (buttonRect.width === 0) return
 
-  // 计算相对位置：累加前面所有按钮的宽度
-  let offsetLeft = 0
-  for (let i = 0; i < newIndex; i++) {
-    offsetLeft += buttons[i].getBoundingClientRect().width
-  }
+  // 计算相对位置：使用真实 DOM 坐标，避免 grid gap / padding / 换行被漏算导致指示器偏移
+  const offsetLeft = Math.max(0, buttonRect.left - listRect.left)
+  const offsetTop = Math.max(0, buttonRect.top - listRect.top)
 
   // 判断是否需要动画：
   // 1. 首次初始化不需要动画
@@ -100,11 +103,12 @@ const updateIndicator = () => {
   }
 
   indicatorStyle.value = {
-    transform: `translateX(${offsetLeft}px)`,
+    transform: `translate(${offsetLeft}px, ${offsetTop}px)`,
     width: `${buttonRect.width}px`,
+    height: `${buttonRect.height}px`,
     opacity: '1',
     transition: isTabChange
-      ? 'transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), width 0.2s cubic-bezier(0.4, 0, 0.2, 1)'
+      ? 'transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), width 0.2s cubic-bezier(0.4, 0, 0.2, 1), height 0.2s cubic-bezier(0.4, 0, 0.2, 1)'
       : 'none'
   }
 }
@@ -166,7 +170,7 @@ onUnmounted(() => {
 <style scoped>
 .tabs-list {
   position: relative;
-  height: 2.5rem;
+  min-height: 2.5rem;
   align-items: center;
   justify-content: center;
   border-radius: 0.5rem;
@@ -179,8 +183,7 @@ onUnmounted(() => {
 .tabs-indicator {
   position: absolute;
   z-index: 0;
-  top: 0.25rem;
-  bottom: 0.25rem;
+  top: 0;
   left: 0;
   border-radius: 0.375rem;
   background: linear-gradient(

@@ -275,6 +275,12 @@ const routes: RouteRecordRaw[] = [
         meta: { module: 'chat_pii_redaction' }
       },
       {
+        path: 'modules/risk-control',
+        name: 'RiskControlModule',
+        component: () => importWithRetry(() => import('@/views/admin/modules/RiskControl.vue')),
+        meta: { module: 'risk_control' }
+      },
+      {
         path: 'modules/s3-backup',
         name: 'S3BackupSettings',
         component: () => importWithRetry(() => import('@/views/admin/modules/S3BackupSettings.vue')),

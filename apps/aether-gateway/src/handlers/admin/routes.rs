@@ -1,6 +1,6 @@
 use super::{
     announcements, auth, billing, endpoint, features, model, observability, provider, referrals,
-    request, routing, system, users,
+    request, risk_control, routing, system, users,
 };
 
 pub(crate) async fn maybe_build_local_admin_response(
@@ -21,6 +21,12 @@ pub(crate) async fn maybe_build_local_admin_response(
     }
 
     if let Some(response) = routing::maybe_build_local_admin_routing_response(request).await? {
+        return Ok(Some(response));
+    }
+
+    if let Some(response) =
+        risk_control::maybe_build_local_admin_risk_control_response(request).await?
+    {
         return Ok(Some(response));
     }
 

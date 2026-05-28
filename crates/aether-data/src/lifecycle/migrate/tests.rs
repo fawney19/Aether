@@ -313,7 +313,9 @@ fn empty_database_snapshot_covers_current_cutoff_versions() {
             20260520000000,
             20260520010000,
             20260522000000,
+            20260523000000,
             20260524000000,
+            20260526010000,
             20260527000000,
         ]
     );
@@ -384,8 +386,8 @@ fn empty_database_snapshot_sql_includes_usage_body_blobs_and_audit_admin_role() 
         EMPTY_DATABASE_SNAPSHOT_SQL.contains("cache_hit_total_requests bigint DEFAULT 0 NOT NULL")
     );
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains(
-            "ALTER TABLE public.stats_daily_model\n    ADD COLUMN IF NOT EXISTS cache_creation_ephemeral_5m_tokens bigint DEFAULT '0'::bigint NOT NULL,"
-        ));
+        "ADD COLUMN IF NOT EXISTS cache_creation_ephemeral_5m_tokens bigint DEFAULT '0'::bigint NOT NULL"
+    ));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL
         .contains("CREATE TABLE IF NOT EXISTS public.usage_counter_deltas"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("ix_usage_counter_deltas_unprocessed"));
@@ -399,6 +401,12 @@ fn empty_database_snapshot_sql_includes_usage_body_blobs_and_audit_admin_role() 
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("idx_video_tasks_due_poll"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("request_count bigint DEFAULT 0"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("usage_count bigint DEFAULT 0 NOT NULL"));
+    assert!(
+        EMPTY_DATABASE_SNAPSHOT_SQL.contains("CREATE TABLE IF NOT EXISTS public.risk_control_logs")
+    );
+    assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("idx_risk_control_logs_created_at"));
+    assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("notification_attempts bigint DEFAULT 0 NOT NULL"));
+    assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("module.risk_control.enabled"));
 }
 
 #[test]
@@ -669,8 +677,11 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260519130000,
             20260520000000,
             20260520010000,
+            20260523000000,
             20260524000000,
+            20260526010000,
             20260527000000,
+            20260527010000,
         ]
     );
     assert_eq!(
@@ -694,8 +705,11 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260519130000,
             20260520000000,
             20260520010000,
+            20260523000000,
             20260524000000,
+            20260526010000,
             20260527000000,
+            20260527010000,
         ]
     );
 }
@@ -1220,14 +1234,17 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20260520000000,
             20260520010000,
             20260522000000,
+            20260523000000,
             20260524000000,
+            20260526010000,
             20260527000000,
+            20260527010000,
         ]
     );
 }
 
 #[test]
-fn pending_migrations_from_applied_is_empty_after_empty_database_snapshot_stamp() {
+fn pending_migrations_from_applied_leaves_post_snapshot_migrations_after_snapshot_stamp() {
     let applied = empty_database_snapshot_migrations(&POSTGRES_MIGRATOR)
         .expect("empty database snapshot migrations should resolve")
         .into_iter()
@@ -1239,10 +1256,14 @@ fn pending_migrations_from_applied_is_empty_after_empty_database_snapshot_stamp(
 
     let pending = pending_migrations_from_applied(&applied);
 
-    assert!(
-            pending.is_empty(),
-            "empty database snapshot-stamped databases should not require a manual migration before first startup"
-        );
+    assert_eq!(
+        pending
+            .into_iter()
+            .map(|migration| migration.version)
+            .collect::<Vec<_>>(),
+        vec![20260527010000],
+        "empty database snapshot-stamped databases should only report migrations newer than the snapshot cutoff"
+    );
 }
 
 #[tokio::test]
@@ -1535,9 +1556,13 @@ async fn prepare_database_for_startup_bootstraps_clean_database() {
         .await
         .expect("clean database bootstrap should succeed");
 
-    assert!(
-        pending.is_empty(),
-        "fresh databases should not report pending migrations after startup preparation"
+    assert_eq!(
+        pending
+            .iter()
+            .map(|migration| migration.version)
+            .collect::<Vec<_>>(),
+        vec![20260527010000],
+        "fresh databases should only report migrations newer than the empty database snapshot cutoff after startup preparation"
     );
     assert!(table_exists(&pool, "users")
         .await
@@ -1593,9 +1618,13 @@ async fn prepare_database_for_startup_bootstraps_when_only_unrelated_public_tabl
         .await
         .expect("startup preparation should tolerate unrelated public tables");
 
-    assert!(
-        pending.is_empty(),
-        "unrelated public tables should not block baseline bootstrap on first startup"
+    assert_eq!(
+        pending
+            .iter()
+            .map(|migration| migration.version)
+            .collect::<Vec<_>>(),
+        vec![20260527010000],
+        "unrelated public tables should not block baseline bootstrap; only post-snapshot migrations should remain pending"
     );
     assert!(table_exists(&pool, "vendor_bootstrap_marker")
         .await

@@ -9,3 +9,4 @@
 006_usage.sql
 007_stats.sql
 008_background_tasks.sql
+009_risk_control.sql
