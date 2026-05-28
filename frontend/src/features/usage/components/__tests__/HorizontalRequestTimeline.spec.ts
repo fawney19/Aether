@@ -495,10 +495,11 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).toContain('错误信息')
     expect(root.textContent).toContain('HTTP 302')
     expect(root.textContent).toContain('上游返回非成功状态 302')
-    expect(root.textContent).toContain('供应商')
-    expect(root.textContent).toContain('Provider Upstream')
-    expect(root.textContent).toContain('Key')
-    expect(root.textContent).toContain('Upstream Key')
+    const errorBlock = root.querySelector('.error-block')
+    expect(errorBlock?.textContent).not.toContain('供应商')
+    expect(errorBlock?.textContent).not.toContain('Provider Upstream')
+    expect(errorBlock?.textContent).not.toContain('Key')
+    expect(errorBlock?.textContent).not.toContain('Upstream Key')
     expect(root.textContent).not.toContain('HTTP 状态')
     expect(root.querySelector('.error-block .error-json')?.textContent).toContain('"status_code":302')
     expect(root.querySelector('.error-block .error-json')?.textContent).toContain('"headers"')
@@ -541,15 +542,48 @@ describe('HorizontalRequestTimeline', () => {
 
     const root = mountTimeline(trace)
     await nextTick()
+    const errorBlockText = root.querySelector('.error-block')?.textContent ?? ''
 
-    expect(root.textContent).toContain('This model\'s maximum context length is 131072 tokens.')
-    expect(root.textContent).toContain('GPUStack')
-    expect(root.textContent).toContain('key1')
-    expect(root.textContent).toContain('错误类型')
-    expect(root.textContent).toContain('BadRequestError')
-    expect(root.textContent).toContain('错误参数')
-    expect(root.textContent).toContain('input_tokens')
+    expect(errorBlockText).toContain('This model\'s maximum context length is 131072 tokens.')
+    expect(errorBlockText).toContain('错误类型')
+    expect(errorBlockText).toContain('BadRequestError')
+    expect(errorBlockText).toContain('错误参数')
+    expect(errorBlockText).toContain('input_tokens')
+    expect(errorBlockText).not.toContain('供应商')
+    expect(errorBlockText).not.toContain('Key')
+    expect(errorBlockText).not.toContain('GPUStack')
+    expect(errorBlockText).not.toContain('key1')
     expect(root.querySelector('.error-block .error-json')?.textContent).toContain('"status_code":400')
+  })
+
+  it('localizes internal error types and keeps repeated provider context out of the error block', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-watchdog-timeout',
+        provider_id: 'provider-watchdog',
+        provider_name: 'aether 公益',
+        key_id: 'key-watchdog',
+        key_name: '公益 Key',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 504,
+        error_type: 'local_stream_candidate_watchdog_timeout',
+        error_message: 'Stream first byte timeout',
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+    const errorBlockText = root.querySelector('.error-block')?.textContent ?? ''
+
+    expect(errorBlockText).toContain('请求超时（等待上游首字超时）')
+    expect(errorBlockText).toContain('错误类型')
+    expect(errorBlockText).toContain('本地流式候选首字超时')
+    expect(errorBlockText).not.toContain('local_stream_candidate_watchdog_timeout')
+    expect(errorBlockText).not.toContain('供应商')
+    expect(errorBlockText).not.toContain('Key')
+    expect(errorBlockText).not.toContain('aether 公益')
+    expect(errorBlockText).not.toContain('公益 Key')
   })
 
   it('keeps the failure message when upstream response only records an empty body state', async () => {
@@ -644,7 +678,8 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).toContain('HTTP 503')
     expect(root.textContent).toContain('model not found')
     expect(root.textContent).toContain('错误类型')
-    expect(root.textContent).toContain('not_found')
+    expect(root.textContent).toContain('资源不存在')
     expect(root.textContent).not.toContain('错误代码')
   })
+
 })

@@ -559,7 +559,7 @@ import { formatTokens } from '@/utils/format'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { resolveTimelineFinalStatus } from '../utils/status'
-import { isHttpLikeErrorCode, normalizeFailureMessage } from '../utils/failureDisplay'
+import { formatFailureTypeLabel, isHttpLikeErrorCode, normalizeFailureMessage } from '../utils/failureDisplay'
 import {
   buildPoolGroupVisibleAttempts,
   buildPoolParticipatedCandidates,
@@ -1451,15 +1451,12 @@ const buildCurrentAttemptErrorFields = (
   errorParam?: string,
   statusCode?: number,
 ): Array<{ label: string, value: string }> => {
-  const providerName = attempt.provider_name
-  const keyName = attempt.key_name || attempt.key_account_label || attempt.key_preview
   const bodyState = readStringField(upstreamResponse ?? {}, 'body_state')
     ?? readStringField(upstreamResponse ?? {}, 'bodyState')
   const meaningfulBodyState = bodyState && bodyState.toLowerCase() !== 'none'
+  const errorTypeLabel = formatFailureTypeLabel(errorType)
   const fields = [
-    providerName ? { label: '供应商', value: providerName } : null,
-    keyName ? { label: 'Key', value: keyName } : null,
-    errorType ? { label: '错误类型', value: errorType } : null,
+    errorTypeLabel ? { label: '错误类型', value: errorTypeLabel } : null,
     errorParam ? { label: '错误参数', value: errorParam } : null,
     readStringField(errorFlow ?? {}, 'source') ? { label: '错误来源', value: readStringField(errorFlow ?? {}, 'source') as string } : null,
   ].filter((field): field is { label: string, value: string } => Boolean(field))
@@ -1508,7 +1505,9 @@ const currentAttemptRequestError = computed<{
   const fallbackMessage = typeof attempt.error_message === 'string' && attempt.error_message.trim()
     ? attempt.error_message.trim()
     : ''
-  const message = formatAttemptErrorMessage(flowMessage || upstreamErrorMessage || fallbackMessage, statusCode) || upstreamErrorType || ''
+  const message = formatAttemptErrorMessage(flowMessage || upstreamErrorMessage || fallbackMessage, statusCode)
+    || formatFailureTypeLabel(upstreamErrorType)
+    || ''
   const upstreamResponseDisplay = normalizeUpstreamResponseDisplay(extra?.upstream_response)
   const fields = buildCurrentAttemptErrorFields(
     attempt,
