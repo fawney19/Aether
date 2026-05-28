@@ -49,6 +49,23 @@ const FAILURE_TYPE_LABELS: Record<string, string> = {
   chatgpt_web_image_execution_unavailable: 'ChatGPT Web 图片执行通道不可用',
 }
 
+const FAILURE_CODE_LABELS: Record<string, string> = {
+  context_length_exceeded: '上下文长度超出限制',
+  max_context_length_exceeded: '上下文长度超出限制',
+  prompt_too_long: '输入内容过长',
+  request_too_large: '请求内容过大',
+  model_not_found: '模型不存在',
+  not_found: '资源不存在',
+  invalid_request_error: '请求参数错误',
+  invalid_api_key: 'API Key 无效',
+  authentication_error: '认证失败',
+  permission_error: '权限不足',
+  insufficient_quota: '额度不足',
+  rate_limit_exceeded: '请求频率超限',
+  content_policy_violation: '内容安全策略拦截',
+  server_error: '上游服务异常',
+}
+
 function looksInternalErrorType(value: string): boolean {
   return /^[a-z][a-z0-9_]+$/.test(value)
 }
@@ -70,6 +87,29 @@ export function formatFailureTypeLabel(value: string | null | undefined): string
   if (!normalized) return null
   const key = normalized.toLowerCase()
   return FAILURE_TYPE_LABELS[key] ?? inferInternalFailureTypeLabel(normalized) ?? normalized
+}
+
+export function formatFailureCodeLabel(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const normalized = nonEmptyString(value)
+  if (!normalized) return null
+  const key = normalized.toLowerCase()
+  return FAILURE_CODE_LABELS[key] ?? FAILURE_TYPE_LABELS[key] ?? inferInternalFailureTypeLabel(normalized)
+}
+
+export function resolveFailureReason(input: {
+  message?: string | null
+  type?: string | null
+  code?: unknown
+  statusCode?: number | null
+}): string | null {
+  const codeLabel = formatFailureCodeLabel(input.code)
+  if (codeLabel) return codeLabel
+
+  const message = normalizeFailureMessage(input.message, input.statusCode)
+  if (message) return message
+
+  return formatFailureTypeLabel(input.type)
 }
 
 export function normalizeFailureMessage(message: string | null | undefined, statusCode?: number | null): string | null {

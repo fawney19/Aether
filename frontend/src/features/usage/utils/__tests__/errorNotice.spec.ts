@@ -87,7 +87,7 @@ describe('request failure notice', () => {
       title: '执行失败原因',
       message: 'quota exceeded',
       isSchedulingFailure: false,
-      meta: ['HTTP 429', '额度不足', 'upstream_response'],
+      meta: ['HTTP 429', '额度不足'],
     })
   })
 
@@ -105,7 +105,7 @@ describe('request failure notice', () => {
       title: '执行失败原因',
       message: '请求超时（等待上游首字超时）',
       isSchedulingFailure: false,
-      meta: ['HTTP 504', '本地流式候选首字超时', 'local_candidate'],
+      meta: ['HTTP 504', '本地流式候选首字超时'],
     })
   })
 
@@ -123,7 +123,7 @@ describe('request failure notice', () => {
       title: '执行失败原因',
       message: '请求超时（等待上游首字超时）',
       isSchedulingFailure: false,
-      meta: ['HTTP 504', '本地流式候选首字超时', 'local_execution_runtime'],
+      meta: ['HTTP 504', '本地流式候选首字超时'],
     })
   })
 
@@ -162,7 +162,7 @@ describe('request failure notice', () => {
       title: '唯一候选执行失败，已无可重试上游',
       message: '输入上下文超过模型 qwen3.6-27b 的最大长度限制。',
       isSchedulingFailure: true,
-      meta: ['HTTP 400', 'BadRequestError', 'input_tokens', 'gpustack', 'qwen3.6-27b'],
+      meta: ['HTTP 400', 'BadRequestError', 'input_tokens'],
     })
   })
 
@@ -183,7 +183,26 @@ describe('request failure notice', () => {
       title: '执行失败原因',
       message: 'This content was flagged for possible cybersecurity risk',
       isSchedulingFailure: false,
-      meta: ['流式响应结束异常', 'client_response'],
+      meta: ['流式响应结束异常'],
+    })
+  })
+
+  it('summarizes structured context length errors without raw source tags', () => {
+    const notice = resolveRequestFailureNotice(buildRequestDetail({
+      failure_summary: {
+        source: 'upstream_response',
+        status_code: 400,
+        type: 'invalid_request_error',
+        code: 'context_length_exceeded',
+        message: 'Input exceeds the context window.',
+      },
+    }))
+
+    expect(notice).toEqual({
+      title: '执行失败原因',
+      message: '上下文长度超出限制',
+      isSchedulingFailure: false,
+      meta: ['HTTP 400'],
     })
   })
 

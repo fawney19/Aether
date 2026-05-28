@@ -1,5 +1,5 @@
 import type { RequestDetail, RequestErrorDomain, RequestSchedulingFailure } from '@/api/dashboard'
-import { formatFailureTypeLabel, normalizeFailureMessage } from './failureDisplay'
+import { formatFailureCodeLabel, formatFailureTypeLabel, normalizeFailureMessage, resolveFailureReason } from './failureDisplay'
 
 export interface RequestFailureNotice {
   title: string
@@ -14,12 +14,17 @@ function nonEmptyString(value: string | null | undefined): string | null {
 }
 
 function normalizeErrorDomain(domain: RequestErrorDomain | null | undefined): RequestErrorDomain | null {
-  if (!nonEmptyString(domain?.message)) return null
+  if (!nonEmptyString(domain?.message) && !nonEmptyString(domain?.type) && domain?.code == null) return null
   return domain ?? null
 }
 
 function normalizeDomainMessage(domain: RequestErrorDomain | null | undefined): string | null {
-  return normalizeFailureMessage(domain?.message ?? null, domain?.status_code ?? null)
+  return resolveFailureReason({
+    message: domain?.message ?? null,
+    type: domain?.type ?? null,
+    code: domain?.code ?? null,
+    statusCode: domain?.status_code ?? null,
+  })
 }
 
 function formatHttpStatus(statusCode: number | null | undefined): string | null {
@@ -74,8 +79,11 @@ export function resolveRequestFailureNotice(detail: RequestDetail | null | undef
   if (schedulingFailure) {
     const upstreamFailure = schedulingFailure.upstream_failure ?? null
     const upstreamMessage = normalizeFailureMessage(upstreamFailure?.user_message, upstreamFailure?.status_code)
-      ?? normalizeFailureMessage(schedulingFailure.message, schedulingFailure.status_code)
-      ?? normalizeFailureMessage(upstreamFailure?.message, upstreamFailure?.status_code)
+      ?? resolveFailureReason({
+        message: schedulingFailure.message ?? upstreamFailure?.message ?? null,
+        type: upstreamFailure?.type ?? null,
+        statusCode: upstreamFailure?.status_code ?? schedulingFailure.status_code ?? null,
+      })
     if (upstreamFailure && upstreamMessage) {
       return {
         title: schedulingFailureTitle(schedulingFailure),
@@ -85,8 +93,6 @@ export function resolveRequestFailureNotice(detail: RequestDetail | null | undef
           formatHttpStatus(upstreamFailure.status_code ?? schedulingFailure.status_code ?? detail.status_code),
           formatFailureTypeLabel(upstreamFailure.type),
           nonEmptyString(upstreamFailure.param),
-          nonEmptyString(upstreamFailure.provider_name),
-          nonEmptyString(upstreamFailure.model),
           schedulingFailure.no_upstream_attempt ? '未进入上游执行' : null,
         ]),
       }
@@ -119,8 +125,7 @@ export function resolveRequestFailureNotice(detail: RequestDetail | null | undef
     isSchedulingFailure: false,
     meta: uniqueMeta([
       formatHttpStatus(domain ? domain.status_code ?? detail.status_code : undefined),
-      formatFailureTypeLabel(domain?.type),
-      nonEmptyString(domain?.source),
+      formatFailureCodeLabel(domain?.code) ? null : formatFailureTypeLabel(domain?.type),
     ]),
   }
 }
