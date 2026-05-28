@@ -484,6 +484,19 @@
                     {{ currentAttemptRequestError.message }}
                   </div>
                   <div
+                    v-if="currentAttemptRequestError.fields.length > 0"
+                    class="error-fields"
+                  >
+                    <div
+                      v-for="field in currentAttemptRequestError.fields"
+                      :key="field.label"
+                      class="error-field"
+                    >
+                      <span class="error-field-label">{{ field.label }}</span>
+                      <span class="error-field-value">{{ field.value }}</span>
+                    </div>
+                  </div>
+                  <div
                     v-if="currentAttemptRequestError.upstreamResponse"
                     class="error-json"
                   >
@@ -1099,6 +1112,21 @@ const readNumberField = (obj: Record<string, unknown>, key: string): number | un
   return undefined
 }
 
+const readNestedValue = (value: unknown, ...path: string[]): unknown => {
+  let current: unknown = value
+  for (const key of path) {
+    const object = extractObject(current)
+    if (!object) return undefined
+    current = object[key]
+  }
+  return current
+}
+
+const readNestedString = (value: unknown, ...path: string[]): string | undefined => {
+  const nested = readNestedValue(value, ...path)
+  return typeof nested === 'string' && nested.trim() ? nested.trim() : undefined
+}
+
 const hasRenderableValue = (value: unknown): boolean => {
   if (value == null) return false
   if (typeof value === 'string') return value.trim().length > 0
@@ -1421,9 +1449,45 @@ const formatAttemptErrorMessage = (message: string, statusCode?: number): string
   return normalized
 }
 
+const buildCurrentAttemptErrorFields = (
+  attempt: CandidateRecord,
+  upstreamResponse: Record<string, unknown> | null,
+  upstreamBody: unknown,
+  errorFlow: Record<string, unknown> | null,
+  errorType?: string,
+  errorParam?: string,
+  statusCode?: number,
+): Array<{ label: string, value: string }> => {
+  const providerName = attempt.provider_name
+  const keyName = attempt.key_name || attempt.key_account_label || attempt.key_preview
+  const fields = [
+    providerName ? { label: '供应商', value: providerName } : null,
+    keyName ? { label: 'Key', value: keyName } : null,
+    statusCode != null ? { label: 'HTTP 状态', value: String(statusCode) } : null,
+    errorType ? { label: '错误类型', value: errorType } : null,
+    errorParam ? { label: '错误参数', value: errorParam } : null,
+    readStringField(upstreamResponse ?? {}, 'body_ref')
+      ? { label: '响应 Body', value: readStringField(upstreamResponse ?? {}, 'body_ref') as string }
+      : null,
+    readStringField(errorFlow ?? {}, 'source') ? { label: '错误来源', value: readStringField(errorFlow ?? {}, 'source') as string } : null,
+  ].filter((field): field is { label: string, value: string } => Boolean(field))
+
+  const bodyState = readStringField(upstreamResponse ?? {}, 'body_state')
+    ?? readStringField(upstreamResponse ?? {}, 'bodyState')
+  if (bodyState && bodyState.toLowerCase() !== 'none') {
+    fields.push({ label: 'Body 状态', value: bodyState })
+  }
+  const bodyErrorCode = readNestedValue(upstreamBody, 'error', 'code')
+  if (bodyErrorCode != null && typeof bodyErrorCode !== 'object') {
+    fields.push({ label: '错误代码', value: String(bodyErrorCode) })
+  }
+  return fields
+}
+
 const currentAttemptRequestError = computed<{
   message: string
   statusCode?: number
+  fields: Array<{ label: string, value: string }>
   upstreamResponse: Record<string, unknown> | null
 } | null>(() => {
   const attempt = currentAttempt.value
@@ -1432,6 +1496,7 @@ const currentAttemptRequestError = computed<{
   const extra = extractObject(attempt.extra_data)
   const upstreamResponse = extractObject(extra?.upstream_response)
   const errorFlow = extractObject(extra?.error_flow)
+  const upstreamBody = upstreamResponse?.body
   const statusCode = readNumberField(upstreamResponse ?? {}, 'status_code')
     ?? readNumberField(upstreamResponse ?? {}, 'statusCode')
     ?? readNumberField(errorFlow ?? {}, 'status_code')
@@ -1440,19 +1505,36 @@ const currentAttemptRequestError = computed<{
   const flowMessage = errorFlow
     ? readStringField(errorFlow, 'message')
     : ''
+  const upstreamErrorMessage = readNestedString(upstreamBody, 'error', 'message')
+    ?? readNestedString(upstreamBody, 'message')
+    ?? readNestedString(upstreamBody, 'detail')
+  const upstreamErrorType = readNestedString(upstreamBody, 'error', 'type')
+    ?? readNestedString(upstreamBody, 'type')
+    ?? readStringField(errorFlow ?? {}, 'type')
+    ?? (typeof attempt.error_type === 'string' && attempt.error_type.trim() ? attempt.error_type.trim() : undefined)
+  const upstreamErrorParam = readNestedString(upstreamBody, 'error', 'param')
+    ?? readNestedString(upstreamBody, 'param')
+    ?? readStringField(errorFlow ?? {}, 'param')
   const fallbackMessage = typeof attempt.error_message === 'string' && attempt.error_message.trim()
     ? attempt.error_message.trim()
     : ''
-  const fallbackType = typeof attempt.error_type === 'string' && attempt.error_type.trim()
-    ? attempt.error_type.trim()
-    : ''
-  const message = formatAttemptErrorMessage(flowMessage || fallbackMessage, statusCode) || fallbackType
+  const message = formatAttemptErrorMessage(flowMessage || upstreamErrorMessage || fallbackMessage, statusCode) || upstreamErrorType || ''
   const upstreamResponseDisplay = normalizeUpstreamResponseDisplay(extra?.upstream_response)
-  if (!message && statusCode == null && !upstreamResponseDisplay) return null
+  const fields = buildCurrentAttemptErrorFields(
+    attempt,
+    upstreamResponse,
+    upstreamBody,
+    errorFlow,
+    upstreamErrorType,
+    upstreamErrorParam,
+    statusCode,
+  )
+  if (!message && statusCode == null && !upstreamResponseDisplay && fields.length === 0) return null
 
   return {
-    message: upstreamResponseDisplay ? '' : (message || '未知错误'),
+    message: message || '未知错误',
     statusCode,
+    fields,
     upstreamResponse: upstreamResponseDisplay,
   }
 })
@@ -2781,6 +2863,38 @@ function getDisplayStatus(attempt: CandidateRecord | null | undefined): string {
   font-size: 0.85rem;
   color: #dc2626;
   word-break: break-word;
+}
+
+.error-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin-top: 0.625rem;
+}
+
+.error-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  max-width: 100%;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid #ef44442f;
+  border-radius: 999px;
+  background: hsl(var(--background) / 0.72);
+  font-size: 0.72rem;
+}
+
+.error-field-label {
+  color: hsl(var(--muted-foreground));
+}
+
+.error-field-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: hsl(var(--foreground));
+  font-family: ui-monospace, monospace;
 }
 
 .error-json {

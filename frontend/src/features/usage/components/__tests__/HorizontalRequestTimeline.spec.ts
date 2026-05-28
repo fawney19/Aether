@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App } from 'vue'
+import { createApp, nextTick, type App } from 'vue'
 
 import type { CandidateRecord, RequestTrace } from '@/api/requestTrace'
 import HorizontalRequestTimeline from '../HorizontalRequestTimeline.vue'
@@ -373,7 +373,7 @@ describe('HorizontalRequestTimeline', () => {
     })
     await nextTick()
 
-    const lastCall = onTraceState.mock.calls.at(-1)?.[0]
+    const lastCall = onTraceState.mock.calls[onTraceState.mock.calls.length - 1]?.[0]
     expect(lastCall).toMatchObject({
       finalStatus: 'streaming',
     })
@@ -429,7 +429,7 @@ describe('HorizontalRequestTimeline', () => {
     expect(requestPathCode?.textContent).toContain('/v1/images/generations')
   })
 
-  it('shows upstream response JSON inside the error block on trace nodes', async () => {
+  it('shows structured upstream response details inside the error block on trace nodes', async () => {
     const trace = buildTrace([
       buildCandidate({
         id: 'cand-upstream-response',
@@ -468,7 +468,12 @@ describe('HorizontalRequestTimeline', () => {
 
     expect(root.textContent).toContain('错误信息')
     expect(root.textContent).toContain('HTTP 302')
-    expect(root.textContent).not.toContain('上游返回非成功状态 302')
+    expect(root.textContent).toContain('上游返回非成功状态 302')
+    expect(root.textContent).toContain('供应商')
+    expect(root.textContent).toContain('Provider Upstream')
+    expect(root.textContent).toContain('Key')
+    expect(root.textContent).toContain('Upstream Key')
+    expect(root.textContent).toContain('HTTP 状态')
     expect(root.querySelector('.error-block .error-json')?.textContent).toContain('"status_code":302')
     expect(root.querySelector('.error-block .error-json')?.textContent).toContain('"headers"')
     expect(root.textContent).not.toContain('上游真实响应')
@@ -480,6 +485,45 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).not.toContain('none')
     expect(root.textContent).not.toContain('不再重试')
     expect(root.textContent).not.toContain('该错误被标记为敏感上游错误')
+  })
+
+  it('shows upstream body error message and typed fields by default', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-upstream-body-error',
+        provider_id: 'provider-body-error',
+        provider_name: 'GPUStack',
+        key_id: 'key-body-error',
+        key_name: 'key1',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 400,
+        extra_data: {
+          upstream_response: {
+            status_code: 400,
+            body: {
+              error: {
+                type: 'BadRequestError',
+                param: 'input_tokens',
+                message: 'This model\'s maximum context length is 131072 tokens.',
+              },
+            },
+          },
+        },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    expect(root.textContent).toContain('This model\'s maximum context length is 131072 tokens.')
+    expect(root.textContent).toContain('GPUStack')
+    expect(root.textContent).toContain('key1')
+    expect(root.textContent).toContain('错误类型')
+    expect(root.textContent).toContain('BadRequestError')
+    expect(root.textContent).toContain('错误参数')
+    expect(root.textContent).toContain('input_tokens')
+    expect(root.querySelector('.error-block .error-json')?.textContent).toContain('"status_code":400')
   })
 
   it('keeps the failure message when upstream response only records an empty body state', async () => {
