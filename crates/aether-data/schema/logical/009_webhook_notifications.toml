@@ -1,0 +1,300 @@
+[table.webhook_endpoints]
+domain = "webhook_notifications"
+order = 10
+primary_key = ["id"]
+
+[[table.webhook_endpoints.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.webhook_endpoints.columns]]
+name = "name"
+type = "text"
+length = 128
+
+[[table.webhook_endpoints.columns]]
+name = "url"
+type = "text"
+length = 1000
+
+[[table.webhook_endpoints.columns]]
+name = "secret_encrypted"
+type = "long_text"
+nullable = true
+
+[[table.webhook_endpoints.columns]]
+name = "enabled"
+type = "bool"
+default = true
+
+[[table.webhook_endpoints.columns]]
+name = "event_filter_json"
+type = "json"
+nullable = true
+
+[[table.webhook_endpoints.columns]]
+name = "timeout_ms"
+type = "int32"
+default = 5000
+
+[[table.webhook_endpoints.columns]]
+name = "max_attempts"
+type = "int32"
+default = 5
+
+[[table.webhook_endpoints.columns]]
+name = "initial_retry_delay_seconds"
+type = "int32"
+default = 60
+
+[[table.webhook_endpoints.columns]]
+name = "max_retry_delay_seconds"
+type = "int32"
+default = 3600
+
+[[table.webhook_endpoints.columns]]
+name = "last_test_delivery_id"
+type = "text_id"
+length = 64
+nullable = true
+
+[[table.webhook_endpoints.columns]]
+name = "last_test_status"
+type = "text"
+length = 32
+nullable = true
+
+[[table.webhook_endpoints.columns]]
+name = "last_test_error"
+type = "long_text"
+nullable = true
+
+[[table.webhook_endpoints.columns]]
+name = "last_test_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+
+[[table.webhook_endpoints.columns]]
+name = "created_by"
+type = "text_id"
+length = 64
+nullable = true
+
+[[table.webhook_endpoints.columns]]
+name = "created_at_unix_secs"
+type = "unix_seconds"
+
+[[table.webhook_endpoints.columns]]
+name = "updated_at_unix_secs"
+type = "unix_seconds"
+
+[[table.webhook_endpoints.indexes]]
+name = "idx_webhook_endpoints_enabled"
+columns = ["enabled"]
+
+[[table.webhook_endpoints.indexes]]
+name = "idx_webhook_endpoints_updated"
+columns = ["updated_at_unix_secs"]
+
+[table.webhook_deliveries]
+domain = "webhook_notifications"
+order = 20
+primary_key = ["id"]
+
+[[table.webhook_deliveries.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.webhook_deliveries.columns]]
+name = "endpoint_id"
+type = "text_id"
+length = 64
+
+[[table.webhook_deliveries.columns]]
+name = "event_id"
+type = "text"
+length = 128
+
+[[table.webhook_deliveries.columns]]
+name = "event_type"
+type = "text"
+length = 128
+
+[[table.webhook_deliveries.columns]]
+name = "is_test"
+type = "bool"
+default = false
+
+[[table.webhook_deliveries.columns]]
+name = "payload_json"
+type = "json"
+
+[[table.webhook_deliveries.columns]]
+name = "status"
+type = "text"
+length = 32
+default = "pending"
+
+[[table.webhook_deliveries.columns]]
+name = "attempt_count"
+type = "int32"
+default = 0
+
+[[table.webhook_deliveries.columns]]
+name = "max_attempts"
+type = "int32"
+default = 5
+
+[[table.webhook_deliveries.columns]]
+name = "next_attempt_at_unix_secs"
+type = "unix_seconds"
+
+[[table.webhook_deliveries.columns]]
+name = "last_attempt_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+
+[[table.webhook_deliveries.columns]]
+name = "delivered_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+
+[[table.webhook_deliveries.columns]]
+name = "failed_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+
+[[table.webhook_deliveries.columns]]
+name = "last_http_status"
+type = "int32"
+nullable = true
+
+[[table.webhook_deliveries.columns]]
+name = "last_error"
+type = "long_text"
+nullable = true
+
+[[table.webhook_deliveries.columns]]
+name = "response_excerpt"
+type = "long_text"
+nullable = true
+
+[[table.webhook_deliveries.columns]]
+name = "lease_owner"
+type = "text"
+length = 200
+nullable = true
+
+[[table.webhook_deliveries.columns]]
+name = "lease_expires_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+
+[[table.webhook_deliveries.columns]]
+name = "created_at_unix_secs"
+type = "unix_seconds"
+
+[[table.webhook_deliveries.columns]]
+name = "updated_at_unix_secs"
+type = "unix_seconds"
+
+[[table.webhook_deliveries.indexes]]
+name = "idx_webhook_deliveries_endpoint_created"
+columns = ["endpoint_id", "created_at_unix_secs"]
+
+[[table.webhook_deliveries.indexes]]
+name = "idx_webhook_deliveries_status_next"
+columns = ["status", "next_attempt_at_unix_secs"]
+
+[[table.webhook_deliveries.indexes]]
+name = "idx_webhook_deliveries_event"
+columns = ["event_type", "event_id"]
+
+[[table.webhook_deliveries.indexes]]
+name = "idx_webhook_deliveries_lease"
+columns = ["lease_owner", "lease_expires_at_unix_secs"]
+
+[[table.webhook_deliveries.uniques]]
+name = "uq_webhook_deliveries_endpoint_event"
+columns = ["endpoint_id", "event_id"]
+
+[[table.webhook_deliveries.foreign_keys]]
+name = "fk_webhook_deliveries_endpoint"
+columns = ["endpoint_id"]
+references_table = "webhook_endpoints"
+references_columns = ["id"]
+on_delete = "cascade"
+
+[table.webhook_delivery_attempts]
+domain = "webhook_notifications"
+order = 30
+primary_key = ["id"]
+
+[[table.webhook_delivery_attempts.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.webhook_delivery_attempts.columns]]
+name = "delivery_id"
+type = "text_id"
+length = 64
+
+[[table.webhook_delivery_attempts.columns]]
+name = "attempt_index"
+type = "int32"
+
+[[table.webhook_delivery_attempts.columns]]
+name = "status"
+type = "text"
+length = 32
+
+[[table.webhook_delivery_attempts.columns]]
+name = "http_status"
+type = "int32"
+nullable = true
+
+[[table.webhook_delivery_attempts.columns]]
+name = "error_message"
+type = "long_text"
+nullable = true
+
+[[table.webhook_delivery_attempts.columns]]
+name = "response_excerpt"
+type = "long_text"
+nullable = true
+
+[[table.webhook_delivery_attempts.columns]]
+name = "started_at_unix_secs"
+type = "unix_seconds"
+
+[[table.webhook_delivery_attempts.columns]]
+name = "completed_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+
+[[table.webhook_delivery_attempts.columns]]
+name = "duration_ms"
+type = "int32"
+nullable = true
+
+[[table.webhook_delivery_attempts.indexes]]
+name = "idx_webhook_attempts_delivery_created"
+columns = ["delivery_id", "started_at_unix_secs"]
+
+[[table.webhook_delivery_attempts.indexes]]
+name = "idx_webhook_attempts_status"
+columns = ["status", "started_at_unix_secs"]
+
+[[table.webhook_delivery_attempts.uniques]]
+name = "uq_webhook_attempts_delivery_index"
+columns = ["delivery_id", "attempt_index"]
+
+[[table.webhook_delivery_attempts.foreign_keys]]
+name = "fk_webhook_attempts_delivery"
+columns = ["delivery_id"]
+references_table = "webhook_deliveries"
+references_columns = ["id"]
+on_delete = "cascade"

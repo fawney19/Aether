@@ -1,4 +1,4 @@
-use super::wallet::admin_payment_gateway_response_map;
+use super::wallet::{admin_payment_gateway_response_map, emit_wallet_recharged_webhook};
 use crate::{AdminWalletMutationOutcome, AdminWalletPaymentOrderRecord, AppState, GatewayError};
 
 impl AppState {
@@ -125,78 +125,82 @@ impl AppState {
             self.admin_wallet_payment_order_store.as_ref(),
             self.auth_wallet_store.as_ref(),
         ) {
-            let mut orders = order_store
-                .lock()
-                .expect("admin wallet payment order store should lock");
-            let Some(order) = orders.get_mut(order_id) else {
-                return Ok(AdminWalletMutationOutcome::NotFound);
+            let (wallet, order) = {
+                let mut orders = order_store
+                    .lock()
+                    .expect("admin wallet payment order store should lock");
+                let Some(order) = orders.get_mut(order_id) else {
+                    return Ok(AdminWalletMutationOutcome::NotFound);
+                };
+                if order.status == "credited" {
+                    return Ok(AdminWalletMutationOutcome::Applied((order.clone(), false)));
+                }
+                if matches!(order.status.as_str(), "failed" | "expired" | "refunded") {
+                    return Ok(AdminWalletMutationOutcome::Invalid(format!(
+                        "payment order is not creditable: {}",
+                        order.status
+                    )));
+                }
+                if order
+                    .expires_at_unix_secs
+                    .is_some_and(|value| value < chrono::Utc::now().timestamp().max(0) as u64)
+                {
+                    return Ok(AdminWalletMutationOutcome::Invalid(
+                        "payment order expired".to_string(),
+                    ));
+                }
+
+                let mut wallets = wallet_store.lock().expect("auth wallet store should lock");
+                let Some(wallet) = wallets.get_mut(&order.wallet_id) else {
+                    return Ok(AdminWalletMutationOutcome::Invalid(
+                        "wallet not found".to_string(),
+                    ));
+                };
+                if wallet.status != "active" {
+                    return Ok(AdminWalletMutationOutcome::Invalid(
+                        "wallet is not active".to_string(),
+                    ));
+                }
+
+                let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+                let mut gateway_response =
+                    admin_payment_gateway_response_map(order.gateway_response.take());
+                if let Some(serde_json::Value::Object(map)) = gateway_response_patch {
+                    gateway_response.extend(map);
+                }
+                gateway_response.insert("manual_credit".to_string(), serde_json::Value::Bool(true));
+                gateway_response.insert(
+                    "credited_by".to_string(),
+                    operator_id
+                        .map(|value| serde_json::Value::String(value.to_string()))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+
+                wallet.balance += order.amount_usd;
+                wallet.total_recharged += order.amount_usd;
+                wallet.updated_at_unix_secs = now_unix_secs;
+
+                if let Some(value) = gateway_order_id {
+                    order.gateway_order_id = Some(value.to_string());
+                }
+                if let Some(value) = pay_amount {
+                    order.pay_amount = Some(value);
+                }
+                if let Some(value) = pay_currency {
+                    order.pay_currency = Some(value.to_string());
+                }
+                if let Some(value) = exchange_rate {
+                    order.exchange_rate = Some(value);
+                }
+                order.status = "credited".to_string();
+                order.paid_at_unix_secs = order.paid_at_unix_secs.or(Some(now_unix_secs));
+                order.credited_at_unix_secs = Some(now_unix_secs);
+                order.refundable_amount_usd = order.amount_usd;
+                order.gateway_response = Some(serde_json::Value::Object(gateway_response));
+                (wallet.clone(), order.clone())
             };
-            if order.status == "credited" {
-                return Ok(AdminWalletMutationOutcome::Applied((order.clone(), false)));
-            }
-            if matches!(order.status.as_str(), "failed" | "expired" | "refunded") {
-                return Ok(AdminWalletMutationOutcome::Invalid(format!(
-                    "payment order is not creditable: {}",
-                    order.status
-                )));
-            }
-            if order
-                .expires_at_unix_secs
-                .is_some_and(|value| value < chrono::Utc::now().timestamp().max(0) as u64)
-            {
-                return Ok(AdminWalletMutationOutcome::Invalid(
-                    "payment order expired".to_string(),
-                ));
-            }
-
-            let mut wallets = wallet_store.lock().expect("auth wallet store should lock");
-            let Some(wallet) = wallets.get_mut(&order.wallet_id) else {
-                return Ok(AdminWalletMutationOutcome::Invalid(
-                    "wallet not found".to_string(),
-                ));
-            };
-            if wallet.status != "active" {
-                return Ok(AdminWalletMutationOutcome::Invalid(
-                    "wallet is not active".to_string(),
-                ));
-            }
-
-            let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
-            let mut gateway_response =
-                admin_payment_gateway_response_map(order.gateway_response.take());
-            if let Some(serde_json::Value::Object(map)) = gateway_response_patch {
-                gateway_response.extend(map);
-            }
-            gateway_response.insert("manual_credit".to_string(), serde_json::Value::Bool(true));
-            gateway_response.insert(
-                "credited_by".to_string(),
-                operator_id
-                    .map(|value| serde_json::Value::String(value.to_string()))
-                    .unwrap_or(serde_json::Value::Null),
-            );
-
-            wallet.balance += order.amount_usd;
-            wallet.total_recharged += order.amount_usd;
-            wallet.updated_at_unix_secs = now_unix_secs;
-
-            if let Some(value) = gateway_order_id {
-                order.gateway_order_id = Some(value.to_string());
-            }
-            if let Some(value) = pay_amount {
-                order.pay_amount = Some(value);
-            }
-            if let Some(value) = pay_currency {
-                order.pay_currency = Some(value.to_string());
-            }
-            if let Some(value) = exchange_rate {
-                order.exchange_rate = Some(value);
-            }
-            order.status = "credited".to_string();
-            order.paid_at_unix_secs = order.paid_at_unix_secs.or(Some(now_unix_secs));
-            order.credited_at_unix_secs = Some(now_unix_secs);
-            order.refundable_amount_usd = order.amount_usd;
-            order.gateway_response = Some(serde_json::Value::Object(gateway_response));
-            return Ok(AdminWalletMutationOutcome::Applied((order.clone(), true)));
+            emit_wallet_recharged_webhook(self.clone(), &wallet, &order, "payment_order_credit");
+            return Ok(AdminWalletMutationOutcome::Applied((order, true)));
         }
 
         match self
@@ -216,10 +220,25 @@ impl AppState {
             Some(aether_data::repository::wallet::WalletMutationOutcome::Applied((
                 order,
                 changed,
-            ))) => Ok(AdminWalletMutationOutcome::Applied((
-                stored_admin_payment_order_to_gateway(order),
-                changed,
-            ))),
+            ))) => {
+                let order = stored_admin_payment_order_to_gateway(order);
+                if changed {
+                    if let Ok(Some(wallet)) = self
+                        .find_wallet(aether_data::repository::wallet::WalletLookupKey::WalletId(
+                            &order.wallet_id,
+                        ))
+                        .await
+                    {
+                        emit_wallet_recharged_webhook(
+                            self.clone(),
+                            &wallet,
+                            &order,
+                            "payment_order_credit",
+                        );
+                    }
+                }
+                Ok(AdminWalletMutationOutcome::Applied((order, changed)))
+            }
             Some(aether_data::repository::wallet::WalletMutationOutcome::NotFound) => {
                 Ok(AdminWalletMutationOutcome::NotFound)
             }

@@ -5,7 +5,7 @@ use super::{classified, ClassifiedRoute};
 pub(super) fn classify_admin_system_family_route(
     method: &http::Method,
     normalized_path: &str,
-    _normalized_path_no_trailing: &str,
+    normalized_path_no_trailing: &str,
 ) -> Option<ClassifiedRoute> {
     if method == http::Method::GET && normalized_path == "/api/admin/system/version" {
         Some(classified(
@@ -178,6 +178,131 @@ pub(super) fn classify_admin_system_family_route(
             "admin_proxy",
             "system_manage",
             "important_notification_test",
+            "admin:system",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
+            "/api/admin/system/webhooks/outbound" | "/api/admin/system/webhooks/outbound/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "outbound_webhooks_get",
+            "admin:system",
+            false,
+        ))
+    } else if method == http::Method::PUT
+        && matches!(
+            normalized_path,
+            "/api/admin/system/webhooks/outbound" | "/api/admin/system/webhooks/outbound/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "outbound_webhooks_set",
+            "admin:system",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
+            "/api/admin/system/webhooks/outbound/endpoints"
+                | "/api/admin/system/webhooks/outbound/endpoints/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "outbound_webhook_endpoints",
+            "admin:system",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && matches!(
+            normalized_path,
+            "/api/admin/system/webhooks/outbound/endpoints"
+                | "/api/admin/system/webhooks/outbound/endpoints/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "outbound_webhook_endpoint_create",
+            "admin:system",
+            false,
+        ))
+    } else if method == http::Method::PUT
+        && normalized_path_no_trailing.starts_with("/api/admin/system/webhooks/outbound/endpoints/")
+        && normalized_path_no_trailing.matches('/').count() == 7
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "outbound_webhook_endpoint_update",
+            "admin:system",
+            false,
+        ))
+    } else if method == http::Method::DELETE
+        && normalized_path_no_trailing.starts_with("/api/admin/system/webhooks/outbound/endpoints/")
+        && normalized_path_no_trailing.matches('/').count() == 7
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "outbound_webhook_endpoint_delete",
+            "admin:system",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && normalized_path_no_trailing.starts_with("/api/admin/system/webhooks/outbound/endpoints/")
+        && normalized_path_no_trailing.ends_with("/test")
+        && normalized_path_no_trailing.matches('/').count() == 8
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "outbound_webhook_endpoint_test",
+            "admin:system",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
+            "/api/admin/system/webhooks/outbound/deliveries"
+                | "/api/admin/system/webhooks/outbound/deliveries/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "outbound_webhook_deliveries",
+            "admin:system",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && normalized_path == "/api/admin/system/webhooks/outbound/test"
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "outbound_webhook_test",
+            "admin:system",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && normalized_path_no_trailing
+            .starts_with("/api/admin/system/webhooks/outbound/deliveries/")
+        && normalized_path_no_trailing.ends_with("/retry")
+        && normalized_path_no_trailing.matches('/').count() == 8
+    {
+        Some(classified(
+            "admin_proxy",
+            "system_manage",
+            "outbound_webhook_retry",
             "admin:system",
             false,
         ))

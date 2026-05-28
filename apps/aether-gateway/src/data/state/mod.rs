@@ -77,6 +77,9 @@ use aether_data::repository::wallet::{
     StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot, WalletLookupKey, WalletMutationOutcome,
     WalletReadRepository, WalletWriteRepository,
 };
+use aether_data::repository::webhook_notifications::{
+    WebhookNotificationReadRepository, WebhookNotificationWriteRepository,
+};
 use aether_data::{
     DataBackends, DataLayerError, DatabaseMaintenanceSummary, WalletDailyUsageAggregationInput,
     WalletDailyUsageAggregationResult,
@@ -193,6 +196,10 @@ pub(crate) struct GatewayDataState {
     wallet_reader: Option<Arc<dyn WalletReadRepository>>,
     wallet_writer: Option<Arc<dyn WalletWriteRepository>>,
     settlement_writer: Option<Arc<dyn SettlementWriteRepository>>,
+    #[cfg(not(test))]
+    webhook_notification_reader: Option<Arc<dyn WebhookNotificationReadRepository>>,
+    #[cfg(not(test))]
+    webhook_notification_writer: Option<Arc<dyn WebhookNotificationWriteRepository>>,
     system_config_values: Option<Arc<RwLock<BTreeMap<String, StoredSystemConfigEntry>>>>,
 }
 
@@ -310,6 +317,14 @@ impl fmt::Debug for GatewayDataState {
             .field("has_wallet_writer", &self.wallet_writer.is_some())
             .field("has_settlement_writer", &self.settlement_writer.is_some())
             .field(
+                "has_webhook_notification_reader",
+                &self.has_webhook_notification_reader(),
+            )
+            .field(
+                "has_webhook_notification_writer",
+                &self.has_webhook_notification_writer(),
+            )
+            .field(
                 "has_system_config_values",
                 &self.system_config_values.is_some(),
             )
@@ -330,3 +345,4 @@ mod routing_profiles;
 mod runtime;
 #[cfg(test)]
 mod testing;
+mod webhook_notifications;

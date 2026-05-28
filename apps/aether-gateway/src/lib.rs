@@ -74,6 +74,7 @@ mod tunnel;
 mod usage;
 mod video_tasks;
 mod wallet_runtime;
+mod webhook_outbound;
 
 pub(crate) use self::ai_serving::api::{
     AiControlPlanRequest, EXECUTION_RUNTIME_STREAM_DECISION_ACTION,

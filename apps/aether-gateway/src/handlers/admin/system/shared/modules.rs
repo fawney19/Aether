@@ -135,6 +135,30 @@ pub(crate) const ADMIN_MODULE_DEFINITIONS: &[AdminModuleDefinition] = &[
         admin_menu_order: 60,
     },
     AdminModuleDefinition {
+        name: "external_integrations",
+        display_name: "外部系统集成",
+        description: "将工单、状态页、文档等外部系统作为受控入口嵌入 Aether",
+        category: "integration",
+        env_key: "EXTERNAL_INTEGRATIONS_AVAILABLE",
+        default_available: true,
+        admin_route: Some("/admin/modules/external-integrations"),
+        admin_menu_icon: Some("ExternalLink"),
+        admin_menu_group: Some("system"),
+        admin_menu_order: 61,
+    },
+    AdminModuleDefinition {
+        name: "webhook_outbound",
+        display_name: "Webhook 出站",
+        description: "将 Aether 事件推送到外部系统，支持签名、重试和投递日志",
+        category: "integration",
+        env_key: "WEBHOOK_OUTBOUND_AVAILABLE",
+        default_available: true,
+        admin_route: Some("/admin/modules/webhook-outbound"),
+        admin_menu_icon: Some("Webhook"),
+        admin_menu_group: Some("system"),
+        admin_menu_order: 62,
+    },
+    AdminModuleDefinition {
         name: "gemini_files",
         display_name: "文件缓存",
         description: "管理 Gemini Files API 上传的文件，支持文件上传、查看和删除",
@@ -197,6 +221,8 @@ pub(crate) struct AdminModuleRuntimeState {
     server_chan_push_configured: bool,
     bark_push_configured: bool,
     s3_backup_configured: bool,
+    external_integrations_configured: bool,
+    webhook_outbound_configured: bool,
 }
 
 pub(crate) fn admin_module_by_name(name: &str) -> Option<&'static AdminModuleDefinition> {
@@ -289,6 +315,20 @@ pub(crate) async fn build_admin_module_runtime_state(
     let server_chan_configured = server_chan_push_configured(state.app()).await?;
     let bark_configured = bark_push_configured(state.app()).await?;
     let backup_configured = s3_backup_configured(state.app()).await;
+    let external_integrations_items = state
+        .read_system_config_json_value(admin_system_kernel::EXTERNAL_INTEGRATIONS_ITEMS_CONFIG_KEY)
+        .await?
+        .or_else(|| {
+            admin_system_kernel::admin_system_config_default_value(
+                admin_system_kernel::EXTERNAL_INTEGRATIONS_ITEMS_CONFIG_KEY,
+            )
+        });
+    let external_integrations_configured =
+        admin_system_kernel::external_integrations_has_enabled_entry(
+            external_integrations_items.as_ref(),
+        );
+    let webhook_outbound_configured = state.app().has_webhook_notification_data_reader()
+        && state.app().has_webhook_notification_data_writer();
 
     Ok(AdminModuleRuntimeState {
         oauth_providers,
@@ -298,6 +338,8 @@ pub(crate) async fn build_admin_module_runtime_state(
         server_chan_push_configured: server_chan_configured,
         bark_push_configured: bark_configured,
         s3_backup_configured: backup_configured,
+        external_integrations_configured,
+        webhook_outbound_configured,
     })
 }
 
@@ -326,6 +368,8 @@ pub(crate) fn build_admin_module_validation_result(
             server_chan_push_configured: runtime.server_chan_push_configured,
             bark_push_configured: runtime.bark_push_configured,
             s3_backup_configured: runtime.s3_backup_configured,
+            external_integrations_configured: runtime.external_integrations_configured,
+            webhook_outbound_configured: runtime.webhook_outbound_configured,
         },
     )
 }

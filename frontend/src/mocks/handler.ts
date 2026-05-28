@@ -4,6 +4,14 @@
  */
 
 import type { AxiosRequestConfig, AxiosResponse } from 'axios'
+import type {
+  WebhookDeliveryLog,
+  WebhookDeliveryStatus,
+  WebhookEndpoint,
+  WebhookEndpointUpsertRequest,
+  WebhookEventType,
+  WebhookTestRequest,
+} from '@/api/outboundWebhooks'
 import { isDemoMode, DEMO_ACCOUNTS } from '@/config/demo'
 import {
   MOCK_ADMIN_USER,
@@ -1469,6 +1477,7 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
   'GET /api/admin/modules/status': async () => {
     await delay()
     requireAdmin()
+    refreshMockExternalIntegrationsModuleStatus()
     return createMockResponse(MOCK_MODULE_STATUSES)
   },
 
@@ -2028,6 +2037,217 @@ function refreshMockS3BackupModuleStatus() {
   }
 }
 
+function mockExternalIntegrationsConfigured() {
+  const value = mockSystemConfigValue('module.external_integrations.items')
+  return Array.isArray(value) && value.some(item => {
+    if (!item || typeof item !== 'object') return false
+    return (item as { enabled?: unknown }).enabled !== false
+  })
+}
+
+function refreshMockExternalIntegrationsModuleStatus() {
+  const moduleStatus = MOCK_MODULE_STATUSES.external_integrations
+  if (!moduleStatus) return
+  const enabled = mockSystemConfigValue('module.external_integrations.enabled') === true
+  const configValidated = mockExternalIntegrationsConfigured()
+  MOCK_MODULE_STATUSES.external_integrations = {
+    ...moduleStatus,
+    enabled,
+    config_validated: configValidated,
+    config_error: configValidated ? null : '请先配置至少一个已启用的外部系统入口',
+    active: moduleStatus.available && enabled && configValidated,
+  }
+}
+
+const MOCK_WEBHOOK_EVENT_TYPES: WebhookEventType[] = [
+  'user.registered',
+  'wallet.recharged',
+  'api_key.created',
+  'risk_control.hit',
+  'provider.error',
+  'balance.low',
+  'webhook.test',
+]
+
+const mockWebhookNow = Date.now()
+const MOCK_WEBHOOK_ENDPOINTS: WebhookEndpoint[] = [
+  {
+    id: 'webhook-ops-center',
+    name: 'Ops 工单系统',
+    url: 'https://ops.example.com/aether/webhook',
+    enabled: true,
+    subscribed_events: ['risk_control.hit', 'provider.error', 'balance.low'],
+    secret_set: true,
+    timeout_ms: 5000,
+    max_retries: 5,
+    created_at: new Date(mockWebhookNow - 12 * 86400_000).toISOString(),
+    updated_at: new Date(mockWebhookNow - 2 * 3600_000).toISOString(),
+    last_delivery_at: new Date(mockWebhookNow - 12 * 60_000).toISOString(),
+    last_delivery_status: 'failed',
+    failure_count: 2,
+  },
+  {
+    id: 'webhook-data-lake',
+    name: '数据湖事件流',
+    url: 'https://data.example.com/events/aether',
+    enabled: true,
+    subscribed_events: ['user.registered', 'wallet.recharged', 'api_key.created'],
+    secret_set: true,
+    timeout_ms: 3000,
+    max_retries: 3,
+    created_at: new Date(mockWebhookNow - 30 * 86400_000).toISOString(),
+    updated_at: new Date(mockWebhookNow - 6 * 3600_000).toISOString(),
+    last_delivery_at: new Date(mockWebhookNow - 5 * 60_000).toISOString(),
+    last_delivery_status: 'succeeded',
+    failure_count: 0,
+  },
+]
+
+const MOCK_WEBHOOK_DELIVERIES: WebhookDeliveryLog[] = [
+  {
+    id: 'delivery-demo-001',
+    endpoint_id: 'webhook-data-lake',
+    endpoint_name: '数据湖事件流',
+    event_type: 'wallet.recharged',
+    status: 'succeeded',
+    attempt_count: 1,
+    max_attempts: 4,
+    status_code: 204,
+    duration_ms: 182,
+    created_at: new Date(mockWebhookNow - 5 * 60_000).toISOString(),
+    next_retry_at: null,
+    delivered_at: new Date(mockWebhookNow - 5 * 60_000 + 182).toISOString(),
+    last_error: null,
+    response_excerpt: '',
+    request_id: 'whreq-demo-001',
+  },
+  {
+    id: 'delivery-demo-002',
+    endpoint_id: 'webhook-ops-center',
+    endpoint_name: 'Ops 工单系统',
+    event_type: 'risk_control.hit',
+    status: 'failed',
+    attempt_count: 3,
+    max_attempts: 6,
+    status_code: 500,
+    duration_ms: 5031,
+    created_at: new Date(mockWebhookNow - 12 * 60_000).toISOString(),
+    next_retry_at: new Date(mockWebhookNow + 3 * 60_000).toISOString(),
+    delivered_at: null,
+    last_error: 'HTTP 500: upstream ticket service timeout',
+    response_excerpt: '{"error":"ticket service timeout","trace":"demo"}',
+    request_id: 'whreq-demo-002',
+  },
+  {
+    id: 'delivery-demo-003',
+    endpoint_id: 'webhook-ops-center',
+    endpoint_name: 'Ops 工单系统',
+    event_type: 'provider.error',
+    status: 'dead',
+    attempt_count: 6,
+    max_attempts: 6,
+    status_code: 401,
+    duration_ms: 94,
+    created_at: new Date(mockWebhookNow - 52 * 60_000).toISOString(),
+    next_retry_at: null,
+    delivered_at: null,
+    last_error: 'HTTP 401: signature rejected by receiver',
+    response_excerpt: '{"message":"invalid signature"}',
+    request_id: 'whreq-demo-003',
+  },
+]
+
+function cloneMockWebhookEndpoint(endpoint: WebhookEndpoint): WebhookEndpoint {
+  return {
+    ...endpoint,
+    subscribed_events: [...endpoint.subscribed_events],
+  }
+}
+
+function cloneMockWebhookDelivery(delivery: WebhookDeliveryLog): WebhookDeliveryLog {
+  return { ...delivery }
+}
+
+function normalizeMockWebhookEvents(value: unknown, fallback: WebhookEventType[]): WebhookEventType[] {
+  if (!Array.isArray(value)) return [...fallback]
+  const seen = new Set<WebhookEventType>()
+  for (const item of value) {
+    if (typeof item !== 'string') continue
+    if (!MOCK_WEBHOOK_EVENT_TYPES.includes(item as WebhookEventType)) continue
+    if (item === 'webhook.test') continue
+    seen.add(item as WebhookEventType)
+  }
+  return seen.size > 0 ? Array.from(seen) : [...fallback]
+}
+
+function normalizeMockWebhookEndpointPayload(
+  body: Partial<WebhookEndpointUpsertRequest>,
+  existing?: WebhookEndpoint,
+): WebhookEndpoint {
+  const now = new Date().toISOString()
+  const fallbackEvents: WebhookEventType[] = existing?.subscribed_events ?? ['risk_control.hit', 'provider.error', 'balance.low']
+  const timeoutMs = Number(body.timeout_ms ?? existing?.timeout_ms ?? 5000)
+  const maxRetries = Number(body.max_retries ?? existing?.max_retries ?? 5)
+  const secret = typeof body.secret === 'string' ? body.secret.trim() : ''
+
+  return {
+    id: existing?.id ?? `webhook-${Date.now()}`,
+    name: typeof body.name === 'string' && body.name.trim()
+      ? body.name.trim()
+      : existing?.name ?? '未命名 Webhook',
+    url: typeof body.url === 'string' && body.url.trim()
+      ? body.url.trim()
+      : existing?.url ?? 'https://example.com/aether/webhook',
+    enabled: typeof body.enabled === 'boolean' ? body.enabled : existing?.enabled ?? true,
+    subscribed_events: normalizeMockWebhookEvents(body.subscribed_events, fallbackEvents),
+    secret_set: secret.length > 0 ? true : existing?.secret_set ?? true,
+    timeout_ms: Number.isFinite(timeoutMs) ? Math.min(Math.max(Math.round(timeoutMs), 1000), 30000) : 5000,
+    max_retries: Number.isFinite(maxRetries) ? Math.min(Math.max(Math.round(maxRetries), 0), 10) : 5,
+    created_at: existing?.created_at ?? now,
+    updated_at: now,
+    last_delivery_at: existing?.last_delivery_at ?? null,
+    last_delivery_status: existing?.last_delivery_status ?? null,
+    failure_count: existing?.failure_count ?? 0,
+  }
+}
+
+function upsertMockWebhookDelivery(delivery: WebhookDeliveryLog) {
+  const existingIndex = MOCK_WEBHOOK_DELIVERIES.findIndex(item => item.id === delivery.id)
+  if (existingIndex === -1) {
+    MOCK_WEBHOOK_DELIVERIES.unshift(delivery)
+  } else {
+    MOCK_WEBHOOK_DELIVERIES.splice(existingIndex, 1, delivery)
+  }
+
+  const endpoint = MOCK_WEBHOOK_ENDPOINTS.find(item => item.id === delivery.endpoint_id)
+  if (endpoint) {
+    endpoint.last_delivery_at = delivery.created_at
+    endpoint.last_delivery_status = delivery.status
+    endpoint.failure_count = delivery.status === 'succeeded' ? 0 : endpoint.failure_count + 1
+  }
+}
+
+function createMockWebhookDelivery(endpoint: WebhookEndpoint, body: WebhookTestRequest): WebhookDeliveryLog {
+  const now = new Date()
+  return {
+    id: `delivery-demo-${Date.now()}`,
+    endpoint_id: endpoint.id,
+    endpoint_name: endpoint.name,
+    event_type: body.event_type || 'webhook.test',
+    status: 'succeeded',
+    attempt_count: 1,
+    max_attempts: endpoint.max_retries + 1,
+    status_code: 200,
+    duration_ms: 126,
+    created_at: now.toISOString(),
+    next_retry_at: null,
+    delivered_at: new Date(now.getTime() + 126).toISOString(),
+    last_error: null,
+    response_excerpt: '{"ok":true,"demo":true}',
+    request_id: `whreq-${Date.now()}`,
+  }
+}
+
 // 系统配置详情
 registerDynamicRoute('GET', '/api/admin/system/configs/:configKey', async (_config, params) => {
   await delay()
@@ -2071,7 +2291,142 @@ registerDynamicRoute('PUT', '/api/admin/system/configs/:configKey', async (confi
   if (key.startsWith('backup_s3_')) {
     refreshMockS3BackupModuleStatus()
   }
+  if (key.startsWith('module.external_integrations.')) {
+    refreshMockExternalIntegrationsModuleStatus()
+  }
   return createMockResponse(entry)
+})
+
+registerDynamicRoute('GET', '/api/modules/external-integrations', async () => {
+  await delay()
+  if (!currentUserToken) {
+    throw { response: createMockResponse({ detail: '缺少用户凭证' }, 401) }
+  }
+  refreshMockExternalIntegrationsModuleStatus()
+  const enabled = mockSystemConfigValue('module.external_integrations.enabled') === true
+  const items = mockSystemConfigValue('module.external_integrations.items')
+  const role = isCurrentUserAdmin() ? 'admin' : 'user'
+  const visibleItems = Array.isArray(items)
+    ? items.filter(item => {
+        if (!item || typeof item !== 'object') return false
+        const typed = item as { enabled?: unknown; visibility?: unknown }
+        if (typed.enabled === false) return false
+        if (typed.visibility === 'all') return true
+        if (typed.visibility === 'admin') return role === 'admin'
+        return role === 'user'
+      })
+    : []
+  return createMockResponse({
+    enabled,
+    items: enabled ? visibleItems : [],
+  })
+})
+
+registerDynamicRoute('GET', '/api/admin/system/webhooks/outbound/endpoints', async () => {
+  await delay()
+  requireAdmin()
+  return createMockResponse({
+    items: MOCK_WEBHOOK_ENDPOINTS.map(cloneMockWebhookEndpoint),
+  })
+})
+
+registerDynamicRoute('POST', '/api/admin/system/webhooks/outbound/endpoints', async (config) => {
+  await delay()
+  requireAdmin()
+  const body = JSON.parse(config.data || '{}') as Partial<WebhookEndpointUpsertRequest>
+  const endpoint = normalizeMockWebhookEndpointPayload(body)
+  MOCK_WEBHOOK_ENDPOINTS.unshift(endpoint)
+  return createMockResponse(cloneMockWebhookEndpoint(endpoint))
+})
+
+registerDynamicRoute('PUT', '/api/admin/system/webhooks/outbound/endpoints/:endpointId', async (config, params) => {
+  await delay()
+  requireAdmin()
+  const index = MOCK_WEBHOOK_ENDPOINTS.findIndex(item => item.id === params.endpointId)
+  if (index === -1) {
+    throw { response: createMockResponse({ detail: 'Webhook Endpoint 不存在' }, 404) }
+  }
+  const body = JSON.parse(config.data || '{}') as Partial<WebhookEndpointUpsertRequest>
+  const updated = normalizeMockWebhookEndpointPayload(body, MOCK_WEBHOOK_ENDPOINTS[index])
+  MOCK_WEBHOOK_ENDPOINTS[index] = updated
+  return createMockResponse(cloneMockWebhookEndpoint(updated))
+})
+
+registerDynamicRoute('DELETE', '/api/admin/system/webhooks/outbound/endpoints/:endpointId', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const index = MOCK_WEBHOOK_ENDPOINTS.findIndex(item => item.id === params.endpointId)
+  if (index === -1) {
+    throw { response: createMockResponse({ detail: 'Webhook Endpoint 不存在' }, 404) }
+  }
+  MOCK_WEBHOOK_ENDPOINTS.splice(index, 1)
+  for (let i = MOCK_WEBHOOK_DELIVERIES.length - 1; i >= 0; i -= 1) {
+    if (MOCK_WEBHOOK_DELIVERIES[i].endpoint_id === params.endpointId) {
+      MOCK_WEBHOOK_DELIVERIES.splice(i, 1)
+    }
+  }
+  return createMockResponse({ message: 'Webhook Endpoint 已删除' })
+})
+
+registerDynamicRoute('GET', '/api/admin/system/webhooks/outbound/deliveries', async (config) => {
+  await delay()
+  requireAdmin()
+  const params = config.params || {}
+  const endpointId = typeof params.endpoint_id === 'string' && params.endpoint_id !== 'all' ? params.endpoint_id : null
+  const status = typeof params.status === 'string' && params.status !== 'all' ? params.status : null
+  const eventType = typeof params.event_type === 'string' && params.event_type !== 'all' ? params.event_type : null
+  const limit = Math.max(1, Math.min(Number.parseInt(String(params.limit || '50'), 10) || 50, 200))
+
+  const filtered = MOCK_WEBHOOK_DELIVERIES
+    .filter(item => (endpointId ? item.endpoint_id === endpointId : true))
+    .filter(item => (status ? item.status === status : true))
+    .filter(item => (eventType ? item.event_type === eventType : true))
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+
+  const items = filtered
+    .slice(0, limit)
+    .map(cloneMockWebhookDelivery)
+
+  return createMockResponse({
+    items,
+    total: filtered.length,
+  })
+})
+
+registerDynamicRoute('POST', '/api/admin/system/webhooks/outbound/deliveries/:deliveryId/retry', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const index = MOCK_WEBHOOK_DELIVERIES.findIndex(item => item.id === params.deliveryId)
+  if (index === -1) {
+    throw { response: createMockResponse({ detail: 'Webhook 投递记录不存在' }, 404) }
+  }
+  const current = MOCK_WEBHOOK_DELIVERIES[index]
+  const updated: WebhookDeliveryLog = {
+    ...current,
+    status: 'retrying',
+    attempt_count: Math.min(current.attempt_count + 1, current.max_attempts),
+    status_code: null,
+    duration_ms: null,
+    next_retry_at: new Date(Date.now() + 2 * 60_000).toISOString(),
+    last_error: '已重新入队，等待 worker 处理',
+    delivered_at: null,
+  }
+  MOCK_WEBHOOK_DELIVERIES[index] = updated
+  upsertMockWebhookDelivery(updated)
+  return createMockResponse(cloneMockWebhookDelivery(updated))
+})
+
+registerDynamicRoute('POST', '/api/admin/system/webhooks/outbound/endpoints/:endpointId/test', async (config, params) => {
+  await delay()
+  requireAdmin()
+  const endpoint = MOCK_WEBHOOK_ENDPOINTS.find(item => item.id === params.endpointId)
+  if (!endpoint) {
+    throw { response: createMockResponse({ detail: 'Webhook Endpoint 不存在' }, 404) }
+  }
+  const body = JSON.parse(config.data || '{}') as WebhookTestRequest
+  const delivery = createMockWebhookDelivery(endpoint, body)
+  upsertMockWebhookDelivery(delivery)
+  return createMockResponse(cloneMockWebhookDelivery(delivery))
 })
 
 registerDynamicRoute('POST', '/api/admin/system/backups/s3/run', async () => {
@@ -2092,6 +2447,9 @@ registerDynamicRoute('POST', '/api/admin/system/backups/s3/run', async () => {
 registerDynamicRoute('GET', '/api/admin/modules/status/:moduleName', async (_config, params) => {
   await delay()
   requireAdmin()
+  if (params.moduleName === 'external_integrations') {
+    refreshMockExternalIntegrationsModuleStatus()
+  }
   const moduleStatus = MOCK_MODULE_STATUSES[params.moduleName]
   if (!moduleStatus) {
     throw { response: createMockResponse({ detail: '模块不存在' }, 404) }
@@ -2123,6 +2481,21 @@ registerDynamicRoute('PUT', '/api/admin/modules/status/:moduleName/enabled', asy
     }
     refreshMockS3BackupModuleStatus()
     return createMockResponse(MOCK_MODULE_STATUSES.s3_backup)
+  }
+  if (params.moduleName === 'external_integrations') {
+    const index = MOCK_SYSTEM_CONFIGS.findIndex(item => item.key === 'module.external_integrations.enabled')
+    const entry = {
+      key: 'module.external_integrations.enabled',
+      value: enabled,
+      description: '外部系统集成开关',
+    }
+    if (index === -1) {
+      MOCK_SYSTEM_CONFIGS.push(entry)
+    } else {
+      MOCK_SYSTEM_CONFIGS[index] = { ...MOCK_SYSTEM_CONFIGS[index], ...entry }
+    }
+    refreshMockExternalIntegrationsModuleStatus()
+    return createMockResponse(MOCK_MODULE_STATUSES.external_integrations)
   }
   const updated = {
     ...moduleStatus,

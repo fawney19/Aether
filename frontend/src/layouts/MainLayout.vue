@@ -151,6 +151,9 @@
               </button>
               <button
                 class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
+                :aria-expanded="mobileMenuOpen"
+                :aria-label="mobileMenuOpen ? '关闭菜单' : '打开菜单'"
+                :title="mobileMenuOpen ? '关闭菜单' : '打开菜单'"
                 @click="mobileMenuOpen = !mobileMenuOpen"
               >
                 <div class="relative w-5 h-5">
@@ -182,14 +185,14 @@
         <Transition
           enter-active-class="transition-all duration-300 ease-out overflow-hidden"
           enter-from-class="opacity-0 max-h-0"
-          enter-to-class="opacity-100 max-h-[500px]"
+          enter-to-class="opacity-100 max-h-[calc(100vh-4.5rem)]"
           leave-active-class="transition-all duration-200 ease-in overflow-hidden"
-          leave-from-class="opacity-100 max-h-[500px]"
+          leave-from-class="opacity-100 max-h-[calc(100vh-4.5rem)]"
           leave-to-class="opacity-0 max-h-0"
         >
           <div
             v-if="mobileMenuOpen"
-            class="border-t border-[var(--shell-border)] bg-[var(--shell-glass)] backdrop-blur-xl"
+            class="max-h-[calc(100vh-4.5rem)] overflow-y-auto border-t border-[var(--shell-border)] bg-[var(--shell-glass)] backdrop-blur-xl"
           >
             <div class="mx-auto max-w-7xl px-6 py-4">
               <!-- Navigation Groups -->
@@ -218,8 +221,16 @@
                       @pointerdown="prefetchNavigationItem(item.href)"
                       @click="mobileMenuOpen = false"
                     >
+                      <!-- eslint-disable vue/no-v-html -->
+                      <span
+                        v-if="item.iconSvg"
+                        class="inline-flex h-4 w-4 shrink-0 [&>svg]:h-full [&>svg]:w-full"
+                        v-html="item.iconSvg"
+                      />
+                      <!-- eslint-enable vue/no-v-html -->
                       <component
                         :is="item.icon"
+                        v-else
                         class="h-4 w-4 shrink-0"
                       />
                       <span class="truncate">{{ item.name }}</span>
@@ -438,6 +449,7 @@ import { useToast } from '@/composables/useToast'
 import { isDemoMode } from '@/config/demo'
 import { adminApi, type CheckUpdateResponse, type ReleaseEntry, type SystemUpdateCapabilityResponse, type UpdateTaskStatusResponse } from '@/api/admin'
 import { announcementApi, type Announcement } from '@/api/announcements'
+import { EXTERNAL_INTEGRATIONS_UPDATED_EVENT, modulesApi, type ExternalIntegrationItem } from '@/api/modules'
 import { parseApiError } from '@/utils/errorParser'
 import Button from '@/components/ui/button.vue'
 import { Dialog } from '@/components/ui'
@@ -471,8 +483,13 @@ import {
   Megaphone,
   Wallet,
   CreditCard,
+  BookOpen,
+  FileText,
   Package,
   Gift,
+  Globe,
+  LifeBuoy,
+  MessageSquare,
   Menu,
   X,
   Puzzle,
@@ -481,12 +498,15 @@ import {
   Send,
   Server,
   SlidersHorizontal,
+  ExternalLink,
+  Webhook,
   type LucideIcon,
 } from 'lucide-vue-next'
 
 import GithubIcon from '@/components/icons/GithubIcon.vue'
 import { BUILTIN_TOOL_BREADCRUMBS } from '@/config/builtin-tools'
 import { prefetchAdminNavigationTarget } from '@/utils/adminNavigationPrefetch'
+import { sanitizeExternalIntegrationIconSvg } from '@/utils/externalIntegrationIcons'
 import { sanitizeMarkdown } from '@/utils/sanitize'
 
 type SystemUpdatePhase = 'download' | 'restart' | 'reconnecting'
@@ -504,6 +524,7 @@ const isAdmin = computed(() => authStore.user?.role === 'admin')
 const showAuthError = ref(false)
 const mobileMenuOpen = ref(false)
 const requiredAnnouncements = ref<Announcement[]>([])
+const externalIntegrations = ref<ExternalIntegrationItem[]>([])
 const acknowledgingRequiredAnnouncement = ref(false)
 const requiredAnnouncementOpen = computed({
   get: () => requiredAnnouncements.value.length > 0,
@@ -1011,6 +1032,10 @@ function handleVisibilityChange() {
   }
 }
 
+function handleExternalIntegrationsUpdated() {
+  void loadExternalIntegrations()
+}
+
 watch(
   () => [authStore.user, authStore.token] as const,
   () => {
@@ -1023,6 +1048,27 @@ watch(
   },
   { immediate: true }
 )
+
+watch(
+  () => [authStore.token, moduleStore.modules.external_integrations?.active] as const,
+  () => {
+    void loadExternalIntegrations()
+  },
+  { immediate: true }
+)
+
+async function loadExternalIntegrations() {
+  if (!authStore.token || !moduleStore.isActive('external_integrations')) {
+    externalIntegrations.value = []
+    return
+  }
+  try {
+    const payload = await modulesApi.getVisibleExternalIntegrations()
+    externalIntegrations.value = payload.enabled ? payload.items : []
+  } catch {
+    externalIntegrations.value = []
+  }
+}
 
 async function loadRequiredAnnouncements() {
   if (!authStore.user || !authStore.token) return
@@ -1056,6 +1102,7 @@ async function acknowledgeRequiredAnnouncement() {
 
 onMounted(() => {
   window.addEventListener('storage', handleStorageChange)
+  window.addEventListener(EXTERNAL_INTEGRATIONS_UPDATED_EVENT, handleExternalIntegrationsUpdated)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   syncAuthNotice()
 
@@ -1079,6 +1126,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('storage', handleStorageChange)
+  window.removeEventListener(EXTERNAL_INTEGRATIONS_UPDATED_EVENT, handleExternalIntegrationsUpdated)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   stopUpdateStatusPolling()
   if (import.meta.env.DEV && window.__aetherShowUpdateDialog === showDebugUpdateDialog) {
@@ -1113,6 +1161,36 @@ function prefetchNavigationItem(href: string) {
 
 // Navigation Data
 const navigation = computed(() => {
+  const iconMap: Record<string, LucideIcon> = {
+    Key,
+    KeyRound,
+    FileUp,
+    Activity,
+    Box,
+    Shield,
+    Puzzle,
+    Settings,
+    Server,
+    Send,
+    SlidersHorizontal,
+    ExternalLink,
+    Webhook,
+    CreditCard,
+    BookOpen,
+    FileText,
+    Globe,
+    LifeBuoy,
+    MessageSquare,
+    Gift,
+  }
+
+  const externalIntegrationNavItems = externalIntegrations.value.map(item => ({
+    name: item.name,
+    href: `/dashboard/external/${encodeURIComponent(item.id)}`,
+    icon: iconMap[item.icon || ''] || ExternalLink,
+    iconSvg: sanitizeExternalIntegrationIconSvg(item.icon_svg) || null,
+  }))
+
   const baseNavigation = [
     {
       title: '概览',
@@ -1126,6 +1204,7 @@ const navigation = computed(() => {
       items: [
         { name: '模型目录', href: '/dashboard/models', icon: Box },
         { name: 'API 密钥', href: '/dashboard/api-keys', icon: Key },
+        ...externalIntegrationNavItems,
       ]
     },
     {
@@ -1145,21 +1224,11 @@ const navigation = computed(() => {
     { name: '缓存监控', href: '/admin/cache-monitoring', icon: Gauge },
   ]
 
-  // 动态添加已激活模块的菜单项
-  // 图标映射
-  const iconMap: Record<string, LucideIcon> = {
-    Key,
-    KeyRound,
-    FileUp,
-    Shield,
-    Puzzle,
-    Server,
-    Send,
-    SlidersHorizontal,
-    CreditCard,
-    Gift,
+  if (!moduleStore.modules.webhook_outbound) {
+    systemItems.push({ name: 'Webhook 出站', href: '/admin/modules/webhook-outbound', icon: Webhook })
   }
 
+  // 动态添加已激活模块的菜单项
   const activeModuleItems = (group: string) =>
     Object.values(moduleStore.modules)
       .filter(m => m.active && m.admin_route && m.admin_menu_group === group)
@@ -1203,6 +1272,12 @@ const navigation = computed(() => {
         { name: '使用记录', href: '/admin/usage', icon: BarChart3 },
       ]
     },
+    ...(externalIntegrationNavItems.length > 0
+      ? [{
+          title: '外部入口',
+          items: externalIntegrationNavItems,
+        }]
+      : []),
     {
       title: '系统',
       items: systemItems

@@ -20,7 +20,7 @@ use regex::Regex;
 use semver::Version;
 use serde::{de, de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, net::IpAddr};
 
 #[derive(Debug, Clone)]
 pub struct AdminSystemSettingsUpdate {
@@ -60,6 +60,38 @@ pub const ADMIN_SYSTEM_PROVIDER_OPS_SENSITIVE_CREDENTIAL_FIELDS: &[&str] = &[
     "cookie_string",
     "cookie",
 ];
+pub const EXTERNAL_INTEGRATIONS_ENABLED_CONFIG_KEY: &str = "module.external_integrations.enabled";
+pub const EXTERNAL_INTEGRATIONS_ITEMS_CONFIG_KEY: &str = "module.external_integrations.items";
+const EXTERNAL_INTEGRATIONS_MAX_ITEMS: usize = 20;
+const EXTERNAL_INTEGRATION_DEFAULT_ICON: &str = "ExternalLink";
+const EXTERNAL_INTEGRATION_ICON_SVG_MAX_BYTES: usize = 8 * 1024;
+const EXTERNAL_INTEGRATION_ALLOWED_ICONS: &[&str] = &[
+    "ExternalLink",
+    "Activity",
+    "BookOpen",
+    "Box",
+    "CreditCard",
+    "FileText",
+    "Globe",
+    "LifeBuoy",
+    "MessageSquare",
+    "Server",
+    "Settings",
+];
+const EXTERNAL_INTEGRATION_ALLOWED_SVG_TAGS: &[&str] = &[
+    "svg", "g", "path", "circle", "rect", "line", "polyline", "polygon", "ellipse", "title", "desc",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalIntegrationConfigError {
+    Invalid,
+}
+
+impl From<()> for ExternalIntegrationConfigError {
+    fn from(_: ()) -> Self {
+        Self::Invalid
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminSystemUpdateRelease {
@@ -1293,6 +1325,8 @@ pub struct AdminModuleValidationInput<'a> {
     pub server_chan_push_configured: bool,
     pub bark_push_configured: bool,
     pub s3_backup_configured: bool,
+    pub external_integrations_configured: bool,
+    pub webhook_outbound_configured: bool,
 }
 
 pub fn build_admin_module_validation_result(
@@ -1307,6 +1341,8 @@ pub fn build_admin_module_validation_result(
         server_chan_push_configured,
         bark_push_configured,
         s3_backup_configured,
+        external_integrations_configured,
+        webhook_outbound_configured,
     } = input;
 
     match module_name {
@@ -1406,6 +1442,26 @@ pub fn build_admin_module_validation_result(
                 (false, Some("请先完成 S3 备份配置".to_string()))
             }
         }
+        "external_integrations" => {
+            if external_integrations_configured {
+                (true, None)
+            } else {
+                (
+                    false,
+                    Some("请先配置至少一个已启用的外部系统入口".to_string()),
+                )
+            }
+        }
+        "webhook_outbound" => {
+            if webhook_outbound_configured {
+                (true, None)
+            } else {
+                (
+                    false,
+                    Some("Webhook 投递存储不可用，请确认数据库迁移已完成".to_string()),
+                )
+            }
+        }
         "gemini_files" => {
             if gemini_files_has_capable_key {
                 (true, None)
@@ -1432,7 +1488,9 @@ pub fn build_admin_module_health(
         | "important_notification"
         | "bark_push"
         | "server_chan_push"
-        | "s3_backup" => "healthy",
+        | "s3_backup"
+        | "external_integrations"
+        | "webhook_outbound" => "healthy",
         "gemini_files" => {
             if gemini_files_has_capable_key {
                 "healthy"
@@ -1718,6 +1776,7 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "email_suffix_list" => Some(json!([])),
         "enable_format_conversion" => Some(json!(false)),
         "enable_model_directives" => Some(json!(false)),
+        "module.webhook_outbound.enabled" => Some(json!(true)),
         "model_directives" => Some(json!({
             "reasoning_effort": {
                 "enabled": true,
@@ -1803,6 +1862,8 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "module.bark_push.device_key" => Some(serde_json::Value::Null),
         "module.bark_push.server_url" => Some(json!(DEFAULT_BARK_API_BASE)),
         "module.bark_push.template" => Some(json!("")),
+        EXTERNAL_INTEGRATIONS_ENABLED_CONFIG_KEY => Some(json!(false)),
+        EXTERNAL_INTEGRATIONS_ITEMS_CONFIG_KEY => Some(json!([])),
         "module.chat_pii_redaction.enabled" => Some(json!(false)),
         "module.chat_pii_redaction.rules" => Some(chat_pii_redaction_default_rules()),
         "module.chat_pii_redaction.cache_ttl_seconds" => Some(json!(300)),
@@ -1861,6 +1922,274 @@ pub fn build_admin_system_config_detail_payload(
         "key": requested_key,
         "value": value,
     }))
+}
+
+pub fn normalize_external_integrations_items_value(
+    value: serde_json::Value,
+) -> Result<serde_json::Value, ExternalIntegrationConfigError> {
+    let Value::Array(items) = value else {
+        return Err(ExternalIntegrationConfigError::Invalid);
+    };
+    if items.len() > EXTERNAL_INTEGRATIONS_MAX_ITEMS {
+        return Err(ExternalIntegrationConfigError::Invalid);
+    }
+
+    let mut normalized_items = Vec::with_capacity(items.len());
+    let mut ids = BTreeSet::new();
+    for item in items {
+        let Value::Object(raw_item) = item else {
+            return Err(ExternalIntegrationConfigError::Invalid);
+        };
+        let id = normalize_external_integration_id(raw_item.get("id"))?;
+        if !ids.insert(id.clone()) {
+            return Err(ExternalIntegrationConfigError::Invalid);
+        }
+        let name = normalize_required_bounded_string(raw_item.get("name"), 64)?;
+        let url = normalize_external_integration_url(raw_item.get("url"))?;
+        let enabled = raw_item
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let visibility = normalize_external_integration_visibility(raw_item.get("visibility"))?;
+        let open_mode = normalize_external_integration_open_mode(raw_item.get("open_mode"))?;
+        let description = normalize_optional_bounded_string(raw_item.get("description"), 200)?
+            .unwrap_or_default();
+        let icon = normalize_external_integration_icon(raw_item.get("icon"))?;
+        let icon_svg = normalize_external_integration_icon_svg(raw_item.get("icon_svg"))?;
+        let color = normalize_external_integration_color(raw_item.get("color"))?;
+
+        normalized_items.push(json!({
+            "id": id,
+            "name": name,
+            "url": url,
+            "enabled": enabled,
+            "visibility": visibility,
+            "open_mode": open_mode,
+            "description": description,
+            "icon": icon,
+            "icon_svg": icon_svg,
+            "color": color,
+        }));
+    }
+    Ok(Value::Array(normalized_items))
+}
+
+pub fn external_integrations_has_enabled_entry(value: Option<&serde_json::Value>) -> bool {
+    let Some(value) = value.cloned() else {
+        return false;
+    };
+    let Ok(Value::Array(items)) = normalize_external_integrations_items_value(value) else {
+        return false;
+    };
+    items
+        .iter()
+        .any(|item| item.get("enabled").and_then(Value::as_bool) == Some(true))
+}
+
+pub fn build_external_integrations_payload_for_role(
+    enabled: bool,
+    items_value: Option<&serde_json::Value>,
+    role: &str,
+) -> serde_json::Value {
+    if !enabled {
+        return json!({
+            "enabled": false,
+            "items": [],
+        });
+    }
+
+    let items = items_value
+        .cloned()
+        .and_then(|value| normalize_external_integrations_items_value(value).ok())
+        .and_then(|value| match value {
+            Value::Array(items) => Some(items),
+            _ => None,
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|item| item.get("enabled").and_then(Value::as_bool) == Some(true))
+        .filter(|item| {
+            item.get("visibility")
+                .and_then(Value::as_str)
+                .map(|visibility| external_integration_visible_to_role(visibility, role))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "enabled": true,
+        "items": items,
+    })
+}
+
+fn normalize_external_integration_id(value: Option<&Value>) -> Result<String, ()> {
+    let Some(raw) = value.and_then(Value::as_str).map(str::trim) else {
+        return Err(());
+    };
+    if raw.is_empty() || raw.len() > 64 {
+        return Err(());
+    }
+    if !raw
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        return Err(());
+    }
+    Ok(raw.to_string())
+}
+
+fn normalize_required_bounded_string(value: Option<&Value>, max_len: usize) -> Result<String, ()> {
+    let Some(raw) = value.and_then(Value::as_str).map(str::trim) else {
+        return Err(());
+    };
+    if raw.is_empty() || raw.chars().count() > max_len {
+        return Err(());
+    }
+    Ok(raw.to_string())
+}
+
+fn normalize_external_integration_url(value: Option<&Value>) -> Result<String, ()> {
+    let raw = normalize_required_bounded_string(value, 2048)?;
+    if raw.starts_with("//") {
+        return Err(());
+    }
+    let parsed = url::Url::parse(&raw).map_err(|_| ())?;
+    let Some(host) = parsed.host_str() else {
+        return Err(());
+    };
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(());
+    }
+    match parsed.scheme() {
+        "https" => Ok(parsed.to_string()),
+        "http" if external_integration_http_host_allowed(host) => Ok(parsed.to_string()),
+        _ => Err(()),
+    }
+}
+
+fn external_integration_http_host_allowed(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+fn normalize_external_integration_visibility(value: Option<&Value>) -> Result<&'static str, ()> {
+    match value.and_then(Value::as_str).map(str::trim) {
+        None | Some("") => Ok("admin"),
+        Some("admin") => Ok("admin"),
+        Some("user") => Ok("user"),
+        Some("all") => Ok("all"),
+        Some(_) => Err(()),
+    }
+}
+
+fn normalize_external_integration_open_mode(value: Option<&Value>) -> Result<&'static str, ()> {
+    match value.and_then(Value::as_str).map(str::trim) {
+        None | Some("") => Ok("embed"),
+        Some("embed") => Ok("embed"),
+        Some("new_tab") => Ok("new_tab"),
+        Some(_) => Err(()),
+    }
+}
+
+fn normalize_external_integration_icon(value: Option<&Value>) -> Result<&'static str, ()> {
+    let Some(raw) = value.and_then(Value::as_str).map(str::trim) else {
+        return Ok(EXTERNAL_INTEGRATION_DEFAULT_ICON);
+    };
+    if raw.is_empty() {
+        return Ok(EXTERNAL_INTEGRATION_DEFAULT_ICON);
+    }
+    EXTERNAL_INTEGRATION_ALLOWED_ICONS
+        .iter()
+        .copied()
+        .find(|icon| *icon == raw)
+        .ok_or(())
+}
+
+fn normalize_external_integration_icon_svg(value: Option<&Value>) -> Result<Value, ()> {
+    let Some(raw) = value.and_then(Value::as_str).map(str::trim) else {
+        return Ok(Value::Null);
+    };
+    if raw.is_empty() {
+        return Ok(Value::Null);
+    }
+    validate_external_integration_icon_svg(raw)?;
+    Ok(Value::String(raw.to_string()))
+}
+
+fn validate_external_integration_icon_svg(raw: &str) -> Result<(), ()> {
+    if raw.len() > EXTERNAL_INTEGRATION_ICON_SVG_MAX_BYTES {
+        return Err(());
+    }
+
+    let lower = raw.to_ascii_lowercase();
+    if !lower.starts_with("<svg") {
+        return Err(());
+    }
+    if !(lower.ends_with("</svg>") || lower.ends_with("/>")) {
+        return Err(());
+    }
+    if lower.contains("<?") || lower.contains("<!") {
+        return Err(());
+    }
+    for needle in ["javascript:", "data:", "base64", "url("] {
+        if lower.contains(needle) {
+            return Err(());
+        }
+    }
+
+    for pattern in [
+        r#"(?i)\son[a-z0-9_:-]+\s*="#,
+        r#"(?i)\s(?:href|xlink:href|src)\s*="#,
+        r#"(?i)\sstyle\s*="#,
+    ] {
+        let regex = Regex::new(pattern).map_err(|_| ())?;
+        if regex.is_match(raw) {
+            return Err(());
+        }
+    }
+
+    let tag_regex = Regex::new(r#"(?i)<\s*/?\s*([a-z][a-z0-9:-]*)"#).map_err(|_| ())?;
+    for captures in tag_regex.captures_iter(raw) {
+        let tag = captures
+            .get(1)
+            .map(|value| value.as_str().to_ascii_lowercase())
+            .ok_or(())?;
+        if !EXTERNAL_INTEGRATION_ALLOWED_SVG_TAGS.contains(&tag.as_str()) {
+            return Err(());
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_external_integration_color(value: Option<&Value>) -> Result<Value, ()> {
+    let Some(raw) = value.and_then(Value::as_str).map(str::trim) else {
+        return Ok(Value::Null);
+    };
+    if raw.is_empty() {
+        return Ok(Value::Null);
+    }
+    let hex = raw.strip_prefix('#').ok_or(())?;
+    if matches!(hex.len(), 3 | 6) && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Ok(json!(format!("#{hex}")))
+    } else {
+        Err(())
+    }
+}
+
+fn external_integration_visible_to_role(visibility: &str, role: &str) -> bool {
+    let admin_role = matches!(role, "admin" | "audit_admin");
+    match visibility {
+        "all" => true,
+        "admin" => admin_role,
+        "user" => !admin_role,
+        _ => false,
+    }
 }
 
 fn normalize_chat_pii_redaction_rules_value(
@@ -2186,7 +2515,9 @@ pub fn parse_admin_system_config_update(
         "module.important_notification.enabled"
         | "module.important_notification.email_enabled"
         | "module.server_chan_push.enabled"
-        | "module.bark_push.enabled" => match value.as_bool() {
+        | "module.bark_push.enabled"
+        | EXTERNAL_INTEGRATIONS_ENABLED_CONFIG_KEY
+        | "module.webhook_outbound.enabled" => match value.as_bool() {
             Some(enabled) => value = json!(enabled),
             None if value.is_null() => {
                 value = admin_system_config_default_value(&normalized_key).unwrap_or(json!(false));
@@ -2219,6 +2550,18 @@ pub fn parse_admin_system_config_update(
                 value = notification_service_default_items();
             } else {
                 value = normalize_notification_service_items_value(value).map_err(|_| {
+                    (
+                        http::StatusCode::BAD_REQUEST,
+                        json!({ "detail": "请求数据验证失败" }),
+                    )
+                })?;
+            }
+        }
+        EXTERNAL_INTEGRATIONS_ITEMS_CONFIG_KEY => {
+            if value.is_null() {
+                value = json!([]);
+            } else {
+                value = normalize_external_integrations_items_value(value).map_err(|_| {
                     (
                         http::StatusCode::BAD_REQUEST,
                         json!({ "detail": "请求数据验证失败" }),
@@ -3514,5 +3857,216 @@ mod tests {
         assert_eq!(payload["key"], "turnstile_secret_key");
         assert_eq!(payload["value"], serde_json::Value::Null);
         assert_eq!(payload["is_set"], json!(true));
+    }
+
+    #[test]
+    fn external_integrations_items_are_normalized() {
+        let update = parse_admin_system_config_update(
+            EXTERNAL_INTEGRATIONS_ITEMS_CONFIG_KEY,
+            r##"{
+                "value": [
+                    {
+                        "id": "status_page",
+                        "name": " 状态页 ",
+                        "url": "https://status.example.com",
+                        "enabled": true,
+                        "visibility": "all",
+                        "open_mode": "embed",
+                        "description": " 服务状态 ",
+                        "icon": "Globe",
+                        "icon_svg": "<svg viewBox=\"0 0 24 24\" xmlns=\"http://www.w3.org/2000/svg\"><path fill=\"#2563eb\" d=\"M4 4h16v16H4z\"/></svg>",
+                        "color": "#2563eb"
+                    }
+                ]
+            }"##
+            .as_bytes(),
+        )
+        .expect("external integration items should parse");
+
+        assert_eq!(
+            update.normalized_key,
+            EXTERNAL_INTEGRATIONS_ITEMS_CONFIG_KEY
+        );
+        assert_eq!(update.value[0]["id"], json!("status_page"));
+        assert_eq!(update.value[0]["name"], json!("状态页"));
+        assert_eq!(update.value[0]["visibility"], json!("all"));
+        assert_eq!(update.value[0]["open_mode"], json!("embed"));
+        assert_eq!(update.value[0]["icon"], json!("Globe"));
+        assert_eq!(
+            update.value[0]["icon_svg"],
+            json!("<svg viewBox=\"0 0 24 24\" xmlns=\"http://www.w3.org/2000/svg\"><path fill=\"#2563eb\" d=\"M4 4h16v16H4z\"/></svg>")
+        );
+    }
+
+    #[test]
+    fn external_integrations_reject_unsafe_urls() {
+        for raw_url in [
+            "javascript:alert(1)",
+            "data:text/html,hello",
+            "http://example.com",
+            "https://user:pass@example.com",
+        ] {
+            let err = parse_admin_system_config_update(
+                EXTERNAL_INTEGRATIONS_ITEMS_CONFIG_KEY,
+                json!({
+                    "value": [
+                        {
+                            "id": "bad",
+                            "name": "Bad",
+                            "url": raw_url
+                        }
+                    ]
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .expect_err("unsafe URL should fail");
+            assert_eq!(err.0, http::StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn external_integrations_reject_unsafe_icon_svgs() {
+        let oversized = format!(
+            "<svg>{}</svg>",
+            "a".repeat(EXTERNAL_INTEGRATION_ICON_SVG_MAX_BYTES)
+        );
+        for icon_svg in [
+            r#"<svg onload="alert(1)"></svg>"#.to_string(),
+            r#"<svg><script>alert(1)</script></svg>"#.to_string(),
+            r#"<svg><foreignObject><div>bad</div></foreignObject></svg>"#.to_string(),
+            r#"<svg><image href="https://example.com/icon.png"/></svg>"#.to_string(),
+            r#"<svg><path style="background:url(https://example.com/x)"/></svg>"#.to_string(),
+            r#"<svg><path href="javascript:alert(1)"/></svg>"#.to_string(),
+            oversized,
+        ] {
+            let err = parse_admin_system_config_update(
+                EXTERNAL_INTEGRATIONS_ITEMS_CONFIG_KEY,
+                json!({
+                    "value": [
+                        {
+                            "id": "bad_icon",
+                            "name": "Bad Icon",
+                            "url": "https://status.example.com",
+                            "icon_svg": icon_svg
+                        }
+                    ]
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .expect_err("unsafe SVG icon should fail");
+            assert_eq!(err.0, http::StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn external_integrations_allow_loopback_http() {
+        let update = parse_admin_system_config_update(
+            EXTERNAL_INTEGRATIONS_ITEMS_CONFIG_KEY,
+            r#"{
+                "value": [
+                    {
+                        "id": "dev",
+                        "name": "Dev",
+                        "url": "http://localhost:3000"
+                    }
+                ]
+            }"#
+            .as_bytes(),
+        )
+        .expect("loopback http should parse");
+
+        assert_eq!(update.value[0]["url"], json!("http://localhost:3000/"));
+        assert_eq!(update.value[0]["visibility"], json!("admin"));
+        assert_eq!(update.value[0]["open_mode"], json!("embed"));
+    }
+
+    #[test]
+    fn external_integrations_reject_duplicate_ids() {
+        let err = parse_admin_system_config_update(
+            EXTERNAL_INTEGRATIONS_ITEMS_CONFIG_KEY,
+            r#"{
+                "value": [
+                    { "id": "status", "name": "Status A", "url": "https://a.example.com" },
+                    { "id": "status", "name": "Status B", "url": "https://b.example.com" }
+                ]
+            }"#
+            .as_bytes(),
+        )
+        .expect_err("duplicate IDs should fail");
+
+        assert_eq!(err.0, http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn external_integrations_payload_filters_by_role() {
+        let items = normalize_external_integrations_items_value(json!([
+            { "id": "admin_only", "name": "Admin", "url": "https://admin.example.com", "visibility": "admin" },
+            { "id": "user_only", "name": "User", "url": "https://user.example.com", "visibility": "user" },
+            { "id": "all", "name": "All", "url": "https://all.example.com", "visibility": "all" },
+            { "id": "disabled", "name": "Disabled", "url": "https://disabled.example.com", "enabled": false, "visibility": "all" }
+        ]))
+        .expect("items should normalize");
+
+        let admin_payload =
+            build_external_integrations_payload_for_role(true, Some(&items), "admin");
+        let user_payload = build_external_integrations_payload_for_role(true, Some(&items), "user");
+
+        assert_eq!(admin_payload["items"].as_array().unwrap().len(), 2);
+        assert_eq!(user_payload["items"].as_array().unwrap().len(), 2);
+        assert!(admin_payload["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "admin_only"));
+        assert!(user_payload["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "user_only"));
+    }
+
+    #[test]
+    fn webhook_outbound_module_validation_depends_on_storage_availability() {
+        assert_eq!(
+            admin_system_config_default_value("module.webhook_outbound.enabled"),
+            Some(json!(true))
+        );
+
+        let (valid, error) = build_admin_module_validation_result(AdminModuleValidationInput {
+            module_name: "webhook_outbound",
+            oauth_providers: &[],
+            ldap_config: None,
+            gemini_files_has_capable_key: false,
+            important_notification_configured: false,
+            server_chan_push_configured: false,
+            bark_push_configured: false,
+            s3_backup_configured: false,
+            external_integrations_configured: false,
+            webhook_outbound_configured: true,
+        });
+
+        assert!(valid);
+        assert_eq!(error, None);
+
+        let (valid, error) = build_admin_module_validation_result(AdminModuleValidationInput {
+            module_name: "webhook_outbound",
+            oauth_providers: &[],
+            ldap_config: None,
+            gemini_files_has_capable_key: false,
+            important_notification_configured: false,
+            server_chan_push_configured: false,
+            bark_push_configured: false,
+            s3_backup_configured: false,
+            external_integrations_configured: false,
+            webhook_outbound_configured: false,
+        });
+
+        assert!(!valid);
+        assert_eq!(
+            error.as_deref(),
+            Some("Webhook 投递存储不可用，请确认数据库迁移已完成")
+        );
     }
 }

@@ -199,6 +199,25 @@ pub(crate) async fn build_admin_create_user_api_key_response(
         created
     };
 
+    crate::webhook_outbound::spawn_outbound_webhook_event_best_effort(
+        state.cloned_app(),
+        "api_key.created",
+        json!({
+            "api_key_id": created.api_key_id.as_str(),
+            "user_id": user_id.as_str(),
+            "name": created.name.as_deref(),
+            "created_by": "admin",
+            "admin_user_id": request_context
+                .decision()
+                .and_then(|decision| decision.admin_principal.as_ref())
+                .map(|principal| principal.user_id.as_str()),
+            "rate_limit": created.rate_limit,
+            "concurrent_limit": created.concurrent_limit,
+            "expires_at_unix_secs": created.expires_at_unix_secs,
+            "is_standalone": false,
+        }),
+    );
+
     Ok(attach_audit_response(
         Json(json!({
             "id": created.api_key_id,

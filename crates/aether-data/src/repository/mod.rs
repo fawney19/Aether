@@ -28,3 +28,4 @@ pub mod usage;
 pub mod users;
 pub mod video_tasks;
 pub mod wallet;
+pub mod webhook_notifications;

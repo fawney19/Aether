@@ -35,8 +35,17 @@
             @click="handleNavigate(item.href)"
           >
             <div class="flex items-center gap-2.5">
+              <!-- eslint-disable vue/no-v-html -->
+              <span
+                v-if="item.iconSvg"
+                class="inline-flex h-4 w-4 shrink-0 transition-colors duration-200 [&>svg]:h-full [&>svg]:w-full"
+                :class="isItemActive(item.href) ? 'text-primary' : 'text-muted-foreground/70 group-hover:text-foreground'"
+                v-html="item.iconSvg"
+              />
+              <!-- eslint-enable vue/no-v-html -->
               <component
                 :is="item.icon"
+                v-else
                 class="h-4 w-4 transition-colors duration-200"
                 :class="isItemActive(item.href) ? 'text-primary' : 'text-muted-foreground/70 group-hover:text-foreground'"
                 :stroke-width="isItemActive(item.href) ? 2 : 1.75"
@@ -63,6 +72,7 @@ export interface NavigationItem {
   name: string
   href: string
   icon: Component
+  iconSvg?: string | null
   description?: string
 }
 

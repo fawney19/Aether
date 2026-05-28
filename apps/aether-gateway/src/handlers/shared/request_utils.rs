@@ -259,6 +259,23 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                     http::Method::POST,
                     Some("important_notification_test"),
                 )
+                | (Some("system_manage"), http::Method::PUT, Some("outbound_webhooks_set"))
+                | (Some("system_manage"), http::Method::POST, Some("outbound_webhook_test"))
+                | (
+                    Some("system_manage"),
+                    http::Method::POST,
+                    Some("outbound_webhook_endpoint_create"),
+                )
+                | (
+                    Some("system_manage"),
+                    http::Method::PUT,
+                    Some("outbound_webhook_endpoint_update"),
+                )
+                | (
+                    Some("system_manage"),
+                    http::Method::POST,
+                    Some("outbound_webhook_endpoint_test"),
+                )
                 | (
                     Some("provider_models_manage"),
                     http::Method::POST,

@@ -23,6 +23,7 @@ use crate::repository::usage::UsageReadRepository;
 use crate::repository::users::UserReadRepository;
 use crate::repository::video_tasks::VideoTaskReadRepository;
 use crate::repository::wallet::WalletReadRepository;
+use crate::repository::webhook_notifications::WebhookNotificationReadRepository;
 
 #[derive(Clone, Default)]
 pub struct DataReadRepositories {
@@ -47,6 +48,7 @@ pub struct DataReadRepositories {
     users: Option<Arc<dyn UserReadRepository>>,
     video_tasks: Option<Arc<dyn VideoTaskReadRepository>>,
     wallets: Option<Arc<dyn WalletReadRepository>>,
+    webhook_notifications: Option<Arc<dyn WebhookNotificationReadRepository>>,
 }
 
 impl fmt::Debug for DataReadRepositories {
@@ -79,6 +81,10 @@ impl fmt::Debug for DataReadRepositories {
             .field("has_users", &self.users.is_some())
             .field("has_video_tasks", &self.video_tasks.is_some())
             .field("has_wallets", &self.wallets.is_some())
+            .field(
+                "has_webhook_notifications",
+                &self.webhook_notifications.is_some(),
+            )
             .finish()
     }
 }
@@ -174,6 +180,10 @@ impl DataReadRepositories {
                 .map(PostgresBackend::wallet_read_repository)
                 .or_else(|| mysql.map(MysqlBackend::wallet_read_repository))
                 .or_else(|| sqlite.map(SqliteBackend::wallet_read_repository)),
+            webhook_notifications: postgres
+                .map(PostgresBackend::webhook_notification_read_repository)
+                .or_else(|| mysql.map(MysqlBackend::webhook_notification_read_repository))
+                .or_else(|| sqlite.map(SqliteBackend::webhook_notification_read_repository)),
         }
     }
 
@@ -268,6 +278,10 @@ impl DataReadRepositories {
         self.wallets.clone()
     }
 
+    pub fn webhook_notifications(&self) -> Option<Arc<dyn WebhookNotificationReadRepository>> {
+        self.webhook_notifications.clone()
+    }
+
     pub fn has_any(&self) -> bool {
         self.auth_api_keys.is_some()
             || self.announcements.is_some()
@@ -290,6 +304,7 @@ impl DataReadRepositories {
             || self.users.is_some()
             || self.video_tasks.is_some()
             || self.wallets.is_some()
+            || self.webhook_notifications.is_some()
     }
 }
 
@@ -333,5 +348,6 @@ mod tests {
         assert!(read.usage().is_some());
         assert!(read.video_tasks().is_some());
         assert!(read.wallets().is_some());
+        assert!(read.webhook_notifications().is_some());
     }
 }

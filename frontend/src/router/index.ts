@@ -155,6 +155,12 @@ const routes: RouteRecordRaw[] = [
         component: () => importWithRetry(() => import('@/views/user/ModelCatalog.vue'))
       },
       {
+        path: 'external/:id',
+        name: 'ExternalIntegrationEmbed',
+        component: () => importWithRetry(() => import('@/views/shared/ExternalIntegrationEmbed.vue')),
+        meta: { module: 'external_integrations' }
+      },
+      {
         path: 'async-tasks',
         name: 'UserAsyncTasks',
         component: () => importWithRetry(() => import('@/views/admin/AsyncTasks.vue'))
@@ -279,6 +285,18 @@ const routes: RouteRecordRaw[] = [
         name: 'S3BackupSettings',
         component: () => importWithRetry(() => import('@/views/admin/modules/S3BackupSettings.vue')),
         meta: { module: 's3_backup' }
+      },
+      {
+        path: 'modules/external-integrations',
+        name: 'ExternalIntegrationsModule',
+        component: () => importWithRetry(() => import('@/views/admin/modules/ExternalIntegrations.vue')),
+        meta: { module: 'external_integrations' }
+      },
+      {
+        path: 'modules/webhook-outbound',
+        name: 'WebhookOutboundModule',
+        component: () => importWithRetry(() => import('@/views/admin/modules/WebhookOutbound.vue')),
+        meta: { module: 'webhook_outbound' }
       },
       {
         path: 'modules/important-notification',

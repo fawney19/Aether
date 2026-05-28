@@ -120,45 +120,54 @@ impl AppState {
     > {
         #[cfg(test)]
         if let Some(store) = self.auth_wallet_store.as_ref() {
-            let mut guard = store.lock().expect("auth wallet store should lock");
-            let Some(wallet) = guard.get_mut(wallet_id) else {
+            let result = {
+                let mut guard = store.lock().expect("auth wallet store should lock");
+                let Some(wallet) = guard.get_mut(wallet_id) else {
+                    return Ok(None);
+                };
+                wallet.balance += amount_usd;
+                wallet.total_recharged += amount_usd;
+                wallet.updated_at_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+                let now = chrono::Utc::now();
+                let created_at = now.timestamp().max(0) as u64;
+                let order = AdminWalletPaymentOrderRecord {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    order_no: admin_wallet_build_order_no(now),
+                    wallet_id: wallet.id.clone(),
+                    user_id: wallet.user_id.clone(),
+                    amount_usd,
+                    pay_amount: None,
+                    pay_currency: None,
+                    exchange_rate: None,
+                    refunded_amount_usd: 0.0,
+                    refundable_amount_usd: amount_usd,
+                    payment_method: payment_method.to_string(),
+                    gateway_order_id: None,
+                    status: "credited".to_string(),
+                    gateway_response: Some(serde_json::json!({
+                        "source": "manual",
+                        "operator_id": operator_id,
+                        "description": description,
+                    })),
+                    created_at_unix_ms: created_at,
+                    paid_at_unix_secs: Some(created_at),
+                    credited_at_unix_secs: Some(created_at),
+                    expires_at_unix_secs: None,
+                };
+                Some((wallet.clone(), order))
+            };
+            if let Some((wallet, order)) = result.as_ref() {
+                emit_wallet_recharged_webhook(self.clone(), wallet, order, "admin_manual");
+            }
+            let Some((wallet, order)) = result else {
                 return Ok(None);
             };
-            wallet.balance += amount_usd;
-            wallet.total_recharged += amount_usd;
-            wallet.updated_at_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
-            let now = chrono::Utc::now();
-            let created_at = now.timestamp().max(0) as u64;
-            let order = AdminWalletPaymentOrderRecord {
-                id: uuid::Uuid::new_v4().to_string(),
-                order_no: admin_wallet_build_order_no(now),
-                wallet_id: wallet.id.clone(),
-                user_id: wallet.user_id.clone(),
-                amount_usd,
-                pay_amount: None,
-                pay_currency: None,
-                exchange_rate: None,
-                refunded_amount_usd: 0.0,
-                refundable_amount_usd: amount_usd,
-                payment_method: payment_method.to_string(),
-                gateway_order_id: None,
-                status: "credited".to_string(),
-                gateway_response: Some(serde_json::json!({
-                    "source": "manual",
-                    "operator_id": operator_id,
-                    "description": description,
-                })),
-                created_at_unix_ms: created_at,
-                paid_at_unix_secs: Some(created_at),
-                credited_at_unix_secs: Some(created_at),
-                expires_at_unix_secs: None,
-            };
-            return Ok(Some((wallet.clone(), order)));
+            return Ok(Some((wallet, order)));
         }
 
         let now = chrono::Utc::now();
         let order_no = admin_wallet_build_order_no(now);
-        Ok(self
+        let result = self
             .create_manual_wallet_recharge(
                 aether_data::repository::wallet::CreateManualWalletRechargeInput {
                     wallet_id: wallet_id.to_string(),
@@ -170,8 +179,39 @@ impl AppState {
                 },
             )
             .await?
-            .map(|(wallet, order)| (wallet, stored_admin_payment_order_to_gateway(order))))
+            .map(|(wallet, order)| (wallet, stored_admin_payment_order_to_gateway(order)));
+        if let Some((wallet, order)) = result.as_ref() {
+            emit_wallet_recharged_webhook(self.clone(), wallet, order, "admin_manual");
+        }
+        Ok(result)
     }
+}
+
+pub(crate) fn emit_wallet_recharged_webhook(
+    state: AppState,
+    wallet: &aether_data::repository::wallet::StoredWalletSnapshot,
+    order: &AdminWalletPaymentOrderRecord,
+    source: &str,
+) {
+    crate::webhook_outbound::spawn_outbound_webhook_event_best_effort(
+        state,
+        "wallet.recharged",
+        serde_json::json!({
+            "wallet_id": wallet.id.as_str(),
+            "user_id": wallet.user_id.as_deref().or(order.user_id.as_deref()),
+            "api_key_id": wallet.api_key_id.as_deref(),
+            "amount_usd": order.amount_usd,
+            "payment_method": order.payment_method.as_str(),
+            "payment_order_id": order.id.as_str(),
+            "order_no": order.order_no.as_str(),
+            "status": order.status.as_str(),
+            "credited_at_unix_secs": order.credited_at_unix_secs,
+            "recharge_balance_after": wallet.balance,
+            "gift_balance_after": wallet.gift_balance,
+            "currency": wallet.currency.as_str(),
+            "source": source,
+        }),
+    );
 }
 
 fn stored_wallet_transaction_to_gateway(

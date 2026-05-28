@@ -67,6 +67,10 @@ use crate::repository::video_tasks::{
 use crate::repository::wallet::{
     SqlxWalletRepository, WalletReadRepository, WalletWriteRepository,
 };
+use crate::repository::webhook_notifications::{
+    SqlxWebhookNotificationRepository, WebhookNotificationReadRepository,
+    WebhookNotificationWriteRepository,
+};
 use crate::DataLayerError;
 
 #[derive(Debug, Clone)]
@@ -133,6 +137,18 @@ impl PostgresBackend {
 
     pub fn background_task_write_repository(&self) -> Arc<dyn BackgroundTaskWriteRepository> {
         Arc::new(SqlxBackgroundTaskRepository::new(self.pool_clone()))
+    }
+
+    pub fn webhook_notification_read_repository(
+        &self,
+    ) -> Arc<dyn WebhookNotificationReadRepository> {
+        Arc::new(SqlxWebhookNotificationRepository::new(self.pool_clone()))
+    }
+
+    pub fn webhook_notification_write_repository(
+        &self,
+    ) -> Arc<dyn WebhookNotificationWriteRepository> {
+        Arc::new(SqlxWebhookNotificationRepository::new(self.pool_clone()))
     }
 
     pub fn minimal_candidate_selection_read_repository(
@@ -318,6 +334,8 @@ mod tests {
         let _usage_writer = backend.usage_write_repository();
         let _wallet_reader = backend.wallet_read_repository();
         let _wallet_writer = backend.wallet_write_repository();
+        let _webhook_notification_reader = backend.webhook_notification_read_repository();
+        let _webhook_notification_writer = backend.webhook_notification_write_repository();
         let _settlement_writer = backend.settlement_write_repository();
         let _video_task_reader = backend.video_task_read_repository();
         let _video_task_writer = backend.video_task_write_repository();
