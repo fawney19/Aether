@@ -2,6 +2,11 @@ export type PasswordPolicyLevel = 'weak' | 'medium' | 'strong'
 export const PASSWORD_MAX_BYTES = 72
 
 const textEncoder = new TextEncoder()
+const PASSWORD_RANDOM_LENGTH = 14
+const LOWERCASE_CHARS = 'abcdefghijkmnopqrstuvwxyz'
+const UPPERCASE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
+const NUMBER_CHARS = '23456789'
+const SPECIAL_CHARS = '!@#$%^&*_-+=?'
 
 function getPasswordByteLength(password: string): number {
   return textEncoder.encode(password).length
@@ -107,4 +112,61 @@ export function validatePasswordByPolicy(password: string, level: unknown): stri
     return `密码${  errors[0]}`
   }
   return `密码需要：${  errors.join('、')}`
+}
+
+function randomInt(maxExclusive: number): number {
+  if (maxExclusive <= 0) return 0
+
+  const cryptoApi = globalThis.crypto
+  if (cryptoApi?.getRandomValues) {
+    const randomValues = new Uint32Array(1)
+    cryptoApi.getRandomValues(randomValues)
+    return randomValues[0] % maxExclusive
+  }
+
+  return Math.floor(Math.random() * maxExclusive)
+}
+
+function pickRandomChar(chars: string): string {
+  return chars[randomInt(chars.length)]
+}
+
+function shuffleChars(chars: string[]): string[] {
+  const shuffled = [...chars]
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = randomInt(index + 1)
+    const current = shuffled[index]
+    shuffled[index] = shuffled[swapIndex]
+    shuffled[swapIndex] = current
+  }
+  return shuffled
+}
+
+export function generatePasswordByPolicy(level: unknown): string {
+  const normalized = normalizePasswordPolicyLevel(level)
+  const requiredChars: string[] = []
+
+  if (normalized === 'strong') {
+    requiredChars.push(
+      pickRandomChar(LOWERCASE_CHARS),
+      pickRandomChar(UPPERCASE_CHARS),
+      pickRandomChar(NUMBER_CHARS),
+      pickRandomChar(SPECIAL_CHARS),
+    )
+  } else if (normalized === 'medium') {
+    requiredChars.push(
+      pickRandomChar(LOWERCASE_CHARS + UPPERCASE_CHARS),
+      pickRandomChar(NUMBER_CHARS),
+    )
+  }
+
+  const characterPool = normalized === 'strong'
+    ? LOWERCASE_CHARS + UPPERCASE_CHARS + NUMBER_CHARS + SPECIAL_CHARS
+    : LOWERCASE_CHARS + UPPERCASE_CHARS + NUMBER_CHARS
+
+  while (requiredChars.length < PASSWORD_RANDOM_LENGTH) {
+    requiredChars.push(pickRandomChar(characterPool))
+  }
+
+  return shuffleChars(requiredChars).join('')
 }

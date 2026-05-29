@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getPasswordPolicyErrors, validatePasswordByPolicy } from '../passwordPolicy'
+import { generatePasswordByPolicy, getPasswordPolicyErrors, validatePasswordByPolicy } from '../passwordPolicy'
 
 describe('passwordPolicy utils', () => {
   it('rejects passwords longer than 72 bytes', () => {
@@ -14,5 +14,21 @@ describe('passwordPolicy utils', () => {
     expect(validatePasswordByPolicy('abc', 'strong')).toBe(
       '密码需要：至少 8 个字符、包含大写字母、包含数字、包含特殊字符',
     )
+  })
+
+  it('generates passwords that satisfy every policy level', () => {
+    for (const level of ['weak', 'medium', 'strong']) {
+      const password = generatePasswordByPolicy(level)
+      expect(validatePasswordByPolicy(password, level)).toBe('')
+    }
+  })
+
+  it('generates strong passwords with all required character classes', () => {
+    const password = generatePasswordByPolicy('strong')
+
+    expect(password).toMatch(/[A-Z]/)
+    expect(password).toMatch(/[a-z]/)
+    expect(password).toMatch(/[0-9]/)
+    expect(password).toMatch(/[!@#$%^&*()_+\-=[\]{};:'",.<>?/\\|`~]/)
   })
 })
