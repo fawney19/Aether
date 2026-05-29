@@ -91,6 +91,18 @@ describe('usage status helpers', () => {
     expect(isUsageRecordFailed(record)).toBe(true)
   })
 
+  it('treats active stream records with 2xx transport and an error message as failed', () => {
+    const record = buildUsageRecord({
+      status: 'streaming',
+      status_code: 200,
+      error_message: 'UpstreamRequest("provider stream first byte timeout after 10000 ms")',
+      first_byte_time_ms: 120,
+    })
+
+    expect(resolveDisplayRequestStatus(record)).toBe('failed')
+    expect(isUsageRecordFailed(record)).toBe(true)
+  })
+
   it('treats failed image progress as failed before the usage record finalizes', () => {
     const record = buildUsageRecord({
       status: 'streaming',
@@ -141,7 +153,7 @@ describe('usage status helpers', () => {
     })).toBe('failed')
   })
 
-  it('keeps active request lifecycle status authoritative over detail status code inference', () => {
+  it('keeps active request lifecycle status unless terminal failure signals are present', () => {
     expect(resolveTimelineFinalStatus({
       requestStatus: 'streaming',
       statusCode: 200,
@@ -151,7 +163,13 @@ describe('usage status helpers', () => {
       requestStatus: 'streaming',
       statusCode: 503,
       traceFinalStatus: 'failed',
-    })).toBe('streaming')
+    })).toBe('failed')
+
+    expect(resolveTimelineFinalStatus({
+      requestStatus: 'streaming',
+      statusCode: 200,
+      traceFinalStatus: 'failed',
+    })).toBe('failed')
 
     expect(resolveTimelineFinalStatus({
       requestStatus: 'pending',

@@ -1,4 +1,5 @@
 import type { RequestDetail, RequestErrorDomain, RequestSchedulingFailure } from '@/api/dashboard'
+import { formatFailureCodeLabel, formatFailureTypeLabel, normalizeFailureMessage, resolveFailureReason } from './failureDisplay'
 
 export interface RequestFailureNotice {
   title: string
@@ -13,8 +14,17 @@ function nonEmptyString(value: string | null | undefined): string | null {
 }
 
 function normalizeErrorDomain(domain: RequestErrorDomain | null | undefined): RequestErrorDomain | null {
-  if (!nonEmptyString(domain?.message)) return null
+  if (!nonEmptyString(domain?.message) && !nonEmptyString(domain?.type) && domain?.code == null) return null
   return domain ?? null
+}
+
+function normalizeDomainMessage(domain: RequestErrorDomain | null | undefined): string | null {
+  return resolveFailureReason({
+    message: domain?.message ?? null,
+    type: domain?.type ?? null,
+    code: domain?.code ?? null,
+    statusCode: domain?.status_code ?? null,
+  })
 }
 
 function formatHttpStatus(statusCode: number | null | undefined): string | null {
@@ -32,11 +42,28 @@ function schedulingFailureMessage(
   fallbackDomain: RequestErrorDomain | null,
   fallbackErrorMessage: string | null,
 ): string | null {
-  return nonEmptyString(failure.message)
-    ?? nonEmptyString(fallbackDomain?.message)
+  return normalizeFailureMessage(failure.message, failure.status_code)
+    ?? normalizeDomainMessage(fallbackDomain)
     ?? fallbackErrorMessage
     ?? nonEmptyString(failure.reason_label)
     ?? nonEmptyString(failure.reason)
+}
+
+function schedulingFailureTitle(failure: RequestSchedulingFailure): string {
+  const summary = failure.candidate_failure_summary
+  if (!summary) return nonEmptyString(failure.title) ?? '本地调度失败'
+  const total = typeof summary.total === 'number' ? summary.total : null
+  const failed = typeof summary.failed === 'number' ? summary.failed : 0
+  const skipped = typeof summary.skipped === 'number' ? summary.skipped : 0
+  if (total === 0) return nonEmptyString(failure.title) ?? '没有找到可调度候选'
+  if (failed === 1 && total === 1) return nonEmptyString(failure.title) ?? '唯一候选执行失败，已无可重试上游'
+  if (total != null && failed > 0 && failed + skipped >= total) {
+    return nonEmptyString(failure.title) ?? '所有候选已完成重试，但全部执行失败'
+  }
+  if (total != null && total > 0 && skipped === total) {
+    return nonEmptyString(failure.title) ?? '所有候选都被调度规则跳过'
+  }
+  return nonEmptyString(failure.title) ?? '本地调度失败'
 }
 
 export function resolveRequestFailureNotice(detail: RequestDetail | null | undefined): RequestFailureNotice | null {
@@ -46,14 +73,35 @@ export function resolveRequestFailureNotice(detail: RequestDetail | null | undef
     ?? normalizeErrorDomain(detail.client_error)
     ?? normalizeErrorDomain(detail.upstream_error)
     ?? normalizeErrorDomain(detail.request_error)
-  const fallbackErrorMessage = nonEmptyString(detail.error_message ?? null)
+  const fallbackErrorMessage = normalizeFailureMessage(detail.error_message ?? null, detail.status_code)
   const schedulingFailure = detail.scheduling_failure ?? null
 
   if (schedulingFailure) {
+    const upstreamFailure = schedulingFailure.upstream_failure ?? null
+    const upstreamMessage = normalizeFailureMessage(upstreamFailure?.user_message, upstreamFailure?.status_code)
+      ?? resolveFailureReason({
+        message: schedulingFailure.message ?? upstreamFailure?.message ?? null,
+        type: upstreamFailure?.type ?? null,
+        statusCode: upstreamFailure?.status_code ?? schedulingFailure.status_code ?? null,
+      })
+    if (upstreamFailure && upstreamMessage) {
+      return {
+        title: schedulingFailureTitle(schedulingFailure),
+        message: upstreamMessage,
+        isSchedulingFailure: true,
+        meta: uniqueMeta([
+          formatHttpStatus(upstreamFailure.status_code ?? schedulingFailure.status_code ?? detail.status_code),
+          formatFailureTypeLabel(upstreamFailure.type),
+          nonEmptyString(upstreamFailure.param),
+          schedulingFailure.no_upstream_attempt ? '未进入上游执行' : null,
+        ]),
+      }
+    }
+
     const message = schedulingFailureMessage(schedulingFailure, fallbackDomain, fallbackErrorMessage)
     if (message) {
       return {
-        title: nonEmptyString(schedulingFailure.title) ?? '本地调度失败',
+        title: schedulingFailureTitle(schedulingFailure),
         message,
         isSchedulingFailure: true,
         meta: uniqueMeta([
@@ -68,7 +116,7 @@ export function resolveRequestFailureNotice(detail: RequestDetail | null | undef
   }
 
   const domain = fallbackDomain
-  const message = nonEmptyString(domain?.message) ?? fallbackErrorMessage
+  const message = normalizeDomainMessage(domain) ?? fallbackErrorMessage
   if (!message) return null
 
   return {
@@ -76,9 +124,8 @@ export function resolveRequestFailureNotice(detail: RequestDetail | null | undef
     message,
     isSchedulingFailure: false,
     meta: uniqueMeta([
-      formatHttpStatus(domain?.status_code ?? detail.status_code),
-      nonEmptyString(domain?.type),
-      nonEmptyString(domain?.source),
+      formatHttpStatus(domain ? domain.status_code ?? detail.status_code : undefined),
+      formatFailureCodeLabel(domain?.code) ? null : formatFailureTypeLabel(domain?.type),
     ]),
   }
 }

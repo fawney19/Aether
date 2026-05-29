@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App } from 'vue'
+import { createApp, nextTick, type App } from 'vue'
 
 import type { CandidateRecord, RequestTrace } from '@/api/requestTrace'
 import HorizontalRequestTimeline from '../HorizontalRequestTimeline.vue'
@@ -390,7 +390,7 @@ describe('HorizontalRequestTimeline', () => {
     expect(nodeDot?.classList.contains('status-success')).toBe(false)
   })
 
-  it('keeps emitted trace state active while the request lifecycle is still streaming', async () => {
+  it('emits failed trace state when a streaming lifecycle already has terminal failure evidence', async () => {
     const onTraceState = vi.fn()
     const trace = buildTrace([
       buildCandidate({
@@ -413,10 +413,36 @@ describe('HorizontalRequestTimeline', () => {
     })
     await nextTick()
 
-    const lastCall = onTraceState.mock.calls.at(-1)?.[0]
+    const lastCall = onTraceState.mock.calls[onTraceState.mock.calls.length - 1]?.[0]
     expect(lastCall).toMatchObject({
-      finalStatus: 'streaming',
+      finalStatus: 'failed',
     })
+  })
+
+  it('shows active streaming candidate error signals as failed on the node and detail panel', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-active-timeout',
+        provider_id: 'provider-active-timeout',
+        provider_name: 'Provider Active Timeout',
+        key_id: 'key-active-timeout',
+        key_name: 'Active Timeout Key',
+        candidate_index: 0,
+        status: 'streaming',
+        status_code: 200,
+        error_message: 'UpstreamRequest("provider stream first byte timeout after 10000 ms")',
+        finished_at: undefined,
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    const nodeDot = root.querySelector<HTMLElement>('.node-dot')
+    expect(nodeDot?.classList.contains('status-failed')).toBe(true)
+    expect(root.textContent).toContain('错误信息')
+    expect(root.textContent).toContain('请求超时（10秒）')
+    expect(root.textContent).not.toContain('传输中')
   })
 
   it('shows request path from request metadata', async () => {
@@ -469,7 +495,7 @@ describe('HorizontalRequestTimeline', () => {
     expect(requestPathCode?.textContent).toContain('/v1/images/generations')
   })
 
-  it('shows upstream response JSON inside the error block on trace nodes', async () => {
+  it('shows structured upstream response details inside the error block on trace nodes', async () => {
     const trace = buildTrace([
       buildCandidate({
         id: 'cand-upstream-response',
@@ -508,7 +534,13 @@ describe('HorizontalRequestTimeline', () => {
 
     expect(root.textContent).toContain('错误信息')
     expect(root.textContent).toContain('HTTP 302')
-    expect(root.textContent).not.toContain('上游返回非成功状态 302')
+    expect(root.textContent).toContain('上游返回非成功状态 302')
+    const errorBlock = root.querySelector('.error-block')
+    expect(errorBlock?.textContent).not.toContain('供应商')
+    expect(errorBlock?.textContent).not.toContain('Provider Upstream')
+    expect(errorBlock?.textContent).not.toContain('Key')
+    expect(errorBlock?.textContent).not.toContain('Upstream Key')
+    expect(root.textContent).not.toContain('HTTP 状态')
     expect(root.querySelector('.error-block .error-json')?.textContent).toContain('"status_code":302')
     expect(root.querySelector('.error-block .error-json')?.textContent).toContain('"headers"')
     expect(root.textContent).not.toContain('上游真实响应')
@@ -520,6 +552,78 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).not.toContain('none')
     expect(root.textContent).not.toContain('不再重试')
     expect(root.textContent).not.toContain('该错误被标记为敏感上游错误')
+  })
+
+  it('shows upstream body error message and typed fields by default', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-upstream-body-error',
+        provider_id: 'provider-body-error',
+        provider_name: 'GPUStack',
+        key_id: 'key-body-error',
+        key_name: 'key1',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 400,
+        extra_data: {
+          upstream_response: {
+            status_code: 400,
+            body: {
+              error: {
+                type: 'BadRequestError',
+                param: 'input_tokens',
+                message: 'This model\'s maximum context length is 131072 tokens.',
+              },
+            },
+          },
+        },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+    const errorBlockText = root.querySelector('.error-block')?.textContent ?? ''
+
+    expect(errorBlockText).toContain('This model\'s maximum context length is 131072 tokens.')
+    expect(errorBlockText).toContain('错误类型')
+    expect(errorBlockText).toContain('BadRequestError')
+    expect(errorBlockText).toContain('错误参数')
+    expect(errorBlockText).toContain('input_tokens')
+    expect(errorBlockText).not.toContain('供应商')
+    expect(errorBlockText).not.toContain('Key')
+    expect(errorBlockText).not.toContain('GPUStack')
+    expect(errorBlockText).not.toContain('key1')
+    expect(root.querySelector('.error-block .error-json')).toBeNull()
+  })
+
+  it('localizes internal error types and keeps repeated provider context out of the error block', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-watchdog-timeout',
+        provider_id: 'provider-watchdog',
+        provider_name: 'aether 公益',
+        key_id: 'key-watchdog',
+        key_name: '公益 Key',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 504,
+        error_type: 'local_stream_candidate_watchdog_timeout',
+        error_message: 'Stream first byte timeout',
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+    const errorBlockText = root.querySelector('.error-block')?.textContent ?? ''
+
+    expect(errorBlockText).toContain('请求超时（等待上游首字超时）')
+    expect(errorBlockText).toContain('错误类型')
+    expect(errorBlockText).toContain('本地流式候选首字超时')
+    expect(errorBlockText).not.toContain('local_stream_candidate_watchdog_timeout')
+    expect(errorBlockText).not.toContain('供应商')
+    expect(errorBlockText).not.toContain('Key')
+    expect(errorBlockText).not.toContain('aether 公益')
+    expect(errorBlockText).not.toContain('公益 Key')
   })
 
   it('keeps the failure message when upstream response only records an empty body state', async () => {
@@ -550,4 +654,121 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.querySelector('.error-block .error-json')).toBeNull()
     expect(root.textContent).not.toContain('"body_state":"none"')
   })
+
+  it('normalizes stream first byte timeout errors and hides empty body refs', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-timeout-body-ref',
+        provider_id: 'provider-timeout',
+        provider_name: 'Provider Timeout',
+        key_id: 'key-timeout',
+        key_name: 'Timeout Key',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 503,
+        error_message: 'UpstreamRequest("provider stream first byte timeout after 10000 ms")',
+        extra_data: {
+          upstream_response: {
+            body_ref: 'usage://request/c676f8a0-3185-46a0-af06-e7c6f5873c39/response_body',
+            body_state: 'none',
+          },
+        },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    expect(root.textContent).toContain('请求超时（10秒）')
+    expect(root.textContent).not.toContain('UpstreamRequest')
+    expect(root.textContent).not.toContain('响应 Body')
+    expect(root.textContent).not.toContain('usage://request/c676f8a0')
+    expect(root.querySelector('.error-block .error-json')).toBeNull()
+  })
+
+  it('does not show numeric upstream body error codes as a competing HTTP status', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-wrapper-503-provider-404',
+        provider_id: 'provider-mixed-status',
+        provider_name: 'Provider Mixed Status',
+        key_id: 'key-mixed-status',
+        key_name: 'Mixed Status Key',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 503,
+        extra_data: {
+          upstream_response: {
+            status_code: 503,
+            body: {
+              error: {
+                code: 404,
+                type: 'not_found',
+                message: 'model not found',
+              },
+            },
+          },
+        },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    expect(root.textContent).toContain('HTTP 503')
+    expect(root.textContent).toContain('model not found')
+    expect(root.textContent).toContain('错误类型')
+    expect(root.textContent).toContain('资源不存在')
+    expect(root.textContent).not.toContain('错误代码')
+  })
+
+  it('summarizes context length errors without machine tags or body refs', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'c4220779-9f86-4fb0-a18e-389c8c131bf5',
+        provider_id: 'provider-aether-public',
+        provider_name: 'aether 公益',
+        key_id: 'key-aether-public',
+        key_name: 'key',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 400,
+        extra_data: {
+          upstream_response: {
+            status_code: 400,
+            body_ref: 'usage://request/c4220779-9f86-4fb0-a18e-389c8c131bf5/response_body',
+            body_state: 'inline',
+            body: {
+              error: {
+                type: 'invalid_request_error',
+                code: 'context_length_exceeded',
+                message: 'Input exceeds the context window.',
+              },
+            },
+          },
+        },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+    const errorBlockText = root.querySelector('.error-block')?.textContent ?? ''
+
+    expect(errorBlockText).toContain('HTTP 400')
+    expect(errorBlockText).toContain('上下文长度超出限制')
+    expect(errorBlockText).not.toContain('供应商')
+    expect(errorBlockText).not.toContain('aether 公益')
+    expect(errorBlockText).not.toContain('Key')
+    expect(errorBlockText).not.toContain('key')
+    expect(errorBlockText).not.toContain('错误类型')
+    expect(errorBlockText).not.toContain('invalid_request_error')
+    expect(errorBlockText).not.toContain('错误代码')
+    expect(errorBlockText).not.toContain('context_length_exceeded')
+    expect(errorBlockText).not.toContain('响应 Body')
+    expect(errorBlockText).not.toContain('usage://request/c4220779')
+    expect(errorBlockText).not.toContain('Body 状态')
+    expect(errorBlockText).not.toContain('inline')
+    expect(root.querySelector('.error-block .error-json')).toBeNull()
+  })
+
 })

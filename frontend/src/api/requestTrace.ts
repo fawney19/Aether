@@ -31,6 +31,20 @@ export interface CandidateResponseBoundary {
   body_state?: string | null
 }
 
+export interface CandidateErrorFlow {
+  source?: string | null
+  status_code?: number | null
+  statusCode?: number | null
+  type?: string | null
+  message?: string | null
+  param?: string | null
+  classification?: string | null
+  decision?: string | null
+  propagation?: string | null
+  retryable?: boolean | null
+  safe_to_expose?: boolean | null
+}
+
 export interface CandidateRecord {
   id: string
   request_id: string
@@ -71,6 +85,7 @@ export interface CandidateRecord {
   image_progress?: ImageProgress | null
   extra_data?: Record<string, unknown> & {
     upstream_response?: CandidateResponseBoundary
+    error_flow?: CandidateErrorFlow
     image_progress?: ImageProgress | null
   }
   created_at: string

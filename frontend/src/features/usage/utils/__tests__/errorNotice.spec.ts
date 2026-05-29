@@ -87,7 +87,82 @@ describe('request failure notice', () => {
       title: '执行失败原因',
       message: 'quota exceeded',
       isSchedulingFailure: false,
-      meta: ['HTTP 429', 'insufficient_quota', 'upstream_response'],
+      meta: ['HTTP 429', '额度不足'],
+    })
+  })
+
+  it('localizes internal request failure error types', () => {
+    const notice = resolveRequestFailureNotice(buildRequestDetail({
+      failure_summary: {
+        source: 'local_candidate',
+        status_code: 504,
+        type: 'local_stream_candidate_watchdog_timeout',
+        message: 'Stream first byte timeout',
+      },
+    }))
+
+    expect(notice).toEqual({
+      title: '执行失败原因',
+      message: '请求超时（等待上游首字超时）',
+      isSchedulingFailure: false,
+      meta: ['HTTP 504', '本地流式候选首字超时'],
+    })
+  })
+
+  it('localizes internal usage failure types in the notice metadata', () => {
+    const notice = resolveRequestFailureNotice(buildRequestDetail({
+      failure_summary: {
+        source: 'local_execution_runtime',
+        status_code: 504,
+        type: 'local_stream_candidate_watchdog_timeout',
+        message: 'Stream first byte timeout',
+      },
+    }))
+
+    expect(notice).toEqual({
+      title: '执行失败原因',
+      message: '请求超时（等待上游首字超时）',
+      isSchedulingFailure: false,
+      meta: ['HTTP 504', '本地流式候选首字超时'],
+    })
+  })
+
+  it('prefers structured upstream failure details when scheduling failure includes them', () => {
+    const notice = resolveRequestFailureNotice(buildRequestDetail({
+      scheduling_failure: {
+        source: 'local_execution_runtime_miss',
+        reason: 'execution_runtime_candidates_exhausted',
+        reason_label: '候选执行失败且已耗尽',
+        title: '唯一候选执行失败，已无可重试上游',
+        message: 'gpustack 返回 HTTP 400',
+        reason_summary: '候选 1 个',
+        status_code: 503,
+        no_upstream_attempt: false,
+        upstream_failure: {
+          provider_name: 'gpustack',
+          endpoint_id: 'endpoint-1',
+          key_name: 'key-1',
+          model: 'qwen3.6-27b',
+          status_code: 400,
+          type: 'BadRequestError',
+          param: 'input_tokens',
+          message: 'This model\'s maximum context length is 131072 tokens.',
+          user_message: '输入上下文超过模型 qwen3.6-27b 的最大长度限制。',
+        },
+        candidate_failure_summary: {
+          total: 1,
+          failed: 1,
+          skipped: 0,
+          retried: 1,
+        },
+      },
+    }))
+
+    expect(notice).toEqual({
+      title: '唯一候选执行失败，已无可重试上游',
+      message: '输入上下文超过模型 qwen3.6-27b 的最大长度限制。',
+      isSchedulingFailure: true,
+      meta: ['HTTP 400', 'BadRequestError', 'input_tokens'],
     })
   })
 
@@ -108,7 +183,26 @@ describe('request failure notice', () => {
       title: '执行失败原因',
       message: 'This content was flagged for possible cybersecurity risk',
       isSchedulingFailure: false,
-      meta: ['stream_terminal_error', 'client_response'],
+      meta: ['流式响应结束异常'],
+    })
+  })
+
+  it('summarizes structured context length errors without raw source tags', () => {
+    const notice = resolveRequestFailureNotice(buildRequestDetail({
+      failure_summary: {
+        source: 'upstream_response',
+        status_code: 400,
+        type: 'invalid_request_error',
+        code: 'context_length_exceeded',
+        message: 'Input exceeds the context window.',
+      },
+    }))
+
+    expect(notice).toEqual({
+      title: '执行失败原因',
+      message: '上下文长度超出限制',
+      isSchedulingFailure: false,
+      meta: ['HTTP 400'],
     })
   })
 
@@ -125,5 +219,16 @@ describe('request failure notice', () => {
     }))
 
     expect(notice).toBeNull()
+  })
+
+  it('normalizes equivalent upstream timeout messages to Chinese wording', () => {
+    const notice = resolveRequestFailureNotice(buildRequestDetail({
+      status_code: 503,
+      status: 'failed',
+      error_message: 'UpstreamRequest("provider stream first byte timeout after 10000 ms")',
+    }))
+
+    expect(notice?.message).toBe('请求超时（10秒）')
+    expect(notice?.meta).toEqual([])
   })
 })
