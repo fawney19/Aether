@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -318,8 +319,58 @@ fn empty_database_snapshot_covers_current_cutoff_versions() {
             20260524000000,
             20260527000000,
             20260528000000,
+            20260528010000,
         ]
     );
+}
+
+#[test]
+fn empty_database_snapshot_includes_tables_created_by_stamped_migrations() {
+    let snapshot_tables = create_table_names(EMPTY_DATABASE_SNAPSHOT_SQL);
+    let missing_tables = empty_database_snapshot_migrations(&POSTGRES_MIGRATOR)
+        .expect("empty database snapshot migrations should resolve")
+        .into_iter()
+        .flat_map(|migration| create_table_names(migration.sql.as_ref()))
+        .filter(|table| !snapshot_tables.contains(table.as_str()))
+        .collect::<BTreeSet<_>>();
+
+    assert!(
+        missing_tables.is_empty(),
+        "empty database snapshot is missing tables created by stamped migrations: {missing_tables:?}"
+    );
+}
+
+#[test]
+fn routing_profiles_repair_migration_creates_missing_tables() {
+    let migration = POSTGRES_MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 20260528010000)
+        .expect("routing profiles repair migration should be embedded");
+
+    assert!(migration
+        .sql
+        .contains("CREATE TABLE IF NOT EXISTS public.routing_groups"));
+    assert!(migration
+        .sql
+        .contains("CREATE TABLE IF NOT EXISTS public.routing_group_bindings"));
+    assert!(migration
+        .sql
+        .contains("CREATE TABLE IF NOT EXISTS public.routing_group_versions"));
+}
+
+fn create_table_names(sql: &str) -> BTreeSet<String> {
+    sql.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            let table_part = trimmed
+                .strip_prefix("CREATE TABLE IF NOT EXISTS public.")
+                .or_else(|| trimmed.strip_prefix("CREATE TABLE IF NOT EXISTS "))?;
+            let table_name = table_part
+                .split(|ch: char| ch.is_ascii_whitespace() || ch == '(')
+                .next()?;
+            Some(table_name.trim_matches('"').to_string())
+        })
+        .collect()
 }
 
 #[test]
@@ -386,9 +437,10 @@ fn empty_database_snapshot_sql_includes_usage_body_blobs_and_audit_admin_role() 
     assert!(
         EMPTY_DATABASE_SNAPSHOT_SQL.contains("cache_hit_total_requests bigint DEFAULT 0 NOT NULL")
     );
-    assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains(
-            "ALTER TABLE public.stats_daily_model\n    ADD COLUMN IF NOT EXISTS cache_creation_ephemeral_5m_tokens bigint DEFAULT '0'::bigint NOT NULL,"
-        ));
+    let normalized_snapshot_sql = EMPTY_DATABASE_SNAPSHOT_SQL.replace("\r\n", "\n");
+    assert!(normalized_snapshot_sql.contains(
+        "ALTER TABLE public.stats_daily_model\n    ADD COLUMN IF NOT EXISTS cache_creation_ephemeral_5m_tokens bigint DEFAULT '0'::bigint NOT NULL,"
+    ));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL
         .contains("CREATE TABLE IF NOT EXISTS public.usage_counter_deltas"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("ix_usage_counter_deltas_unprocessed"));
@@ -1504,6 +1556,7 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20260524000000,
             20260527000000,
             20260528000000,
+            20260528010000,
         ]
     );
 }

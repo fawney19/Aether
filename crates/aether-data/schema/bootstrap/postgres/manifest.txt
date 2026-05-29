@@ -10,3 +10,4 @@
 130_stats_cost_savings.sql
 140_proxy_node_metrics.sql
 150_background_tasks.sql
+160_routing_profiles.sql

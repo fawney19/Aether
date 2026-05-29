@@ -156,40 +156,6 @@ fn admin_pool_health_score(key: &StoredProviderCatalogKey) -> f64 {
     }
 }
 
-fn admin_pool_circuit_breaker_open(key: &StoredProviderCatalogKey) -> bool {
-    let now_unix_secs = Utc::now().timestamp().max(0) as u64;
-    key.circuit_breaker_by_format
-        .as_ref()
-        .and_then(Value::as_object)
-        .map(|formats| {
-            formats
-                .values()
-                .any(|item| admin_pool_circuit_payload_active_open_at(item, now_unix_secs))
-        })
-        .unwrap_or(false)
-}
-
-fn admin_pool_circuit_payload_active_open_at(value: &Value, now_unix_secs: u64) -> bool {
-    let Some(item) = value.as_object() else {
-        return false;
-    };
-    if !item.get("open").and_then(Value::as_bool).unwrap_or(false) {
-        return false;
-    }
-    if let Some(next_probe_at) = item.get("next_probe_at_unix_secs").and_then(Value::as_u64) {
-        return now_unix_secs < next_probe_at;
-    }
-    if let Some(next_probe_at) = item
-        .get("next_probe_at")
-        .and_then(Value::as_str)
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .and_then(|value| u64::try_from(value.timestamp()).ok())
-    {
-        return now_unix_secs < next_probe_at;
-    }
-    true
-}
-
 fn unix_secs_to_rfc3339(unix_secs: u64) -> Option<String> {
     Utc.timestamp_opt(unix_secs as i64, 0)
         .single()
@@ -727,7 +693,7 @@ mod tests {
         let payload = build_admin_pool_key_payload(&key, &AdminPoolKeyPayloadContext::default());
 
         assert_eq!(payload["health_score"], json!(0.2));
-        assert_eq!(payload["circuit_breaker_open"], json!(true));
+        assert_eq!(payload["circuit_breaker_open"], json!(false));
         assert_eq!(payload["scheduling_status"], json!("available"));
         assert_eq!(payload["scheduling_reason"], json!("available"));
         assert_eq!(payload["scheduling_label"], json!("可用"));
@@ -739,7 +705,7 @@ pub fn build_admin_pool_key_payload(
     context: &AdminPoolKeyPayloadContext,
 ) -> Value {
     let health_score = admin_pool_health_score(key);
-    let circuit_breaker_open = admin_pool_circuit_breaker_open(key);
+    let circuit_breaker_open = false;
     let (scheduling_status, scheduling_reason, scheduling_label, scheduling_reasons) =
         admin_pool_scheduling_payload(
             key,
