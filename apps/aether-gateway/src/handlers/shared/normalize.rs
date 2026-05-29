@@ -54,6 +54,7 @@ pub(crate) fn normalize_feature_settings(value: Option<Value>) -> Result<Option<
         Value::Null => Ok(None),
         Value::Object(ref mut settings) => {
             normalize_chat_pii_redaction_feature_settings(settings)?;
+            normalize_billing_source_feature_settings(settings)?;
             normalize_notification_push_service_feature_settings(settings)?;
             if settings.is_empty() {
                 Ok(None)
@@ -397,6 +398,49 @@ fn normalize_notification_push_service_feature_object(
     Ok(())
 }
 
+fn normalize_billing_source_feature_settings(
+    settings: &mut Map<String, Value>,
+) -> Result<(), String> {
+    let Some(value) = settings.get_mut("billing_source") else {
+        return Ok(());
+    };
+    match value {
+        Value::Null => {
+            settings.remove("billing_source");
+            Ok(())
+        }
+        Value::Object(feature) => {
+            normalize_billing_source_feature_object(feature)?;
+            if feature.is_empty() {
+                settings.remove("billing_source");
+            }
+            Ok(())
+        }
+        _ => Err("billing_source 必须是对象".to_string()),
+    }
+}
+
+fn normalize_billing_source_feature_object(feature: &mut Map<String, Value>) -> Result<(), String> {
+    let Some(value) = feature.get("mode") else {
+        return Ok(());
+    };
+    let Some(mode) = value.as_str() else {
+        return Err("billing_source.mode 必须是字符串".to_string());
+    };
+    let normalized = mode.trim().to_lowercase();
+    match normalized.as_str() {
+        "auto" => {
+            feature.remove("mode");
+            Ok(())
+        }
+        "wallet" | "package" => {
+            feature.insert("mode".to_string(), Value::String(normalized));
+            Ok(())
+        }
+        _ => Err("billing_source.mode 必须是 auto、wallet 或 package".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -444,6 +488,27 @@ mod tests {
             normalized["notification_push_service"]["enabled"],
             json!(true)
         );
+    }
+
+    #[test]
+    fn normalize_feature_settings_accepts_billing_source_mode() {
+        let normalized = normalize_feature_settings(Some(json!({
+            "billing_source": {"mode": " wallet "}
+        })))
+        .expect("feature settings should normalize")
+        .expect("feature settings should remain set");
+
+        assert_eq!(normalized["billing_source"]["mode"], json!("wallet"));
+    }
+
+    #[test]
+    fn normalize_feature_settings_removes_auto_billing_source_mode() {
+        let normalized = normalize_feature_settings(Some(json!({
+            "billing_source": {"mode": "auto"}
+        })))
+        .expect("feature settings should normalize");
+
+        assert!(normalized.is_none());
     }
 
     #[test]

@@ -2,6 +2,7 @@ use aether_data::repository::wallet::StoredWalletSnapshot;
 use aether_wallet::{
     WalletAccessDecision, WalletAccessFailure, WalletLimitMode, WalletSnapshot, WalletStatus,
 };
+use serde_json::Value;
 
 use crate::control::GatewayLocalAuthRejection;
 use crate::data::auth::GatewayAuthApiKeySnapshot;
@@ -9,12 +10,28 @@ use crate::{AppState, GatewayError};
 
 const DAILY_QUOTA_EPSILON_USD: f64 = 0.000_000_01;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiKeyBillingSourceMode {
+    Auto,
+    Wallet,
+    Package,
+}
+
 pub(crate) async fn resolve_wallet_auth_gate(
     state: &AppState,
     auth_snapshot: &GatewayAuthApiKeySnapshot,
 ) -> Result<Option<WalletAccessDecision>, GatewayError> {
     if !state.has_wallet_data_reader() {
         return Ok(None);
+    }
+
+    let billing_source_mode = resolve_api_key_billing_source_mode(state, auth_snapshot).await?;
+    if !auth_snapshot.api_key_is_standalone
+        && billing_source_mode == ApiKeyBillingSourceMode::Package
+    {
+        return Ok(Some(
+            resolve_package_billing_source_decision(state, &auth_snapshot.user_id).await?,
+        ));
     }
 
     let wallet = state
@@ -29,7 +46,8 @@ pub(crate) async fn resolve_wallet_auth_gate(
         Some(wallet) => map_wallet_snapshot(wallet).access_decision(false),
         None => WalletAccessDecision::wallet_unavailable(None),
     };
-    if !auth_snapshot.api_key_is_standalone {
+    if !auth_snapshot.api_key_is_standalone && billing_source_mode == ApiKeyBillingSourceMode::Auto
+    {
         if let Some(quota) = state
             .find_user_daily_quota_availability(&auth_snapshot.user_id)
             .await?
@@ -47,6 +65,65 @@ pub(crate) async fn resolve_wallet_auth_gate(
         }
     }
     Ok(Some(decision))
+}
+
+async fn resolve_api_key_billing_source_mode(
+    state: &AppState,
+    auth_snapshot: &GatewayAuthApiKeySnapshot,
+) -> Result<ApiKeyBillingSourceMode, GatewayError> {
+    if auth_snapshot.api_key_is_standalone {
+        return Ok(ApiKeyBillingSourceMode::Auto);
+    }
+    let feature_settings = state
+        .read_auth_api_key_feature_settings(
+            &auth_snapshot.user_id,
+            &auth_snapshot.api_key_id,
+            auth_snapshot.api_key_is_standalone,
+        )
+        .await?;
+    Ok(api_key_billing_source_mode_from_feature_settings(
+        feature_settings.as_ref(),
+    ))
+}
+
+async fn resolve_package_billing_source_decision(
+    state: &AppState,
+    user_id: &str,
+) -> Result<WalletAccessDecision, GatewayError> {
+    let quota = state
+        .find_user_daily_quota_availability(user_id)
+        .await?
+        .filter(|quota| quota.has_active_daily_quota);
+    let Some(quota) = quota else {
+        return Ok(WalletAccessDecision::balance_denied(Some(0.0)));
+    };
+    if quota.remaining_usd > DAILY_QUOTA_EPSILON_USD {
+        return Ok(WalletAccessDecision::allowed(Some(quota.remaining_usd)));
+    }
+    Ok(WalletAccessDecision::balance_denied(Some(
+        quota.remaining_usd.max(0.0),
+    )))
+}
+
+fn api_key_billing_source_mode_from_feature_settings(
+    feature_settings: Option<&Value>,
+) -> ApiKeyBillingSourceMode {
+    let Some(settings) = feature_settings.and_then(Value::as_object) else {
+        return ApiKeyBillingSourceMode::Auto;
+    };
+    let Some(billing_source) = settings.get("billing_source").and_then(Value::as_object) else {
+        return ApiKeyBillingSourceMode::Auto;
+    };
+    match billing_source
+        .get("mode")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("wallet") => ApiKeyBillingSourceMode::Wallet,
+        Some("package") => ApiKeyBillingSourceMode::Package,
+        _ => ApiKeyBillingSourceMode::Auto,
+    }
 }
 
 pub(crate) fn local_rejection_from_wallet_access(
@@ -82,6 +159,12 @@ fn map_wallet_snapshot(snapshot: &StoredWalletSnapshot) -> WalletSnapshot {
 mod tests {
     use std::sync::Arc;
 
+    use aether_data::repository::auth::{
+        InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeyExportRecord,
+    };
+    use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
+    use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data::repository::usage::InMemoryUsageReadRepository;
     use aether_data::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
     use aether_data_contracts::repository::billing::{
@@ -90,6 +173,7 @@ mod tests {
     use aether_data_contracts::DataLayerError;
     use aether_wallet::{WalletAccessFailure, WalletLimitMode, WalletSnapshot, WalletStatus};
     use async_trait::async_trait;
+    use serde_json::json;
 
     use super::{
         local_rejection_from_wallet_access, map_wallet_snapshot, resolve_wallet_auth_gate,
@@ -232,6 +316,63 @@ mod tests {
         assert_eq!(decision.remaining, Some(4.0));
     }
 
+    #[tokio::test]
+    async fn wallet_billing_source_ignores_remaining_quota() {
+        let state = state_with_wallet_quota_and_billing_source(
+            empty_user_wallet(),
+            Some(quota_availability(10.0, 4.0, false)),
+            "wallet",
+        );
+        let auth_snapshot = ordinary_user_api_key_snapshot();
+
+        let decision = resolve_wallet_auth_gate(&state, &auth_snapshot)
+            .await
+            .expect("wallet gate should resolve")
+            .expect("wallet gate should return a decision");
+
+        assert!(!decision.allowed);
+        assert_eq!(decision.failure, Some(WalletAccessFailure::BalanceDenied));
+        assert_eq!(decision.remaining, Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn package_billing_source_allows_remaining_quota_with_empty_wallet() {
+        let state = state_with_wallet_quota_and_billing_source(
+            empty_user_wallet(),
+            Some(quota_availability(10.0, 4.0, false)),
+            "package",
+        );
+        let auth_snapshot = ordinary_user_api_key_snapshot();
+
+        let decision = resolve_wallet_auth_gate(&state, &auth_snapshot)
+            .await
+            .expect("wallet gate should resolve")
+            .expect("wallet gate should return a decision");
+
+        assert!(decision.allowed);
+        assert_eq!(decision.failure, None);
+        assert_eq!(decision.remaining, Some(4.0));
+    }
+
+    #[tokio::test]
+    async fn package_billing_source_denies_exhausted_quota_even_with_wallet_balance() {
+        let state = state_with_wallet_quota_and_billing_source(
+            funded_user_wallet(10.0),
+            Some(quota_availability(10.0, 0.0, true)),
+            "package",
+        );
+        let auth_snapshot = ordinary_user_api_key_snapshot();
+
+        let decision = resolve_wallet_auth_gate(&state, &auth_snapshot)
+            .await
+            .expect("wallet gate should resolve")
+            .expect("wallet gate should return a decision");
+
+        assert!(!decision.allowed);
+        assert_eq!(decision.failure, Some(WalletAccessFailure::BalanceDenied));
+        assert_eq!(decision.remaining, Some(0.0));
+    }
+
     fn state_with_wallet_and_quota(
         wallet: StoredWalletSnapshot,
         quota: Option<UserDailyQuotaAvailabilityRecord>,
@@ -250,12 +391,48 @@ mod tests {
             .with_data_state_for_tests(data)
     }
 
+    fn state_with_wallet_quota_and_billing_source(
+        wallet: StoredWalletSnapshot,
+        quota: Option<UserDailyQuotaAvailabilityRecord>,
+        mode: &str,
+    ) -> AppState {
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let billing_repository: Arc<dyn BillingReadRepository> =
+            Arc::new(FixedQuotaBillingReadRepository { quota });
+        let wallet_repository = Arc::new(InMemoryWalletRepository::seed(vec![wallet]));
+        let auth_repository = Arc::new(
+            InMemoryAuthApiKeySnapshotRepository::default().with_export_records(vec![
+                auth_export_record(json!({
+                    "billing_source": {"mode": mode}
+                })),
+            ]),
+        );
+        let data =
+            GatewayDataState::with_auth_candidate_selection_provider_catalog_request_candidates_usage_billing_and_wallet_for_tests(
+                auth_repository,
+                Arc::new(InMemoryMinimalCandidateSelectionReadRepository::default()),
+                Arc::new(InMemoryProviderCatalogReadRepository::default()),
+                Arc::new(InMemoryRequestCandidateRepository::default()),
+                usage_repository,
+                billing_repository,
+                wallet_repository,
+                "test-encryption-key",
+            );
+        AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data)
+    }
+
     fn empty_user_wallet() -> StoredWalletSnapshot {
+        funded_user_wallet(0.0)
+    }
+
+    fn funded_user_wallet(balance: f64) -> StoredWalletSnapshot {
         StoredWalletSnapshot::new(
             "wallet-user-1".to_string(),
             Some("user-1".to_string()),
             None,
-            0.0,
+            balance,
             0.0,
             "finite".to_string(),
             "USD".to_string(),
@@ -267,6 +444,31 @@ mod tests {
             100,
         )
         .expect("wallet should build")
+    }
+
+    fn auth_export_record(feature_settings: serde_json::Value) -> StoredAuthApiKeyExportRecord {
+        StoredAuthApiKeyExportRecord::new(
+            "user-1".to_string(),
+            "api-key-1".to_string(),
+            "hash-api-key-1".to_string(),
+            None,
+            Some("user-key".to_string()),
+            None,
+            None,
+            None,
+            Some(0),
+            None,
+            None,
+            true,
+            None,
+            false,
+            0,
+            0,
+            0.0,
+            false,
+        )
+        .expect("auth export record should build")
+        .with_feature_settings(Some(feature_settings))
     }
 
     fn quota_availability(

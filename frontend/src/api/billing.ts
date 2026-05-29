@@ -64,7 +64,10 @@ export interface DailyQuotaEntitlement {
   daily_quota_usd: number
   reset_timezone?: string
   carry_over?: boolean
+  carry_over_days?: number
+  carry_over_limit_multiplier?: number
   allow_wallet_overage?: boolean
+  self_service_daily_quota_reset?: boolean
 }
 
 export interface MembershipGroupEntitlement {
@@ -254,6 +257,14 @@ export const billingApi = {
 
   async listEntitlements(): Promise<UserPlanEntitlementsResponse> {
     const response = await apiClient.get<UserPlanEntitlementsResponse>('/api/billing/entitlements')
+    return response.data
+  },
+
+  async resetDailyQuota(entitlementId: string): Promise<UserPlanEntitlement> {
+    const response = await apiClient.post<UserPlanEntitlement>(
+      `/api/billing/entitlements/${entitlementId}/daily-quota-reset`,
+      {}
+    )
     return response.data
   },
 }

@@ -514,4 +514,17 @@ impl AppState {
             .await
             .map_err(data_error)
     }
+
+    pub(crate) async fn reset_user_daily_quota(
+        &self,
+        user_id: &str,
+        entitlement_id: &str,
+        min_remaining_secs: u64,
+        penalty_secs: u64,
+    ) -> Result<AdminBillingMutationOutcome<UserPlanEntitlementRecord>, GatewayError> {
+        self.data
+            .reset_user_daily_quota(user_id, entitlement_id, min_remaining_secs, penalty_secs)
+            .await
+            .map_err(data_error)
+    }
 }

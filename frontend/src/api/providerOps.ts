@@ -87,6 +87,13 @@ export interface BalanceInfo {
   expires_at: string | null
   currency: string
   extra: Record<string, unknown> & {
+    balance?: number | string | null
+    normal_balance?: number | string | null
+    pay_as_you_go_balance?: number | string | null
+    subscription_balance?: number | string | null
+    subscription_available?: number | string | null
+    points?: number | string | null
+    charity_balance?: number | string | null
     // Anyrouter 签到信息
     checkin_success?: boolean | null  // true=成功, false=失败, null=已签到/跳过
     checkin_message?: string

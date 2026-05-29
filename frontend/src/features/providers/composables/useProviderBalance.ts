@@ -9,6 +9,17 @@ const MAX_BALANCE_RETRIES = 2
 const PENDING_BALANCE_RETRY_BASE_DELAY_MS = 12_000
 const PENDING_BALANCE_RETRY_MAX_DELAY_MS = 60_000
 
+export interface ProviderBalanceLine {
+  key: string
+  label: string
+  amount: number
+}
+
+export interface ProviderBalanceBreakdown {
+  currency: string
+  lines: ProviderBalanceLine[]
+}
+
 export function useProviderBalance() {
   // 余额数据缓存 {providerId: ActionResultResponse}
   const balanceCache = ref<Record<string, ActionResultResponse>>({})
@@ -150,6 +161,17 @@ export function useProviderBalance() {
     return true
   }
 
+  function numericExtra(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value
+    }
+    if (typeof value === 'string') {
+      const parsed = Number(value.trim())
+      return Number.isFinite(parsed) ? parsed : null
+    }
+    return null
+  }
+
   // 获取 provider 的余额显示
   function getProviderBalance(providerId: string): { available: number | null; currency: string } | null {
     const result = balanceCache.value[providerId]
@@ -166,21 +188,47 @@ export function useProviderBalance() {
     }
   }
 
-  // 获取 provider 余额明细（balance + points 分开显示）
-  function getProviderBalanceBreakdown(providerId: string): { balance: number; points: number; currency: string } | null {
+  // 获取 provider 余额明细（余额 / 订阅 / 积分分开显示）
+  function getProviderBalanceBreakdown(providerId: string): ProviderBalanceBreakdown | null {
     const result = balanceCache.value[providerId]
     if (!result || (result.status !== 'success' && result.status !== 'auth_expired') || !result.data) {
       return null
     }
     const data = result.data as Record<string, unknown>
-    const extra = data.extra
-    if (!extra || extra.balance === undefined || extra.points === undefined) {
+    const extra = data.extra as Record<string, unknown> | undefined
+    if (!extra || typeof extra !== 'object') {
       return null
     }
+    const lines: ProviderBalanceLine[] = []
+    const balance = numericExtra(extra.pay_as_you_go_balance)
+      ?? numericExtra(extra.normal_balance)
+      ?? numericExtra(extra.balance)
+    const subscriptionBalance = numericExtra(extra.subscription_balance)
+      ?? numericExtra(extra.subscription_available)
+    const points = numericExtra(extra.points)
+    const charityBalance = numericExtra(extra.charity_balance)
+
+    if (balance !== null) {
+      lines.push({ key: 'balance', label: '余额', amount: balance })
+    }
+    if (subscriptionBalance !== null) {
+      lines.push({ key: 'subscription', label: '订阅', amount: subscriptionBalance })
+    }
+    if (points !== null) {
+      lines.push({ key: 'points', label: '积分', amount: points })
+    }
+    if (charityBalance !== null) {
+      lines.push({ key: 'charity', label: '公益', amount: charityBalance })
+    }
+    if (lines.length === 0) {
+      return null
+    }
+    const currency = typeof data.currency === 'string' && data.currency.trim()
+      ? data.currency
+      : 'USD'
     return {
-      balance: extra.balance,
-      points: extra.points,
-      currency: data.currency || 'USD',
+      currency,
+      lines,
     }
   }
 

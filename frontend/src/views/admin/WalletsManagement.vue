@@ -13,6 +13,179 @@
       </div>
 
       <div class="px-5 py-5">
+        <div class="mb-5 space-y-4">
+          <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <h4 class="text-sm font-semibold">
+                运营概览
+              </h4>
+              <p class="mt-1 text-xs text-muted-foreground">
+                {{ overviewUpdatedText }}
+              </p>
+            </div>
+            <RefreshButton
+              :loading="loadingOverview"
+              @click="loadOverview"
+            />
+          </div>
+
+          <div
+            v-if="overviewErrorText"
+            class="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-200"
+          >
+            {{ overviewErrorText }}
+          </div>
+
+          <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <div class="rounded-2xl border border-border/60 bg-muted/20 p-4">
+              <div class="flex items-center justify-between gap-3">
+                <div class="text-xs text-muted-foreground">
+                  余额池
+                </div>
+                <WalletCards class="h-4 w-4 text-muted-foreground" />
+              </div>
+              <div class="mt-3 text-2xl font-semibold tabular-nums">
+                {{ formatCurrency(walletOpsOverview.totalAvailableBalance) }}
+              </div>
+              <div class="mt-2 text-xs text-muted-foreground">
+                钱包 {{ formatCount(walletOpsOverview.walletCount) }} · 正常 {{ formatCount(walletOpsOverview.activeWalletCount) }}
+              </div>
+              <div class="mt-1 text-xs text-muted-foreground">
+                套餐 {{ formatCurrency(walletOpsOverview.totalPackageBalance) }} · 每日额度 {{ formatCount(walletOpsOverview.activeDailyQuotaWalletCount) }}
+              </div>
+            </div>
+
+            <div class="rounded-2xl border border-border/60 bg-muted/20 p-4">
+              <div class="flex items-center justify-between gap-3">
+                <div class="text-xs text-muted-foreground">
+                  订单看板
+                </div>
+                <ReceiptText class="h-4 w-4 text-muted-foreground" />
+              </div>
+              <div class="mt-3 flex items-end gap-2">
+                <span class="text-2xl font-semibold tabular-nums">{{ formatCount(walletOpsOverview.pendingOrderCount) }}</span>
+                <span class="pb-1 text-xs text-muted-foreground">待支付</span>
+              </div>
+              <div class="mt-2 text-xs text-muted-foreground">
+                待支付 {{ formatCurrency(walletOpsOverview.pendingOrderAmountUsd) }} · 待到账 {{ formatCount(walletOpsOverview.paidOrderCount) }}
+              </div>
+              <div class="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                <span>异常提示 {{ formatCount(walletOpsOverview.pendingOrderAlertCount) }}</span>
+                <Badge
+                  v-if="walletOpsOverview.pendingOrderAlertCount"
+                  variant="warning"
+                  class="px-1.5 py-0 text-[10px]"
+                >
+                  需关注
+                </Badge>
+              </div>
+            </div>
+
+            <div class="rounded-2xl border border-border/60 bg-muted/20 p-4">
+              <div class="flex items-center justify-between gap-3">
+                <div class="text-xs text-muted-foreground">
+                  退款看板
+                </div>
+                <ClipboardList class="h-4 w-4 text-muted-foreground" />
+              </div>
+              <div class="mt-3 flex items-end gap-2">
+                <span class="text-2xl font-semibold tabular-nums">
+                  {{ formatCount(walletOpsOverview.pendingRefundCount + walletOpsOverview.processingRefundCount) }}
+                </span>
+                <span class="pb-1 text-xs text-muted-foreground">待处理</span>
+              </div>
+              <div class="mt-2 text-xs text-muted-foreground">
+                待审 {{ formatCount(walletOpsOverview.pendingRefundCount) }} · 处理中 {{ formatCount(walletOpsOverview.processingRefundCount) }}
+              </div>
+              <div class="mt-1 text-xs text-muted-foreground">
+                占用 {{ formatCurrency(walletOpsOverview.pendingRefundAmountUsd) }} · 已完成 {{ formatCurrency(walletOpsOverview.completedRefundAmountUsd) }}
+              </div>
+            </div>
+
+            <div class="rounded-2xl border border-border/60 bg-muted/20 p-4">
+              <div class="flex items-center justify-between gap-3">
+                <div class="text-xs text-muted-foreground">
+                  兑换码
+                </div>
+                <TicketPercent class="h-4 w-4 text-muted-foreground" />
+              </div>
+              <div class="mt-3 flex items-end gap-2">
+                <span class="text-2xl font-semibold tabular-nums">{{ formatCount(walletOpsOverview.activeRedeemCodeCount) }}</span>
+                <span class="pb-1 text-xs text-muted-foreground">可用码</span>
+              </div>
+              <div class="mt-2 text-xs text-muted-foreground">
+                批次 {{ formatCount(walletOpsOverview.activeRedeemBatchCount) }} / {{ formatCount(walletOpsOverview.redeemBatchCount) }} · 7天到期 {{ formatCount(walletOpsOverview.expiringRedeemBatchCount) }}
+              </div>
+              <div class="mt-1 text-xs text-muted-foreground">
+                库存 {{ formatCurrency(walletOpsOverview.redeemStockValueUsd) }} · 已兑 {{ formatCurrency(walletOpsOverview.redeemRedeemedValueUsd) }}
+              </div>
+            </div>
+          </div>
+
+          <div
+            v-if="pendingOrderWarnings.length"
+            class="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4"
+          >
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div class="flex gap-3">
+                <div class="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-700 dark:text-amber-200">
+                  <AlertTriangle class="h-4 w-4" />
+                </div>
+                <div>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <h4 class="text-sm font-semibold">
+                      异常待支付订单提示
+                    </h4>
+                    <Badge
+                      variant="warning"
+                      class="px-1.5 py-0 text-[10px]"
+                    >
+                      {{ pendingOrderWarnings.length }} 单
+                    </Badge>
+                  </div>
+                  <p class="mt-1 text-xs text-muted-foreground">
+                    无过期时间 {{ walletOpsOverview.pendingOrderMissingExpiryCount }} 单 · 15 分钟内到期 {{ walletOpsOverview.pendingOrderExpiringSoonCount }} 单
+                  </p>
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                @click="focusPendingOrders"
+              >
+                查看待支付
+              </Button>
+            </div>
+
+            <div class="mt-3 grid gap-2">
+              <div
+                v-for="warning in visiblePendingOrderWarnings"
+                :key="warning.id"
+                class="flex flex-col gap-2 rounded-xl border border-border/60 bg-background/70 px-3 py-2 text-xs md:flex-row md:items-center md:justify-between"
+              >
+                <div class="min-w-0">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="font-mono text-foreground">{{ warning.order_no }}</span>
+                    <Badge
+                      :variant="pendingOrderWarningVariant(warning)"
+                      class="px-1.5 py-0 text-[10px]"
+                    >
+                      {{ pendingOrderWarningLabel(warning) }}
+                    </Badge>
+                    <span class="text-muted-foreground">{{ orderKindLabel(warning.order_kind) }}</span>
+                  </div>
+                  <div class="mt-1 text-muted-foreground">
+                    {{ paymentMethodLabel(warning.payment_method) }} · {{ warning.expires_at ? formatDateTime(warning.expires_at) : '无过期时间' }}
+                  </div>
+                </div>
+                <div class="shrink-0 font-medium tabular-nums text-foreground">
+                  {{ formatCurrency(warning.amount_usd) }}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <Tabs v-model="activeTab">
           <TabsList class="tabs-button-list grid w-full max-w-[960px] grid-cols-5">
             <TabsTrigger value="ledger">
@@ -441,6 +614,7 @@
                       <TableHead>金额</TableHead>
                       <TableHead>支付方式</TableHead>
                       <TableHead>状态</TableHead>
+                      <TableHead>过期时间</TableHead>
                       <TableHead>创建时间</TableHead>
                       <TableHead class="text-right">
                         操作
@@ -470,6 +644,16 @@
                       <TableCell>
                         <Badge :variant="paymentStatusBadge(order.status)">
                           {{ paymentStatusLabel(order.status) }}
+                        </Badge>
+                      </TableCell>
+                      <TableCell class="text-xs text-muted-foreground whitespace-nowrap">
+                        <div>{{ formatOrderExpiry(order) }}</div>
+                        <Badge
+                          v-if="pendingOrderWarningMap[order.id]"
+                          :variant="pendingOrderWarningVariant(pendingOrderWarningMap[order.id])"
+                          class="mt-1 px-1.5 py-0 text-[10px]"
+                        >
+                          {{ pendingOrderWarningLabel(pendingOrderWarningMap[order.id]) }}
                         </Badge>
                       </TableCell>
                       <TableCell class="text-xs text-muted-foreground whitespace-nowrap">
@@ -507,7 +691,7 @@
                     </TableRow>
                     <TableRow v-if="!loadingOrders && orders.length === 0">
                       <TableCell
-                        colspan="7"
+                        colspan="8"
                         class="py-10"
                       >
                         <EmptyState
@@ -665,11 +849,57 @@
                   />
                 </div>
                 <div class="space-y-1.5">
-                  <Label>过期时间（可选）</Label>
-                  <Input
-                    v-model="redeemBatchForm.expires_at"
-                    type="datetime-local"
-                  />
+                  <Label>有效期</Label>
+                  <Select v-model="redeemBatchExpiryPreset">
+                    <SelectTrigger>
+                      <SelectValue placeholder="选择有效期" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">
+                        不设置过期
+                      </SelectItem>
+                      <SelectItem value="7d">
+                        7 天后过期
+                      </SelectItem>
+                      <SelectItem value="30d">
+                        30 天后过期
+                      </SelectItem>
+                      <SelectItem value="90d">
+                        90 天后过期
+                      </SelectItem>
+                      <SelectItem value="custom">
+                        自定义天数
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p class="min-h-5 text-xs leading-5 text-muted-foreground">
+                    {{ redeemBatchExpiryHint }}
+                  </p>
+                </div>
+                <div
+                  v-if="redeemBatchExpiryPreset === 'custom'"
+                  class="space-y-1.5 lg:col-span-4"
+                >
+                  <Label>自定义过期天数</Label>
+                  <div class="relative">
+                    <Input
+                      v-model.number="redeemBatchCustomExpiryDays"
+                      class="pr-12"
+                      type="number"
+                      inputmode="numeric"
+                      min="1"
+                      :max="MAX_REDEEM_BATCH_CUSTOM_EXPIRY_DAYS"
+                      step="1"
+                      placeholder="例如：356"
+                      @blur="normalizeRedeemBatchCustomExpiryDays"
+                    />
+                    <span class="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                      天
+                    </span>
+                  </div>
+                  <p class="text-xs leading-5 text-muted-foreground">
+                    按填写天数计算，到期日 23:59 失效。
+                  </p>
                 </div>
               </div>
 
@@ -708,11 +938,19 @@
               </div>
             </div>
 
-            <div class="grid gap-5 xl:grid-cols-[1.1fr_1fr]">
-              <div class="space-y-4">
-                <div class="flex flex-wrap items-center gap-2">
+            <div class="grid items-stretch gap-5 xl:grid-cols-2">
+              <div class="flex min-h-[430px] flex-col gap-4">
+                <div class="flex min-h-[64px] flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <h4 class="text-sm font-semibold">
+                      兑换码批次
+                    </h4>
+                    <p class="mt-1 text-xs text-muted-foreground">
+                      共 {{ redeemBatchTotal }} 个批次
+                    </p>
+                  </div>
                   <Select v-model="redeemBatchStatusFilter">
-                    <SelectTrigger class="w-[180px]">
+                    <SelectTrigger class="w-full sm:w-[180px]">
                       <SelectValue placeholder="批次状态" />
                     </SelectTrigger>
                     <SelectContent>
@@ -727,13 +965,14 @@
                       </SelectItem>
                     </SelectContent>
                   </Select>
-                  <div class="text-sm text-muted-foreground">
-                    共 {{ redeemBatchTotal }} 个批次
-                  </div>
                 </div>
 
-                <div class="rounded-2xl border border-border/60 overflow-hidden bg-background">
-                  <div class="overflow-x-auto">
+                <div class="min-h-10 text-xs leading-5 text-muted-foreground">
+                  选择批次后，右侧会显示该批次下的兑换码明细。
+                </div>
+
+                <div class="flex min-h-[300px] flex-1 flex-col overflow-hidden rounded-2xl border border-border/60 bg-background">
+                  <div class="flex-1 overflow-x-auto">
                     <Table>
                       <TableHeader>
                         <TableRow>
@@ -818,6 +1057,7 @@
                 </div>
 
                 <Pagination
+                  class="mt-auto"
                   :current="redeemBatchPage"
                   :total="redeemBatchTotal"
                   :page-size="redeemBatchPageSize"
@@ -828,9 +1068,9 @@
 
               <div
                 ref="redeemCodesPanelRef"
-                class="space-y-4"
+                class="flex min-h-[430px] flex-col gap-4"
               >
-                <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="flex min-h-[64px] flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div>
                     <h4 class="text-sm font-semibold">
                       {{ currentRedeemBatch?.name || '兑换码列表' }}
@@ -839,7 +1079,7 @@
                       {{ currentRedeemBatch ? `面额 ${formatCurrency(currentRedeemBatch.amount_usd)} · 剩余 ${currentRedeemBatch.active_count}` : '先从左侧选择一个批次' }}
                     </p>
                   </div>
-                  <div class="flex flex-wrap items-center gap-3">
+                  <div class="flex w-full flex-wrap items-center gap-3 sm:w-auto sm:justify-end">
                     <div class="flex items-center gap-2">
                       <span class="text-xs text-muted-foreground">显示明文</span>
                       <Switch
@@ -849,7 +1089,7 @@
                       />
                     </div>
                     <Select v-model="redeemCodeStatusFilter">
-                      <SelectTrigger class="w-[180px]">
+                      <SelectTrigger class="w-full sm:w-[180px]">
                         <SelectValue placeholder="码状态" />
                       </SelectTrigger>
                       <SelectContent>
@@ -870,7 +1110,7 @@
                   </div>
                 </div>
 
-                <div class="text-xs text-muted-foreground">
+                <div class="min-h-10 text-xs leading-5 text-muted-foreground">
                   {{
                     canRevealPlainRedeemCodes
                       ? '当前批次属于本次生成，已支持明文显示开关。'
@@ -878,8 +1118,8 @@
                   }}
                 </div>
 
-                <div class="rounded-2xl border border-border/60 overflow-hidden bg-background">
-                  <div class="overflow-x-auto">
+                <div class="flex min-h-[300px] flex-1 flex-col overflow-hidden rounded-2xl border border-border/60 bg-background">
+                  <div class="flex-1 overflow-x-auto">
                     <Table>
                       <TableHeader>
                         <TableRow>
@@ -939,6 +1179,7 @@
                 </div>
 
                 <Pagination
+                  class="mt-auto"
                   :current="redeemCodePage"
                   :total="redeemCodeTotal"
                   :page-size="redeemCodePageSize"
@@ -1368,11 +1609,12 @@ import {
   Textarea,
 } from '@/components/ui'
 import { EmptyState } from '@/components/common'
-import { X } from 'lucide-vue-next'
+import { AlertTriangle, ClipboardList, ReceiptText, TicketPercent, WalletCards, X } from 'lucide-vue-next'
 import {
   adminWalletApi,
   type AdminGlobalRefund,
   type AdminLedgerTransaction,
+  type AdminWallet,
 } from '@/api/admin-wallets'
 import {
   adminPaymentsApi,
@@ -1399,9 +1641,15 @@ import {
   walletTransactionCategoryLabel,
   walletTransactionReasonLabel,
 } from '@/utils/walletDisplay'
+import {
+  buildWalletOpsOverview,
+  type PendingOrderWarning,
+} from '@/features/wallet/utils/opsOverview'
 
 type WalletManagementTab = 'ledger' | 'refunds' | 'orders' | 'callbacks' | 'redeem_codes'
 type LedgerCategory = 'recharge' | 'gift' | 'adjust' | 'refund'
+type RedeemBatchExpiryPreset = 'none' | '7d' | '30d' | '90d' | 'custom'
+const MAX_REDEEM_BATCH_CUSTOM_EXPIRY_DAYS = 3650
 type LedgerReasonOption = {
   value: string
   label: string
@@ -1421,6 +1669,16 @@ const LEDGER_REASON_OPTIONS: LedgerReasonOption[] = [
   { value: 'refund_revert', label: '退款回补', category: 'refund' },
 ]
 
+const OVERVIEW_PAGE_SIZE = 200
+const OVERVIEW_MAX_PAGES = 200
+
+type PagedListResponse<T> = {
+  items: T[]
+  total: number
+  limit: number
+  offset: number
+}
+
 const { success, error: showError } = useToast()
 const route = useRoute()
 
@@ -1432,9 +1690,12 @@ const loadingOrders = ref(false)
 const loadingCallbacks = ref(false)
 const loadingRedeemBatches = ref(false)
 const loadingRedeemCodes = ref(false)
+const loadingOverview = ref(false)
 const submittingRefundAction = ref(false)
 const submittingOrderAction = ref(false)
 const submittingRedeemBatch = ref(false)
+const overviewErrorText = ref('')
+const overviewLoadedAt = ref<string | null>(null)
 
 const ledgerItems = ref<AdminLedgerTransaction[]>([])
 const ledgerTotal = ref(0)
@@ -1495,6 +1756,8 @@ const redeemBatchForm = reactive({
   expires_at: '',
   description: '',
 })
+const redeemBatchExpiryPreset = ref<RedeemBatchExpiryPreset>('none')
+const redeemBatchCustomExpiryDays = ref(30)
 
 const canRevealPlainRedeemCodes = computed(
   () =>
@@ -1505,6 +1768,46 @@ const canRevealPlainRedeemCodes = computed(
 
 const canExportLatestGeneratedRedeemCodes = computed(
   () => !!latestGeneratedRedeemBatch.value && latestGeneratedRedeemCodes.value.length > 0
+)
+
+const redeemBatchExpiryHint = computed(() => {
+  if (redeemBatchExpiryPreset.value === 'custom') {
+    const days = normalizeRedeemBatchCustomExpiryDaysValue(redeemBatchCustomExpiryDays.value)
+    if (days === null) {
+      return `请输入 1-${MAX_REDEEM_BATCH_CUSTOM_EXPIRY_DAYS} 之间的天数`
+    }
+    return `自定义 ${days} 天后过期：${formatRedeemBatchExpiryPreview(getRedeemBatchExpiryValue('custom'))}`
+  }
+  if (!redeemBatchForm.expires_at) {
+    return '长期有效，适合内部发放或低风险批次。'
+  }
+  return `预计过期：${formatRedeemBatchExpiryPreview(redeemBatchForm.expires_at)}`
+})
+
+const overviewWallets = ref<AdminWallet[]>([])
+const overviewOrders = ref<PaymentOrder[]>([])
+const overviewRefunds = ref<AdminGlobalRefund[]>([])
+const overviewRedeemBatches = ref<RedeemCodeBatch[]>([])
+const walletOpsOverview = computed(() =>
+  buildWalletOpsOverview({
+    wallets: overviewWallets.value,
+    orders: overviewOrders.value,
+    refunds: overviewRefunds.value,
+    redeemBatches: overviewRedeemBatches.value,
+  })
+)
+const pendingOrderWarnings = computed(() => walletOpsOverview.value.pendingOrderWarnings)
+const visiblePendingOrderWarnings = computed(() => pendingOrderWarnings.value.slice(0, 5))
+const pendingOrderWarningMap = computed<Record<string, PendingOrderWarning>>(() =>
+  pendingOrderWarnings.value.reduce<Record<string, PendingOrderWarning>>((acc, warning) => {
+    acc[warning.id] = warning
+    return acc
+  }, {})
+)
+const overviewUpdatedText = computed(() =>
+  overviewLoadedAt.value
+    ? `最近更新 ${formatDateTime(overviewLoadedAt.value)}`
+    : '等待加载运营指标'
 )
 
 const walletMetaMap = ref<Record<string, { ownerName: string; ownerType: 'user' | 'api_key' }>>({})
@@ -1582,6 +1885,22 @@ watch(canRevealPlainRedeemCodes, (enabled) => {
   }
 })
 
+watch(redeemBatchExpiryPreset, (preset) => {
+  if (preset === 'custom') {
+    normalizeRedeemBatchCustomExpiryDays()
+    redeemBatchForm.expires_at = getRedeemBatchExpiryValue(preset)
+    return
+  }
+  redeemBatchForm.expires_at = getRedeemBatchExpiryValue(preset)
+})
+
+watch(redeemBatchCustomExpiryDays, () => {
+  if (redeemBatchExpiryPreset.value !== 'custom') {
+    return
+  }
+  redeemBatchForm.expires_at = getRedeemBatchExpiryValue('custom')
+})
+
 watch(
   () => route.query.tab,
   (tab) => {
@@ -1595,7 +1914,7 @@ watch(
 
 onMounted(async () => {
   await Promise.all([
-    loadWalletMetaMap(),
+    loadOverview(),
     loadLedger(),
     loadRefunds(),
     loadOrders(),
@@ -1608,23 +1927,125 @@ function isValidTab(tab: unknown): tab is WalletManagementTab {
   return tab === 'ledger' || tab === 'refunds' || tab === 'orders' || tab === 'callbacks' || tab === 'redeem_codes'
 }
 
-async function loadWalletMetaMap() {
+function getRedeemBatchExpiryValue(preset: RedeemBatchExpiryPreset): string {
+  if (preset === 'none' || preset === 'custom') {
+    if (preset === 'custom') {
+      const days = normalizeRedeemBatchCustomExpiryDaysValue(redeemBatchCustomExpiryDays.value)
+      if (days === null) {
+        return ''
+      }
+      const date = new Date()
+      date.setDate(date.getDate() + days)
+      date.setHours(23, 59, 0, 0)
+      return formatDatetimeLocalValue(date)
+    }
+    return ''
+  }
+
+  const days = preset === '7d' ? 7 : preset === '30d' ? 30 : 90
+  const date = new Date()
+  date.setDate(date.getDate() + days)
+  date.setHours(23, 59, 0, 0)
+  return formatDatetimeLocalValue(date)
+}
+
+function formatDatetimeLocalValue(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function normalizeRedeemBatchCustomExpiryDaysValue(value: number): number | null {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return null
+  }
+  return Math.min(MAX_REDEEM_BATCH_CUSTOM_EXPIRY_DAYS, Math.floor(parsed))
+}
+
+function normalizeRedeemBatchCustomExpiryDays() {
+  const normalized = normalizeRedeemBatchCustomExpiryDaysValue(redeemBatchCustomExpiryDays.value)
+  redeemBatchCustomExpiryDays.value = normalized ?? 1
+}
+
+function formatRedeemBatchExpiryPreview(value: string): string {
+  const timestamp = new Date(value).getTime()
+  if (!Number.isFinite(timestamp)) {
+    return '时间格式待确认'
+  }
+  return formatDateTime(new Date(timestamp).toISOString())
+}
+
+async function loadAllPages<T>(
+  loadPage: (limit: number, offset: number) => Promise<PagedListResponse<T>>,
+  label: string
+): Promise<T[]> {
+  const items: T[] = []
+  let offset = 0
+  let page = 0
+
+  while (page < OVERVIEW_MAX_PAGES) {
+    const response = await loadPage(OVERVIEW_PAGE_SIZE, offset)
+    items.push(...response.items)
+    if (items.length >= response.total || response.items.length < OVERVIEW_PAGE_SIZE) {
+      return items
+    }
+    const nextOffset = offset + response.items.length
+    if (nextOffset <= offset) {
+      throw new Error(`${label}分页游标未前进`)
+    }
+    offset = nextOffset
+    page += 1
+  }
+
+  throw new Error(`${label}分页超过最大页数 ${OVERVIEW_MAX_PAGES}`)
+}
+
+function applyWalletMetaMap(wallets: AdminWallet[]) {
+  walletMetaMap.value = wallets.reduce<Record<string, { ownerName: string; ownerType: 'user' | 'api_key' }>>(
+    (acc, wallet) => {
+      const ownerName =
+        wallet.owner_name || (wallet.owner_type === 'user' ? '未命名用户' : '未命名密钥')
+      acc[wallet.id] = {
+        ownerName,
+        ownerType: wallet.owner_type,
+      }
+      return acc
+    },
+    {}
+  )
+}
+
+async function loadOverview() {
+  loadingOverview.value = true
+  overviewErrorText.value = ''
   try {
-    const wallets = await adminWalletApi.listAllWallets()
-    walletMetaMap.value = wallets.reduce<Record<string, { ownerName: string; ownerType: 'user' | 'api_key' }>>(
-      (acc, wallet) => {
-        const ownerName =
-          wallet.owner_name || (wallet.owner_type === 'user' ? '未命名用户' : '未命名密钥')
-        acc[wallet.id] = {
-          ownerName,
-          ownerType: wallet.owner_type,
-        }
-        return acc
-      },
-      {}
-    )
+    const [wallets, allOrders, allRefunds, allRedeemBatches] = await Promise.all([
+      adminWalletApi.listAllWallets(undefined, { cacheTtlMs: 0 }),
+      loadAllPages<PaymentOrder>(
+        (limit, offset) => adminPaymentsApi.listOrders({ limit, offset }),
+        '支付订单'
+      ),
+      loadAllPages<AdminGlobalRefund>(
+        (limit, offset) => adminWalletApi.listGlobalRefunds({ limit, offset }),
+        '退款申请'
+      ),
+      loadAllPages<RedeemCodeBatch>(
+        (limit, offset) => adminPaymentsApi.listRedeemCodeBatches({ limit, offset }),
+        '兑换码批次'
+      ),
+    ])
+    overviewWallets.value = wallets
+    overviewOrders.value = allOrders
+    overviewRefunds.value = allRefunds
+    overviewRedeemBatches.value = allRedeemBatches
+    overviewLoadedAt.value = new Date().toISOString()
+    applyWalletMetaMap(wallets)
   } catch (error) {
-    log.error('加载钱包名称映射失败:', error)
+    log.error('加载钱包运营概览失败:', error)
+    overviewErrorText.value = parseApiError(error, '加载运营概览失败')
+    showError(overviewErrorText.value)
+  } finally {
+    loadingOverview.value = false
   }
 }
 
@@ -1808,14 +2229,23 @@ async function submitRedeemCodeBatch() {
     showError('请填写有效数量')
     return
   }
+  if (redeemBatchExpiryPreset.value === 'custom') {
+    const normalizedDays = normalizeRedeemBatchCustomExpiryDaysValue(redeemBatchCustomExpiryDays.value)
+    if (normalizedDays === null) {
+      showError(`请填写 1-${MAX_REDEEM_BATCH_CUSTOM_EXPIRY_DAYS} 之间的自定义天数`)
+      return
+    }
+    redeemBatchCustomExpiryDays.value = normalizedDays
+  }
 
   submittingRedeemBatch.value = true
   try {
+    const expiresAt = getRedeemBatchExpiryValue(redeemBatchExpiryPreset.value)
     const payload = {
       name: redeemBatchForm.name.trim(),
       amount_usd: redeemBatchForm.amount_usd,
       total_count: redeemBatchForm.total_count,
-      expires_at: redeemBatchForm.expires_at ? new Date(redeemBatchForm.expires_at).toISOString() : undefined,
+      expires_at: expiresAt ? new Date(expiresAt).toISOString() : undefined,
       description: redeemBatchForm.description.trim() || undefined,
     }
     const resp = await adminPaymentsApi.createRedeemCodeBatch(payload)
@@ -1826,10 +2256,13 @@ async function submitRedeemCodeBatch() {
     redeemBatchForm.name = ''
     redeemBatchForm.description = ''
     redeemBatchForm.expires_at = ''
+    redeemBatchExpiryPreset.value = 'none'
+    redeemBatchCustomExpiryDays.value = 30
     currentRedeemBatch.value = resp.batch
     selectedRedeemBatchId.value = resp.batch.id
     await loadRedeemCodeBatches()
     await loadRedeemCodes(resp.batch.id)
+    await loadOverview()
   } catch (error) {
     log.error('创建兑换码批次失败:', error)
     showError(parseApiError(error, '创建兑换码批次失败'))
@@ -1858,7 +2291,7 @@ async function disableRedeemBatch(batchId: string) {
   try {
     await adminPaymentsApi.disableRedeemCodeBatch(batchId)
     success('批次已停用')
-    await loadRedeemCodeBatches()
+    await Promise.all([loadRedeemCodeBatches(), loadOverview()])
   } catch (error) {
     log.error('停用兑换码批次失败:', error)
     showError(parseApiError(error, '停用兑换码批次失败'))
@@ -1889,7 +2322,7 @@ async function deleteRedeemBatch(batch: RedeemCodeBatch) {
       latestGeneratedRedeemCodes.value = []
       showPlainRedeemCodes.value = false
     }
-    await loadRedeemCodeBatches()
+    await Promise.all([loadRedeemCodeBatches(), loadOverview()])
   } catch (error) {
     log.error('删除兑换码批次失败:', error)
     showError(parseApiError(error, '删除兑换码批次失败'))
@@ -1900,7 +2333,7 @@ async function disableRedeemCode(codeId: string) {
   try {
     await adminPaymentsApi.disableRedeemCode(codeId)
     success('兑换码已停用')
-    await Promise.all([loadRedeemCodes(), loadRedeemCodeBatches()])
+    await Promise.all([loadRedeemCodes(), loadRedeemCodeBatches(), loadOverview()])
   } catch (error) {
     log.error('停用兑换码失败:', error)
     showError(parseApiError(error, '停用兑换码失败'))
@@ -1915,6 +2348,40 @@ function orderWalletTypeLabel(walletId: string) {
   const ownerType = walletMetaMap.value[walletId]?.ownerType
   if (!ownerType) return '未知归属'
   return ownerType === 'user' ? '用户钱包' : '独立密钥钱包'
+}
+
+function formatCount(value: number): string {
+  return Number(value || 0).toLocaleString('zh-CN')
+}
+
+function orderKindLabel(kind: string | null | undefined): string {
+  if (kind === 'plan_purchase') return '套餐订单'
+  if (kind === 'wallet_recharge') return '钱包充值'
+  return kind || '支付订单'
+}
+
+function pendingOrderWarningLabel(warning: PendingOrderWarning): string {
+  if (warning.reason === 'missing_expiry') return '缺少过期时间'
+  return '即将到期'
+}
+
+function pendingOrderWarningVariant(warning: PendingOrderWarning): string {
+  return warning.reason === 'missing_expiry' ? 'destructive' : 'warning'
+}
+
+function formatOrderExpiry(order: PaymentOrder): string {
+  if (!order.expires_at) {
+    return order.status === 'pending' ? '无过期时间' : '-'
+  }
+  return formatDateTime(order.expires_at)
+}
+
+function focusPendingOrders() {
+  activeTab.value = 'orders'
+  orderStatusFilter.value = 'pending'
+  orderMethodFilter.value = 'all'
+  orderPage.value = 1
+  void loadOrders()
 }
 
 function openLedgerDrawer(tx: AdminLedgerTransaction) {
@@ -1980,7 +2447,7 @@ async function processRefund(refund: AdminGlobalRefund) {
   try {
     await adminWalletApi.processRefund(refund.wallet_id, refund.id)
     success('退款已进入 processing')
-    await Promise.all([loadRefunds(), loadLedger()])
+    await Promise.all([loadRefunds(), loadLedger(), loadOverview()])
     syncCurrentRefund(refund.id)
   } catch (error) {
     log.error('处理退款失败:', error)
@@ -2003,7 +2470,7 @@ async function submitFailRefund() {
       reason: failRefundForm.reason.trim(),
     })
     success('退款已驳回')
-    await Promise.all([loadRefunds(), loadLedger()])
+    await Promise.all([loadRefunds(), loadLedger(), loadOverview()])
     syncCurrentRefund(currentRefund.value.id)
   } catch (error) {
     log.error('驳回退款失败:', error)
@@ -2023,7 +2490,7 @@ async function submitCompleteRefund() {
       payout_reference: completeRefundForm.payout_reference || undefined,
     })
     success('退款已完成')
-    await Promise.all([loadRefunds(), loadLedger()])
+    await Promise.all([loadRefunds(), loadLedger(), loadOverview()])
     syncCurrentRefund(currentRefund.value.id)
   } catch (error) {
     log.error('完成退款失败:', error)
@@ -2054,7 +2521,7 @@ async function submitCreditOrder() {
     })
     success('订单已手动到账')
     showCreditDialog.value = false
-    await Promise.all([loadOrders(), loadLedger(), loadWalletMetaMap()])
+    await Promise.all([loadOrders(), loadLedger(), loadOverview()])
   } catch (error) {
     log.error('手动到账失败:', error)
     showError(parseApiError(error, '手动到账失败'))
@@ -2068,7 +2535,7 @@ async function expireOrder(orderId: string) {
   try {
     await adminPaymentsApi.expireOrder(orderId)
     success('订单已标记过期')
-    await loadOrders()
+    await Promise.all([loadOrders(), loadOverview()])
   } catch (error) {
     log.error('标记过期失败:', error)
     showError(parseApiError(error, '标记过期失败'))
@@ -2082,7 +2549,7 @@ async function failOrder(orderId: string) {
   try {
     await adminPaymentsApi.failOrder(orderId)
     success('订单已标记失败')
-    await loadOrders()
+    await Promise.all([loadOrders(), loadOverview()])
   } catch (error) {
     log.error('标记失败失败:', error)
     showError(parseApiError(error, '标记失败失败'))

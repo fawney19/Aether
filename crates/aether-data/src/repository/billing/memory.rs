@@ -103,9 +103,27 @@ fn daily_quota_availability_from_entitlements(
             if !daily_quota_usd.is_finite() || daily_quota_usd <= 0.0 {
                 continue;
             }
+            let quota_multiplier = if item
+                .get("carry_over")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                item.get("carry_over_limit_multiplier")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or_else(|| {
+                        item.get("carry_over_days")
+                            .and_then(serde_json::Value::as_u64)
+                            .map(|days| days.saturating_add(1) as f64)
+                            .unwrap_or(2.0)
+                    })
+                    .clamp(1.0, 31.0)
+            } else {
+                1.0
+            };
+            let quota_usd = daily_quota_usd * quota_multiplier;
             has_active_daily_quota = true;
-            total_quota_usd += daily_quota_usd;
-            remaining_usd += daily_quota_usd;
+            total_quota_usd += quota_usd;
+            remaining_usd += quota_usd;
             allow_wallet_overage &= item
                 .get("allow_wallet_overage")
                 .and_then(serde_json::Value::as_bool)
@@ -119,6 +137,32 @@ fn daily_quota_availability_from_entitlements(
         remaining_usd,
         allow_wallet_overage,
     }
+}
+
+fn entitlement_has_self_service_daily_quota_reset(entitlement: &UserPlanEntitlementRecord) -> bool {
+    entitlement
+        .entitlements_snapshot
+        .as_array()
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("type").and_then(serde_json::Value::as_str) == Some("daily_quota")
+                    && item
+                        .get("self_service_daily_quota_reset")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+            })
+        })
+}
+
+fn entitlement_has_daily_quota(entitlement: &UserPlanEntitlementRecord) -> bool {
+    entitlement
+        .entitlements_snapshot
+        .as_array()
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("type").and_then(serde_json::Value::as_str) == Some("daily_quota")
+            })
+        })
 }
 
 #[async_trait]
@@ -383,6 +427,50 @@ impl BillingReadRepository for InMemoryBillingReadRepository {
             entitlements,
             now,
         )))
+    }
+
+    async fn reset_user_daily_quota(
+        &self,
+        user_id: &str,
+        entitlement_id: &str,
+        min_remaining_secs: u64,
+        penalty_secs: u64,
+    ) -> Result<AdminBillingMutationOutcome<UserPlanEntitlementRecord>, DataLayerError> {
+        let mut entitlements = self
+            .entitlements_by_id
+            .write()
+            .expect("billing repository lock");
+        let Some(record) = entitlements.get_mut(entitlement_id) else {
+            return Ok(AdminBillingMutationOutcome::NotFound);
+        };
+        let now = current_unix_secs();
+        if record.user_id != user_id
+            || record.status != "active"
+            || record.starts_at_unix_secs > now
+            || record.expires_at_unix_secs <= now
+        {
+            return Ok(AdminBillingMutationOutcome::Invalid(
+                "权益未生效或已过期".to_string(),
+            ));
+        }
+        if record.expires_at_unix_secs.saturating_sub(now) < min_remaining_secs {
+            return Ok(AdminBillingMutationOutcome::Invalid(
+                "剩余有效期不足 72 小时，不能自助重置".to_string(),
+            ));
+        }
+        if !entitlement_has_daily_quota(record) {
+            return Ok(AdminBillingMutationOutcome::Invalid(
+                "权益不包含每日额度".to_string(),
+            ));
+        }
+        if !entitlement_has_self_service_daily_quota_reset(record) {
+            return Ok(AdminBillingMutationOutcome::Invalid(
+                "该套餐未开放自助重置每日额度".to_string(),
+            ));
+        }
+        record.expires_at_unix_secs = record.expires_at_unix_secs.saturating_sub(penalty_secs);
+        record.updated_at_unix_secs = now;
+        Ok(AdminBillingMutationOutcome::Applied(record.clone()))
     }
 }
 

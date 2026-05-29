@@ -253,32 +253,18 @@
             </div>
 
             <div class="space-y-1.5 xl:col-span-8">
-              <Label
-                for="plan-title"
-                class="inline-flex items-center gap-1.5 text-sm font-medium"
-              >
-                <span>套餐名称</span>
-                <span class="text-destructive">*</span>
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <button
-                        type="button"
-                        class="text-muted-foreground/60 hover:text-muted-foreground"
-                        aria-label="套餐名称说明"
-                      >
-                        <CircleHelp class="h-3.5 w-3.5" />
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent
-                      side="top"
-                      class="max-w-64 text-xs"
-                    >
-                      用户端购买页和订单快照里显示的套餐名称。
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              </Label>
+              <div class="inline-flex items-center gap-1.5">
+                <Label
+                  for="plan-title"
+                  class="inline-flex items-center gap-1.5 text-sm font-medium"
+                >
+                  <span>套餐名称</span>
+                  <span class="text-destructive">*</span>
+                </Label>
+                <HelpPopover label="套餐名称说明">
+                  用户端购买页和订单快照里显示的套餐名称。
+                </HelpPopover>
+              </div>
               <Input
                 id="plan-title"
                 v-model="form.title"
@@ -288,32 +274,18 @@
             </div>
 
             <div class="space-y-1.5 xl:col-span-4">
-              <Label
-                for="plan-price"
-                class="inline-flex items-center gap-1.5 text-sm font-medium"
-              >
-                <span>价格</span>
-                <span class="text-destructive">*</span>
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <button
-                        type="button"
-                        class="text-muted-foreground/60 hover:text-muted-foreground"
-                        aria-label="价格字段说明"
-                      >
-                        <CircleHelp class="h-3.5 w-3.5" />
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent
-                      side="top"
-                      class="max-w-72 text-xs"
-                    >
-                      设置用户实际支付的套餐价格。
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              </Label>
+              <div class="inline-flex items-center gap-1.5">
+                <Label
+                  for="plan-price"
+                  class="inline-flex items-center gap-1.5 text-sm font-medium"
+                >
+                  <span>价格</span>
+                  <span class="text-destructive">*</span>
+                </Label>
+                <HelpPopover label="价格字段说明">
+                  设置用户实际支付的套餐价格。
+                </HelpPopover>
+              </div>
               <div class="grid grid-cols-[minmax(0,1fr)_88px]">
                 <Input
                   id="plan-price"
@@ -343,31 +315,17 @@
             </div>
 
             <div class="space-y-1.5 xl:col-span-12">
-              <Label
-                for="plan-description"
-                class="inline-flex items-center gap-1.5 text-sm font-medium"
-              >
-                <span>说明</span>
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger as-child>
-                      <button
-                        type="button"
-                        class="text-muted-foreground/60 hover:text-muted-foreground"
-                        aria-label="套餐说明字段说明"
-                      >
-                        <CircleHelp class="h-3.5 w-3.5" />
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent
-                      side="top"
-                      class="max-w-72 text-xs"
-                    >
-                      简短描述套餐包含的权益，建议控制在一两句话内。
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              </Label>
+              <div class="inline-flex items-center gap-1.5">
+                <Label
+                  for="plan-description"
+                  class="inline-flex items-center gap-1.5 text-sm font-medium"
+                >
+                  <span>说明</span>
+                </Label>
+                <HelpPopover label="套餐说明字段说明">
+                  简短描述套餐包含的权益，建议控制在一两句话内。
+                </HelpPopover>
+              </div>
               <Textarea
                 id="plan-description"
                 v-model="form.description"
@@ -389,31 +347,17 @@
                 class="space-y-1.5"
                 :class="purchaseLimitFieldSpanClass"
               >
-                <Label
-                  for="plan-purchase-limit-scope"
-                  class="inline-flex items-center gap-1.5 text-sm font-medium"
-                >
-                  <span>重复购买限制</span>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger as-child>
-                        <button
-                          type="button"
-                          class="text-muted-foreground/60 hover:text-muted-foreground"
-                          aria-label="重复购买限制说明"
-                        >
-                          <CircleHelp class="h-3.5 w-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent
-                        side="top"
-                        class="max-w-72 text-xs"
-                      >
-                        控制同一用户能否重复购买本套餐；不决定余额、每日额度或会员分组怎么发放。
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </Label>
+                <div class="inline-flex items-center gap-1.5">
+                  <Label
+                    for="plan-purchase-limit-scope"
+                    class="inline-flex items-center gap-1.5 text-sm font-medium"
+                  >
+                    <span>重复购买限制</span>
+                  </Label>
+                  <HelpPopover label="重复购买限制说明">
+                    控制同一用户能否重复购买本套餐；不决定余额、每日额度或会员分组怎么发放。
+                  </HelpPopover>
+                </div>
                 <Select v-model="form.purchase_limit_scope">
                   <SelectTrigger
                     id="plan-purchase-limit-scope"
@@ -439,32 +383,18 @@
                 v-if="showPurchaseLimitPeriod"
                 class="space-y-1.5 xl:col-span-4"
               >
-                <Label
-                  for="plan-duration"
-                  class="inline-flex items-center gap-1.5 text-sm font-medium"
-                >
-                  <span>{{ durationFieldLabel }}</span>
-                  <span class="text-destructive">*</span>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger as-child>
-                        <button
-                          type="button"
-                          class="text-muted-foreground/60 hover:text-muted-foreground"
-                          aria-label="周期窗口说明"
-                        >
-                          <CircleHelp class="h-3.5 w-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent
-                        side="top"
-                        class="max-w-72 text-xs"
-                      >
-                        {{ durationTooltipText }}
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </Label>
+                <div class="inline-flex items-center gap-1.5">
+                  <Label
+                    for="plan-duration"
+                    class="inline-flex items-center gap-1.5 text-sm font-medium"
+                  >
+                    <span>{{ durationFieldLabel }}</span>
+                    <span class="text-destructive">*</span>
+                  </Label>
+                  <HelpPopover label="周期窗口说明">
+                    {{ durationTooltipText }}
+                  </HelpPopover>
+                </div>
                 <div class="grid grid-cols-[minmax(0,1fr)_88px]">
                   <Input
                     id="plan-duration"
@@ -500,31 +430,17 @@
                 class="space-y-1.5"
                 :class="purchaseLimitFieldSpanClass"
               >
-                <Label
-                  for="plan-max-active"
-                  class="inline-flex items-center gap-1.5 text-sm font-medium"
-                >
-                  <span>{{ activeLimitFieldLabel }}</span>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger as-child>
-                        <button
-                          type="button"
-                          class="text-muted-foreground/60 hover:text-muted-foreground"
-                          aria-label="最多持有份数字段说明"
-                        >
-                          <CircleHelp class="h-3.5 w-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent
-                        side="top"
-                        class="max-w-72 text-xs"
-                      >
-                        {{ activeLimitTooltipText }}
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </Label>
+                <div class="inline-flex items-center gap-1.5">
+                  <Label
+                    for="plan-max-active"
+                    class="inline-flex items-center gap-1.5 text-sm font-medium"
+                  >
+                    <span>{{ activeLimitFieldLabel }}</span>
+                  </Label>
+                  <HelpPopover label="最多持有份数字段说明">
+                    {{ activeLimitTooltipText }}
+                  </HelpPopover>
+                </div>
                 <Input
                   id="plan-max-active"
                   v-model.number="form.max_active_per_user"
@@ -540,7 +456,8 @@
                 <span class="font-medium text-foreground/80">当前逻辑：</span>
                 {{ purchaseLimitSummaryText }}
               </div>
-              <div class="xl:col-span-12 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
+              <div class="xl:col-span-12 rounded-xl border border-border/60 bg-card/70 px-3 py-2 text-[13px] leading-5 text-foreground/85 dark:bg-card/50">
+                <span class="font-medium text-foreground">替换规则：</span>
                 同一用户只保留一个有效每日额度套餐、一个有效会员权益包。购买新的同类套餐后，旧同类套餐会自动失效；混合套餐会同时替换这两类旧权益。
               </div>
             </div>
@@ -554,31 +471,17 @@
             </div>
             <div class="grid grid-cols-1 gap-x-4 gap-y-3 xl:grid-cols-12">
               <div class="space-y-1.5 xl:col-span-6">
-                <Label
-                  for="plan-sort"
-                  class="inline-flex items-center gap-1.5 text-sm font-medium"
-                >
-                  <span>展示排序</span>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger as-child>
-                        <button
-                          type="button"
-                          class="text-muted-foreground/60 hover:text-muted-foreground"
-                          aria-label="展示排序说明"
-                        >
-                          <CircleHelp class="h-3.5 w-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent
-                        side="top"
-                        class="max-w-64 text-xs"
-                      >
-                        数值越小越靠前，用户端套餐列表按排序值升序展示。
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </Label>
+                <div class="inline-flex items-center gap-1.5">
+                  <Label
+                    for="plan-sort"
+                    class="inline-flex items-center gap-1.5 text-sm font-medium"
+                  >
+                    <span>展示排序</span>
+                  </Label>
+                  <HelpPopover label="展示排序说明">
+                    数值越小越靠前，用户端套餐列表按排序值升序展示。
+                  </HelpPopover>
+                </div>
                 <Input
                   id="plan-sort"
                   v-model.number="form.sort_order"
@@ -588,28 +491,14 @@
                 />
               </div>
               <div class="space-y-1.5 xl:col-span-6">
-                <Label class="inline-flex items-center gap-1.5 text-sm font-medium">
-                  <span>上架状态</span>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger as-child>
-                        <button
-                          type="button"
-                          class="text-muted-foreground/60 hover:text-muted-foreground"
-                          aria-label="上架状态说明"
-                        >
-                          <CircleHelp class="h-3.5 w-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent
-                        side="top"
-                        class="max-w-64 text-xs"
-                      >
-                        停用后保留配置，但用户端套餐中心不再展示。
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </Label>
+                <div class="inline-flex items-center gap-1.5">
+                  <Label class="inline-flex items-center gap-1.5 text-sm font-medium">
+                    <span>上架状态</span>
+                  </Label>
+                  <HelpPopover label="上架状态说明">
+                    停用后保留配置，但用户端套餐中心不再展示。
+                  </HelpPopover>
+                </div>
                 <div class="flex h-9 items-center justify-between rounded-xl border border-border/60 bg-muted/70 px-3">
                   <span class="text-sm text-muted-foreground">
                     {{ form.enabled ? '已上架' : '未上架' }}
@@ -705,10 +594,24 @@
               </div>
               <div class="space-y-1.5">
                 <Label>重置时区</Label>
-                <Input
-                  v-model="form.reset_timezone"
-                  placeholder="Asia/Shanghai"
-                />
+                <Select v-model="form.reset_timezone">
+                  <SelectTrigger>
+                    <SelectValue placeholder="选择重置时区" />
+                  </SelectTrigger>
+                  <SelectContent
+                    :search-threshold="6"
+                    search-placeholder="搜索时区或城市..."
+                  >
+                    <SelectItem
+                      v-for="option in resetTimezoneOptions"
+                      :key="option.value"
+                      :value="option.value"
+                      :text-value="`${option.value} ${option.label}`"
+                    >
+                      {{ option.label }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <div class="flex items-center justify-between rounded-xl border border-border/60 bg-card/50 p-3">
                 <div>
@@ -719,18 +622,60 @@
                 </div>
                 <Switch v-model="form.allow_wallet_overage" />
               </div>
-              <div class="flex items-center justify-between rounded-xl border border-border/60 bg-card/50 p-3 opacity-70">
+              <div class="flex items-center justify-between rounded-xl border border-border/60 bg-card/50 p-3">
+                <div>
+                  <Label>允许自助重置</Label>
+                  <p class="mt-1 text-xs text-muted-foreground">
+                    用户剩余有效期不少于 72 小时时可自助重置，每次扣除 24 小时
+                  </p>
+                </div>
+                <Switch v-model="form.self_service_daily_quota_reset" />
+              </div>
+              <div class="flex items-center justify-between rounded-xl border border-border/60 bg-card/50 p-3">
                 <div>
                   <Label>额度结转</Label>
                   <p class="mt-1 text-xs text-muted-foreground">
-                    当前后端固定不支持结转
+                    未用完额度可在后续日期继续使用
                   </p>
                 </div>
-                <Switch
-                  v-model="form.carry_over"
-                  disabled
-                />
+                <Switch v-model="form.carry_over" />
               </div>
+              <template v-if="form.carry_over">
+                <div class="space-y-1.5">
+                  <Label>结转保留天数</Label>
+                  <Select v-model="carryOverDaysSelectValue">
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem
+                        v-for="option in carryOverDayOptions"
+                        :key="option.value"
+                        :value="option.value"
+                      >
+                        {{ option.label }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div class="space-y-1.5">
+                  <Label>最高累计倍数</Label>
+                  <Select v-model="carryOverLimitMultiplierSelectValue">
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem
+                        v-for="option in carryOverLimitMultiplierOptions"
+                        :key="option.value"
+                        :value="option.value"
+                      >
+                        {{ option.label }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </template>
               <p class="rounded-xl border border-border/50 bg-card/60 px-3 py-2 text-xs leading-5 text-muted-foreground md:col-span-2">
                 {{ dailyQuotaDetailText }}
               </p>
@@ -805,7 +750,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { CircleHelp, MoreHorizontal, Plus, Trash2 } from 'lucide-vue-next'
+import { MoreHorizontal, Plus, Trash2 } from 'lucide-vue-next'
 import {
   adminBillingPlansApi,
   type BillingDurationUnit,
@@ -842,12 +787,8 @@ import {
   TableHeader,
   TableRow,
   Textarea,
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
 } from '@/components/ui'
-import { EmptyState, LoadingState, MultiSelect } from '@/components/common'
+import { EmptyState, HelpPopover, LoadingState, MultiSelect } from '@/components/common'
 import { CardSection, PageContainer, PageHeader } from '@/components/layout'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
@@ -881,7 +822,10 @@ interface PlanFormState {
   daily_quota_usd: number
   reset_timezone: string
   carry_over: boolean
+  carry_over_days: number
+  carry_over_limit_multiplier: number
   allow_wallet_overage: boolean
+  self_service_daily_quota_reset: boolean
   membership_group_enabled: boolean
   grant_user_groups: string[]
 }
@@ -910,6 +854,83 @@ const priceCurrencyOptions = computed(() => {
   const normalized = form.price_currency.trim().toUpperCase()
   const options = ['CNY', 'USD']
   return normalized && !options.includes(normalized) ? [...options, normalized] : options
+})
+
+const defaultResetTimezoneOptions = [
+  { value: 'Asia/Shanghai', label: 'Asia/Shanghai（北京时间）' },
+  { value: 'Asia/Singapore', label: 'Asia/Singapore（新加坡）' },
+  { value: 'Asia/Hong_Kong', label: 'Asia/Hong_Kong（香港）' },
+  { value: 'Asia/Tokyo', label: 'Asia/Tokyo（东京）' },
+  { value: 'Asia/Seoul', label: 'Asia/Seoul（首尔）' },
+  { value: 'Asia/Dubai', label: 'Asia/Dubai（迪拜）' },
+  { value: 'UTC', label: 'UTC（协调世界时）' },
+  { value: 'Europe/London', label: 'Europe/London（伦敦）' },
+  { value: 'Europe/Berlin', label: 'Europe/Berlin（柏林）' },
+  { value: 'America/New_York', label: 'America/New_York（纽约）' },
+  { value: 'America/Los_Angeles', label: 'America/Los_Angeles（洛杉矶）' },
+  { value: 'Australia/Sydney', label: 'Australia/Sydney（悉尼）' },
+] as const
+
+const resetTimezoneOptions = computed(() => {
+  const normalized = form.reset_timezone.trim()
+  const options = [...defaultResetTimezoneOptions]
+  if (normalized && !options.some((option) => option.value === normalized)) {
+    options.unshift({
+      value: normalized,
+      label: `${normalized}（当前值）`,
+    })
+  }
+  return options
+})
+
+const carryOverDayOptions = computed(() => {
+  const currentDays = Math.min(30, Math.max(1, Math.floor(Number(form.carry_over_days) || 1)))
+  return uniqueNumericOptions([1, 3, 7, 14, 30, currentDays]).map((days) => ({
+    value: String(days),
+    label: formatCarryOverDaysLabel(days),
+  }))
+})
+
+const carryOverDaysSelectValue = computed({
+  get: () => String(Math.min(30, Math.max(1, Math.floor(Number(form.carry_over_days) || 1)))),
+  set: (value: string) => {
+    form.carry_over_days = Number(value)
+    normalizeCarryOverDays()
+    normalizeCarryOverLimitMultiplier()
+  },
+})
+
+const carryOverLimitMultiplierOptions = computed(() => {
+  const maxMultiplier = Math.min(31, Number(form.carry_over_days || 1) + 1)
+  const currentMultiplier = Number(form.carry_over_limit_multiplier)
+  return uniqueNumericOptions([
+    1,
+    1.5,
+    2,
+    2.5,
+    3,
+    5,
+    10,
+    maxMultiplier,
+    Number.isFinite(currentMultiplier) ? currentMultiplier : 2,
+  ])
+    .filter((value) => value >= 1 && value <= maxMultiplier)
+    .map((value) => ({
+      value: formatCarryOverNumberValue(value),
+      label: formatCarryOverMultiplierLabel(value),
+    }))
+})
+
+const carryOverLimitMultiplierSelectValue = computed({
+  get: () => {
+    const maxMultiplier = Math.min(31, Number(form.carry_over_days || 1) + 1)
+    const value = Math.min(maxMultiplier, Math.max(1, Number(form.carry_over_limit_multiplier) || 1))
+    return formatCarryOverNumberValue(value)
+  },
+  set: (value: string) => {
+    form.carry_over_limit_multiplier = Number(value)
+    normalizeCarryOverLimitMultiplier()
+  },
 })
 
 const hasValidPriceAmount = computed(() => {
@@ -1093,11 +1114,16 @@ const dailyQuotaSummaryText = computed(() =>
     : '每天独立 USD 消费用量，默认不结转'
 )
 
-const dailyQuotaDetailText = computed(() =>
-  form.allow_wallet_overage
-    ? '每日额度不足时会继续使用钱包余额，适合希望用户不中断请求的套餐。'
-    : '每日额度不足时不再继续扣钱包，适合严格封顶的月卡或体验卡。'
-)
+const dailyQuotaDetailText = computed(() => {
+  const overageText = form.allow_wallet_overage
+    ? '额度不足时会继续使用钱包余额。'
+    : '额度不足时不再继续扣钱包。'
+  const resetText = form.self_service_daily_quota_reset
+    ? '可开放给用户自助重置，每次会扣除 24 小时有效期。'
+    : '不开放自助重置。'
+  if (!form.carry_over) return `${overageText} ${resetText} 每日额度按重置时区单日清零。`
+  return `${overageText} ${resetText} 未用完额度最多保留 ${form.carry_over_days} 天，累计可用额度最高为每日额度的 ${form.carry_over_limit_multiplier} 倍。`
+})
 
 const membershipSummaryText = computed(() =>
   planMode.value === 'mixed'
@@ -1134,7 +1160,10 @@ function buildDefaultForm(): PlanFormState {
     daily_quota_usd: 50,
     reset_timezone: 'Asia/Shanghai',
     carry_over: false,
+    carry_over_days: 1,
+    carry_over_limit_multiplier: 2,
     allow_wallet_overage: false,
+    self_service_daily_quota_reset: false,
     membership_group_enabled: false,
     grant_user_groups: [],
   }
@@ -1207,7 +1236,12 @@ function formFromPlan(plan: BillingPlan): PlanFormState {
       next.daily_quota_usd = Number(quota.daily_quota_usd || next.daily_quota_usd)
       next.reset_timezone = quota.reset_timezone || 'Asia/Shanghai'
       next.carry_over = Boolean(quota.carry_over)
+      next.carry_over_days = Number(quota.carry_over_days || next.carry_over_days)
+      next.carry_over_limit_multiplier = Number(
+        quota.carry_over_limit_multiplier || next.carry_over_limit_multiplier
+      )
       next.allow_wallet_overage = Boolean(quota.allow_wallet_overage)
+      next.self_service_daily_quota_reset = Boolean(quota.self_service_daily_quota_reset)
     } else if (entitlement.type === 'membership_group') {
       const membership = entitlement as MembershipGroupEntitlement
       next.membership_group_enabled = true
@@ -1253,12 +1287,20 @@ function buildEntitlements(): BillingEntitlement[] {
     })
   }
   if (form.daily_quota_enabled) {
-    entitlements.push({
+    const dailyQuota: DailyQuotaEntitlement = {
       type: 'daily_quota',
       daily_quota_usd: Number(form.daily_quota_usd),
       reset_timezone: form.reset_timezone.trim() || 'Asia/Shanghai',
-      carry_over: false,
+      carry_over: Boolean(form.carry_over),
       allow_wallet_overage: Boolean(form.allow_wallet_overage),
+      self_service_daily_quota_reset: Boolean(form.self_service_daily_quota_reset),
+    }
+    if (form.carry_over) {
+      dailyQuota.carry_over_days = Math.floor(Number(form.carry_over_days))
+      dailyQuota.carry_over_limit_multiplier = Number(form.carry_over_limit_multiplier)
+    }
+    entitlements.push({
+      ...dailyQuota,
     })
   }
   if (form.membership_group_enabled) {
@@ -1288,6 +1330,48 @@ function normalizeActiveLimit() {
   form.max_active_per_user = Math.floor(value)
 }
 
+function normalizeCarryOverDays() {
+  const value = Number(form.carry_over_days)
+  if (!Number.isFinite(value) || value <= 0) {
+    form.carry_over_days = 1
+    return
+  }
+  form.carry_over_days = Math.min(30, Math.max(1, Math.floor(value)))
+  if (form.carry_over_limit_multiplier > form.carry_over_days + 1) {
+    form.carry_over_limit_multiplier = form.carry_over_days + 1
+  }
+}
+
+function normalizeCarryOverLimitMultiplier() {
+  const value = Number(form.carry_over_limit_multiplier)
+  if (!Number.isFinite(value) || value < 1) {
+    form.carry_over_limit_multiplier = 1
+    return
+  }
+  const maxMultiplier = Number(form.carry_over_days || 1) + 1
+  form.carry_over_limit_multiplier = Number(Math.min(maxMultiplier, value).toFixed(2))
+}
+
+function uniqueNumericOptions(values: number[]): number[] {
+  const normalized = values
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value >= 1)
+    .map((value) => Number(value.toFixed(2)))
+  return [...new Set(normalized)].sort((left, right) => left - right)
+}
+
+function formatCarryOverNumberValue(value: number): string {
+  return Number(value.toFixed(2)).toString()
+}
+
+function formatCarryOverDaysLabel(days: number): string {
+  return days === 1 ? '保留 1 天' : `保留 ${days} 天`
+}
+
+function formatCarryOverMultiplierLabel(value: number): string {
+  return `累计 ${formatCarryOverNumberValue(value)} 倍`
+}
+
 function validatePlan(entitlements: BillingEntitlement[]): string | null {
   if (!form.title.trim()) return '请输入套餐名称'
   if (!Number.isFinite(Number(form.price_amount)) || Number(form.price_amount) <= 0) return '价格必须大于 0'
@@ -1303,6 +1387,18 @@ function validatePlan(entitlements: BillingEntitlement[]): string | null {
   if (!hasPackageEntitlement(entitlements)) return '套餐至少需要包含每日额度或会员分组；钱包充值请使用充值功能'
   if (form.wallet_credit_enabled && Number(form.wallet_credit_amount_usd) <= 0) return '附赠余额金额必须大于 0'
   if (form.daily_quota_enabled && Number(form.daily_quota_usd) <= 0) return '每日额度必须大于 0'
+  if (form.daily_quota_enabled && form.carry_over) {
+    if (!Number.isFinite(Number(form.carry_over_days)) || Number(form.carry_over_days) <= 0) {
+      return '结转保留天数必须是正整数'
+    }
+    if (
+      !Number.isFinite(Number(form.carry_over_limit_multiplier))
+      || Number(form.carry_over_limit_multiplier) < 1
+      || Number(form.carry_over_limit_multiplier) > Number(form.carry_over_days) + 1
+    ) {
+      return '最高累计倍数必须在 1 到结转天数+1 之间'
+    }
+  }
   if (form.membership_group_enabled && form.grant_user_groups.length === 0) return '会员分组权益至少选择一个分组'
   return null
 }
@@ -1451,7 +1547,7 @@ function entitlementBadges(plan: BillingPlan): string[] {
       return `附赠余额 $${Number(entitlement.amount_usd || 0).toFixed(2)}`
     }
     if (entitlement.type === 'daily_quota') {
-      return `每日 $${Number(entitlement.daily_quota_usd || 0).toFixed(2)}`
+      return `每日 $${Number(entitlement.daily_quota_usd || 0).toFixed(2)}${entitlement.self_service_daily_quota_reset ? ' · 自助重置' : ''}`
     }
     if (entitlement.type === 'membership_group') {
       const groups = entitlement.grant_user_groups.map(groupName).join(', ')

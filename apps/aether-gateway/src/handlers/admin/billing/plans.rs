@@ -138,11 +138,36 @@ fn validate_entitlements(value: &serde_json::Value) -> Result<(), String> {
                     })?;
                 }
                 if let Some(carry_over) = item.get("carry_over") {
-                    let carry_over = carry_over
+                    carry_over
                         .as_bool()
                         .ok_or_else(|| "daily_quota.carry_over must be a boolean".to_string())?;
-                    if carry_over {
-                        return Err("daily_quota.carry_over is not supported".to_string());
+                }
+                let carry_over_days = if let Some(carry_over_days) = item.get("carry_over_days") {
+                    let carry_over_days = carry_over_days.as_u64().ok_or_else(|| {
+                        "daily_quota.carry_over_days must be an integer".to_string()
+                    })?;
+                    if !(1..=30).contains(&carry_over_days) {
+                        return Err(
+                            "daily_quota.carry_over_days must be between 1 and 30".to_string()
+                        );
+                    }
+                    carry_over_days
+                } else {
+                    1
+                };
+                if let Some(limit_multiplier) = item.get("carry_over_limit_multiplier") {
+                    let limit_multiplier = limit_multiplier.as_f64().ok_or_else(|| {
+                        "daily_quota.carry_over_limit_multiplier must be a number".to_string()
+                    })?;
+                    let max_multiplier = carry_over_days as f64 + 1.0;
+                    if !limit_multiplier.is_finite()
+                        || limit_multiplier < 1.0
+                        || limit_multiplier > max_multiplier
+                    {
+                        return Err(
+                            "daily_quota.carry_over_limit_multiplier must be between 1 and carry_over_days+1"
+                                .to_string(),
+                        );
                     }
                 }
                 if item
@@ -150,6 +175,14 @@ fn validate_entitlements(value: &serde_json::Value) -> Result<(), String> {
                     .is_some_and(|value| !value.is_boolean())
                 {
                     return Err("daily_quota.allow_wallet_overage must be a boolean".to_string());
+                }
+                if item
+                    .get("self_service_daily_quota_reset")
+                    .is_some_and(|value| !value.is_boolean())
+                {
+                    return Err(
+                        "daily_quota.self_service_daily_quota_reset must be a boolean".to_string(),
+                    );
                 }
             }
             "membership_group" => {

@@ -925,7 +925,7 @@ ORDER BY expires_at ASC, created_at ASC
         let now_unix_secs = current_unix_secs_i64();
         let rows = sqlx::query(
             r#"
-SELECT id, entitlements_snapshot
+SELECT id, starts_at, entitlements_snapshot
 FROM user_plan_entitlements
 WHERE user_id = ?
   AND status = 'active'
@@ -944,10 +944,13 @@ ORDER BY expires_at ASC, created_at ASC, id ASC
         let mut grants = Vec::new();
         for row in rows {
             let entitlement_id: String = row.try_get("id").map_sql_err()?;
+            let starts_at_unix_secs =
+                row.try_get::<i64, _>("starts_at").map_sql_err()?.max(0) as u64;
             let entitlements = parse_json(row.try_get("entitlements_snapshot").ok().flatten())?
                 .unwrap_or_else(|| serde_json::json!([]));
             grants.extend(daily_quota_grants_from_entitlement(
                 &entitlement_id,
+                starts_at_unix_secs,
                 &entitlements,
                 now,
             )?);
@@ -959,22 +962,25 @@ ORDER BY expires_at ASC, created_at ASC, id ASC
         let mut allow_wallet_overage = true;
         for grant in &grants {
             allow_wallet_overage &= grant.allow_wallet_overage;
-            let used = sqlx::query_scalar::<_, f64>(
-                r#"
+            let mut used = 0.0;
+            for usage_date in &grant.usage_dates {
+                used += sqlx::query_scalar::<_, f64>(
+                    r#"
 SELECT COALESCE(SUM(amount_usd), 0)
 FROM entitlement_usage_ledgers
 WHERE user_entitlement_id = ?
   AND usage_date = ?
                 "#,
-            )
-            .bind(&grant.entitlement_id)
-            .bind(&grant.usage_date)
-            .fetch_one(&self.pool)
-            .await
-            .map_sql_err()?;
-            total_quota_usd += grant.daily_quota_usd;
-            used_usd += used.min(grant.daily_quota_usd).max(0.0);
-            remaining_usd += (grant.daily_quota_usd - used).max(0.0);
+                )
+                .bind(&grant.entitlement_id)
+                .bind(usage_date)
+                .fetch_one(&self.pool)
+                .await
+                .map_sql_err()?;
+            }
+            total_quota_usd += grant.effective_limit_usd;
+            used_usd += used.min(grant.effective_limit_usd).max(0.0);
+            remaining_usd += (grant.effective_limit_usd - used).max(0.0);
         }
         let has_active_daily_quota = !grants.is_empty();
         Ok(Some(UserDailyQuotaAvailabilityRecord {
@@ -984,6 +990,168 @@ WHERE user_entitlement_id = ?
             remaining_usd,
             allow_wallet_overage: has_active_daily_quota && allow_wallet_overage,
         }))
+    }
+
+    async fn reset_user_daily_quota(
+        &self,
+        user_id: &str,
+        entitlement_id: &str,
+        min_remaining_secs: u64,
+        penalty_secs: u64,
+    ) -> Result<AdminBillingMutationOutcome<UserPlanEntitlementRecord>, DataLayerError> {
+        let min_remaining_secs = i64::try_from(min_remaining_secs)
+            .map_err(|_| DataLayerError::InvalidInput("min remaining overflow".to_string()))?;
+        let penalty_secs = i64::try_from(penalty_secs)
+            .map_err(|_| DataLayerError::InvalidInput("penalty overflow".to_string()))?;
+        let now_unix_secs = current_unix_secs_i64();
+        let now = now_unix_secs.max(0) as u64;
+        let mut tx = self.pool.begin().await.map_sql_err()?;
+        let row = sqlx::query(
+            r#"
+SELECT
+  id, user_id, plan_id, payment_order_id, status,
+  starts_at AS starts_at_unix_secs, expires_at AS expires_at_unix_secs,
+  entitlements_snapshot, created_at AS created_at_unix_secs,
+  updated_at AS updated_at_unix_secs
+FROM user_plan_entitlements
+WHERE id = ?
+  AND user_id = ?
+LIMIT 1
+            "#,
+        )
+        .bind(entitlement_id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_sql_err()?;
+        let Some(row) = row else {
+            return Ok(AdminBillingMutationOutcome::NotFound);
+        };
+        let record = map_user_plan_entitlement_mysql(&row)?;
+        if record.status != "active"
+            || record.starts_at_unix_secs > now
+            || record.expires_at_unix_secs <= now
+        {
+            return Ok(AdminBillingMutationOutcome::Invalid(
+                "权益未生效或已过期".to_string(),
+            ));
+        }
+        if record.expires_at_unix_secs.saturating_sub(now) < min_remaining_secs as u64 {
+            return Ok(AdminBillingMutationOutcome::Invalid(
+                "剩余有效期不足 72 小时，不能自助重置".to_string(),
+            ));
+        }
+        if !entitlement_has_daily_quota(&record.entitlements_snapshot) {
+            return Ok(AdminBillingMutationOutcome::Invalid(
+                "权益不包含每日额度".to_string(),
+            ));
+        }
+        if !entitlement_allows_self_service_daily_quota_reset(&record.entitlements_snapshot) {
+            return Ok(AdminBillingMutationOutcome::Invalid(
+                "该套餐未开放自助重置每日额度".to_string(),
+            ));
+        }
+        let grants = daily_quota_grants_from_entitlement(
+            &record.id,
+            record.starts_at_unix_secs,
+            &record.entitlements_snapshot,
+            chrono::Utc::now(),
+        )?;
+        if grants.is_empty() {
+            return Ok(AdminBillingMutationOutcome::Invalid(
+                "权益不包含可用每日额度".to_string(),
+            ));
+        }
+        for grant in &grants {
+            let current_used = sqlx::query_scalar::<_, f64>(
+                r#"
+SELECT COALESCE(SUM(amount_usd), 0)
+FROM entitlement_usage_ledgers
+WHERE user_entitlement_id = ?
+  AND usage_date = ?
+                "#,
+            )
+            .bind(&grant.entitlement_id)
+            .bind(&grant.usage_date)
+            .fetch_one(&mut *tx)
+            .await
+            .map_sql_err()?;
+            let used_to_reset = current_used.max(0.0);
+            if used_to_reset <= 0.000_000_01 {
+                continue;
+            }
+            let balance_before = (grant.effective_limit_usd - current_used).max(0.0);
+            let balance_after = (balance_before + used_to_reset).min(grant.effective_limit_usd);
+            sqlx::query(
+                r#"
+INSERT INTO entitlement_usage_ledgers (
+  id, user_entitlement_id, user_id, request_id, amount_usd,
+  balance_before, balance_after, usage_date, created_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(&grant.entitlement_id)
+            .bind(user_id)
+            .bind(format!(
+                "self_service_daily_quota_reset:{}",
+                uuid::Uuid::new_v4()
+            ))
+            .bind(-used_to_reset)
+            .bind(balance_before)
+            .bind(balance_after)
+            .bind(&grant.usage_date)
+            .bind(now_unix_secs)
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+        }
+        let next_expires_at = (record.expires_at_unix_secs as i64 - penalty_secs).max(0);
+        let result = sqlx::query(
+            r#"
+UPDATE user_plan_entitlements
+SET expires_at = ?,
+    updated_at = ?
+WHERE id = ?
+  AND user_id = ?
+            "#,
+        )
+        .bind(next_expires_at)
+        .bind(now_unix_secs)
+        .bind(entitlement_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_sql_err()?;
+        if result.rows_affected() == 0 {
+            return Ok(AdminBillingMutationOutcome::NotFound);
+        }
+        let row = sqlx::query(
+            r#"
+SELECT
+  id, user_id, plan_id, payment_order_id, status,
+  starts_at AS starts_at_unix_secs, expires_at AS expires_at_unix_secs,
+  entitlements_snapshot, created_at AS created_at_unix_secs,
+  updated_at AS updated_at_unix_secs
+FROM user_plan_entitlements
+WHERE id = ?
+LIMIT 1
+            "#,
+        )
+        .bind(entitlement_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_sql_err()?;
+        tx.commit().await.map_sql_err()?;
+        match row
+            .as_ref()
+            .map(map_user_plan_entitlement_mysql)
+            .transpose()?
+        {
+            Some(record) => Ok(AdminBillingMutationOutcome::Applied(record)),
+            None => Ok(AdminBillingMutationOutcome::NotFound),
+        }
     }
 }
 
@@ -1157,26 +1325,44 @@ fn json_to_string(value: &serde_json::Value) -> Result<String, DataLayerError> {
 #[derive(Debug)]
 struct DailyQuotaGrant {
     entitlement_id: String,
-    daily_quota_usd: f64,
     usage_date: String,
+    usage_dates: Vec<String>,
     allow_wallet_overage: bool,
+    effective_limit_usd: f64,
 }
 
-fn daily_quota_usage_date(
+fn daily_quota_usage_dates(
     reset_timezone: Option<&str>,
+    starts_at_unix_secs: u64,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<String, DataLayerError> {
+    carry_over_days: u64,
+) -> Result<Vec<String>, DataLayerError> {
     let timezone = reset_timezone
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("Asia/Shanghai")
         .parse::<chrono_tz::Tz>()
         .map_err(|err| DataLayerError::InvalidInput(format!("invalid reset_timezone: {err}")))?;
-    Ok(now.with_timezone(&timezone).date_naive().to_string())
+    let current_date = now.with_timezone(&timezone).date_naive();
+    let starts_at = chrono::DateTime::from_timestamp(starts_at_unix_secs as i64, 0)
+        .unwrap_or(now)
+        .with_timezone(&timezone)
+        .date_naive();
+    let first_date = (current_date - chrono::Duration::days(carry_over_days as i64)).max(starts_at);
+    let mut dates = Vec::new();
+    let mut date = first_date;
+    while date <= current_date {
+        dates.push(date.to_string());
+        date = date
+            .succ_opt()
+            .ok_or_else(|| DataLayerError::InvalidInput("daily quota date overflow".to_string()))?;
+    }
+    Ok(dates)
 }
 
 fn daily_quota_grants_from_entitlement(
     entitlement_id: &str,
+    starts_at_unix_secs: u64,
     entitlements: &serde_json::Value,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<DailyQuotaGrant>, DataLayerError> {
@@ -1195,21 +1381,68 @@ fn daily_quota_grants_from_entitlement(
         if !daily_quota_usd.is_finite() || daily_quota_usd <= 0.0 {
             continue;
         }
+        let carry_over = item
+            .get("carry_over")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let carry_over_days = if carry_over {
+            item.get("carry_over_days")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(1)
+                .clamp(1, 30)
+        } else {
+            0
+        };
+        let usage_dates = daily_quota_usage_dates(
+            item.get("reset_timezone")
+                .and_then(serde_json::Value::as_str),
+            starts_at_unix_secs,
+            now,
+            carry_over_days,
+        )?;
+        let usage_date = usage_dates
+            .last()
+            .cloned()
+            .unwrap_or_else(|| now.date_naive().to_string());
+        let window_limit_usd = daily_quota_usd * usage_dates.len() as f64;
+        let multiplier_limit_usd = daily_quota_usd
+            * item
+                .get("carry_over_limit_multiplier")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(usage_dates.len() as f64)
+                .clamp(1.0, usage_dates.len() as f64);
         grants.push(DailyQuotaGrant {
             entitlement_id: entitlement_id.to_string(),
-            daily_quota_usd,
-            usage_date: daily_quota_usage_date(
-                item.get("reset_timezone")
-                    .and_then(serde_json::Value::as_str),
-                now,
-            )?,
+            usage_date,
+            usage_dates,
             allow_wallet_overage: item
                 .get("allow_wallet_overage")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
+            effective_limit_usd: window_limit_usd.min(multiplier_limit_usd),
         });
     }
     Ok(grants)
+}
+
+fn entitlement_has_daily_quota(entitlements: &serde_json::Value) -> bool {
+    entitlements.as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item.get("type").and_then(serde_json::Value::as_str) == Some("daily_quota"))
+    })
+}
+
+fn entitlement_allows_self_service_daily_quota_reset(entitlements: &serde_json::Value) -> bool {
+    entitlements.as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item.get("type").and_then(serde_json::Value::as_str) == Some("daily_quota")
+                && item
+                    .get("self_service_daily_quota_reset")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+        })
+    })
 }
 
 fn read_count_mysql(row: &MySqlRow) -> Result<u64, DataLayerError> {

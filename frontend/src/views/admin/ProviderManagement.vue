@@ -239,6 +239,7 @@
           :editing-description-id="editingDescriptionId"
           :is-balance-loading="isBalanceLoading"
           :get-provider-balance="getProviderBalance"
+          :get-provider-balance-breakdown="getProviderBalanceBreakdown"
           :get-provider-balance-error="getProviderBalanceError"
           :get-provider-checkin="getProviderCheckin"
           :get-provider-cookie-expired="getProviderCookieExpired"

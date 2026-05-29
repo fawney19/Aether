@@ -7,6 +7,12 @@ export interface NotificationPushServiceFeatureSettings {
   enabled: boolean
 }
 
+export type BillingSourceMode = 'auto' | 'wallet' | 'package'
+
+export interface BillingSourceFeatureSettings {
+  mode: BillingSourceMode
+}
+
 export type FeatureSettingsMap = Record<string, unknown>
 
 const DEFAULT_CHAT_PII_REDACTION_FEATURE_SETTINGS: ChatPiiRedactionFeatureSettings = {
@@ -16,6 +22,10 @@ const DEFAULT_CHAT_PII_REDACTION_FEATURE_SETTINGS: ChatPiiRedactionFeatureSettin
 
 const DEFAULT_NOTIFICATION_PUSH_SERVICE_FEATURE_SETTINGS: NotificationPushServiceFeatureSettings = {
   enabled: false,
+}
+
+const DEFAULT_BILLING_SOURCE_FEATURE_SETTINGS: BillingSourceFeatureSettings = {
+  mode: 'auto',
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -81,6 +91,42 @@ export function mergeNotificationPushServiceFeatureSettings(
     : {}
   settings.notification_push_service = {
     enabled: notificationPushService.enabled,
+  }
+  return Object.keys(settings).length > 0 ? settings : null
+}
+
+export function readBillingSourceFeatureSettings(
+  featureSettings: unknown,
+): BillingSourceFeatureSettings {
+  const feature = isRecord(featureSettings)
+    ? featureSettings.billing_source
+    : null
+  if (!isRecord(feature)) {
+    return { ...DEFAULT_BILLING_SOURCE_FEATURE_SETTINGS }
+  }
+  const rawMode = typeof feature.mode === 'string'
+    ? feature.mode.trim().toLowerCase()
+    : ''
+  if (rawMode === 'wallet' || rawMode === 'package') {
+    return { mode: rawMode }
+  }
+  return { ...DEFAULT_BILLING_SOURCE_FEATURE_SETTINGS }
+}
+
+export function mergeBillingSourceFeatureSettings(
+  featureSettings: unknown,
+  billingSource: BillingSourceFeatureSettings,
+): FeatureSettingsMap | null {
+  const settings: FeatureSettingsMap = isRecord(featureSettings)
+    ? { ...featureSettings }
+    : {}
+
+  if (billingSource.mode === 'auto') {
+    delete settings.billing_source
+  } else {
+    settings.billing_source = {
+      mode: billingSource.mode,
+    }
   }
   return Object.keys(settings).length > 0 ? settings : null
 }

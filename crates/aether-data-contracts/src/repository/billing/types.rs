@@ -443,4 +443,15 @@ pub trait BillingReadRepository: Send + Sync {
         let _ = user_id;
         Ok(None)
     }
+
+    async fn reset_user_daily_quota(
+        &self,
+        user_id: &str,
+        entitlement_id: &str,
+        min_remaining_secs: u64,
+        penalty_secs: u64,
+    ) -> Result<AdminBillingMutationOutcome<UserPlanEntitlementRecord>, crate::DataLayerError> {
+        let _ = (user_id, entitlement_id, min_remaining_secs, penalty_secs);
+        Ok(AdminBillingMutationOutcome::Unavailable)
+    }
 }
