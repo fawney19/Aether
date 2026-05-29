@@ -142,6 +142,25 @@ export interface RequestErrorFlow {
   summary_source?: string | null
 }
 
+export interface RequestUpstreamFailure {
+  provider_name?: string | null
+  endpoint_id?: string | null
+  key_name?: string | null
+  model?: string | null
+  status_code?: number | null
+  type?: string | null
+  param?: string | null
+  message?: string | null
+  user_message?: string | null
+}
+
+export interface RequestCandidateFailureSummary {
+  total?: number | null
+  failed?: number | null
+  skipped?: number | null
+  retried?: number | null
+}
+
 export interface RequestSchedulingFailure {
   source?: string | null
   reason?: string | null
@@ -151,6 +170,8 @@ export interface RequestSchedulingFailure {
   reason_summary?: string | null
   status_code?: number | null
   no_upstream_attempt?: boolean | null
+  upstream_failure?: RequestUpstreamFailure | null
+  candidate_failure_summary?: RequestCandidateFailureSummary | null
 }
 
 export interface RequestDetail {

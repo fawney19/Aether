@@ -6,6 +6,7 @@ use aether_billing::{
 };
 use aether_data::repository::users::StoredUserSummary;
 use aether_data_contracts::repository::{
+    candidates::{RequestCandidateStatus, StoredRequestCandidate},
     provider_catalog::{StoredProviderCatalogEndpoint, StoredProviderCatalogProvider},
     usage::{StoredRequestUsageAudit, StoredUsageAuditSummary, UsageBodyField},
 };
@@ -474,10 +475,298 @@ fn admin_usage_local_runtime_miss_reason_label(reason: &str) -> &'static str {
     match reason {
         "all_candidates_skipped" => "所有候选均被跳过",
         "candidate_list_empty" => "没有可调度候选",
+        "execution_runtime_candidates_exhausted" => "候选执行失败且已耗尽",
         "local_runtime_unavailable" => "本地执行运行时不可用",
         "provider_transport_unavailable" => "提供商传输不可用",
         _ => "本地调度未命中",
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AdminUsageCandidateFailureSummary {
+    total: usize,
+    failed: usize,
+    skipped: usize,
+    retried: usize,
+}
+
+impl AdminUsageCandidateFailureSummary {
+    fn to_json(self) -> Value {
+        if self.total == 0 {
+            Value::Null
+        } else {
+            json!({
+                "total": self.total,
+                "failed": self.failed,
+                "skipped": self.skipped,
+                "retried": self.retried,
+            })
+        }
+    }
+}
+
+fn admin_usage_candidate_was_attempted(candidate: &StoredRequestCandidate) -> bool {
+    candidate.status.is_attempted(candidate.started_at_unix_ms)
+        || candidate.status_code.is_some()
+        || candidate
+            .error_message
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn admin_usage_candidate_failed(candidate: &StoredRequestCandidate) -> bool {
+    matches!(
+        candidate.status,
+        RequestCandidateStatus::Failed | RequestCandidateStatus::Cancelled
+    ) || candidate.status_code.is_some_and(|code| code >= 400)
+        || candidate
+            .error_message
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn admin_usage_candidate_failure_summary(
+    candidates: &[StoredRequestCandidate],
+) -> AdminUsageCandidateFailureSummary {
+    let mut summary = AdminUsageCandidateFailureSummary {
+        total: candidates.len(),
+        ..AdminUsageCandidateFailureSummary::default()
+    };
+    for candidate in candidates {
+        if admin_usage_candidate_failed(candidate) {
+            summary.failed += 1;
+        }
+        if matches!(candidate.status, RequestCandidateStatus::Skipped) {
+            summary.skipped += 1;
+        }
+        if admin_usage_candidate_was_attempted(candidate) {
+            summary.retried += 1;
+        }
+    }
+    summary
+}
+
+fn admin_usage_scheduling_title(
+    reason: &str,
+    summary: AdminUsageCandidateFailureSummary,
+) -> String {
+    if summary.total == 0 || reason == "candidate_list_empty" {
+        return "没有找到可调度候选".to_string();
+    }
+    if summary.failed == 1 && summary.total == 1 {
+        return "唯一候选执行失败，已无可重试上游".to_string();
+    }
+    if summary.failed > 0 && summary.failed + summary.skipped >= summary.total {
+        return "所有候选已完成重试，但全部执行失败".to_string();
+    }
+    if summary.skipped == summary.total {
+        return "所有候选都被调度规则跳过".to_string();
+    }
+    format!(
+        "本地调度失败：{}",
+        admin_usage_local_runtime_miss_reason_label(reason)
+    )
+}
+
+fn admin_usage_first_non_empty_string<'a>(
+    values: impl IntoIterator<Item = Option<&'a Value>>,
+) -> Option<String> {
+    values
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn admin_usage_body_object_from_upstream_response(upstream_response: &Value) -> Option<&Value> {
+    upstream_response.get("body")
+}
+
+fn admin_usage_upstream_response_status_code(upstream_response: &Value) -> Option<u16> {
+    upstream_response
+        .get("status_code")
+        .or_else(|| upstream_response.get("statusCode"))
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+}
+
+fn admin_usage_friendly_upstream_user_message(upstream: &Value) -> Option<String> {
+    let message = upstream
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let haystack = [
+        upstream
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        upstream
+            .get("param")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        message,
+    ]
+    .join(" ")
+    .to_ascii_lowercase();
+    let model = upstream
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("当前模型");
+
+    if haystack.contains("maximum context length")
+        || haystack.contains("context length")
+        || haystack.contains("input_tokens")
+    {
+        return Some(format!(
+            "输入上下文超过模型 {model} 的最大长度限制。请减少输入内容、缩短历史上下文或调整客户端上下文裁剪策略。"
+        ));
+    }
+    if haystack.contains("insufficient_quota")
+        || haystack.contains("quota exceeded")
+        || haystack.contains("insufficient quota")
+    {
+        return Some(
+            "上游账号额度不足或配额已耗尽，请更换 Key、补充额度或调整路由策略。".to_string(),
+        );
+    }
+    if haystack.contains("rate limit") || haystack.contains("429") {
+        return Some("上游触发限流，请稍后重试或切换到其他可用上游。".to_string());
+    }
+    if haystack.contains("invalid api key")
+        || haystack.contains("unauthorized")
+        || haystack.contains("401")
+    {
+        return Some("上游鉴权失败，请检查 Provider API Key 是否有效。".to_string());
+    }
+    if haystack.contains("model not found") {
+        return Some(format!(
+            "上游未找到模型 {model}，请检查模型映射或端点配置。"
+        ));
+    }
+    None
+}
+
+fn admin_usage_candidate_upstream_failure_json(
+    item: &StoredRequestUsageAudit,
+    candidate: &StoredRequestCandidate,
+    provider_key_name: Option<&str>,
+) -> Value {
+    let extra = candidate.extra_data.as_ref().and_then(Value::as_object);
+    let upstream_response = extra
+        .and_then(|object| object.get("upstream_response"))
+        .filter(|value| value.is_object());
+    let error_flow = extra
+        .and_then(|object| object.get("error_flow"))
+        .filter(|value| value.is_object());
+    let body = upstream_response.and_then(admin_usage_body_object_from_upstream_response);
+    let message = error_flow
+        .and_then(|value| admin_usage_string_field(value, "message").map(ToOwned::to_owned))
+        .or_else(|| body.and_then(admin_usage_error_message_from_body))
+        .or_else(|| {
+            body.and_then(|value| admin_usage_string_field(value, "message").map(ToOwned::to_owned))
+        })
+        .or_else(|| {
+            candidate
+                .error_message
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        });
+    let status_code = upstream_response
+        .and_then(admin_usage_upstream_response_status_code)
+        .or(candidate.status_code)
+        .or(item.status_code);
+    let error_type = body.and_then(admin_usage_error_type_from_body).or_else(|| {
+        candidate
+            .error_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    });
+    let param = body
+        .and_then(|value| admin_usage_error_field(value, "param"))
+        .map(ToOwned::to_owned);
+    let mapped_model = extra
+        .and_then(|object| {
+            admin_usage_first_non_empty_string([
+                object.get("mapped_model"),
+                object.get("model"),
+                object.get("target_model"),
+            ])
+        })
+        .or_else(|| item.target_model.clone())
+        .or_else(|| Some(item.model.clone()));
+    let key_name = extra
+        .and_then(|object| object.get("key_name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| provider_key_name.map(ToOwned::to_owned))
+        .or_else(|| item.routing_key_name().map(ToOwned::to_owned));
+
+    if message.is_none()
+        && status_code.is_none()
+        && error_type.is_none()
+        && upstream_response.is_none()
+    {
+        return Value::Null;
+    }
+
+    let mut upstream = json!({
+        "provider_name": admin_usage_provider_display_name(item),
+        "endpoint_id": candidate.endpoint_id.as_ref().or(item.provider_endpoint_id.as_ref()),
+        "key_name": key_name,
+        "model": mapped_model,
+        "status_code": status_code,
+        "type": error_type,
+        "param": param,
+        "message": message,
+    });
+    let user_message = admin_usage_friendly_upstream_user_message(&upstream);
+    upstream["user_message"] = user_message.map(Value::String).unwrap_or(Value::Null);
+    upstream
+}
+
+fn admin_usage_primary_upstream_failure_json(
+    item: &StoredRequestUsageAudit,
+    candidates: &[StoredRequestCandidate],
+    provider_key_name: Option<&str>,
+) -> Value {
+    let mut failed_candidates = candidates
+        .iter()
+        .filter(|candidate| admin_usage_candidate_failed(candidate))
+        .collect::<Vec<_>>();
+    failed_candidates.sort_by(|left, right| {
+        left.candidate_index
+            .cmp(&right.candidate_index)
+            .then(left.retry_index.cmp(&right.retry_index))
+    });
+    for candidate in failed_candidates {
+        let upstream =
+            admin_usage_candidate_upstream_failure_json(item, candidate, provider_key_name);
+        if !upstream.is_null() {
+            return upstream;
+        }
+    }
+    Value::Null
+}
+
+fn admin_usage_candidates_have_upstream_status(candidates: &[StoredRequestCandidate]) -> bool {
+    candidates.iter().any(|candidate| {
+        let extra = candidate.extra_data.as_ref().and_then(Value::as_object);
+        extra
+            .and_then(|object| object.get("upstream_response"))
+            .and_then(admin_usage_upstream_response_status_code)
+            .is_some()
+    })
 }
 
 fn admin_usage_extract_local_runtime_miss_reason_summary(message: &str) -> Option<String> {
@@ -496,6 +785,8 @@ fn admin_usage_extract_local_runtime_miss_reason_summary(message: &str) -> Optio
 fn admin_usage_scheduling_failure_json(
     item: &StoredRequestUsageAudit,
     client_error: &Value,
+    candidates: &[StoredRequestCandidate],
+    provider_key_name: Option<&str>,
 ) -> Value {
     if item.routing_execution_path() != Some("local_execution_runtime_miss") {
         return Value::Null;
@@ -514,20 +805,56 @@ fn admin_usage_scheduling_failure_json(
         .filter(|value| !value.is_empty());
     let reason_summary =
         raw_message.and_then(admin_usage_extract_local_runtime_miss_reason_summary);
+    let candidate_failure_summary = admin_usage_candidate_failure_summary(candidates);
+    let upstream_failure =
+        admin_usage_primary_upstream_failure_json(item, candidates, provider_key_name);
+    let no_upstream_attempt = if admin_usage_candidates_have_upstream_status(candidates) {
+        false
+    } else if !candidates.is_empty() {
+        candidate_failure_summary.failed == 0
+            && (candidate_failure_summary.total == 0
+                || candidate_failure_summary.skipped == candidate_failure_summary.total)
+    } else {
+        item.candidate_id.is_none()
+            && item.provider_api_key_id.is_none()
+            && item.provider_request_headers.is_none()
+            && item.provider_request_body.is_none()
+            && item.provider_request_body_ref.is_none()
+    };
+    let mut display_message = message.clone();
+    if !upstream_failure.is_null() {
+        display_message = upstream_failure
+            .get("user_message")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .or(display_message)
+            .or_else(|| {
+                upstream_failure
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            });
+    }
+    let title = if candidates.is_empty() {
+        format!(
+            "本地调度失败：{}",
+            admin_usage_local_runtime_miss_reason_label(reason)
+        )
+    } else {
+        admin_usage_scheduling_title(reason, candidate_failure_summary)
+    };
 
     json!({
         "source": "local_execution_runtime_miss",
         "reason": reason,
         "reason_label": admin_usage_local_runtime_miss_reason_label(reason),
-        "title": format!("本地调度失败：{}", admin_usage_local_runtime_miss_reason_label(reason)),
-        "message": message,
+        "title": title,
+        "message": display_message,
         "reason_summary": reason_summary,
         "status_code": item.status_code,
-        "no_upstream_attempt": item.candidate_id.is_none()
-            && item.provider_api_key_id.is_none()
-            && item.provider_request_headers.is_none()
-            && item.provider_request_body.is_none()
-            && item.provider_request_body_ref.is_none(),
+        "no_upstream_attempt": no_upstream_attempt,
+        "upstream_failure": upstream_failure,
+        "candidate_failure_summary": candidate_failure_summary.to_json(),
     })
 }
 
@@ -2355,6 +2682,33 @@ pub fn build_admin_usage_detail_payload(
     request_body: Option<Value>,
     default_headers: &BTreeMap<String, String>,
 ) -> Value {
+    build_admin_usage_detail_payload_with_candidates(
+        item,
+        users_by_id,
+        api_key_names,
+        auth_user_reader_available,
+        auth_api_key_reader_available,
+        provider_key_name,
+        include_bodies,
+        request_body,
+        default_headers,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_admin_usage_detail_payload_with_candidates(
+    item: &StoredRequestUsageAudit,
+    users_by_id: &BTreeMap<String, StoredUserSummary>,
+    api_key_names: &BTreeMap<String, String>,
+    auth_user_reader_available: bool,
+    auth_api_key_reader_available: bool,
+    provider_key_name: Option<&str>,
+    include_bodies: bool,
+    request_body: Option<Value>,
+    default_headers: &BTreeMap<String, String>,
+    candidates: &[StoredRequestCandidate],
+) -> Value {
     let mut payload = admin_usage_record_json(
         item,
         users_by_id,
@@ -2415,8 +2769,12 @@ pub fn build_admin_usage_detail_payload(
     payload["upstream_error"] = error_domains["upstream_error"].clone();
     payload["client_error"] = error_domains["client_error"].clone();
     payload["failure_summary"] = error_domains["failure_summary"].clone();
-    payload["scheduling_failure"] =
-        admin_usage_scheduling_failure_json(item, &error_domains["client_error"]);
+    payload["scheduling_failure"] = admin_usage_scheduling_failure_json(
+        item,
+        &error_domains["client_error"],
+        candidates,
+        provider_key_name,
+    );
     payload["error_flow"] = error_flow;
     payload["has_request_body"] = json!(admin_usage_has_body_value(
         item,
@@ -2511,8 +2869,12 @@ mod tests {
         admin_usage_matches_search, admin_usage_matches_status, admin_usage_matches_username,
         admin_usage_record_json, admin_usage_resolve_request_capture_body,
         admin_usage_total_tokens, admin_usage_upstream_is_stream, build_admin_usage_detail_payload,
+        build_admin_usage_detail_payload_with_candidates,
     };
-    use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageBodyField};
+    use aether_data_contracts::repository::{
+        candidates::{RequestCandidateStatus, StoredRequestCandidate},
+        usage::{StoredRequestUsageAudit, UsageBodyField},
+    };
 
     fn sample_usage(
         status: &str,
@@ -2558,6 +2920,40 @@ mod tests {
             Some(102),
         )
         .expect("usage should build")
+    }
+
+    fn sample_candidate(
+        status: RequestCandidateStatus,
+        status_code: Option<i32>,
+        extra_data: Option<serde_json::Value>,
+    ) -> StoredRequestCandidate {
+        StoredRequestCandidate::new(
+            "candidate-1".to_string(),
+            "req-1".to_string(),
+            Some("user-1".to_string()),
+            Some("api-key-1".to_string()),
+            Some("alice".to_string()),
+            Some("default".to_string()),
+            0,
+            0,
+            Some("provider-1".to_string()),
+            Some("endpoint-1".to_string()),
+            Some("provider-key-1".to_string()),
+            status,
+            None,
+            false,
+            status_code,
+            None,
+            None,
+            Some(120),
+            None,
+            extra_data,
+            None,
+            100,
+            Some(101),
+            Some(102),
+        )
+        .expect("candidate should build")
     }
 
     #[test]
@@ -3309,6 +3705,98 @@ mod tests {
             "没有可用提供商支持模型 gpt-5.4 的流式请求"
         );
         assert_eq!(payload["scheduling_failure"]["no_upstream_attempt"], true);
+    }
+
+    #[test]
+    fn detail_payload_adds_candidate_upstream_failure_for_exhausted_local_runtime() {
+        let item = StoredRequestUsageAudit {
+            execution_path: Some("local_execution_runtime_miss".to_string()),
+            local_execution_runtime_miss_reason: Some(
+                "execution_runtime_candidates_exhausted".to_string(),
+            ),
+            target_model: Some("qwen3.6-27b".to_string()),
+            error_category: Some("http_error".to_string()),
+            client_response_body: Some(json!({
+                "error": {
+                    "type": "http_error",
+                    "message": "local execution runtime exhausted"
+                }
+            })),
+            ..sample_usage(
+                "failed",
+                Some(503),
+                Some("已尝试所有本地执行候选提供商，但没有任何候选成功完成请求（原因代码: execution_runtime_candidates_exhausted）"),
+            )
+        };
+        let candidate = sample_candidate(
+            RequestCandidateStatus::Failed,
+            Some(400),
+            Some(json!({
+                "key_name": "key1",
+                "mapped_model": "qwen3.6-27b",
+                "upstream_response": {
+                    "status_code": 400,
+                    "body": {
+                        "error": {
+                            "type": "BadRequestError",
+                            "param": "input_tokens",
+                            "message": "This model's maximum context length is 131072 tokens. However, your prompt contains at least 131073 input tokens."
+                        }
+                    }
+                }
+            })),
+        );
+
+        let payload = build_admin_usage_detail_payload_with_candidates(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            Some("key1"),
+            true,
+            Some(json!({"model": "qwen3.6-27b"})),
+            &BTreeMap::new(),
+            &[candidate],
+        );
+
+        assert_eq!(
+            payload["scheduling_failure"]["reason_label"],
+            "候选执行失败且已耗尽"
+        );
+        assert_eq!(
+            payload["scheduling_failure"]["title"],
+            "唯一候选执行失败，已无可重试上游"
+        );
+        assert_eq!(payload["scheduling_failure"]["no_upstream_attempt"], false);
+        assert_eq!(
+            payload["scheduling_failure"]["candidate_failure_summary"]["total"],
+            1
+        );
+        assert_eq!(
+            payload["scheduling_failure"]["candidate_failure_summary"]["failed"],
+            1
+        );
+        assert_eq!(
+            payload["scheduling_failure"]["candidate_failure_summary"]["retried"],
+            1
+        );
+        assert_eq!(
+            payload["scheduling_failure"]["upstream_failure"]["status_code"],
+            400
+        );
+        assert_eq!(
+            payload["scheduling_failure"]["upstream_failure"]["type"],
+            "BadRequestError"
+        );
+        assert_eq!(
+            payload["scheduling_failure"]["upstream_failure"]["param"],
+            "input_tokens"
+        );
+        assert_eq!(
+            payload["scheduling_failure"]["upstream_failure"]["user_message"],
+            "输入上下文超过模型 qwen3.6-27b 的最大长度限制。请减少输入内容、缩短历史上下文或调整客户端上下文裁剪策略。"
+        );
     }
 
     #[test]
