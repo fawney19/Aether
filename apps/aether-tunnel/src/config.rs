@@ -65,6 +65,7 @@ pub const DEFAULT_TUNNEL_SCALE_CHECK_INTERVAL_MS: u64 = 1_000;
 pub const DEFAULT_TUNNEL_SCALE_UP_THRESHOLD_PERCENT: u32 = 50;
 pub const DEFAULT_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT: u32 = 35;
 pub const DEFAULT_TUNNEL_SCALE_DOWN_GRACE_SECS: u64 = 15;
+pub const DEFAULT_UPSTREAM_CLIENT_POOL_CAPACITY: usize = 256;
 const AUTO_TUNNEL_CONNECTIONS_REDUNDANT_FLOOR: u64 = 2;
 const AUTO_TUNNEL_CONNECTIONS_BASE_CAP: u64 = 4;
 // Bias the automatic pool toward a per-device upper band without letting
@@ -524,6 +525,14 @@ pub struct Config {
     )]
     pub upstream_pool_idle_timeout_secs: u64,
 
+    /// Maximum number of keyed upstream HTTP clients retained by the tunnel.
+    #[arg(
+        long,
+        env = "AETHER_TUNNEL_UPSTREAM_CLIENT_POOL_CAPACITY",
+        default_value_t = DEFAULT_UPSTREAM_CLIENT_POOL_CAPACITY
+    )]
+    pub upstream_client_pool_capacity: usize,
+
     /// Upstream TCP keepalive in seconds (0 disables)
     #[arg(
         long,
@@ -813,6 +822,9 @@ impl Config {
         if self.upstream_connect_timeout_secs == 0 {
             anyhow::bail!("upstream_connect_timeout_secs must be > 0");
         }
+        if self.upstream_client_pool_capacity == 0 {
+            anyhow::bail!("upstream_client_pool_capacity must be > 0");
+        }
         if let Some(proxy_url) = normalized_proxy_url(&self.aether_outbound_proxy_url) {
             crate::egress_proxy::UpstreamProxyConfig::parse(proxy_url)
                 .map_err(|err| anyhow::anyhow!("aether_outbound_proxy_url invalid: {err}"))?;
@@ -1044,6 +1056,8 @@ pub struct ConfigFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_pool_idle_timeout_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_client_pool_capacity: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_tcp_keepalive_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_tcp_nodelay: Option<bool>,
@@ -1226,6 +1240,10 @@ impl ConfigFile {
         set!(
             "AETHER_TUNNEL_UPSTREAM_POOL_IDLE_TIMEOUT",
             self.upstream_pool_idle_timeout_secs
+        );
+        set!(
+            "AETHER_TUNNEL_UPSTREAM_CLIENT_POOL_CAPACITY",
+            self.upstream_client_pool_capacity
         );
         set!(
             "AETHER_TUNNEL_UPSTREAM_TCP_KEEPALIVE",

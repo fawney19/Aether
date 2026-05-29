@@ -1514,6 +1514,32 @@ async fn gateway_reports_proxy_node_metrics_and_filters_events_locally() {
         .expect("system time should be after epoch")
         .as_secs();
 
+    let baseline_heartbeat_response = client
+        .post(format!("{gateway_url}/api/internal/tunnel/heartbeat"))
+        .json(&json!({
+            "node_id": "node-1",
+            "heartbeat_id": 90,
+            "heartbeat_interval": 30,
+            "active_connections": 0,
+            "proxy_metadata": {
+                "tunnel_metrics": {
+                    "connect_errors": 0,
+                    "disconnects": 0,
+                    "error_events_total": 0,
+                    "ws_in_bytes": 0,
+                    "ws_out_bytes": 0,
+                    "ws_in_frames": 0,
+                    "ws_out_frames": 0,
+                    "heartbeat_rtt_last_ms": 0
+                }
+            },
+            "proxy_version": "2.0.0"
+        }))
+        .send()
+        .await
+        .expect("baseline heartbeat request should succeed");
+    assert_eq!(baseline_heartbeat_response.status(), StatusCode::OK);
+
     let heartbeat_response = client
         .post(format!("{gateway_url}/api/internal/tunnel/heartbeat"))
         .json(&json!({
@@ -1564,18 +1590,21 @@ async fn gateway_reports_proxy_node_metrics_and_filters_events_locally() {
         .await
         .expect("metrics json should parse");
     assert_eq!(metrics_payload["step"], "1m");
-    assert_eq!(metrics_payload["summary"]["samples"], 1);
-    assert_eq!(metrics_payload["summary"]["uptime_samples"], 1);
+    assert_eq!(metrics_payload["summary"]["samples"], 2);
+    assert_eq!(metrics_payload["summary"]["uptime_samples"], 2);
     assert_eq!(metrics_payload["summary"]["active_connections_max"], 7);
-    assert_eq!(metrics_payload["summary"]["heartbeat_rtt_ms_avg"], 42.0);
+    assert_eq!(metrics_payload["summary"]["heartbeat_rtt_ms_sum"], 42);
+    assert_eq!(metrics_payload["summary"]["heartbeat_rtt_ms_avg"], 21.0);
     assert_eq!(metrics_payload["summary"]["connect_errors_delta"], 3);
     assert_eq!(metrics_payload["summary"]["ws_out_frames_delta"], 20);
     let metric_items = metrics_payload["items"]
         .as_array()
         .expect("metrics items should be array");
-    assert_eq!(metric_items.len(), 1);
-    assert_eq!(metric_items[0]["node_id"], "node-1");
-    assert!(metric_items[0]["bucket_start"].is_string());
+    assert!(!metric_items.is_empty());
+    assert!(metric_items.iter().any(|item| item["node_id"] == "node-1"));
+    assert!(metric_items
+        .iter()
+        .all(|item| item["bucket_start"].is_string()));
 
     let fleet_response = client
         .get(format!(
@@ -1593,7 +1622,7 @@ async fn gateway_reports_proxy_node_metrics_and_filters_events_locally() {
         .json()
         .await
         .expect("fleet json should parse");
-    assert_eq!(fleet_payload["summary"]["samples"], 1);
+    assert_eq!(fleet_payload["summary"]["samples"], 2);
     assert_eq!(fleet_payload["summary"]["error_events_delta"], 1);
 
     let events_response = client

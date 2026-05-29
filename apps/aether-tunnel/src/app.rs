@@ -1384,6 +1384,7 @@ mod tests {
             upstream_connect_timeout_secs: 30,
             upstream_pool_max_idle_per_host: 4,
             upstream_pool_idle_timeout_secs: 60,
+            upstream_client_pool_capacity: crate::config::DEFAULT_UPSTREAM_CLIENT_POOL_CAPACITY,
             upstream_tcp_keepalive_secs: 60,
             upstream_tcp_nodelay: true,
             upstream_proxy_url: None,
