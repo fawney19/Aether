@@ -203,14 +203,181 @@
         </p>
         <div
           v-if="isDockerUpdate && dockerUpdateCommand"
-          class="mt-3 w-full max-w-sm rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-left"
+          class="mt-3 w-full rounded-xl border border-sky-500/20 bg-sky-500/[0.06] px-4 py-3 text-left"
         >
-          <p class="text-xs text-muted-foreground">
-            在 docker-compose.yml 所在目录执行
+          <div class="flex items-start gap-3">
+            <div class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-sky-500/10 text-sky-600 dark:text-sky-300">
+              <Terminal class="h-4 w-4" />
+            </div>
+            <div class="min-w-0 flex-1 space-y-3">
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div class="min-w-0">
+                  <div class="text-sm font-semibold text-foreground">
+                    Docker 更新操作
+                  </div>
+                  <p class="mt-1 text-xs leading-5 text-muted-foreground">
+                    需要在宿主机的 compose 目录执行，页面不会直接操作容器。
+                  </p>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  class="h-7 shrink-0 px-2 text-xs"
+                  @click="copyDockerUpdateCommand"
+                >
+                  <CheckCircle2
+                    v-if="dockerCommandCopied"
+                    class="mr-1.5 h-3.5 w-3.5 text-emerald-500"
+                  />
+                  <Copy
+                    v-else
+                    class="mr-1.5 h-3.5 w-3.5"
+                  />
+                  {{ dockerCommandCopied ? '已复制' : dockerCommandCopyError ? '复制失败' : '复制命令' }}
+                </Button>
+              </div>
+
+              <div class="grid gap-2 text-xs sm:grid-cols-3">
+                <div class="rounded-lg border border-border/60 bg-background/55 px-3 py-2">
+                  <span class="mr-1.5 font-mono text-sky-600 dark:text-sky-300">1</span>
+                  进入 docker-compose.yml 所在目录
+                </div>
+                <div class="rounded-lg border border-border/60 bg-background/55 px-3 py-2">
+                  <span class="mr-1.5 font-mono text-sky-600 dark:text-sky-300">2</span>
+                  执行更新命令并等待镜像拉取
+                </div>
+                <div class="rounded-lg border border-border/60 bg-background/55 px-3 py-2">
+                  <span class="mr-1.5 font-mono text-sky-600 dark:text-sky-300">3</span>
+                  容器健康后刷新管理端
+                </div>
+              </div>
+
+              <div class="overflow-hidden rounded-lg border border-border/60 bg-background/80">
+                <div class="flex items-center gap-2 border-b border-border/60 px-3 py-1.5 text-[11px] text-muted-foreground">
+                  <Terminal class="h-3.5 w-3.5" />
+                  Shell
+                </div>
+                <code class="block break-all px-3 py-2 font-mono text-xs leading-5 text-foreground">
+                  {{ dockerUpdateCommand }}
+                </code>
+              </div>
+
+              <p class="text-[11px] leading-5 text-muted-foreground">
+                GitHub 检查代理走 AETHER_UPDATE_PROXY_URL；镜像拉取是否走代理取决于 Docker 守护进程配置。
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-4 w-full rounded-xl border border-border/60 bg-muted/20 px-4 py-3 text-left">
+          <div class="flex items-center justify-between gap-3">
+            <div class="flex items-center gap-3">
+              <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <History class="h-4 w-4" />
+              </div>
+              <div>
+                <div class="text-sm font-semibold text-foreground">
+                  最近更新记录
+                </div>
+                <div class="mt-0.5 text-[11px] text-muted-foreground">
+                  {{ updateHistorySummaryText }}
+                </div>
+              </div>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-7 px-2 text-xs"
+              :disabled="loadingUpdateHistory"
+              @click="loadUpdateHistory(true)"
+            >
+              <Loader2
+                v-if="loadingUpdateHistory"
+                class="mr-1.5 h-3.5 w-3.5 animate-spin"
+              />
+              <RefreshCw
+                v-else
+                class="mr-1.5 h-3.5 w-3.5"
+              />
+              刷新
+            </Button>
+          </div>
+
+          <div
+            v-if="loadingUpdateHistory && visibleUpdateHistory.length === 0"
+            class="mt-3 flex items-center gap-2 text-xs text-muted-foreground"
+          >
+            <Loader2 class="h-4 w-4 animate-spin" />
+            正在读取更新记录...
+          </div>
+          <p
+            v-else-if="updateHistoryError"
+            class="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400"
+          >
+            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{{ updateHistoryError }}</span>
           </p>
-          <code class="mt-1 block break-all rounded bg-background/70 px-2 py-1.5 font-mono text-xs text-foreground">
-            {{ dockerUpdateCommand }}
-          </code>
+          <p
+            v-else-if="visibleUpdateHistory.length === 0"
+            class="mt-3 rounded-lg bg-background/50 px-3 py-3 text-center text-xs text-muted-foreground"
+          >
+            暂无更新记录。
+          </p>
+          <div
+            v-else
+            class="relative mt-3 max-h-64 space-y-3 overflow-y-auto pr-1 before:absolute before:bottom-2 before:left-[15px] before:top-2 before:w-px before:bg-border"
+          >
+            <div
+              v-for="entry in visibleUpdateHistory"
+              :key="`${entry.timestamp}-${entry.operation}`"
+              class="relative flex gap-3"
+            >
+              <div
+                class="z-10 mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border bg-background"
+                :class="entry.success
+                  ? 'border-emerald-500/30 text-emerald-500'
+                  : 'border-destructive/30 text-destructive'"
+              >
+                <component
+                  :is="entry.success ? CheckCircle2 : XCircle"
+                  class="h-4 w-4"
+                />
+              </div>
+              <div class="min-w-0 flex-1 rounded-lg border border-border/60 bg-background/65 px-3 py-2">
+                <div class="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+                  <div class="min-w-0">
+                    <span class="text-sm font-medium text-foreground">
+                      {{ updateHistoryOperationLabel(entry.operation) }}
+                    </span>
+                    <p class="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                      <Clock3 class="h-3.5 w-3.5" />
+                      {{ formatUpdateHistoryTime(entry.timestamp) }}
+                    </p>
+                  </div>
+                  <div class="flex shrink-0 items-center gap-2">
+                    <span
+                      class="rounded-full border px-2 py-0.5 text-[10px] font-semibold"
+                      :class="entry.success
+                        ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                        : 'border-destructive/20 bg-destructive/10 text-destructive'"
+                    >
+                      {{ entry.success ? '成功' : '失败' }}
+                    </span>
+                  </div>
+                </div>
+                <p
+                  v-if="entry.error"
+                  class="mt-2 rounded-md bg-destructive/10 px-2 py-1.5 text-xs leading-5 text-destructive"
+                >
+                  {{ entry.error }}
+                </p>
+                <pre
+                  v-else-if="entry.output_tail"
+                  class="mt-2 max-h-24 overflow-y-auto whitespace-pre-wrap rounded-md bg-muted/50 px-2 py-1.5 font-mono text-[11px] leading-5 text-muted-foreground"
+                >{{ entry.output_tail }}</pre>
+              </div>
+            </div>
+          </div>
         </div>
       </template>
     </div>
@@ -260,7 +427,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, onMounted } from 'vue'
 import { Dialog } from '@/components/ui'
 import Button from '@/components/ui/button.vue'
 import HeaderLogo from '@/components/HeaderLogo.vue'
@@ -268,9 +435,9 @@ import { formatDisplayVersion } from '@/utils/version'
 import { normalizeReleaseNotesForDisplay } from '@/utils/releaseNotes'
 import { sanitizeMarkdown } from '@/utils/sanitize'
 import { marked } from 'marked'
-import type { SystemUpdatePreflightResponse } from '@/api/admin'
+import { adminApi, type SystemUpdatePreflightResponse, type UpdateHistoryEntry } from '@/api/admin'
 import { isPreflightBlocking } from './updateDialogLogic'
-import { AlertTriangle, CheckCircle2, Loader2, XCircle } from 'lucide-vue-next'
+import { AlertTriangle, CheckCircle2, Clock3, Copy, History, Loader2, RefreshCw, Terminal, XCircle } from 'lucide-vue-next'
 
 const props = defineProps<{
   modelValue: boolean
@@ -306,8 +473,14 @@ const emit = defineEmits<{
 }>()
 
 const SOURCE_BUILD_UPDATE_HINT = '当前为源码构建，请使用 git pull 后重新编译。'
+const UPDATE_HISTORY_LIMIT = 5
 
 const isOpen = ref(props.modelValue)
+const updateHistory = ref<UpdateHistoryEntry[]>([])
+const loadingUpdateHistory = ref(false)
+const updateHistoryError = ref<string | null>(null)
+const dockerCommandCopied = ref(false)
+const dockerCommandCopyError = ref(false)
 const updating = computed(() => props.updating ?? false)
 const updatePhase = computed(() => props.updatePhase ?? 'download')
 const updateSupported = computed(() => props.updateSupported ?? true)
@@ -356,6 +529,15 @@ watch(() => props.modelValue, (val) => {
 
 watch(isOpen, (val) => {
   emit('update:modelValue', val)
+  if (val) {
+    void loadUpdateHistory(true)
+  }
+})
+
+onMounted(() => {
+  if (isOpen.value) {
+    void loadUpdateHistory()
+  }
 })
 
 const formattedPublishedAt = computed(() => {
@@ -403,6 +585,29 @@ const preflightBlockedCount = computed(() => {
   return updatePreflight.value?.checks.filter(item => item.status === 'blocked').length ?? 0
 })
 const preflightBlocking = computed(() => isPreflightBlocking(updatePreflight.value))
+const visibleUpdateHistory = computed(() => {
+  return [...updateHistory.value].reverse().slice(0, UPDATE_HISTORY_LIMIT)
+})
+const updateHistorySuccessCount = computed(() => {
+  return updateHistory.value.filter(entry => entry.success).length
+})
+const updateHistoryFailureCount = computed(() => {
+  return updateHistory.value.filter(entry => !entry.success).length
+})
+const historyDisplayCountText = computed(() => {
+  const total = updateHistory.value.length
+  if (total === 0) return ''
+  return `最近 ${Math.min(total, UPDATE_HISTORY_LIMIT)} / ${total} 条`
+})
+const updateHistorySummaryText = computed(() => {
+  const total = updateHistory.value.length
+  if (loadingUpdateHistory.value && total === 0) return '正在读取历史记录'
+  if (total === 0) return '暂无历史记录'
+  const failed = updateHistoryFailureCount.value
+  return failed > 0
+    ? `${historyDisplayCountText.value} · 成功 ${updateHistorySuccessCount.value} · 失败 ${failed}`
+    : `${historyDisplayCountText.value} · 全部成功`
+})
 
 function preflightStatusClass(status: 'ok' | 'warning' | 'blocked'): string {
   if (status === 'ok') return 'border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
@@ -441,5 +646,69 @@ function handleApplyUpdate() {
 
 function handleRollback() {
   emit('rollback')
+}
+
+async function copyDockerUpdateCommand() {
+  dockerCommandCopied.value = false
+  dockerCommandCopyError.value = false
+  try {
+    await navigator.clipboard.writeText(dockerUpdateCommand.value)
+    dockerCommandCopied.value = true
+    window.setTimeout(() => {
+      dockerCommandCopied.value = false
+    }, 1600)
+  } catch {
+    dockerCommandCopyError.value = true
+    window.setTimeout(() => {
+      dockerCommandCopyError.value = false
+    }, 1600)
+  }
+}
+
+async function loadUpdateHistory(force = false) {
+  if (loadingUpdateHistory.value) return
+  if (!force && updateHistory.value.length > 0) return
+
+  loadingUpdateHistory.value = true
+  updateHistoryError.value = null
+  try {
+    const response = await adminApi.getUpdateHistory()
+    updateHistory.value = response.entries
+  } catch (error) {
+    updateHistoryError.value = error instanceof Error
+      ? error.message
+      : '读取更新记录失败'
+  } finally {
+    loadingUpdateHistory.value = false
+  }
+}
+
+function updateHistoryOperationLabel(operation: string): string {
+  switch (operation) {
+    case 'prepare':
+      return '准备更新'
+    case 'apply':
+      return '应用更新'
+    case 'rollback':
+      return '回滚版本'
+    default:
+      return operation || '更新任务'
+  }
+}
+
+function formatUpdateHistoryTime(value: string): string {
+  try {
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return value
+    return date.toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  } catch {
+    return value
+  }
 }
 </script>
