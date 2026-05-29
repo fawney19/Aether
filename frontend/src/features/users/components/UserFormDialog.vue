@@ -127,6 +127,8 @@
             :class="[
               passwordError ? 'border-destructive' : '',
             ]"
+            @focus="clearGeneratedPassword"
+            @click="clearGeneratedPassword"
           />
           <p
             v-if="passwordError"
@@ -138,7 +140,7 @@
             v-else-if="!isEditMode"
             class="text-xs text-muted-foreground"
           >
-            {{ passwordHint }}
+            {{ passwordHelperText }}
           </p>
         </div>
 
@@ -290,6 +292,7 @@ import {
 import {
   getPasswordPolicyHint,
   getPasswordPolicyPlaceholder,
+  generatePasswordByPolicy,
   normalizePasswordPolicyLevel,
   validatePasswordByPolicy,
   type PasswordPolicyLevel,
@@ -323,6 +326,7 @@ const isOpen = computed(() => props.open)
 const saving = ref(false)
 const formNonce = ref(createFieldNonce())
 const passwordPolicyLevel = ref<PasswordPolicyLevel>('weak')
+const isGeneratedPasswordActive = ref(false)
 
 // 表单数据
 const form = ref({
@@ -351,9 +355,11 @@ function createFieldNonce(): string {
 
 function resetForm() {
   formNonce.value = createFieldNonce()
+  const generatedPassword = generatePasswordByPolicy(passwordPolicyLevel.value)
+  isGeneratedPasswordActive.value = true
   form.value = {
     username: '',
-    password: '',
+    password: generatedPassword,
     confirmPassword: '',
     email: '',
     initial_gift_usd: 10,
@@ -370,6 +376,7 @@ function resetForm() {
 function loadUserData() {
   if (!props.user) return
   formNonce.value = createFieldNonce()
+  isGeneratedPasswordActive.value = false
   const redactionFeature = readChatPiiRedactionFeatureSettings(props.user.feature_settings)
   const notificationPushFeature = readNotificationPushServiceFeatureSettings(props.user.feature_settings)
   // 创建数组副本，避免与 props 数据共享引用
@@ -411,6 +418,12 @@ const usernameError = computed(() => {
 })
 
 const passwordHint = computed(() => getPasswordPolicyHint(passwordPolicyLevel.value))
+const passwordHelperText = computed(() => {
+  if (isGeneratedPasswordActive.value) {
+    return '已自动生成符合要求的随机密码；点击密码框可清空后手动输入'
+  }
+  return passwordHint.value
+})
 
 const passwordError = computed(() => {
   if (!form.value.password) {
@@ -444,10 +457,27 @@ async function loadPasswordPolicy(): Promise<void> {
       .getSystemConfig('password_policy_level')
       .catch(() => ({ value: 'weak' }))
     passwordPolicyLevel.value = normalizePasswordPolicyLevel(passwordPolicyResponse.value)
+    refreshGeneratedPassword()
   } catch (err) {
     log.error('加载密码策略失败:', err)
     passwordPolicyLevel.value = 'weak'
+    refreshGeneratedPassword()
   }
+}
+
+function refreshGeneratedPassword(): void {
+  if (isEditMode.value || !isGeneratedPasswordActive.value) {
+    return
+  }
+  form.value.password = generatePasswordByPolicy(passwordPolicyLevel.value)
+}
+
+function clearGeneratedPassword(): void {
+  if (isEditMode.value || !isGeneratedPasswordActive.value) {
+    return
+  }
+  form.value.password = ''
+  isGeneratedPasswordActive.value = false
 }
 
 // 提交表单
