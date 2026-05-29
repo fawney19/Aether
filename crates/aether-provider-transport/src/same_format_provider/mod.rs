@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::antigravity::is_antigravity_provider_transport;
 use crate::auth::{
     build_complete_passthrough_headers, build_complete_passthrough_headers_with_auth,
-    resolve_local_gemini_auth, resolve_local_standard_auth,
+    resolve_local_gemini_auth, resolve_local_openai_bearer_auth, resolve_local_standard_auth,
 };
 use crate::claude_code::build_claude_code_passthrough_headers;
 use crate::claude_code::local_claude_code_transport_unsupported_reason_with_network;
@@ -438,10 +438,13 @@ pub fn should_try_same_format_provider_oauth_auth(
     behavior: &SameFormatProviderRequestBehavior,
     transport: &GatewayProviderTransportSnapshot,
     family: SameFormatProviderFamily,
+    provider_api_format: &str,
 ) -> bool {
+    let provider_api_format = aether_ai_formats::normalize_api_format_alias(provider_api_format);
     behavior.is_kiro
         || matches!(family, SameFormatProviderFamily::Standard)
-            && resolve_local_standard_auth(transport).is_none()
+            && resolve_same_format_standard_direct_auth(transport, provider_api_format.as_str())
+                .is_none()
         || matches!(family, SameFormatProviderFamily::Gemini)
             && behavior.is_vertex
             && is_vertex_service_account_transport_context(transport)
@@ -454,6 +457,7 @@ pub fn resolve_same_format_provider_direct_auth(
     behavior: &SameFormatProviderRequestBehavior,
     transport: &GatewayProviderTransportSnapshot,
     family: SameFormatProviderFamily,
+    provider_api_format: &str,
 ) -> Option<(String, String)> {
     if is_grok_provider_transport(transport) && matches!(family, SameFormatProviderFamily::Standard)
     {
@@ -463,9 +467,22 @@ pub fn resolve_same_format_provider_direct_auth(
         None
     } else {
         match family {
-            SameFormatProviderFamily::Standard => resolve_local_standard_auth(transport),
+            SameFormatProviderFamily::Standard => {
+                resolve_same_format_standard_direct_auth(transport, provider_api_format)
+            }
             SameFormatProviderFamily::Gemini => resolve_local_gemini_auth(transport),
         }
+    }
+}
+
+fn resolve_same_format_standard_direct_auth(
+    transport: &GatewayProviderTransportSnapshot,
+    provider_api_format: &str,
+) -> Option<(String, String)> {
+    if aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:embedding") {
+        resolve_local_openai_bearer_auth(transport)
+    } else {
+        resolve_local_standard_auth(transport)
     }
 }
 
@@ -750,6 +767,57 @@ mod tests {
                 &behavior,
                 &transport,
                 SameFormatProviderFamily::Standard,
+                "openai:chat",
+            ),
+            Some(("x-api-key".to_string(), "secret".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolves_openai_embedding_direct_auth_with_bearer_header() {
+        let mut transport = sample_transport("custom");
+        transport.endpoint.api_format = "openai:embedding".to_string();
+        transport.key.auth_type = "api_key".to_string();
+        let behavior = classify_same_format_provider_request_behavior(
+            &transport,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: false,
+                provider_api_format: "openai:embedding",
+                report_kind: "openai_embedding_sync_success",
+            },
+        );
+
+        assert_eq!(
+            resolve_same_format_provider_direct_auth(
+                &behavior,
+                &transport,
+                SameFormatProviderFamily::Standard,
+                "openai:embedding",
+            ),
+            Some(("authorization".to_string(), "Bearer secret".to_string()))
+        );
+    }
+
+    #[test]
+    fn keeps_claude_same_format_api_key_on_x_api_key_header() {
+        let mut transport = sample_transport("custom");
+        transport.endpoint.api_format = "claude:messages".to_string();
+        transport.key.auth_type = "api_key".to_string();
+        let behavior = classify_same_format_provider_request_behavior(
+            &transport,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: false,
+                provider_api_format: "claude:messages",
+                report_kind: "claude_chat_sync_success",
+            },
+        );
+
+        assert_eq!(
+            resolve_same_format_provider_direct_auth(
+                &behavior,
+                &transport,
+                SameFormatProviderFamily::Standard,
+                "claude:messages",
             ),
             Some(("x-api-key".to_string(), "secret".to_string()))
         );

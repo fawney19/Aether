@@ -92,8 +92,12 @@ pub(super) async fn prepare_local_same_format_provider_candidate(
     } else {
         None
     };
-    let should_try_oauth_auth =
-        should_try_same_format_provider_oauth_auth(&behavior, &transport, spec.family);
+    let should_try_oauth_auth = should_try_same_format_provider_oauth_auth(
+        &behavior,
+        &transport,
+        spec.family,
+        provider_api_format,
+    );
     let oauth_auth = if should_try_oauth_auth {
         resolve_candidate_oauth_auth(
             planner_state,
@@ -118,7 +122,12 @@ pub(super) async fn prepare_local_same_format_provider_candidate(
     {
         Some((name.clone(), value.clone()))
     } else {
-        resolve_same_format_provider_direct_auth(&behavior, &transport, spec.family)
+        resolve_same_format_provider_direct_auth(
+            &behavior,
+            &transport,
+            spec.family,
+            provider_api_format,
+        )
     };
     let (auth_header, auth_value) = match auth {
         Some((name, value)) => (Some(name), Some(value)),
