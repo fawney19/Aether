@@ -681,7 +681,7 @@ fn admin_usage_candidate_upstream_failure_json(
     let status_code = upstream_response
         .and_then(admin_usage_upstream_response_status_code)
         .or(candidate.status_code)
-        .or(item.status_code.and_then(|value| u16::try_from(value).ok()));
+        .or(item.status_code);
     let error_type = body.and_then(admin_usage_error_type_from_body).or_else(|| {
         candidate
             .error_type
