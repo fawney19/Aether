@@ -1631,6 +1631,43 @@ impl UserReadRepository for InMemoryUserReadRepository {
         Ok(normalized)
     }
 
+    async fn update_user_remark(
+        &self,
+        user_id: &str,
+        remark: Option<String>,
+    ) -> Result<Option<Option<String>>, DataLayerError> {
+        if self.read_only {
+            return Ok(None);
+        }
+
+        let user_exists = self
+            .auth_by_id
+            .read()
+            .expect("user repository lock")
+            .contains_key(user_id)
+            || self
+                .export_rows
+                .read()
+                .expect("user repository lock")
+                .iter()
+                .any(|row| row.id == user_id);
+        if !user_exists {
+            return Ok(None);
+        }
+
+        if let Some(row) = self
+            .export_rows
+            .write()
+            .expect("user repository lock")
+            .iter_mut()
+            .find(|row| row.id == user_id)
+        {
+            row.remark = remark.clone();
+        }
+
+        Ok(Some(remark))
+    }
+
     async fn create_local_auth_user(
         &self,
         email: Option<String>,

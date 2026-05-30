@@ -28,6 +28,7 @@ const USER_EXPORT_COLUMNS: &str = r#"
 SELECT
   id,
   email,
+  remark,
   email_verified,
   username,
   password_hash,
@@ -1259,6 +1260,25 @@ WHERE id = ?
         Ok(normalized)
     }
 
+    async fn update_user_remark(
+        &self,
+        user_id: &str,
+        remark: Option<String>,
+    ) -> Result<Option<Option<String>>, DataLayerError> {
+        sqlx::query("UPDATE users SET remark = ?, updated_at = ? WHERE id = ?")
+            .bind(remark)
+            .bind(chrono::Utc::now().timestamp())
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map_sql_err()?;
+        sqlx::query_scalar("SELECT remark FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_sql_err()
+    }
+
     async fn create_local_auth_user(
         &self,
         email: Option<String>,
@@ -1962,6 +1982,7 @@ fn map_user_export_row(row: &MySqlRow) -> Result<StoredUserExportRow, DataLayerE
         )?,
         row.try_get("is_active").map_sql_err()?,
     )
+    .and_then(|record| Ok(record.with_remark(row.try_get("remark").map_sql_err()?)))
     .map(|record| record.with_feature_settings(feature_settings))
     .and_then(|record| {
         record.with_policy_modes(

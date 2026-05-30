@@ -50,9 +50,10 @@ use self::shared::{
     build_admin_users_data_unavailable_response, build_admin_users_read_only_response,
     disabled_user_policy_detail, disabled_user_policy_field, format_optional_datetime_iso8601,
     legacy_admin_list_policy_mode, legacy_admin_rate_limit_policy_mode,
-    normalize_admin_optional_user_email, normalize_admin_user_group_ids, normalize_admin_user_role,
-    normalize_admin_username, validate_admin_user_password, AdminCreateUserApiKeyRequest,
-    AdminCreateUserRequest, AdminToggleUserApiKeyLockRequest, AdminUpdateUserApiKeyRequest,
+    normalize_admin_optional_user_email, normalize_admin_optional_user_remark,
+    normalize_admin_user_group_ids, normalize_admin_user_role, normalize_admin_username,
+    validate_admin_user_password, AdminCreateUserApiKeyRequest, AdminCreateUserRequest,
+    AdminToggleUserApiKeyLockRequest, AdminUpdateUserApiKeyRequest,
 };
 pub(crate) use self::shared::{
     normalize_admin_list_policy_mode, normalize_admin_rate_limit_policy_mode,

@@ -222,6 +222,7 @@ impl StoredUserOAuthLinkSummary {
 pub struct StoredUserExportRow {
     pub id: String,
     pub email: Option<String>,
+    pub remark: Option<String>,
     pub email_verified: bool,
     pub username: String,
     pub password_hash: Option<String>,
@@ -281,6 +282,7 @@ impl StoredUserExportRow {
         Ok(Self {
             id,
             email,
+            remark: None,
             email_verified,
             username,
             password_hash,
@@ -326,6 +328,11 @@ impl StoredUserExportRow {
 
     pub fn with_feature_settings(mut self, feature_settings: Option<Value>) -> Self {
         self.feature_settings = normalize_optional_json(feature_settings);
+        self
+    }
+
+    pub fn with_remark(mut self, remark: Option<String>) -> Self {
+        self.remark = remark;
         self
     }
 
@@ -938,6 +945,12 @@ pub trait UserReadRepository: Send + Sync {
         user_id: &str,
         settings: Option<Value>,
     ) -> Result<Option<Value>, crate::DataLayerError>;
+
+    async fn update_user_remark(
+        &self,
+        user_id: &str,
+        remark: Option<String>,
+    ) -> Result<Option<Option<String>>, crate::DataLayerError>;
 
     async fn create_local_auth_user(
         &self,

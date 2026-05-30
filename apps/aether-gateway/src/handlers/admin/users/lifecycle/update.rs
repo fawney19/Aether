@@ -2,8 +2,9 @@ use super::super::{
     build_admin_users_bad_request_response, build_admin_users_data_unavailable_response,
     build_admin_users_read_only_response, disabled_user_policy_detail, disabled_user_policy_field,
     normalize_admin_feature_settings, normalize_admin_optional_user_email,
-    normalize_admin_user_group_ids, normalize_admin_user_role, normalize_admin_username,
-    validate_admin_user_password, AdminUpdateUserPatch,
+    normalize_admin_optional_user_remark, normalize_admin_user_group_ids,
+    normalize_admin_user_role, normalize_admin_username, validate_admin_user_password,
+    AdminUpdateUserPatch,
 };
 use super::support::{
     admin_user_id_from_detail_path, admin_user_password_policy,
@@ -98,6 +99,20 @@ pub(in super::super) async fn build_admin_update_user_response(
         },
         None => None,
     };
+    let remark = if field_presence.contains("remark") {
+        match normalize_admin_optional_user_remark(payload.remark.as_deref()) {
+            Ok(value) => Some(value),
+            Err(detail) => {
+                return Ok((
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": detail })),
+                )
+                    .into_response())
+            }
+        }
+    } else {
+        None
+    };
     if let Some(email) = email.as_deref() {
         if state
             .is_other_user_auth_email_taken(email, &user_id)
@@ -186,7 +201,8 @@ pub(in super::super) async fn build_admin_update_user_response(
         || role.is_some()
         || payload.is_active.is_some()
         || group_ids.is_some()
-        || feature_settings.is_some();
+        || feature_settings.is_some()
+        || remark.is_some();
     if needs_auth_user_write && !state.has_auth_user_write_capability() {
         return Ok(build_admin_users_read_only_response(
             "当前为只读模式，无法更新用户",
@@ -309,6 +325,9 @@ pub(in super::super) async fn build_admin_update_user_response(
             .update_user_feature_settings(&user_id, feature_settings)
             .await?;
     }
+    if let Some(remark) = remark {
+        state.update_user_remark(&user_id, remark).await?;
+    }
 
     let Some(user) = state.find_user_auth_by_id(&user_id).await? else {
         return Ok((
@@ -339,6 +358,11 @@ pub(in super::super) async fn build_admin_update_user_response(
     payload["feature_settings"] = export_row
         .as_ref()
         .and_then(|row| row.feature_settings.clone())
+        .unwrap_or(Value::Null);
+    payload["remark"] = export_row
+        .as_ref()
+        .and_then(|row| row.remark.clone())
+        .map(Value::String)
         .unwrap_or(Value::Null);
 
     Ok(attach_admin_audit_response(
