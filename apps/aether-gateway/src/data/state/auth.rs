@@ -467,6 +467,17 @@ impl GatewayDataState {
             .await
     }
 
+    pub(crate) async fn update_user_remark(
+        &self,
+        user_id: &str,
+        remark: Option<String>,
+    ) -> Result<Option<Option<String>>, DataLayerError> {
+        let Some(repository) = self.user_reader.as_ref() else {
+            return Ok(None);
+        };
+        repository.update_user_remark(user_id, remark).await
+    }
+
     pub(crate) async fn update_local_auth_user_profile(
         &self,
         user_id: &str,

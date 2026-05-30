@@ -60,11 +60,13 @@ pub(super) fn should_try_same_format_provider_oauth_auth(
     behavior: &SameFormatProviderRequestBehavior,
     transport: &GatewayProviderTransportSnapshot,
     family: LocalSameFormatProviderFamily,
+    provider_api_format: &str,
 ) -> bool {
     should_try_same_format_provider_oauth_auth_impl(
         behavior,
         transport,
         same_format_provider_family(family),
+        provider_api_format,
     )
 }
 
@@ -72,11 +74,13 @@ pub(super) fn resolve_same_format_provider_direct_auth(
     behavior: &SameFormatProviderRequestBehavior,
     transport: &GatewayProviderTransportSnapshot,
     family: LocalSameFormatProviderFamily,
+    provider_api_format: &str,
 ) -> Option<(String, String)> {
     resolve_same_format_provider_direct_auth_impl(
         behavior,
         transport,
         same_format_provider_family(family),
+        provider_api_format,
     )
 }
 

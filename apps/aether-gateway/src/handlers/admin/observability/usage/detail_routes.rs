@@ -5,7 +5,7 @@ use super::replay::{
     admin_usage_id_from_action_path, admin_usage_id_from_detail_path,
     admin_usage_resolve_body_value, admin_usage_resolve_request_capture_body,
     admin_usage_resolve_request_capture_body_for_item, build_admin_usage_curl_response,
-    build_admin_usage_detail_payload, build_admin_usage_replay_response,
+    build_admin_usage_detail_payload_with_candidates, build_admin_usage_replay_response,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{attach_admin_audit_response, query_param_bool};
@@ -172,6 +172,13 @@ pub(super) async fn maybe_build_local_admin_usage_detail_response(
                 admin_usage_api_key_names(state, std::slice::from_ref(&item)),
             )?;
             let provider_key_name = admin_usage_provider_key_name(&item, &provider_key_names);
+            let candidates = if state.has_request_candidate_data_reader() {
+                state
+                    .read_request_candidates_by_request_id(&item.request_id)
+                    .await?
+            } else {
+                Vec::new()
+            };
 
             let mut detail_item = item.clone();
             let request_body = if include_bodies {
@@ -207,7 +214,7 @@ pub(super) async fn maybe_build_local_admin_usage_detail_response(
                 // request_body 已通过 request capture 解析；其余 detached body 在上方并行加载。
             }
             let default_headers = admin_usage_curl_headers();
-            let payload = build_admin_usage_detail_payload(
+            let payload = build_admin_usage_detail_payload_with_candidates(
                 &detail_item,
                 &users_by_id,
                 &api_key_names,
@@ -217,6 +224,7 @@ pub(super) async fn maybe_build_local_admin_usage_detail_response(
                 include_bodies,
                 request_body,
                 &default_headers,
+                &candidates,
             );
 
             return Ok(Some(attach_admin_audit_response(

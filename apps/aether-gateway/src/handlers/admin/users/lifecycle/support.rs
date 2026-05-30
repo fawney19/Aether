@@ -93,6 +93,7 @@ pub(super) fn build_admin_user_export_payload(
     json!({
         "id": row.id,
         "email": row.email,
+        "remark": row.remark,
         "username": row.username,
         "role": row.role,
         "allowed_providers": row.allowed_providers,

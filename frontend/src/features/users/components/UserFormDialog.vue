@@ -105,6 +105,21 @@
         </div>
 
         <div class="space-y-2">
+          <Label
+            for="form-remark"
+            class="text-sm font-medium"
+          >备注</Label>
+          <Textarea
+            id="form-remark"
+            v-model="form.remark"
+            rows="3"
+            maxlength="500"
+            placeholder="可填写用户备注（选填）"
+            class="min-h-20 resize-none"
+          />
+        </div>
+
+        <div class="space-y-2">
           <Label class="text-sm font-medium">
             {{ isEditMode ? '新密码 (留空保持不变)' : '密码' }}
             <span
@@ -138,7 +153,7 @@
             v-else-if="!isEditMode"
             class="text-xs text-muted-foreground"
           >
-            {{ passwordHint }}
+            {{ passwordHelperText }}
           </p>
         </div>
 
@@ -269,6 +284,7 @@ import {
   Input,
   Label,
   Switch,
+  Textarea,
   Select,
   SelectTrigger,
   SelectValue,
@@ -290,6 +306,7 @@ import {
 import {
   getPasswordPolicyHint,
   getPasswordPolicyPlaceholder,
+  generatePasswordByPolicy,
   normalizePasswordPolicyLevel,
   validatePasswordByPolicy,
   type PasswordPolicyLevel,
@@ -300,6 +317,7 @@ export interface UserFormData {
   id?: string
   username: string
   email: string
+  remark?: string | null
   initial_gift_usd?: number | null
   unlimited?: boolean
   role: 'admin' | 'user'
@@ -323,6 +341,7 @@ const isOpen = computed(() => props.open)
 const saving = ref(false)
 const formNonce = ref(createFieldNonce())
 const passwordPolicyLevel = ref<PasswordPolicyLevel>('weak')
+const isGeneratedPasswordActive = ref(false)
 
 // 表单数据
 const form = ref({
@@ -330,6 +349,7 @@ const form = ref({
   password: '',
   confirmPassword: '',
   email: '',
+  remark: '',
   initial_gift_usd: 10 as number | undefined,
   role: 'user' as 'admin' | 'user',
   unlimited: false,
@@ -351,11 +371,14 @@ function createFieldNonce(): string {
 
 function resetForm() {
   formNonce.value = createFieldNonce()
+  const generatedPassword = generatePasswordByPolicy(passwordPolicyLevel.value)
+  isGeneratedPasswordActive.value = true
   form.value = {
     username: '',
-    password: '',
+    password: generatedPassword,
     confirmPassword: '',
     email: '',
+    remark: '',
     initial_gift_usd: 10,
     role: 'user',
     unlimited: false,
@@ -370,6 +393,7 @@ function resetForm() {
 function loadUserData() {
   if (!props.user) return
   formNonce.value = createFieldNonce()
+  isGeneratedPasswordActive.value = false
   const redactionFeature = readChatPiiRedactionFeatureSettings(props.user.feature_settings)
   const notificationPushFeature = readNotificationPushServiceFeatureSettings(props.user.feature_settings)
   // 创建数组副本，避免与 props 数据共享引用
@@ -378,6 +402,7 @@ function loadUserData() {
     password: '',
     confirmPassword: '',
     email: props.user.email || '',
+    remark: props.user.remark || '',
     initial_gift_usd: undefined,
     role: props.user.role,
     unlimited: props.user.unlimited ?? false,
@@ -411,6 +436,12 @@ const usernameError = computed(() => {
 })
 
 const passwordHint = computed(() => getPasswordPolicyHint(passwordPolicyLevel.value))
+const passwordHelperText = computed(() => {
+  if (isGeneratedPasswordActive.value) {
+    return '已自动生成符合要求的随机密码'
+  }
+  return passwordHint.value
+})
 
 const passwordError = computed(() => {
   if (!form.value.password) {
@@ -444,10 +475,19 @@ async function loadPasswordPolicy(): Promise<void> {
       .getSystemConfig('password_policy_level')
       .catch(() => ({ value: 'weak' }))
     passwordPolicyLevel.value = normalizePasswordPolicyLevel(passwordPolicyResponse.value)
+    refreshGeneratedPassword()
   } catch (err) {
     log.error('加载密码策略失败:', err)
     passwordPolicyLevel.value = 'weak'
+    refreshGeneratedPassword()
   }
+}
+
+function refreshGeneratedPassword(): void {
+  if (isEditMode.value || !isGeneratedPasswordActive.value) {
+    return
+  }
+  form.value.password = generatePasswordByPolicy(passwordPolicyLevel.value)
 }
 
 // 提交表单
@@ -457,6 +497,7 @@ async function handleSubmit() {
     const data: UserFormData & { password?: string; unlimited: boolean } = {
       username: form.value.username,
       email: form.value.email.trim() || '',
+      remark: form.value.remark.trim() || null,
       unlimited: form.value.unlimited,
       role: form.value.role,
       group_ids: [...form.value.group_ids],

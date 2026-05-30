@@ -729,6 +729,16 @@ async fn gateway_handles_dashboard_daily_stats_locally_without_proxying_upstream
         now - chrono::Duration::hours(2),
     );
     today_claude_usage.total_tokens = 160;
+    let mut today_bailian_usage = sample_user_usage_audit(
+        "usage-dashboard-daily-4",
+        "req-dashboard-daily-4",
+        "user-auth-4",
+        "qwen3.6-27b",
+        "bailian",
+        "completed",
+        now - chrono::Duration::hours(3),
+    );
+    today_bailian_usage.total_tokens = 160;
     let mut prior_usage = sample_user_usage_audit(
         "usage-dashboard-daily-3",
         "req-dashboard-daily-3",
@@ -742,6 +752,7 @@ async fn gateway_handles_dashboard_daily_stats_locally_without_proxying_upstream
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
         today_openai_usage,
         today_claude_usage,
+        today_bailian_usage,
         prior_usage,
     ]));
 
@@ -789,30 +800,41 @@ async fn gateway_handles_dashboard_daily_stats_locally_without_proxying_upstream
     assert_eq!(daily_stats[0]["requests"], 1);
     assert_eq!(daily_stats[0]["unique_providers"], 1);
     assert_eq!(daily_stats[1]["date"], json!(now.date_naive().to_string()));
-    assert_eq!(daily_stats[1]["requests"], 2);
-    assert_eq!(daily_stats[1]["tokens"], 320);
-    assert_eq!(daily_stats[1]["unique_models"], 2);
-    assert_eq!(daily_stats[1]["unique_providers"], 2);
+    assert_eq!(daily_stats[1]["requests"], 3);
+    assert_eq!(daily_stats[1]["tokens"], 480);
+    assert_eq!(daily_stats[1]["unique_models"], 3);
+    assert_eq!(daily_stats[1]["unique_providers"], 3);
+    let today_model_breakdown = daily_stats[1]["model_breakdown"]
+        .as_array()
+        .expect("today model breakdown should be an array");
+    assert_eq!(today_model_breakdown.len(), 3);
+    let today_models = today_model_breakdown
+        .iter()
+        .filter_map(|item| item["model"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
-        daily_stats[1]["model_breakdown"].as_array().map(Vec::len),
-        Some(2)
+        today_models,
+        std::collections::BTreeSet::from(["claude-3-7", "gpt-5", "qwen3.6-27b"])
     );
 
     let model_summary = payload["model_summary"]
         .as_array()
         .expect("model summary should exist");
-    assert_eq!(model_summary.len(), 2);
+    assert_eq!(model_summary.len(), 3);
     assert_eq!(model_summary[0]["model"], "gpt-5");
     assert_eq!(model_summary[0]["requests"], 2);
 
     let provider_summary = payload["provider_summary"]
         .as_array()
         .expect("provider summary should exist");
-    assert_eq!(provider_summary.len(), 2);
-    assert_eq!(provider_summary[0]["provider"], "openai");
-    assert_eq!(provider_summary[0]["requests"], 2);
-    assert_eq!(provider_summary[1]["provider"], "claude");
-    assert_eq!(provider_summary[1]["requests"], 1);
+    assert_eq!(provider_summary.len(), 3);
+    let provider_requests = provider_summary
+        .iter()
+        .filter_map(|item| Some((item["provider"].as_str()?, item["requests"].as_u64()?)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(provider_requests.get("openai"), Some(&2));
+    assert_eq!(provider_requests.get("claude"), Some(&1));
+    assert_eq!(provider_requests.get("bailian"), Some(&1));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

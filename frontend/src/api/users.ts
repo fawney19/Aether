@@ -36,6 +36,7 @@ export interface User {
   id: string // UUID
   username: string
   email: string
+  remark?: string | null
   role: UserRole
   is_active: boolean
   unlimited: boolean
@@ -61,6 +62,7 @@ export interface CreateUserRequest {
   username: string
   password: string
   email: string
+  remark?: string | null
   role?: UserRole
   initial_gift_usd?: number | null
   unlimited?: boolean
@@ -70,6 +72,7 @@ export interface CreateUserRequest {
 
 export interface UpdateUserRequest {
   email?: string
+  remark?: string | null
   is_active?: boolean
   role?: UserRole
   unlimited?: boolean

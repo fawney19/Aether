@@ -438,6 +438,14 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn update_user_remark(
+        &self,
+        user_id: &str,
+        remark: Option<String>,
+    ) -> Result<Option<Option<String>>, GatewayError> {
+        self.app.update_user_remark(user_id, remark).await
+    }
+
     pub(crate) async fn count_user_pending_refunds(
         &self,
         user_id: &str,

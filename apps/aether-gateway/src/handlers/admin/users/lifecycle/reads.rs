@@ -176,5 +176,10 @@ pub(in super::super) async fn build_admin_get_user_response(
         .as_ref()
         .and_then(|row| row.feature_settings.clone())
         .unwrap_or(serde_json::Value::Null);
+    payload["remark"] = export_row
+        .as_ref()
+        .and_then(|row| row.remark.clone())
+        .map(serde_json::Value::String)
+        .unwrap_or(serde_json::Value::Null);
     Ok(Json(payload).into_response())
 }

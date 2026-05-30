@@ -78,6 +78,17 @@ impl AppState {
         Ok(updated)
     }
 
+    pub(crate) async fn update_user_remark(
+        &self,
+        user_id: &str,
+        remark: Option<String>,
+    ) -> Result<Option<Option<String>>, GatewayError> {
+        self.data
+            .update_user_remark(user_id, remark)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn find_active_provider_name(
         &self,
         provider_id: &str,

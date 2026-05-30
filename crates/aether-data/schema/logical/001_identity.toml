@@ -21,6 +21,12 @@ length = 320
 nullable = true
 
 [[table.users.columns]]
+name = "remark"
+type = "text"
+length = 500
+nullable = true
+
+[[table.users.columns]]
 name = "username"
 type = "text"
 length = 255

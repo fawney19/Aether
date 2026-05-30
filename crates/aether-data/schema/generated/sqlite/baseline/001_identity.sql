@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY NOT NULL,
     external_id TEXT,
     email TEXT,
+    remark TEXT,
     username TEXT,
     password_hash TEXT,
     role TEXT,

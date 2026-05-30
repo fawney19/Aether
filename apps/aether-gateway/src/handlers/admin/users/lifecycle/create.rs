@@ -1,8 +1,9 @@
 use super::super::{
     admin_default_user_initial_gift, build_admin_users_read_only_response,
     disabled_user_policy_detail, disabled_user_policy_field, normalize_admin_feature_settings,
-    normalize_admin_optional_user_email, normalize_admin_user_group_ids, normalize_admin_user_role,
-    normalize_admin_username, validate_admin_user_password, AdminCreateUserRequest,
+    normalize_admin_optional_user_email, normalize_admin_optional_user_remark,
+    normalize_admin_user_group_ids, normalize_admin_user_role, normalize_admin_username,
+    validate_admin_user_password, AdminCreateUserRequest,
 };
 use super::support::{admin_user_password_policy, build_admin_user_payload_with_groups};
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -78,6 +79,16 @@ pub(in super::super) async fn build_admin_create_user_response(
     };
 
     let email = match normalize_admin_optional_user_email(payload.email.as_deref()) {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok((
+                http::StatusCode::BAD_REQUEST,
+                Json(json!({ "detail": detail })),
+            )
+                .into_response())
+        }
+    };
+    let remark = match normalize_admin_optional_user_remark(payload.remark.as_deref()) {
         Ok(value) => value,
         Err(detail) => {
             return Ok((
@@ -220,6 +231,9 @@ pub(in super::super) async fn build_admin_create_user_response(
             .replace_user_groups_for_user(&user.id, &group_ids)
             .await?;
     }
+    if remark.is_some() {
+        state.update_user_remark(&user.id, remark.clone()).await?;
+    }
     let feature_settings = if feature_settings.is_some() {
         state
             .update_user_feature_settings(&user.id, feature_settings.clone())
@@ -231,6 +245,7 @@ pub(in super::super) async fn build_admin_create_user_response(
 
     let mut payload =
         build_admin_user_payload_with_groups(&user, None, None, payload.unlimited, &groups);
+    payload["remark"] = remark.map(Value::String).unwrap_or(Value::Null);
     payload["feature_settings"] = feature_settings.unwrap_or(Value::Null);
 
     Ok(attach_admin_audit_response(

@@ -4,6 +4,7 @@ use aether_admin::observability::usage::{
     admin_usage_bad_request_response, admin_usage_data_unavailable_response,
     ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
 };
+use aether_data_contracts::repository::candidates::StoredRequestCandidate;
 use aether_data_contracts::repository::{
     provider_catalog::StoredProviderCatalogEndpoint,
     usage::{StoredRequestUsageAudit, UsageBodyCaptureState, UsageBodyField},
@@ -137,6 +138,33 @@ pub(super) fn build_admin_usage_detail_payload(
         include_bodies,
         request_body,
         default_headers,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_admin_usage_detail_payload_with_candidates(
+    item: &StoredRequestUsageAudit,
+    users_by_id: &BTreeMap<String, aether_data::repository::users::StoredUserSummary>,
+    api_key_names: &BTreeMap<String, String>,
+    auth_user_reader_available: bool,
+    auth_api_key_reader_available: bool,
+    provider_key_name: Option<&str>,
+    include_bodies: bool,
+    request_body: Option<Value>,
+    default_headers: &BTreeMap<String, String>,
+    candidates: &[StoredRequestCandidate],
+) -> Value {
+    aether_admin::observability::usage::build_admin_usage_detail_payload_with_candidates(
+        item,
+        users_by_id,
+        api_key_names,
+        auth_user_reader_available,
+        auth_api_key_reader_available,
+        provider_key_name,
+        include_bodies,
+        request_body,
+        default_headers,
+        candidates,
     )
 }
 

@@ -1,0 +1,2 @@
+ALTER TABLE users
+  ADD COLUMN remark VARCHAR(500) NULL AFTER email;

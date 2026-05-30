@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS public.users (
     id character varying(64) NOT NULL,
     external_id character varying(255),
     email character varying(320),
+    remark character varying(500),
     username character varying(255),
     password_hash character varying(255),
     role character varying(64),

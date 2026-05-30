@@ -73,6 +73,8 @@ pub(super) struct AdminCreateUserRequest {
     #[serde(default)]
     pub(super) email: Option<String>,
     #[serde(default)]
+    pub(super) remark: Option<String>,
+    #[serde(default)]
     pub(super) role: Option<String>,
     #[serde(default)]
     pub(super) initial_gift_usd: Option<f64>,
@@ -88,6 +90,8 @@ pub(super) struct AdminCreateUserRequest {
 pub(super) struct AdminUpdateUserRequest {
     #[serde(default)]
     pub(super) email: Option<String>,
+    #[serde(default)]
+    pub(super) remark: Option<String>,
     #[serde(default)]
     pub(super) username: Option<String>,
     #[serde(default)]
@@ -174,6 +178,22 @@ pub(super) fn normalize_admin_optional_user_email(
         return Err("邮箱格式无效".to_string());
     }
     Ok(Some(normalized))
+}
+
+pub(super) fn normalize_admin_optional_user_remark(
+    value: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > 500 {
+        return Err("备注不能超过500个字符".to_string());
+    }
+    Ok(Some(value.to_string()))
 }
 
 pub(super) fn normalize_admin_username(value: &str) -> Result<String, String> {

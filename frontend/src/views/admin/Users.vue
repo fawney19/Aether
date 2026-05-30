@@ -344,6 +344,9 @@
                   />
                 </template>
               </SortableTableHead>
+              <TableHead class="w-[200px] h-12 font-semibold">
+                备注
+              </TableHead>
               <TableHead class="w-[240px] h-12 font-semibold">
                 钱包
               </TableHead>
@@ -438,6 +441,14 @@
                       </Badge>
                     </div>
                   </div>
+                </div>
+              </TableCell>
+              <TableCell class="py-4 text-xs text-muted-foreground">
+                <div
+                  class="line-clamp-2 max-w-[200px] whitespace-pre-line"
+                  :title="user.remark || '-'"
+                >
+                  {{ user.remark || '-' }}
                 </div>
               </TableCell>
               <TableCell class="py-4">
@@ -669,6 +680,13 @@
                     :title="user.email || '-'"
                   >
                     {{ user.email || '-' }}
+                  </div>
+                  <div
+                    v-if="user.remark"
+                    class="line-clamp-2 text-[11px] text-muted-foreground"
+                    :title="user.remark"
+                  >
+                    备注：{{ user.remark }}
                   </div>
                 </div>
               </div>
@@ -2012,6 +2030,7 @@ function editUser(user: User) {
     id: user.id,
     username: user.username,
     email: user.email,
+    remark: user.remark ?? null,
     unlimited: user.unlimited,
     role: user.role,
     is_active: user.is_active,
@@ -2034,6 +2053,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
       const updateData: Record<string, unknown> = {
         username: data.username,
         email: data.email || undefined,
+        remark: data.remark ?? null,
         unlimited: data.unlimited,
         role: data.role,
         group_ids: data.group_ids ?? [],
@@ -2051,6 +2071,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
         username: data.username,
         password: data.password ?? '',
         email: data.email || undefined,
+        remark: data.remark ?? null,
         initial_gift_usd: data.initial_gift_usd,
         unlimited: data.unlimited,
         role: data.role,
