@@ -10,6 +10,7 @@ use crate::handlers::shared::{
     create_alipay_direct_checkout, create_stripe_direct_checkout, create_wxpay_direct_checkout,
     direct_payment_client_ip, DirectPaymentCheckoutInput,
 };
+use aether_data_contracts::repository::billing::AdminBillingMutationOutcome;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -22,6 +23,8 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 const BILLING_STORAGE_UNAVAILABLE_DETAIL: &str = "套餐后端暂不可用";
+const DAILY_QUOTA_RESET_MIN_REMAINING_SECS: u64 = 72 * 60 * 60;
+const DAILY_QUOTA_RESET_PENALTY_SECS: u64 = 24 * 60 * 60;
 
 #[derive(Debug, Deserialize, Default)]
 struct BillingPlanCheckoutRequest {
@@ -85,6 +88,17 @@ fn plan_id_from_checkout_path(path: &str) -> Option<String> {
         None
     } else {
         Some(plan_id.to_string())
+    }
+}
+
+fn entitlement_id_from_daily_quota_reset_path(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches('/');
+    let rest = trimmed.strip_prefix("/api/billing/entitlements/")?;
+    let entitlement_id = rest.strip_suffix("/daily-quota-reset")?.trim_matches('/');
+    if entitlement_id.is_empty() || entitlement_id.contains('/') {
+        None
+    } else {
+        Some(entitlement_id.to_string())
     }
 }
 
@@ -191,6 +205,23 @@ fn entitlement_payload(
     })
 }
 
+fn entitlement_has_self_service_daily_quota_reset(
+    record: &aether_data_contracts::repository::billing::UserPlanEntitlementRecord,
+) -> bool {
+    record
+        .entitlements_snapshot
+        .as_array()
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("type").and_then(serde_json::Value::as_str) == Some("daily_quota")
+                    && item
+                        .get("self_service_daily_quota_reset")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+            })
+        })
+}
+
 fn compute_plan_payment_amounts(
     plan: &aether_data_contracts::repository::billing::BillingPlanRecord,
     pay_currency: &str,
@@ -267,6 +298,88 @@ pub(super) async fn handle_billing_entitlements(
         })
         .collect::<Vec<_>>();
     Json(json!({"items": items, "total": items.len()})).into_response()
+}
+
+pub(super) async fn handle_billing_daily_quota_reset(
+    state: &AppState,
+    request_context: &GatewayPublicRequestContext,
+    headers: &http::HeaderMap,
+) -> Response<Body> {
+    let auth = match resolve_authenticated_local_user(state, request_context, headers).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Some(entitlement_id) =
+        entitlement_id_from_daily_quota_reset_path(&request_context.request_path)
+    else {
+        return build_auth_error_response(http::StatusCode::BAD_REQUEST, "缺少权益ID", false);
+    };
+
+    let entitlements = match state.list_user_plan_entitlements(&auth.user.id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return billing_storage_unavailable_response(),
+        Err(err) => {
+            return build_auth_error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("billing entitlement lookup failed: {err:?}"),
+                false,
+            )
+        }
+    };
+    let Some(entitlement) = entitlements
+        .iter()
+        .find(|record| record.id == entitlement_id)
+        .cloned()
+    else {
+        return build_auth_error_response(http::StatusCode::NOT_FOUND, "权益不存在", false);
+    };
+    let now = Utc::now().timestamp().max(0) as u64;
+    if entitlement.status != "active"
+        || entitlement.starts_at_unix_secs > now
+        || entitlement.expires_at_unix_secs <= now
+    {
+        return build_auth_error_response(http::StatusCode::CONFLICT, "权益未生效或已过期", false);
+    }
+    if !entitlement_has_self_service_daily_quota_reset(&entitlement) {
+        return build_auth_error_response(
+            http::StatusCode::FORBIDDEN,
+            "该套餐未开放自助重置每日额度",
+            false,
+        );
+    }
+    if entitlement.expires_at_unix_secs.saturating_sub(now) < DAILY_QUOTA_RESET_MIN_REMAINING_SECS {
+        return build_auth_error_response(
+            http::StatusCode::CONFLICT,
+            "剩余有效期不足 72 小时，不能自助重置",
+            false,
+        );
+    }
+
+    match state
+        .reset_user_daily_quota(
+            &auth.user.id,
+            &entitlement.id,
+            DAILY_QUOTA_RESET_MIN_REMAINING_SECS,
+            DAILY_QUOTA_RESET_PENALTY_SECS,
+        )
+        .await
+    {
+        Ok(AdminBillingMutationOutcome::Applied(record)) => {
+            build_auth_json_response(http::StatusCode::OK, entitlement_payload(&record), None)
+        }
+        Ok(AdminBillingMutationOutcome::NotFound) => {
+            build_auth_error_response(http::StatusCode::NOT_FOUND, "权益不存在", false)
+        }
+        Ok(AdminBillingMutationOutcome::Invalid(detail)) => {
+            build_auth_error_response(http::StatusCode::CONFLICT, detail, false)
+        }
+        Ok(AdminBillingMutationOutcome::Unavailable) => billing_storage_unavailable_response(),
+        Err(err) => build_auth_error_response(
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("daily quota reset failed: {err:?}"),
+            false,
+        ),
+    }
 }
 
 pub(super) async fn handle_billing_plan_checkout(
@@ -639,6 +752,9 @@ pub(super) async fn maybe_build_local_billing_response(
         }
         Some("entitlements") if request_context.request_path == "/api/billing/entitlements" => {
             Some(handle_billing_entitlements(state, request_context, headers).await)
+        }
+        Some("daily_quota_reset") => {
+            Some(handle_billing_daily_quota_reset(state, request_context, headers).await)
         }
         _ => None,
     }

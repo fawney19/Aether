@@ -211,6 +211,7 @@ import TableCell from '@/components/ui/table-cell.vue'
 import ProviderBalanceCell from './ProviderBalanceCell.vue'
 import { type ProviderWithEndpointsSummary, formatApiFormatShort } from '@/api/endpoints'
 import { sortEndpoints, isEndpointAvailable, getEndpointDotColor, getEndpointTooltip } from '@/features/providers/composables/useEndpointStatus'
+import type { ProviderBalanceBreakdown } from '@/features/providers/composables/useProviderBalance'
 import type { BalanceExtraItem } from '@/features/providers/auth-templates'
 
 const props = defineProps<{
@@ -219,7 +220,7 @@ const props = defineProps<{
   // Balance functions
   isBalanceLoading: (providerId: string) => boolean
   getProviderBalance: (providerId: string) => { available: number | null; currency: string } | null
-  getProviderBalanceBreakdown: (providerId: string) => { balance: number; points: number; currency: string } | null
+  getProviderBalanceBreakdown: (providerId: string) => ProviderBalanceBreakdown | null
   getProviderBalanceError: (providerId: string) => { status: string; message: string } | null
   getProviderCheckin: (providerId: string) => { success: boolean | null; message: string } | null
   getProviderCookieExpired: (providerId: string) => { expired: boolean; message: string } | null

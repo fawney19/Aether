@@ -134,29 +134,43 @@
         加载中...
       </span>
       <!-- 余额（从上游 API 查询） -->
-      <span
+      <div
         v-else-if="provider.ops_configured && getProviderBalance(provider.id)"
-        class="text-muted-foreground"
+        class="space-y-0.5 text-muted-foreground"
       >
-        余额 <span class="font-semibold text-foreground/90">{{ formatBalanceDisplay(getProviderBalance(provider.id)) }}</span>
-        <!-- Cookie 失效警告 -->
-        <span
-          v-if="getProviderCookieExpired(provider.id)"
-          class="ml-1 text-amber-600 dark:text-amber-500"
-          :title="getProviderCookieExpired(provider.id)?.message"
-        >签到 Cookie 已失效</span>
-        <!-- 签到状态显示 -->
-        <span
-          v-else-if="getProviderCheckin(provider.id) && getProviderCheckin(provider.id)?.success !== false"
-          class="ml-1 text-muted-foreground"
-          :title="getProviderCheckin(provider.id)?.message"
-        >已签到</span>
-        <span
-          v-else-if="getProviderCheckin(provider.id)?.success === false"
-          class="ml-1 text-destructive/70"
-          :title="getProviderCheckin(provider.id)?.message"
-        >签到失败</span>
-      </span>
+        <template v-if="getProviderBalanceBreakdown(provider.id)?.lines.length">
+          <div
+            v-for="line in getProviderBalanceBreakdown(provider.id)?.lines || []"
+            :key="line.key"
+            class="flex items-baseline gap-1.5"
+          >
+            <span class="text-[10px] text-muted-foreground/60">{{ line.label }}</span>
+            <span class="font-semibold text-foreground/90">{{ formatBalanceAmount(line.amount, getProviderBalance(provider.id)?.currency || 'USD') }}</span>
+          </div>
+        </template>
+        <div v-else>
+          余额 <span class="font-semibold text-foreground/90">{{ formatBalanceDisplay(getProviderBalance(provider.id)) }}</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-1.5">
+          <!-- Cookie 失效警告 -->
+          <span
+            v-if="getProviderCookieExpired(provider.id)"
+            class="text-[10px] text-amber-600 dark:text-amber-500"
+            :title="getProviderCookieExpired(provider.id)?.message"
+          >签到 Cookie 已失效</span>
+          <!-- 签到状态显示 -->
+          <span
+            v-else-if="getProviderCheckin(provider.id) && getProviderCheckin(provider.id)?.success !== false"
+            class="text-[10px] text-muted-foreground"
+            :title="getProviderCheckin(provider.id)?.message"
+          >已签到</span>
+          <span
+            v-else-if="getProviderCheckin(provider.id)?.success === false"
+            class="text-[10px] text-destructive/70"
+            :title="getProviderCheckin(provider.id)?.message"
+          >签到失败</span>
+        </div>
+      </div>
       <!-- 余额查询失败时显示错误 -->
       <span
         v-else-if="provider.ops_configured && getProviderBalanceError(provider.id)"
@@ -239,6 +253,7 @@ import Badge from '@/components/ui/badge.vue'
 import { type ProviderWithEndpointsSummary, formatApiFormatShort } from '@/api/endpoints'
 import { formatBillingType } from '@/utils/format'
 import { sortEndpoints, isEndpointAvailable, getEndpointDotColor, getEndpointTooltip } from '@/features/providers/composables/useEndpointStatus'
+import type { ProviderBalanceBreakdown } from '@/features/providers/composables/useProviderBalance'
 import { isKeyManagedProviderType } from '../utils/providerTypeUtils'
 
 const props = defineProps<{
@@ -247,12 +262,18 @@ const props = defineProps<{
   // Balance functions
   isBalanceLoading: (providerId: string) => boolean
   getProviderBalance: (providerId: string) => { available: number | null; currency: string } | null
+  getProviderBalanceBreakdown: (providerId: string) => ProviderBalanceBreakdown | null
   getProviderBalanceError: (providerId: string) => { status: string; message: string } | null
   getProviderCheckin: (providerId: string) => { success: boolean | null; message: string } | null
   getProviderCookieExpired: (providerId: string) => { expired: boolean; message: string } | null
   formatBalanceDisplay: (balance: { available: number | null; currency: string } | null) => string
   getQuotaUsedColorClass: (provider: ProviderWithEndpointsSummary) => string
 }>()
+
+function formatBalanceAmount(amount: number, currency: string): string {
+  const symbol = currency === 'USD' ? '$' : `${currency} `
+  return `${symbol}${amount.toFixed(2)}`
+}
 
 const emit = defineEmits<{
   'viewDetail': [providerId: string]

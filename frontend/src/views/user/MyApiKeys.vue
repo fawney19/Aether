@@ -391,7 +391,7 @@
                 {{ editingApiKey ? '编辑 API 密钥' : '创建 API 密钥' }}
               </h3>
               <p class="text-xs text-muted-foreground">
-                {{ editingApiKey ? '更新密钥名称、速率限制和并发限制' : '创建一个新的密钥用于访问 API 服务' }}
+                {{ editingApiKey ? '更新密钥名称、限制与扣费来源' : '创建一个新的密钥用于访问 API 服务' }}
               </p>
             </div>
           </div>
@@ -472,6 +472,29 @@
           <p class="text-xs text-muted-foreground">
             留空表示不限制；支持 IP、CIDR、IPv4 通配符、*，用 ! 前缀拒绝，多个规则用英文逗号分隔
           </p>
+        </div>
+
+        <div class="rounded-lg border border-border/60 bg-muted/30 p-4">
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+            <div class="min-w-0">
+              <Label class="text-sm font-semibold">扣费来源</Label>
+              <p class="mt-1 text-xs text-muted-foreground">
+                {{ billingSourceHint(keyBillingSourceMode) }}
+              </p>
+            </div>
+            <div class="grid w-full grid-cols-3 gap-1 rounded-lg border border-border/60 bg-background/70 p-1 sm:w-auto sm:min-w-[240px]">
+              <Button
+                v-for="option in billingSourceOptions"
+                :key="option.value"
+                size="sm"
+                class="h-8 px-2 text-xs"
+                :variant="keyBillingSourceMode === option.value ? 'default' : 'ghost'"
+                @click="keyBillingSourceMode = option.value"
+              >
+                {{ option.label }}
+              </Button>
+            </div>
+          </div>
         </div>
 
         <div class="rounded-lg border border-border/60 bg-muted/30 p-4">
@@ -761,9 +784,12 @@ import { formatRateLimitSimple } from '@/utils/format'
 import { parseNumberInput } from '@/utils/form'
 import { getErrorStatus } from '@/types/api-error'
 import {
+  mergeBillingSourceFeatureSettings,
   hasChatPiiRedactionFeatureSettings,
-  mergeChatPiiRedactionFeatureSettings,
+  readBillingSourceFeatureSettings,
   readChatPiiRedactionFeatureSettings,
+  type BillingSourceMode,
+  type FeatureSettingsMap,
 } from '@/utils/featureSettings'
 
 const { success, error: showError } = useToast()
@@ -778,6 +804,12 @@ const installSystemOptions: Array<{ value: InstallSessionTargetSystem; label: st
   { value: 'macos', label: 'macOS' },
   { value: 'linux', label: 'Linux' },
   { value: 'windows', label: 'Windows' }
+]
+
+const billingSourceOptions: Array<{ value: BillingSourceMode; label: string }> = [
+  { value: 'auto', label: '自动' },
+  { value: 'wallet', label: '余额' },
+  { value: 'package', label: '套餐' },
 ]
 
 const apiKeys = ref<ApiKey[]>([])
@@ -806,6 +838,7 @@ const newKeyIpRulesText = ref('')
 const keyRedactionMode = ref<'inherit' | 'custom'>('inherit')
 const newKeyRedactionEnabled = ref(false)
 const newKeyRedactionInjectNotice = ref(true)
+const keyBillingSourceMode = ref<BillingSourceMode>('auto')
 const newKeyValue = ref('')
 const keyToDelete = ref<ApiKey | null>(null)
 const editingApiKey = ref<ApiKey | null>(null)
@@ -887,6 +920,7 @@ function resetInstallCopiedState() {
 function openEditApiKeyDialog(apiKey: ApiKey) {
   const hasRedactionFeature = hasChatPiiRedactionFeatureSettings(apiKey.feature_settings)
   const redactionFeature = readChatPiiRedactionFeatureSettings(apiKey.feature_settings)
+  const billingSourceFeature = readBillingSourceFeatureSettings(apiKey.feature_settings)
   editingApiKey.value = apiKey
   newKeyName.value = apiKey.name || ''
   newKeyRateLimit.value = apiKey.rate_limit ?? undefined
@@ -895,6 +929,7 @@ function openEditApiKeyDialog(apiKey: ApiKey) {
   keyRedactionMode.value = hasRedactionFeature ? 'custom' : 'inherit'
   newKeyRedactionEnabled.value = redactionFeature.enabled
   newKeyRedactionInjectNotice.value = redactionFeature.inject_model_instruction
+  keyBillingSourceMode.value = billingSourceFeature.mode
   showCreateDialog.value = true
 }
 
@@ -907,6 +942,7 @@ function openCreateApiKeyDialog() {
   keyRedactionMode.value = 'inherit'
   newKeyRedactionEnabled.value = false
   newKeyRedactionInjectNotice.value = true
+  keyBillingSourceMode.value = 'auto'
   showCreateDialog.value = true
 }
 
@@ -987,6 +1023,7 @@ function closeApiKeyDialog() {
   keyRedactionMode.value = 'inherit'
   newKeyRedactionEnabled.value = false
   newKeyRedactionInjectNotice.value = true
+  keyBillingSourceMode.value = 'auto'
 }
 
 async function saveApiKey() {
@@ -998,6 +1035,13 @@ async function saveApiKey() {
   creating.value = true
   try {
     const ipRules = parseIpRulesInput(newKeyIpRulesText.value)
+    const featureSettings = buildApiKeyFeatureSettings(
+      editingApiKey.value?.feature_settings,
+      keyRedactionMode.value,
+      newKeyRedactionEnabled.value,
+      newKeyRedactionInjectNotice.value,
+      keyBillingSourceMode.value,
+    )
     const isCreatingFirstApiKey = !editingApiKey.value && apiKeys.value.length === 0
     if (editingApiKey.value) {
       await meApi.updateApiKey(editingApiKey.value.id, {
@@ -1005,12 +1049,7 @@ async function saveApiKey() {
         rate_limit: newKeyRateLimit.value ?? 0,
         concurrent_limit: newKeyConcurrentLimit.value,
         ip_rules: ipRules,
-        feature_settings: keyRedactionMode.value === 'custom'
-          ? mergeChatPiiRedactionFeatureSettings(editingApiKey.value.feature_settings, {
-                enabled: newKeyRedactionEnabled.value,
-                inject_model_instruction: newKeyRedactionInjectNotice.value,
-            })
-          : null,
+        feature_settings: featureSettings,
       })
       success('API 密钥更新成功')
     } else {
@@ -1019,14 +1058,7 @@ async function saveApiKey() {
         rate_limit: newKeyRateLimit.value ?? 0,
         concurrent_limit: newKeyConcurrentLimit.value,
         ip_rules: ipRules,
-        ...(keyRedactionMode.value === 'custom'
-          ? {
-              feature_settings: mergeChatPiiRedactionFeatureSettings(null, {
-                enabled: newKeyRedactionEnabled.value,
-                inject_model_instruction: newKeyRedactionInjectNotice.value,
-              }),
-            }
-          : {}),
+        feature_settings: featureSettings,
       })
       newKeyValue.value = newKey.key || ''
       if (isCreatingFirstApiKey) {
@@ -1043,6 +1075,33 @@ async function saveApiKey() {
   } finally {
     creating.value = false
   }
+}
+
+function buildApiKeyFeatureSettings(
+  baseFeatureSettings: unknown,
+  redactionMode: 'inherit' | 'custom',
+  redactionEnabled: boolean,
+  redactionInjectNotice: boolean,
+  billingSourceMode: BillingSourceMode,
+): FeatureSettingsMap | null {
+  const settings: FeatureSettingsMap = baseFeatureSettings
+    && typeof baseFeatureSettings === 'object'
+    && !Array.isArray(baseFeatureSettings)
+    ? { ...(baseFeatureSettings as FeatureSettingsMap) }
+    : {}
+
+  if (redactionMode === 'custom') {
+    settings.chat_pii_redaction = {
+      enabled: redactionEnabled,
+      inject_model_instruction: redactionInjectNotice,
+    }
+  } else {
+    delete settings.chat_pii_redaction
+  }
+
+  return mergeBillingSourceFeatureSettings(settings, {
+    mode: billingSourceMode,
+  })
 }
 
 function confirmDelete(apiKey: ApiKey) {
@@ -1146,6 +1205,16 @@ function formatConcurrentLimitSimple(concurrentLimit?: number | null): string {
     return '不限并发'
   }
   return `${concurrentLimit} 并发`
+}
+
+function billingSourceHint(mode: BillingSourceMode): string {
+  if (mode === 'wallet') {
+    return '只使用钱包余额扣费，不再使用套餐额度兜底。'
+  }
+  if (mode === 'package') {
+    return '只使用套餐每日额度扣费，不再使用钱包余额兜底。'
+  }
+  return '沿用当前账号规则，在钱包余额与套餐额度之间自动切换。'
 }
 
 function formatIpRules(ipRules?: string[] | null): string {

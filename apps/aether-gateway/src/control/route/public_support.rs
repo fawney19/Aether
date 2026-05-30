@@ -421,6 +421,20 @@ pub(super) fn classify_public_support_route(
             false,
         ))
     } else if method == http::Method::POST
+        && has_single_nested_suffix_after_prefix(
+            normalized_path,
+            "/api/billing/entitlements/",
+            "daily-quota-reset",
+        )
+    {
+        Some(classified(
+            "public_support",
+            "billing",
+            "daily_quota_reset",
+            "user:billing",
+            false,
+        ))
+    } else if method == http::Method::POST
         && has_single_nested_suffix_after_prefix(normalized_path, "/api/billing/plans/", "checkout")
     {
         Some(classified(

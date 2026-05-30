@@ -577,6 +577,12 @@ fn classifies_billing_plan_routes_as_public_support_routes() {
             "entitlements",
             "user:billing",
         ),
+        (
+            http::Method::POST,
+            "/api/billing/entitlements/entitlement-1/daily-quota-reset",
+            "daily_quota_reset",
+            "user:billing",
+        ),
     ] {
         let uri: Uri = uri.parse().expect("uri should parse");
         let decision =

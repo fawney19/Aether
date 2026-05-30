@@ -250,26 +250,44 @@ struct DailyQuotaDebitResult {
 #[derive(Debug)]
 struct DailyQuotaGrant {
     entitlement_id: String,
-    daily_quota_usd: f64,
     usage_date: String,
+    usage_dates: Vec<String>,
     allow_wallet_overage: bool,
+    effective_limit_usd: f64,
 }
 
-fn daily_quota_usage_date(
+fn daily_quota_usage_dates(
     reset_timezone: Option<&str>,
+    starts_at_unix_secs: u64,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<String, DataLayerError> {
+    carry_over_days: u64,
+) -> Result<Vec<String>, DataLayerError> {
     let timezone = reset_timezone
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("Asia/Shanghai")
         .parse::<chrono_tz::Tz>()
         .map_err(|err| DataLayerError::InvalidInput(format!("invalid reset_timezone: {err}")))?;
-    Ok(now.with_timezone(&timezone).date_naive().to_string())
+    let current_date = now.with_timezone(&timezone).date_naive();
+    let starts_at = chrono::DateTime::from_timestamp(starts_at_unix_secs as i64, 0)
+        .unwrap_or(now)
+        .with_timezone(&timezone)
+        .date_naive();
+    let first_date = (current_date - chrono::Duration::days(carry_over_days as i64)).max(starts_at);
+    let mut dates = Vec::new();
+    let mut date = first_date;
+    while date <= current_date {
+        dates.push(date.to_string());
+        date = date
+            .succ_opt()
+            .ok_or_else(|| DataLayerError::InvalidInput("daily quota date overflow".to_string()))?;
+    }
+    Ok(dates)
 }
 
 fn daily_quota_grants_from_entitlement(
     entitlement_id: &str,
+    starts_at_unix_secs: u64,
     entitlements: &serde_json::Value,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<DailyQuotaGrant>, DataLayerError> {
@@ -288,19 +306,45 @@ fn daily_quota_grants_from_entitlement(
         if !daily_quota_usd.is_finite() || daily_quota_usd <= 0.0 {
             continue;
         }
-        let usage_date = daily_quota_usage_date(
+        let carry_over = item
+            .get("carry_over")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let carry_over_days = if carry_over {
+            item.get("carry_over_days")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(1)
+                .clamp(1, 30)
+        } else {
+            0
+        };
+        let usage_dates = daily_quota_usage_dates(
             item.get("reset_timezone")
                 .and_then(serde_json::Value::as_str),
+            starts_at_unix_secs,
             now,
+            carry_over_days,
         )?;
+        let usage_date = usage_dates
+            .last()
+            .cloned()
+            .unwrap_or_else(|| now.date_naive().to_string());
+        let window_limit_usd = daily_quota_usd * usage_dates.len() as f64;
+        let multiplier_limit_usd = daily_quota_usd
+            * item
+                .get("carry_over_limit_multiplier")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(usage_dates.len() as f64)
+                .clamp(1.0, usage_dates.len() as f64);
         grants.push(DailyQuotaGrant {
             entitlement_id: entitlement_id.to_string(),
-            daily_quota_usd,
             usage_date,
+            usage_dates,
             allow_wallet_overage: item
                 .get("allow_wallet_overage")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
+            effective_limit_usd: window_limit_usd.min(multiplier_limit_usd),
         });
     }
     Ok(grants)
@@ -320,7 +364,7 @@ async fn consume_daily_quota_postgres(
     let now = chrono::Utc::now();
     let entitlement_rows = sqlx::query(
         r#"
-SELECT id, entitlements_snapshot
+SELECT id, CAST(EXTRACT(EPOCH FROM starts_at) AS BIGINT) AS starts_at_unix_secs, entitlements_snapshot
 FROM user_plan_entitlements
 WHERE user_id = $1
   AND status = 'active'
@@ -337,10 +381,15 @@ FOR UPDATE
     let mut grants = Vec::new();
     for row in entitlement_rows {
         let entitlement_id: String = row.try_get("id").map_postgres_err()?;
+        let starts_at_unix_secs = row
+            .try_get::<i64, _>("starts_at_unix_secs")
+            .map_postgres_err()?
+            .max(0) as u64;
         let entitlements: serde_json::Value =
             row.try_get("entitlements_snapshot").map_postgres_err()?;
         grants.extend(daily_quota_grants_from_entitlement(
             &entitlement_id,
+            starts_at_unix_secs,
             &entitlements,
             now,
         )?);
@@ -354,21 +403,24 @@ FOR UPDATE
     let mut allow_wallet_overage = true;
     for grant in grants {
         allow_wallet_overage &= grant.allow_wallet_overage;
-        let used = sqlx::query_scalar::<_, Option<f64>>(
-            r#"
+        let mut used = 0.0;
+        for usage_date in &grant.usage_dates {
+            used += sqlx::query_scalar::<_, Option<f64>>(
+                r#"
 SELECT CAST(COALESCE(SUM(amount_usd), 0) AS DOUBLE PRECISION)
 FROM entitlement_usage_ledgers
 WHERE user_entitlement_id = $1
   AND usage_date = $2
             "#,
-        )
-        .bind(&grant.entitlement_id)
-        .bind(&grant.usage_date)
-        .fetch_one(&mut **tx)
-        .await
-        .map_postgres_err()?
-        .unwrap_or(0.0);
-        let remaining = (grant.daily_quota_usd - used).max(0.0);
+            )
+            .bind(&grant.entitlement_id)
+            .bind(usage_date)
+            .fetch_one(&mut **tx)
+            .await
+            .map_postgres_err()?
+            .unwrap_or(0.0);
+        }
+        let remaining = (grant.effective_limit_usd - used).max(0.0);
         total_remaining += remaining;
         grants_with_remaining.push((grant, remaining));
     }

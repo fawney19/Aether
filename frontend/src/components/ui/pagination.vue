@@ -105,6 +105,9 @@ const jumpPageInput = ref('')
 const totalPages = computed(() => Math.ceil(props.total / props.pageSize))
 
 const recordRange = computed(() => {
+  if (props.total <= 0) {
+    return { start: 0, end: 0 }
+  }
   const start = (props.current - 1) * props.pageSize + 1
   const end = Math.min(props.current * props.pageSize, props.total)
   return { start, end }

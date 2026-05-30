@@ -8,6 +8,26 @@
     </div>
 
     <template v-else>
+      <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div>
+          <h2 class="text-lg font-semibold text-foreground">
+            钱包中心
+          </h2>
+          <p class="mt-1 text-xs text-muted-foreground">
+            查看套餐额度、钱包余额，并使用兑换码完成充值
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          class="w-full md:w-auto"
+          @click="scrollToRedeemCard"
+        >
+          <TicketPercent class="mr-2 h-3.5 w-3.5" />
+          兑换码充值
+        </Button>
+      </div>
+
       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         <Card class="p-5 space-y-2">
           <div class="text-xs uppercase tracking-wider text-muted-foreground">
@@ -48,6 +68,28 @@
             </div>
             <div class="text-xs text-muted-foreground">
               {{ dailyQuota?.allow_wallet_overage ? '套餐不足时继续扣钱包余额' : '套餐额度不足时会拒绝请求' }}
+            </div>
+            <div
+              v-if="showDailyQuotaResetButton"
+              class="mt-2 flex items-center justify-between gap-3 rounded-xl border border-border/60 bg-card/60 px-3 py-2"
+            >
+              <div class="min-w-0 space-y-0.5">
+                <div class="text-xs font-medium text-foreground">
+                  自助重置每日额度
+                </div>
+                <div class="text-[11px] text-muted-foreground">
+                  剩余有效期 {{ dailyQuotaResetRemainingLabel }} · 每次扣除 24 小时
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                :disabled="submittingDailyQuotaReset"
+                @click="resetDailyQuota"
+              >
+                <RotateCcw class="mr-2 h-3.5 w-3.5" />
+                {{ submittingDailyQuotaReset ? '重置中...' : '重置今日额度' }}
+              </Button>
             </div>
           </div>
           <div
@@ -100,7 +142,10 @@
         </Card>
       </div>
 
-      <Card class="p-5 space-y-4">
+      <Card
+        id="wallet-redeem"
+        class="p-5 space-y-4 scroll-mt-24"
+      >
         <div class="flex items-center justify-between">
           <div>
             <h3 class="text-base font-semibold">
@@ -112,7 +157,7 @@
           </div>
           <RefreshButton
             :loading="loadingOrders || loadingTransactions"
-            @click="() => Promise.all([loadBalance(), loadOrders(), loadTransactions()])"
+            @click="() => Promise.all([loadBalance(), loadOrders(), loadTransactions(), loadEntitlements()])"
           />
         </div>
 
@@ -683,6 +728,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { RotateCcw, TicketPercent } from 'lucide-vue-next'
 import {
   Badge,
   Button,
@@ -709,6 +755,11 @@ import {
   Textarea,
 } from '@/components/ui'
 import { EmptyState, LoadingState, StripePaymentDialog } from '@/components/common'
+import {
+  billingApi,
+  type DailyQuotaEntitlement,
+  type UserPlanEntitlement,
+} from '@/api/billing'
 import {
   walletApi,
   type DailyUsageRecord,
@@ -746,6 +797,7 @@ import {
 const { success, error: showError } = useToast()
 
 const ENABLE_WALLET_ACTION_FORMS = true
+const DAILY_QUOTA_RESET_MIN_REMAINING_MS = 72 * 60 * 60 * 1000
 
 const loadingInitial = ref(true)
 const loadingTransactions = ref(false)
@@ -755,8 +807,10 @@ const loadingRefundEligibility = ref(false)
 const submittingRedeem = ref(false)
 const submittingRecharge = ref(false)
 const submittingRefund = ref(false)
+const submittingDailyQuotaReset = ref(false)
 
 const walletBalance = ref<WalletBalanceResponse | null>(null)
+const userEntitlements = ref<UserPlanEntitlement[]>([])
 const latestRecharge = ref<{ order: PaymentOrder; payment_instructions: Record<string, unknown> } | null>(null)
 const latestRedeem = ref<WalletRedeemResponse | null>(null)
 const rechargeOptions = ref<WalletRechargeOption[]>([])
@@ -902,12 +956,40 @@ const dailyQuotaRemainingPercent = computed(() => {
   if (!hasActiveDailyQuota.value || dailyQuotaTotal.value <= 0) return 0
   return Math.min(100, Math.max(0, (packageBalance.value / dailyQuotaTotal.value) * 100))
 })
+const activeDailyQuotaResetEntitlement = computed(() =>
+  userEntitlements.value.find((entitlement) =>
+    isActiveUserEntitlement(entitlement)
+    && (entitlement.entitlements || []).some((item) =>
+      item.type === 'daily_quota'
+      && Boolean((item as DailyQuotaEntitlement).self_service_daily_quota_reset)
+    )
+  ) || null
+)
+const dailyQuotaResetRemainingMs = computed(() => {
+  const expiresAt = parseEntitlementTime(activeDailyQuotaResetEntitlement.value?.expires_at)
+  if (!expiresAt) return 0
+  return Math.max(0, expiresAt - Date.now())
+})
+const showDailyQuotaResetButton = computed(() =>
+  hasActiveDailyQuota.value
+  && Boolean(activeDailyQuotaResetEntitlement.value)
+  && dailyQuotaResetRemainingMs.value >= DAILY_QUOTA_RESET_MIN_REMAINING_MS
+)
+const dailyQuotaResetRemainingLabel = computed(() => {
+  const totalHours = Math.max(0, Math.floor(dailyQuotaResetRemainingMs.value / (60 * 60 * 1000)))
+  const days = Math.floor(totalHours / 24)
+  const hours = totalHours % 24
+  if (days <= 0) return `${hours} 小时`
+  if (hours === 0) return `${days} 天`
+  return `${days} 天 ${hours} 小时`
+})
 
 onMounted(async () => {
   document.addEventListener('visibilitychange', handleVisibilityChange)
   try {
     await Promise.all([
       loadBalance(),
+      loadEntitlements(),
       loadTransactions(),
       loadTodayCost(),
       loadOrders(),
@@ -936,6 +1018,57 @@ watch(refundableOrders, () => {
 
 async function loadBalance() {
   walletBalance.value = await walletApi.getBalance()
+}
+
+function scrollToRedeemCard() {
+  document.getElementById('wallet-redeem')?.scrollIntoView({
+    behavior: 'smooth',
+    block: 'start',
+  })
+}
+
+function parseEntitlementTime(value: string | null | undefined): number | null {
+  if (!value) return null
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+function isActiveUserEntitlement(entitlement: UserPlanEntitlement): boolean {
+  if (entitlement.active !== undefined) return Boolean(entitlement.active)
+  const startsAt = parseEntitlementTime(entitlement.starts_at)
+  const expiresAt = parseEntitlementTime(entitlement.expires_at)
+  const now = Date.now()
+  return (
+    entitlement.status === 'active'
+    && (startsAt === null || startsAt <= now)
+    && (expiresAt === null || expiresAt > now)
+  )
+}
+
+async function loadEntitlements() {
+  try {
+    const response = await billingApi.listEntitlements()
+    userEntitlements.value = response.items || []
+  } catch (error) {
+    log.error('加载套餐权益失败:', error)
+    userEntitlements.value = []
+  }
+}
+
+async function resetDailyQuota() {
+  const entitlement = activeDailyQuotaResetEntitlement.value
+  if (!entitlement || submittingDailyQuotaReset.value) return
+  submittingDailyQuotaReset.value = true
+  try {
+    await billingApi.resetDailyQuota(entitlement.id)
+    success('今日额度已重置，套餐有效期已扣除 24 小时')
+    await Promise.all([loadEntitlements(), loadBalance(), loadTransactions(), loadTodayCost()])
+  } catch (error) {
+    log.error('重置每日额度失败:', error)
+    showError(parseApiError(error, '重置每日额度失败'))
+  } finally {
+    submittingDailyQuotaReset.value = false
+  }
 }
 
 async function loadRechargeOptions() {

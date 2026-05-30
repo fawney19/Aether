@@ -372,6 +372,7 @@ fn yescode_balance_extra(combined_data: &Map<String, Value>) -> Map<String, Valu
 
     let mut extra = Map::new();
     extra.insert("pay_as_you_go_balance".to_string(), json!(pay_as_you_go));
+    extra.insert("subscription_balance".to_string(), json!(subscription));
     extra.insert("daily_limit".to_string(), json!(daily_balance));
     if let Some(limit) = weekly_limit {
         extra.insert("weekly_limit".to_string(), json!(limit));
@@ -397,6 +398,10 @@ fn yescode_balance_extra(combined_data: &Map<String, Value>) -> Map<String, Valu
         (daily_balance - subscription).max(0.0)
     };
     extra.insert("daily_spent".to_string(), json!(daily_spent));
+    extra.insert(
+        "subscription_available".to_string(),
+        json!(subscription_available),
+    );
     extra.insert(
         "_subscription_available".to_string(),
         json!(subscription_available),
@@ -467,7 +472,7 @@ fn parse_subscription(value: &Value) -> Option<Value> {
 mod tests {
     use super::{
         attach_balance_checkin_outcome, parse_query_balance_payload, parse_sub2api_balance_payload,
-        ProviderOpsCheckinOutcome,
+        parse_yescode_combined_balance_payload, ProviderOpsCheckinOutcome,
     };
     use serde_json::json;
 
@@ -538,6 +543,33 @@ mod tests {
 
         assert_eq!(payload["total_available"], json!(10.0));
         assert_eq!(payload["extra"]["active_subscriptions"], json!(2));
+    }
+
+    #[test]
+    fn yescode_parser_keeps_subscription_balance_breakdown() {
+        let payload = parse_yescode_combined_balance_payload(
+            &json!({ "currency": "USD" })
+                .as_object()
+                .cloned()
+                .expect("config"),
+            &json!({
+                "pay_as_you_go_balance": 4.0,
+                "subscription_balance": 10.0,
+                "weekly_limit": 12.0,
+                "weekly_spent_balance": 3.0,
+                "subscription_plan": {
+                    "daily_balance": 10.0
+                }
+            })
+            .as_object()
+            .cloned()
+            .expect("combined data"),
+        );
+
+        assert_eq!(payload["total_available"], json!(13.0));
+        assert_eq!(payload["extra"]["pay_as_you_go_balance"], json!(4.0));
+        assert_eq!(payload["extra"]["subscription_balance"], json!(10.0));
+        assert_eq!(payload["extra"]["subscription_available"], json!(9.0));
     }
 
     #[test]
