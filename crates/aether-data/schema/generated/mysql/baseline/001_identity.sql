@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS users (
     `id` VARCHAR(64) NOT NULL,
     `external_id` VARCHAR(255),
     `email` VARCHAR(320),
+    `remark` VARCHAR(500),
     `username` VARCHAR(255),
     `password_hash` VARCHAR(255),
     `role` VARCHAR(64),

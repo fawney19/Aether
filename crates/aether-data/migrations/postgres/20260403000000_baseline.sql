@@ -1263,6 +1263,7 @@ CREATE TABLE IF NOT EXISTS public.users (
     id character varying(36) NOT NULL,
     external_id character varying(255),
     email character varying(255),
+    remark character varying(500),
     username character varying(100) NOT NULL,
     password_hash character varying(255),
     role public.userrole DEFAULT 'user'::public.userrole NOT NULL,
