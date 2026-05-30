@@ -127,8 +127,6 @@
             :class="[
               passwordError ? 'border-destructive' : '',
             ]"
-            @focus="clearGeneratedPassword"
-            @click="clearGeneratedPassword"
           />
           <p
             v-if="passwordError"
@@ -420,7 +418,7 @@ const usernameError = computed(() => {
 const passwordHint = computed(() => getPasswordPolicyHint(passwordPolicyLevel.value))
 const passwordHelperText = computed(() => {
   if (isGeneratedPasswordActive.value) {
-    return '已自动生成符合要求的随机密码；点击密码框可清空后手动输入'
+    return '已自动生成符合要求的随机密码'
   }
   return passwordHint.value
 })
@@ -470,14 +468,6 @@ function refreshGeneratedPassword(): void {
     return
   }
   form.value.password = generatePasswordByPolicy(passwordPolicyLevel.value)
-}
-
-function clearGeneratedPassword(): void {
-  if (isEditMode.value || !isGeneratedPasswordActive.value) {
-    return
-  }
-  form.value.password = ''
-  isGeneratedPasswordActive.value = false
 }
 
 // 提交表单
