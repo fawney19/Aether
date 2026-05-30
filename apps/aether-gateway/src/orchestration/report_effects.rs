@@ -9,6 +9,7 @@ use aether_usage_runtime::{
     report_request_id, GatewayStreamReportRequest, GatewaySyncReportRequest,
     GEMINI_FILE_MAPPING_TTL_SECONDS,
 };
+use base64::Engine as _;
 use regex::Regex;
 use serde_json::{json, Value};
 use tracing::warn;
@@ -263,6 +264,121 @@ fn grok_upstream_response_body(report_context: Option<&Value>) -> Option<&Value>
         .and_then(|response| response.get("body"))
 }
 
+fn gemini_cli_credits_from_report_context(
+    report_context: Option<&Value>,
+    now_unix_secs: u64,
+) -> Option<Value> {
+    report_context
+        .and_then(|context| context.get("gemini_cli_v1internal_credits"))
+        .and_then(|value| {
+            admin_provider_quota_pure::parse_gemini_cli_v1internal_credits_response(
+                value,
+                now_unix_secs,
+            )
+        })
+}
+
+fn gemini_cli_credits_from_stream_payload(
+    payload: &GatewayStreamReportRequest,
+    now_unix_secs: u64,
+) -> Option<Value> {
+    let body_base64 = payload.provider_body_base64.as_deref()?;
+    let body = base64::engine::general_purpose::STANDARD
+        .decode(body_base64)
+        .ok()?;
+    let text = std::str::from_utf8(&body).ok()?;
+    let mut latest = None::<Value>;
+    for raw_line in text.lines() {
+        let line = raw_line.trim_matches('\r').trim();
+        let data = line.strip_prefix("data:").map(str::trim).unwrap_or(line);
+        if data.is_empty() || data == "[DONE]" || data.starts_with(':') {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        if let Some(credits) =
+            admin_provider_quota_pure::parse_gemini_cli_v1internal_credits_response(
+                &value,
+                now_unix_secs,
+            )
+        {
+            latest = Some(credits);
+        }
+    }
+    latest
+}
+
+async fn sync_gemini_cli_credits_from_report(
+    state: &AppState,
+    report_context: Option<&Value>,
+    credits: Option<Value>,
+) -> Result<bool, GatewayError> {
+    let Some(credits) = credits else {
+        return Ok(false);
+    };
+    let key_id = match report_context_key_id(report_context) {
+        Some(value) => value,
+        None => return Ok(false),
+    };
+    let Some(key) = state
+        .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(false);
+    };
+    let Some(provider) = state
+        .read_provider_catalog_providers_by_ids(std::slice::from_ref(&key.provider_id))
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(false);
+    };
+    if !provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("gemini_cli")
+    {
+        return Ok(false);
+    }
+
+    let now_unix_secs = current_unix_secs();
+    let mut gemini_cli_bucket = key
+        .upstream_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("gemini_cli"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_else(serde_json::Map::new);
+    gemini_cli_bucket.insert("credits".to_string(), credits);
+    gemini_cli_bucket.insert("updated_at".to_string(), json!(now_unix_secs));
+
+    let updated_upstream_metadata = merge_metadata_object(
+        key.upstream_metadata.as_ref(),
+        "gemini_cli",
+        Value::Object(gemini_cli_bucket),
+    );
+    let updated_status_snapshot = sync_provider_key_quota_status_snapshot(
+        key.status_snapshot.as_ref(),
+        provider.provider_type.as_str(),
+        updated_upstream_metadata.as_ref(),
+        "report_effect",
+    );
+    let mut updated_key = key;
+    updated_key.upstream_metadata = updated_upstream_metadata;
+    updated_key.status_snapshot = updated_status_snapshot;
+    updated_key.updated_at_unix_secs = Some(now_unix_secs);
+
+    Ok(state
+        .update_provider_catalog_key(&updated_key)
+        .await?
+        .is_some())
+}
+
 fn grok_quota_reset_after_seconds(
     body_json: Option<&Value>,
     report_context: Option<&Value>,
@@ -464,6 +580,23 @@ async fn apply_local_sync_report_effect(state: &AppState, payload: &GatewaySyncR
             "gateway failed to persist grok realtime quota from sync response"
         );
     }
+    let now_unix_secs = current_unix_secs();
+    if let Err(err) = sync_gemini_cli_credits_from_report(
+        state,
+        payload.report_context.as_ref(),
+        gemini_cli_credits_from_report_context(payload.report_context.as_ref(), now_unix_secs),
+    )
+    .await
+    {
+        warn!(
+            event_name = "gemini_cli_realtime_credits_sync_failed",
+            log_type = "ops",
+            report_kind = %payload.report_kind,
+            report_request_id = %short_request_id(report_request_id(payload.report_context.as_ref())),
+            error = ?err,
+            "gateway failed to persist gemini cli realtime credits from sync response"
+        );
+    }
 }
 
 async fn apply_local_stream_report_effect(state: &AppState, payload: &GatewayStreamReportRequest) {
@@ -498,6 +631,22 @@ async fn apply_local_stream_report_effect(state: &AppState, payload: &GatewayStr
             report_request_id = %short_request_id(report_request_id(payload.report_context.as_ref())),
             error = ?err,
             "gateway failed to persist grok realtime quota from stream response"
+        );
+    }
+    let now_unix_secs = current_unix_secs();
+    let credits =
+        gemini_cli_credits_from_report_context(payload.report_context.as_ref(), now_unix_secs)
+            .or_else(|| gemini_cli_credits_from_stream_payload(payload, now_unix_secs));
+    if let Err(err) =
+        sync_gemini_cli_credits_from_report(state, payload.report_context.as_ref(), credits).await
+    {
+        warn!(
+            event_name = "gemini_cli_realtime_credits_sync_failed",
+            log_type = "ops",
+            report_kind = %payload.report_kind,
+            report_request_id = %short_request_id(report_request_id(payload.report_context.as_ref())),
+            error = ?err,
+            "gateway failed to persist gemini cli realtime credits from stream response"
         );
     }
 }

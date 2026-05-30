@@ -1,7 +1,7 @@
 use super::extractors::{admin_health_key_id, admin_recover_key_id};
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
-use crate::handlers::public::ApiFormatHealthMonitorOptions;
+use crate::handlers::public::{ApiFormatHealthMonitorOptions, ModelHealthMonitorOptions};
 use crate::GatewayError;
 use axum::{
     body::Body,
@@ -149,6 +149,80 @@ pub(super) async fn maybe_build_local_admin_endpoints_health_response(
                     include_provider_count: true,
                     include_key_count: true,
                 },
+            )
+            .await
+        else {
+            return Ok(Some(build_admin_endpoint_health_data_unavailable_response()));
+        };
+        return Ok(Some(Json(payload).into_response()));
+    }
+
+    if decision.route_family.as_deref() == Some("endpoints_health")
+        && decision.route_kind.as_deref() == Some("health_models")
+        && request_context.path() == "/api/admin/endpoints/health/models"
+    {
+        if !state.has_usage_data_reader() {
+            return Ok(Some(build_admin_endpoint_health_data_unavailable_response()));
+        }
+        let lookback_hours = query_param_value(request_context.query_string(), "lookback_hours")
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| (1..=72).contains(value))
+            .unwrap_or(6);
+        let model_limit = query_param_value(request_context.query_string(), "model_limit")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| (1..=50).contains(value))
+            .unwrap_or(12);
+        let per_model_limit = query_param_value(request_context.query_string(), "per_model_limit")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| (10..=200).contains(value))
+            .unwrap_or(60);
+        let Some(payload) = state
+            .build_model_health_monitor_payload(
+                lookback_hours,
+                model_limit,
+                per_model_limit,
+                ModelHealthMonitorOptions {
+                    include_provider_count: true,
+                },
+            )
+            .await
+        else {
+            return Ok(Some(build_admin_endpoint_health_data_unavailable_response()));
+        };
+        return Ok(Some(Json(payload).into_response()));
+    }
+
+    if decision.route_family.as_deref() == Some("endpoints_health")
+        && decision.route_kind.as_deref() == Some("health_providers")
+        && request_context.path() == "/api/admin/endpoints/health/providers"
+    {
+        if !state.has_provider_catalog_data_reader() || !state.has_usage_data_reader() {
+            return Ok(Some(build_admin_endpoint_health_data_unavailable_response()));
+        }
+        let lookback_hours = query_param_value(request_context.query_string(), "lookback_hours")
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| (1..=72).contains(value))
+            .unwrap_or(6);
+        let provider_limit = query_param_value(request_context.query_string(), "provider_limit")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| (1..=100).contains(value))
+            .unwrap_or(50);
+        let per_provider_model_limit =
+            query_param_value(request_context.query_string(), "per_provider_model_limit")
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| (1..=50).contains(value))
+                .unwrap_or(12);
+        let per_model_event_limit =
+            query_param_value(request_context.query_string(), "per_model_limit")
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| (10..=200).contains(value))
+                .unwrap_or(100);
+        let Some(payload) = state
+            .build_provider_health_monitor_payload(
+                lookback_hours,
+                provider_limit,
+                per_provider_model_limit,
+                per_model_event_limit,
             )
             .await
         else {

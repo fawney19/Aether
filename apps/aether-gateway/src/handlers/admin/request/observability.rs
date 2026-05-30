@@ -254,6 +254,40 @@ impl<'a> AdminAppState<'a> {
         .await
     }
 
+    pub(crate) async fn build_model_health_monitor_payload(
+        &self,
+        lookback_hours: u64,
+        model_limit: usize,
+        per_model_limit: usize,
+        options: crate::handlers::public::ModelHealthMonitorOptions,
+    ) -> Option<serde_json::Value> {
+        crate::handlers::public::build_model_health_monitor_payload(
+            self.app,
+            lookback_hours,
+            model_limit,
+            per_model_limit,
+            options,
+        )
+        .await
+    }
+
+    pub(crate) async fn build_provider_health_monitor_payload(
+        &self,
+        lookback_hours: u64,
+        provider_limit: usize,
+        per_provider_model_limit: usize,
+        per_model_event_limit: usize,
+    ) -> Option<serde_json::Value> {
+        crate::handlers::public::build_provider_health_monitor_payload(
+            self.app,
+            lookback_hours,
+            provider_limit,
+            per_provider_model_limit,
+            per_model_event_limit,
+        )
+        .await
+    }
+
     pub(crate) async fn execute_execution_runtime_sync_plan(
         &self,
         trace_id: Option<&str>,

@@ -28,6 +28,12 @@ pub(crate) fn maybe_normalize_provider_private_sync_report_payload(
 
     let mut normalized = payload.clone();
     normalized.report_context = normalize_provider_private_report_context(Some(report_context));
+    if let (Some(body_json), Some(context)) = (
+        payload.body_json.as_ref(),
+        normalized.report_context.as_mut(),
+    ) {
+        maybe_attach_gemini_cli_v1internal_credits_context(report_context, body_json, context);
+    }
 
     if let Some(body_json) = payload.body_json.clone() {
         normalized.body_json = normalize_provider_private_response_value(body_json, report_context);
@@ -53,6 +59,44 @@ pub(crate) fn maybe_normalize_provider_private_sync_report_payload(
     }
 
     Ok(Some(normalized))
+}
+
+fn maybe_attach_gemini_cli_v1internal_credits_context(
+    original_report_context: &Value,
+    body_json: &Value,
+    normalized_report_context: &mut Value,
+) {
+    if !original_report_context
+        .get("envelope_name")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case("gemini_cli:v1internal"))
+    {
+        return;
+    }
+
+    let mut credits = serde_json::Map::new();
+    for (source, target) in [
+        ("remainingCredits", "remainingCredits"),
+        ("consumedCredits", "consumedCredits"),
+        ("traceId", "traceId"),
+    ] {
+        if let Some(value) = body_json
+            .get(source)
+            .cloned()
+            .filter(|value| !value.is_null())
+        {
+            credits.insert(target.to_string(), value);
+        }
+    }
+    if credits.is_empty() {
+        return;
+    }
+    if let Some(object) = normalized_report_context.as_object_mut() {
+        object.insert(
+            "gemini_cli_v1internal_credits".to_string(),
+            Value::Object(credits),
+        );
+    }
 }
 
 fn normalize_provider_private_stream_bytes(

@@ -255,6 +255,275 @@ pub fn parse_antigravity_usage_response(
     }))
 }
 
+pub fn parse_gemini_cli_retrieve_user_quota_response(
+    value: &serde_json::Value,
+    updated_at_unix_secs: u64,
+) -> Option<serde_json::Value> {
+    let buckets = value.get("buckets")?.as_array()?;
+    let mut quota_by_model = serde_json::Map::new();
+
+    for bucket in buckets {
+        if !bucket.is_object() {
+            continue;
+        }
+        let model_id = first_json_string_by_paths(
+            bucket,
+            &[
+                &["modelId"],
+                &["model_id"],
+                &["model"],
+                &["modelName"],
+                &["metadata", "modelId"],
+                &["metadata", "model_id"],
+                &["labels", "modelId"],
+                &["labels", "model_id"],
+            ],
+        );
+        let token_type = first_json_string_by_paths(
+            bucket,
+            &[
+                &["tokenType"],
+                &["token_type"],
+                &["metadata", "tokenType"],
+                &["metadata", "token_type"],
+                &["labels", "tokenType"],
+                &["labels", "token_type"],
+            ],
+        );
+        let Some(quota_key) = model_id
+            .as_deref()
+            .or(token_type.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+        else {
+            continue;
+        };
+        let display_name = first_json_string_by_paths(
+            bucket,
+            &[
+                &["displayName"],
+                &["display_name"],
+                &["metadata", "displayName"],
+                &["metadata", "display_name"],
+            ],
+        )
+        .or_else(|| model_id.clone())
+        .or_else(|| token_type.clone())
+        .unwrap_or_else(|| quota_key.clone());
+        let remaining_fraction = first_json_f64_by_paths(
+            bucket,
+            &[
+                &["remainingFraction"],
+                &["remaining_fraction"],
+                &["quotaInfo", "remainingFraction"],
+                &["quotaInfo", "remaining_fraction"],
+                &["quota", "remainingFraction"],
+                &["quota", "remaining_fraction"],
+            ],
+        )
+        .map(|value| value.clamp(0.0, 1.0));
+        let reset_time = first_json_value_by_paths(
+            bucket,
+            &[
+                &["resetTime"],
+                &["reset_time"],
+                &["nextResetTime"],
+                &["next_reset_time"],
+                &["quotaInfo", "resetTime"],
+                &["quotaInfo", "reset_time"],
+                &["quota", "resetTime"],
+                &["quota", "reset_time"],
+            ],
+        )
+        .cloned()
+        .filter(|value| !value.is_null());
+        let reset_at = reset_time
+            .as_ref()
+            .and_then(parse_gemini_cli_reset_timestamp);
+        let is_exhausted = first_json_bool_by_paths(
+            bucket,
+            &[
+                &["isExhausted"],
+                &["is_exhausted"],
+                &["exhausted"],
+                &["quotaInfo", "isExhausted"],
+                &["quotaInfo", "is_exhausted"],
+                &["quota", "isExhausted"],
+                &["quota", "is_exhausted"],
+            ],
+        )
+        .or_else(|| remaining_fraction.map(|value| value <= 1e-9));
+        let remaining_amount = first_json_f64_by_paths(
+            bucket,
+            &[
+                &["remainingAmount"],
+                &["remaining_amount"],
+                &["remaining"],
+                &["remaining_value"],
+                &["quotaInfo", "remainingAmount"],
+                &["quotaInfo", "remaining_amount"],
+                &["quotaInfo", "remaining"],
+                &["quotaInfo", "remaining_value"],
+                &["quota", "remainingAmount"],
+                &["quota", "remaining_amount"],
+                &["quota", "remaining"],
+                &["quota", "remaining_value"],
+            ],
+        );
+        let explicit_total = first_json_f64_by_paths(
+            bucket,
+            &[
+                &["limit"],
+                &["limitAmount"],
+                &["limit_amount"],
+                &["total"],
+                &["totalAmount"],
+                &["total_amount"],
+                &["quotaInfo", "limit"],
+                &["quotaInfo", "limitAmount"],
+                &["quotaInfo", "limit_amount"],
+                &["quotaInfo", "total"],
+                &["quotaInfo", "totalAmount"],
+                &["quotaInfo", "total_amount"],
+                &["quota", "limit"],
+                &["quota", "limitAmount"],
+                &["quota", "limit_amount"],
+                &["quota", "total"],
+                &["quota", "totalAmount"],
+                &["quota", "total_amount"],
+            ],
+        )
+        .filter(|value| *value > 0.0);
+        let total_amount = explicit_total.or_else(|| {
+            remaining_amount
+                .zip(remaining_fraction)
+                .and_then(|(remaining, fraction)| {
+                    (fraction > 0.0).then_some((remaining / fraction).round())
+                })
+        });
+
+        let mut payload = serde_json::Map::new();
+        payload.insert("display_name".to_string(), json!(display_name));
+        if let Some(model_id) = model_id {
+            payload.insert("model_id".to_string(), json!(model_id));
+        }
+        if let Some(token_type) = token_type {
+            payload.insert("token_type".to_string(), json!(token_type));
+        }
+        if let Some(remaining_fraction) = remaining_fraction {
+            payload.insert("remaining_fraction".to_string(), json!(remaining_fraction));
+            payload.insert(
+                "used_percent".to_string(),
+                json!(((1.0 - remaining_fraction) * 100.0).clamp(0.0, 100.0)),
+            );
+        }
+        if let Some(reset_time) = reset_time {
+            payload.insert("reset_time".to_string(), reset_time);
+        }
+        if let Some(reset_at) = reset_at {
+            payload.insert("reset_at".to_string(), json!(reset_at));
+        }
+        if let Some(is_exhausted) = is_exhausted {
+            payload.insert("is_exhausted".to_string(), json!(is_exhausted));
+        }
+        if let Some(value) = total_amount {
+            payload.insert("total".to_string(), json!(value));
+        }
+        if let Some(value) = remaining_amount {
+            payload.insert("remaining".to_string(), json!(value));
+        }
+
+        quota_by_model.insert(quota_key, serde_json::Value::Object(payload));
+    }
+
+    if quota_by_model.is_empty() {
+        return None;
+    }
+
+    Some(json!({
+        "updated_at": updated_at_unix_secs,
+        "quota_by_model": quota_by_model,
+    }))
+}
+
+pub fn parse_gemini_cli_v1internal_credits_response(
+    value: &serde_json::Value,
+    updated_at_unix_secs: u64,
+) -> Option<serde_json::Value> {
+    let mut credits = serde_json::Map::new();
+    if let Some(value) = value.get("remainingCredits").and_then(coerce_json_f64) {
+        credits.insert("remaining".to_string(), json!(value));
+    }
+    if let Some(value) = value.get("consumedCredits").and_then(coerce_json_f64) {
+        credits.insert("consumed".to_string(), json!(value));
+    }
+    if let Some(value) = coerce_json_string(value.get("traceId")) {
+        credits.insert("trace_id".to_string(), json!(value));
+    }
+    if credits.is_empty() {
+        return None;
+    }
+    credits.insert("updated_at".to_string(), json!(updated_at_unix_secs));
+    Some(serde_json::Value::Object(credits))
+}
+
+fn first_json_value_by_paths<'a>(
+    value: &'a serde_json::Value,
+    paths: &[&[&str]],
+) -> Option<&'a serde_json::Value> {
+    for path in paths {
+        let mut current = value;
+        let mut matched = true;
+        for segment in *path {
+            let Some(next) = current.get(*segment) else {
+                matched = false;
+                break;
+            };
+            current = next;
+        }
+        if matched {
+            return Some(current);
+        }
+    }
+    None
+}
+
+fn first_json_string_by_paths(value: &serde_json::Value, paths: &[&[&str]]) -> Option<String> {
+    paths
+        .iter()
+        .find_map(|path| coerce_json_string(first_json_value_by_paths(value, &[*path])))
+}
+
+fn first_json_f64_by_paths(value: &serde_json::Value, paths: &[&[&str]]) -> Option<f64> {
+    paths
+        .iter()
+        .find_map(|path| first_json_value_by_paths(value, &[*path]).and_then(coerce_json_f64))
+}
+
+fn first_json_bool_by_paths(value: &serde_json::Value, paths: &[&[&str]]) -> Option<bool> {
+    paths
+        .iter()
+        .find_map(|path| first_json_value_by_paths(value, &[*path]).and_then(coerce_json_bool))
+}
+
+fn parse_gemini_cli_reset_timestamp(value: &serde_json::Value) -> Option<u64> {
+    if let Some(value) = coerce_json_u64(value) {
+        return Some(if value > 1_000_000_000_000 {
+            value / 1000
+        } else {
+            value
+        });
+    }
+    let raw = value.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .and_then(|timestamp| u64::try_from(timestamp.timestamp()).ok())
+}
+
 pub fn normalize_codex_plan_type(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -1452,7 +1721,8 @@ mod tests {
     use super::{
         codex_build_invalid_state, codex_runtime_invalid_reason,
         parse_chatgpt_web_conversation_init_response, parse_codex_backend_me_response,
-        parse_codex_wham_usage_response, parse_windsurf_model_configs_response,
+        parse_codex_wham_usage_response, parse_gemini_cli_retrieve_user_quota_response,
+        parse_gemini_cli_v1internal_credits_response, parse_windsurf_model_configs_response,
         parse_windsurf_rate_limit_response, parse_windsurf_user_status_response,
         quota_refresh_success_invalid_state, should_auto_remove_structured_reason,
         OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
@@ -1849,6 +2119,85 @@ mod tests {
         assert_eq!(parsed.get("updated_at"), Some(&json!(1_777_000_000u64)));
         assert!(parsed.get("primary_used_percent").is_none());
         assert!(parsed.get("secondary_used_percent").is_none());
+    }
+
+    #[test]
+    fn parses_gemini_cli_retrieve_user_quota_buckets() {
+        let parsed = parse_gemini_cli_retrieve_user_quota_response(
+            &json!({
+                "buckets": [
+                    {
+                        "modelId": "gemini-2.5-pro",
+                        "tokenType": "model",
+                        "displayName": "Gemini 2.5 Pro",
+                        "remainingFraction": 0.25,
+                        "remainingAmount": "25",
+                        "resetTime": "2030-01-01T00:00:00Z",
+                        "isExhausted": false
+                    },
+                    {
+                        "modelId": "gemini-2.5-flash",
+                        "tokenType": "model",
+                        "displayName": "Gemini 2.5 Flash",
+                        "quotaInfo": {
+                            "remainingFraction": 0.0,
+                            "resetTime": 1_893_459_600_000u64,
+                            "isExhausted": true
+                        }
+                    }
+                ]
+            }),
+            1_777_000_000,
+        )
+        .expect("gemini cli quota should parse");
+
+        assert_eq!(parsed.get("updated_at"), Some(&json!(1_777_000_000u64)));
+        assert_eq!(
+            parsed["quota_by_model"]["gemini-2.5-pro"]["remaining_fraction"],
+            json!(0.25)
+        );
+        assert_eq!(
+            parsed["quota_by_model"]["gemini-2.5-pro"]["remaining"],
+            json!(25.0)
+        );
+        assert_eq!(
+            parsed["quota_by_model"]["gemini-2.5-pro"]["total"],
+            json!(100.0)
+        );
+        assert_eq!(
+            parsed["quota_by_model"]["gemini-2.5-pro"]["reset_at"],
+            json!(1_893_456_000u64)
+        );
+        assert_eq!(
+            parsed["quota_by_model"]["gemini-2.5-flash"]["is_exhausted"],
+            json!(true)
+        );
+        assert_eq!(
+            parsed["quota_by_model"]["gemini-2.5-flash"]["used_percent"],
+            json!(100.0)
+        );
+    }
+
+    #[test]
+    fn parses_gemini_cli_v1internal_credits() {
+        let parsed = parse_gemini_cli_v1internal_credits_response(
+            &json!({
+                "response": {"candidates": []},
+                "remainingCredits": "41.5",
+                "consumedCredits": 1,
+                "traceId": "trace-upstream-sync-1"
+            }),
+            1_777_000_123,
+        )
+        .expect("gemini cli credits should parse");
+
+        assert_eq!(parsed.get("remaining"), Some(&json!(41.5)));
+        assert_eq!(parsed.get("consumed"), Some(&json!(1.0)));
+        assert_eq!(
+            parsed.get("trace_id"),
+            Some(&json!("trace-upstream-sync-1"))
+        );
+        assert_eq!(parsed.get("updated_at"), Some(&json!(1_777_000_123u64)));
     }
 
     #[test]

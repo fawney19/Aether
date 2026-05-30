@@ -29,6 +29,7 @@ pub struct CandidateRuntimeSelectabilityInput<'a> {
     pub provider_quota_blocks_requests: bool,
     pub account_quota_exhausted: bool,
     pub oauth_invalid: bool,
+    pub enforce_key_circuit_breaker: bool,
     pub rpm_reset_at: Option<u64>,
 }
 
@@ -50,6 +51,7 @@ pub fn candidate_runtime_skip_reason_with_state(
         provider_quota_blocks_requests,
         account_quota_exhausted,
         oauth_invalid,
+        enforce_key_circuit_breaker,
         rpm_reset_at,
     } = input;
 
@@ -94,11 +96,13 @@ pub fn candidate_runtime_skip_reason_with_state(
     }
 
     if let Some(provider_key) = provider_key {
-        if crate::is_provider_key_circuit_open_at(
-            provider_key,
-            candidate.endpoint_api_format.as_str(),
-            now_unix_secs,
-        ) {
+        if enforce_key_circuit_breaker
+            && crate::is_provider_key_circuit_open_at(
+                provider_key,
+                candidate.endpoint_api_format.as_str(),
+                now_unix_secs,
+            )
+        {
             return Some("key_circuit_open");
         }
         if crate::provider_key_health_score(provider_key, candidate.endpoint_api_format.as_str())

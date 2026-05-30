@@ -234,7 +234,7 @@ async fn ai_execute_stream_pii_redaction_round_trip() {
     let seen_provider_request = Arc::new(Mutex::new(None::<SeenProviderStreamRequest>));
     let seen_provider_request_clone = Arc::clone(&seen_provider_request);
     let provider_app = Router::new().route(
-        "/v1/chat/completions",
+        "/chat/completions",
         any(move |request: Request| {
             let seen_provider_request_inner = Arc::clone(&seen_provider_request_clone);
             async move {

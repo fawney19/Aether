@@ -190,16 +190,26 @@ pub(crate) fn snapshot_local_request_candidate_status(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
-    let metadata = parse_request_candidate_report_context(report_context)?;
-    let candidate_index = metadata.candidate_index.unwrap_or(0);
+    let metadata = parse_request_candidate_report_context(report_context);
+    let candidate_index = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.candidate_index)
+        .unwrap_or(0);
 
     Some(LocalRequestCandidateStatusSnapshot {
         candidate_id: candidate_id.to_string(),
         request_id: plan.request_id.clone(),
-        user_id: metadata.user_id,
-        api_key_id: metadata.api_key_id,
+        user_id: metadata
+            .as_ref()
+            .and_then(|metadata| metadata.user_id.clone()),
+        api_key_id: metadata
+            .as_ref()
+            .and_then(|metadata| metadata.api_key_id.clone()),
         candidate_index,
-        retry_index: metadata.retry_index,
+        retry_index: metadata
+            .as_ref()
+            .map(|metadata| metadata.retry_index)
+            .unwrap_or(0),
         provider_id: plan.provider_id.clone(),
         endpoint_id: plan.endpoint_id.clone(),
         key_id: plan.key_id.clone(),
@@ -438,11 +448,16 @@ pub(crate) async fn ensure_execution_request_candidate_slot(
         );
         return;
     }
-    if plan
+    let existing_candidate_id = plan
         .candidate_id
         .as_deref()
         .map(str::trim)
-        .is_some_and(|value| !value.is_empty())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let report_candidate_id = parse_request_candidate_report_context(report_context.as_ref())
+        .and_then(|metadata| metadata.candidate_id);
+    if existing_candidate_id.as_deref().is_some()
+        && report_candidate_id.as_deref() == existing_candidate_id.as_deref()
     {
         return;
     }
@@ -451,7 +466,7 @@ pub(crate) async fn ensure_execution_request_candidate_slot(
         plan,
         report_context.as_ref(),
         current_unix_ms(),
-        Uuid::new_v4().to_string(),
+        existing_candidate_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
     );
     let generated_candidate_id = seed.upsert_record.id.clone();
     let request_id = short_request_id(plan.request_id.as_str());
@@ -879,13 +894,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn does_not_reseed_execution_request_candidate_slot_when_plan_already_has_candidate_id() {
+    async fn does_not_reseed_execution_request_candidate_slot_when_report_context_matches_plan_candidate_id(
+    ) {
         let repository = Arc::new(InMemoryRequestCandidateRepository::default());
         let state = build_test_state(Arc::clone(&repository));
         let mut plan = sample_plan();
         plan.candidate_id = Some("cand-existing-123".to_string());
         let mut report_context = Some(json!({
-            "request_id": "req-request-candidate-seed-123"
+            "request_id": "req-request-candidate-seed-123",
+            "candidate_id": "cand-existing-123"
         }));
 
         ensure_execution_request_candidate_slot(&state, &mut plan, &mut report_context).await;
@@ -901,8 +918,35 @@ mod tests {
                 .as_ref()
                 .and_then(|value| value.get("candidate_id"))
                 .and_then(|value| value.as_str()),
-            None
+            Some("cand-existing-123")
         );
+    }
+
+    #[tokio::test]
+    async fn seeds_execution_request_candidate_slot_when_plan_candidate_id_lacks_report_context() {
+        let repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = build_test_state(Arc::clone(&repository));
+        let mut plan = sample_plan();
+        plan.candidate_id = Some("cand-existing-123".to_string());
+        let mut report_context = None;
+
+        ensure_execution_request_candidate_slot(&state, &mut plan, &mut report_context).await;
+
+        assert_eq!(plan.candidate_id.as_deref(), Some("cand-existing-123"));
+        let report_context = report_context.expect("report context should be populated");
+        assert_eq!(
+            report_context
+                .get("candidate_id")
+                .and_then(|value| value.as_str()),
+            Some("cand-existing-123")
+        );
+        let stored = repository
+            .list_by_request_id("req-request-candidate-seed-123")
+            .await
+            .expect("request candidates should read");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, "cand-existing-123");
+        assert_eq!(stored[0].status, RequestCandidateStatus::Pending);
     }
 
     #[tokio::test]

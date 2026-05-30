@@ -130,6 +130,7 @@ mod tests {
                 expires_at_unix_secs: None,
                 proxy: None,
                 fingerprint: Some(json!({"transport_profile":"chrome_136"})),
+                upstream_metadata: None,
                 decrypted_api_key: "sk-ant-123".to_string(),
                 decrypted_auth_config: None,
             },

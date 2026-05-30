@@ -111,9 +111,9 @@
                   >
                     {{ apiKey.name }}
                   </div>
-                <div class="text-xs text-muted-foreground mt-0.5">
-                  创建于 {{ formatDate(apiKey.created_at) }}
-                </div>
+                  <div class="text-xs text-muted-foreground mt-0.5">
+                    创建于 {{ formatDate(apiKey.created_at) }}
+                  </div>
                   <div class="text-xs text-muted-foreground mt-0.5 truncate">
                     IP 限制：{{ formatIpRules(apiKey.ip_rules) }}
                   </div>

@@ -2824,6 +2824,7 @@ mod tests {
         .expect("usage should parse");
 
         assert_eq!(usage.input_tokens, 20_435);
+        assert!(usage.input_tokens_include_cache);
         assert_eq!(usage.output_tokens, 177);
         assert_eq!(usage.cache_read_tokens, 19_840);
         assert_eq!(usage.reasoning_tokens, 7);
@@ -3734,6 +3735,7 @@ mod tests {
                         finish_reason: Some("stop".to_string()),
                         usage: Some(CanonicalUsage {
                             input_tokens: 1,
+                            input_tokens_include_cache: true,
                             output_tokens: 2,
                             total_tokens: 3,
                             cache_creation_tokens: 5,

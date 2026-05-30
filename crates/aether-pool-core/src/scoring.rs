@@ -138,7 +138,6 @@ pub struct PoolMemberScoreInput {
     pub quota_exhausted: bool,
     pub account_blocked: bool,
     pub oauth_invalid_reason: Option<String>,
-    pub circuit_open: bool,
     pub success_count: u64,
     pub error_count: u64,
     pub total_response_time_ms: u64,
@@ -260,9 +259,6 @@ fn derive_hard_state(
     if input.quota_exhausted {
         return PoolMemberHardState::QuotaExhausted;
     }
-    if input.circuit_open {
-        return PoolMemberHardState::Cooldown;
-    }
     if input.probe_status == PoolMemberProbeStatus::Failed
         && rules.probe_failure_cooldown_threshold > 0
         && input.probe_failure_count >= rules.probe_failure_cooldown_threshold
@@ -370,7 +366,6 @@ mod tests {
             quota_exhausted: false,
             account_blocked: false,
             oauth_invalid_reason: None,
-            circuit_open: false,
             success_count: 10,
             error_count: 0,
             total_response_time_ms: 2_000,

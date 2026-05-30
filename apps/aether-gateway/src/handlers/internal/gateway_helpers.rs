@@ -402,10 +402,16 @@ pub(crate) fn parse_internal_tunnel_heartbeat_request(
         .is_some_and(|value| !(5..=600).contains(&value))
         || payload.active_connections.is_some_and(|value| value < 0)
         || payload.total_requests.is_some_and(|value| value < 0)
+        || payload.window_total_requests.is_some_and(|value| value < 0)
         || payload.avg_latency_ms.is_some_and(|value| value < 0.0)
         || payload.failed_requests.is_some_and(|value| value < 0)
+        || payload
+            .window_failed_requests
+            .is_some_and(|value| value < 0)
         || payload.dns_failures.is_some_and(|value| value < 0)
+        || payload.window_dns_failures.is_some_and(|value| value < 0)
         || payload.stream_errors.is_some_and(|value| value < 0)
+        || payload.window_stream_errors.is_some_and(|value| value < 0)
         || payload
             .proxy_version
             .as_deref()

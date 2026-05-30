@@ -36,7 +36,7 @@ use super::pool_score_rebuild::ensure_provider_key_pool_scores_for_keys;
 const POOL_QUOTA_PROBE_REDIS_PREFIX: &str = "ap:quota_probe:last";
 const POOL_QUOTA_PROBE_DEFAULT_SCAN_INTERVAL_SECONDS: u64 = 60;
 const POOL_QUOTA_PROBE_MIN_SCAN_INTERVAL_SECONDS: u64 = 15;
-const POOL_QUOTA_PROBE_DEFAULT_MAX_KEYS_PER_PROVIDER: usize = 50;
+const POOL_QUOTA_PROBE_UNLIMITED_MAX_KEYS_PER_PROVIDER: usize = usize::MAX;
 const POOL_QUOTA_PROBE_PROVIDER_SCORE_READ_LIMIT: usize = 100_000;
 const POOL_QUOTA_PROBE_DEFAULT_GLOBAL_CONCURRENCY: usize = 16;
 const POOL_QUOTA_PROBE_PROVIDER_LOCK_TTL_MS: u64 = 30_000;
@@ -106,7 +106,7 @@ impl PoolQuotaProbeWorkerConfig {
         .max(POOL_QUOTA_PROBE_MIN_SCAN_INTERVAL_SECONDS);
         let max_keys_per_provider = env_usize(
             "POOL_QUOTA_PROBE_MAX_KEYS_PER_PROVIDER",
-            POOL_QUOTA_PROBE_DEFAULT_MAX_KEYS_PER_PROVIDER,
+            POOL_QUOTA_PROBE_UNLIMITED_MAX_KEYS_PER_PROVIDER,
         );
         let global_concurrency = env_usize(
             "POOL_QUOTA_PROBE_GLOBAL_CONCURRENCY",

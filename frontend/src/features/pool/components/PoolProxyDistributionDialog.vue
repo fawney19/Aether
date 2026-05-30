@@ -122,20 +122,36 @@
       >
         <div class="grid gap-2 text-xs sm:grid-cols-4">
           <div class="rounded-lg border bg-background px-3 py-2">
-            <div class="text-muted-foreground">号池账号</div>
-            <div class="mt-1 text-base font-semibold tabular-nums">{{ plan.totalKeys }}</div>
+            <div class="text-muted-foreground">
+              号池账号
+            </div>
+            <div class="mt-1 text-base font-semibold tabular-nums">
+              {{ plan.totalKeys }}
+            </div>
           </div>
           <div class="rounded-lg border bg-background px-3 py-2">
-            <div class="text-muted-foreground">代理节点</div>
-            <div class="mt-1 text-base font-semibold tabular-nums">{{ plan.nodeCount }}</div>
+            <div class="text-muted-foreground">
+              代理节点
+            </div>
+            <div class="mt-1 text-base font-semibold tabular-nums">
+              {{ plan.nodeCount }}
+            </div>
           </div>
           <div class="rounded-lg border bg-background px-3 py-2">
-            <div class="text-muted-foreground">单节点上限</div>
-            <div class="mt-1 text-base font-semibold tabular-nums">{{ plan.maxPerNode }}</div>
+            <div class="text-muted-foreground">
+              单节点上限
+            </div>
+            <div class="mt-1 text-base font-semibold tabular-nums">
+              {{ plan.maxPerNode }}
+            </div>
           </div>
           <div class="rounded-lg border bg-background px-3 py-2">
-            <div class="text-muted-foreground">待写入</div>
-            <div class="mt-1 text-base font-semibold tabular-nums">{{ plan.changedCount }}</div>
+            <div class="text-muted-foreground">
+              待写入
+            </div>
+            <div class="mt-1 text-base font-semibold tabular-nums">
+              {{ plan.changedCount }}
+            </div>
           </div>
         </div>
 
@@ -163,8 +179,12 @@
               </div>
             </div>
             <div class="flex flex-wrap items-center gap-2 text-xs">
-              <Badge variant="outline">目标 {{ item.targetCount }}</Badge>
-              <Badge variant="secondary">保留 {{ item.retainedCount }}</Badge>
+              <Badge variant="outline">
+                目标 {{ item.targetCount }}
+              </Badge>
+              <Badge variant="secondary">
+                保留 {{ item.retainedCount }}
+              </Badge>
               <Badge :variant="item.changedCount > 0 ? 'default' : 'outline'">
                 写入 {{ item.changedCount }}
               </Badge>

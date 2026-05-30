@@ -209,6 +209,79 @@ async fn admin_monitoring_trace_request_resolves_usage_request_id_to_metadata_tr
 }
 
 #[tokio::test]
+async fn admin_monitoring_trace_request_falls_back_to_usage_routing_snapshot() {
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::default());
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider()],
+        vec![sample_endpoint()],
+        vec![sample_key()],
+    ));
+    let mut usage = sample_usage(
+        "request-usage-snapshot",
+        "provider-1",
+        "OpenAI",
+        0,
+        0.0,
+        "failed",
+        Some(503),
+        100,
+    );
+    usage.candidate_id = Some("routing-cand-1".to_string());
+    usage.candidate_index = Some(0);
+    usage.planner_kind = Some("openai_responses_stream".to_string());
+    usage.execution_path = Some("local_execution_runtime_miss".to_string());
+    usage.local_execution_runtime_miss_reason = Some("no_local_stream_plans".to_string());
+    usage.api_format = Some("openai:responses".to_string());
+    usage.endpoint_api_format = Some("openai:responses".to_string());
+    usage.provider_api_key_id = Some("provider-key-1".to_string());
+    usage.error_message = Some("no local stream plans".to_string());
+    usage.response_time_ms = Some(45);
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![usage]));
+    let data_state =
+        crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+            request_candidates,
+            usage_repository,
+        )
+        .with_provider_catalog_reader(provider_catalog);
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(data_state);
+    let context = request_context(
+        http::Method::GET,
+        "/api/admin/monitoring/trace/request-usage-snapshot?attempted_only=true",
+    );
+
+    let response = local_monitoring_response(&state, &context)
+        .await
+        .expect("handler should not error")
+        .expect("route should be handled locally");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    assert_eq!(payload["request_id"], json!("request-usage-snapshot"));
+    assert_eq!(payload["total_candidates"], json!(1));
+    assert_eq!(payload["final_status"], json!("failed"));
+    assert_eq!(payload["candidates"][0]["id"], json!("routing-cand-1"));
+    assert_eq!(payload["candidates"][0]["status"], json!("failed"));
+    assert_eq!(
+        payload["candidates"][0]["error_type"],
+        json!("no_local_stream_plans")
+    );
+    assert_eq!(
+        payload["candidates"][0]["extra_data"]["source"],
+        json!("usage_routing_snapshot")
+    );
+    assert_eq!(
+        payload["candidates"][0]["extra_data"]["execution_path"],
+        json!("local_execution_runtime_miss")
+    );
+}
+
+#[tokio::test]
 async fn admin_monitoring_trace_request_returns_oauth_account_label_from_auth_config() {
     let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(vec![
         sample_candidate(

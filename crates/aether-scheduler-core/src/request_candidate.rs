@@ -462,44 +462,32 @@ pub fn build_local_request_candidate_status_record(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
-    let metadata = parse_request_candidate_report_context(report_context)?;
-    let candidate_index = metadata.candidate_index.unwrap_or(0);
-    let extra_data = build_report_candidate_extra_data(ReportCandidateExtraDataInput {
-        client_api_format: metadata.client_api_format.clone(),
-        provider_api_format: metadata.provider_api_format.clone(),
-        request_path: metadata.request_path.clone(),
-        request_query_string: metadata.request_query_string.clone(),
-        request_path_and_query: metadata.request_path_and_query.clone(),
-        upstream_url: metadata.upstream_url.clone(),
-        mapped_model: metadata.mapped_model.clone(),
-        key_name: metadata.key_name.clone(),
-        header_rules: metadata.header_rules.clone(),
-        body_rules: metadata.body_rules.clone(),
-        upstream_response: metadata.upstream_response.clone(),
-        proxy: metadata.proxy.clone(),
-        error_flow: metadata.error_flow.clone(),
-        candidate_group_id: metadata.candidate_group_id.clone(),
-        pool_key_index: metadata.pool_key_index,
-        ranking_mode: metadata.ranking_mode.clone(),
-        priority_mode: metadata.priority_mode.clone(),
-        ranking_index: metadata.ranking_index,
-        priority_slot: metadata.priority_slot,
-        promoted_by: metadata.promoted_by.clone(),
-        demoted_by: metadata.demoted_by.clone(),
-        routing_trace: metadata.routing_trace.clone(),
-    });
+    let metadata = parse_request_candidate_report_context(report_context);
+    let candidate_index = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.candidate_index)
+        .unwrap_or(0);
+    let retry_index = metadata
+        .as_ref()
+        .map(|metadata| metadata.retry_index)
+        .unwrap_or(0);
+    let extra_data = build_local_request_candidate_extra_data(plan, metadata.as_ref());
     let extra_data = mark_request_candidate_stream_completed_if_success(status, extra_data);
     let created_at_unix_ms = started_at_unix_ms.or(finished_at_unix_ms);
 
     Some(UpsertRequestCandidateRecord {
         id: candidate_id.to_string(),
         request_id: plan.request_id.clone(),
-        user_id: metadata.user_id,
-        api_key_id: metadata.api_key_id,
+        user_id: metadata
+            .as_ref()
+            .and_then(|metadata| metadata.user_id.clone()),
+        api_key_id: metadata
+            .as_ref()
+            .and_then(|metadata| metadata.api_key_id.clone()),
         username: None,
         api_key_name: None,
         candidate_index,
-        retry_index: metadata.retry_index,
+        retry_index,
         provider_id: Some(plan.provider_id.clone()),
         endpoint_id: Some(plan.endpoint_id.clone()),
         key_id: Some(plan.key_id.clone()),
@@ -516,6 +504,45 @@ pub fn build_local_request_candidate_status_record(
         created_at_unix_ms,
         started_at_unix_ms,
         finished_at_unix_ms,
+    })
+}
+
+fn build_local_request_candidate_extra_data(
+    plan: &ExecutionPlan,
+    metadata: Option<&SchedulerRequestCandidateReportContext>,
+) -> Option<Value> {
+    build_report_candidate_extra_data(ReportCandidateExtraDataInput {
+        client_api_format: metadata
+            .and_then(|metadata| metadata.client_api_format.clone())
+            .or_else(|| non_empty_string(plan.client_api_format.as_str())),
+        provider_api_format: metadata
+            .and_then(|metadata| metadata.provider_api_format.clone())
+            .or_else(|| non_empty_string(plan.provider_api_format.as_str())),
+        request_path: metadata.and_then(|metadata| metadata.request_path.clone()),
+        request_query_string: metadata.and_then(|metadata| metadata.request_query_string.clone()),
+        request_path_and_query: metadata
+            .and_then(|metadata| metadata.request_path_and_query.clone()),
+        upstream_url: metadata
+            .and_then(|metadata| metadata.upstream_url.clone())
+            .or_else(|| non_empty_string(plan.url.as_str())),
+        mapped_model: metadata
+            .and_then(|metadata| metadata.mapped_model.clone())
+            .or_else(|| plan.model_name.as_deref().and_then(non_empty_string)),
+        key_name: metadata.and_then(|metadata| metadata.key_name.clone()),
+        header_rules: metadata.and_then(|metadata| metadata.header_rules.clone()),
+        body_rules: metadata.and_then(|metadata| metadata.body_rules.clone()),
+        upstream_response: metadata.and_then(|metadata| metadata.upstream_response.clone()),
+        proxy: metadata.and_then(|metadata| metadata.proxy.clone()),
+        error_flow: metadata.and_then(|metadata| metadata.error_flow.clone()),
+        candidate_group_id: metadata.and_then(|metadata| metadata.candidate_group_id.clone()),
+        pool_key_index: metadata.and_then(|metadata| metadata.pool_key_index),
+        ranking_mode: metadata.and_then(|metadata| metadata.ranking_mode.clone()),
+        priority_mode: metadata.and_then(|metadata| metadata.priority_mode.clone()),
+        ranking_index: metadata.and_then(|metadata| metadata.ranking_index),
+        priority_slot: metadata.and_then(|metadata| metadata.priority_slot),
+        promoted_by: metadata.and_then(|metadata| metadata.promoted_by.clone()),
+        demoted_by: metadata.and_then(|metadata| metadata.demoted_by.clone()),
+        routing_trace: metadata.and_then(|metadata| metadata.routing_trace.clone()),
     })
 }
 
@@ -635,6 +662,11 @@ fn string_field_from_object(object: &Map<String, Value>, key: &str) -> Option<St
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn u32_field(value: &Value, key: &str) -> Option<u32> {
@@ -1275,6 +1307,52 @@ mod tests {
                 .and_then(|value| value.get("routing_trace"))
                 .and_then(|value| value.get("group_id")),
             Some(&json!("routing-group-1"))
+        );
+    }
+
+    #[test]
+    fn builds_local_request_candidate_status_record_without_report_context() {
+        let mut plan = sample_plan();
+        plan.candidate_id = Some("cand-plan-only".to_string());
+
+        let record =
+            build_local_request_candidate_status_record(LocalRequestCandidateStatusRecordInput {
+                plan: &plan,
+                report_context: None,
+                status_update: SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Failed,
+                    status_code: Some(401),
+                    error_type: Some("Unauthorized".to_string()),
+                    error_message: Some("oauth refresh failed".to_string()),
+                    latency_ms: Some(12),
+                    started_at_unix_ms: Some(1_000),
+                    finished_at_unix_ms: Some(1_012),
+                },
+            })
+            .expect("record should build from plan fields");
+
+        assert_eq!(record.id, "cand-plan-only");
+        assert_eq!(record.request_id, "req-1");
+        assert_eq!(record.candidate_index, 0);
+        assert_eq!(record.retry_index, 0);
+        assert_eq!(record.provider_id.as_deref(), Some("provider-1"));
+        assert_eq!(record.endpoint_id.as_deref(), Some("endpoint-1"));
+        assert_eq!(record.key_id.as_deref(), Some("key-1"));
+        assert_eq!(record.status, RequestCandidateStatus::Failed);
+        assert_eq!(record.status_code, Some(401));
+        assert_eq!(
+            record
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("client_api_format")),
+            Some(&json!("openai:chat"))
+        );
+        assert_eq!(
+            record
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("upstream_url")),
+            Some(&json!("https://example.com/v1/chat/completions"))
         );
     }
 

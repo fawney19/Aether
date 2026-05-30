@@ -99,6 +99,7 @@ pub fn canonical_usage_from_openai_usage(value: Option<&Value>) -> Option<Canoni
     }
     Some(CanonicalUsage {
         input_tokens,
+        input_tokens_include_cache: cache_read_tokens > 0 || cache_creation_tokens > 0,
         output_tokens,
         total_tokens,
         cache_creation_tokens,
@@ -247,6 +248,7 @@ pub fn canonical_usage_from_claude_usage(value: Option<&Value>) -> Option<Canoni
         .unwrap_or(0);
     Some(CanonicalUsage {
         input_tokens,
+        input_tokens_include_cache: false,
         output_tokens,
         total_tokens: input_tokens
             .saturating_add(output_tokens)
@@ -314,22 +316,27 @@ pub fn canonical_usage_from_gemini_usage(value: Option<&Value>) -> Option<Canoni
     let usage = value?.as_object()?;
     let input_tokens = usage
         .get("promptTokenCount")
+        .or_else(|| usage.get("prompt_token_count"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let output_tokens = usage
         .get("candidatesTokenCount")
+        .or_else(|| usage.get("candidates_token_count"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let reasoning_tokens = usage
         .get("thoughtsTokenCount")
+        .or_else(|| usage.get("thoughts_token_count"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let cache_read_tokens = usage
         .get("cachedContentTokenCount")
+        .or_else(|| usage.get("cached_content_token_count"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let total_tokens = usage
         .get("totalTokenCount")
+        .or_else(|| usage.get("total_token_count"))
         .and_then(Value::as_u64)
         .unwrap_or(
             input_tokens
@@ -338,6 +345,7 @@ pub fn canonical_usage_from_gemini_usage(value: Option<&Value>) -> Option<Canoni
         );
     Some(CanonicalUsage {
         input_tokens,
+        input_tokens_include_cache: cache_read_tokens > 0,
         output_tokens: output_tokens.saturating_add(reasoning_tokens),
         total_tokens,
         cache_read_tokens,
@@ -490,12 +498,13 @@ pub fn build_openai_chat_usage_chunk_from_usage(
     model: &str,
     usage: &CanonicalUsage,
 ) -> Value {
+    let input_tokens = inclusive_input_tokens_from_usage(usage);
     build_openai_chat_usage_chunk_with_cache(
         id,
         model,
-        usage.input_tokens,
+        input_tokens,
         usage.output_tokens,
-        usage.total_tokens,
+        inclusive_total_tokens_from_usage(usage, input_tokens),
         usage.reasoning_tokens,
         cache_creation_tokens_for_usage(usage),
         usage.cache_read_tokens,
@@ -504,12 +513,16 @@ pub fn build_openai_chat_usage_chunk_from_usage(
 
 pub fn openai_responses_usage_from_usage(usage: &CanonicalUsage) -> Value {
     let mut output = Map::new();
-    output.insert("input_tokens".to_string(), Value::from(usage.input_tokens));
+    let input_tokens = inclusive_input_tokens_from_usage(usage);
+    output.insert("input_tokens".to_string(), Value::from(input_tokens));
     output.insert(
         "output_tokens".to_string(),
         Value::from(usage.output_tokens),
     );
-    output.insert("total_tokens".to_string(), Value::from(usage.total_tokens));
+    output.insert(
+        "total_tokens".to_string(),
+        Value::from(inclusive_total_tokens_from_usage(usage, input_tokens)),
+    );
     if usage.reasoning_tokens > 0 {
         output.insert(
             "output_tokens_details".to_string(),
@@ -527,7 +540,10 @@ pub fn openai_responses_usage_from_usage(usage: &CanonicalUsage) -> Value {
 
 pub fn claude_usage_from_usage(usage: &CanonicalUsage) -> Value {
     let mut output = Map::new();
-    output.insert("input_tokens".to_string(), Value::from(usage.input_tokens));
+    output.insert(
+        "input_tokens".to_string(),
+        Value::from(claude_input_tokens_from_usage(usage)),
+    );
     output.insert(
         "output_tokens".to_string(),
         Value::from(usage.output_tokens),
@@ -560,18 +576,16 @@ pub fn claude_usage_from_usage(usage: &CanonicalUsage) -> Value {
 
 pub fn gemini_usage_metadata_from_usage(usage: &CanonicalUsage) -> Value {
     let visible_output_tokens = usage.output_tokens.saturating_sub(usage.reasoning_tokens);
+    let input_tokens = inclusive_input_tokens_from_usage(usage);
     let mut output = Map::new();
-    output.insert(
-        "promptTokenCount".to_string(),
-        Value::from(usage.input_tokens),
-    );
+    output.insert("promptTokenCount".to_string(), Value::from(input_tokens));
     output.insert(
         "candidatesTokenCount".to_string(),
         Value::from(visible_output_tokens),
     );
     output.insert(
         "totalTokenCount".to_string(),
-        Value::from(usage.total_tokens),
+        Value::from(inclusive_total_tokens_from_usage(usage, input_tokens)),
     );
     if usage.reasoning_tokens > 0 {
         output.insert(
@@ -647,5 +661,41 @@ fn cache_creation_tokens_for_usage(usage: &CanonicalUsage) -> u64 {
         usage
             .cache_creation_ephemeral_5m_tokens
             .saturating_add(usage.cache_creation_ephemeral_1h_tokens)
+    }
+}
+
+fn cache_input_tokens_for_usage(usage: &CanonicalUsage) -> u64 {
+    usage
+        .cache_read_tokens
+        .saturating_add(cache_creation_tokens_for_usage(usage))
+}
+
+fn claude_input_tokens_from_usage(usage: &CanonicalUsage) -> u64 {
+    if usage.input_tokens_include_cache {
+        usage
+            .input_tokens
+            .saturating_sub(cache_input_tokens_for_usage(usage))
+    } else {
+        usage.input_tokens
+    }
+}
+
+fn inclusive_input_tokens_from_usage(usage: &CanonicalUsage) -> u64 {
+    if usage.input_tokens_include_cache {
+        usage.input_tokens
+    } else {
+        usage
+            .input_tokens
+            .saturating_add(cache_input_tokens_for_usage(usage))
+    }
+}
+
+fn inclusive_total_tokens_from_usage(usage: &CanonicalUsage, input_tokens: u64) -> u64 {
+    if usage.total_tokens > 0
+        && (usage.input_tokens_include_cache || cache_input_tokens_for_usage(usage) == 0)
+    {
+        usage.total_tokens
+    } else {
+        input_tokens.saturating_add(usage.output_tokens)
     }
 }

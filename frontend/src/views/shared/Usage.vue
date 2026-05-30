@@ -100,6 +100,7 @@
       :total-records="effectiveTotalRecords"
       :page-size-options="pageSizeOptions"
       :auto-refresh="globalAutoRefresh"
+      :hide-unknown-records="hideUnknownRecords"
       @update:time-range="handleTimeRangeChange"
       @update:filter-search="handleFilterSearchChange"
       @update:filter-user="handleFilterUserChange"
@@ -111,6 +112,7 @@
       @update:current-page="handlePageChange"
       @update:page-size="handlePageSizeChange"
       @update:auto-refresh="handleAutoRefreshChange"
+      @update:hide-unknown-records="handleHideUnknownRecordsChange"
       @refresh="handleManualRefresh"
       @prefetch-detail="prefetchRequestDetail"
       @show-detail="showRequestDetail"
@@ -148,6 +150,8 @@ import {
   IntervalTimelineCard
 } from '@/features/usage/components'
 import {
+  provideActiveElapsedDisplayClock,
+  useActiveElapsedDisplayClock,
   useUsageData,
   getDateRangeFromPeriod
 } from '@/features/usage/composables'
@@ -159,7 +163,7 @@ import {
   normalizeRequestStatus,
   resolveDisplayRequestStatus,
 } from '@/features/usage/utils/status'
-import type { DateRangeParams, FilterStatusValue, RequestStatus } from '@/features/usage/types'
+import type { DateRangeParams, FilterStatusValue, RequestStatus, UsageRecord } from '@/features/usage/types'
 import type { UserOption } from '@/features/usage/components/UsageRecordsTable.vue'
 import { log } from '@/utils/logger'
 import type { ActivityHeatmap } from '@/types/activity'
@@ -174,6 +178,7 @@ const isAdminPage = computed(() => route.path.startsWith('/admin'))
 
 // 用量分析面板折叠状态（默认展开，持久化到 localStorage）
 const statsExpanded = useLocalStorage('usage-stats-expanded', true)
+const hideUnknownRecords = useLocalStorage('usage-hide-unknown-records', false)
 
 // 时间范围选择
 const timeRange = ref<DateRangeParams>(
@@ -246,7 +251,10 @@ const {
   availableModels,
   availableProviders,
   loadStats,
-  loadRecords
+  loadRecords,
+  serverClockOffsetMs,
+  hasServerClockOffset,
+  updateServerClockOffset
 } = useUsageData({ isAdminPage })
 
 // 热力图状态
@@ -359,11 +367,25 @@ async function refreshAdminAnalyticsForSelectionChange() {
   await refreshAdminAnalytics({ force: true, preserveOnFailure: false })
 }
 
-// 用户页面需要前端筛选
-const filteredRecords = computed(() => {
-  if (!isAdminPage.value) {
-    let records = [...currentRecords.value]
+function isUnknownUsageLabel(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  const normalized = value.trim().toLowerCase()
+  return normalized === 'unknown' || normalized === 'unknow'
+}
 
+function hasUnknownModelOrProvider(record: UsageRecord): boolean {
+  if (isUnknownUsageLabel(record.model)) return true
+  if (isUnknownUsageLabel(record.provider)) return true
+  return false
+}
+
+// 用户页面需要前端筛选；隐藏 unknown 的开关对管理员当前页也生效。
+const filteredRecords = computed(() => {
+  let records = hideUnknownRecords.value
+    ? currentRecords.value.filter(record => !hasUnknownModelOrProvider(record))
+    : [...currentRecords.value]
+
+  if (!isAdminPage.value) {
     if (filterModel.value !== '__all__') {
       records = records.filter(record => record.model === filterModel.value)
     }
@@ -409,7 +431,7 @@ const filteredRecords = computed(() => {
 
     return records
   }
-  return currentRecords.value
+  return records
 })
 
 // 获取活跃请求的 ID 列表
@@ -434,6 +456,7 @@ const AUTO_REFRESH_INTERVAL = 1000 // 1秒刷新一次（用于活跃请求）
 const ACTIVE_DISCOVERY_HOT_INTERVAL = 1000 // 有活跃请求时 1 秒扫描一次
 const ACTIVE_DISCOVERY_IDLE_INTERVAL = 5000 // 空闲时降频，避免后台持续刷日志
 const GLOBAL_AUTO_REFRESH_INTERVAL = 3000 // 3秒刷新一次（全局自动刷新）
+const ACTIVE_ELAPSED_DISPLAY_INTERVAL = 250 // 共享显示时钟，避免每行单独动画
 const globalAutoRefresh = ref(false) // 全局自动刷新开关（默认关闭）
 const isPageVisible = ref(typeof document === 'undefined' ? true : !document.hidden)
 
@@ -445,10 +468,14 @@ const discoveredActiveRequestIds = new Set<string>()
 
 async function loadActiveRequestUpdates(ids?: string[]) {
   if (isAdminPage.value) {
-    return usageApi.getActiveRequests(ids, timeRange.value)
+    const result = await usageApi.getActiveRequests(ids, timeRange.value)
+    updateServerClockOffset(result.server_timing)
+    return result
   }
   const idsParam = ids?.length ? ids.join(',') : undefined
-  return meApi.getActiveRequests(idsParam)
+  const result = await meApi.getActiveRequests(idsParam)
+  updateServerClockOffset(result.server_timing)
+  return result
 }
 
 async function pollActiveRequests() {
@@ -708,14 +735,24 @@ function handleAutoRefreshChange(value: boolean) {
   }
 }
 
+async function handleHideUnknownRecordsChange(value: boolean) {
+  hideUnknownRecords.value = value
+  currentPage.value = 1
+  if (isAdminPage.value) {
+    await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters(), timeRange.value)
+  }
+}
+
 function handleVisibilityChange() {
   isPageVisible.value = !document.hidden
   if (!isPageVisible.value) {
     stopAutoRefresh()
     stopActiveDiscovery()
     stopGlobalAutoRefresh()
+    stopActiveElapsedDisplayTimer()
     return
   }
+  syncActiveElapsedDisplayTimer()
   if (hasActiveRequests.value) {
     startAutoRefresh()
   }
@@ -732,6 +769,7 @@ onUnmounted(() => {
   stopAutoRefresh()
   stopActiveDiscovery()
   stopGlobalAutoRefresh()
+  stopActiveElapsedDisplayClock()
 })
 
 // 用户页面的前端分页（后端一次性返回所有记录，前端分页+筛选）
@@ -741,7 +779,7 @@ const paginatedRecords = computed(() => {
     const end = start + pageSize.value
     return filteredRecords.value.slice(start, end)
   }
-  return currentRecords.value
+  return filteredRecords.value
 })
 
 // 用户页面使用前端筛选后的总数，管理员页面使用后端返回的总数
@@ -754,6 +792,21 @@ const effectiveTotalRecords = computed(() => {
 
 // 显示的记录
 const displayRecords = computed(() => paginatedRecords.value)
+
+const {
+  calibratedDisplayNowMs,
+  stopActiveElapsedDisplayTimer,
+  syncActiveElapsedDisplayTimer,
+  stopActiveElapsedDisplayClock,
+} = useActiveElapsedDisplayClock({
+  records: displayRecords,
+  isPageVisible,
+  serverClockOffsetMs,
+  hasServerClockOffset,
+  resolveStatus: resolveDisplayRequestStatus,
+  intervalMs: ACTIVE_ELAPSED_DISPLAY_INTERVAL,
+})
+provideActiveElapsedDisplayClock(calibratedDisplayNowMs)
 
 const availableClientFamilies = computed(() => {
   const families = new Set<string>()
@@ -848,7 +901,8 @@ function getCurrentFilters() {
     provider: filterProvider.value !== '__all__' ? filterProvider.value : undefined,
     api_format: filterApiFormat.value !== '__all__' ? filterApiFormat.value : undefined,
     status: filterStatus.value !== '__all__' ? filterStatus.value : undefined,
-    client_family: filterClientFamily.value !== '__all__' ? filterClientFamily.value : undefined
+    client_family: filterClientFamily.value !== '__all__' ? filterClientFamily.value : undefined,
+    hideUnknownRecords: hideUnknownRecords.value || undefined
   }
 }
 

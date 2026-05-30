@@ -15,7 +15,7 @@ use crate::ai_serving::{
     ANTIGRAVITY_V1INTERNAL_ENVELOPE_NAME, GEMINI_CHAT_SYNC_FINALIZE_REPORT_KIND,
     OPENAI_IMAGE_SYNC_FINALIZE_REPORT_KIND,
 };
-use crate::clock::current_unix_ms;
+use crate::clock::{current_unix_ms, current_unix_secs};
 use crate::execution_runtime;
 use crate::handlers::admin::provider::shared::model_test_capabilities::{
     admin_provider_model_supports_image_generation, admin_provider_model_test_capabilities_payload,
@@ -64,7 +64,7 @@ use aether_data_contracts::repository::provider_catalog::{
 };
 use aether_model_fetch::{
     aggregate_models_for_cache, fetch_models_from_transports, json_string_list,
-    preset_models_for_provider, selected_models_fetch_endpoints,
+    merge_upstream_metadata, preset_models_for_provider, selected_models_fetch_endpoints,
 };
 use axum::{
     body::{to_bytes, Body},
@@ -515,6 +515,18 @@ async fn provider_query_fetch_models_for_key(
             &unique_models,
         )
         .await;
+    }
+    if let Some(upstream_metadata) = outcome.upstream_metadata.as_ref() {
+        let merged_metadata =
+            merge_upstream_metadata(key.upstream_metadata.as_ref(), upstream_metadata);
+        state
+            .app()
+            .update_provider_catalog_key_upstream_metadata(
+                &key.id,
+                Some(&merged_metadata),
+                Some(current_unix_secs()),
+            )
+            .await?;
     }
 
     if unique_models.is_empty() && !all_errors.is_empty() {

@@ -308,7 +308,7 @@ async fn run_sync_redaction_case_with_system_config(
     let seen_provider_request = Arc::new(Mutex::new(None::<SeenProviderRequest>));
     let seen_provider_request_clone = Arc::clone(&seen_provider_request);
     let provider_app = Router::new().route(
-        "/v1/chat/completions",
+        "/chat/completions",
         any(move |request: Request| {
             let seen_provider_request_inner = Arc::clone(&seen_provider_request_clone);
             async move {
@@ -631,7 +631,7 @@ async fn ai_execute_pii_redaction_restores_executed_candidate_session_after_late
     let seen_provider_request = Arc::new(Mutex::new(None::<SeenProviderRequest>));
     let seen_provider_request_clone = Arc::clone(&seen_provider_request);
     let provider_app = Router::new().route(
-        "/v1/chat/completions",
+        "/chat/completions",
         any(move |request: Request| {
             let seen_provider_request_inner = Arc::clone(&seen_provider_request_clone);
             async move {

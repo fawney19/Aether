@@ -175,6 +175,34 @@ describe('poolTrace', () => {
     expect(attempts[1].extra_data?.pool_group_id).toBe('provider-1')
   })
 
+  it('infers pool membership from runtime pool key metadata', () => {
+    const attempts = buildPoolParticipatedCandidates([
+      buildCandidate({
+        id: 'cand-pool-skipped',
+        candidate_index: 0,
+        provider_id: 'provider-1',
+        provider_name: 'CodexFree2',
+        key_id: 'pool-group',
+        key_name: 'CodexFree2',
+        status: 'skipped',
+        extra_data: { pool_group_id: 'provider-1' },
+      }),
+      buildCandidate({
+        id: 'cand-pool-success',
+        candidate_index: 1,
+        provider_id: 'provider-1',
+        provider_name: 'CodexFree2',
+        key_id: 'key-success',
+        key_name: 'Success Key',
+        status: 'success',
+        extra_data: { pool_key_index: 0 },
+      }),
+    ], null, 'req-1')
+
+    expect(attempts).toHaveLength(2)
+    expect(attempts.map(item => item.key_id)).toEqual(['pool-group', 'key-success'])
+  })
+
   it('treats only real execution statuses as attempted', () => {
     expect(isAttemptedCandidate(buildCandidate({ status: 'success' }))).toBe(true)
     expect(isAttemptedCandidate(buildCandidate({ status: 'failed' }))).toBe(true)

@@ -156,6 +156,7 @@ pub(super) fn classify_public_support_route(
                 | "/api/public/stats"
                 | "/api/public/global-models"
                 | "/api/public/health/api-formats"
+                | "/api/public/health/models"
         )
     {
         let route_kind = match normalized_path {
@@ -166,6 +167,7 @@ pub(super) fn classify_public_support_route(
             "/api/public/stats" => "stats",
             "/api/public/global-models" => "global_models",
             "/api/public/health/api-formats" => "health_api_formats",
+            "/api/public/health/models" => "health_models",
             _ => "site_info",
         };
         Some(classified(

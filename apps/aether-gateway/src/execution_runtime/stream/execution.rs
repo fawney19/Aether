@@ -6109,9 +6109,7 @@ mod tests {
                 .await
                 .expect("usage should read");
             if usage.as_ref().is_some_and(|usage| {
-                usage.status == "streaming"
-                    && usage.response_time_ms == Some(12)
-                    && usage.first_byte_time_ms.is_some()
+                usage.status == "streaming" && usage.first_byte_time_ms.is_some()
             }) {
                 break usage.expect("streaming usage should exist");
             }
@@ -6122,7 +6120,6 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
         assert!(first_event_usage.first_byte_time_ms.is_some());
-        assert_eq!(first_event_usage.response_time_ms, Some(12));
 
         release_text.notify_one();
         text_seen.notified().await;

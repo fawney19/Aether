@@ -413,4 +413,9 @@ mod tests {
         assert!(low.desired_hot >= PROVIDER_POOL_DEMAND_FLOOR);
         assert!(low.desired_hot < high.desired_hot);
     }
+
+    #[test]
+    fn desired_hot_without_provider_limit_is_capped_by_active_keys() {
+        assert_eq!(provider_pool_desired_hot(100, 100.0, 37, usize::MAX), 37);
+    }
 }

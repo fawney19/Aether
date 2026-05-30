@@ -439,6 +439,7 @@ mod tests {
                 expires_at_unix_secs: None,
                 proxy: None,
                 fingerprint: None,
+                upstream_metadata: None,
                 decrypted_api_key: "sk-upstream".to_string(),
                 decrypted_auth_config: None,
             },
@@ -485,6 +486,46 @@ mod tests {
                 candidate: sample_candidate(api_format, endpoint_id),
                 transport: Arc::new(sample_transport(api_format, endpoint_id)),
                 provider_api_format: api_format.to_string(),
+                orchestration: LocalExecutionCandidateMetadata::default(),
+                ranking: None,
+            },
+            candidate_index,
+            retry_index: 0,
+            candidate_id: format!("candidate-{candidate_index}"),
+        }
+    }
+
+    fn sample_gemini_cli_attempt(candidate_index: u32) -> LocalExecutionCandidateAttempt {
+        let mut transport = sample_transport("gemini:generate_content", "endpoint-gemini-cli");
+        transport.provider.provider_type = "gemini_cli".to_string();
+        transport.provider.name = "gemini".to_string();
+        transport.endpoint.base_url = "https://cloudcode-pa.googleapis.com".to_string();
+        transport.endpoint.custom_path = Some("/v1internal:{action}".to_string());
+        transport.endpoint.endpoint_kind = Some("generate_content".to_string());
+        transport.key.auth_type = "bearer".to_string();
+        transport.key.api_formats = Some(vec!["gemini:generate_content".to_string()]);
+        transport.key.global_priority_by_format = Some(json!({
+            "gemini:generate_content": 1,
+        }));
+        transport.key.upstream_metadata = Some(json!({
+            "gemini_cli": {
+                "project_id": "test-project"
+            }
+        }));
+
+        let mut candidate = sample_candidate("gemini:generate_content", "endpoint-gemini-cli");
+        candidate.provider_name = "gemini".to_string();
+        candidate.provider_type = "gemini_cli".to_string();
+        candidate.key_auth_type = "bearer".to_string();
+        candidate.selected_provider_model_name = "gemini-2.5-pro".to_string();
+        candidate.global_model_name = "gemini-2.5-pro".to_string();
+
+        LocalExecutionCandidateAttempt {
+            eligible: EligibleLocalExecutionCandidate {
+                kind: LocalExecutionCandidateKind::SingleKey,
+                candidate,
+                transport: Arc::new(transport),
+                provider_api_format: "gemini:generate_content".to_string(),
                 orchestration: LocalExecutionCandidateMetadata::default(),
                 ranking: None,
             },
@@ -583,6 +624,92 @@ mod tests {
         assert_eq!(
             cross_format_payload.conversion_mode.as_deref(),
             Some("bidirectional")
+        );
+    }
+
+    #[tokio::test]
+    async fn standard_family_wraps_gemini_cli_cross_format_body_in_v1internal_envelope() {
+        let state = crate::AppState::new().expect("state should build");
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(())
+            .expect("request should build");
+        let (parts, _) = request.into_parts();
+        let body_json = json!({
+            "model": "gemini-2.5-pro",
+            "messages": [{"role": "user", "content": "hello"}],
+            "temperature": 0.2,
+            "stream": true
+        });
+        let mut input = sample_input();
+        input.requested_model = "gemini-2.5-pro".to_string();
+        let spec = LocalStandardSpec {
+            api_format: "openai:chat",
+            decision_kind: "openai_chat_stream",
+            report_kind: "openai_chat_stream_success",
+            family: LocalStandardSourceFamily::Standard,
+            mode: LocalStandardSourceMode::Chat,
+            require_streaming: true,
+        };
+
+        let payload = maybe_build_local_standard_decision_payload_for_candidate(
+            &state,
+            &parts,
+            "trace-gemini-cli-cross-format",
+            &body_json,
+            &input,
+            sample_gemini_cli_attempt(0),
+            spec,
+        )
+        .await
+        .expect("cross-format candidate should not fail routing mutation")
+        .expect("gemini_cli candidate should build a payload");
+
+        assert_eq!(
+            payload.upstream_url.as_deref(),
+            Some("https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse")
+        );
+        assert_eq!(
+            payload.execution_strategy.as_deref(),
+            Some("local_cross_format")
+        );
+        assert_eq!(
+            payload.provider_api_format.as_deref(),
+            Some("gemini:generate_content")
+        );
+        assert_eq!(
+            payload
+                .provider_request_headers
+                .get("user-agent")
+                .map(String::as_str),
+            Some(crate::ai_serving::transport::GEMINI_CLI_USER_AGENT)
+        );
+
+        let provider_body = payload
+            .provider_request_body
+            .as_ref()
+            .expect("provider request body should be present");
+        assert_eq!(provider_body["model"], "gemini-2.5-pro");
+        assert_eq!(provider_body["project"], "test-project");
+        assert_eq!(
+            provider_body["user_prompt_id"],
+            "trace-gemini-cli-cross-format"
+        );
+        assert!(provider_body.get("contents").is_none());
+        assert!(provider_body.get("generationConfig").is_none());
+        assert!(provider_body["request"].get("contents").is_some());
+
+        let report_context = payload
+            .report_context
+            .as_ref()
+            .expect("report context should be present");
+        assert_eq!(
+            report_context
+                .get("envelope_name")
+                .and_then(|value| value.as_str()),
+            Some(crate::ai_serving::transport::GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME)
         );
     }
 }

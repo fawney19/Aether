@@ -304,7 +304,7 @@ fn assert_embedding_execution_plan(plan: &ExecutionPlan) {
     assert_eq!(plan.client_api_format, "openai:embedding");
     assert_eq!(plan.provider_api_format, "openai:embedding");
     assert_eq!(plan.method, "POST");
-    assert_eq!(plan.url, "https://api.openai.example/v1/embeddings");
+    assert_eq!(plan.url, "https://api.openai.example/embeddings");
     assert_eq!(plan.model_name.as_deref(), Some("text-embedding-3-small"));
     let body = plan.body.json_body.as_ref().expect("json request body");
     assert_eq!(body["model"], "upstream-embedding");

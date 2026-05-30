@@ -1359,6 +1359,209 @@ async fn gateway_refresh_kiro_quota_reconciles_missing_fixed_endpoint_before_ref
 }
 
 #[tokio::test]
+async fn gateway_refreshes_admin_provider_quota_locally_for_gemini_cli_with_trusted_admin_principal(
+) {
+    #[derive(Debug, Clone)]
+    struct SeenExecutionRuntimeRequest {
+        url: String,
+        authorization: String,
+        provider_api_format: String,
+        request_body: Option<serde_json::Value>,
+    }
+
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/api/admin/endpoints/providers/provider-gemini-cli/refresh-quota",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }
+        }),
+    );
+
+    let seen_execution_runtime = Arc::new(Mutex::new(None::<SeenExecutionRuntimeRequest>));
+    let seen_execution_runtime_clone = Arc::clone(&seen_execution_runtime);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |request: Request| {
+            let seen_execution_runtime_inner = Arc::clone(&seen_execution_runtime_clone);
+            async move {
+                let plan: aether_contracts::ExecutionPlan = serde_json::from_slice(
+                    &to_bytes(request.into_body(), usize::MAX)
+                        .await
+                        .expect("body should read"),
+                )
+                .expect("plan should parse");
+                *seen_execution_runtime_inner
+                    .lock()
+                    .expect("mutex should lock") = Some(SeenExecutionRuntimeRequest {
+                    url: plan.url.clone(),
+                    authorization: plan
+                        .headers
+                        .get("authorization")
+                        .cloned()
+                        .unwrap_or_default(),
+                    provider_api_format: plan.provider_api_format.clone(),
+                    request_body: plan.body.json_body.clone(),
+                });
+                let result = aether_contracts::ExecutionResult {
+                    request_id: plan.request_id,
+                    candidate_id: None,
+                    status_code: 200,
+                    headers: BTreeMap::new(),
+                    body: Some(aether_contracts::ResponseBody {
+                        json_body: Some(json!({
+                            "buckets": [
+                                {
+                                    "modelId": "gemini-2.5-pro",
+                                    "tokenType": "model",
+                                    "displayName": "Gemini 2.5 Pro",
+                                    "remainingFraction": 0.25,
+                                    "resetTime": "2030-01-01T00:00:00Z",
+                                    "isExhausted": false
+                                },
+                                {
+                                    "modelId": "gemini-2.5-flash",
+                                    "tokenType": "model",
+                                    "displayName": "Gemini 2.5 Flash",
+                                    "quotaInfo": {
+                                        "remainingFraction": 0.0,
+                                        "resetTime": "2030-01-01T01:00:00Z",
+                                        "isExhausted": true
+                                    }
+                                }
+                            ]
+                        })),
+                        body_bytes_b64: None,
+                    }),
+                    telemetry: None,
+                    error: None,
+                };
+                (StatusCode::OK, Json(result))
+            }
+        }),
+    );
+
+    let mut key = sample_key(
+        "key-gemini-cli-quota",
+        "provider-gemini-cli",
+        "gemini:generate_content",
+        "cached-gemini-cli-token",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"gemini_cli","project_id":"gemini-cli-project-1"}"#,
+        )
+        .expect("auth config should encrypt"),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![StoredProviderCatalogProvider::new(
+            "provider-gemini-cli".to_string(),
+            "gemini_cli".to_string(),
+            Some("https://example.com".to_string()),
+            "gemini_cli".to_string(),
+        )
+        .expect("provider should build")],
+        vec![sample_endpoint(
+            "endpoint-gemini-cli-quota",
+            "provider-gemini-cli",
+            "gemini:generate_content",
+            "https://cloudcode-pa.googleapis.com",
+        )],
+        vec![key],
+    ));
+
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url.clone())
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/endpoints/providers/provider-gemini-cli/refresh-quota"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], 1);
+    assert_eq!(payload["failed"], 0);
+    assert_eq!(payload["results"][0]["status"], "success");
+    assert_eq!(
+        payload["results"][0]["quota_snapshot"]["provider_type"],
+        "gemini_cli"
+    );
+    assert_eq!(
+        payload["results"][0]["quota_snapshot"]["windows"][0]["model"],
+        "gemini-2.5-pro"
+    );
+
+    let seen_request = seen_execution_runtime
+        .lock()
+        .expect("mutex should lock")
+        .clone()
+        .expect("execution runtime request should be captured");
+    assert_eq!(
+        seen_request.url,
+        "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+    );
+    assert_eq!(seen_request.authorization, "Bearer cached-gemini-cli-token");
+    assert_eq!(
+        seen_request.provider_api_format,
+        "gemini_cli:retrieve_user_quota"
+    );
+    assert_eq!(
+        seen_request.request_body,
+        Some(json!({
+            "project": "gemini-cli-project-1"
+        }))
+    );
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    let reloaded = provider_catalog_repository
+        .list_keys_by_ids(&["key-gemini-cli-quota".to_string()])
+        .await
+        .expect("keys should read");
+    assert_eq!(reloaded.len(), 1);
+    let upstream_metadata = reloaded[0]
+        .upstream_metadata
+        .as_ref()
+        .expect("upstream metadata should persist");
+    assert_eq!(
+        upstream_metadata["gemini_cli"]["quota_by_model"]["gemini-2.5-pro"]["remaining_fraction"],
+        json!(0.25)
+    );
+    assert_eq!(
+        upstream_metadata["gemini_cli"]["quota_by_model"]["gemini-2.5-flash"]["is_exhausted"],
+        json!(true)
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_refresh_quota_reconciles_unsupported_fixed_provider_endpoints_before_clear_message(
 ) {
     let cases = [
@@ -1369,14 +1572,6 @@ async fn gateway_refresh_quota_reconciles_unsupported_fixed_provider_endpoints_b
             "claude:messages",
             "https://api.anthropic.com",
             "Claude Code 暂不支持自动刷新额度",
-        ),
-        (
-            "provider-gemini-cli-reconcile",
-            "gemini_cli",
-            1usize,
-            "gemini:generate_content",
-            "https://cloudcode-pa.googleapis.com",
-            "Gemini CLI 暂不支持自动刷新额度",
         ),
         (
             "provider-vertex-ai-reconcile",

@@ -165,6 +165,11 @@ const FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS: &[FixedProviderEndpointConfigDefaul
         key: "upstream_stream_policy",
         value: FixedProviderEndpointConfigValue::String("force_stream"),
     }];
+const AUTO_STREAM_ENDPOINT_CONFIG_DEFAULTS: &[FixedProviderEndpointConfigDefault] =
+    &[FixedProviderEndpointConfigDefault {
+        key: "upstream_stream_policy",
+        value: FixedProviderEndpointConfigValue::String("auto"),
+    }];
 
 const STANDARD_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy::standard();
 const CUSTOM_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
@@ -332,13 +337,13 @@ const KIRO_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplat
 
 const GEMINI_CLI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
     provider_type: "gemini_cli",
-    version: 1,
+    version: 3,
     base_url: "https://cloudcode-pa.googleapis.com",
     endpoints: &[FixedProviderEndpointTemplate {
         item_key: "gemini:generate_content",
         api_format: "gemini:generate_content",
-        custom_path: None,
-        config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+        custom_path: Some("/v1internal:{action}"),
+        config_defaults: AUTO_STREAM_ENDPOINT_CONFIG_DEFAULTS,
     }],
     runtime_policy: GEMINI_CLI_RUNTIME_POLICY,
 };
@@ -711,6 +716,30 @@ mod tests {
         assert!(!template.runtime_policy.supports_model_fetch);
         assert!(!template.runtime_policy.supports_local_openai_chat_transport);
         assert!(!template.runtime_policy.supports_local_same_format_transport);
+    }
+
+    #[test]
+    fn gemini_cli_fixed_provider_template_uses_v1internal_endpoint_path() {
+        let template =
+            fixed_provider_template("gemini_cli").expect("gemini_cli template should exist");
+        assert_eq!(template.base_url, "https://cloudcode-pa.googleapis.com");
+        assert_eq!(template.version, 3);
+
+        let endpoint =
+            fixed_provider_endpoint_template_by_api_format("gemini_cli", "gemini:generate_content")
+                .expect("gemini_cli generateContent endpoint should exist");
+        assert_eq!(endpoint.custom_path, Some("/v1internal:{action}"));
+        assert_eq!(
+            endpoint
+                .config_defaults
+                .iter()
+                .map(|item| (item.key, item.value))
+                .collect::<Vec<_>>(),
+            vec![(
+                "upstream_stream_policy",
+                FixedProviderEndpointConfigValue::String("auto")
+            )]
+        );
     }
 
     #[test]

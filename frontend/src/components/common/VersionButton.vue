@@ -345,9 +345,6 @@ import { sanitizeMarkdown } from '@/utils/sanitize'
 import { marked } from 'marked'
 import { ChevronRight, ExternalLink, Info, RefreshCw } from 'lucide-vue-next'
 
-const SOURCE_BUILD_UPDATE_HINT = '当前为源码构建，请使用 git pull 后重新编译。'
-const SOURCE_BUILD_RELEASE_HINT = '当前为源码构建，请手动切换到对应标签后重新编译。'
-
 const props = defineProps<{
   status: CheckUpdateResponse | null
   loading?: boolean
@@ -359,7 +356,6 @@ const props = defineProps<{
   downloadProgressText?: string | null
   downloadProgressPercent?: number | null
 }>()
-
 const emit = defineEmits<{
   refresh: []
   openRelease: []
@@ -367,6 +363,8 @@ const emit = defineEmits<{
   previewRelease: [release: ReleaseEntry]
   rollback: []
 }>()
+const SOURCE_BUILD_UPDATE_HINT = '当前为源码构建，请使用 git pull 后重新编译。'
+const SOURCE_BUILD_RELEASE_HINT = '当前为源码构建，请手动切换到对应标签后重新编译。'
 
 const isOpen = ref(false)
 const showReleases = ref(false)

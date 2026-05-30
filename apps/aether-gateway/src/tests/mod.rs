@@ -1,6 +1,9 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 pub(super) use std::convert::Infallible;
 pub(super) use std::sync::{Arc, Mutex};
 
+use aether_contracts::USAGE_SERVER_NOW_UNIX_MS_HEADER;
 pub(super) use axum::body::{to_bytes, Body, Bytes};
 pub(super) use axum::response::Response;
 pub(super) use axum::routing::any;
@@ -28,6 +31,38 @@ pub(super) use super::rate_limit::FrontdoorUserRpmConfig;
 pub(super) use super::router::{attach_static_frontend, build_router, build_router_with_state};
 pub(super) use super::state::{AppState, FrontdoorCorsConfig};
 pub(super) use super::usage::UsageRuntimeConfig;
+
+const SERVER_NOW_HEADER_TEST_TOLERANCE_MS: u64 = 1_000;
+
+pub(super) fn unix_epoch_millis_for_tests() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("current time should be after epoch")
+        .as_millis()
+        .try_into()
+        .expect("current epoch millis should fit in u64")
+}
+
+pub(super) fn assert_usage_server_now_header_between(
+    headers: &reqwest::header::HeaderMap,
+    lower_bound_unix_ms: u64,
+    upper_bound_unix_ms: u64,
+) {
+    let server_now_unix_ms = headers
+        .get(USAGE_SERVER_NOW_UNIX_MS_HEADER)
+        .expect("usage response should include server timing header")
+        .to_str()
+        .expect("server timing header should be valid ASCII")
+        .parse::<u64>()
+        .expect("server timing header should be epoch millis");
+
+    assert!(
+        server_now_unix_ms >= lower_bound_unix_ms.saturating_sub(SERVER_NOW_HEADER_TEST_TOLERANCE_MS)
+            && server_now_unix_ms
+                <= upper_bound_unix_ms.saturating_add(SERVER_NOW_HEADER_TEST_TOLERANCE_MS),
+        "server timing header {server_now_unix_ms} should be near request window {lower_bound_unix_ms}..={upper_bound_unix_ms}"
+    );
+}
 
 pub(super) async fn start_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
     let listener = crate::test_support::bind_loopback_listener()

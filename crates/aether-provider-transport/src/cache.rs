@@ -90,6 +90,7 @@ mod tests {
                 expires_at_unix_secs: Some(1),
                 proxy: None,
                 fingerprint: None,
+                upstream_metadata: None,
                 decrypted_api_key: "sk-test".to_string(),
                 decrypted_auth_config: Some("{\"token\":\"x\"}".to_string()),
             },

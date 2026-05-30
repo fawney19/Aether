@@ -208,6 +208,7 @@ mod tests {
                 expires_at_unix_secs: None,
                 proxy: None,
                 fingerprint: None,
+                upstream_metadata: None,
                 decrypted_api_key: "upstream-key".to_string(),
                 decrypted_auth_config: None,
             },

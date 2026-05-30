@@ -3,10 +3,12 @@ import type {
   QuotaStatusSnapshot,
   QuotaWindowSnapshot,
 } from '@/api/endpoints/types/statusSnapshot'
+import type { UpstreamMetadata } from '@/api/endpoints/types/provider'
 
 export interface ProviderKeyQuotaCarrier {
   account_quota?: string | null
   status_snapshot?: ProviderKeyStatusSnapshot | null
+  upstream_metadata?: UpstreamMetadata | null
 }
 
 function normalizeText(value: unknown): string | null {
@@ -76,6 +78,29 @@ function getQuotaWindow(
   return getQuotaWindows(quota).find(window => normalizeText(window.code)?.toLowerCase() === normalizedCode) ?? null
 }
 
+function finiteNumber(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'string') {
+    const parsed = Number(value.trim())
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function firstFiniteNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    const parsed = finiteNumber(value)
+    if (parsed != null) return parsed
+  }
+  return null
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
 function positiveNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
 }
@@ -121,6 +146,58 @@ function getQuotaWindowValueText(window: QuotaWindowSnapshot | null | undefined)
     return `${formatQuotaValue(Math.max(window.limit_value - window.used_value, 0))}/${formatQuotaValue(window.limit_value)}`
   }
   return null
+}
+
+function getGeminiCliCreditsTextFromQuota(quota: QuotaStatusSnapshot | null | undefined): string | null {
+  const credits = quota?.credits
+  if (!credits) return null
+  const remaining = firstFiniteNumber(credits.remaining, credits.balance)
+  if (remaining != null) return `AI Credits 剩余 ${formatQuotaValue(remaining)}`
+  if (credits.unlimited === true) return 'AI Credits 不限量'
+  if (credits.has_credits === true) return 'AI Credits 可用'
+  if (credits.has_credits === false) return 'AI Credits 已用尽'
+  return null
+}
+
+export function getGeminiCliAccountCreditsText(
+  input: ProviderKeyQuotaCarrier,
+  fallbackProviderType?: string | null,
+): string | null {
+  const quota = getQuotaSnapshot(input)
+  if (getQuotaProviderType(quota, fallbackProviderType) !== 'gemini_cli') return null
+
+  const quotaText = getGeminiCliCreditsTextFromQuota(quota)
+  if (quotaText) return quotaText
+
+  const metadata = input.upstream_metadata?.gemini_cli
+  const credits = objectValue(metadata?.credits)
+  const paidTier = objectValue(metadata?.paidTier)
+  const currentTier = objectValue(metadata?.currentTier)
+  const remaining = firstFiniteNumber(
+    credits?.remaining,
+    credits?.remainingCredits,
+    credits?.available,
+    credits?.availableCredits,
+    credits?.balance,
+    paidTier?.availableCredits,
+    paidTier?.remainingCredits,
+    currentTier?.availableCredits,
+    currentTier?.remainingCredits,
+  )
+  if (remaining != null) return `AI Credits 剩余 ${formatQuotaValue(remaining)}`
+
+  const hasCredits = typeof credits?.has_credits === 'boolean'
+    ? credits.has_credits
+    : typeof paidTier?.hasCredits === 'boolean'
+      ? paidTier.hasCredits
+      : typeof currentTier?.hasCredits === 'boolean'
+        ? currentTier.hasCredits
+        : null
+  if (hasCredits === true) return 'AI Credits 可用'
+  if (hasCredits === false) return 'AI Credits 已用尽'
+
+  const unlimited = credits?.unlimited === true || paidTier?.unlimited === true || currentTier?.unlimited === true
+  return unlimited ? 'AI Credits 不限量' : null
 }
 
 const GROK_QUOTA_MODE_LABELS: Record<string, string> = {
@@ -306,6 +383,7 @@ function getAntigravityQuotaText(quota: QuotaStatusSnapshot): string | null {
 }
 
 function getGeminiCliQuotaText(quota: QuotaStatusSnapshot): string | null {
+  const creditsText = getGeminiCliCreditsTextFromQuota(quota)
   const modelWindows = getQuotaWindowsByScope(quota, 'model')
   const activeCoolingModels = modelWindows
     .filter((window) => {
@@ -329,9 +407,10 @@ function getGeminiCliQuotaText(quota: QuotaStatusSnapshot): string | null {
   const remainingList = modelWindows
     .map(getQuotaWindowRemainingPercent)
     .filter((value): value is number => value != null)
-  if (remainingList.length === 0) return normalizeText(quota.label)
+  if (remainingList.length === 0) return creditsText || normalizeText(quota.label)
 
   const minimumRemaining = Math.min(...remainingList)
+  if (creditsText) return creditsText
   if (remainingList.length === 1) {
     return `剩余 ${formatPercent(minimumRemaining)}`
   }

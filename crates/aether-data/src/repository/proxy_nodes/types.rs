@@ -587,7 +587,8 @@ fn json_string(value: Option<&Value>) -> Option<String> {
 fn counter_delta_u64(previous: Option<u64>, current: u64) -> u64 {
     match previous {
         Some(previous) if current >= previous => current - previous,
-        Some(_) | None => current,
+        Some(_) => current,
+        None => 0,
     }
 }
 
@@ -960,6 +961,39 @@ mod tests {
             build_tunnel_error_event_detail(&sample.recent_error_events[1]),
             "[newer] WebSocket write failed because the peer closed or reset the connection"
         );
+    }
+
+    #[test]
+    fn builds_tunnel_metrics_sample_uses_first_counter_report_as_baseline() {
+        let current = json!({
+            "tunnel_metrics": {
+                "connect_errors": 12,
+                "disconnects": 5,
+                "error_events_total": 7,
+                "ws_in_bytes": 1_500,
+                "ws_out_bytes": 2_500,
+                "ws_in_frames": 15,
+                "ws_out_frames": 25,
+                "heartbeat_rtt_last_ms": 44
+            },
+            "recent_tunnel_errors": [
+                {"timestamp_unix_secs": 101, "category": "newer", "message": "new"}
+            ]
+        });
+
+        let sample = build_tunnel_metrics_sample(None, Some(&current), 4, true)
+            .expect("sample should build");
+
+        assert_eq!(sample.samples, 1);
+        assert_eq!(sample.heartbeat_rtt_ms_sum, 44);
+        assert_eq!(sample.connect_errors_delta, 0);
+        assert_eq!(sample.disconnects_delta, 0);
+        assert_eq!(sample.error_events_delta, 0);
+        assert_eq!(sample.ws_in_bytes_delta, 0);
+        assert_eq!(sample.ws_out_bytes_delta, 0);
+        assert_eq!(sample.ws_in_frames_delta, 0);
+        assert_eq!(sample.ws_out_frames_delta, 0);
+        assert!(sample.recent_error_events.is_empty());
     }
 
     #[test]

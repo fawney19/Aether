@@ -12,7 +12,13 @@ use aether_data_contracts::repository::candidates::{
 use aether_data_contracts::repository::global_models::{
     PublicCatalogModelListQuery, PublicCatalogModelSearchQuery, StoredPublicCatalogModel,
 };
-use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
+use aether_data_contracts::repository::provider_catalog::{
+    StoredProviderCatalogKey, StoredProviderCatalogProvider,
+};
+use aether_data_contracts::repository::usage::{
+    StoredRequestUsageAudit, StoredUsageBreakdownSummaryRow, UsageAuditListQuery,
+    UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
+};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -90,6 +96,13 @@ pub(crate) struct ApiFormatHealthMonitorOptions {
     pub(crate) include_provider_count: bool,
     pub(crate) include_key_count: bool,
 }
+
+#[derive(Clone, Copy)]
+pub(crate) struct ModelHealthMonitorOptions {
+    pub(crate) include_provider_count: bool,
+}
+
+const MODEL_HEALTH_TIMELINE_SEGMENTS: u32 = 60;
 
 pub(crate) fn provider_key_api_formats(key: &StoredProviderCatalogKey) -> Vec<String> {
     provider_key_configured_api_formats(key)
@@ -538,6 +551,508 @@ pub(crate) async fn build_api_format_health_monitor_payload(
         "generated_at": unix_secs_to_rfc3339(now_unix_secs),
         "formats": formats,
     }))
+}
+
+pub(crate) async fn build_model_health_monitor_payload(
+    state: &AppState,
+    lookback_hours: u64,
+    model_limit: usize,
+    per_model_limit: usize,
+    options: ModelHealthMonitorOptions,
+) -> Option<serde_json::Value> {
+    if !state.has_usage_data_reader() {
+        return None;
+    }
+
+    let now_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let since_unix_secs = now_unix_secs.saturating_sub(lookback_hours * 3600);
+
+    let breakdown = state
+        .summarize_usage_breakdown(&UsageBreakdownSummaryQuery {
+            created_from_unix_secs: since_unix_secs,
+            created_until_unix_secs: now_unix_secs,
+            user_id: None,
+            provider_name: None,
+            group_by: UsageBreakdownGroupBy::Model,
+        })
+        .await
+        .ok()
+        .unwrap_or_default();
+
+    let selected_models = breakdown
+        .into_iter()
+        .filter(|row| !row.group_key.trim().is_empty())
+        .take(model_limit)
+        .collect::<Vec<_>>();
+
+    let mut models = Vec::with_capacity(selected_models.len());
+    for row in selected_models {
+        let events = state
+            .list_usage_audits(&UsageAuditListQuery {
+                created_from_unix_secs: Some(since_unix_secs),
+                created_until_unix_secs: Some(now_unix_secs),
+                model: Some(row.group_key.clone()),
+                limit: Some(per_model_limit),
+                newest_first: true,
+                ..UsageAuditListQuery::default()
+            })
+            .await
+            .ok()
+            .unwrap_or_default();
+
+        let (timeline, time_range_start, time_range_end) = build_model_health_timeline(
+            &events,
+            since_unix_secs,
+            now_unix_secs,
+            MODEL_HEALTH_TIMELINE_SEGMENTS,
+        );
+        let provider_count = model_health_provider_count(&events);
+        let first_byte_average = model_health_average_first_byte_ms(&events);
+        let last_event_at = events
+            .first()
+            .and_then(|item| unix_secs_to_rfc3339(item.created_at_unix_ms));
+        let event_payload = events
+            .iter()
+            .rev()
+            .map(model_health_event_payload)
+            .collect::<Vec<_>>();
+
+        let total_attempts = row.request_count;
+        let success_count = row.success_count.min(total_attempts);
+        let failed_count = total_attempts.saturating_sub(success_count);
+        let success_rate = if total_attempts > 0 {
+            success_count as f64 / total_attempts as f64
+        } else {
+            1.0
+        };
+        let avg_latency_ms = model_health_average_latency_ms(&row);
+
+        let model_name = row.group_key.clone();
+        let mut model_payload = json!({
+            "model": model_name,
+            "display_name": model_health_display_name(&row.group_key),
+            "total_attempts": total_attempts,
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "success_rate": success_rate,
+            "avg_latency_ms": avg_latency_ms,
+            "avg_first_byte_ms": first_byte_average,
+            "last_event_at": last_event_at,
+            "events": event_payload,
+            "timeline": timeline,
+            "time_range_start": unix_secs_to_rfc3339(time_range_start),
+            "time_range_end": unix_secs_to_rfc3339(time_range_end),
+        });
+        if options.include_provider_count {
+            model_payload["provider_count"] = json!(provider_count);
+        }
+        models.push(model_payload);
+    }
+
+    Some(json!({
+        "generated_at": unix_secs_to_rfc3339(now_unix_secs),
+        "models": models,
+    }))
+}
+
+pub(crate) async fn build_provider_health_monitor_payload(
+    state: &AppState,
+    lookback_hours: u64,
+    provider_limit: usize,
+    per_provider_model_limit: usize,
+    per_model_event_limit: usize,
+) -> Option<serde_json::Value> {
+    if !state.has_provider_catalog_data_reader() || !state.has_usage_data_reader() {
+        return None;
+    }
+
+    let now_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let since_unix_secs = now_unix_secs.saturating_sub(lookback_hours * 3600);
+
+    let providers = state
+        .list_provider_catalog_providers(true)
+        .await
+        .ok()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|provider| provider.is_active)
+        .take(provider_limit)
+        .collect::<Vec<_>>();
+
+    let provider_breakdown = state
+        .summarize_usage_breakdown(&UsageBreakdownSummaryQuery {
+            created_from_unix_secs: since_unix_secs,
+            created_until_unix_secs: now_unix_secs,
+            user_id: None,
+            provider_name: None,
+            group_by: UsageBreakdownGroupBy::Provider,
+        })
+        .await
+        .ok()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| (row.group_key.clone(), row))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut payload = Vec::with_capacity(providers.len());
+    for provider in providers {
+        let provider_stats = provider_breakdown.get(&provider.name);
+        payload.push(
+            build_provider_health_payload(
+                state,
+                provider,
+                provider_stats,
+                since_unix_secs,
+                now_unix_secs,
+                per_provider_model_limit,
+                per_model_event_limit,
+            )
+            .await,
+        );
+    }
+
+    payload.sort_by(|left, right| {
+        let left_rank = provider_health_sort_rank(left);
+        let right_rank = provider_health_sort_rank(right);
+        left_rank.cmp(&right_rank).then_with(|| {
+            left.get("provider_name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .cmp(
+                    right
+                        .get("provider_name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default(),
+                )
+        })
+    });
+
+    Some(json!({
+        "generated_at": unix_secs_to_rfc3339(now_unix_secs),
+        "providers": payload,
+    }))
+}
+
+async fn build_provider_health_payload(
+    state: &AppState,
+    provider: StoredProviderCatalogProvider,
+    provider_stats: Option<&StoredUsageBreakdownSummaryRow>,
+    since_unix_secs: u64,
+    now_unix_secs: u64,
+    per_provider_model_limit: usize,
+    per_model_event_limit: usize,
+) -> serde_json::Value {
+    let model_breakdown = state
+        .summarize_usage_breakdown(&UsageBreakdownSummaryQuery {
+            created_from_unix_secs: since_unix_secs,
+            created_until_unix_secs: now_unix_secs,
+            user_id: None,
+            provider_name: Some(provider.name.clone()),
+            group_by: UsageBreakdownGroupBy::Model,
+        })
+        .await
+        .ok()
+        .unwrap_or_default();
+
+    let provider_event_limit = per_model_event_limit
+        .saturating_mul(per_provider_model_limit.max(1))
+        .max(per_model_event_limit);
+    let provider_events = state
+        .list_usage_audits(&UsageAuditListQuery {
+            created_from_unix_secs: Some(since_unix_secs),
+            created_until_unix_secs: Some(now_unix_secs),
+            provider_name: Some(provider.name.clone()),
+            limit: Some(provider_event_limit),
+            newest_first: true,
+            ..UsageAuditListQuery::default()
+        })
+        .await
+        .ok()
+        .unwrap_or_default();
+    let selected_model_rows = model_breakdown
+        .iter()
+        .filter(|row| !row.group_key.trim().is_empty())
+        .take(per_provider_model_limit)
+        .collect::<Vec<_>>();
+    let mut events_by_model = selected_model_rows
+        .iter()
+        .map(|row| (row.group_key.clone(), Vec::new()))
+        .collect::<BTreeMap<_, _>>();
+    for event in &provider_events {
+        if let Some(events) = events_by_model.get_mut(&event.model) {
+            if events.len() < per_model_event_limit {
+                events.push(event.clone());
+            }
+        }
+    }
+
+    let mut models = Vec::new();
+    for row in selected_model_rows {
+        let events = events_by_model.remove(&row.group_key).unwrap_or_default();
+        models.push(model_health_payload_from_row(
+            row,
+            &events,
+            since_unix_secs,
+            now_unix_secs,
+            None,
+        ));
+    }
+
+    let (total_attempts, success_count, failed_count, success_rate, avg_latency_ms) =
+        if let Some(row) = provider_stats {
+            let total_attempts = row.request_count;
+            let success_count = row.success_count.min(total_attempts);
+            let failed_count = total_attempts.saturating_sub(success_count);
+            let success_rate = if total_attempts > 0 {
+                success_count as f64 / total_attempts as f64
+            } else {
+                1.0
+            };
+            (
+                total_attempts,
+                success_count,
+                failed_count,
+                success_rate,
+                model_health_average_latency_ms(row),
+            )
+        } else {
+            (0, 0, 0, 1.0, None)
+        };
+
+    let (timeline, time_range_start, time_range_end) = build_model_health_timeline(
+        &provider_events,
+        since_unix_secs,
+        now_unix_secs,
+        MODEL_HEALTH_TIMELINE_SEGMENTS,
+    );
+    let last_event_at = provider_events
+        .iter()
+        .max_by_key(|event| event.created_at_unix_ms)
+        .and_then(|event| unix_secs_to_rfc3339(event.created_at_unix_ms));
+
+    json!({
+        "provider_id": provider.id,
+        "provider_name": provider.name,
+        "provider_type": provider.provider_type,
+        "is_active": provider.is_active,
+        "total_attempts": total_attempts,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "success_rate": success_rate,
+        "avg_latency_ms": avg_latency_ms,
+        "avg_first_byte_ms": model_health_average_first_byte_ms(&provider_events),
+        "model_count": model_breakdown.len(),
+        "last_event_at": last_event_at,
+        "timeline": timeline,
+        "time_range_start": unix_secs_to_rfc3339(time_range_start),
+        "time_range_end": unix_secs_to_rfc3339(time_range_end),
+        "models": models,
+    })
+}
+
+fn provider_health_sort_rank(provider: &serde_json::Value) -> u8 {
+    let total_attempts = provider
+        .get("total_attempts")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if total_attempts == 0 {
+        return 3;
+    }
+    let success_rate = provider
+        .get("success_rate")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(1.0);
+    if success_rate < 0.8 {
+        0
+    } else if success_rate < 0.95 {
+        1
+    } else {
+        2
+    }
+}
+
+fn model_health_payload_from_row(
+    row: &StoredUsageBreakdownSummaryRow,
+    events: &[StoredRequestUsageAudit],
+    since_unix_secs: u64,
+    now_unix_secs: u64,
+    provider_count: Option<usize>,
+) -> serde_json::Value {
+    let (timeline, time_range_start, time_range_end) = build_model_health_timeline(
+        events,
+        since_unix_secs,
+        now_unix_secs,
+        MODEL_HEALTH_TIMELINE_SEGMENTS,
+    );
+    let last_event_at = events
+        .first()
+        .and_then(|item| unix_secs_to_rfc3339(item.created_at_unix_ms));
+    let event_payload = events
+        .iter()
+        .rev()
+        .map(model_health_event_payload)
+        .collect::<Vec<_>>();
+
+    let total_attempts = row.request_count;
+    let success_count = row.success_count.min(total_attempts);
+    let failed_count = total_attempts.saturating_sub(success_count);
+    let success_rate = if total_attempts > 0 {
+        success_count as f64 / total_attempts as f64
+    } else {
+        1.0
+    };
+
+    let mut model_payload = json!({
+        "model": row.group_key.clone(),
+        "display_name": model_health_display_name(&row.group_key),
+        "total_attempts": total_attempts,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "success_rate": success_rate,
+        "avg_latency_ms": model_health_average_latency_ms(row),
+        "avg_first_byte_ms": model_health_average_first_byte_ms(events),
+        "last_event_at": last_event_at,
+        "events": event_payload,
+        "timeline": timeline,
+        "time_range_start": unix_secs_to_rfc3339(time_range_start),
+        "time_range_end": unix_secs_to_rfc3339(time_range_end),
+    });
+    if let Some(provider_count) = provider_count {
+        model_payload["provider_count"] = json!(provider_count);
+    }
+    model_payload
+}
+
+fn model_health_average_latency_ms(row: &StoredUsageBreakdownSummaryRow) -> Option<f64> {
+    if row.overall_response_time_samples > 0 {
+        return Some(row.overall_response_time_sum_ms / row.overall_response_time_samples as f64);
+    }
+    if row.response_time_samples > 0 {
+        return Some(row.response_time_sum_ms / row.response_time_samples as f64);
+    }
+    None
+}
+
+fn model_health_average_first_byte_ms(events: &[StoredRequestUsageAudit]) -> Option<f64> {
+    let mut sum = 0u64;
+    let mut count = 0u64;
+    for event in events {
+        if let Some(first_byte_time_ms) = event.first_byte_time_ms {
+            sum = sum.saturating_add(first_byte_time_ms);
+            count = count.saturating_add(1);
+        }
+    }
+    if count == 0 {
+        None
+    } else {
+        Some(sum as f64 / count as f64)
+    }
+}
+
+fn model_health_provider_count(events: &[StoredRequestUsageAudit]) -> usize {
+    let mut providers = BTreeSet::new();
+    for event in events {
+        if let Some(provider_id) = event.provider_id.as_deref() {
+            providers.insert(provider_id.to_string());
+        } else if !event.provider_name.trim().is_empty() {
+            providers.insert(event.provider_name.clone());
+        }
+    }
+    providers.len()
+}
+
+fn model_health_event_payload(event: &StoredRequestUsageAudit) -> serde_json::Value {
+    json!({
+        "timestamp": unix_secs_to_rfc3339(event.created_at_unix_ms),
+        "status": model_health_event_status(event),
+        "status_code": event.status_code,
+        "latency_ms": event.response_time_ms,
+        "first_byte_time_ms": event.first_byte_time_ms,
+        "error_type": event.error_category,
+    })
+}
+
+fn model_health_event_status(event: &StoredRequestUsageAudit) -> &'static str {
+    if model_health_event_success(event) {
+        "success"
+    } else {
+        "failed"
+    }
+}
+
+fn model_health_event_success(event: &StoredRequestUsageAudit) -> bool {
+    !event.status.eq_ignore_ascii_case("failed")
+        && event.status_code.is_none_or(|status| status < 400)
+        && event
+            .error_message
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+}
+
+fn build_model_health_timeline(
+    events: &[StoredRequestUsageAudit],
+    since_unix_secs: u64,
+    until_unix_secs: u64,
+    segments: u32,
+) -> (Vec<&'static str>, u64, u64) {
+    #[derive(Default)]
+    struct Bucket {
+        success_count: u64,
+        failed_count: u64,
+    }
+
+    let safe_range = until_unix_secs.saturating_sub(since_unix_secs).max(1);
+    let mut buckets = (0..segments).map(|_| Bucket::default()).collect::<Vec<_>>();
+
+    for event in events {
+        let timestamp = event.created_at_unix_ms;
+        if timestamp < since_unix_secs || timestamp > until_unix_secs {
+            continue;
+        }
+        let offset = timestamp.saturating_sub(since_unix_secs);
+        let mut segment_idx = ((offset as u128 * segments as u128) / safe_range as u128) as usize;
+        if segment_idx >= segments as usize {
+            segment_idx = segments.saturating_sub(1) as usize;
+        }
+        let bucket = &mut buckets[segment_idx];
+        if model_health_event_success(event) {
+            bucket.success_count = bucket.success_count.saturating_add(1);
+        } else {
+            bucket.failed_count = bucket.failed_count.saturating_add(1);
+        }
+    }
+
+    let timeline = buckets
+        .into_iter()
+        .map(|bucket| {
+            let total = bucket.success_count.saturating_add(bucket.failed_count);
+            if total == 0 {
+                return "unknown";
+            }
+            let success_rate = bucket.success_count as f64 / total as f64;
+            if success_rate >= 0.95 {
+                "healthy"
+            } else if success_rate >= 0.7 {
+                "warning"
+            } else {
+                "unhealthy"
+            }
+        })
+        .collect::<Vec<_>>();
+
+    (timeline, since_unix_secs, until_unix_secs)
+}
+
+fn model_health_display_name(model: &str) -> String {
+    model.trim().to_string()
 }
 
 pub(crate) fn build_public_health_timeline(

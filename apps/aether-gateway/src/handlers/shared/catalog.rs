@@ -580,6 +580,52 @@ fn provider_quota_metadata_string(
     })
 }
 
+fn provider_quota_metadata_value_by_path<'a>(
+    metadata: &'a Map<String, Value>,
+    path: &[&str],
+) -> Option<&'a Value> {
+    let (first, rest) = path.split_first()?;
+    let mut current = metadata.get(*first)?;
+    for segment in rest {
+        current = current.as_object()?.get(*segment)?;
+    }
+    Some(current)
+}
+
+fn provider_quota_metadata_number_by_paths(
+    metadata: &Map<String, Value>,
+    paths: &[&[&str]],
+) -> Option<f64> {
+    paths.iter().find_map(|path| {
+        provider_quota_metadata_value_by_path(metadata, path)
+            .and_then(admin_provider_quota_pure::coerce_json_f64)
+            .filter(|value| value.is_finite())
+    })
+}
+
+fn provider_quota_metadata_bool_by_paths(
+    metadata: &Map<String, Value>,
+    paths: &[&[&str]],
+) -> Option<bool> {
+    paths.iter().find_map(|path| {
+        provider_quota_metadata_value_by_path(metadata, path)
+            .and_then(admin_provider_quota_pure::coerce_json_bool)
+    })
+}
+
+fn provider_quota_metadata_string_by_paths(
+    metadata: &Map<String, Value>,
+    paths: &[&[&str]],
+) -> Option<String> {
+    paths.iter().find_map(|path| {
+        provider_quota_metadata_value_by_path(metadata, path)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
 fn quota_windows_usage_ratio(windows: &[Value]) -> Option<f64> {
     windows
         .iter()
@@ -1531,12 +1577,144 @@ fn build_grok_quota_status_snapshot(
     }))
 }
 
+fn gemini_cli_plan_type(metadata: &Map<String, Value>) -> Option<String> {
+    provider_quota_metadata_string(metadata, &["plan_type", "tier", "plan"]).or_else(|| {
+        provider_quota_metadata_string_by_paths(
+            metadata,
+            &[
+                &["paidTier", "id"],
+                &["paidTier", "tierType"],
+                &["paidTier", "name"],
+                &["currentTier", "id"],
+                &["currentTier", "tierType"],
+                &["currentTier", "name"],
+            ],
+        )
+    })
+}
+
+fn gemini_cli_credits_status_snapshot(metadata: &Map<String, Value>) -> Option<Value> {
+    let remaining = provider_quota_metadata_number_by_paths(
+        metadata,
+        &[
+            &["credits", "remaining"],
+            &["credits", "remainingCredits"],
+            &["credits", "available"],
+            &["credits", "availableCredits"],
+            &["credits", "balance"],
+            &["remainingCredits"],
+            &["availableCredits"],
+            &["paidTier", "remainingCredits"],
+            &["paidTier", "availableCredits"],
+            &["currentTier", "remainingCredits"],
+            &["currentTier", "availableCredits"],
+        ],
+    );
+    let balance = provider_quota_metadata_number_by_paths(
+        metadata,
+        &[
+            &["credits", "balance"],
+            &["credits", "remaining"],
+            &["credits", "available"],
+            &["paidTier", "availableCredits"],
+            &["currentTier", "availableCredits"],
+            &["availableCredits"],
+            &["remainingCredits"],
+        ],
+    )
+    .or(remaining);
+    let consumed = provider_quota_metadata_number_by_paths(
+        metadata,
+        &[
+            &["credits", "consumed"],
+            &["credits", "consumedCredits"],
+            &["consumedCredits"],
+            &["paidTier", "consumedCredits"],
+            &["currentTier", "consumedCredits"],
+        ],
+    );
+    let total = provider_quota_metadata_number_by_paths(
+        metadata,
+        &[
+            &["credits", "total"],
+            &["credits", "totalCredits"],
+            &["totalCredits"],
+            &["paidTier", "totalCredits"],
+            &["currentTier", "totalCredits"],
+        ],
+    );
+    let unlimited = provider_quota_metadata_bool_by_paths(
+        metadata,
+        &[
+            &["credits", "unlimited"],
+            &["credits_unlimited"],
+            &["paidTier", "unlimited"],
+            &["currentTier", "unlimited"],
+        ],
+    );
+    let explicit_has_credits = provider_quota_metadata_bool_by_paths(
+        metadata,
+        &[
+            &["credits", "has_credits"],
+            &["has_credits"],
+            &["paidTier", "hasCredits"],
+            &["currentTier", "hasCredits"],
+        ],
+    );
+    let trace_id = provider_quota_metadata_string_by_paths(
+        metadata,
+        &[
+            &["credits", "trace_id"],
+            &["credits", "traceId"],
+            &["trace_id"],
+            &["traceId"],
+        ],
+    );
+    let updated_at = provider_quota_metadata_value_by_path(metadata, &["credits", "updated_at"])
+        .or_else(|| provider_quota_metadata_value_by_path(metadata, &["credits", "updatedAt"]))
+        .or_else(|| metadata.get("updated_at"))
+        .and_then(|value| provider_quota_timestamp_unix_secs(Some(value)));
+
+    if remaining.is_none()
+        && balance.is_none()
+        && consumed.is_none()
+        && total.is_none()
+        && unlimited.is_none()
+        && explicit_has_credits.is_none()
+        && trace_id.is_none()
+    {
+        return None;
+    }
+
+    let has_credits = explicit_has_credits
+        .or_else(|| unlimited.filter(|value| *value))
+        .or_else(|| remaining.or(balance).map(|value| value > 0.0));
+    let mut credits = Map::new();
+    credits.insert("has_credits".to_string(), json!(has_credits));
+    credits.insert("balance".to_string(), json!(balance));
+    credits.insert("remaining".to_string(), json!(remaining.or(balance)));
+    credits.insert("consumed".to_string(), json!(consumed));
+    credits.insert("total".to_string(), json!(total));
+    credits.insert("unlimited".to_string(), json!(unlimited));
+    credits.insert("trace_id".to_string(), json!(trace_id));
+    credits.insert("updated_at".to_string(), json!(updated_at));
+    Some(Value::Object(credits))
+}
+
 fn build_gemini_cli_quota_status_snapshot(
     upstream_metadata: Option<&Value>,
     source: &str,
 ) -> Option<Value> {
     let metadata = provider_quota_metadata_bucket(upstream_metadata, "gemini_cli")?;
-    let observed_at_unix_secs = provider_quota_timestamp_unix_secs(metadata.get("updated_at"));
+    let credits = gemini_cli_credits_status_snapshot(metadata);
+    let plan_type = gemini_cli_plan_type(metadata);
+    let observed_at_unix_secs = provider_quota_timestamp_unix_secs(metadata.get("updated_at"))
+        .or_else(|| {
+            credits
+                .as_ref()
+                .and_then(|value| value.get("updated_at"))
+                .and_then(|value| provider_quota_timestamp_unix_secs(Some(value)))
+        });
     let windows = provider_quota_model_bucket(metadata)
         .map(|models| {
             models
@@ -1552,7 +1730,11 @@ fn build_gemini_cli_quota_status_snapshot(
         })
         .unwrap_or_default();
 
-    if windows.is_empty() && observed_at_unix_secs.is_none() {
+    if windows.is_empty()
+        && observed_at_unix_secs.is_none()
+        && credits.is_none()
+        && plan_type.is_none()
+    {
         return None;
     }
 
@@ -1616,7 +1798,8 @@ fn build_gemini_cli_quota_status_snapshot(
         "updated_at": observed_at_unix_secs,
         "reset_at": reset_at,
         "reset_seconds": reset_seconds,
-        "plan_type": serde_json::Value::Null,
+        "plan_type": plan_type,
+        "credits": credits,
         "windows": windows,
     }))
 }
@@ -2681,6 +2864,55 @@ mod tests {
         assert_eq!(auto.get("remaining_value"), Some(&json!(60.0)));
         assert_eq!(auto.get("limit_value"), Some(&json!(150.0)));
         assert_eq!(auto.get("used_value"), Some(&json!(90.0)));
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_backfills_gemini_cli_account_credits() {
+        let mut key = sample_catalog_key();
+        key.upstream_metadata = Some(json!({
+            "gemini_cli": {
+                "updated_at": 1_778_067_246u64,
+                "plan_type": "g1-pro-tier",
+                "paidTier": {
+                    "availableCredits": 123.5,
+                    "consumedCredits": 7.0,
+                    "totalCredits": 200.0
+                },
+                "quota_by_model": {
+                    "gemini-2.5-pro": {
+                        "display_name": "Gemini 2.5 Pro",
+                        "remaining_fraction": 0.75,
+                        "is_exhausted": false
+                    }
+                }
+            }
+        }));
+
+        let payload = provider_key_status_snapshot_payload(&key, "gemini_cli");
+        let quota = payload
+            .get("quota")
+            .and_then(Value::as_object)
+            .expect("quota snapshot should be object");
+        let credits = quota
+            .get("credits")
+            .and_then(Value::as_object)
+            .expect("credits snapshot should exist");
+        let windows = quota
+            .get("windows")
+            .and_then(Value::as_array)
+            .expect("Gemini CLI model windows should exist");
+
+        assert_eq!(quota.get("provider_type"), Some(&json!("gemini_cli")));
+        assert_eq!(quota.get("code"), Some(&json!("ok")));
+        assert_eq!(quota.get("plan_type"), Some(&json!("g1-pro-tier")));
+        assert_eq!(quota.get("updated_at"), Some(&json!(1_778_067_246u64)));
+        assert_eq!(credits.get("remaining"), Some(&json!(123.5)));
+        assert_eq!(credits.get("balance"), Some(&json!(123.5)));
+        assert_eq!(credits.get("consumed"), Some(&json!(7.0)));
+        assert_eq!(credits.get("total"), Some(&json!(200.0)));
+        assert_eq!(credits.get("has_credits"), Some(&json!(true)));
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].get("remaining_ratio"), Some(&json!(0.75)));
     }
 
     #[test]

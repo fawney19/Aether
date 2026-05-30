@@ -271,7 +271,23 @@ export interface PoolKeysQuery {
   page?: number
   page_size?: number
   search?: string
-  status?: 'all' | 'active' | 'cooldown' | 'inactive'
+  status?:
+    | 'all'
+    | 'available'
+    | 'cooldown'
+    | 'inactive'
+    | 'invalid'
+    | 'expired'
+    | 'account_banned'
+    | 'quota_exhausted'
+    | 'account_forbidden'
+    | 'account_disabled'
+    | 'workspace_deactivated'
+    | 'account_verification'
+    | 'account_quarantined'
+    | 'account_blocked'
+    | 'rate_limited'
+    | 'cost_exhausted'
   quick_selectors?: string[]
   search_scope?: 'name' | 'full'
   sort_by?: 'imported_at' | 'last_used_at' | 'score'

@@ -28,6 +28,7 @@ pub(super) struct PreparedSameFormatProviderCandidate {
     pub(super) behavior: SameFormatProviderRequestBehavior,
     pub(super) is_antigravity: bool,
     pub(super) is_claude_code: bool,
+    pub(super) is_gemini_cli: bool,
     pub(super) is_vertex: bool,
     pub(super) is_kiro: bool,
     pub(super) kiro_auth: Option<KiroRequestAuth>,
@@ -91,8 +92,12 @@ pub(super) async fn prepare_local_same_format_provider_candidate(
     } else {
         None
     };
-    let should_try_oauth_auth =
-        should_try_same_format_provider_oauth_auth(&behavior, &transport, spec.family);
+    let should_try_oauth_auth = should_try_same_format_provider_oauth_auth(
+        &behavior,
+        &transport,
+        spec.family,
+        provider_api_format,
+    );
     let oauth_auth = if should_try_oauth_auth {
         resolve_candidate_oauth_auth(
             planner_state,
@@ -117,7 +122,12 @@ pub(super) async fn prepare_local_same_format_provider_candidate(
     {
         Some((name.clone(), value.clone()))
     } else {
-        resolve_same_format_provider_direct_auth(&behavior, &transport, spec.family)
+        resolve_same_format_provider_direct_auth(
+            &behavior,
+            &transport,
+            spec.family,
+            provider_api_format,
+        )
     };
     let (auth_header, auth_value) = match auth {
         Some((name, value)) => (Some(name), Some(value)),
@@ -175,6 +185,7 @@ pub(super) async fn prepare_local_same_format_provider_candidate(
         behavior,
         is_antigravity: behavior.is_antigravity,
         is_claude_code: behavior.is_claude_code,
+        is_gemini_cli: behavior.is_gemini_cli,
         is_vertex: behavior.is_vertex,
         is_kiro: behavior.is_kiro,
         kiro_auth,

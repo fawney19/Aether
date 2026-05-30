@@ -569,7 +569,7 @@ async fn gateway_cancels_admin_video_task_locally_with_trusted_admin_principal()
                     "format_converted": false
                 },
                 "transport": {
-                    "upstream_base_url": "https://api.openai.example",
+                    "upstream_base_url": "https://api.openai.example/v1",
                     "provider_name": "openai-video",
                     "provider_id": "provider-openai",
                     "endpoint_id": "endpoint-1",

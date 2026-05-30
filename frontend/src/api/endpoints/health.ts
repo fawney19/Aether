@@ -3,7 +3,9 @@ import type {
   HealthStatus,
   HealthSummary,
   EndpointStatusMonitorResponse,
-  PublicEndpointStatusMonitorResponse
+  PublicEndpointStatusMonitorResponse,
+  ModelStatusMonitorResponse,
+  ProviderStatusMonitorResponse
 } from './types'
 
 /**
@@ -87,6 +89,49 @@ export async function getPublicEndpointStatusMonitor(params?: {
   per_format_limit?: number
 }): Promise<PublicEndpointStatusMonitorResponse> {
   const response = await client.get('/api/public/health/api-formats', {
+    params
+  })
+  return response.data
+}
+
+/**
+ * 获取按模型聚合的健康监控时间线（管理员版，含 provider 数量）
+ */
+export async function getModelStatusMonitor(params?: {
+  lookback_hours?: number
+  model_limit?: number
+  per_model_limit?: number
+}): Promise<ModelStatusMonitorResponse> {
+  const response = await client.get('/api/admin/endpoints/health/models', {
+    params
+  })
+  return response.data
+}
+
+/**
+ * 获取按模型聚合的健康监控时间线（公开版，不含 provider 信息）
+ */
+export async function getPublicModelStatusMonitor(params?: {
+  lookback_hours?: number
+  model_limit?: number
+  per_model_limit?: number
+}): Promise<ModelStatusMonitorResponse> {
+  const response = await client.get('/api/public/health/models', {
+    params
+  })
+  return response.data
+}
+
+/**
+ * 获取按提供商聚合的健康监控（管理员版，含提供商下模型明细）
+ */
+export async function getProviderStatusMonitor(params?: {
+  lookback_hours?: number
+  provider_limit?: number
+  per_provider_model_limit?: number
+  per_model_limit?: number
+}): Promise<ProviderStatusMonitorResponse> {
+  const response = await client.get('/api/admin/endpoints/health/providers', {
     params
   })
   return response.data

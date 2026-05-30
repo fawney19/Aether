@@ -824,6 +824,72 @@
                         </div>
                       </template>
                     </div>
+                    <!-- Gemini CLI 上游模型配额 -->
+                    <div
+                      v-if="provider.provider_type === 'gemini_cli' && hasGeminiCliQuotaDisplayData(key)"
+                      class="mt-2 p-2 rounded-md bg-muted/30"
+                    >
+                      <div class="flex items-center justify-between mb-1">
+                        <span class="text-[10px] text-muted-foreground">模型配额</span>
+                        <div class="flex items-center gap-1">
+                          <RefreshCw
+                            v-if="refreshingQuota"
+                            class="w-3 h-3 text-muted-foreground/70 animate-spin"
+                          />
+                          <span
+                            v-if="getGeminiCliQuotaUpdatedAt(key)"
+                            class="text-[9px] text-muted-foreground/70"
+                          >
+                            {{ formatUpdatedAt(getGeminiCliQuotaUpdatedAt(key) || 0) }}
+                          </span>
+                        </div>
+                      </div>
+                      <div
+                        v-if="getGeminiCliAccountCreditsText(key, 'gemini_cli')"
+                        class="mb-2 text-[10px] font-medium text-foreground/90"
+                      >
+                        {{ getGeminiCliAccountCreditsText(key, 'gemini_cli') }}
+                      </div>
+                      <div
+                        v-if="getGeminiCliQuotaItems(key).length > 0"
+                        class="grid grid-cols-2 gap-3"
+                      >
+                        <div
+                          v-for="item in getGeminiCliQuotaItems(key)"
+                          :key="item.model"
+                        >
+                          <div class="flex items-center justify-between text-[10px] mb-0.5">
+                            <span
+                              class="text-muted-foreground truncate mr-2 min-w-0 flex-1"
+                              :title="item.model"
+                            >
+                              {{ item.label }}
+                            </span>
+                            <span :class="getQuotaRemainingClass(item.usedPercent)">
+                              {{ item.remainingPercent.toFixed(1) }}%
+                            </span>
+                          </div>
+                          <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
+                            <div
+                              class="absolute left-0 top-0 h-full transition-all duration-300"
+                              :class="getQuotaRemainingBarColor(item.usedPercent)"
+                              :style="{ width: `${Math.max(item.remainingPercent, 0)}%` }"
+                            />
+                          </div>
+                          <div
+                            v-if="item.resetSeconds !== null && item.remainingPercent < 100"
+                            class="text-[9px] text-muted-foreground/70 mt-0.5"
+                          >
+                            <template v-if="item.resetSeconds > 0">
+                              {{ formatResetTime(item.resetSeconds) }}后重置
+                            </template>
+                            <template v-else>
+                              已重置
+                            </template>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                     <!-- Kiro 上游额度信息（仅当有元数据时显示） -->
                     <div
                       v-if="provider.provider_type === 'kiro' && (hasKiroQuotaDisplayData(key) || isKiroBannedKey(key))"
@@ -1457,6 +1523,7 @@ import {
   getOAuthStatusDisplayWithFallback,
   getOAuthStatusTitle as resolveOAuthStatusTitle,
 } from '@/utils/providerKeyStatus'
+import { getGeminiCliAccountCreditsText } from '@/utils/providerKeyQuota'
 
 // 扩展端点类型,包含密钥列表
 interface ProviderEndpointWithKeys extends ProviderEndpoint {
@@ -2081,7 +2148,7 @@ async function handleClearOAuthInvalid(key: EndpointAPIKey) {
   }
 }
 
-// Codex / Antigravity / Kiro / Windsurf / ChatGPT Web：打开抽屉后自动后台刷新（配额缓存缺失/过期，或 Token 即将过期时触发）
+// Codex / Gemini CLI / Antigravity / Kiro / Windsurf / ChatGPT Web：打开抽屉后自动后台刷新（配额缓存缺失/过期，或 Token 即将过期时触发）
 const AUTO_QUOTA_REFRESH_STALE_SECONDS = 5 * 60
 // 与后端 OAuth 懒刷新阈值对齐：到期前 2 分钟内视为需要刷新
 const AUTO_TOKEN_REFRESH_SKEW_SECONDS = 2 * 60
@@ -2722,7 +2789,7 @@ function shouldAutoRefreshCodexQuota(): boolean {
   return false
 }
 
-// 检查 OAuth Token 是否即将过期（Codex / Antigravity / Kiro / Windsurf / ChatGPT Web）
+// 检查 OAuth Token 是否即将过期（Codex / Gemini CLI / Antigravity / Kiro / Windsurf / ChatGPT Web）
 function isTokenExpiringSoon(key: EndpointAPIKey, now: number): boolean {
   const oauthCode = String(key.status_snapshot?.oauth?.code || '').trim().toLowerCase()
   if (oauthCode && oauthCode !== 'valid' && oauthCode !== 'expiring') {
@@ -2746,6 +2813,28 @@ function shouldAutoRefreshAntigravityQuota(): boolean {
       return true
     }
     const updatedAt = getAntigravityQuotaUpdatedAt(key)
+    if (typeof updatedAt !== 'number' || (now - updatedAt) > AUTO_QUOTA_REFRESH_STALE_SECONDS) {
+      return true
+    }
+  }
+
+  return false
+}
+
+function shouldAutoRefreshGeminiCliQuota(): boolean {
+  if (provider.value?.provider_type !== 'gemini_cli') return false
+  const now = Math.floor(Date.now() / 1000)
+
+  for (const { key } of allKeys.value) {
+    if (!key.is_active) continue
+
+    if (isTokenExpiringSoon(key, now)) return true
+
+    if (!hasGeminiCliQuotaDisplayData(key)) {
+      return true
+    }
+
+    const updatedAt = getGeminiCliQuotaUpdatedAt(key)
     if (typeof updatedAt !== 'number' || (now - updatedAt) > AUTO_QUOTA_REFRESH_STALE_SECONDS) {
       return true
     }
@@ -2920,19 +3009,21 @@ function applyQuotaResults(
   return applied
 }
 
-// 通用的自动刷新配额函数（支持 Codex、Antigravity、Kiro、Windsurf 和 ChatGPT Web）
+// 通用的自动刷新配额函数（支持 Codex、Gemini CLI、Antigravity、Kiro、Windsurf 和 ChatGPT Web）
 async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean } = {}) {
   const providerId = props.providerId
   if (!providerId) return
   if (refreshingQuota.value) return
 
   const providerType = provider.value?.provider_type
-  if (providerType !== 'codex' && providerType !== 'antigravity' && providerType !== 'kiro' && providerType !== 'windsurf' && providerType !== 'chatgpt_web' && providerType !== 'grok') return
+  if (providerType !== 'codex' && providerType !== 'gemini_cli' && providerType !== 'antigravity' && providerType !== 'kiro' && providerType !== 'windsurf' && providerType !== 'chatgpt_web' && providerType !== 'grok') return
 
   // 检查是否需要刷新
   let shouldRefresh = false
   if (providerType === 'codex') {
     shouldRefresh = shouldAutoRefreshCodexQuota()
+  } else if (providerType === 'gemini_cli') {
+    shouldRefresh = shouldAutoRefreshGeminiCliQuota()
   } else if (providerType === 'antigravity') {
     shouldRefresh = shouldAutoRefreshAntigravityQuota()
   } else if (providerType === 'kiro') {
@@ -2950,6 +3041,8 @@ async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean 
   let hadCachedQuota = false
   if (providerType === 'codex') {
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasCodexQuotaDisplayData(key))
+  } else if (providerType === 'gemini_cli') {
+    hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasGeminiCliQuotaDisplayData(key))
   } else if (providerType === 'antigravity') {
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasAntigravityQuotaDisplayData(key))
   } else if (providerType === 'kiro') {
@@ -3006,7 +3099,7 @@ async function openAntigravityQuotaDialog(key: EndpointAPIKey) {
 async function handleKeyChanged() {
   await Promise.all([loadEndpoints(), loadMappingPreview()])
   emit('refresh')
-  // 添加/修改 key 后自动获取 Antigravity 配额（新 key 的 upstream_metadata 为空）
+  // 添加/修改 key 后自动获取已支持 provider 的配额（新 key 的 upstream_metadata 为空）
   void autoRefreshQuotaInBackground({ ignoreCooldown: true })
 }
 
@@ -3466,6 +3559,14 @@ interface AntigravityQuotaItem {
   resetSeconds: number | null
 }
 
+interface GeminiCliQuotaItem {
+  model: string
+  label: string
+  usedPercent: number
+  remainingPercent: number
+  resetSeconds: number | null
+}
+
 function hasAntigravityQuotaData(metadata: UpstreamMetadata | null | undefined): boolean {
   const quotaByModel = metadata?.antigravity?.quota_by_model
   return !!quotaByModel && typeof quotaByModel === 'object' && Object.keys(quotaByModel).length > 0
@@ -3477,6 +3578,58 @@ function hasAntigravityQuotaDisplayData(key: EndpointAPIKey): boolean {
     return true
   }
   return hasAntigravityQuotaData(key.upstream_metadata)
+}
+
+function getGeminiCliQuotaUpdatedAt(key: EndpointAPIKey): number | undefined {
+  const quota = getQuotaSnapshotForProvider(key, 'gemini_cli')
+  const quotaUpdatedAt = getQuotaSnapshotUpdatedAt(quota)
+  if (typeof quotaUpdatedAt === 'number') return quotaUpdatedAt
+  const updatedAt = Number(key.upstream_metadata?.gemini_cli?.updated_at ?? NaN)
+  return Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : undefined
+}
+
+function hasGeminiCliQuotaDisplayData(key: EndpointAPIKey): boolean {
+  if (getGeminiCliAccountCreditsText(key, 'gemini_cli')) return true
+  return getGeminiCliQuotaItems(key).length > 0
+}
+
+function getGeminiCliQuotaItems(key: EndpointAPIKey): GeminiCliQuotaItem[] {
+  const quota = getQuotaSnapshotForProvider(key, 'gemini_cli')
+  const windows = getQuotaWindowByScope(quota, 'model')
+  if (!quota || windows.length === 0) return []
+
+  const items = windows
+    .map((window) => {
+      const model = String(window.model || window.label || window.code || '').trim()
+      if (!model) return null
+
+      const usedPercent = getQuotaWindowUsedPercent(window)
+      const remainingPercent = getQuotaWindowRemainingPercent(window)
+      if (usedPercent === undefined && remainingPercent === undefined) {
+        return null
+      }
+
+      const normalizedUsedPercent =
+        usedPercent !== undefined
+          ? usedPercent
+          : Math.max(100 - (remainingPercent ?? 0), 0)
+      const normalizedRemainingPercent =
+        remainingPercent !== undefined
+          ? remainingPercent
+          : Math.max(100 - normalizedUsedPercent, 0)
+
+      return {
+        model,
+        label: String(window.label || window.model || model),
+        usedPercent: normalizedUsedPercent,
+        remainingPercent: normalizedRemainingPercent,
+        resetSeconds: getQuotaWindowLiveResetSeconds(quota, window),
+      } satisfies GeminiCliQuotaItem
+    })
+    .filter((item): item is GeminiCliQuotaItem => item !== null)
+
+  items.sort((a, b) => (b.usedPercent - a.usedPercent) || a.model.localeCompare(b.model))
+  return items
 }
 
 function formatUpdatedAt(updatedAt: number): string {

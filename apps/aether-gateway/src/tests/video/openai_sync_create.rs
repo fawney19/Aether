@@ -715,7 +715,7 @@ async fn gateway_executes_openai_video_remix_via_data_backed_local_follow_up_wit
                             "format_converted": false
                         },
                         "transport": {
-                            "upstream_base_url": "https://api.openai.example",
+                            "upstream_base_url": "https://api.openai.example/v1",
                             "provider_name": "openai-video",
                             "provider_id": "provider-openai-video-local-1",
                             "endpoint_id": "endpoint-openai-video-local-1",

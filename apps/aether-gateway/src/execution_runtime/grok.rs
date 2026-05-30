@@ -994,6 +994,7 @@ impl GrokClientStreamEmitter {
 fn grok_canonical_usage(usage: GrokUsageEstimate) -> StreamingCanonicalUsage {
     StreamingCanonicalUsage {
         input_tokens: usage.input_tokens,
+        input_tokens_include_cache: false,
         output_tokens: usage.output_tokens,
         total_tokens: usage.input_tokens.saturating_add(usage.output_tokens),
         cache_creation_tokens: 0,

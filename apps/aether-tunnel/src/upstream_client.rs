@@ -4,6 +4,7 @@ use std::future::Future;
 use std::io;
 use std::net::IpAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
@@ -65,7 +66,14 @@ pub struct UpstreamClientPoolKey {
 pub struct UpstreamClientPool {
     config: Arc<Config>,
     dns_cache: Arc<DnsCache>,
-    clients: Arc<Mutex<HashMap<UpstreamClientPoolKey, UpstreamClient>>>,
+    clients: Arc<Mutex<HashMap<UpstreamClientPoolKey, UpstreamClientPoolEntry>>>,
+    access_counter: Arc<AtomicU64>,
+}
+
+#[derive(Clone)]
+struct UpstreamClientPoolEntry {
+    client: UpstreamClient,
+    last_used: u64,
 }
 
 impl UpstreamClientPool {
@@ -74,18 +82,17 @@ impl UpstreamClientPool {
             config,
             dns_cache,
             clients: Arc::new(Mutex::new(HashMap::new())),
+            access_counter: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub fn get_or_build(&self, key: UpstreamClientPoolKey) -> Result<UpstreamClient, String> {
-        if let Some(client) = self
-            .clients
-            .lock()
-            .expect("client pool lock")
-            .get(&key)
-            .cloned()
         {
-            return Ok(client);
+            let mut clients = self.clients.lock().expect("client pool lock");
+            if let Some(entry) = clients.get_mut(&key) {
+                entry.last_used = self.next_access_id();
+                return Ok(entry.client.clone());
+            }
         }
 
         validate_proxy_transport_backend(&key.backend)?;
@@ -97,12 +104,45 @@ impl UpstreamClientPool {
             Arc::clone(&self.dns_cache),
             http1_only,
         )?;
-        self.clients
-            .lock()
-            .expect("client pool lock")
-            .insert(key, client.clone());
+        let mut clients = self.clients.lock().expect("client pool lock");
+        if let Some(entry) = clients.get_mut(&key) {
+            entry.last_used = self.next_access_id();
+            return Ok(entry.client.clone());
+        }
+        evict_lru_client_if_needed(
+            &mut clients,
+            self.config.upstream_client_pool_capacity.max(1),
+        );
+        clients.insert(
+            key,
+            UpstreamClientPoolEntry {
+                client: client.clone(),
+                last_used: self.next_access_id(),
+            },
+        );
         Ok(client)
     }
+
+    fn next_access_id(&self) -> u64 {
+        self.access_counter.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+fn evict_lru_client_if_needed(
+    clients: &mut HashMap<UpstreamClientPoolKey, UpstreamClientPoolEntry>,
+    capacity: usize,
+) {
+    if clients.len() < capacity {
+        return;
+    }
+    let Some(oldest_key) = clients
+        .iter()
+        .min_by_key(|(_, entry)| entry.last_used)
+        .map(|(key, _)| key.clone())
+    else {
+        return;
+    };
+    clients.remove(&oldest_key);
 }
 
 pub fn upstream_client_pool_key(
@@ -766,6 +806,44 @@ mod tests {
     }
 
     #[test]
+    fn upstream_client_pool_evicts_lru_clients_above_capacity() {
+        let config = Arc::new(
+            Config::try_parse_from([
+                "aether-tunnel",
+                "--aether-url",
+                "https://aether.example.com",
+                "--management-token",
+                "ae_test",
+                "--node-name",
+                "tunnel-test",
+                "--upstream-client-pool-capacity",
+                "2",
+            ])
+            .expect("config should parse"),
+        );
+        let pool =
+            UpstreamClientPool::new(config, Arc::new(DnsCache::new(Duration::from_secs(60), 16)));
+        let key_a = test_pool_key("key-a");
+        let key_b = test_pool_key("key-b");
+        let key_c = test_pool_key("key-c");
+
+        pool.get_or_build(key_a.clone())
+            .expect("client A should build");
+        pool.get_or_build(key_b.clone())
+            .expect("client B should build");
+        pool.get_or_build(key_a.clone())
+            .expect("client A should be reused and become most recent");
+        pool.get_or_build(key_c.clone())
+            .expect("client C should build");
+
+        let clients = pool.clients.lock().expect("client pool lock");
+        assert_eq!(clients.len(), 2);
+        assert!(clients.contains_key(&key_a));
+        assert!(clients.contains_key(&key_c));
+        assert!(!clients.contains_key(&key_b));
+    }
+
+    #[test]
     fn http_proxy_authorization_header_uses_basic_auth_for_http_proxy() {
         assert_eq!(
             http_proxy_authorization_header(Some("http://user:pass@proxy.example:8080")).as_deref(),
@@ -775,6 +853,16 @@ mod tests {
             http_proxy_authorization_header(Some("socks5h://user:pass@127.0.0.1:1080")),
             None
         );
+    }
+
+    fn test_pool_key(key_id: &str) -> UpstreamClientPoolKey {
+        upstream_client_pool_key(
+            Some("provider-1"),
+            Some("endpoint-1"),
+            Some(key_id),
+            None,
+            false,
+        )
     }
 
     #[tokio::test]

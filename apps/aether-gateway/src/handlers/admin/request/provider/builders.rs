@@ -295,6 +295,25 @@ impl<'a> AdminAppState<'a> {
         use crate::handlers::public::{admin_requested_force_stream, normalize_admin_base_url};
         use aether_admin::provider::endpoints as admin_provider_endpoints_pure;
         let (fields, payload) = patch.into_parts();
+        let provider_type = provider.provider_type.trim().to_ascii_lowercase();
+
+        if provider_type == "gemini_cli"
+            && [
+                "base_url",
+                "custom_path",
+                "header_rules",
+                "body_rules",
+                "max_retries",
+                "is_active",
+                "config",
+                "proxy",
+                "format_acceptance_config",
+            ]
+            .iter()
+            .any(|field| fields.contains(field))
+        {
+            return Err("Gemini CLI Endpoint 由系统固定管理，不允许修改".to_string());
+        }
 
         if self.provider_type_is_fixed(&provider.provider_type)
             && (fields.contains("base_url") || fields.contains("custom_path"))
@@ -326,7 +345,6 @@ impl<'a> AdminAppState<'a> {
                 &update_fields,
             )?;
 
-        let provider_type = provider.provider_type.trim().to_ascii_lowercase();
         if provider_type == "codex"
             && crate::ai_serving::is_openai_responses_format(&existing_endpoint.api_format)
         {

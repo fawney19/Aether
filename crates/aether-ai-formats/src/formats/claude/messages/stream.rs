@@ -928,6 +928,7 @@ impl ClaudeClientEmitter {
 }
 
 fn merge_claude_usage(mut current: CanonicalUsage, next: CanonicalUsage) -> CanonicalUsage {
+    current.input_tokens_include_cache |= next.input_tokens_include_cache;
     if next.input_tokens > 0 {
         current.input_tokens = next.input_tokens;
     }
@@ -949,11 +950,15 @@ fn merge_claude_usage(mut current: CanonicalUsage, next: CanonicalUsage) -> Cano
     if next.reasoning_tokens > 0 {
         current.reasoning_tokens = next.reasoning_tokens;
     }
-    current.total_tokens = current
-        .input_tokens
-        .saturating_add(current.output_tokens)
-        .saturating_add(current.cache_creation_tokens)
+    let cache_input_tokens = current
+        .cache_creation_tokens
         .saturating_add(current.cache_read_tokens);
+    let input_tokens = if current.input_tokens_include_cache {
+        current.input_tokens
+    } else {
+        current.input_tokens.saturating_add(cache_input_tokens)
+    };
+    current.total_tokens = input_tokens.saturating_add(current.output_tokens);
     current
 }
 
@@ -1205,6 +1210,23 @@ mod tests {
     }
 
     #[test]
+    fn merge_claude_usage_preserves_inclusive_input_semantics() {
+        let merged = super::merge_claude_usage(
+            CanonicalUsage::default(),
+            CanonicalUsage {
+                input_tokens: 110_161,
+                input_tokens_include_cache: true,
+                output_tokens: 691,
+                cache_read_tokens: 107_008,
+                ..CanonicalUsage::default()
+            },
+        );
+
+        assert!(merged.input_tokens_include_cache);
+        assert_eq!(merged.total_tokens, 110_852);
+    }
+
+    #[test]
     fn claude_client_emitter_preserves_tool_identity_and_emits_thinking_blocks() {
         let mut emitter = ClaudeClientEmitter::default();
         let mut bytes = emitter
@@ -1394,8 +1416,37 @@ mod tests {
             .expect("finish should encode");
 
         let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        assert!(sse.contains("\"input_tokens\":10"));
         assert!(sse.contains("\"cache_creation_input_tokens\":5"));
         assert!(sse.contains("\"cache_read_input_tokens\":4"));
+    }
+
+    #[test]
+    fn claude_client_emitter_subtracts_cache_when_input_tokens_include_cache() {
+        let mut emitter = ClaudeClientEmitter::default();
+        let bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "msg_cache".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+                event: CanonicalStreamEvent::Finish {
+                    finish_reason: Some("stop".to_string()),
+                    usage: Some(CanonicalUsage {
+                        input_tokens: 110_161,
+                        input_tokens_include_cache: true,
+                        output_tokens: 691,
+                        total_tokens: 110_852,
+                        cache_read_tokens: 107_008,
+                        reasoning_tokens: 516,
+                        ..CanonicalUsage::default()
+                    }),
+                },
+            })
+            .expect("finish should encode");
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        assert!(sse.contains("\"input_tokens\":3153"));
+        assert!(sse.contains("\"cache_read_input_tokens\":107008"));
+        assert!(sse.contains("\"output_tokens\":691"));
     }
 
     #[test]

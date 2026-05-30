@@ -8,7 +8,9 @@ use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadReposi
 use aether_data_contracts::repository::candidates::{
     RequestCandidateReadRepository, RequestCandidateStatus,
 };
-use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogEndpoint;
+use aether_data_contracts::repository::provider_catalog::{
+    ProviderCatalogReadRepository, StoredProviderCatalogEndpoint,
+};
 use axum::body::Body;
 use axum::routing::any;
 use axum::{extract::Request, Json, Router};
@@ -173,7 +175,7 @@ async fn gateway_handles_admin_provider_query_models_fetches_upstream_for_select
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://api.openai.example".to_string(),
+            "https://api.openai.example/v1".to_string(),
             None,
             None,
             None,
@@ -430,7 +432,7 @@ async fn gateway_handles_admin_provider_query_models_with_openai_responses_endpo
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://api.openai.example".to_string(),
+            "https://api.openai.example/v1".to_string(),
             None,
             None,
             None,
@@ -647,7 +649,7 @@ async fn gateway_handles_admin_provider_query_models_respecting_key_api_formats(
             )
             .expect("endpoint should build")
             .with_transport_fields(
-                "https://api.openai.example".to_string(),
+                "https://api.openai.example/v1".to_string(),
                 None,
                 None,
                 None,
@@ -667,7 +669,7 @@ async fn gateway_handles_admin_provider_query_models_respecting_key_api_formats(
             )
             .expect("endpoint should build")
             .with_transport_fields(
-                "https://api.openai.example".to_string(),
+                "https://api.openai.example/v1".to_string(),
                 None,
                 None,
                 None,
@@ -796,7 +798,7 @@ async fn gateway_handles_admin_provider_query_models_aggregating_active_keys() {
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://api.openai.example".to_string(),
+            "https://api.openai.example/v1".to_string(),
             None,
             None,
             None,
@@ -1005,7 +1007,7 @@ async fn gateway_handles_admin_provider_query_test_model_locally_with_trusted_ad
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![sample_key(
             "key-openai-primary",
@@ -1064,7 +1066,7 @@ async fn gateway_handles_admin_provider_query_embedding_model_test() {
             assert_eq!(plan.key_id, "key-siliconflow-embedding");
             assert_eq!(plan.client_api_format, "openai:embedding");
             assert_eq!(plan.provider_api_format, "openai:embedding");
-            assert_eq!(plan.url, "https://api.siliconflow.example/v1/embeddings");
+            assert_eq!(plan.url, "https://api.siliconflow.example/embeddings");
             assert_eq!(plan.model_name.as_deref(), Some("Qwen/Qwen3-Embedding-4B"));
             assert!(!plan.stream);
             assert_eq!(
@@ -1544,7 +1546,7 @@ async fn gateway_handles_admin_provider_query_jina_embedding_model_test() {
             assert_eq!(plan.key_id, "key-jina-embedding");
             assert_eq!(plan.client_api_format, "openai:embedding");
             assert_eq!(plan.provider_api_format, "jina:embedding");
-            assert_eq!(plan.url, "https://api.jina.example/v1/embeddings");
+            assert_eq!(plan.url, "https://api.jina.example/embeddings");
             assert_eq!(plan.model_name.as_deref(), Some("jina-embeddings-v3"));
             assert!(!plan.stream);
             assert_eq!(
@@ -1773,7 +1775,7 @@ async fn gateway_handles_admin_provider_query_rerank_model_test() {
             assert_eq!(plan.key_id, "key-jina-rerank");
             assert_eq!(plan.client_api_format, "openai:rerank");
             assert_eq!(plan.provider_api_format, "jina:rerank");
-            assert_eq!(plan.url, "https://api.jina.example/v1/rerank");
+            assert_eq!(plan.url, "https://api.jina.example/rerank");
             assert_eq!(
                 plan.model_name.as_deref(),
                 Some("jina-reranker-v2-base-multilingual")
@@ -2734,7 +2736,7 @@ async fn gateway_handles_admin_provider_query_test_model_failover_locally_with_t
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![
             sample_key(
@@ -3502,7 +3504,7 @@ async fn gateway_handles_non_kiro_multi_model_failover_locally() {
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![sample_key(
             "key-openai-primary",
@@ -3797,7 +3799,7 @@ async fn gateway_handles_openai_image_test_model_locally() {
             "endpoint-openai-image",
             "provider-openai",
             "openai:image",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![sample_key(
             "key-openai-image",
@@ -4110,13 +4112,13 @@ async fn gateway_prefers_supported_non_kiro_endpoint_when_api_format_is_omitted(
                 "endpoint-openai-cli",
                 "provider-openai",
                 "openai:responses",
-                "https://api.openai.example",
+                "https://api.openai.example/v1",
             ),
             sample_endpoint(
                 "endpoint-openai-chat",
                 "provider-openai",
                 "openai:chat",
-                "https://api.openai.example",
+                "https://api.openai.example/v1",
             ),
         ],
         vec![
@@ -4213,7 +4215,7 @@ async fn gateway_prefers_transport_supported_non_kiro_endpoint_when_api_format_i
         "endpoint-openai-chat-unsupported",
         "provider-openai",
         "openai:chat",
-        "https://api.openai.example",
+        "https://api.openai.example/v1",
     );
     unsupported_endpoint.header_rules = Some(json!({"invalid": true}));
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
@@ -4224,7 +4226,7 @@ async fn gateway_prefers_transport_supported_non_kiro_endpoint_when_api_format_i
                 "endpoint-openai-chat-supported",
                 "provider-openai",
                 "openai:chat",
-                "https://api.openai.example",
+                "https://api.openai.example/v1",
             ),
         ],
         vec![sample_key(
@@ -4320,7 +4322,7 @@ async fn gateway_prefers_supported_non_kiro_endpoint_with_compatible_key_when_ap
                 "endpoint-openai-chat",
                 "provider-openai",
                 "openai:chat",
-                "https://api.openai.example",
+                "https://api.openai.example/v1",
             ),
         ],
         vec![sample_key(
@@ -4409,13 +4411,13 @@ async fn gateway_uses_compatible_cli_endpoint_when_api_format_is_omitted() {
                 "endpoint-openai-chat",
                 "provider-openai",
                 "openai:chat",
-                "https://api.openai.example",
+                "https://api.openai.example/v1",
             ),
             sample_endpoint(
                 "endpoint-openai-cli",
                 "provider-openai",
                 "openai:responses",
-                "https://api.openai.example",
+                "https://api.openai.example/v1",
             ),
         ],
         vec![sample_key(
@@ -4501,14 +4503,14 @@ async fn gateway_uses_runnable_cli_endpoint_after_chat_preference_when_api_forma
         "endpoint-openai-chat-unsupported",
         "provider-openai",
         "openai:chat",
-        "https://api.openai.example",
+        "https://api.openai.example/v1",
     );
     unsupported_chat_endpoint.header_rules = Some(json!({"invalid": true}));
     let cli_endpoint = sample_endpoint(
         "endpoint-openai-cli-runnable",
         "provider-openai",
         "openai:responses",
-        "https://api.openai.example",
+        "https://api.openai.example/v1",
     );
     let mut shared_key = sample_key(
         "key-openai-shared",
@@ -4602,7 +4604,7 @@ async fn gateway_handles_openai_responses_test_model_failover_locally() {
             "endpoint-openai-cli",
             "provider-openai",
             "openai:responses",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![sample_key(
             "key-openai-cli",
@@ -4696,7 +4698,7 @@ async fn gateway_handles_claude_cli_test_model_locally() {
             "endpoint-claude-cli",
             "provider-claude",
             "claude:messages",
-            "https://api.anthropic.example",
+            "https://api.anthropic.example/v1",
         )],
         vec![sample_key(
             "key-claude-cli",
@@ -4784,7 +4786,7 @@ async fn gateway_uses_compatible_claude_cli_endpoint_when_api_format_is_omitted(
             "endpoint-claude-cli",
             "provider-claude",
             "claude:messages",
-            "https://api.anthropic.example",
+            "https://api.anthropic.example/v1",
         )],
         vec![sample_key(
             "key-claude-cli",
@@ -4873,7 +4875,7 @@ async fn gateway_handles_claude_cli_test_model_failover_locally() {
             "endpoint-claude-cli",
             "provider-claude",
             "claude:messages",
-            "https://api.anthropic.example",
+            "https://api.anthropic.example/v1",
         )],
         vec![sample_key(
             "key-claude-cli",
@@ -5025,10 +5027,22 @@ async fn gateway_handles_gemini_cli_test_model_with_oauth_header_fallback() {
             assert_eq!(plan.endpoint_id, "endpoint-gemini-cli");
             assert_eq!(plan.key_id, "key-gemini-cli");
             assert_eq!(plan.provider_api_format, "gemini:generate_content");
+            assert!(!plan.stream);
             assert_eq!(
                 plan.url,
-                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+                "https://cloudcode-pa.googleapis.com/v1internal:generateContent"
             );
+            assert_eq!(
+                plan.body.json_body.as_ref().unwrap()["project"],
+                json!("project-1")
+            );
+            assert_eq!(
+                plan.body.json_body.as_ref().unwrap()["model"],
+                json!("gemini-2.5-pro")
+            );
+            assert!(plan.body.json_body.as_ref().unwrap()["request"]
+                .get("contents")
+                .is_some());
             assert_eq!(
                 plan.headers.get("authorization").map(String::as_str),
                 Some("Bearer cached-gemini-cli-token")
@@ -5072,7 +5086,7 @@ async fn gateway_handles_gemini_cli_test_model_with_oauth_header_fallback() {
     key.encrypted_auth_config = Some(
         aether_crypto::encrypt_python_fernet_plaintext(
             DEVELOPMENT_ENCRYPTION_KEY,
-            r#"{"provider_type":"gemini_cli"}"#,
+            r#"{"provider_type":"gemini_cli","project_id":"project-1"}"#,
         )
         .expect("auth config should encrypt"),
     );
@@ -5082,7 +5096,7 @@ async fn gateway_handles_gemini_cli_test_model_with_oauth_header_fallback() {
             "endpoint-gemini-cli",
             "provider-gemini",
             "gemini:generate_content",
-            "https://generativelanguage.googleapis.com",
+            "https://cloudcode-pa.googleapis.com",
         )],
         vec![key],
     ));
@@ -5117,6 +5131,175 @@ async fn gateway_handles_gemini_cli_test_model_with_oauth_header_fallback() {
     assert_eq!(
         payload["data"]["response"]["choices"][0]["message"]["content"],
         json!("Hello from Gemini CLI")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_hydrates_gemini_cli_project_id_from_load_code_assist_for_test_model() {
+    let seen_urls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen_urls_clone = Arc::clone(&seen_urls);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let seen_urls_inner = Arc::clone(&seen_urls_clone);
+            async move {
+                seen_urls_inner
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(plan.url.clone());
+                if plan.url == "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+                    assert_eq!(plan.model_name.as_deref(), Some("loadCodeAssist"));
+                    assert_eq!(
+                        plan.headers.get("authorization").map(String::as_str),
+                        Some("Bearer cached-gemini-cli-token")
+                    );
+                    assert_eq!(
+                        plan.body.json_body.as_ref().and_then(|body| body
+                            .get("metadata")
+                            .and_then(|metadata| metadata.get("pluginType"))),
+                        Some(&json!("GEMINI"))
+                    );
+                    return Json(json!({
+                        "request_id": plan.request_id,
+                        "candidate_id": plan.candidate_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "cloudaicompanionProject": {
+                                    "id": "project-from-load-code-assist"
+                                },
+                                "currentTier": {
+                                    "id": "free"
+                                }
+                            }
+                        }
+                    }));
+                }
+
+                assert_eq!(
+                    plan.url,
+                    "https://cloudcode-pa.googleapis.com/v1internal:generateContent"
+                );
+                assert!(!plan.stream);
+                assert_eq!(
+                    plan.body.json_body.as_ref().unwrap()["project"],
+                    json!("project-from-load-code-assist")
+                );
+                assert_eq!(
+                    plan.body.json_body.as_ref().unwrap()["model"],
+                    json!("gemini-2.5-pro")
+                );
+                Json(json!({
+                    "request_id": plan.request_id,
+                    "candidate_id": plan.candidate_id,
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {
+                            "id": "chatcmpl-gemini-cli-test-model",
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Hello from hydrated Gemini CLI"
+                                }
+                            }]
+                        }
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 19
+                    }
+                }))
+            }
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-gemini", "Gemini", 10);
+    provider.provider_type = "gemini_cli".to_string();
+    let mut key = sample_key(
+        "key-gemini-cli",
+        "provider-gemini",
+        "gemini:generate_content",
+        "cached-gemini-cli-token",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        aether_crypto::encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"gemini_cli","refresh_token":"rt-gemini-cli-123"}"#,
+        )
+        .expect("auth config should encrypt"),
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-gemini-cli",
+            "provider-gemini",
+            "gemini:generate_content",
+            "https://cloudcode-pa.googleapis.com",
+        )],
+        vec![key],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(Arc::clone(
+                    &provider_catalog_repository,
+                ))
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-gemini",
+            "model": "gemini-2.5-pro",
+            "api_format": "gemini:generate_content"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(
+        payload["data"]["response"]["choices"][0]["message"]["content"],
+        json!("Hello from hydrated Gemini CLI")
+    );
+    assert_eq!(
+        *seen_urls.lock().expect("mutex should lock"),
+        vec![
+            "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist".to_string(),
+            "https://cloudcode-pa.googleapis.com/v1internal:generateContent".to_string(),
+        ]
+    );
+    let reloaded = provider_catalog_repository
+        .list_keys_by_ids(&["key-gemini-cli".to_string()])
+        .await
+        .expect("key should reload");
+    assert_eq!(
+        reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("gemini_cli"))
+            .and_then(|metadata| metadata.get("project_id")),
+        Some(&json!("project-from-load-code-assist"))
     );
 
     gateway_handle.abort();
@@ -5304,6 +5487,133 @@ async fn gateway_handles_gemini_cli_test_model_failover_locally() {
 }
 
 #[tokio::test]
+async fn gateway_unwraps_gemini_cli_v1internal_response_for_failover_model_test() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-gemini-cli");
+            assert_eq!(plan.endpoint_id, "endpoint-gemini-cli");
+            assert_eq!(plan.key_id, "key-gemini-cli");
+            assert_eq!(plan.provider_api_format, "gemini:generate_content");
+            assert!(!plan.stream);
+            assert_eq!(
+                plan.url,
+                "https://cloudcode-pa.googleapis.com/v1internal:generateContent"
+            );
+            assert_eq!(
+                plan.body.json_body.as_ref().unwrap()["project"],
+                json!("project-1")
+            );
+            assert_eq!(
+                plan.body.json_body.as_ref().unwrap()["model"],
+                json!("gemini-3-flash-preview")
+            );
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "response": {
+                            "candidates": [{
+                                "content": {
+                                    "parts": [{"text":"Gemini CLI v1internal failover response"}],
+                                    "role": "model"
+                                },
+                                "finishReason": "STOP",
+                                "index": 0
+                            }],
+                            "modelVersion": "gemini-3-flash-preview",
+                            "usageMetadata": {
+                                "promptTokenCount": 2,
+                                "candidatesTokenCount": 5,
+                                "totalTokenCount": 7
+                            }
+                        },
+                        "remainingCredits": 123,
+                        "consumedCredits": 1,
+                        "traceId": "trace-gemini-cli-1"
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 23
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-gemini-cli", "Gemini CLI", 10);
+    provider.provider_type = "gemini_cli".to_string();
+    let mut key = sample_key(
+        "key-gemini-cli",
+        "provider-gemini-cli",
+        "gemini:generate_content",
+        "cached-gemini-cli-token",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        aether_crypto::encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"gemini_cli","project_id":"project-1"}"#,
+        )
+        .expect("auth config should encrypt"),
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-gemini-cli",
+            "provider-gemini-cli",
+            "gemini:generate_content",
+            "https://cloudcode-pa.googleapis.com",
+        )],
+        vec![key],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-query/test-model-failover"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-gemini-cli",
+            "failover_models": ["gemini-3-flash-preview"],
+            "api_format": "gemini:generate_content"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["total_attempts"], json!(1));
+    assert_eq!(
+        payload["data"]["response"]["candidates"][0]["content"]["parts"][0]["text"],
+        json!("Gemini CLI v1internal failover response")
+    );
+    assert!(payload["data"]["response"].get("response").is_none());
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_provider_query_test_model_failover_with_single_model_name_alias() {
     let execution_runtime = Router::new().route(
         "/v1/execute/sync",
@@ -5343,7 +5653,7 @@ async fn gateway_handles_admin_provider_query_test_model_failover_with_single_mo
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![sample_key(
             "key-openai-alias",
@@ -5456,7 +5766,7 @@ async fn gateway_retries_non_kiro_failover_after_http_error_without_message() {
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![
             sample_key(
@@ -5576,7 +5886,7 @@ async fn gateway_retries_non_kiro_failover_after_success_status_without_body() {
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![
             sample_key(

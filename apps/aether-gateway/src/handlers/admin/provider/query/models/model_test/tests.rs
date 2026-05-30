@@ -3,6 +3,11 @@ use crate::handlers::admin::request::AdminGatewayProviderTransportSnapshot;
 use serde_json::json;
 
 fn sample_openai_image_transport(provider_type: &str) -> AdminGatewayProviderTransportSnapshot {
+    let base_url = if provider_type == "custom" {
+        "https://grok.com/v1/"
+    } else {
+        "https://grok.com/"
+    };
     AdminGatewayProviderTransportSnapshot {
         provider: crate::provider_transport::snapshot::GatewayProviderTransportProvider {
             id: "provider-1".to_string(),
@@ -26,7 +31,7 @@ fn sample_openai_image_transport(provider_type: &str) -> AdminGatewayProviderTra
             api_family: None,
             endpoint_kind: None,
             is_active: true,
-            base_url: "https://grok.com/".to_string(),
+            base_url: base_url.to_string(),
             header_rules: None,
             body_rules: None,
             max_retries: None,
@@ -51,6 +56,7 @@ fn sample_openai_image_transport(provider_type: &str) -> AdminGatewayProviderTra
             expires_at_unix_secs: None,
             proxy: None,
             fingerprint: None,
+            upstream_metadata: None,
             decrypted_api_key: String::new(),
             decrypted_auth_config: Some(
                 json!({
@@ -185,7 +191,7 @@ fn provider_query_execution_json_body_decodes_stream_encoded_json_response() {
         Some(body.clone())
     );
     assert_eq!(
-        provider_query_standard_execution_response_body("openai:image", &result),
+        provider_query_standard_execution_response_body("openai:image", &result, None),
         Some(body)
     );
 }
@@ -390,7 +396,7 @@ fn provider_query_standard_test_aggregates_responses_stream_body() {
         error: None,
     };
 
-    let body = provider_query_standard_execution_response_body("openai:responses", &result)
+    let body = provider_query_standard_execution_response_body("openai:responses", &result, None)
         .expect("stream body should aggregate");
 
     assert_eq!(body["model"], json!("gpt-5.4-mini"));
@@ -422,7 +428,7 @@ fn provider_query_standard_test_aggregates_responses_image_generation_call() {
         error: None,
     };
 
-    let body = provider_query_standard_execution_response_body("openai:responses", &result)
+    let body = provider_query_standard_execution_response_body("openai:responses", &result, None)
         .expect("responses image stream body should aggregate");
 
     assert_eq!(body["output"][0]["type"], json!("image_generation_call"));
@@ -584,10 +590,12 @@ fn provider_query_standard_test_rejects_gemini_success_without_visible_output() 
         error: None,
     };
 
-    assert!(
-        provider_query_standard_execution_response_body("gemini:generate_content", &result)
-            .is_none()
-    );
+    assert!(provider_query_standard_execution_response_body(
+        "gemini:generate_content",
+        &result,
+        None
+    )
+    .is_none());
 }
 
 #[test]

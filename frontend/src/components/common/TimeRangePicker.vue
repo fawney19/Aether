@@ -3,7 +3,10 @@
     <Select
       v-model="selectedPreset"
     >
-      <SelectTrigger :class="['h-8 w-32 text-xs border-border/60', presetTriggerClass]">
+      <SelectTrigger
+        class="h-8 w-32 text-xs border-border/60"
+        :class="[presetTriggerClass]"
+      >
         <SelectValue placeholder="选择时间段" />
       </SelectTrigger>
       <SelectContent :searchable="false">
@@ -74,6 +77,18 @@ import {
 } from '@/components/ui'
 import type { DateRangeParams } from '@/features/usage/types'
 
+const props = withDefaults(defineProps<{
+  modelValue: DateRangeParams
+  showGranularity?: boolean
+  allowHourly?: boolean
+  presetOptions?: SelectablePreset[]
+  presetTriggerClass?: string
+}>(), {
+  presetOptions: () => ['today', 'yesterday', 'last7days', 'last30days', 'last90days', 'custom']
+})
+const emit = defineEmits<{
+  'update:modelValue': [value: DateRangeParams]
+}>()
 const selectablePresets = ['today', 'yesterday', 'last7days', 'last30days', 'last90days', 'custom'] as const
 type SelectablePreset = typeof selectablePresets[number]
 
@@ -85,20 +100,6 @@ const presetLabels: Record<SelectablePreset, string> = {
   last90days: '最近90天',
   custom: '自定义'
 }
-
-const props = withDefaults(defineProps<{
-  modelValue: DateRangeParams
-  showGranularity?: boolean
-  allowHourly?: boolean
-  presetOptions?: SelectablePreset[]
-  presetTriggerClass?: string
-}>(), {
-  presetOptions: () => ['today', 'yesterday', 'last7days', 'last30days', 'last90days', 'custom']
-})
-
-const emit = defineEmits<{
-  'update:modelValue': [value: DateRangeParams]
-}>()
 
 const activePresetOptions = computed<SelectablePreset[]>(() => {
   const unique = new Set(props.presetOptions)

@@ -205,6 +205,18 @@ mod tests {
     }
 
     #[test]
+    fn does_not_force_streaming_for_gemini_cli_generate_content() {
+        assert!(!force_upstream_streaming_for_provider(
+            "gemini_cli",
+            "gemini:generate_content"
+        ));
+        assert!(!force_upstream_streaming_for_provider(
+            "google",
+            "gemini:generate_content"
+        ));
+    }
+
+    #[test]
     fn does_not_force_streaming_for_compact_or_other_provider_types() {
         assert!(!force_upstream_streaming_for_provider(
             "codex",

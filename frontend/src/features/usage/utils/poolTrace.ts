@@ -74,14 +74,40 @@ export const parseTimelineStatus = (value: unknown): CandidateRecord['status'] |
 }
 
 export const extractPoolGroupId = (
-  candidate: Pick<CandidateRecord, 'extra_data'>,
+  candidate: Pick<CandidateRecord, 'extra_data' | 'provider_id'>,
 ): string | null => {
   const extra = candidate.extra_data
   if (!extra || typeof extra !== 'object' || Array.isArray(extra)) return null
-  const value = (extra as Record<string, unknown>).pool_group_id
-  if (typeof value !== 'string') return null
-  const text = value.trim()
-  return text || null
+  const raw = extra as Record<string, unknown>
+
+  for (const key of ['pool_group_id', 'candidate_group_id']) {
+    const value = raw[key]
+    if (typeof value === 'string') {
+      const text = value.trim()
+      if (text) return text
+    }
+  }
+
+  const routingTrace = raw.routing_trace
+  if (routingTrace && typeof routingTrace === 'object' && !Array.isArray(routingTrace)) {
+    const poolExpansion = (routingTrace as Record<string, unknown>).pool_expansion
+    if (Array.isArray(poolExpansion)) {
+      for (const item of poolExpansion) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+        const value = (item as Record<string, unknown>).pool_group_id
+        if (typeof value !== 'string') continue
+        const text = value.trim()
+        if (text) return text
+      }
+    }
+  }
+
+  if (raw.pool_key_index !== undefined && raw.pool_key_index !== null) {
+    const providerId = String(candidate.provider_id || '').trim()
+    if (providerId) return providerId
+  }
+
+  return null
 }
 
 export function buildPoolParticipatedCandidates(

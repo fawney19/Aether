@@ -4,6 +4,10 @@ use serde_json::Value;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalUsage {
     pub input_tokens: u64,
+    /// True when `input_tokens` already includes cache read and cache creation
+    /// input tokens. Claude-style usage leaves cached input tokens separate.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub input_tokens_include_cache: bool,
     pub output_tokens: u64,
     pub total_tokens: u64,
     pub cache_creation_tokens: u64,
@@ -11,6 +15,10 @@ pub struct CanonicalUsage {
     pub cache_creation_ephemeral_1h_tokens: u64,
     pub cache_read_tokens: u64,
     pub reasoning_tokens: u64,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

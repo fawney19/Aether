@@ -209,6 +209,10 @@ pub struct CanonicalResponseFormat {
 pub struct CanonicalUsage {
     #[serde(default)]
     pub input_tokens: u64,
+    /// True when `input_tokens` already includes cache read and cache creation
+    /// input tokens. Claude-style usage leaves cached input tokens separate.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub input_tokens_include_cache: bool,
     #[serde(default)]
     pub output_tokens: u64,
     #[serde(default)]
@@ -225,6 +229,10 @@ pub struct CanonicalUsage {
     pub reasoning_tokens: u64,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extensions: BTreeMap<String, Value>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4378,11 +4386,12 @@ pub(crate) fn openai_usage_to_canonical(value: Option<&Value>) -> Option<Canonic
         .unwrap_or(0);
     Some(CanonicalUsage {
         input_tokens,
+        input_tokens_include_cache: cache_read_tokens > 0 || cache_write_tokens > 0,
         output_tokens,
         total_tokens: usage
             .get("total_tokens")
             .and_then(Value::as_u64)
-            .unwrap_or(input_tokens + output_tokens),
+            .unwrap_or(input_tokens.saturating_add(output_tokens)),
         cache_read_tokens,
         cache_write_tokens,
         reasoning_tokens,
@@ -4414,8 +4423,9 @@ pub(crate) fn claude_usage_to_canonical(value: Option<&Value>) -> Option<Canonic
         .unwrap_or(0);
     Some(CanonicalUsage {
         input_tokens,
+        input_tokens_include_cache: false,
         output_tokens,
-        total_tokens: input_tokens + output_tokens,
+        total_tokens: input_tokens.saturating_add(output_tokens),
         cache_read_tokens,
         cache_write_tokens,
         cache_creation_ephemeral_5m_tokens: usage
@@ -4461,21 +4471,30 @@ pub(crate) fn gemini_usage_to_canonical(value: Option<&Value>) -> Option<Canonic
         .or_else(|| usage.get("thoughts_token_count"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let cache_read_tokens = usage
+        .get("cachedContentTokenCount")
+        .or_else(|| usage.get("cached_content_token_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let output_tokens = visible_output_tokens + reasoning_tokens;
     Some(CanonicalUsage {
         input_tokens,
+        input_tokens_include_cache: cache_read_tokens > 0,
         output_tokens,
         total_tokens: usage
             .get("totalTokenCount")
             .or_else(|| usage.get("total_token_count"))
             .and_then(Value::as_u64)
             .unwrap_or(input_tokens + output_tokens),
+        cache_read_tokens,
         reasoning_tokens,
         extensions: gemini_extensions(
             usage,
             &[
                 "promptTokenCount",
                 "prompt_token_count",
+                "cachedContentTokenCount",
+                "cached_content_token_count",
                 "candidatesTokenCount",
                 "candidates_token_count",
                 "thoughtsTokenCount",
@@ -4489,14 +4508,12 @@ pub(crate) fn gemini_usage_to_canonical(value: Option<&Value>) -> Option<Canonic
 }
 
 pub(crate) fn canonical_usage_to_openai(value: &CanonicalUsage) -> Value {
+    let input_tokens = canonical_usage_total_input_tokens(value);
+    let total_tokens = canonical_usage_total_tokens_for_inclusive_input(value, input_tokens);
     let mut output = json!({
-        "prompt_tokens": value.input_tokens,
+        "prompt_tokens": input_tokens,
         "completion_tokens": value.output_tokens,
-        "total_tokens": if value.total_tokens > 0 {
-            value.total_tokens
-        } else {
-            value.input_tokens + value.output_tokens
-        },
+        "total_tokens": total_tokens,
     });
     if value.reasoning_tokens > 0 {
         output["completion_tokens_details"] = json!({
@@ -4519,14 +4536,12 @@ pub(crate) fn canonical_usage_to_openai(value: &CanonicalUsage) -> Value {
 }
 
 pub(crate) fn canonical_usage_to_openai_responses_usage(value: &CanonicalUsage) -> Value {
+    let input_tokens = canonical_usage_total_input_tokens(value);
+    let total_tokens = canonical_usage_total_tokens_for_inclusive_input(value, input_tokens);
     let mut output = json!({
-        "input_tokens": value.input_tokens,
+        "input_tokens": input_tokens,
         "output_tokens": value.output_tokens,
-        "total_tokens": if value.total_tokens > 0 {
-            value.total_tokens
-        } else {
-            value.input_tokens + value.output_tokens
-        },
+        "total_tokens": total_tokens,
     });
     if value.reasoning_tokens > 0 {
         output["output_tokens_details"] = json!({
@@ -4550,7 +4565,7 @@ pub(crate) fn canonical_usage_to_openai_responses_usage(value: &CanonicalUsage) 
 
 pub(crate) fn canonical_usage_to_claude(value: &CanonicalUsage) -> Value {
     let mut output = json!({
-        "input_tokens": value.input_tokens,
+        "input_tokens": canonical_usage_uncached_input_tokens(value),
         "output_tokens": value.output_tokens,
     });
     if value.cache_read_tokens > 0 {
@@ -4567,6 +4582,55 @@ pub(crate) fn canonical_usage_to_claude(value: &CanonicalUsage) -> Value {
         });
     }
     output
+}
+
+fn canonical_usage_cache_creation_tokens(value: &CanonicalUsage) -> u64 {
+    if value.cache_write_tokens > 0 {
+        value.cache_write_tokens
+    } else {
+        value
+            .cache_creation_ephemeral_5m_tokens
+            .saturating_add(value.cache_creation_ephemeral_1h_tokens)
+    }
+}
+
+fn canonical_usage_cache_input_tokens(value: &CanonicalUsage) -> u64 {
+    value
+        .cache_read_tokens
+        .saturating_add(canonical_usage_cache_creation_tokens(value))
+}
+
+fn canonical_usage_uncached_input_tokens(value: &CanonicalUsage) -> u64 {
+    if value.input_tokens_include_cache {
+        value
+            .input_tokens
+            .saturating_sub(canonical_usage_cache_input_tokens(value))
+    } else {
+        value.input_tokens
+    }
+}
+
+pub(crate) fn canonical_usage_total_input_tokens(value: &CanonicalUsage) -> u64 {
+    if value.input_tokens_include_cache {
+        value.input_tokens
+    } else {
+        value
+            .input_tokens
+            .saturating_add(canonical_usage_cache_input_tokens(value))
+    }
+}
+
+pub(crate) fn canonical_usage_total_tokens_for_inclusive_input(
+    value: &CanonicalUsage,
+    input_tokens: u64,
+) -> u64 {
+    if value.total_tokens > 0
+        && (value.input_tokens_include_cache || canonical_usage_cache_input_tokens(value) == 0)
+    {
+        value.total_tokens
+    } else {
+        input_tokens.saturating_add(value.output_tokens)
+    }
 }
 
 pub(crate) fn openai_finish_reason_to_canonical(
@@ -5996,6 +6060,26 @@ mod tests {
         assert_eq!(rebuilt["stop_reason"], "tool_use");
         assert_eq!(rebuilt["usage"]["cache_read_input_tokens"], 3);
         assert_eq!(rebuilt["usage"]["cache_creation_input_tokens"], 2);
+
+        let rebuilt_openai = canonical_to_openai_responses_response(&canonical, &json!({}));
+        assert_eq!(rebuilt_openai["usage"]["input_tokens"], 16);
+        assert_eq!(
+            rebuilt_openai["usage"]["input_tokens_details"]["cached_tokens"],
+            3
+        );
+        assert_eq!(
+            rebuilt_openai["usage"]["input_tokens_details"]["cached_creation_tokens"],
+            2
+        );
+        assert_eq!(rebuilt_openai["usage"]["total_tokens"], 23);
+
+        let rebuilt_gemini = canonical_to_gemini_response(&canonical, &json!({})).expect("gemini");
+        assert_eq!(rebuilt_gemini["usageMetadata"]["promptTokenCount"], 16);
+        assert_eq!(
+            rebuilt_gemini["usageMetadata"]["cachedContentTokenCount"],
+            3
+        );
+        assert_eq!(rebuilt_gemini["usageMetadata"]["totalTokenCount"], 23);
     }
 
     #[test]
@@ -6388,6 +6472,7 @@ mod tests {
             }],
             "usageMetadata": {
                 "promptTokenCount": 10,
+                "cachedContentTokenCount": 4,
                 "candidatesTokenCount": 5,
                 "thoughtsTokenCount": 2,
                 "totalTokenCount": 17
@@ -6417,8 +6502,14 @@ mod tests {
             } if tool_use_id == "call_123" && name == "lookup" && output == &json!({"ok": true}))
         ));
         assert_eq!(canonical.usage.as_ref().unwrap().input_tokens, 10);
+        assert!(canonical.usage.as_ref().unwrap().input_tokens_include_cache);
+        assert_eq!(canonical.usage.as_ref().unwrap().cache_read_tokens, 4);
         assert_eq!(canonical.usage.as_ref().unwrap().output_tokens, 7);
         assert_eq!(canonical.usage.as_ref().unwrap().reasoning_tokens, 2);
+
+        let claude = canonical_to_claude_response(&canonical);
+        assert_eq!(claude["usage"]["input_tokens"], 6);
+        assert_eq!(claude["usage"]["cache_read_input_tokens"], 4);
 
         let rebuilt = canonical_to_gemini_response(&canonical, &json!({})).expect("gemini");
         assert_eq!(
@@ -6433,6 +6524,9 @@ mod tests {
             rebuilt["candidates"][0]["content"]["parts"][3]["functionResponse"]["response"],
             json!({"ok": true})
         );
+        assert_eq!(rebuilt["usageMetadata"]["promptTokenCount"], 10);
+        assert_eq!(rebuilt["usageMetadata"]["cachedContentTokenCount"], 4);
+        assert_eq!(rebuilt["usageMetadata"]["totalTokenCount"], 17);
         assert_eq!(rebuilt["usageMetadata"]["thoughtsTokenCount"], 2);
     }
 

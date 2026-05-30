@@ -62,6 +62,25 @@ pub(super) fn classify_admin_endpoints_family_route(
             "admin:endpoints_health",
             false,
         ))
+    } else if method == http::Method::GET && normalized_path == "/api/admin/endpoints/health/models"
+    {
+        Some(classified(
+            "admin_proxy",
+            "endpoints_health",
+            "health_models",
+            "admin:endpoints_health",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && normalized_path == "/api/admin/endpoints/health/providers"
+    {
+        Some(classified(
+            "admin_proxy",
+            "endpoints_health",
+            "health_providers",
+            "admin:endpoints_health",
+            false,
+        ))
     } else if method == http::Method::GET
         && normalized_path.starts_with("/api/admin/endpoints/rpm/key/")
     {

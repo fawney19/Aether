@@ -1570,6 +1570,33 @@ VALUES ('node-1', 'registered', 'ok', 3)
             .apply_heartbeat(&ProxyNodeHeartbeatMutation {
                 node_id: registered.id.clone(),
                 heartbeat_interval: Some(30),
+                active_connections: Some(0),
+                total_requests_delta: None,
+                avg_latency_ms: None,
+                failed_requests_delta: None,
+                dns_failures_delta: None,
+                stream_errors_delta: None,
+                proxy_metadata: Some(json!({
+                    "tunnel_metrics": {
+                        "connect_errors": 0,
+                        "disconnects": 0,
+                        "error_events_total": 0,
+                        "ws_in_bytes": 0,
+                        "ws_out_bytes": 0,
+                        "ws_in_frames": 0,
+                        "ws_out_frames": 0,
+                        "heartbeat_rtt_last_ms": 0
+                    }
+                })),
+                proxy_version: Some("1.0.0".to_string()),
+            })
+            .await
+            .expect("baseline heartbeat should apply")
+            .expect("node should exist");
+        repository
+            .apply_heartbeat(&ProxyNodeHeartbeatMutation {
+                node_id: registered.id.clone(),
+                heartbeat_interval: Some(30),
                 active_connections: Some(5),
                 total_requests_delta: None,
                 avg_latency_ms: None,
@@ -1609,13 +1636,44 @@ VALUES ('node-1', 'registered', 'ok', 3)
             )
             .await
             .expect("metrics should list");
-        assert_eq!(metrics.len(), 1);
-        assert_eq!(metrics[0].samples, 1);
-        assert_eq!(metrics[0].uptime_samples, 1);
-        assert_eq!(metrics[0].active_connections_max, 5);
-        assert_eq!(metrics[0].heartbeat_rtt_ms_sum, 33);
-        assert_eq!(metrics[0].connect_errors_delta, 4);
-        assert_eq!(metrics[0].ws_out_frames_delta, 6);
+        assert!(!metrics.is_empty());
+        assert_eq!(metrics.iter().map(|bucket| bucket.samples).sum::<i64>(), 2);
+        assert_eq!(
+            metrics
+                .iter()
+                .map(|bucket| bucket.uptime_samples)
+                .sum::<i64>(),
+            2
+        );
+        assert_eq!(
+            metrics
+                .iter()
+                .map(|bucket| bucket.active_connections_max)
+                .max()
+                .unwrap_or_default(),
+            5
+        );
+        assert_eq!(
+            metrics
+                .iter()
+                .map(|bucket| bucket.heartbeat_rtt_ms_sum)
+                .sum::<i64>(),
+            33
+        );
+        assert_eq!(
+            metrics
+                .iter()
+                .map(|bucket| bucket.connect_errors_delta)
+                .sum::<i64>(),
+            4
+        );
+        assert_eq!(
+            metrics
+                .iter()
+                .map(|bucket| bucket.ws_out_frames_delta)
+                .sum::<i64>(),
+            6
+        );
 
         let fleet = repository
             .list_proxy_fleet_metrics(
@@ -1626,9 +1684,15 @@ VALUES ('node-1', 'registered', 'ok', 3)
             )
             .await
             .expect("fleet metrics should list");
-        assert_eq!(fleet.len(), 1);
-        assert_eq!(fleet[0].samples, 1);
-        assert_eq!(fleet[0].error_events_delta, 1);
+        assert!(!fleet.is_empty());
+        assert_eq!(fleet.iter().map(|bucket| bucket.samples).sum::<i64>(), 2);
+        assert_eq!(
+            fleet
+                .iter()
+                .map(|bucket| bucket.error_events_delta)
+                .sum::<i64>(),
+            1
+        );
 
         let events = repository
             .list_proxy_node_events_filtered(

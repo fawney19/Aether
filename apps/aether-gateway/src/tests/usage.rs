@@ -140,7 +140,7 @@ pub(super) fn sample_local_openai_endpoint() -> StoredProviderCatalogEndpoint {
     )
     .expect("endpoint should build")
     .with_transport_fields(
-        "https://api.openai.example".to_string(),
+        "https://api.openai.example/v1".to_string(),
         None,
         None,
         Some(2),

@@ -103,6 +103,44 @@ fn classifies_admin_endpoint_health_status_as_admin_proxy_route() {
 }
 
 #[test]
+fn classifies_admin_endpoint_health_models_as_admin_proxy_route() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/admin/endpoints/health/models?lookback_hours=12"
+        .parse()
+        .expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::GET, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(decision.route_family.as_deref(), Some("endpoints_health"));
+    assert_eq!(decision.route_kind.as_deref(), Some("health_models"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("admin:endpoints_health")
+    );
+    assert!(!decision.is_execution_runtime_candidate());
+}
+
+#[test]
+fn classifies_admin_endpoint_health_providers_as_admin_proxy_route() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/admin/endpoints/health/providers?lookback_hours=12"
+        .parse()
+        .expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::GET, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(decision.route_family.as_deref(), Some("endpoints_health"));
+    assert_eq!(decision.route_kind.as_deref(), Some("health_providers"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("admin:endpoints_health")
+    );
+    assert!(!decision.is_execution_runtime_candidate());
+}
+
+#[test]
 fn classifies_admin_endpoint_key_rpm_as_admin_proxy_route() {
     let headers = headers(&[]);
     let uri: Uri = "/api/admin/endpoints/rpm/key/key-1"

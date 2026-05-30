@@ -139,6 +139,20 @@ function generateHealthEvents(
   return events.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
 }
 
+function generateHealthTimeline(
+  healthyRate: number,
+  warningRate: number,
+  segments = 60
+) {
+  return Array.from({ length: segments }, () => {
+    const rand = Math.random()
+    if (rand < healthyRate) return 'healthy'
+    if (rand < healthyRate + warningRate) return 'warning'
+    if (rand < 0.96) return 'unknown'
+    return 'unhealthy'
+  })
+}
+
 // Mock 端点健康数据
 // 注意：success_rate 使用 0-1 之间的小数，前端会乘以 100 显示为百分比
 // 事件的成功/失败/跳过比例必须与 success_rate 保持一致
@@ -242,6 +256,154 @@ const MOCK_ENDPOINT_STATUS = {
       key_count: 1,
       last_event_at: new Date().toISOString(),
       events: generateHealthEvents(40, 0.987, 0.01, 0.003, 320, 140)
+    }
+  ]
+}
+
+const MOCK_MODEL_STATUS = {
+  generated_at: new Date().toISOString(),
+  models: [
+    {
+      model: 'gpt-5.5',
+      display_name: 'gpt-5.5',
+      total_attempts: 2021,
+      success_count: 2000,
+      failed_count: 21,
+      success_rate: 0.9896,
+      avg_latency_ms: 1736,
+      avg_first_byte_ms: 176,
+      provider_count: 3,
+      last_event_at: new Date().toISOString(),
+      events: generateHealthEvents(60, 0.989, 0.008, 0.003, 1600, 460),
+      timeline: generateHealthTimeline(0.9, 0.05),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString()
+    },
+    {
+      model: 'claude-sonnet-4-5-20250929',
+      display_name: 'Claude Sonnet 4.5',
+      total_attempts: 1684,
+      success_count: 1642,
+      failed_count: 42,
+      success_rate: 0.9751,
+      avg_latency_ms: 1280,
+      avg_first_byte_ms: 221,
+      provider_count: 2,
+      last_event_at: new Date().toISOString(),
+      events: generateHealthEvents(60, 0.975, 0.02, 0.005, 1200, 520),
+      timeline: generateHealthTimeline(0.84, 0.09),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString()
+    },
+    {
+      model: 'gemini-3-pro-preview',
+      display_name: 'Gemini 3 Pro Preview',
+      total_attempts: 932,
+      success_count: 887,
+      failed_count: 45,
+      success_rate: 0.9517,
+      avg_latency_ms: 940,
+      avg_first_byte_ms: 184,
+      provider_count: 2,
+      last_event_at: new Date().toISOString(),
+      events: generateHealthEvents(55, 0.952, 0.04, 0.008, 860, 300),
+      timeline: generateHealthTimeline(0.78, 0.14),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString()
+    },
+    {
+      model: 'gpt-5.1-codex-mini',
+      display_name: 'gpt-5.1-codex-mini',
+      total_attempts: 418,
+      success_count: 349,
+      failed_count: 69,
+      success_rate: 0.835,
+      avg_latency_ms: 2310,
+      avg_first_byte_ms: 420,
+      provider_count: 1,
+      last_event_at: new Date().toISOString(),
+      events: generateHealthEvents(45, 0.835, 0.145, 0.02, 2200, 780),
+      timeline: generateHealthTimeline(0.58, 0.24),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString()
+    }
+  ]
+}
+
+const MOCK_PROVIDER_HEALTH_STATUS = {
+  generated_at: new Date().toISOString(),
+  providers: [
+    {
+      provider_id: 'provider-001',
+      provider_name: 'OpenAI Official',
+      provider_type: 'codex',
+      is_active: true,
+      total_attempts: 2021,
+      success_count: 2000,
+      failed_count: 21,
+      success_rate: 0.9896,
+      avg_latency_ms: 1736,
+      avg_first_byte_ms: 176,
+      model_count: 2,
+      last_event_at: new Date().toISOString(),
+      timeline: generateHealthTimeline(0.9, 0.05),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString(),
+      models: [MOCK_MODEL_STATUS.models[0], MOCK_MODEL_STATUS.models[3]]
+    },
+    {
+      provider_id: 'provider-002',
+      provider_name: 'Anthropic Official',
+      provider_type: 'claude_code',
+      is_active: true,
+      total_attempts: 1684,
+      success_count: 1642,
+      failed_count: 42,
+      success_rate: 0.9751,
+      avg_latency_ms: 1280,
+      avg_first_byte_ms: 221,
+      model_count: 1,
+      last_event_at: new Date().toISOString(),
+      timeline: generateHealthTimeline(0.84, 0.09),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString(),
+      models: [MOCK_MODEL_STATUS.models[1]]
+    },
+    {
+      provider_id: 'provider-003',
+      provider_name: 'Google AI',
+      provider_type: 'gemini_cli',
+      is_active: true,
+      total_attempts: 932,
+      success_count: 887,
+      failed_count: 45,
+      success_rate: 0.9517,
+      avg_latency_ms: 940,
+      avg_first_byte_ms: 184,
+      model_count: 1,
+      last_event_at: new Date().toISOString(),
+      timeline: generateHealthTimeline(0.78, 0.14),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString(),
+      models: [MOCK_MODEL_STATUS.models[2]]
+    },
+    {
+      provider_id: 'provider-004',
+      provider_name: 'AWS Bedrock',
+      provider_type: 'custom',
+      is_active: true,
+      total_attempts: 0,
+      success_count: 0,
+      failed_count: 0,
+      success_rate: 1,
+      avg_latency_ms: null,
+      avg_first_byte_ms: null,
+      model_count: 0,
+      last_event_at: null,
+      timeline: Array.from({ length: 60 }, () => 'unknown'),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString(),
+      models: []
     }
   ]
 }
@@ -546,7 +708,6 @@ function getMockEndpointExtras(apiFormat: string) {
       { action: 'regex_replace', path: 'messages[0].content', pattern: '\\s+', replacement: ' ', flags: 'm', condition: { path: 'metadata.source', op: 'eq', value: 'internal' } }
     ]
   } else if (normalizedFormat === 'openai:chat') {
-    extras.custom_path = '/v1/chat/completions'
     extras.header_rules = [
       { action: 'set', key: 'x-client', value: 'demo' }
     ]
@@ -558,13 +719,11 @@ function getMockEndpointExtras(apiFormat: string) {
   } else if (normalizedFormat === 'openai:responses') {
     extras.config = { upstream_stream_policy: 'force_non_stream' }
   } else if (normalizedFormat === 'openai:embedding') {
-    extras.custom_path = '/v1/embeddings'
     extras.config = { route_kind: 'embedding' }
   } else if (normalizedFormat === 'openai:rerank' || normalizedFormat === 'jina:rerank') {
-    extras.custom_path = '/v1/rerank'
     extras.config = { route_kind: 'rerank' }
   } else if (normalizedFormat === 'gemini:generate_content') {
-    extras.custom_path = '/v1beta/models/gemini-3-pro-preview:generateContent'
+    extras.custom_path = '/models/gemini-3-pro-preview:generateContent'
     extras.body_rules = [
       { action: 'drop', path: 'metadata.debug' }
     ]
@@ -583,9 +742,9 @@ const MOCK_ENDPOINT_KEYS = [
 
 // Mock Endpoints
 const MOCK_ENDPOINTS = [
-  { id: 'ep-001', provider_id: 'provider-001', provider_name: 'anthropic', api_format: 'claude:messages', base_url: 'https://api.anthropic.com', max_retries: 2, is_active: true, total_keys: 2, active_keys: 2, created_at: '2024-01-01T00:00:00Z', updated_at: new Date().toISOString(), ...getMockEndpointExtras('claude:messages') },
-  { id: 'ep-002', provider_id: 'provider-002', provider_name: 'openai', api_format: 'openai:chat', base_url: 'https://api.openai.com', max_retries: 2, is_active: true, total_keys: 1, active_keys: 1, created_at: '2024-01-01T00:00:00Z', updated_at: new Date().toISOString(), ...getMockEndpointExtras('openai:chat') },
-  { id: 'ep-003', provider_id: 'provider-003', provider_name: 'google', api_format: 'gemini:generate_content', base_url: 'https://generativelanguage.googleapis.com', max_retries: 2, is_active: true, total_keys: 1, active_keys: 1, created_at: '2024-01-15T00:00:00Z', updated_at: new Date().toISOString(), ...getMockEndpointExtras('gemini:generate_content') }
+  { id: 'ep-001', provider_id: 'provider-001', provider_name: 'anthropic', api_format: 'claude:messages', base_url: 'https://api.anthropic.com/v1', max_retries: 2, is_active: true, total_keys: 2, active_keys: 2, created_at: '2024-01-01T00:00:00Z', updated_at: new Date().toISOString(), ...getMockEndpointExtras('claude:messages') },
+  { id: 'ep-002', provider_id: 'provider-002', provider_name: 'openai', api_format: 'openai:chat', base_url: 'https://api.openai.com/v1', max_retries: 2, is_active: true, total_keys: 1, active_keys: 1, created_at: '2024-01-01T00:00:00Z', updated_at: new Date().toISOString(), ...getMockEndpointExtras('openai:chat') },
+  { id: 'ep-003', provider_id: 'provider-003', provider_name: 'google', api_format: 'gemini:generate_content', base_url: 'https://generativelanguage.googleapis.com/v1beta', max_retries: 2, is_active: true, total_keys: 1, active_keys: 1, created_at: '2024-01-15T00:00:00Z', updated_at: new Date().toISOString(), ...getMockEndpointExtras('gemini:generate_content') }
 ]
 
 // Mock 能力定义
@@ -1026,6 +1185,18 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     return createMockResponse(MOCK_ENDPOINT_STATUS)
   },
 
+  'GET /api/admin/endpoints/health/models': async () => {
+    await delay()
+    requireAdmin()
+    return createMockResponse(MOCK_MODEL_STATUS)
+  },
+
+  'GET /api/admin/endpoints/health/providers': async () => {
+    await delay()
+    requireAdmin()
+    return createMockResponse(MOCK_PROVIDER_HEALTH_STATUS)
+  },
+
   'GET /api/admin/endpoints/keys': async () => {
     await delay()
     requireAdmin()
@@ -1387,6 +1558,28 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
         events: f.events.slice(0, 10)
       }))
     })
+  },
+
+  'GET /api/public/health/models': async () => {
+    await delay()
+    return createMockResponse({
+      generated_at: new Date().toISOString(),
+      models: MOCK_MODEL_STATUS.models.map(model => ({
+        model: model.model,
+        display_name: model.display_name,
+        total_attempts: model.total_attempts,
+        success_count: model.success_count,
+        failed_count: model.failed_count,
+        success_rate: model.success_rate,
+        avg_latency_ms: model.avg_latency_ms,
+        avg_first_byte_ms: model.avg_first_byte_ms,
+        last_event_at: model.last_event_at,
+        events: model.events.slice(0, 10),
+        timeline: model.timeline,
+        time_range_start: model.time_range_start,
+        time_range_end: model.time_range_end
+      }))
+    })
   }
 }
 
@@ -1541,9 +1734,10 @@ function generateMockEndpointsForProvider(providerId: string) {
   return provider.api_formats.map((format, index) => {
     const normalizedFormat = normalizeApiFormat(format)
     const healthDetail = provider.endpoint_health_details.find(h => h.api_format === format)
-    const baseUrl = normalizedFormat.includes('claude') ? 'https://api.anthropic.com' :
-      normalizedFormat.includes('openai') ? 'https://api.openai.com' :
-        'https://generativelanguage.googleapis.com'
+    const baseUrl = normalizedFormat.includes('claude') ? 'https://api.anthropic.com/v1' :
+      normalizedFormat.includes('openai') ? 'https://api.openai.com/v1' :
+        normalizedFormat.includes('jina') ? 'https://api.jina.ai/v1' :
+          'https://generativelanguage.googleapis.com'
     return {
       id: `ep-${providerId}-${index + 1}`,
       provider_id: providerId,

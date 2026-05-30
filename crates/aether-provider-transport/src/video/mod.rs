@@ -171,7 +171,7 @@ pub fn build_video_create_upstream_url(
     match family {
         ProviderVideoCreateFamily::OpenAi => build_passthrough_path_url(
             &transport.endpoint.base_url,
-            request_path,
+            openai_video_api_root_request_path(request_path),
             request_query,
             &[],
         ),
@@ -180,6 +180,14 @@ pub fn build_video_create_upstream_url(
             mapped_model,
             request_query,
         ),
+    }
+}
+
+fn openai_video_api_root_request_path(request_path: &str) -> &str {
+    if request_path.starts_with("/v1/") {
+        &request_path[3..]
+    } else {
+        request_path
     }
 }
 
@@ -315,6 +323,7 @@ mod tests {
                 expires_at_unix_secs: None,
                 proxy: None,
                 fingerprint: None,
+                upstream_metadata: None,
                 decrypted_api_key: "secret".to_string(),
                 decrypted_auth_config: None,
             },
@@ -424,6 +433,22 @@ mod tests {
 
         assert_eq!(body.get("prompt"), Some(&json!("make a clip")));
         assert_eq!(body.get("model"), Some(&json!("upstream-video-model")));
+    }
+
+    #[test]
+    fn builds_openai_video_create_url_from_api_root_base() {
+        let mut transport = sample_transport("openai:video", "bearer");
+        transport.endpoint.base_url = "https://api.openai.example/v1".to_string();
+        let url = build_video_create_upstream_url(
+            &transport,
+            "/v1/videos",
+            Some("trace=1"),
+            "sora-upstream",
+            ProviderVideoCreateFamily::OpenAi,
+        )
+        .expect("url should build");
+
+        assert_eq!(url, "https://api.openai.example/v1/videos?trace=1");
     }
 
     #[test]

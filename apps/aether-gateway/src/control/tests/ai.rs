@@ -220,6 +220,23 @@ fn classifies_gemini_generate_content_api_key_without_cli_marker() {
 }
 
 #[test]
+fn does_not_classify_gemini_options_preflight_as_ai_execution_route() {
+    let headers = headers(&[
+        ("origin", "http://localhost:3000"),
+        ("access-control-request-method", "POST"),
+        (
+            "access-control-request-headers",
+            "authorization,content-type",
+        ),
+    ]);
+    let uri: Uri = "/v1beta/models/gemini-3-flash-preview:streamGenerateContent?alt=sse"
+        .parse()
+        .expect("uri should parse");
+
+    assert!(classify_control_route(&http::Method::OPTIONS, &uri, &headers).is_none());
+}
+
+#[test]
 fn classifies_gemini_embed_content_as_embedding_route() {
     let headers = headers(&[("x-goog-api-key", "gemini-key")]);
     let uri: Uri = "/v1beta/models/gemini-embedding-2-preview:embedContent"

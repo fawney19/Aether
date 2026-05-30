@@ -66,7 +66,7 @@ async fn gateway_executes_openai_video_content_from_reconstructed_data_task_with
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://api.openai.example".to_string(),
+            "https://api.openai.example/v1".to_string(),
             None,
             None,
             Some(2),

@@ -10,7 +10,7 @@ use aether_scheduler_core::{
     EnumerateMinimalCandidateSelectionInput, SchedulerMinimalCandidateSelectionCandidate,
 };
 use async_trait::async_trait;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::ai_serving::planner::candidate_resolution::SkippedLocalExecutionCandidate;
 use crate::ai_serving::{GatewayAuthApiKeySnapshot, PlannerAppState};
@@ -21,6 +21,7 @@ use crate::data::candidate_selection::{
     REQUESTED_MODEL_MAX_SCANNED_ROWS,
 };
 use crate::scheduler::candidate::SchedulerSkippedCandidate;
+use crate::scheduler::config::SchedulerOrderingConfig;
 use crate::GatewayError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,6 +245,17 @@ pub(crate) struct LocalCandidatePreselectionPageCursor<'a> {
     key_mode: LocalCandidatePreselectionKeyMode,
     candidate_api_formats: Vec<String>,
     model_directive_enabled_api_formats: BTreeSet<String>,
+    ordering_config: SchedulerOrderingConfig,
+    priority_page_emitted: bool,
+    deferred_pages_by_format: BTreeMap<
+        String,
+        VecDeque<
+            AiCandidatePreselectionOutcome<
+                SchedulerMinimalCandidateSelectionCandidate,
+                SkippedLocalExecutionCandidate,
+            >,
+        >,
+    >,
     format_index: usize,
     requested_name_indexes: BTreeMap<String, usize>,
     requested_name_offsets: BTreeMap<String, u32>,
@@ -286,6 +298,13 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             }
         }
 
+        let ordering_config =
+            super::candidate_ranking::scheduler_ordering_config_for_routing_policy(
+                state,
+                routing_policy,
+            )
+            .await;
+
         Self {
             state,
             client_api_format: client_api_format.to_string(),
@@ -299,6 +318,9 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             key_mode,
             candidate_api_formats,
             model_directive_enabled_api_formats,
+            ordering_config,
+            priority_page_emitted: false,
+            deferred_pages_by_format: BTreeMap::new(),
             format_index: 0,
             requested_name_indexes: BTreeMap::new(),
             requested_name_offsets: BTreeMap::new(),
@@ -320,8 +342,20 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         >,
         GatewayError,
     > {
+        if !self.priority_page_emitted {
+            self.priority_page_emitted = true;
+            let priority_page = self.next_priority_page().await?;
+            if !priority_page.candidates.is_empty() || !priority_page.skipped_candidates.is_empty()
+            {
+                return Ok(Some(priority_page));
+            }
+        }
+
         while self.format_index < self.candidate_api_formats.len() {
             let candidate_api_format = self.candidate_api_formats[self.format_index].clone();
+            if let Some(outcome) = self.pop_deferred_page(&candidate_api_format) {
+                return Ok(Some(outcome));
+            }
             let Some(outcome) = self.next_page_for_api_format(&candidate_api_format).await? else {
                 self.format_index += 1;
                 continue;
@@ -342,6 +376,165 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         self.resolved_global_model_names.clear();
         self.fallback_scanned_api_formats.clear();
         self.seen_candidate_keys.clear();
+        self.priority_page_emitted = false;
+        self.deferred_pages_by_format.clear();
+    }
+
+    async fn next_priority_page(
+        &mut self,
+    ) -> Result<
+        AiCandidatePreselectionOutcome<
+            SchedulerMinimalCandidateSelectionCandidate,
+            SkippedLocalExecutionCandidate,
+        >,
+        GatewayError,
+    > {
+        let mut priority_page = AiCandidatePreselectionOutcome {
+            candidates: Vec::new(),
+            skipped_candidates: Vec::new(),
+        };
+
+        for candidate_api_format in self.candidate_api_formats.clone() {
+            let Some(outcome) = self.next_page_for_api_format(&candidate_api_format).await? else {
+                continue;
+            };
+            if matches_client_api_format(
+                self.use_api_format_alias_match,
+                &candidate_api_format,
+                &self.client_api_format,
+            ) {
+                priority_page.candidates.extend(outcome.candidates);
+                priority_page
+                    .skipped_candidates
+                    .extend(outcome.skipped_candidates);
+                continue;
+            }
+
+            let (promoted, deferred) = self
+                .split_priority_conversion_page(&candidate_api_format, outcome)
+                .await;
+            priority_page.candidates.extend(promoted.candidates);
+            priority_page
+                .skipped_candidates
+                .extend(promoted.skipped_candidates);
+            self.defer_page(candidate_api_format, deferred);
+        }
+
+        Ok(priority_page)
+    }
+
+    async fn split_priority_conversion_page(
+        &self,
+        candidate_api_format: &str,
+        outcome: AiCandidatePreselectionOutcome<
+            SchedulerMinimalCandidateSelectionCandidate,
+            SkippedLocalExecutionCandidate,
+        >,
+    ) -> (
+        AiCandidatePreselectionOutcome<
+            SchedulerMinimalCandidateSelectionCandidate,
+            SkippedLocalExecutionCandidate,
+        >,
+        AiCandidatePreselectionOutcome<
+            SchedulerMinimalCandidateSelectionCandidate,
+            SkippedLocalExecutionCandidate,
+        >,
+    ) {
+        let mut promoted = AiCandidatePreselectionOutcome {
+            candidates: Vec::new(),
+            skipped_candidates: Vec::new(),
+        };
+        let mut deferred = AiCandidatePreselectionOutcome {
+            candidates: Vec::new(),
+            skipped_candidates: Vec::new(),
+        };
+
+        for candidate in outcome.candidates {
+            if self
+                .cross_format_candidate_keeps_priority(&candidate, candidate_api_format)
+                .await
+            {
+                promoted.candidates.push(candidate);
+            } else {
+                deferred.candidates.push(candidate);
+            }
+        }
+
+        for skipped_candidate in outcome.skipped_candidates {
+            if self
+                .cross_format_candidate_keeps_priority(
+                    &skipped_candidate.candidate,
+                    candidate_api_format,
+                )
+                .await
+            {
+                promoted.skipped_candidates.push(skipped_candidate);
+            } else {
+                deferred.skipped_candidates.push(skipped_candidate);
+            }
+        }
+
+        (promoted, deferred)
+    }
+
+    async fn cross_format_candidate_keeps_priority(
+        &self,
+        candidate: &SchedulerMinimalCandidateSelectionCandidate,
+        candidate_api_format: &str,
+    ) -> bool {
+        if matches_client_api_format(
+            self.use_api_format_alias_match,
+            candidate_api_format,
+            &self.client_api_format,
+        ) {
+            return false;
+        }
+        super::candidate_transport_ranking_facts::candidate_keeps_priority_on_conversion(
+            self.state,
+            candidate,
+            self.ordering_config,
+        )
+        .await
+    }
+
+    fn defer_page(
+        &mut self,
+        candidate_api_format: String,
+        outcome: AiCandidatePreselectionOutcome<
+            SchedulerMinimalCandidateSelectionCandidate,
+            SkippedLocalExecutionCandidate,
+        >,
+    ) {
+        if outcome.candidates.is_empty() && outcome.skipped_candidates.is_empty() {
+            return;
+        }
+        self.deferred_pages_by_format
+            .entry(candidate_api_format)
+            .or_default()
+            .push_back(outcome);
+    }
+
+    fn pop_deferred_page(
+        &mut self,
+        candidate_api_format: &str,
+    ) -> Option<
+        AiCandidatePreselectionOutcome<
+            SchedulerMinimalCandidateSelectionCandidate,
+            SkippedLocalExecutionCandidate,
+        >,
+    > {
+        loop {
+            let pages = self
+                .deferred_pages_by_format
+                .get_mut(candidate_api_format)?;
+            let outcome = pages.pop_front()?;
+            if pages.is_empty() {
+                self.deferred_pages_by_format.remove(candidate_api_format);
+            }
+            if !outcome.candidates.is_empty() || !outcome.skipped_candidates.is_empty() {
+                return Some(outcome);
+            }
+        }
     }
 
     async fn next_page_for_api_format(
@@ -770,8 +963,12 @@ mod tests {
     use crate::data::GatewayDataState;
     use crate::AppState;
     use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data_contracts::repository::candidate_selection::{
         MinimalCandidateSelectionReadRepository, StoredProviderModelMapping,
+    };
+    use aether_data_contracts::repository::provider_catalog::{
+        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
     use std::sync::Arc;
 
@@ -836,6 +1033,115 @@ mod tests {
             model_is_active: true,
             model_is_available: true,
         }
+    }
+
+    fn standard_candidate_row(
+        provider_id: &str,
+        api_format: &str,
+        provider_priority: i32,
+    ) -> StoredMinimalCandidateSelectionRow {
+        StoredMinimalCandidateSelectionRow {
+            provider_id: provider_id.to_string(),
+            provider_name: provider_id.to_string(),
+            provider_type: "custom".to_string(),
+            provider_priority,
+            provider_is_active: true,
+            endpoint_id: format!("endpoint-{provider_id}"),
+            endpoint_api_format: api_format.to_string(),
+            endpoint_api_family: api_format.split(':').next().map(ToOwned::to_owned),
+            endpoint_kind: api_format.split(':').nth(1).map(ToOwned::to_owned),
+            endpoint_is_active: true,
+            key_id: format!("key-{provider_id}"),
+            key_name: format!("{provider_id}-key"),
+            key_auth_type: "api_key".to_string(),
+            key_is_active: true,
+            key_api_formats: Some(vec![api_format.to_string()]),
+            key_allowed_models: None,
+            key_capabilities: None,
+            key_internal_priority: 0,
+            key_global_priority_by_format: None,
+            model_id: format!("model-{provider_id}"),
+            global_model_id: "global-model-gpt-5".to_string(),
+            global_model_name: "gpt-5".to_string(),
+            global_model_mappings: None,
+            global_model_supports_streaming: Some(true),
+            model_provider_model_name: "gpt-5".to_string(),
+            model_provider_model_mappings: None,
+            model_supports_streaming: Some(true),
+            model_is_active: true,
+            model_is_available: true,
+        }
+    }
+
+    fn provider_catalog_for_standard_row(
+        row: &StoredMinimalCandidateSelectionRow,
+        keep_priority_on_conversion: bool,
+    ) -> (
+        StoredProviderCatalogProvider,
+        StoredProviderCatalogEndpoint,
+        StoredProviderCatalogKey,
+    ) {
+        let provider = StoredProviderCatalogProvider::new(
+            row.provider_id.clone(),
+            row.provider_name.clone(),
+            Some("https://provider.example".to_string()),
+            row.provider_type.clone(),
+        )
+        .expect("provider should build")
+        .with_transport_fields(
+            true,
+            keep_priority_on_conversion,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_routing_fields(row.provider_priority);
+        let endpoint = StoredProviderCatalogEndpoint::new(
+            row.endpoint_id.clone(),
+            row.provider_id.clone(),
+            row.endpoint_api_format.clone(),
+            row.endpoint_api_family.clone(),
+            row.endpoint_kind.clone(),
+            row.endpoint_is_active,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://provider.example/v1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build");
+        let key = StoredProviderCatalogKey::new(
+            row.key_id.clone(),
+            row.provider_id.clone(),
+            row.key_name.clone(),
+            row.key_auth_type.clone(),
+            None,
+            row.key_is_active,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(serde_json::json!([row.endpoint_api_format.clone()])),
+            "plain-upstream-key".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build");
+        (provider, endpoint, key)
     }
 
     fn opg_deepseek_row(
@@ -989,6 +1295,117 @@ mod tests {
         assert_eq!(
             page.candidates[0].selected_provider_model_name,
             "deepseek-v4-pro"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_page_includes_cross_format_candidates_that_keep_conversion_priority() {
+        let same_format = standard_candidate_row("provider-claude", "claude:messages", 10);
+        let keep_priority_cross =
+            standard_candidate_row("provider-openai-responses-keep", "openai:responses", 0);
+        let regular_cross =
+            standard_candidate_row("provider-openai-responses-regular", "openai:responses", 1);
+        let candidate_repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed([
+                same_format.clone(),
+                keep_priority_cross.clone(),
+                regular_cross.clone(),
+            ]));
+        let catalog_items = [
+            provider_catalog_for_standard_row(&same_format, false),
+            provider_catalog_for_standard_row(&keep_priority_cross, true),
+            provider_catalog_for_standard_row(&regular_cross, false),
+        ];
+        let provider_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            catalog_items
+                .iter()
+                .map(|(provider, _, _)| provider.clone())
+                .collect(),
+            catalog_items
+                .iter()
+                .map(|(_, endpoint, _)| endpoint.clone())
+                .collect(),
+            catalog_items
+                .iter()
+                .map(|(_, _, key)| key.clone())
+                .collect(),
+        ));
+        let data_state =
+            GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+                provider_repository,
+                candidate_repository,
+            )
+            .with_encryption_key_for_tests("development-key");
+        let app = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(data_state);
+        let auth_snapshot = unrestricted_auth_snapshot();
+        let mut cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            "claude:messages",
+            "gpt-5",
+            false,
+            None,
+            &auth_snapshot,
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+        )
+        .await;
+
+        let first_page = cursor
+            .next_page()
+            .await
+            .expect("preselection should succeed")
+            .expect("same-format and keep-priority conversion candidates should share first page");
+
+        assert_eq!(
+            first_page
+                .candidates
+                .iter()
+                .map(|candidate| candidate.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider-claude", "provider-openai-responses-keep"]
+        );
+
+        let (ranked, skipped) =
+            super::super::candidate_resolution::resolve_and_rank_logical_local_execution_candidates(
+                PlannerAppState::new(&app),
+                first_page.candidates,
+                "claude:messages",
+                Some("gpt-5"),
+                Some(&auth_snapshot),
+                None,
+                None,
+                None,
+                None,
+                None,
+                aether_ai_serving::AiCandidateResolutionMode::Standard,
+            )
+            .await;
+
+        assert!(skipped.is_empty());
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|candidate| candidate.candidate.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider-openai-responses-keep", "provider-claude"]
+        );
+
+        let second_page = cursor
+            .next_page()
+            .await
+            .expect("preselection should continue")
+            .expect("regular conversion candidate should remain in a later page");
+        assert_eq!(
+            second_page
+                .candidates
+                .iter()
+                .map(|candidate| candidate.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider-openai-responses-regular"]
         );
     }
 }

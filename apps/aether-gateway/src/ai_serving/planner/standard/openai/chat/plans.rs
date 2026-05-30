@@ -31,6 +31,10 @@ pub(super) fn openai_chat_upstream_is_stream_for_candidate(
         crate::ai_serving::transport::kiro::is_kiro_claude_messages_transport(
             transport,
             provider_api_format,
+        ) || openai_chat_gemini_cli_client_stream_requires_upstream_streaming(
+            transport,
+            provider_api_format,
+            client_is_stream,
         );
     resolve_upstream_is_stream_for_provider(
         transport.endpoint.config.as_ref(),
@@ -39,6 +43,18 @@ pub(super) fn openai_chat_upstream_is_stream_for_candidate(
         client_is_stream,
         hard_requires_streaming,
     )
+}
+
+fn openai_chat_gemini_cli_client_stream_requires_upstream_streaming(
+    transport: &GatewayProviderTransportSnapshot,
+    provider_api_format: &str,
+    client_is_stream: bool,
+) -> bool {
+    crate::ai_serving::transport::gemini_cli::is_gemini_cli_provider_transport(transport)
+        && crate::ai_serving::transport::gemini_cli::gemini_cli_v1internal_requires_upstream_streaming(
+            provider_api_format,
+            client_is_stream,
+        )
 }
 
 #[cfg(test)]
@@ -103,6 +119,7 @@ mod tests {
                 expires_at_unix_secs: None,
                 proxy: None,
                 fingerprint: None,
+                upstream_metadata: None,
                 decrypted_api_key: "secret".to_string(),
                 decrypted_auth_config: None,
             },
@@ -161,6 +178,26 @@ mod tests {
         assert!(openai_chat_upstream_is_stream_for_candidate(
             &codex,
             "openai:responses",
+            false,
+        ));
+    }
+
+    #[test]
+    fn openai_chat_policy_resolver_preserves_gemini_cli_streaming_requests() {
+        let gemini_cli = sample_transport(
+            "gemini_cli",
+            "gemini:generate_content",
+            Some(json!({"upstream_stream_policy": "force_non_stream"})),
+        );
+
+        assert!(openai_chat_upstream_is_stream_for_candidate(
+            &gemini_cli,
+            "gemini:generate_content",
+            true,
+        ));
+        assert!(!openai_chat_upstream_is_stream_for_candidate(
+            &gemini_cli,
+            "gemini:generate_content",
             false,
         ));
     }

@@ -380,6 +380,17 @@ fn invalid_gemini_provider_success_message(
     {
         return None;
     }
+    let normalized_body_json = report_context
+        .filter(|context| {
+            context
+                .get("has_envelope")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .and_then(|context| {
+            crate::ai_serving::normalize_provider_private_response_value(body_json.clone(), context)
+        });
+    let body_json = normalized_body_json.as_ref().unwrap_or(body_json);
     if crate::ai_serving::gemini_generate_content_response_has_visible_output(body_json) {
         return None;
     }
@@ -2518,6 +2529,39 @@ mod tests {
         .expect("empty Gemini 200 response should be rejected from plan format");
 
         assert!(message.contains("visible model output"));
+    }
+
+    #[test]
+    fn invalid_gemini_provider_success_unwraps_gemini_cli_v1internal_envelope() {
+        let plan = test_gemini_chat_plan();
+        let report_context = json!({
+            "has_envelope": true,
+            "envelope_name": "gemini_cli:v1internal",
+            "provider_api_format": "gemini:generate_content",
+        });
+        let body = json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [{"text": "Hello from Gemini CLI"}]
+                    },
+                    "finishReason": "STOP"
+                }]
+            },
+            "remainingCredits": 41,
+            "consumedCredits": 1,
+            "traceId": "trace-upstream-sync-1"
+        });
+
+        let message = invalid_gemini_provider_success_message(
+            &plan,
+            Some(&report_context),
+            StatusCode::OK.as_u16(),
+            Some(&body),
+        );
+
+        assert!(message.is_none());
     }
 
     #[tokio::test]

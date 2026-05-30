@@ -1,9 +1,10 @@
 use super::{
-    build_api_format_health_monitor_payload, build_public_auth_modules_status_payload,
-    build_public_catalog_models_payload, build_public_catalog_search_models_payload,
-    build_public_providers_payload, capability_detail_by_name, ldap_module_config_is_valid,
-    sanitize_public_model_config_for_user, serialize_public_capability, supported_capability_names,
-    ApiFormatHealthMonitorOptions, PUBLIC_CAPABILITY_DEFINITIONS,
+    build_api_format_health_monitor_payload, build_model_health_monitor_payload,
+    build_public_auth_modules_status_payload, build_public_catalog_models_payload,
+    build_public_catalog_search_models_payload, build_public_providers_payload,
+    capability_detail_by_name, ldap_module_config_is_valid, sanitize_public_model_config_for_user,
+    serialize_public_capability, supported_capability_names, ApiFormatHealthMonitorOptions,
+    ModelHealthMonitorOptions, PUBLIC_CAPABILITY_DEFINITIONS,
 };
 use crate::control::GatewayPublicRequestContext;
 use crate::handlers::shared::{
@@ -421,6 +422,43 @@ pub(crate) async fn maybe_build_local_public_support_response(
                     include_api_path: true,
                     include_provider_count: false,
                     include_key_count: false,
+                },
+            )
+            .await?;
+            return Some(Json(payload).into_response());
+        }
+
+        if decision.route_kind.as_deref() == Some("health_models")
+            && request_context.request_path == "/api/public/health/models"
+        {
+            let lookback_hours = query_param_value(
+                request_context.request_query_string.as_deref(),
+                "lookback_hours",
+            )
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| (1..=168).contains(value))
+            .unwrap_or(6);
+            let model_limit = query_param_value(
+                request_context.request_query_string.as_deref(),
+                "model_limit",
+            )
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| (1..=50).contains(value))
+            .unwrap_or(12);
+            let per_model_limit = query_param_value(
+                request_context.request_query_string.as_deref(),
+                "per_model_limit",
+            )
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| (10..=500).contains(value))
+            .unwrap_or(100);
+            let payload = build_model_health_monitor_payload(
+                state,
+                lookback_hours,
+                model_limit,
+                per_model_limit,
+                ModelHealthMonitorOptions {
+                    include_provider_count: false,
                 },
             )
             .await?;

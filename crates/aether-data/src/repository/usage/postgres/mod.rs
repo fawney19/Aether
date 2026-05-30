@@ -4389,7 +4389,7 @@ ORDER BY date ASC, total_cost_usd DESC, model ASC, provider_name ASC
             r#"
 SELECT
   TO_CHAR(
-    date_trunc('day', "usage".created_at + (
+    date_trunc('day', ("usage".created_at AT TIME ZONE 'UTC') + (
       "#,
         );
         builder.push_bind(query.tz_offset_minutes);
@@ -4484,53 +4484,12 @@ ORDER BY date ASC, total_cost_usd DESC, "usage".model ASC, "usage".provider_name
         Ok(items)
     }
 
-    async fn list_dashboard_daily_breakdown_aggregate_segments(
-        &self,
-        query: &UsageDashboardDailyBreakdownQuery,
-    ) -> Result<Vec<StoredUsageDashboardDailyBreakdownRow>, DataLayerError> {
-        let cutoff_utc = match self.read_stats_daily_cutoff_date().await {
-            Ok(value) => value,
-            Err(err) if dashboard_should_fallback_to_raw_on_aggregate_error(&err) => {
-                return Ok(Vec::new());
-            }
-            Err(err) => return Err(err),
-        };
-        let Some(cutoff_utc) = cutoff_utc else {
-            return Ok(Vec::new());
-        };
-        let start_utc = dashboard_unix_secs_to_utc(query.created_from_unix_secs);
-        let end_utc = dashboard_unix_secs_to_utc(query.created_until_unix_secs);
-        let split = split_dashboard_daily_aggregate_range(start_utc, end_utc, cutoff_utc);
-        let Some((aggregate_start, aggregate_end)) = split.aggregate else {
-            return Ok(Vec::new());
-        };
-
-        self.list_dashboard_daily_breakdown_from_daily_aggregates(
-            aggregate_start,
-            aggregate_end,
-            query.user_id.as_deref(),
-        )
-        .await
-    }
-
     pub async fn list_dashboard_daily_breakdown(
         &self,
         query: &UsageDashboardDailyBreakdownQuery,
     ) -> Result<Vec<StoredUsageDashboardDailyBreakdownRow>, DataLayerError> {
         if query.tz_offset_minutes != 0 {
-            let mut items = self
-                .list_dashboard_daily_breakdown_aggregate_segments(query)
-                .await?;
-            let mut aggregate_dates = items
-                .iter()
-                .map(|item| item.date.clone())
-                .collect::<std::collections::BTreeSet<_>>();
-            for item in self.list_dashboard_daily_breakdown_raw(query).await? {
-                if aggregate_dates.insert(item.date.clone()) {
-                    items.push(item);
-                }
-            }
-            return Ok(finalize_dashboard_daily_breakdown_rows(items));
+            return self.list_dashboard_daily_breakdown_raw(query).await;
         }
 
         let cutoff_utc = match self.read_stats_daily_cutoff_date().await {
@@ -4822,6 +4781,12 @@ WITH filtered_usage AS (
                 .push("\"usage\".user_id = ")
                 .push_bind(user_id.to_string());
         }
+        if let Some(provider_name) = query.provider_name.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            builder
+                .push("\"usage\".provider_name = ")
+                .push_bind(provider_name.to_string());
+        }
         builder.push(filtered_extra_where);
         builder.push(
             r#"
@@ -4914,6 +4879,9 @@ ORDER BY request_count DESC, group_key ASC
         &self,
         query: &UsageBreakdownSummaryQuery,
     ) -> Result<Vec<StoredUsageBreakdownSummaryRow>, DataLayerError> {
+        if query.provider_name.is_some() {
+            return self.summarize_usage_breakdown_raw(query).await;
+        }
         let Some(user_id) = query.user_id.as_deref() else {
             return self.summarize_usage_breakdown_raw(query).await;
         };
@@ -4935,6 +4903,7 @@ ORDER BY request_count DESC, group_key ASC
                     created_from_unix_secs: dashboard_utc_to_unix_secs(raw_start),
                     created_until_unix_secs: dashboard_utc_to_unix_secs(raw_end),
                     user_id: Some(user_id.to_string()),
+                    provider_name: None,
                     group_by: query.group_by,
                 })
                 .await?;
@@ -4957,6 +4926,7 @@ ORDER BY request_count DESC, group_key ASC
                     created_from_unix_secs: dashboard_utc_to_unix_secs(raw_start),
                     created_until_unix_secs: dashboard_utc_to_unix_secs(raw_end),
                     user_id: Some(user_id.to_string()),
+                    provider_name: None,
                     group_by: query.group_by,
                 })
                 .await?;

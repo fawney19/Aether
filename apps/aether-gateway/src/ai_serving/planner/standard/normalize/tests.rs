@@ -68,6 +68,7 @@ fn sample_transport(base_url: &str, api_format: &str) -> GatewayProviderTranspor
             expires_at_unix_secs: None,
             proxy: None,
             fingerprint: None,
+            upstream_metadata: None,
             decrypted_api_key: "__placeholder__".to_string(),
             decrypted_auth_config: None,
         },

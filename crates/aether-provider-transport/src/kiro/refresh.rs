@@ -223,6 +223,7 @@ mod tests {
                 expires_at_unix_secs: None,
                 proxy: None,
                 fingerprint: None,
+                upstream_metadata: None,
                 decrypted_api_key: "__placeholder__".to_string(),
                 decrypted_auth_config: Some(raw_auth_config.to_string()),
             },

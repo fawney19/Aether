@@ -117,7 +117,8 @@ SELECT
       OR CASE
         WHEN jsonb_typeof("usage".provider_request_body::jsonb) = 'object' THEN COALESCE(
           NULLIF(BTRIM("usage".provider_request_body->>'reasoning_effort'), ''),
-          NULLIF(BTRIM("usage".provider_request_body->'reasoning'->>'effort'), '')
+          NULLIF(BTRIM("usage".provider_request_body->'reasoning'->>'effort'), ''),
+          NULLIF(BTRIM("usage".provider_request_body->'output_config'->>'effort'), '')
         )
         ELSE NULLIF(BTRIM("usage".request_metadata->>'provider_reasoning_effort'), '')
       END IS NOT NULL
@@ -140,7 +141,8 @@ SELECT
         CASE
           WHEN jsonb_typeof("usage".provider_request_body::jsonb) = 'object' THEN COALESCE(
             NULLIF(BTRIM("usage".provider_request_body->>'reasoning_effort'), ''),
-            NULLIF(BTRIM("usage".provider_request_body->'reasoning'->>'effort'), '')
+            NULLIF(BTRIM("usage".provider_request_body->'reasoning'->>'effort'), ''),
+            NULLIF(BTRIM("usage".provider_request_body->'output_config'->>'effort'), '')
           )
           ELSE NULLIF(BTRIM("usage".request_metadata->>'provider_reasoning_effort'), '')
         END,

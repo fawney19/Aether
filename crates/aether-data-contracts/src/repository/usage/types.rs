@@ -17,6 +17,13 @@ pub fn extract_provider_reasoning_effort_from_body(value: Option<&Value>) -> Opt
                 .and_then(|reasoning| reasoning.get("effort"))
                 .and_then(Value::as_str)
         })
+        .or_else(|| {
+            object
+                .get("output_config")
+                .and_then(Value::as_object)
+                .and_then(|output_config| output_config.get("effort"))
+                .and_then(Value::as_str)
+        })
         .and_then(normalize_provider_reasoning_effort)
 }
 
@@ -977,6 +984,7 @@ pub struct UsageBreakdownSummaryQuery {
     pub created_from_unix_secs: u64,
     pub created_until_unix_secs: u64,
     pub user_id: Option<String>,
+    pub provider_name: Option<String>,
     pub group_by: UsageBreakdownGroupBy,
 }
 
@@ -2436,12 +2444,18 @@ mod tests {
 
         usage.request_metadata = None;
         usage.provider_request_body = Some(json!({
-            "reasoning_effort": "High",
+            "output_config": { "effort": "High" },
             "service_tier": "priority"
         }));
 
         assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("high"));
         assert_eq!(usage.provider_service_tier().as_deref(), Some("priority"));
+
+        usage.provider_request_body = Some(json!({
+            "reasoning_effort": "medium"
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("medium"));
 
         usage.request_metadata = Some(json!({
             "provider_reasoning_effort": "max",

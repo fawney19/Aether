@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
-import { getQuotaDisplayText } from '../providerKeyQuota'
+import {
+  getGeminiCliAccountCreditsText,
+  getQuotaDisplayText,
+} from '../providerKeyQuota'
 
 describe('providerKeyQuota', () => {
   it('includes Codex Spark quota windows in display text', () => {
@@ -103,6 +106,40 @@ describe('providerKeyQuota', () => {
         },
       },
     }, 'grok')).toBe('Auto剩余 40.0% (60/150) | Heavy剩余 0.0% (0/20)')
+  })
+
+  it('formats Gemini CLI AI credits from status snapshot and upstream metadata', () => {
+    expect(getQuotaDisplayText({
+      status_snapshot: {
+        quota: {
+          provider_type: 'gemini_cli',
+          code: 'ok',
+          exhausted: false,
+          credits: {
+            remaining: 123.5,
+            consumed: 7,
+          },
+        },
+      },
+    }, 'gemini_cli')).toBe('AI Credits 剩余 123.5')
+
+    expect(getGeminiCliAccountCreditsText({
+      status_snapshot: {
+        quota: {
+          provider_type: 'gemini_cli',
+          code: 'ok',
+          exhausted: false,
+        },
+      },
+      upstream_metadata: {
+        gemini_cli: {
+          paidTier: {
+            id: 'g1-pro-tier',
+            availableCredits: '41.5',
+          },
+        },
+      },
+    }, 'gemini_cli')).toBe('AI Credits 剩余 41.5')
   })
 
   it('formats ChatGPT Web image quota as remaining count', () => {

@@ -195,8 +195,6 @@ import { normalizeReleaseNotesForDisplay } from '@/utils/releaseNotes'
 import { sanitizeMarkdown } from '@/utils/sanitize'
 import { marked } from 'marked'
 
-const SOURCE_BUILD_UPDATE_HINT = '当前为源码构建，请使用 git pull 后重新编译。'
-
 const props = defineProps<{
   modelValue: boolean
   currentVersion: string
@@ -226,6 +224,8 @@ const emit = defineEmits<{
   applyUpdate: []
   rollback: []
 }>()
+
+const SOURCE_BUILD_UPDATE_HINT = '当前为源码构建，请使用 git pull 后重新编译。'
 
 const isOpen = ref(props.modelValue)
 const updating = computed(() => props.updating ?? false)

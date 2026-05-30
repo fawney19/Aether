@@ -521,6 +521,21 @@ fn prepare_request_body(
     }
 }
 
+fn prepare_bodyless_request_body(
+    body_rx: mpsc::Receiver<TunnelFrame>,
+    follow_redirects: bool,
+) -> PreparedRequestBody {
+    drop(body_rx);
+    PreparedRequestBody {
+        first_request_body: Some(empty_request_body()),
+        replay_body: if follow_redirects {
+            ReplayableRequestBody::None
+        } else {
+            ReplayableRequestBody::NonReplayable
+        },
+    }
+}
+
 async fn collect_request_body_for_replay(
     mut body_rx: mpsc::Receiver<TunnelFrame>,
     body_size: Arc<AtomicUsize>,
@@ -1379,17 +1394,7 @@ async fn handle_stream_inner(
             0,
         )
     } else {
-        PreparedRequestBody {
-            first_request_body: Some(build_streaming_request_body(
-                body_rx,
-                Arc::clone(&request_body_size),
-            )),
-            replay_body: if follow_redirects {
-                ReplayableRequestBody::None
-            } else {
-                ReplayableRequestBody::NonReplayable
-            },
-        }
+        prepare_bodyless_request_body(body_rx, follow_redirects)
     };
 
     let mut total_dns_ms = 0u64;
@@ -1591,6 +1596,7 @@ async fn send_error(tx: &FrameSender, stream_id: u32, msg: &str) {
     .await;
 }
 
+#[cfg(test)]
 fn build_streaming_request_body(
     body_rx: mpsc::Receiver<TunnelFrame>,
     body_size: Arc<AtomicUsize>,
@@ -1620,6 +1626,7 @@ fn build_spooled_request_body(
     upstream_client::stream_request_body(body_stream)
 }
 
+#[cfg(test)]
 fn build_prefixed_request_body(
     prefix_chunks: Vec<Bytes>,
     body_rx: mpsc::Receiver<TunnelFrame>,
@@ -1792,6 +1799,22 @@ mod tests {
         assert!(err.to_string().contains("client cancelled"));
         assert!(body.frame().await.is_none());
         assert_eq!(body_size.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn bodyless_request_body_completes_without_waiting_for_tunnel_sender() {
+        let (_tx, rx) = mpsc::channel(4);
+        let mut prepared = prepare_bodyless_request_body(rx, true);
+        let mut body = prepared
+            .first_request_body
+            .take()
+            .expect("bodyless request should have an initial body");
+
+        let frame = tokio::time::timeout(Duration::from_millis(25), body.frame())
+            .await
+            .expect("bodyless request body should not wait for tunnel body frames");
+        assert!(frame.is_none());
+        assert!(matches!(prepared.replay_body, ReplayableRequestBody::None));
     }
 
     #[tokio::test]
@@ -2690,6 +2713,7 @@ mod tests {
             upstream_connect_timeout_secs: 30,
             upstream_pool_max_idle_per_host: 4,
             upstream_pool_idle_timeout_secs: 60,
+            upstream_client_pool_capacity: crate::config::DEFAULT_UPSTREAM_CLIENT_POOL_CAPACITY,
             upstream_tcp_keepalive_secs: 60,
             upstream_tcp_nodelay: true,
             upstream_proxy_url: None,

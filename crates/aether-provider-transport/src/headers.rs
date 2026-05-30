@@ -1,3 +1,5 @@
+use aether_contracts::USAGE_SERVER_NOW_UNIX_MS_HEADER;
+
 pub fn should_skip_request_header(name: &str) -> bool {
     let normalized = name.to_ascii_lowercase();
     matches!(
@@ -16,6 +18,7 @@ pub fn should_skip_request_header(name: &str) -> bool {
             | "x-aether-execution-loop-guard"
             | "x-aether-control-execute-fallback"
             | "x-aether-rate-limit-preflight"
+            | USAGE_SERVER_NOW_UNIX_MS_HEADER
     )
 }
 
@@ -79,7 +82,11 @@ pub(crate) fn should_skip_upstream_complete_passthrough_header(name: &str) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::should_skip_upstream_passthrough_header;
+    use super::{
+        should_skip_request_header, should_skip_upstream_complete_passthrough_header,
+        should_skip_upstream_passthrough_header,
+    };
+    use aether_contracts::USAGE_SERVER_NOW_UNIX_MS_HEADER;
 
     #[test]
     fn strips_all_stainless_headers() {
@@ -119,6 +126,24 @@ mod tests {
             assert!(
                 should_skip_upstream_passthrough_header(h),
                 "should skip {h}"
+            );
+        }
+    }
+
+    #[test]
+    fn strips_usage_server_time_header_from_provider_requests() {
+        for h in [
+            USAGE_SERVER_NOW_UNIX_MS_HEADER,
+            "X-Aether-Server-Now-Unix-Ms",
+        ] {
+            assert!(should_skip_request_header(h), "should skip {h}");
+            assert!(
+                should_skip_upstream_passthrough_header(h),
+                "should skip passthrough {h}"
+            );
+            assert!(
+                should_skip_upstream_complete_passthrough_header(h),
+                "should skip complete passthrough {h}"
             );
         }
     }

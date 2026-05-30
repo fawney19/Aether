@@ -108,6 +108,7 @@ pub(super) fn map_key(
         expires_at_unix_secs: key.expires_at_unix_secs,
         proxy: normalize_optional_json(key.proxy),
         fingerprint: normalize_optional_json(key.fingerprint),
+        upstream_metadata: normalize_optional_json(key.upstream_metadata),
         decrypted_api_key,
         decrypted_auth_config,
     })

@@ -1782,6 +1782,7 @@ fn admin_provider_oauth_quota_mod_stays_thin() {
         "refresh_codex_provider_quota_locally",
         "refresh_kiro_provider_quota_locally",
         "refresh_antigravity_provider_quota_locally",
+        "refresh_gemini_cli_provider_quota_locally",
         "refresh_chatgpt_web_provider_quota_locally",
     ] {
         assert!(

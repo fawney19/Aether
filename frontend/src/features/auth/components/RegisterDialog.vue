@@ -329,6 +329,23 @@ import Input from '@/components/ui/input.vue'
 import Label from '@/components/ui/label.vue'
 import TurnstileWidget from './TurnstileWidget.vue'
 
+const props = withDefaults(defineProps<Props>(), {
+  open: false,
+  requireEmailVerification: false,
+  emailConfigured: true,
+  passwordPolicyLevel: 'weak',
+  turnstileEnabled: false,
+  turnstileSiteKey: null,
+  privacyPolicy: () => ({
+    enabled: false,
+    format: 'markdown',
+    content: '',
+    version: ''
+  })
+})
+
+const emit = defineEmits<Emits>()
+
 const INVITE_CODE_STORAGE_KEY = 'aether_invite_code'
 
 interface Props {
@@ -347,22 +364,6 @@ interface Emits {
   (e: 'switchToLogin'): void
 }
 
-const props = withDefaults(defineProps<Props>(), {
-  open: false,
-  requireEmailVerification: false,
-  emailConfigured: true,
-  passwordPolicyLevel: 'weak',
-  turnstileEnabled: false,
-  turnstileSiteKey: null,
-  privacyPolicy: () => ({
-    enabled: false,
-    format: 'markdown',
-    content: '',
-    version: ''
-  })
-})
-
-const emit = defineEmits<Emits>()
 const { success, error: showError } = useToast()
 
 // Form nonce for password fields (prevent autofill)

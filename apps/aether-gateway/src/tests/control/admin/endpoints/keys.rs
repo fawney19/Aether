@@ -847,7 +847,7 @@ async fn gateway_fetches_allowed_models_immediately_when_creating_key_with_auto_
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![],
     ));
@@ -1662,7 +1662,7 @@ async fn gateway_overwrites_allowed_models_immediately_when_enabling_auto_fetch(
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![key],
     ));
@@ -1770,7 +1770,7 @@ async fn gateway_fetches_allowed_models_immediately_when_enabling_auto_fetch_fro
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![key],
     ));
@@ -1878,7 +1878,7 @@ async fn gateway_refreshes_allowed_models_when_updating_include_patterns_with_au
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![key],
     ));
@@ -1982,7 +1982,7 @@ async fn gateway_refreshes_allowed_models_when_updating_exclude_patterns_with_au
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![key],
     ));

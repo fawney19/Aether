@@ -31,6 +31,7 @@ pub(super) struct AdminProviderOAuthBatchImportEntry {
     pub user_id: Option<String>,
     pub email: Option<String>,
     pub account_name: Option<String>,
+    pub project_id: Option<String>,
     pub sso_rw_token: Option<String>,
     pub cf_cookies: Option<String>,
     pub cf_clearance: Option<String>,
@@ -74,6 +75,20 @@ fn coerce_admin_provider_oauth_import_str(value: Option<&serde_json::Value>) -> 
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn coerce_admin_provider_oauth_import_project_id(
+    value: Option<&serde_json::Value>,
+) -> Option<String> {
+    match value {
+        Some(serde_json::Value::Object(object)) => coerce_admin_provider_oauth_import_str(
+            object
+                .get("id")
+                .or_else(|| object.get("project_id"))
+                .or_else(|| object.get("projectId")),
+        ),
+        other => coerce_admin_provider_oauth_import_str(other),
+    }
 }
 
 fn json_import_expiry_value(value: Option<&serde_json::Value>) -> Option<u64> {
@@ -175,6 +190,7 @@ fn extract_admin_provider_oauth_batch_import_entry(
                     user_id: grok_cookie_value(raw_token, "x-userid"),
                     email: None,
                     account_name: None,
+                    project_id: None,
                     sso_rw_token: grok_cookie_value(raw_token, "sso-rw"),
                     cf_cookies: grok_cookie_profile(raw_token),
                     cf_clearance: grok_cookie_value(raw_token, "cf_clearance"),
@@ -308,6 +324,13 @@ fn extract_admin_provider_oauth_batch_import_entry(
                     .get("account_name")
                     .or_else(|| object.get("accountName")),
             );
+            let project_id = coerce_admin_provider_oauth_import_project_id(
+                object
+                    .get("project_id")
+                    .or_else(|| object.get("projectId"))
+                    .or_else(|| object.get("cloudaicompanionProject"))
+                    .or_else(|| object.get("cloudAiCompanionProject")),
+            );
             let sso_rw_token = coerce_admin_provider_oauth_import_str(
                 object
                     .get("sso_rw_token")
@@ -355,6 +378,7 @@ fn extract_admin_provider_oauth_batch_import_entry(
                 user_id,
                 email,
                 account_name,
+                project_id,
                 sso_rw_token,
                 cf_cookies,
                 cf_clearance,
@@ -445,6 +469,7 @@ fn parse_error_entry(error: String) -> AdminProviderOAuthBatchImportEntry {
         user_id: None,
         email: None,
         account_name: None,
+        project_id: None,
         sso_rw_token: None,
         cf_cookies: None,
         cf_clearance: None,
@@ -464,6 +489,19 @@ pub(super) fn apply_admin_provider_oauth_batch_import_hints(
     auth_config: &mut serde_json::Map<String, serde_json::Value>,
 ) {
     let provider_type = provider_type.trim().to_ascii_lowercase();
+    if provider_type == "gemini_cli" {
+        if let Some(project_id) = entry.project_id.as_ref() {
+            auth_config
+                .entry("project_id".to_string())
+                .or_insert_with(|| json!(project_id));
+        }
+        if let Some(plan_type) = entry.plan_type.as_ref() {
+            auth_config
+                .entry("plan_type".to_string())
+                .or_insert_with(|| json!(plan_type));
+        }
+        return;
+    }
     if !matches!(provider_type.as_str(), "codex" | "chatgpt_web" | "grok") {
         return;
     }
@@ -614,7 +652,10 @@ pub(super) fn build_admin_provider_oauth_batch_task_state(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_admin_provider_oauth_batch_import_entries;
+    use super::{
+        apply_admin_provider_oauth_batch_import_hints,
+        parse_admin_provider_oauth_batch_import_entries,
+    };
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use serde_json::json;
 
@@ -748,6 +789,38 @@ mod tests {
         assert_eq!(entries[0].cf_clearance.as_deref(), Some("cf-1"));
         assert_eq!(entries[0].user_id.as_deref(), Some("user-1"));
         assert_eq!(entries[0].pool_tier.as_deref(), Some("heavy"));
+    }
+
+    #[test]
+    fn parses_gemini_cli_project_id_hint() {
+        let entries = parse_admin_provider_oauth_batch_import_entries(
+            "gemini_cli",
+            r#"[{"refresh_token":"rt-1","projectId":"project-gemini-cli-1","planType":"free"}]"#,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].refresh_token.as_deref(), Some("rt-1"));
+        assert_eq!(
+            entries[0].project_id.as_deref(),
+            Some("project-gemini-cli-1")
+        );
+        assert_eq!(entries[0].plan_type.as_deref(), Some("free"));
+    }
+
+    #[test]
+    fn applies_gemini_cli_project_id_hint_to_auth_config() {
+        let entries = parse_admin_provider_oauth_batch_import_entries(
+            "gemini_cli",
+            r#"{"refreshToken":"rt-1","cloudaicompanionProject":{"id":"project-gemini-cli-2"}}"#,
+        );
+        let mut auth_config = serde_json::Map::new();
+
+        apply_admin_provider_oauth_batch_import_hints("gemini_cli", &entries[0], &mut auth_config);
+
+        assert_eq!(
+            auth_config.get("project_id"),
+            Some(&json!("project-gemini-cli-2"))
+        );
     }
 
     #[test]

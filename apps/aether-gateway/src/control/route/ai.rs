@@ -97,7 +97,7 @@ pub(super) fn classify_ai_public_route(
             "openai:video",
             true,
         ))
-    } else if is_gemini_models_route(normalized_path) {
+    } else if method == http::Method::POST && is_gemini_models_route(normalized_path) {
         if normalized_path.ends_with(":predictLongRunning") {
             Some(classified(
                 "ai_public",
@@ -136,7 +136,9 @@ pub(super) fn classify_ai_public_route(
                 true,
             ))
         }
-    } else if is_gemini_operation_route(normalized_path) {
+    } else if is_gemini_operation_method(method, normalized_path)
+        && is_gemini_operation_route(normalized_path)
+    {
         Some(classified(
             "ai_public",
             "gemini",
@@ -144,9 +146,7 @@ pub(super) fn classify_ai_public_route(
             "gemini:video",
             true,
         ))
-    } else if (method == http::Method::POST && normalized_path == "/upload/v1beta/files")
-        || normalized_path.starts_with("/v1beta/files")
-    {
+    } else if is_gemini_files_method(method, normalized_path) {
         Some(classified(
             "ai_public",
             "gemini",
@@ -157,6 +157,17 @@ pub(super) fn classify_ai_public_route(
     } else {
         None
     }
+}
+
+fn is_gemini_operation_method(method: &http::Method, normalized_path: &str) -> bool {
+    method == http::Method::GET
+        || (method == http::Method::POST && normalized_path.ends_with(":cancel"))
+}
+
+fn is_gemini_files_method(method: &http::Method, normalized_path: &str) -> bool {
+    (method == http::Method::POST && normalized_path == "/upload/v1beta/files")
+        || ((method == http::Method::GET || method == http::Method::DELETE)
+            && normalized_path.starts_with("/v1beta/files"))
 }
 
 fn classify_antigravity_v1internal_route(

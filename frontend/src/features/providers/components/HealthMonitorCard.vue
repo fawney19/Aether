@@ -6,9 +6,14 @@
     <!-- 标题和筛选器 -->
     <div class="px-6 py-3.5 border-b border-border/60">
       <div class="flex items-center justify-between gap-4">
-        <h3 class="text-base font-semibold">
-          {{ title }}
-        </h3>
+        <div>
+          <h3 class="text-base font-semibold">
+            {{ title }}
+          </h3>
+          <p class="mt-1 text-xs text-muted-foreground">
+            基于真实请求统计端点可用率、请求成功率与健康历史
+          </p>
+        </div>
         <div class="flex items-center gap-3">
           <Label class="text-xs text-muted-foreground">回溯时间：</Label>
           <Select

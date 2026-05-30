@@ -349,6 +349,7 @@ mod tests {
                 expires_at_unix_secs: None,
                 proxy: None,
                 fingerprint: None,
+                upstream_metadata: None,
                 decrypted_api_key: "secret".to_string(),
                 decrypted_auth_config: None,
             },
@@ -567,12 +568,12 @@ mod tests {
     #[test]
     fn plan_fallback_url_helpers_route_openai_surfaces() {
         assert_eq!(
-            build_standard_plan_fallback_openai_chat_url("https://api.example.com", Some("x=1")),
+            build_standard_plan_fallback_openai_chat_url("https://api.example.com/v1", Some("x=1")),
             "https://api.example.com/v1/chat/completions?x=1"
         );
         assert_eq!(
             build_standard_plan_fallback_openai_responses_url(
-                "https://api.example.com",
+                "https://api.example.com/v1",
                 Some("x=1"),
                 true,
             ),

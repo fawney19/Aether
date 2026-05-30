@@ -222,7 +222,7 @@ fn first_error_text(
     })
 }
 
-pub(crate) fn admin_provider_pool_key_circuit_breaker_reason(
+pub(crate) fn admin_provider_pool_key_terminal_error_reason(
     status_code: u16,
     error_body: Option<&str>,
 ) -> Option<String> {
@@ -475,7 +475,7 @@ pub(crate) async fn record_admin_provider_pool_error(
 
     if status_code == 400 {
         // Bad Request is usually attributable to the caller payload, not key health.
-        // Account-level 400s are handled by the orchestration circuit-breaker path.
+        // Account-level 400s are handled by orchestration pool-score feedback.
         return;
     }
 
@@ -588,7 +588,7 @@ pub(crate) async fn record_admin_provider_pool_stream_timeout(
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_provider_pool_key_circuit_breaker_reason, parse_google_quota_cooldown_seconds_at,
+        admin_provider_pool_key_terminal_error_reason, parse_google_quota_cooldown_seconds_at,
         record_admin_provider_pool_error, record_admin_provider_pool_stream_timeout,
         record_admin_provider_pool_success,
     };
@@ -646,7 +646,7 @@ mod tests {
             account_self_check_interval_minutes: 60,
             account_self_check_concurrency: 4,
             score_top_n: 128,
-            score_fallback_scan_limit: 1024,
+            score_fallback_scan_limit: 4096,
             score_rules: aether_pool_core::PoolMemberScoreRules::default(),
             stream_timeout_threshold: 3,
             stream_timeout_window_seconds: 1800,
@@ -747,9 +747,9 @@ mod tests {
     }
 
     #[test]
-    fn circuit_reason_detects_workspace_deactivated_errors() {
+    fn terminal_error_reason_detects_workspace_deactivated_errors() {
         assert_eq!(
-            admin_provider_pool_key_circuit_breaker_reason(
+            admin_provider_pool_key_terminal_error_reason(
                 402,
                 Some(r#"{"error":{"message":"workspace has been deactivated"}}"#),
             )
@@ -757,7 +757,7 @@ mod tests {
             Some("workspace_deactivated_402:workspace has been deactivated")
         );
         assert_eq!(
-            admin_provider_pool_key_circuit_breaker_reason(
+            admin_provider_pool_key_terminal_error_reason(
                 400,
                 Some(r#"{"error":{"message":"deactivated_workspace"}}"#),
             )
@@ -767,9 +767,9 @@ mod tests {
     }
 
     #[test]
-    fn circuit_reason_detects_account_ban_errors() {
+    fn terminal_error_reason_detects_account_ban_errors() {
         assert_eq!(
-            admin_provider_pool_key_circuit_breaker_reason(
+            admin_provider_pool_key_terminal_error_reason(
                 403,
                 Some(r#"{"error":{"message":"AccountSuspendedException: account suspended"}}"#),
             )
@@ -777,7 +777,7 @@ mod tests {
             Some("forbidden_403")
         );
         assert_eq!(
-            admin_provider_pool_key_circuit_breaker_reason(
+            admin_provider_pool_key_terminal_error_reason(
                 423,
                 Some(r#"{"error":{"message":"account access denied"}}"#),
             )
@@ -1099,7 +1099,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn severe_account_errors_use_circuit_breaker_instead_of_pool_cooldown() {
+    async fn severe_account_errors_do_not_use_pool_cooldown() {
         let Some(redis) = start_managed_redis_or_skip().await else {
             return;
         };
@@ -1109,7 +1109,7 @@ mod tests {
         let key_ids = vec!["key-account-disabled".to_string()];
 
         assert_eq!(
-            admin_provider_pool_key_circuit_breaker_reason(
+            admin_provider_pool_key_terminal_error_reason(
                 401,
                 Some(r#"{"error":{"message":"account has been deactivated"}}"#),
             )

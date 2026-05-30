@@ -2459,6 +2459,12 @@ FROM "usage"
             "user_id",
             query.user_id.as_deref(),
         );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "provider_name",
+            query.provider_name.as_deref(),
+        );
         if matches!(query.group_by, UsageBreakdownGroupBy::ApiFormat) {
             push_sqlite_usage_where(&mut builder, &mut has_where);
             builder.push("api_format IS NOT NULL");

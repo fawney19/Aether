@@ -428,6 +428,56 @@ export interface GrokUpstreamMetadata {
   account_user_id?: string | null
 }
 
+export interface GeminiCliTierMetadata {
+  id?: string | null
+  tierType?: string | null
+  name?: string | null
+  displayName?: string | null
+  availableCredits?: number | string | null
+  remainingCredits?: number | string | null
+  consumedCredits?: number | string | null
+  totalCredits?: number | string | null
+  unlimited?: boolean | null
+  hasCredits?: boolean | null
+}
+
+export interface GeminiCliCreditsMetadata {
+  remaining?: number | string | null
+  remainingCredits?: number | string | null
+  available?: number | string | null
+  availableCredits?: number | string | null
+  balance?: number | string | null
+  consumed?: number | string | null
+  consumedCredits?: number | string | null
+  total?: number | string | null
+  totalCredits?: number | string | null
+  has_credits?: boolean | null
+  unlimited?: boolean | null
+  trace_id?: string | null
+  traceId?: string | null
+  updated_at?: number | string | null
+}
+
+export interface GeminiCliModelQuota {
+  remaining_fraction?: number | string | null
+  used_percent?: number | string | null
+  remaining?: number | string | null
+  total?: number | string | null
+  reset_at?: number | string | null
+  display_name?: string | null
+  is_exhausted?: boolean | null
+}
+
+export interface GeminiCliUpstreamMetadata {
+  updated_at?: number | string | null
+  plan_type?: string | null
+  project_id?: string | null
+  paidTier?: GeminiCliTierMetadata | string | null
+  currentTier?: GeminiCliTierMetadata | string | null
+  credits?: GeminiCliCreditsMetadata | null
+  quota_by_model?: Record<string, GeminiCliModelQuota> | null
+}
+
 export interface UpstreamMetadata {
   codex?: CodexUpstreamMetadata
   antigravity?: AntigravityUpstreamMetadata
@@ -435,6 +485,7 @@ export interface UpstreamMetadata {
   windsurf?: WindsurfUpstreamMetadata
   chatgpt_web?: ChatGPTWebUpstreamMetadata
   grok?: GrokUpstreamMetadata
+  gemini_cli?: GeminiCliUpstreamMetadata
 }
 
 // 按格式的健康度数据
@@ -560,6 +611,61 @@ export interface PublicEndpointStatusMonitor {
 export interface PublicEndpointStatusMonitorResponse {
   generated_at: string
   formats: PublicEndpointStatusMonitor[]
+}
+
+export interface ModelHealthEvent {
+  timestamp: string
+  status: 'success' | 'failed'
+  status_code?: number | null
+  latency_ms?: number | null
+  first_byte_time_ms?: number | null
+  error_type?: string | null
+}
+
+export interface ModelStatusMonitor {
+  model: string
+  display_name?: string | null
+  total_attempts: number
+  success_count: number
+  failed_count: number
+  success_rate: number
+  avg_latency_ms?: number | null
+  avg_first_byte_ms?: number | null
+  provider_count?: number
+  last_event_at?: string | null
+  events: ModelHealthEvent[]
+  timeline?: string[]
+  time_range_start?: string | null
+  time_range_end?: string | null
+}
+
+export interface ModelStatusMonitorResponse {
+  generated_at: string
+  models: ModelStatusMonitor[]
+}
+
+export interface ProviderStatusMonitor {
+  provider_id: string
+  provider_name: string
+  provider_type?: string | null
+  is_active: boolean
+  total_attempts: number
+  success_count: number
+  failed_count: number
+  success_rate: number
+  avg_latency_ms?: number | null
+  avg_first_byte_ms?: number | null
+  model_count: number
+  last_event_at?: string | null
+  timeline?: string[]
+  time_range_start?: string | null
+  time_range_end?: string | null
+  models: ModelStatusMonitor[]
+}
+
+export interface ProviderStatusMonitorResponse {
+  generated_at: string
+  providers: ProviderStatusMonitor[]
 }
 
 export type ProviderType = 'custom' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro' | 'grok' | 'windsurf' | 'vertex_ai'

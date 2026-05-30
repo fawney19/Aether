@@ -3,10 +3,11 @@ use serde_json::{json, Map, Value};
 use crate::{
     formats::context::FormatContext,
     protocol::canonical::{
-        canonical_extension_object_mut, gemini_extensions, gemini_part_to_canonical_block,
-        gemini_stop_reason_to_canonical, gemini_usage_to_canonical, CanonicalContentBlock,
-        CanonicalResponse, CanonicalResponseOutput, CanonicalRole, CanonicalStopReason,
-        CanonicalUsage,
+        canonical_extension_object_mut, canonical_usage_total_input_tokens,
+        canonical_usage_total_tokens_for_inclusive_input, gemini_extensions,
+        gemini_part_to_canonical_block, gemini_stop_reason_to_canonical, gemini_usage_to_canonical,
+        CanonicalContentBlock, CanonicalResponse, CanonicalResponseOutput, CanonicalRole,
+        CanonicalStopReason, CanonicalUsage,
     },
 };
 
@@ -359,19 +360,26 @@ fn canonical_stop_reason_to_gemini(reason: Option<&CanonicalStopReason>) -> Valu
 }
 
 fn canonical_usage_to_gemini_usage_metadata(usage: &CanonicalUsage) -> Value {
+    let input_tokens = canonical_usage_total_input_tokens(usage);
     let mut out = Map::new();
-    out.insert(
-        "promptTokenCount".to_string(),
-        Value::from(usage.input_tokens),
-    );
+    out.insert("promptTokenCount".to_string(), Value::from(input_tokens));
     out.insert(
         "candidatesTokenCount".to_string(),
         Value::from(usage.output_tokens.saturating_sub(usage.reasoning_tokens)),
     );
     out.insert(
         "totalTokenCount".to_string(),
-        Value::from(usage.total_tokens),
+        Value::from(canonical_usage_total_tokens_for_inclusive_input(
+            usage,
+            input_tokens,
+        )),
     );
+    if usage.cache_read_tokens > 0 {
+        out.insert(
+            "cachedContentTokenCount".to_string(),
+            Value::from(usage.cache_read_tokens),
+        );
+    }
     if usage.reasoning_tokens > 0 {
         out.insert(
             "thoughtsTokenCount".to_string(),

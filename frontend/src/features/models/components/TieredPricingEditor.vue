@@ -301,19 +301,17 @@ type ImageOutputPriceRangeRow = {
   prices: Partial<Record<ImageOutputQuality, number>>
 }
 
-const DEFAULT_IMAGE_OUTPUT_SIZES = ['1024x1024', '1536x1024', '1024x1536']
-const DEFAULT_IMAGE_OUTPUT_PIXEL_LIMITS = [1_048_576, 1_572_864, 2_097_152]
-const IMAGE_OUTPUT_QUALITIES: ImageOutputQuality[] = ['low', 'medium', 'high']
-
 const props = defineProps<{
   modelValue?: TieredPricingConfig | null
   showCache1h?: boolean
   showImagePricing?: boolean
 }>()
-
 const emit = defineEmits<{
   'update:modelValue': [value: TieredPricingConfig | null]
 }>()
+const DEFAULT_IMAGE_OUTPUT_SIZES = ['1024x1024', '1536x1024', '1024x1536']
+const DEFAULT_IMAGE_OUTPUT_PIXEL_LIMITS = [1_048_576, 1_572_864, 2_097_152]
+const IMAGE_OUTPUT_QUALITIES: ImageOutputQuality[] = ['low', 'medium', 'high']
 
 // 本地状态
 const localTiers = ref<PricingTier[]>([])

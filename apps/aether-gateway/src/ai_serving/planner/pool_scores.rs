@@ -6,7 +6,6 @@ use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKe
 use aether_pool_core::{
     score_pool_member_with_rules, PoolMemberScoreInput, PoolMemberScoreRules, POOL_SCORE_VERSION,
 };
-use aether_scheduler_core::any_provider_key_circuit_open_at;
 use serde_json::Value;
 
 use crate::handlers::shared::{provider_key_health_summary, provider_key_status_snapshot_payload};
@@ -100,7 +99,6 @@ fn provider_key_score_input(
         .and_then(|snapshot| snapshot.get("account"))
         .and_then(Value::as_object);
     let (health_score, _, _, _, _) = provider_key_health_summary(key);
-    let active_circuit_open = any_provider_key_circuit_open_at(key, now_unix_secs);
     let health_score = key
         .health_by_format
         .as_ref()
@@ -127,7 +125,6 @@ fn provider_key_score_input(
             .and_then(Value::as_bool)
             .unwrap_or(false),
         oauth_invalid_reason: key.oauth_invalid_reason.clone(),
-        circuit_open: active_circuit_open,
         success_count: key.success_count.unwrap_or(0).into(),
         error_count: key.error_count.unwrap_or(0).into(),
         total_response_time_ms: key.total_response_time_ms.unwrap_or(0).into(),
@@ -213,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn future_circuit_probe_deadline_keeps_pool_score_in_cooldown() {
+    fn future_key_circuit_probe_deadline_does_not_drive_pool_score_cooldown() {
         let now_unix_secs = 1_000;
         let key = sample_key_with_circuit_next_probe(1_100);
 
@@ -225,6 +222,6 @@ mod tests {
             PoolMemberScoreRules::default(),
         );
 
-        assert_eq!(score.hard_state, PoolMemberHardState::Cooldown);
+        assert_eq!(score.hard_state, PoolMemberHardState::Available);
     }
 }

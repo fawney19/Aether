@@ -14,9 +14,6 @@
             {{ group.description || '未填写描述' }}
           </p>
         </div>
-        <span class="shrink-0 rounded-md border px-2 py-1 text-xs text-muted-foreground">
-          v{{ group.version }}
-        </span>
       </div>
     </div>
   </div>
@@ -28,7 +25,6 @@ export interface RoutingGroupListItem {
   name: string
   description?: string | null
   enabled: boolean
-  version: number
 }
 
 defineProps<{

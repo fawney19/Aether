@@ -3,25 +3,7 @@
     <PageHeader
       title="调度策略"
       description="管理调度分组、模型范围、默认调度模式和规则配置"
-    >
-      <template #actions>
-        <Button
-          variant="outline"
-          :disabled="loading"
-          @click="refreshPage"
-        >
-          <RefreshCw
-            class="mr-2 h-4 w-4"
-            :class="{ 'animate-spin': loading || loadingGlobalModels }"
-          />
-          刷新
-        </Button>
-        <Button @click="startCreate">
-          <Plus class="mr-2 h-4 w-4" />
-          新建策略
-        </Button>
-      </template>
-    </PageHeader>
+    />
 
     <div class="mt-6 grid gap-5 xl:grid-cols-[320px_minmax(0,1fr)]">
       <Card class="overflow-hidden">
@@ -35,7 +17,17 @@
                 共 {{ groups.length }} 个
               </p>
             </div>
-            <SlidersHorizontal class="h-4 w-4 text-muted-foreground" />
+            <Button
+              variant="ghost"
+              size="icon"
+              class="h-8 w-8 text-muted-foreground/70 hover:text-foreground"
+              :disabled="loading"
+              aria-label="添加策略"
+              title="添加策略"
+              @click="startCreate"
+            >
+              <Plus class="h-4 w-4" />
+            </Button>
           </div>
         </div>
 
@@ -47,49 +39,111 @@
             正在加载调度策略
           </div>
           <div
-            v-else-if="groups.length === 0"
-            class="rounded-lg border border-dashed border-border/70 px-4 py-8 text-center"
-          >
-            <p class="text-sm font-medium">
-              暂无调度策略
-            </p>
-            <p class="mt-1 text-xs text-muted-foreground">
-              可以先创建一个默认分组
-            </p>
-          </div>
-          <button
-            v-for="group in groups"
             v-else
-            :key="group.id"
-            type="button"
-            class="mb-2 w-full rounded-lg border px-4 py-3 text-left transition-colors"
-            :class="group.id === selectedGroupId
-              ? 'border-primary/60 bg-primary/10'
-              : 'border-border/60 bg-background hover:border-primary/40 hover:bg-muted/50'"
-            @click="selectGroup(group)"
+            class="space-y-2"
           >
-            <div class="flex items-start justify-between gap-3">
-              <div class="min-w-0">
-                <p class="truncate text-sm font-medium">
-                  {{ group.name }}
-                </p>
-                <p class="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                  {{ group.description || '未填写描述' }}
-                </p>
+            <div
+              v-if="groups.length === 0 && !isCreating"
+              class="rounded-lg border border-dashed border-border/70 px-4 py-8 text-center"
+            >
+              <p class="text-sm font-medium">
+                暂无调度策略
+              </p>
+              <p class="mt-1 text-xs text-muted-foreground">
+                可以先创建一个默认分组
+              </p>
+            </div>
+
+            <div
+              v-if="isCreating && draft"
+              class="rounded-lg border border-primary/60 bg-primary/10 px-4 py-2.5 text-left"
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <p class="truncate text-sm font-medium">
+                    {{ draft.name || '新调度策略' }}
+                  </p>
+                  <p class="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                    {{ draft.description || '未填写描述' }}
+                  </p>
+                </div>
+                <div class="shrink-0">
+                  <Badge :variant="draft.enabled ? 'default' : 'secondary'">
+                    {{ draft.enabled ? '启用' : '停用' }}
+                  </Badge>
+                </div>
               </div>
-              <Badge
-                :variant="group.enabled ? 'default' : 'secondary'"
-                class="shrink-0"
-              >
-                {{ group.enabled ? '启用' : '停用' }}
-              </Badge>
+              <div class="mt-1.5 flex items-end justify-between gap-3">
+                <div class="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <span v-if="draft.is_system_default">系统默认</span>
+                  <span>{{ draft.config_json.allowed_models.length || '全部' }} 模型范围</span>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="h-8 w-8 shrink-0"
+                  :class="draft.enabled
+                    ? 'text-primary hover:text-primary'
+                    : 'text-muted-foreground/70 hover:text-foreground'"
+                  :aria-label="draft.enabled ? '停用策略' : '启用策略'"
+                  :title="draft.enabled ? '已启用，点击停用' : '已停用，点击启用'"
+                  @click="setDraftEnabled(!draft.enabled)"
+                >
+                  <Power class="h-4 w-4" />
+                </Button>
+              </div>
             </div>
-            <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <span>v{{ group.version }}</span>
-              <span v-if="group.is_system_default">系统默认</span>
-              <span>{{ group.config_json.allowed_models.length || '全部' }} 模型范围</span>
+
+            <div
+              v-for="group in groups"
+              :key="group.id"
+              role="button"
+              tabindex="0"
+              class="w-full rounded-lg border px-4 py-2.5 text-left transition-colors"
+              :class="group.id === selectedGroupId
+                ? 'border-primary/60 bg-primary/10'
+                : 'border-border/60 bg-background hover:border-primary/40 hover:bg-muted/50'"
+              @click="selectGroup(group)"
+              @keydown.enter.prevent="selectGroup(group)"
+              @keydown.space.prevent="selectGroup(group)"
+            >
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <p class="truncate text-sm font-medium">
+                    {{ group.name }}
+                  </p>
+                  <p class="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                    {{ group.description || '未填写描述' }}
+                  </p>
+                </div>
+                <div class="shrink-0">
+                  <Badge :variant="displayGroupEnabled(group) ? 'default' : 'secondary'">
+                    {{ displayGroupEnabled(group) ? '启用' : '停用' }}
+                  </Badge>
+                </div>
+              </div>
+              <div class="mt-1.5 flex items-end justify-between gap-3">
+                <div class="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <span v-if="group.is_system_default">系统默认</span>
+                  <span>{{ group.config_json.allowed_models.length || '全部' }} 模型范围</span>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="h-8 w-8 shrink-0"
+                  :class="displayGroupEnabled(group)
+                    ? 'text-primary hover:text-primary'
+                    : 'text-muted-foreground/70 hover:text-foreground'"
+                  :aria-label="displayGroupEnabled(group) ? '停用策略' : '启用策略'"
+                  :title="displayGroupEnabled(group) ? '已启用，点击停用' : '已停用，点击启用'"
+                  @keydown.stop
+                  @click.stop="updateGroupEnabled(group, !displayGroupEnabled(group))"
+                >
+                  <Power class="h-4 w-4" />
+                </Button>
+              </div>
             </div>
-          </button>
+          </div>
         </div>
       </Card>
 
@@ -105,12 +159,6 @@
                   {{ isCreating ? '新建调度策略' : draft.name || '未命名策略' }}
                 </h2>
                 <Badge
-                  v-if="!isCreating"
-                  variant="outline"
-                >
-                  v{{ draft.version }}
-                </Badge>
-                <Badge
                   v-if="draft.is_system_default"
                   variant="secondary"
                 >
@@ -123,42 +171,50 @@
             </div>
             <div class="flex flex-wrap items-center gap-2">
               <Button
-                variant="outline"
-                size="sm"
-                :class="draft.is_system_default ? 'border-primary/50 bg-primary/10 text-primary' : ''"
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8"
+                :class="draft.is_system_default
+                  ? 'text-primary hover:text-primary'
+                  : 'text-muted-foreground/70 hover:text-foreground'"
+                :aria-label="draft.is_system_default ? '系统默认' : '设为系统默认'"
+                :title="draft.is_system_default ? '系统默认' : '设为系统默认'"
                 @click="draft.is_system_default = !draft.is_system_default"
               >
-                <Star class="mr-2 h-4 w-4" />
-                {{ draft.is_system_default ? '系统默认' : '设为系统默认' }}
+                <Star class="h-4 w-4" />
               </Button>
               <Button
-                variant="outline"
-                size="sm"
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8 text-muted-foreground/70 hover:text-foreground"
                 :disabled="!canSaveDraft"
+                aria-label="保存"
+                title="保存"
                 @click="saveDraft"
               >
                 <Save
-                  class="mr-2 h-4 w-4"
+                  class="h-4 w-4"
                   :class="{ 'animate-pulse': saving }"
                 />
-                保存
               </Button>
               <Button
                 v-if="!isCreating"
-                variant="destructive"
-                size="sm"
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8 text-muted-foreground/70 hover:text-destructive"
                 :disabled="deleting"
+                aria-label="删除"
+                title="删除"
                 @click="deleteDraft"
               >
-                <Trash2 class="mr-2 h-4 w-4" />
-                删除
+                <Trash2 class="h-4 w-4" />
               </Button>
             </div>
           </div>
         </div>
 
         <div class="space-y-6 p-5">
-          <div class="grid gap-3 lg:grid-cols-[240px_minmax(0,1fr)_160px]">
+          <div class="grid gap-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.2fr)_320px]">
             <label class="space-y-1 text-sm">
               <span class="text-muted-foreground">名称</span>
               <Input
@@ -173,44 +229,34 @@
                 placeholder="例如：默认策略 / 高推理策略 / 号池优先策略"
               />
             </label>
-            <div class="flex items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2 text-sm">
-              <span>启用策略</span>
-              <Switch v-model="draft.enabled" />
+            <div class="space-y-1 text-sm">
+              <span class="text-muted-foreground">
+                维度
+              </span>
+              <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/40 p-1">
+                <button
+                  type="button"
+                  class="h-9 rounded-md px-3 text-sm font-medium transition-colors"
+                  :class="sortingScope === 'unified'
+                    ? 'bg-primary/10 text-primary shadow-sm ring-1 ring-border'
+                    : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
+                  @click="setSortingScope('unified')"
+                >
+                  统一调度
+                </button>
+                <button
+                  type="button"
+                  class="h-9 rounded-md px-3 text-sm font-medium transition-colors"
+                  :class="sortingScope === 'per_model'
+                    ? 'bg-primary/10 text-primary shadow-sm ring-1 ring-border'
+                    : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
+                  @click="setSortingScope('per_model')"
+                >
+                  区分模型
+                </button>
+              </div>
             </div>
           </div>
-
-          <section class="space-y-3 rounded-lg border border-border/60 p-4">
-            <div>
-              <h3 class="text-sm font-medium">
-                排序作用范围
-              </h3>
-              <p class="mt-1 text-xs text-muted-foreground">
-                统一排序对策略内全部模型生效；按模型排序需先挑选模型，再逐个配置排序与调度方式。
-              </p>
-            </div>
-            <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/40 p-1 sm:max-w-[320px]">
-              <button
-                type="button"
-                class="h-9 rounded-md px-3 text-sm font-medium transition-colors"
-                :class="sortingScope === 'unified'
-                  ? 'bg-background text-foreground shadow-sm'
-                  : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
-                @click="setSortingScope('unified')"
-              >
-                统一排序
-              </button>
-              <button
-                type="button"
-                class="h-9 rounded-md px-3 text-sm font-medium transition-colors"
-                :class="sortingScope === 'per_model'
-                  ? 'bg-background text-foreground shadow-sm'
-                  : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
-                @click="setSortingScope('per_model')"
-              >
-                按模型排序
-              </button>
-            </div>
-          </section>
 
           <section
             v-if="sortingScope === 'unified'"
@@ -225,7 +271,7 @@
                   统一作用于策略范围内的全部模型。
                 </p>
               </div>
-              <div class="grid gap-3 lg:grid-cols-2">
+              <div class="grid grid-cols-2 gap-3">
                 <div class="space-y-1 text-sm">
                   <span class="text-muted-foreground">优先级模式</span>
                   <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/40 p-1">
@@ -233,7 +279,7 @@
                       type="button"
                       class="flex h-9 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors"
                       :class="firstStepPriorityMode === 'provider'
-                        ? 'bg-background text-foreground shadow-sm'
+                        ? 'bg-primary/10 text-primary shadow-sm ring-1 ring-border'
                         : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
                       @click="updateFirstStepPriorityMode('provider')"
                     >
@@ -244,7 +290,7 @@
                       type="button"
                       class="flex h-9 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors"
                       :class="firstStepPriorityMode === 'global_key'
-                        ? 'bg-background text-foreground shadow-sm'
+                        ? 'bg-primary/10 text-primary shadow-sm ring-1 ring-border'
                         : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
                       @click="updateFirstStepPriorityMode('global_key')"
                     >
@@ -263,7 +309,7 @@
                       type="button"
                       class="h-9 rounded-md px-3 text-sm font-medium transition-colors"
                       :class="firstStepSchedulingMode === mode.value
-                        ? 'bg-background text-foreground shadow-sm'
+                        ? 'bg-primary/10 text-primary shadow-sm ring-1 ring-border'
                         : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
                       @click="updateFirstStepSchedulingMode(mode.value)"
                     >
@@ -284,112 +330,93 @@
             />
           </section>
 
-          <section
-            v-else
-            class="space-y-4"
-          >
-            <div class="grid gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
-              <div class="flex flex-col gap-3 rounded-lg border border-border/60 p-3">
-                <div class="flex items-center justify-between gap-3">
-                  <span class="text-sm font-medium">全局模型</span>
-                  <Badge variant="outline">
-                    {{ filteredGlobalModels.length }}
-                  </Badge>
-                </div>
+          <section v-else>
+            <div class="flex max-h-[560px] flex-col gap-3 overflow-hidden rounded-lg border border-border/60 p-3">
+              <div class="grid grid-cols-2 gap-3">
                 <Input
                   v-model="globalModelSearch"
                   placeholder="搜索模型"
+                  class="w-full"
                 />
-                <div class="grid grid-cols-3 gap-1 rounded-lg bg-muted/40 p-1">
+                <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/40 p-1 text-xs">
                   <button
-                    v-for="filter in modelFilterOptions"
+                    v-for="filter in modelFilters"
                     :key="filter.value"
                     type="button"
-                    class="h-7 rounded-md px-2 text-xs font-medium transition-colors"
+                    class="h-9 rounded-md px-3 font-medium transition-colors"
                     :class="modelFilter === filter.value
-                      ? 'bg-background text-foreground shadow-sm'
+                      ? 'bg-primary/10 text-primary shadow-sm ring-1 ring-border'
                       : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
                     @click="modelFilter = filter.value"
                   >
                     {{ filter.label }}
                   </button>
                 </div>
-                <div
-                  v-if="loadingGlobalModels"
-                  class="rounded-md border border-dashed border-border/70 px-3 py-4 text-center text-xs text-muted-foreground"
-                >
-                  正在加载全局模型
-                </div>
-                <div
-                  v-else-if="globalModelsError"
-                  class="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
-                >
-                  {{ globalModelsError }}
-                </div>
-                <div
-                  v-else-if="globalModels.length === 0"
-                  class="rounded-md border border-dashed border-border/70 px-3 py-4 text-center text-xs text-muted-foreground"
-                >
-                  暂无可选择的全局模型
-                </div>
-                <div
-                  v-else-if="filteredGlobalModels.length === 0"
-                  class="rounded-md border border-dashed border-border/70 px-3 py-4 text-center text-xs text-muted-foreground"
-                >
-                  未匹配到模型
-                </div>
-                <div
-                  v-else
-                  class="max-h-[640px] overflow-y-auto"
-                >
-                  <button
-                    v-for="model in filteredGlobalModels"
-                    :key="model.id"
-                    type="button"
-                    class="mb-1 flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-sm transition-colors"
-                    :class="activePerModelPolicy?.model === model.name
-                      ? 'bg-primary/10 text-foreground'
-                      : 'hover:bg-muted/60'"
-                    @click="selectGlobalModel(model.name)"
-                  >
-                    <span
-                      class="h-2 w-2 shrink-0 rounded-full"
-                      :class="hasModelPolicy(model.name)
-                        ? 'bg-primary'
-                        : 'bg-muted-foreground/20'"
-                      :title="hasModelPolicy(model.name) ? '已配置' : '未配置'"
-                    />
-                    <span class="min-w-0 flex-1">
-                      <span class="block truncate font-medium">{{ model.display_name || model.name }}</span>
-                      <span class="block truncate text-xs text-muted-foreground">{{ model.name }}</span>
-                    </span>
-                  </button>
-                </div>
               </div>
 
-              <div class="min-w-0 rounded-lg border border-border/60 p-4">
-                <template v-if="activePerModelPolicy">
-                  <div class="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                    <div class="min-w-0 space-y-1 text-sm">
-                      <span class="text-muted-foreground">当前模型</span>
-                      <div class="truncate text-sm font-medium">
-                        {{ globalModelLabel(activePerModelPolicy.model) }}
-                      </div>
-                      <div class="truncate text-xs text-muted-foreground">
-                        {{ activePerModelPolicy.model }}
-                      </div>
-                    </div>
-                    <div class="flex flex-wrap items-center gap-2">
+              <div
+                v-if="loadingGlobalModels"
+                class="rounded-md border border-dashed border-border/70 px-3 py-6 text-center text-xs text-muted-foreground"
+              >
+                正在加载模型
+              </div>
+              <div
+                v-else-if="globalModelsError"
+                class="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+              >
+                {{ globalModelsError }}
+              </div>
+              <div
+                v-else-if="modelRows.length === 0"
+                class="rounded-md border border-dashed border-border/70 px-3 py-6 text-center text-xs text-muted-foreground"
+              >
+                {{ globalModelSearch.trim() ? '未匹配到模型' : modelFilter === 'configured' ? '暂无已配置模型' : '暂无未配置模型' }}
+              </div>
+              <div
+                v-else
+                class="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1"
+              >
+                <div
+                  v-for="row in modelRows"
+                  :key="row.name"
+                  class="rounded-lg border transition-colors"
+                  :class="selectedPerModelName === row.name
+                    ? 'border-primary/50 bg-primary/5'
+                    : 'border-border/60'"
+                >
+                  <div class="flex w-full items-center gap-3 px-4 py-3">
+                    <button
+                      type="button"
+                      class="flex min-w-0 flex-1 items-center gap-3 text-left text-sm"
+                      @click="selectGlobalModel(row.name)"
+                    >
+                      <span
+                        v-if="row.configured"
+                        class="h-2 w-2 shrink-0 rounded-full bg-primary"
+                        aria-hidden="true"
+                      />
+                      <Plus
+                        v-else
+                        class="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                        aria-hidden="true"
+                      />
+                      <span class="min-w-0 flex-1">
+                        <span class="block truncate font-medium">{{ row.displayName }}</span>
+                        <span class="block truncate text-xs text-muted-foreground">{{ row.name }}</span>
+                      </span>
+                    </button>
+                    <template v-if="selectedPerModelName === row.name && activePerModelPolicy">
                       <DropdownMenu>
                         <DropdownMenuTrigger as-child>
                           <Button
                             type="button"
-                            variant="outline"
-                            size="sm"
+                            variant="ghost"
+                            size="icon"
+                            class="h-8 w-8 shrink-0 text-muted-foreground/70 hover:text-foreground"
                             :disabled="copySourceCandidates.length === 0"
+                            title="加载其他模型配置"
                           >
-                            <Copy class="mr-2 h-4 w-4" />
-                            加载
+                            <Copy class="h-4 w-4" />
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent
@@ -410,108 +437,110 @@
                       </DropdownMenu>
                       <Button
                         type="button"
-                        variant="outline"
-                        size="sm"
+                        variant="ghost"
+                        size="icon"
+                        class="h-8 w-8 shrink-0 text-muted-foreground/70 hover:text-foreground"
                         :disabled="!canSaveCurrentModel"
+                        title="保存到草稿"
                         @click="saveCurrentModel"
                       >
-                        <Save
-                          class="mr-2 h-4 w-4"
-                        />
-                        保存到草稿
+                        <Save class="h-4 w-4" />
                       </Button>
                       <Button
                         v-if="hasModelPolicy(activePerModelPolicy.model)"
                         type="button"
-                        :variant="canRemoveCurrentModel ? 'destructive' : 'outline'"
-                        size="sm"
-                        :class="canRemoveCurrentModel ? 'shadow-sm' : 'text-muted-foreground'"
+                        variant="ghost"
+                        size="icon"
+                        class="h-8 w-8 shrink-0"
+                        :class="canRemoveCurrentModel ? 'text-muted-foreground/70 hover:text-destructive' : 'text-muted-foreground/30'"
                         :disabled="!canRemoveCurrentModel"
                         :title="canRemoveCurrentModel ? '移除当前模型排序' : '当前有未保存改动，不能移除'"
                         @click="removePerModelPolicy(activePerModelPolicy.model)"
                       >
-                        <Trash2 class="mr-2 h-4 w-4" />
-                        移除
+                        <Trash2 class="h-4 w-4" />
                       </Button>
-                    </div>
+                    </template>
+                    <button
+                      type="button"
+                      class="shrink-0"
+                      @click="selectGlobalModel(row.name)"
+                    >
+                      <ChevronDown
+                        class="h-4 w-4 text-muted-foreground transition-transform"
+                        :class="selectedPerModelName === row.name ? 'rotate-180' : ''"
+                      />
+                    </button>
                   </div>
 
-                  <div class="mb-4 space-y-3 rounded-lg border border-border/60 p-4">
-                    <div>
+                  <div
+                    v-if="selectedPerModelName === row.name && activePerModelPolicy"
+                    class="border-t border-border/60 p-4"
+                  >
+                    <div class="mb-4 space-y-3 rounded-lg border border-border/60 p-4">
                       <h3 class="text-sm font-medium">
                         优先级模式与调度策略
                       </h3>
-                      <p class="mt-1 text-xs text-muted-foreground">
-                        仅作用于当前选中的模型。
-                      </p>
-                    </div>
-                    <div class="grid gap-3 lg:grid-cols-2">
-                      <div class="space-y-1 text-sm">
-                        <span class="text-muted-foreground">优先级模式</span>
-                        <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/40 p-1">
-                          <button
-                            type="button"
-                            class="flex h-9 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors"
-                            :class="modelPriorityMode(activePerModelPolicy.model) === 'provider'
-                              ? 'bg-background text-foreground shadow-sm'
-                              : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
-                            @click="updateModelPriorityMode(activePerModelPolicy.model, 'provider')"
-                          >
-                            <Layers class="h-4 w-4" />
-                            Provider
-                          </button>
-                          <button
-                            type="button"
-                            class="flex h-9 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors"
-                            :class="modelPriorityMode(activePerModelPolicy.model) === 'global_key'
-                              ? 'bg-background text-foreground shadow-sm'
-                              : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
-                            @click="updateModelPriorityMode(activePerModelPolicy.model, 'global_key')"
-                          >
-                            <Key class="h-4 w-4" />
-                            Key
-                          </button>
+                      <div class="grid gap-3 lg:grid-cols-2">
+                        <div class="space-y-1 text-sm">
+                          <span class="text-muted-foreground">优先级模式</span>
+                          <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/40 p-1">
+                            <button
+                              type="button"
+                              class="flex h-9 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors"
+                              :class="modelPriorityMode(activePerModelPolicy.model) === 'provider'
+                                ? 'bg-primary/10 text-primary shadow-sm ring-1 ring-border'
+                                : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
+                              @click="updateModelPriorityMode(activePerModelPolicy.model, 'provider')"
+                            >
+                              <Layers class="h-4 w-4" />
+                              Provider
+                            </button>
+                            <button
+                              type="button"
+                              class="flex h-9 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors"
+                              :class="modelPriorityMode(activePerModelPolicy.model) === 'global_key'
+                                ? 'bg-primary/10 text-primary shadow-sm ring-1 ring-border'
+                                : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
+                              @click="updateModelPriorityMode(activePerModelPolicy.model, 'global_key')"
+                            >
+                              <Key class="h-4 w-4" />
+                              Key
+                            </button>
+                          </div>
+                        </div>
+                        <div class="space-y-1 text-sm">
+                          <span class="text-muted-foreground">调度策略</span>
+                          <div class="grid grid-cols-3 gap-1 rounded-lg bg-muted/40 p-1">
+                            <button
+                              v-for="mode in schedulingModes"
+                              :key="mode.value"
+                              type="button"
+                              class="h-9 rounded-md px-3 text-sm font-medium transition-colors"
+                              :class="modelSchedulingMode(activePerModelPolicy.model) === mode.value
+                                ? 'bg-primary/10 text-primary shadow-sm ring-1 ring-border'
+                                : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
+                              @click="updateModelSchedulingMode(activePerModelPolicy.model, mode.value)"
+                            >
+                              {{ mode.label }}
+                            </button>
+                          </div>
                         </div>
                       </div>
+                    </div>
 
-                      <div class="space-y-1 text-sm">
-                        <span class="text-muted-foreground">调度策略</span>
-                        <div class="grid grid-cols-3 gap-1 rounded-lg bg-muted/40 p-1">
-                          <button
-                            v-for="mode in schedulingModes"
-                            :key="mode.value"
-                            type="button"
-                            class="h-9 rounded-md px-3 text-sm font-medium transition-colors"
-                            :class="modelSchedulingMode(activePerModelPolicy.model) === mode.value
-                              ? 'bg-background text-foreground shadow-sm'
-                              : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
-                            @click="updateModelSchedulingMode(activePerModelPolicy.model, mode.value)"
-                          >
-                            {{ mode.label }}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
+                    <RoutingPriorityPolicyEditor
+                      :config="activeConfigForReading"
+                      :model="activePerModelPolicy.model"
+                      :priority-mode="modelPriorityMode(activePerModelPolicy.model)"
+                      :scheduling-mode="modelSchedulingMode(activePerModelPolicy.model)"
+                      :show-priority-mode="false"
+                      :show-scheduling-mode="false"
+                      :subtitle="`仅作用于 ${activePerModelPolicy.model}`"
+                      @update:config="updateEditingConfig"
+                      @update:priority-mode="mode => updateModelPriorityMode(activePerModelPolicy.model, mode)"
+                      @update:scheduling-mode="mode => updateModelSchedulingMode(activePerModelPolicy.model, mode)"
+                    />
                   </div>
-
-                  <RoutingPriorityPolicyEditor
-                    :config="activeConfigForReading"
-                    :model="activePerModelPolicy.model"
-                    :priority-mode="modelPriorityMode(activePerModelPolicy.model)"
-                    :scheduling-mode="modelSchedulingMode(activePerModelPolicy.model)"
-                    :show-priority-mode="false"
-                    :show-scheduling-mode="false"
-                    :subtitle="`仅作用于 ${activePerModelPolicy.model}`"
-                    @update:config="updateEditingConfig"
-                    @update:priority-mode="mode => updateModelPriorityMode(activePerModelPolicy.model, mode)"
-                    @update:scheduling-mode="mode => updateModelSchedulingMode(activePerModelPolicy.model, mode)"
-                  />
-                </template>
-                <div
-                  v-else
-                  class="rounded-lg border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground"
-                >
-                  在左侧添加模型后即可配置
                 </div>
               </div>
             </div>
@@ -556,10 +585,10 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { Copy, Key, Layers, Plus, RefreshCw, Save, SlidersHorizontal, Star, Trash2 } from 'lucide-vue-next'
+import { ChevronDown, Copy, Key, Layers, Plus, Power, Save, Star, Trash2 } from 'lucide-vue-next'
 
 import { PageContainer, PageHeader } from '@/components/layout'
-import { Badge, Button, Card, Input, Switch } from '@/components/ui'
+import { Badge, Button, Card, Input } from '@/components/ui'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu'
 import { AlertDialog } from '@/components/common'
 import {
@@ -605,7 +634,12 @@ interface RoutingGroupDraft {
 }
 
 type SortingScope = 'unified' | 'per_model'
-type ModelFilter = 'all' | 'configured' | 'unconfigured'
+type ModelFilter = 'configured' | 'unconfigured'
+
+const modelFilters: Array<{ value: ModelFilter; label: string }> = [
+  { value: 'unconfigured', label: '未配置' },
+  { value: 'configured', label: '已配置' },
+]
 
 const { success, error: showError } = useToast()
 
@@ -613,12 +647,6 @@ const schedulingModes: Array<{ value: RoutingSchedulingMode; label: string }> = 
   { value: 'cache_affinity', label: '缓存亲和' },
   { value: 'load_balance', label: '负载均衡' },
   { value: 'fixed_order', label: '固定顺序' },
-]
-
-const modelFilterOptions: Array<{ value: ModelFilter; label: string }> = [
-  { value: 'all', label: '全部' },
-  { value: 'configured', label: '已配置' },
-  { value: 'unconfigured', label: '未配置' },
 ]
 
 const groups = ref<RoutingGroupRecord[]>([])
@@ -629,7 +657,7 @@ const sortingScope = ref<SortingScope>('unified')
 const selectedPerModelName = ref<string | null>(null)
 const editingConfig = ref<RoutingGroupConfig | null>(null)
 const globalModelSearch = ref('')
-const modelFilter = ref<ModelFilter>('all')
+const modelFilter = ref<ModelFilter>('unconfigured')
 const globalModels = ref<GlobalModelResponse[]>([])
 const loadingGlobalModels = ref(false)
 const globalModelsError = ref<string | null>(null)
@@ -668,22 +696,53 @@ const firstStepSchedulingMode = computed<RoutingSchedulingMode>(() => {
   return draft.value?.config_json.default_policy.scheduling_mode ?? 'cache_affinity'
 })
 
-const filteredGlobalModels = computed(() => {
+interface ModelRow {
+  name: string
+  displayName: string
+  configured: boolean
+}
+
+const modelRows = computed<ModelRow[]>(() => {
   const query = globalModelSearch.value.trim().toLowerCase()
-  const filter = modelFilter.value
-  const models = [...globalModels.value].sort((left, right) =>
-    left.name.localeCompare(right.name)
-  )
-  return models.filter(model => {
-    if (query
-      && !model.name.toLowerCase().includes(query)
-      && !model.display_name?.toLowerCase().includes(query)) {
-      return false
-    }
-    if (filter === 'configured' && !hasModelPolicy(model.name)) return false
-    if (filter === 'unconfigured' && hasModelPolicy(model.name)) return false
-    return true
-  })
+  const seen = new Set<string>()
+  const rows: ModelRow[] = []
+
+  for (const policy of perModelPolicies.value) {
+    const name = policy.model
+    const found = globalModels.value.find(item => item.name === name)
+    rows.push({
+      name,
+      displayName: found?.display_name || name,
+      configured: true,
+    })
+    seen.add(name)
+  }
+
+  for (const model of globalModels.value) {
+    if (seen.has(model.name)) continue
+    rows.push({
+      name: model.name,
+      displayName: model.display_name || model.name,
+      configured: false,
+    })
+  }
+
+  return rows
+    .filter(row => {
+      if (modelFilter.value === 'configured' && !row.configured) return false
+      if (modelFilter.value === 'unconfigured' && row.configured) return false
+      if (!query) return true
+      return (
+        row.name.toLowerCase().includes(query)
+        || row.displayName.toLowerCase().includes(query)
+      )
+    })
+    .sort((left, right) => {
+      if (left.configured !== right.configured) {
+        return left.configured ? -1 : 1
+      }
+      return left.name.localeCompare(right.name)
+    })
 })
 
 function normalizeRecord(group: RoutingGroupRecord): RoutingGroupRecord {
@@ -730,13 +789,32 @@ function selectGroup(group: RoutingGroupRecord): void {
   resetEditingConfig()
 }
 
+function displayGroupEnabled(group: RoutingGroupRecord): boolean {
+  if (!isCreating.value && group.id === selectedGroupId.value && draft.value) {
+    return draft.value.enabled
+  }
+  return group.enabled
+}
+
+function setDraftEnabled(value: boolean): void {
+  if (!draft.value) return
+  draft.value.enabled = value
+}
+
+function updateGroupEnabled(group: RoutingGroupRecord, value: boolean): void {
+  if (isCreating.value || group.id !== selectedGroupId.value || !draft.value) {
+    selectGroup(group)
+  }
+  setDraftEnabled(value)
+}
+
 function startCreate(): void {
   isCreating.value = true
   selectedGroupId.value = null
   draft.value = {
     name: '新调度策略',
     description: '',
-    enabled: true,
+    enabled: false,
     is_system_default: groups.value.length === 0,
     config_json: createEmptyRoutingGroupConfig(),
     version: 1,
@@ -803,7 +881,6 @@ const canRemoveCurrentModel = computed(() => {
     && currentModelPersisted.value
     && !saving.value
     && !editingDirty.value
-    && !draftDirty.value
 })
 
 function syncEditorStateFromConfig(config: RoutingGroupConfig): void {
@@ -863,7 +940,7 @@ function updateFirstStepSchedulingMode(mode: RoutingSchedulingMode): void {
 
 function removePerModelPolicy(model: string): void {
   if (!draft.value) return
-  if (perModelEditingActive.value && (editingDirty.value || draftDirty.value)) {
+  if (perModelEditingActive.value && editingDirty.value) {
     showError('请先保存当前改动后再移除模型')
     return
   }
@@ -873,17 +950,26 @@ function removePerModelPolicy(model: string): void {
   if (selectedPerModelName.value === model) {
     selectedPerModelName.value = null
   }
+  modelFilter.value = 'unconfigured'
   updateDraftConfig(next)
   resetEditingConfig()
 }
 
 function selectGlobalModel(model: string): void {
   if (!model) return
-  if (model === selectedPerModelName.value) return
+  if (model === selectedPerModelName.value) {
+    resetEditingConfig()
+    selectedPerModelName.value = null
+    return
+  }
+  const shouldAddModel = !hasModelPolicy(model)
   if (perModelEditingActive.value && editingDirty.value) {
     switchModelTarget.value = model
     switchModelDialogOpen.value = true
     return
+  }
+  if (shouldAddModel) {
+    resetEditingConfig()
   }
   selectedPerModelName.value = model
 }
@@ -1013,11 +1099,6 @@ function replaceGroup(group: RoutingGroupRecord): void {
   selectGroup(normalized)
 }
 
-function refreshPage(): void {
-  void fetchGroups()
-  void loadGlobalModels()
-}
-
 async function fetchGroups(): Promise<void> {
   loading.value = true
   try {
@@ -1106,6 +1187,7 @@ function saveCurrentModel(): void {
     next = { ...next, allowed_models: [...next.allowed_models, model] }
   }
   updateDraftConfig(next)
+  modelFilter.value = 'configured'
   resetEditingConfig()
   success('当前模型配置已保存到草稿，点击外层保存后生效')
 }

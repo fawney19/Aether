@@ -26,8 +26,9 @@ use crate::formats::shared::response::{
     sanitize_claude_read_tool_inputs,
 };
 use crate::formats::shared::stream_core::common::{
-    content_part_from_openai_image_generation_item, map_openai_finish_reason_to_gemini,
-    parse_json_arguments_value, CanonicalContentPart, CanonicalStreamEvent, CanonicalUsage,
+    content_part_from_openai_image_generation_item, gemini_usage_metadata_from_usage,
+    map_openai_finish_reason_to_gemini, parse_json_arguments_value, CanonicalContentPart,
+    CanonicalStreamEvent, CanonicalUsage,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3044,26 +3045,7 @@ fn gemini_sync_part_from_canonical_content_part(part: CanonicalContentPart) -> V
 }
 
 fn gemini_usage_metadata_from_canonical(usage: CanonicalUsage) -> Value {
-    let mut usage_metadata = Map::new();
-    usage_metadata.insert(
-        "promptTokenCount".to_string(),
-        Value::from(usage.input_tokens),
-    );
-    usage_metadata.insert(
-        "candidatesTokenCount".to_string(),
-        Value::from(usage.output_tokens.saturating_sub(usage.reasoning_tokens)),
-    );
-    usage_metadata.insert(
-        "totalTokenCount".to_string(),
-        Value::from(usage.total_tokens),
-    );
-    if usage.reasoning_tokens > 0 {
-        usage_metadata.insert(
-            "thoughtsTokenCount".to_string(),
-            Value::from(usage.reasoning_tokens),
-        );
-    }
-    Value::Object(usage_metadata)
+    gemini_usage_metadata_from_usage(&usage)
 }
 
 fn parse_data_url(value: &str) -> Option<(String, String)> {
@@ -4213,6 +4195,9 @@ mod tests {
                 "prompt_tokens": 2,
                 "completion_tokens": 4,
                 "total_tokens": 6,
+                "prompt_tokens_details": {
+                    "cached_tokens": 1
+                },
                 "completion_tokens_details": {
                     "reasoning_tokens": 1
                 }
@@ -4230,6 +4215,9 @@ mod tests {
         )
         .expect("canonical openai chat -> claude");
         assert_eq!(converted_claude, legacy_claude);
+        assert_eq!(converted_claude["usage"]["input_tokens"], 1);
+        assert_eq!(converted_claude["usage"]["cache_read_input_tokens"], 1);
+        assert_eq!(converted_claude["usage"]["output_tokens"], 4);
 
         let legacy_gemini =
             convert_openai_chat_response_to_gemini_chat(&provider_body_json, &report_context)
@@ -4341,6 +4329,9 @@ mod tests {
             converted_claude["content"][3]["content"],
             json!({"ok": true})
         );
+        assert_eq!(converted_claude["usage"]["input_tokens"], 1);
+        assert_eq!(converted_claude["usage"]["cache_read_input_tokens"], 2);
+        assert_eq!(converted_claude["usage"]["output_tokens"], 5);
 
         let converted_gemini = convert_standard_chat_response(
             &provider_body_json,

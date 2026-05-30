@@ -10,7 +10,10 @@ use aether_admin::observability::monitoring::{
     parse_admin_monitoring_attempted_only, AdminMonitoringKeyAccountDisplay,
 };
 use aether_data_contracts::repository::{
-    candidates::{DecisionTrace, RequestCandidateStatus},
+    candidates::{
+        DecisionTrace, DecisionTraceCandidate, RequestCandidateFinalStatus, RequestCandidateStatus,
+        StoredRequestCandidate,
+    },
     provider_catalog::StoredProviderCatalogKey,
     usage::StoredRequestUsageAudit,
 };
@@ -18,7 +21,7 @@ use axum::{
     body::Body,
     response::{IntoResponse, Response},
 };
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use tracing::debug;
 
@@ -107,6 +110,7 @@ async fn resolve_admin_monitoring_trace(
         }
     }
 
+    let mut usage_snapshot_fallback = None;
     for usage in usage_candidates {
         for trace_request_id in admin_monitoring_usage_trace_request_ids(&usage) {
             if trace_request_id == request_id {
@@ -124,9 +128,211 @@ async fn resolve_admin_monitoring_trace(
                 }));
             }
         }
+        if usage_snapshot_fallback.is_none() {
+            if let Some(trace) = build_admin_monitoring_usage_routing_snapshot_trace(&usage) {
+                usage_snapshot_fallback = Some(ResolvedAdminMonitoringTrace {
+                    trace,
+                    usage: Some(usage.clone()),
+                });
+            }
+        }
     }
 
-    Ok(None)
+    Ok(usage_snapshot_fallback)
+}
+
+fn build_admin_monitoring_usage_routing_snapshot_trace(
+    usage: &StoredRequestUsageAudit,
+) -> Option<DecisionTrace> {
+    if !admin_monitoring_usage_has_routing_snapshot_trace_data(usage) {
+        return None;
+    }
+
+    let status = admin_monitoring_usage_candidate_status(usage);
+    let final_status = match status {
+        RequestCandidateStatus::Success => RequestCandidateFinalStatus::Success,
+        RequestCandidateStatus::Cancelled => RequestCandidateFinalStatus::Cancelled,
+        RequestCandidateStatus::Streaming => RequestCandidateFinalStatus::Streaming,
+        RequestCandidateStatus::Pending => RequestCandidateFinalStatus::Pending,
+        RequestCandidateStatus::Available
+        | RequestCandidateStatus::Unused
+        | RequestCandidateStatus::Failed
+        | RequestCandidateStatus::Skipped => RequestCandidateFinalStatus::Failed,
+    };
+    let latency_ms = usage.response_time_ms.unwrap_or_default();
+    let candidate = StoredRequestCandidate {
+        id: usage
+            .routing_candidate_id()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("usage-routing-snapshot:{}", usage.id)),
+        request_id: admin_monitoring_usage_primary_trace_request_id(usage),
+        user_id: usage.user_id.clone(),
+        api_key_id: usage.api_key_id.clone(),
+        username: usage.username.clone(),
+        api_key_name: usage.api_key_name.clone(),
+        candidate_index: usage
+            .routing_candidate_index()
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0),
+        retry_index: 0,
+        provider_id: usage.provider_id.clone(),
+        endpoint_id: usage.provider_endpoint_id.clone(),
+        key_id: usage.provider_api_key_id.clone(),
+        status,
+        skip_reason: None,
+        is_cached: false,
+        status_code: usage.status_code,
+        error_type: usage
+            .routing_local_execution_runtime_miss_reason()
+            .or(usage.error_category.as_deref())
+            .map(ToOwned::to_owned),
+        error_message: usage.error_message.clone(),
+        latency_ms: usage.response_time_ms,
+        concurrent_requests: None,
+        extra_data: build_admin_monitoring_usage_routing_snapshot_extra_data(usage),
+        required_capabilities: None,
+        created_at_unix_ms: usage.created_at_unix_ms,
+        started_at_unix_ms: Some(usage.created_at_unix_ms),
+        finished_at_unix_ms: admin_monitoring_usage_finished_at_unix_ms(usage),
+    };
+
+    Some(DecisionTrace {
+        request_id: candidate.request_id.clone(),
+        total_candidates: 1,
+        final_status,
+        total_latency_ms: latency_ms,
+        candidates: vec![DecisionTraceCandidate {
+            candidate,
+            provider_name: non_empty_string(usage.provider_name.as_str()),
+            provider_website: None,
+            provider_type: None,
+            provider_priority: None,
+            provider_keep_priority_on_conversion: None,
+            provider_enable_format_conversion: None,
+            endpoint_api_format: usage
+                .endpoint_api_format
+                .clone()
+                .or_else(|| usage.api_format.clone()),
+            endpoint_api_family: usage
+                .provider_api_family
+                .clone()
+                .or_else(|| usage.api_family.clone()),
+            endpoint_kind: usage
+                .provider_endpoint_kind
+                .clone()
+                .or_else(|| usage.endpoint_kind.clone()),
+            endpoint_format_acceptance_config: None,
+            provider_key_name: usage.routing_key_name().map(ToOwned::to_owned),
+            provider_key_auth_type: None,
+            provider_key_api_formats: None,
+            provider_key_internal_priority: None,
+            provider_key_global_priority_by_format: None,
+            provider_key_capabilities: None,
+            provider_key_is_active: None,
+        }],
+    })
+}
+
+fn admin_monitoring_usage_has_routing_snapshot_trace_data(usage: &StoredRequestUsageAudit) -> bool {
+    usage.routing_candidate_id().is_some()
+        || usage.routing_candidate_index().is_some()
+        || usage.routing_execution_path().is_some()
+        || usage
+            .routing_local_execution_runtime_miss_reason()
+            .is_some()
+}
+
+fn admin_monitoring_usage_candidate_status(
+    usage: &StoredRequestUsageAudit,
+) -> RequestCandidateStatus {
+    if usage.status.trim().eq_ignore_ascii_case("cancelled")
+        || usage.status.trim().eq_ignore_ascii_case("canceled")
+    {
+        return RequestCandidateStatus::Cancelled;
+    }
+
+    match usage.status_code {
+        Some(status_code) if (200..300).contains(&status_code) => RequestCandidateStatus::Success,
+        Some(_) => RequestCandidateStatus::Failed,
+        None if usage.status.trim().eq_ignore_ascii_case("completed")
+            || usage.status.trim().eq_ignore_ascii_case("success") =>
+        {
+            RequestCandidateStatus::Success
+        }
+        None => RequestCandidateStatus::Failed,
+    }
+}
+
+fn admin_monitoring_usage_primary_trace_request_id(usage: &StoredRequestUsageAudit) -> String {
+    if let Some(trace_id) = usage.trace_id() {
+        return trace_id.to_string();
+    }
+    if let Some(trace_id) = usage_trace_id_from_headers(usage.request_headers.as_ref()) {
+        return trace_id;
+    }
+    if let Some(trace_id) = usage_trace_id_from_headers(usage.provider_request_headers.as_ref()) {
+        return trace_id;
+    }
+    usage.request_id.clone()
+}
+
+fn admin_monitoring_usage_finished_at_unix_ms(usage: &StoredRequestUsageAudit) -> Option<u64> {
+    usage
+        .finalized_at_unix_secs
+        .map(|value| value.saturating_mul(1_000))
+        .or_else(|| {
+            usage
+                .response_time_ms
+                .map(|latency_ms| usage.created_at_unix_ms.saturating_add(latency_ms))
+        })
+}
+
+fn build_admin_monitoring_usage_routing_snapshot_extra_data(
+    usage: &StoredRequestUsageAudit,
+) -> Option<Value> {
+    let mut object = Map::new();
+    object.insert("source".to_string(), json!("usage_routing_snapshot"));
+    insert_optional_string(&mut object, "planner_kind", usage.routing_planner_kind());
+    insert_optional_string(&mut object, "route_family", usage.routing_route_family());
+    insert_optional_string(&mut object, "route_kind", usage.routing_route_kind());
+    insert_optional_string(
+        &mut object,
+        "execution_path",
+        usage.routing_execution_path(),
+    );
+    insert_optional_string(
+        &mut object,
+        "local_execution_runtime_miss_reason",
+        usage.routing_local_execution_runtime_miss_reason(),
+    );
+    insert_optional_string(&mut object, "key_name", usage.routing_key_name());
+    insert_optional_string(&mut object, "model", Some(usage.model.as_str()));
+    insert_optional_string(&mut object, "target_model", usage.target_model.as_deref());
+    insert_optional_string(
+        &mut object,
+        "client_api_format",
+        usage.api_format.as_deref(),
+    );
+    insert_optional_string(
+        &mut object,
+        "provider_api_format",
+        usage.endpoint_api_format.as_deref(),
+    );
+    insert_optional_string(
+        &mut object,
+        "provider_api_family",
+        usage.provider_api_family.as_deref(),
+    );
+    insert_optional_string(
+        &mut object,
+        "provider_endpoint_kind",
+        usage.provider_endpoint_kind.as_deref(),
+    );
+    insert_optional_string(&mut object, "candidate_id", usage.routing_candidate_id());
+    if let Some(candidate_index) = usage.routing_candidate_index() {
+        object.insert("candidate_index".to_string(), json!(candidate_index));
+    }
+    Some(Value::Object(object))
 }
 
 fn admin_monitoring_usage_trace_request_ids(usage: &StoredRequestUsageAudit) -> Vec<String> {
@@ -165,6 +371,18 @@ fn push_non_empty_unique(values: &mut Vec<String>, value: &str) {
         return;
     }
     values.push(value.to_string());
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn insert_optional_string(object: &mut Map<String, Value>, key: &str, value: Option<&str>) {
+    let Some(value) = value.and_then(non_empty_string) else {
+        return;
+    };
+    object.insert(key.to_string(), Value::String(value));
 }
 
 async fn build_admin_monitoring_key_account_display_map(

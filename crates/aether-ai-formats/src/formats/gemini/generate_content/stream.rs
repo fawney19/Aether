@@ -873,10 +873,11 @@ mod tests {
                         }
                     }],
                     "usageMetadata": {
-                        "promptTokenCount": 1,
+                        "promptTokenCount": 5,
+                        "cachedContentTokenCount": 4,
                         "candidatesTokenCount": 2,
                         "thoughtsTokenCount": 4,
-                        "totalTokenCount": 7
+                        "totalTokenCount": 11
                     }
                 })),
             )
@@ -904,10 +905,12 @@ mod tests {
             frame.event,
             CanonicalStreamEvent::Finish {
                 usage: Some(CanonicalUsage {
-                    input_tokens: 1,
+                    input_tokens: 5,
+                    input_tokens_include_cache: true,
                     output_tokens: 6,
+                    cache_read_tokens: 4,
                     reasoning_tokens: 4,
-                    total_tokens: 7,
+                    total_tokens: 11,
                     ..
                 }),
                 ..
@@ -994,9 +997,11 @@ mod tests {
         let sse = String::from_utf8(bytes).expect("sse should be utf8");
         assert!(sse.contains("\"thought\":true"));
         assert!(sse.contains("\"thoughtSignature\":\"sig_123\""));
+        assert!(sse.contains("\"promptTokenCount\":6"));
         assert!(sse.contains("\"thoughtsTokenCount\":1"));
         assert!(sse.contains("\"candidatesTokenCount\":2"));
         assert!(sse.contains("\"cachedContentTokenCount\":5"));
+        assert!(sse.contains("\"totalTokenCount\":9"));
         assert!(sse.contains("\"finishReason\":\"STOP\""));
     }
 

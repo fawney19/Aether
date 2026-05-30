@@ -1,5 +1,8 @@
 <template>
-  <TableCard title="使用记录">
+  <TableCard
+    title="使用记录"
+    class="relative"
+  >
     <template #actions>
       <!-- 时间范围筛选 -->
       <TimeRangePicker
@@ -22,20 +25,34 @@
             class="h-8 w-full text-xs border-border/60 pl-8"
           />
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          class="h-8 w-8 shrink-0 md:hidden"
-          :class="autoRefresh ? 'text-primary' : ''"
-          :title="autoRefresh ? '点击关闭自动刷新' : '点击开启自动刷新'"
-          @click="$emit('update:autoRefresh', !autoRefresh)"
-        >
-          <RefreshCcw
-            class="w-3.5 h-3.5"
-            :class="autoRefresh ? 'animate-spin' : ''"
-          />
-        </Button>
       </div>
+
+      <Button
+        variant="ghost"
+        size="icon"
+        data-usage-hide-unknown-toggle="mobile"
+        class="absolute right-12 top-2.5 h-8 w-8 shrink-0 md:hidden"
+        :class="hideUnknownRecords ? 'text-primary' : ''"
+        :title="hideUnknownRecords ? '显示 unknown 请求' : '隐藏 unknown 请求'"
+        aria-label="隐藏 unknown 模型或提供商的请求"
+        :aria-pressed="hideUnknownRecords"
+        @click="$emit('update:hideUnknownRecords', !hideUnknownRecords)"
+      >
+        <EyeOff class="w-3.5 h-3.5" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        class="absolute right-4 top-2.5 h-8 w-8 shrink-0 md:hidden"
+        :class="autoRefresh ? 'text-primary' : ''"
+        :title="autoRefresh ? '点击关闭自动刷新' : '点击开启自动刷新'"
+        @click="$emit('update:autoRefresh', !autoRefresh)"
+      >
+        <RefreshCcw
+          class="w-3.5 h-3.5"
+          :class="autoRefresh ? 'animate-spin' : ''"
+        />
+      </Button>
 
       <div class="order-3 grid w-full grid-cols-2 gap-2 md:hidden">
         <!-- 时间范围筛选 -->
@@ -181,6 +198,19 @@
       <Button
         variant="ghost"
         size="icon"
+        data-usage-hide-unknown-toggle="desktop"
+        class="hidden h-8 w-8 shrink-0 md:inline-flex"
+        :class="hideUnknownRecords ? 'text-primary' : ''"
+        :title="hideUnknownRecords ? '显示 unknown 请求' : '隐藏 unknown 请求'"
+        aria-label="隐藏 unknown 模型或提供商的请求"
+        :aria-pressed="hideUnknownRecords"
+        @click="$emit('update:hideUnknownRecords', !hideUnknownRecords)"
+      >
+        <EyeOff class="w-3.5 h-3.5" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
         class="hidden h-8 w-8 shrink-0 md:inline-flex"
         :class="autoRefresh ? 'text-primary' : ''"
         :title="autoRefresh ? '点击关闭自动刷新' : '点击开启自动刷新'"
@@ -205,15 +235,15 @@
         v-for="record in records"
         v-else
         :key="record.id"
-        class="border-b border-border/40 py-2.5 px-2"
+        class="border-b border-border/40 px-3 py-2.5"
         :class="isAdmin ? 'cursor-pointer active:bg-muted/30 transition-colors' : ''"
         @click="isAdmin && emit('showDetail', record.id)"
       >
         <!-- 第一行：模型 + 费用 -->
-        <div class="flex items-center justify-between gap-2">
+        <div class="flex items-start justify-between gap-2">
           <div class="min-w-0 flex-1">
-            <div class="flex min-w-0 items-center gap-1">
-              <span class="text-sm font-medium truncate">{{ record.model }}</span>
+            <div class="flex min-w-0 items-center gap-1.5">
+              <span class="min-w-0 truncate text-[15px] font-semibold leading-5">{{ record.model }}</span>
               <Badge
                 v-if="getReasoningEffort(record)"
                 variant="outline"
@@ -230,6 +260,55 @@
               >
                 fast
               </Badge>
+              <!-- 状态 Badge -->
+              <Badge
+                v-if="isUsageRecordFailed(record)"
+                variant="destructive"
+                class="whitespace-nowrap text-[10px] px-1.5 h-4 leading-4 inline-flex items-center flex-shrink-0"
+              >
+                失败
+              </Badge>
+              <Badge
+                v-else-if="getDisplayStatus(record) === 'pending'"
+                variant="outline"
+                class="whitespace-nowrap animate-pulse border-muted-foreground/30 text-muted-foreground text-[10px] px-1.5 h-4 leading-4 inline-flex items-center flex-shrink-0"
+              >
+                等待
+              </Badge>
+              <Badge
+                v-else-if="getDisplayStatus(record) === 'streaming'"
+                variant="outline"
+                class="whitespace-nowrap animate-pulse border-primary/50 text-primary text-[10px] px-1.5 h-4 leading-4 inline-flex items-center flex-shrink-0"
+              >
+                传输
+              </Badge>
+              <Badge
+                v-else-if="record.status === 'cancelled'"
+                variant="outline"
+                class="whitespace-nowrap border-amber-500/50 text-amber-600 dark:text-amber-400 text-[10px] px-1.5 h-4 leading-4 inline-flex items-center flex-shrink-0"
+              >
+                取消
+              </Badge>
+              <Badge
+                v-else-if="getStreamModeSegments(record).hasConversion"
+                :variant="streamBadgeVariant(getStreamModeSegments(record).client === '流式')"
+                :class="(streamBadgeVariant(getStreamModeSegments(record).client === '流式') === 'secondary')
+                  ? 'whitespace-nowrap text-[10px] px-1.5 h-4 leading-4 inline-flex items-center gap-0.5 flex-shrink-0'
+                  : 'whitespace-nowrap border-border/60 text-muted-foreground text-[10px] px-1.5 h-4 leading-4 inline-flex items-center gap-0.5 flex-shrink-0'"
+              >
+                <span>{{ getStreamModeSegments(record).client }}</span>
+                <span class="opacity-60">→</span>
+                <span>{{ getStreamModeSegments(record).upstream }}</span>
+              </Badge>
+              <Badge
+                v-else
+                :variant="streamBadgeVariant(getUpstreamStream(record))"
+                :class="(streamBadgeVariant(getUpstreamStream(record)) === 'secondary')
+                  ? 'whitespace-nowrap text-[10px] px-1.5 h-4 leading-4 inline-flex items-center flex-shrink-0'
+                  : 'whitespace-nowrap border-border/60 text-muted-foreground text-[10px] px-1.5 h-4 leading-4 inline-flex items-center flex-shrink-0'"
+              >
+                {{ getStreamModeLabel(record) }}
+              </Badge>
             </div>
             <span
               v-if="getActualModel(record)"
@@ -237,7 +316,7 @@
             >-> {{ getActualModel(record) }}</span>
           </div>
           <div class="flex flex-col items-end flex-shrink-0">
-            <span class="text-xs text-primary font-medium">{{ formatCurrency(record.cost || 0) }}</span>
+            <span class="text-sm text-primary font-semibold leading-5">{{ formatCurrency(record.cost || 0) }}</span>
             <span
               v-if="showActualCost && record.actual_cost !== undefined && record.rate_multiplier && record.rate_multiplier !== 1.0"
               class="text-[10px] text-muted-foreground"
@@ -245,79 +324,29 @@
           </div>
         </div>
 
-        <!-- 第二行：状态 | 时间 | API格式 | 耗时 | Tokens -->
-        <div class="flex items-center justify-between text-[11px] text-muted-foreground mt-1 leading-4">
-          <div class="flex items-center gap-1.5">
-            <!-- 状态 Badge -->
-            <Badge
-              v-if="isUsageRecordFailed(record)"
-              variant="destructive"
-              class="whitespace-nowrap text-[10px] px-1.5 h-4 leading-4 inline-flex items-center"
-            >
-              失败
-            </Badge>
-            <Badge
-              v-else-if="getDisplayStatus(record) === 'pending'"
-              variant="outline"
-              class="whitespace-nowrap animate-pulse border-muted-foreground/30 text-muted-foreground text-[10px] px-1.5 h-4 leading-4 inline-flex items-center"
-            >
-              等待
-            </Badge>
-            <Badge
-              v-else-if="getDisplayStatus(record) === 'streaming'"
-              variant="outline"
-              class="whitespace-nowrap animate-pulse border-primary/50 text-primary text-[10px] px-1.5 h-4 leading-4 inline-flex items-center"
-            >
-              传输
-            </Badge>
-            <Badge
-              v-else-if="record.status === 'cancelled'"
-              variant="outline"
-              class="whitespace-nowrap border-amber-500/50 text-amber-600 dark:text-amber-400 text-[10px] px-1.5 h-4 leading-4 inline-flex items-center"
-            >
-              取消
-            </Badge>
-            <Badge
-              v-else-if="getStreamModeSegments(record).hasConversion"
-              :variant="streamBadgeVariant(getStreamModeSegments(record).client === '流式')"
-              :class="(streamBadgeVariant(getStreamModeSegments(record).client === '流式') === 'secondary')
-                ? 'whitespace-nowrap text-[10px] px-1.5 h-4 leading-4 inline-flex items-center gap-0.5'
-                : 'whitespace-nowrap border-border/60 text-muted-foreground text-[10px] px-1.5 h-4 leading-4 inline-flex items-center gap-0.5'"
-            >
-              <span>{{ getStreamModeSegments(record).client }}</span>
-              <span class="opacity-60">→</span>
-              <span>{{ getStreamModeSegments(record).upstream }}</span>
-            </Badge>
-            <Badge
-              v-else
-              :variant="streamBadgeVariant(getUpstreamStream(record))"
-              :class="(streamBadgeVariant(getUpstreamStream(record)) === 'secondary')
-                ? 'whitespace-nowrap text-[10px] px-1.5 h-4 leading-4 inline-flex items-center'
-                : 'whitespace-nowrap border-border/60 text-muted-foreground text-[10px] px-1.5 h-4 leading-4 inline-flex items-center'"
-            >
-              {{ getStreamModeLabel(record) }}
-            </Badge>
-            <span class="text-muted-foreground/50">|</span>
-            <div class="flex flex-col leading-tight tabular-nums">
-              <span class="text-[11px] text-foreground whitespace-nowrap">
-                {{ formatRecordTime(record.created_at) }}
-              </span>
-              <span class="text-[10px] text-muted-foreground whitespace-nowrap">
-                {{ formatRecordDate(record.created_at) }}
-              </span>
-            </div>
-            <template v-if="record.api_format">
-              <span class="text-muted-foreground/50">|</span>
-              <span>{{ formatApiFormat(record.api_format) }}</span>
-            </template>
-          </div>
-          <div class="flex items-center gap-1.5">
-            <!-- 耗时 -->
-            <span
-              v-if="getDisplayStatus(record) === 'pending' || getDisplayStatus(record) === 'streaming'"
-              class="tabular-nums whitespace-nowrap"
-            >
-              <span>{{ formatRecordDurationSeconds(record.first_byte_time_ms) }}</span>
+        <!-- 第二行：时间 + API格式 -->
+        <div class="mt-1.5 flex min-w-0 items-center gap-1.5 text-[10px] leading-3.5 text-muted-foreground">
+          <span class="shrink-0 tabular-nums text-foreground whitespace-nowrap">
+            {{ formatRecordTime(record.created_at) }}
+          </span>
+          <span class="shrink-0 tabular-nums whitespace-nowrap">
+            {{ formatRecordShortDate(record.created_at) }}
+          </span>
+          <template v-if="record.api_format">
+            <span class="text-muted-foreground/40">·</span>
+            <span class="min-w-0 truncate">{{ formatApiFormat(record.api_format) }}</span>
+          </template>
+        </div>
+
+        <!-- 第三行：性能指标 -->
+        <div class="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[10px] leading-3.5 text-muted-foreground">
+          <span
+            class="min-w-0 truncate whitespace-nowrap tabular-nums text-foreground"
+            :title="getRecordPerformanceTitle(record)"
+          >
+            <span class="text-muted-foreground">耗时&amp;速度</span>
+            <template v-if="getDisplayStatus(record) === 'pending' || getDisplayStatus(record) === 'streaming'">
+              <span class="ml-1">{{ formatRecordDurationSeconds(record.first_byte_time_ms) }}</span>
               <span class="text-muted-foreground"> / </span>
               <ElapsedTimeText
                 class="text-primary"
@@ -325,25 +354,30 @@
                 :status="getDisplayStatus(record)"
                 :response-time-ms="record.response_time_ms ?? null"
               />
-            </span>
+              <span class="text-muted-foreground"> / </span>
+              <span>{{ formatOutputRate(getRecordDisplayOutputRate(record)) }}</span>
+            </template>
             <span
               v-else-if="record.response_time_ms != null || record.first_byte_time_ms != null"
-              class="flex flex-col items-end tabular-nums leading-3 shrink-0"
-              :title="getRecordPerformanceTitle(record)"
-            >
-              <span class="whitespace-nowrap">{{ formatRecordLatencyPair(record) }}</span>
-              <span class="text-muted-foreground tabular-nums whitespace-nowrap">
-                {{ formatOutputRate(getRecordDisplayOutputRate(record)) }}
-              </span>
-            </span>
+              class="ml-1"
+            >{{ formatRecordLatencyPair(record) }} / {{ formatOutputRate(getRecordDisplayOutputRate(record)) }}</span>
             <span
               v-else
-              class="tabular-nums"
-            >-</span>
-            <span class="text-muted-foreground/50">|</span>
-            <!-- Tokens -->
-            <span>{{ formatTokens(getRecordEffectiveInputTokens(record)) }}/{{ formatTokens(record.output_tokens || 0) }}</span>
-          </div>
+              class="ml-1"
+            >- / {{ formatOutputRate(getRecordDisplayOutputRate(record)) }}</span>
+          </span>
+          <span class="text-muted-foreground/40">·</span>
+          <span
+            class="min-w-0 truncate whitespace-nowrap tabular-nums text-foreground"
+            :title="hasRecordCacheTokens(record) ? getRecordCacheTokensTitle(record) : undefined"
+          >
+            <span class="text-muted-foreground">Tokens</span>
+            <span class="ml-1">{{ formatTokens(getRecordEffectiveInputTokens(record)) }} / {{ formatTokens(record.output_tokens || 0) }}</span>
+            <template v-if="hasRecordCacheTokens(record)">
+              <span class="text-muted-foreground"> | </span>
+              <span>{{ formatOptionalTokens(getRecordCacheReadTokens(record)) }} / {{ formatOptionalTokens(getRecordCacheCreationTokens(record)) }}</span>
+            </template>
+          </span>
         </div>
       </div>
     </div>
@@ -354,35 +388,107 @@
       :class="[desktopTableMinWidthClass]"
     >
       <colgroup v-if="isAdmin">
-        <col v-if="isColumnVisible('time')" class="w-[8%]">
-        <col v-if="isColumnVisible('user')" class="w-[12%]">
-        <col v-if="isColumnVisible('model')" class="w-[14%]">
-        <col v-if="isColumnVisible('provider')" class="w-[16%]">
-        <col v-if="isColumnVisible('api_format')" class="w-[15%]">
-        <col v-if="isColumnVisible('status')" class="w-[10%]">
-        <col v-if="isColumnVisible('tokens')" class="w-[10%]">
-        <col v-if="isColumnVisible('cost')" class="w-[6%]">
-        <col v-if="isColumnVisible('performance')" class="w-[9%]">
-        <col v-if="isColumnVisible('client_family')" class="w-[12%]">
-        <col v-if="isColumnVisible('client_ip')" class="w-[10%]">
-        <col v-if="isColumnVisible('user_agent')" class="w-[13%]">
+        <col
+          v-if="isColumnVisible('time')"
+          class="w-[8%]"
+        >
+        <col
+          v-if="isColumnVisible('user')"
+          class="w-[12%]"
+        >
+        <col
+          v-if="isColumnVisible('model')"
+          class="w-[14%]"
+        >
+        <col
+          v-if="isColumnVisible('provider')"
+          class="w-[16%]"
+        >
+        <col
+          v-if="isColumnVisible('api_format')"
+          class="w-[15%]"
+        >
+        <col
+          v-if="isColumnVisible('status')"
+          class="w-[10%]"
+        >
+        <col
+          v-if="isColumnVisible('tokens')"
+          class="w-[10%]"
+        >
+        <col
+          v-if="isColumnVisible('cost')"
+          class="w-[6%]"
+        >
+        <col
+          v-if="isColumnVisible('performance')"
+          class="w-[9%]"
+        >
+        <col
+          v-if="isColumnVisible('client_family')"
+          class="w-[12%]"
+        >
+        <col
+          v-if="isColumnVisible('client_ip')"
+          class="w-[10%]"
+        >
+        <col
+          v-if="isColumnVisible('user_agent')"
+          class="w-[13%]"
+        >
       </colgroup>
       <colgroup v-else>
-        <col v-if="isColumnVisible('time')" class="w-[9%]">
-        <col v-if="isColumnVisible('key')" class="w-[17%]">
-        <col v-if="isColumnVisible('model')" class="w-[22%]">
-        <col v-if="isColumnVisible('api_format')" class="w-[14%]">
-        <col v-if="isColumnVisible('status')" class="w-[10%]">
-        <col v-if="isColumnVisible('tokens')" class="w-[11%]">
-        <col v-if="isColumnVisible('cost')" class="w-[7%]">
-        <col v-if="isColumnVisible('performance')" class="w-[10%]">
-        <col v-if="isColumnVisible('client_family')" class="w-[12%]">
-        <col v-if="isColumnVisible('client_ip')" class="w-[10%]">
-        <col v-if="isColumnVisible('user_agent')" class="w-[13%]">
+        <col
+          v-if="isColumnVisible('time')"
+          class="w-[9%]"
+        >
+        <col
+          v-if="isColumnVisible('key')"
+          class="w-[17%]"
+        >
+        <col
+          v-if="isColumnVisible('model')"
+          class="w-[22%]"
+        >
+        <col
+          v-if="isColumnVisible('api_format')"
+          class="w-[14%]"
+        >
+        <col
+          v-if="isColumnVisible('status')"
+          class="w-[10%]"
+        >
+        <col
+          v-if="isColumnVisible('tokens')"
+          class="w-[11%]"
+        >
+        <col
+          v-if="isColumnVisible('cost')"
+          class="w-[7%]"
+        >
+        <col
+          v-if="isColumnVisible('performance')"
+          class="w-[10%]"
+        >
+        <col
+          v-if="isColumnVisible('client_family')"
+          class="w-[12%]"
+        >
+        <col
+          v-if="isColumnVisible('client_ip')"
+          class="w-[10%]"
+        >
+        <col
+          v-if="isColumnVisible('user_agent')"
+          class="w-[13%]"
+        >
       </colgroup>
       <TableHeader>
         <TableRow class="border-b border-border/60 hover:bg-transparent">
-          <TableHead v-if="isColumnVisible('time')" class="h-12 font-semibold w-[8%]">
+          <TableHead
+            v-if="isColumnVisible('time')"
+            class="h-12 font-semibold w-[8%]"
+          >
             时间
           </TableHead>
           <SortableTableHead
@@ -489,13 +595,22 @@
               />
             </template>
           </SortableTableHead>
-          <TableHead v-if="isColumnVisible('tokens')" class="h-12 font-semibold w-[10%] text-center">
+          <TableHead
+            v-if="isColumnVisible('tokens')"
+            class="h-12 font-semibold w-[10%] text-center"
+          >
             Tokens
           </TableHead>
-          <TableHead v-if="isColumnVisible('cost')" class="h-12 font-semibold w-[6%] text-right">
+          <TableHead
+            v-if="isColumnVisible('cost')"
+            class="h-12 font-semibold w-[6%] text-right"
+          >
             费用
           </TableHead>
-          <TableHead v-if="isColumnVisible('performance')" class="h-12 font-semibold w-[9%] text-right">
+          <TableHead
+            v-if="isColumnVisible('performance')"
+            class="h-12 font-semibold w-[9%] text-right"
+          >
             <div class="flex flex-col items-end text-xs gap-0.5">
               <span class="whitespace-nowrap">首字/总耗时</span>
               <span class="text-muted-foreground font-normal">输出速度</span>
@@ -520,10 +635,16 @@
               />
             </template>
           </SortableTableHead>
-          <TableHead v-if="isColumnVisible('client_ip')" class="h-12 font-semibold w-[10%]">
+          <TableHead
+            v-if="isColumnVisible('client_ip')"
+            class="h-12 font-semibold w-[10%]"
+          >
             IP 地址
           </TableHead>
-          <TableHead v-if="isColumnVisible('user_agent')" class="h-12 font-semibold w-[13%]">
+          <TableHead
+            v-if="isColumnVisible('user_agent')"
+            class="h-12 font-semibold w-[13%]"
+          >
             User-Agent
           </TableHead>
         </TableRow>
@@ -545,7 +666,10 @@
           @mousedown="handleRowMouseDown($event, record.id)"
           @click="handleRowClick($event, record.id)"
         >
-          <TableCell v-if="isColumnVisible('time')" class="py-4 w-[8%] align-top">
+          <TableCell
+            v-if="isColumnVisible('time')"
+            class="py-4 w-[8%] align-top"
+          >
             <div class="flex flex-col gap-0.5 leading-tight">
               <span class="text-xs text-foreground tabular-nums whitespace-nowrap">
                 {{ formatRecordTime(record.created_at) }}
@@ -728,7 +852,10 @@
               class="text-muted-foreground text-xs"
             >-</span>
           </TableCell>
-          <TableCell v-if="isColumnVisible('status')" class="text-center py-4 w-[10%]">
+          <TableCell
+            v-if="isColumnVisible('status')"
+            class="text-center py-4 w-[10%]"
+          >
             <!-- 优先显示请求状态 -->
             <Badge
               v-if="isUsageRecordFailed(record)"
@@ -779,7 +906,10 @@
               {{ getStreamModeLabel(record) }}
             </Badge>
           </TableCell>
-          <TableCell v-if="isColumnVisible('tokens')" class="py-4 w-[10%]">
+          <TableCell
+            v-if="isColumnVisible('tokens')"
+            class="py-4 w-[10%]"
+          >
             <div class="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] gap-x-1 text-xs leading-tight tabular-nums">
               <span class="justify-self-end whitespace-nowrap text-right">
                 {{ formatTokens(getRecordEffectiveInputTokens(record)) }}
@@ -813,7 +943,10 @@
               </span>
             </div>
           </TableCell>
-          <TableCell v-if="isColumnVisible('cost')" class="text-right py-4 w-[6%]">
+          <TableCell
+            v-if="isColumnVisible('cost')"
+            class="text-right py-4 w-[6%]"
+          >
             <div class="flex flex-col items-end text-xs gap-0.5">
               <span class="text-primary font-medium">{{ formatCurrency(record.cost || 0) }}</span>
               <span
@@ -824,7 +957,10 @@
               </span>
             </div>
           </TableCell>
-          <TableCell v-if="isColumnVisible('performance')" class="text-right py-4 w-[9%]">
+          <TableCell
+            v-if="isColumnVisible('performance')"
+            class="text-right py-4 w-[9%]"
+          >
             <!-- pending/streaming 状态：首字与动态总耗时保留在同一行 -->
             <div
               v-if="getDisplayStatus(record) === 'pending' || getDisplayStatus(record) === 'streaming'"
@@ -926,7 +1062,7 @@ import {
   SortableTableHead,
   TableFilterMenu,
 } from '@/components/ui'
-import { RefreshCcw, Search, Shuffle } from 'lucide-vue-next'
+import { EyeOff, RefreshCcw, Search, Shuffle } from 'lucide-vue-next'
 import { formatTokens, formatCurrency } from '@/utils/format'
 import { getCacheCreationTokens, getCacheReadTokens, getEffectiveInputTokens } from '../token-normalization'
 import {
@@ -986,6 +1122,53 @@ interface UsageRecordColumnOption {
   userOnly?: boolean
 }
 
+const props = defineProps<{
+  records: UsageRecord[]
+  isAdmin: boolean
+  showActualCost: boolean
+  loading: boolean
+  // 时间范围
+  timeRange: DateRangeParams
+  // 筛选
+  filterSearch: string
+  filterUser: string
+  filterModel: string
+  filterProvider: string
+  filterApiFormat: string
+  filterStatus: string
+  filterClientFamily: string
+  availableUsers: UserOption[]
+  availableModels: string[]
+  availableProviders: string[]
+  availableClientFamilies: string[]
+  // 分页
+  currentPage: number
+  pageSize: number
+  totalRecords: number
+  pageSizeOptions: number[]
+  // 自动刷新
+  autoRefresh: boolean
+  hideUnknownRecords: boolean
+}>()
+
+const emit = defineEmits<{
+  'update:timeRange': [value: DateRangeParams]
+  'update:filterSearch': [value: string]
+  'update:filterUser': [value: string]
+  'update:filterModel': [value: string]
+  'update:filterProvider': [value: string]
+  'update:filterApiFormat': [value: string]
+  'update:filterStatus': [value: string]
+  'update:filterClientFamily': [value: string]
+  'update:currentPage': [value: number]
+  'update:pageSize': [value: number]
+  'update:autoRefresh': [value: boolean]
+  'update:hideUnknownRecords': [value: boolean]
+  'refresh': []
+  'showDetail': [id: string]
+  'prefetchDetail': [id: string]
+}>()
+
 const USAGE_RECORD_COLUMN_OPTIONS: UsageRecordColumnOption[] = [
   { id: 'time', label: '时间' },
   { id: 'user', label: '用户', adminOnly: true },
@@ -1024,51 +1207,6 @@ const DEFAULT_USER_COLUMNS: UsageRecordColumnId[] = [
   'cost',
   'performance',
 ]
-
-const props = defineProps<{
-  records: UsageRecord[]
-  isAdmin: boolean
-  showActualCost: boolean
-  loading: boolean
-  // 时间范围
-  timeRange: DateRangeParams
-  // 筛选
-  filterSearch: string
-  filterUser: string
-  filterModel: string
-  filterProvider: string
-  filterApiFormat: string
-  filterStatus: string
-  filterClientFamily: string
-  availableUsers: UserOption[]
-  availableModels: string[]
-  availableProviders: string[]
-  availableClientFamilies: string[]
-  // 分页
-  currentPage: number
-  pageSize: number
-  totalRecords: number
-  pageSizeOptions: number[]
-  // 自动刷新
-  autoRefresh: boolean
-}>()
-
-const emit = defineEmits<{
-  'update:timeRange': [value: DateRangeParams]
-  'update:filterSearch': [value: string]
-  'update:filterUser': [value: string]
-  'update:filterModel': [value: string]
-  'update:filterProvider': [value: string]
-  'update:filterApiFormat': [value: string]
-  'update:filterStatus': [value: string]
-  'update:filterClientFamily': [value: string]
-  'update:currentPage': [value: number]
-  'update:pageSize': [value: number]
-  'update:autoRefresh': [value: boolean]
-  'refresh': []
-  'showDetail': [id: string]
-  'prefetchDetail': [id: string]
-}>()
 
 // 使用统一 API 格式枚举，避免使用记录筛选项和系统格式列表漂移。
 const availableApiFormats = API_FORMAT_ORDER.map((value) => ({
@@ -1234,6 +1372,13 @@ function formatRecordDate(dateStr: string): string {
   return `${year}-${month}-${day}`
 }
 
+function formatRecordShortDate(dateStr: string): string {
+  const date = parseRecordDateTime(dateStr)
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${month}-${day}`
+}
+
 function formatRecordTime(dateStr: string): string {
   const date = parseRecordDateTime(dateStr)
   const hours = String(date.getHours()).padStart(2, '0')
@@ -1296,6 +1441,17 @@ function hasPositiveTokens(value: number | null | undefined): boolean {
 
 function formatOptionalTokens(value: number | null | undefined): string {
   return hasPositiveTokens(value) ? formatTokens(value) : '-'
+}
+
+function hasRecordCacheTokens(record: UsageRecord): boolean {
+  return hasPositiveTokens(getRecordCacheReadTokens(record)) || hasPositiveTokens(getRecordCacheCreationTokens(record))
+}
+
+function getRecordCacheTokensTitle(record: UsageRecord): string {
+  return [
+    `缓存读取: ${formatOptionalTokens(getRecordCacheReadTokens(record))}`,
+    `缓存写入: ${formatOptionalTokens(getRecordCacheCreationTokens(record))}`,
+  ].join('\n')
 }
 
 function formatRecordLatencyPair(record: UsageRecord): string {

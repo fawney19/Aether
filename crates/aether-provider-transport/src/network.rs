@@ -423,6 +423,7 @@ mod tests {
                 expires_at_unix_secs: None,
                 proxy: Some(json!({"node_id":"proxy-node-1","kind":"manual"})),
                 fingerprint: Some(json!({"transport_profile":"chrome_136"})),
+                upstream_metadata: None,
                 decrypted_api_key: "sk-test".to_string(),
                 decrypted_auth_config: None,
             },

@@ -69,37 +69,35 @@
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
-          <select
+          <button
+            v-if="effectivePriorityMode === 'provider'"
+            type="button"
+            class="inline-flex h-8 items-center gap-2 rounded-md px-3 text-xs font-medium transition-colors"
+            :class="providerMultiSelectEnabled
+              ? 'bg-primary/10 text-primary hover:bg-primary/10 hover:text-primary'
+              : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+            @click="toggleProviderMultiSelect"
+          >
+            <ListChecks class="h-3.5 w-3.5" />
+            {{ providerMultiSelectEnabled ? '退出多选' : '多选' }}
+          </button>
+          <Select
             v-if="effectivePriorityMode === 'global_key'"
             v-model="selectedApiFormat"
-            class="h-9 min-w-[180px] rounded-md border border-border bg-background px-3 text-sm"
           >
-            <option
-              v-for="format in apiFormats"
-              :key="format"
-              :value="format"
-            >
-              {{ formatLabel(format) }}
-            </option>
-          </select>
-          <button
-            type="button"
-            class="inline-flex h-9 items-center gap-2 rounded-md border border-border px-3 text-xs"
-            @click="refresh"
-          >
-            <RefreshCw
-              class="h-3.5 w-3.5"
-              :class="{ 'animate-spin': loading }"
-            />
-            刷新
-          </button>
-          <button
-            type="button"
-            class="h-9 rounded-md border border-border px-3 text-xs text-muted-foreground"
-            @click="clearActiveOverrides"
-          >
-            清空排序
-          </button>
+            <SelectTrigger class="h-8 w-[180px] rounded-lg border-border/60 bg-background/80 px-3 text-xs">
+              <SelectValue placeholder="选择端点" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem
+                v-for="format in apiFormats"
+                :key="format"
+                :value="format"
+              >
+                {{ formatLabel(format) }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
 
@@ -131,12 +129,8 @@
             v-for="(row, index) in providerRows"
             v-else
             :key="row.id"
-            class="group grid items-center gap-3 rounded-lg border px-3 py-2 transition-colors sm:grid-cols-[auto_auto_76px_minmax(0,1fr)_auto]"
-            :class="draggedProviderId === row.id
-              ? 'border-primary/50 bg-primary/5 shadow-sm'
-              : dragOverProviderId === row.id
-                ? 'border-primary/30 bg-primary/5'
-                : 'border-border/50 bg-background hover:bg-muted/30'"
+            class="group grid min-h-[56px] items-center gap-3 rounded-lg border px-3 py-2 transition-colors"
+            :class="[providerGridClass, providerRowClass(row.id)]"
             draggable="true"
             @dragstart="handleProviderDragStart(row.id, $event)"
             @dragend="handleProviderDragEnd"
@@ -144,6 +138,15 @@
             @dragleave="handleProviderDragLeave"
             @drop="handleProviderDrop(row.id)"
           >
+            <Checkbox
+              v-if="providerMultiSelectEnabled"
+              class="shrink-0"
+              :checked="isProviderSelected(row.id)"
+              :aria-label="`选择 ${row.name}`"
+              @click.stop
+              @change.stop
+              @update:checked="checked => setProviderSelected(row.id, checked)"
+            />
             <div class="cursor-grab rounded p-1 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground active:cursor-grabbing">
               <GripVertical class="h-4 w-4" />
             </div>
@@ -151,7 +154,7 @@
               <button
                 type="button"
                 class="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30"
-                :disabled="index === 0"
+                :disabled="providerMoveDisabled(row.id, index, -1)"
                 @click="moveProvider(row.id, -1)"
               >
                 <ArrowUp class="h-4 w-4" />
@@ -159,7 +162,7 @@
               <button
                 type="button"
                 class="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30"
-                :disabled="index === providerRows.length - 1"
+                :disabled="providerMoveDisabled(row.id, index, 1)"
                 @click="moveProvider(row.id, 1)"
               >
                 <ArrowDown class="h-4 w-4" />
@@ -169,7 +172,7 @@
               :value="row.priority"
               type="number"
               min="0"
-              class="h-8 w-full rounded-md border border-border bg-background px-2 text-sm"
+              class="priority-input h-8 w-14 rounded-md border border-border bg-background px-2 text-center text-sm"
               @change="event => setProviderPriority(row.id, event)"
             >
             <div class="min-w-0">
@@ -188,17 +191,15 @@
                   停用
                 </span>
               </div>
-              <div class="mt-0.5 truncate text-xs text-muted-foreground">
-                {{ row.id }}
-              </div>
             </div>
             <div class="hidden max-w-[240px] flex-wrap justify-end gap-1 sm:flex">
               <span
                 v-for="format in row.api_formats.slice(0, 3)"
                 :key="format"
+                :title="formatLabel(format)"
                 class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
               >
-                {{ format }}
+                {{ formatShortLabel(format) }}
               </span>
             </div>
           </div>
@@ -218,7 +219,7 @@
             v-for="(row, index) in keyRows"
             v-else
             :key="row.id"
-            class="group grid items-center gap-3 rounded-lg border px-3 py-2 transition-colors sm:grid-cols-[auto_auto_76px_minmax(0,1fr)_auto]"
+            class="group grid min-h-[56px] items-center gap-3 rounded-lg border px-3 py-2 transition-colors sm:grid-cols-[auto_auto_56px_minmax(0,1fr)_auto]"
             :class="draggedKeyId === row.id
               ? 'border-primary/50 bg-primary/5 shadow-sm'
               : dragOverKeyId === row.id
@@ -256,7 +257,7 @@
               :value="row.priority"
               type="number"
               min="0"
-              class="h-8 w-full rounded-md border border-border bg-background px-2 text-sm"
+              class="priority-input h-8 w-14 rounded-md border border-border bg-background px-2 text-center text-sm"
               @change="event => setKeyPriority(row.id, event)"
             >
             <div class="min-w-0">
@@ -277,9 +278,10 @@
               <span
                 v-for="format in row.api_formats.slice(0, 3)"
                 :key="format"
+                :title="formatLabel(format)"
                 class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
               >
-                {{ format }}
+                {{ formatShortLabel(format) }}
               </span>
             </div>
           </div>
@@ -291,14 +293,22 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { ArrowDown, ArrowUp, GripVertical, Key, Layers, RefreshCw } from 'lucide-vue-next'
+import { ArrowDown, ArrowUp, GripVertical, Key, Layers, ListChecks } from 'lucide-vue-next'
 
 import client from '@/api/client'
+import {
+  Checkbox,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui'
 import {
   getProvidersSummary,
   type ProviderWithEndpointsSummary,
 } from '@/api/endpoints'
-import { formatApiFormat, normalizeApiFormatAlias, sortApiFormats } from '@/api/endpoints/types/api-format'
+import { formatApiFormat, formatApiFormatShort, normalizeApiFormatAlias, sortApiFormats } from '@/api/endpoints/types/api-format'
 import { parseApiError } from '@/utils/errorParser'
 import {
   DEFAULT_ROUTING_POLICY_MODEL,
@@ -385,6 +395,8 @@ const draggedProviderId = ref<string | null>(null)
 const dragOverProviderId = ref<string | null>(null)
 const draggedKeyId = ref<string | null>(null)
 const dragOverKeyId = ref<string | null>(null)
+const providerMultiSelectEnabled = ref(false)
+const selectedProviderIds = ref<Set<string>>(new Set())
 
 const config = computed(() => normalizeRoutingGroupConfig(props.config))
 const targetModel = computed(() => props.model?.trim() || DEFAULT_ROUTING_POLICY_MODEL)
@@ -398,6 +410,9 @@ const effectiveSchedulingMode = computed(() => props.schedulingMode ?? config.va
 const subtitle = computed(() => props.subtitle ?? '默认作用于全部模型')
 const loading = computed(() => loadingProviders.value || loadingKeys.value)
 const apiFormats = computed(() => sortApiFormats(Object.keys(keysByFormat.value)))
+const providerGridClass = computed(() => providerMultiSelectEnabled.value
+  ? 'sm:grid-cols-[auto_auto_auto_56px_minmax(0,1fr)_auto]'
+  : 'sm:grid-cols-[auto_auto_56px_minmax(0,1fr)_auto]')
 const providerById = computed(() => {
   const map = new Map<string, ProviderWithEndpointsSummary>()
   for (const provider of providers.value) {
@@ -477,6 +492,16 @@ const keyRows = computed<KeyPriorityRow[]>(() => {
 watch(effectivePriorityMode, mode => {
   if (mode === 'global_key') {
     void loadGlobalKeys()
+    providerMultiSelectEnabled.value = false
+    selectedProviderIds.value = new Set()
+  }
+})
+
+watch(providerRows, rows => {
+  const visibleIds = new Set(rows.map(row => row.id))
+  const next = new Set([...selectedProviderIds.value].filter(id => visibleIds.has(id)))
+  if (next.size !== selectedProviderIds.value.size) {
+    selectedProviderIds.value = next
   }
 })
 
@@ -523,15 +548,6 @@ function updateSchedulingMode(mode: RoutingSchedulingMode): void {
     return
   }
   updateDefaultPolicy({ scheduling_mode: mode })
-}
-
-async function refresh(): Promise<void> {
-  if (effectivePriorityMode.value === 'provider') {
-    await loadProviders()
-  } else {
-    await loadProviders()
-    await loadGlobalKeys(true)
-  }
 }
 
 async function loadProviders(): Promise<void> {
@@ -583,12 +599,79 @@ function setProviderPriority(providerId: string, event: Event): void {
 }
 
 function moveProvider(providerId: string, direction: -1 | 1): void {
-  const rows = moveRow(providerRows.value, providerId, direction)
+  const movingIds = providerMoveIds(providerId)
+  const rows = movingIds.length > 1
+    ? moveRowsByGroup(providerRows.value, movingIds, direction)
+    : moveRow(providerRows.value, providerId, direction)
   updateProviderOverrides(Object.fromEntries(rows.map((row, index) => [row.id, index])))
 }
 
 function updateProviderOverrides(overrides: Record<string, number>): void {
   updateConfig(setModelProviderPriorityOverrides(config.value, targetModel.value, overrides))
+}
+
+function isProviderSelected(providerId: string): boolean {
+  return providerMultiSelectEnabled.value && selectedProviderIds.value.has(providerId)
+}
+
+function setProviderSelected(providerId: string, selected: boolean): void {
+  if (!providerMultiSelectEnabled.value) return
+  const next = new Set(selectedProviderIds.value)
+  if (selected) {
+    next.add(providerId)
+  } else {
+    next.delete(providerId)
+  }
+  selectedProviderIds.value = next
+}
+
+function toggleProviderMultiSelect(): void {
+  providerMultiSelectEnabled.value = !providerMultiSelectEnabled.value
+  if (!providerMultiSelectEnabled.value) {
+    selectedProviderIds.value = new Set()
+  }
+}
+
+function providerMoveIds(providerId: string): string[] {
+  if (!providerMultiSelectEnabled.value || !selectedProviderIds.value.has(providerId)) {
+    return [providerId]
+  }
+  return providerRows.value
+    .map(row => row.id)
+    .filter(id => selectedProviderIds.value.has(id))
+}
+
+function providerMoveDisabled(providerId: string, index: number, direction: -1 | 1): boolean {
+  const movingIds = providerMoveIds(providerId)
+  if (movingIds.length <= 1) {
+    return direction === -1 ? index === 0 : index === providerRows.value.length - 1
+  }
+  const movingSet = new Set(movingIds)
+  const movingIndexes = providerRows.value
+    .map((row, rowIndex) => movingSet.has(row.id) ? rowIndex : -1)
+    .filter(rowIndex => rowIndex >= 0)
+  if (movingIndexes.length === 0) return true
+  return direction === -1
+    ? Math.min(...movingIndexes) === 0
+    : Math.max(...movingIndexes) === providerRows.value.length - 1
+}
+
+function providerRowClass(providerId: string): string {
+  if (isProviderDragged(providerId)) {
+    return 'border-primary/50 bg-primary/5 shadow-sm'
+  }
+  if (dragOverProviderId.value === providerId) {
+    return 'border-primary/30 bg-primary/5'
+  }
+  if (isProviderSelected(providerId)) {
+    return 'border-primary/40 bg-primary/5'
+  }
+  return 'border-border/50 bg-background hover:bg-muted/30'
+}
+
+function isProviderDragged(providerId: string): boolean {
+  const draggedId = draggedProviderId.value
+  return Boolean(draggedId && providerMoveIds(draggedId).includes(providerId))
 }
 
 function setKeyPriority(keyId: string, event: Event): void {
@@ -684,7 +767,14 @@ function handleProviderDrop(providerId: string): void {
     handleProviderDragEnd()
     return
   }
-  const rows = reorderRows(providerRows.value, draggedId, providerId)
+  const movingIds = providerMoveIds(draggedId)
+  if (movingIds.includes(providerId)) {
+    handleProviderDragEnd()
+    return
+  }
+  const rows = movingIds.length > 1
+    ? reorderRowsByGroup(providerRows.value, movingIds, providerId)
+    : reorderRows(providerRows.value, draggedId, providerId)
   updateProviderOverrides(Object.fromEntries(rows.map((row, index) => [row.id, index])))
   handleProviderDragEnd()
 }
@@ -721,14 +811,6 @@ function handleKeyDrop(keyId: string): void {
   handleKeyDragEnd()
 }
 
-function clearActiveOverrides(): void {
-  if (effectivePriorityMode.value === 'provider') {
-    updateProviderOverrides({})
-  } else {
-    updateVisibleKeyAndPoolOverrides([])
-  }
-}
-
 function moveRow<T extends { id: string }>(rows: T[], id: string, direction: -1 | 1): T[] {
   const next = [...rows]
   const index = next.findIndex(row => row.id === id)
@@ -741,6 +823,26 @@ function moveRow<T extends { id: string }>(rows: T[], id: string, direction: -1 
   return next
 }
 
+function moveRowsByGroup<T extends { id: string }>(rows: T[], movingIds: string[], direction: -1 | 1): T[] {
+  const movingSet = new Set(movingIds)
+  const movingRows = rows.filter(row => movingSet.has(row.id))
+  if (movingRows.length === 0) return [...rows]
+
+  const firstMovingIndex = rows.findIndex(row => movingSet.has(row.id))
+  const remainingRows = rows.filter(row => !movingSet.has(row.id))
+  const baseInsertIndex = rows
+    .slice(0, firstMovingIndex)
+    .filter(row => !movingSet.has(row.id))
+    .length
+  const insertIndex = direction === -1
+    ? Math.max(0, baseInsertIndex - 1)
+    : Math.min(remainingRows.length, baseInsertIndex + 1)
+
+  const next = [...remainingRows]
+  next.splice(insertIndex, 0, ...movingRows)
+  return next
+}
+
 function reorderRows<T extends { id: string }>(rows: T[], draggedId: string, targetId: string): T[] {
   const next = [...rows]
   const fromIndex = next.findIndex(row => row.id === draggedId)
@@ -748,6 +850,29 @@ function reorderRows<T extends { id: string }>(rows: T[], draggedId: string, tar
   if (fromIndex < 0 || toIndex < 0) return next
   const [item] = next.splice(fromIndex, 1)
   next.splice(toIndex, 0, item)
+  return next
+}
+
+function reorderRowsByGroup<T extends { id: string }>(rows: T[], movingIds: string[], targetId: string): T[] {
+  const movingSet = new Set(movingIds)
+  if (movingSet.has(targetId)) return [...rows]
+
+  const movingRows = rows.filter(row => movingSet.has(row.id))
+  if (movingRows.length === 0) return [...rows]
+
+  const targetIndex = rows.findIndex(row => row.id === targetId)
+  const firstMovingIndex = rows.findIndex(row => movingSet.has(row.id))
+  if (targetIndex < 0 || firstMovingIndex < 0) return [...rows]
+
+  const remainingRows = rows.filter(row => !movingSet.has(row.id))
+  const remainingTargetIndex = remainingRows.findIndex(row => row.id === targetId)
+  if (remainingTargetIndex < 0) return [...rows]
+
+  const insertIndex = firstMovingIndex < targetIndex
+    ? remainingTargetIndex + 1
+    : remainingTargetIndex
+  const next = [...remainingRows]
+  next.splice(insertIndex, 0, ...movingRows)
   return next
 }
 
@@ -858,6 +983,10 @@ function formatLabel(format: string): string {
   return formatApiFormat(format)
 }
 
+function formatShortLabel(format: string): string {
+  return formatApiFormatShort(format)
+}
+
 function normalizePriorityMap(value: Record<string, unknown> | null | undefined): Record<string, number> {
   if (!value) return {}
   const normalized: Record<string, number> = {}
@@ -882,3 +1011,15 @@ function comparePriorityRows(left: ProviderPriorityRow | KeyPriorityRow, right: 
     || left.id.localeCompare(right.id)
 }
 </script>
+
+<style scoped>
+.priority-input::-webkit-outer-spin-button,
+.priority-input::-webkit-inner-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.priority-input[type='number'] {
+  appearance: textfield;
+}
+</style>

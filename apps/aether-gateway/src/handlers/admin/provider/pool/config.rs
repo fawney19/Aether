@@ -414,7 +414,7 @@ pub(crate) fn admin_provider_pool_config_from_config_value(
             account_self_check_interval_minutes: 60,
             account_self_check_concurrency: 4,
             score_top_n: 128,
-            score_fallback_scan_limit: 1024,
+            score_fallback_scan_limit: 4096,
             score_rules: PoolMemberScoreRules::default(),
             stream_timeout_threshold: 3,
             stream_timeout_window_seconds: 1800,
@@ -512,7 +512,7 @@ pub(crate) fn admin_provider_pool_config_from_config_value(
             .and_then(json_u64)
             .filter(|value| *value > 0)
             .map(|value| value.min(50_000))
-            .unwrap_or(1024),
+            .unwrap_or(4096),
         score_rules,
         stream_timeout_threshold: pool_advanced
             .get("stream_timeout_threshold")

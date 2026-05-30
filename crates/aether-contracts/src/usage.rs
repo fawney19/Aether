@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub const USAGE_SERVER_NOW_UNIX_MS_HEADER: &str = "x-aether-server-now-unix-ms";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct StandardizedUsage {
     pub input_tokens: i64,

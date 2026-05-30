@@ -72,13 +72,21 @@ struct InternalTunnelHeartbeatRequest {
     #[serde(default)]
     total_requests: Option<i64>,
     #[serde(default)]
+    window_total_requests: Option<i64>,
+    #[serde(default)]
     avg_latency_ms: Option<f64>,
     #[serde(default)]
     failed_requests: Option<i64>,
     #[serde(default)]
+    window_failed_requests: Option<i64>,
+    #[serde(default)]
     dns_failures: Option<i64>,
     #[serde(default)]
+    window_dns_failures: Option<i64>,
+    #[serde(default)]
     stream_errors: Option<i64>,
+    #[serde(default)]
+    window_stream_errors: Option<i64>,
     #[serde(default)]
     proxy_metadata: Option<serde_json::Value>,
     #[serde(default)]
@@ -932,11 +940,11 @@ async fn apply_embedded_tunnel_heartbeat(
         node_id: node_id.clone(),
         heartbeat_interval: payload.heartbeat_interval,
         active_connections: payload.active_connections,
-        total_requests_delta: payload.total_requests,
+        total_requests_delta: payload.window_total_requests.or(payload.total_requests),
         avg_latency_ms: payload.avg_latency_ms,
-        failed_requests_delta: payload.failed_requests,
-        dns_failures_delta: payload.dns_failures,
-        stream_errors_delta: payload.stream_errors,
+        failed_requests_delta: payload.window_failed_requests.or(payload.failed_requests),
+        dns_failures_delta: payload.window_dns_failures.or(payload.dns_failures),
+        stream_errors_delta: payload.window_stream_errors.or(payload.stream_errors),
         proxy_metadata: payload.proxy_metadata,
         proxy_version: payload.proxy_version,
     };
@@ -1009,10 +1017,16 @@ fn parse_embedded_tunnel_heartbeat_request(
         .is_some_and(|value| !(5..=600).contains(&value))
         || payload.active_connections.is_some_and(|value| value < 0)
         || payload.total_requests.is_some_and(|value| value < 0)
+        || payload.window_total_requests.is_some_and(|value| value < 0)
         || payload.avg_latency_ms.is_some_and(|value| value < 0.0)
         || payload.failed_requests.is_some_and(|value| value < 0)
+        || payload
+            .window_failed_requests
+            .is_some_and(|value| value < 0)
         || payload.dns_failures.is_some_and(|value| value < 0)
+        || payload.window_dns_failures.is_some_and(|value| value < 0)
         || payload.stream_errors.is_some_and(|value| value < 0)
+        || payload.window_stream_errors.is_some_and(|value| value < 0)
         || payload
             .proxy_version
             .as_deref()

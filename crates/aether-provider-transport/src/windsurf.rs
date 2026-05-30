@@ -414,6 +414,7 @@ mod tests {
                 fingerprint: None,
                 decrypted_api_key: "devin-session-token$abc".to_string(),
                 decrypted_auth_config: Some(r#"{"provider_type":"windsurf"}"#.to_string()),
+                upstream_metadata: None,
             },
         }
     }

@@ -359,7 +359,7 @@ fn seed_captures_transport_metadata_from_execution_plan() {
     };
     assert_eq!(
         seed.transport.upstream_base_url,
-        "https://api.openai.example"
+        "https://api.openai.example/v1"
     );
     assert_eq!(seed.transport.provider_id, "provider-123");
     assert_eq!(seed.transport.endpoint_id, "endpoint-123");

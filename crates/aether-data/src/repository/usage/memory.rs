@@ -161,6 +161,13 @@ fn usage_status_is_lifecycle(status: &str) -> bool {
     matches!(status, "pending" | "streaming")
 }
 
+fn merge_usage_timing(existing: Option<u64>, incoming: Option<u64>) -> Option<u64> {
+    match incoming {
+        Some(0) | None => existing.or(incoming),
+        Some(value) => Some(value),
+    }
+}
+
 fn accumulate_provider_api_key_usage_contribution(
     aggregates: &mut BTreeMap<String, ProviderApiKeyUsageContribution>,
     contribution: ProviderApiKeyUsageContribution,
@@ -525,6 +532,11 @@ fn usage_matches_breakdown_summary_query(
     }
     if let Some(user_id) = query.user_id.as_deref() {
         if item.user_id.as_deref() != Some(user_id) {
+            return false;
+        }
+    }
+    if let Some(provider_name) = query.provider_name.as_deref() {
+        if item.provider_name != provider_name {
             return false;
         }
     }
@@ -2776,8 +2788,18 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
             status_code: usage.status_code,
             error_message: usage.error_message,
             error_category: usage.error_category,
-            response_time_ms: usage.response_time_ms,
-            first_byte_time_ms: usage.first_byte_time_ms,
+            response_time_ms: merge_usage_timing(
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.response_time_ms),
+                usage.response_time_ms,
+            ),
+            first_byte_time_ms: merge_usage_timing(
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.first_byte_time_ms),
+                usage.first_byte_time_ms,
+            ),
             status: usage.status,
             billing_status: usage.billing_status,
             request_headers: usage.request_headers.or_else(|| {
@@ -3816,6 +3838,39 @@ mod tests {
         assert_eq!(stored.response_time_ms, Some(45));
         assert_eq!(stored.target_model.as_deref(), Some("gpt-5-upstream"));
         assert_eq!(stored.total_tokens, 12);
+    }
+
+    #[tokio::test]
+    async fn streaming_refresh_without_timing_does_not_clear_stream_timing() {
+        let repository = InMemoryUsageReadRepository::default();
+        let mut first = sample_upsert_usage_record("req-streaming-refresh");
+        first.is_stream = Some(true);
+        first.status = "streaming".to_string();
+        first.status_code = Some(200);
+        first.response_time_ms = Some(45);
+        first.first_byte_time_ms = Some(12);
+        repository
+            .upsert(first)
+            .await
+            .expect("streaming usage should upsert");
+
+        let mut refresh = sample_upsert_usage_record("req-streaming-refresh");
+        refresh.is_stream = Some(true);
+        refresh.status = "streaming".to_string();
+        refresh.status_code = Some(200);
+        repository
+            .upsert(refresh)
+            .await
+            .expect("streaming refresh should upsert");
+
+        let stored = repository
+            .find_by_request_id("req-streaming-refresh")
+            .await
+            .expect("usage lookup should succeed")
+            .expect("usage should exist");
+        assert_eq!(stored.status, "streaming");
+        assert_eq!(stored.response_time_ms, Some(45));
+        assert_eq!(stored.first_byte_time_ms, Some(12));
     }
 
     #[tokio::test]

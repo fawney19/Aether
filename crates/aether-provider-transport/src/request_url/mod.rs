@@ -10,11 +10,13 @@ use crate::antigravity::{
     AntigravityRequestUrlAction,
 };
 use crate::claude_code::build_claude_code_messages_url;
+use crate::gemini_cli::{
+    build_gemini_cli_v1internal_url, is_gemini_cli_provider_transport, GeminiCliRequestUrlAction,
+};
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::url::{
     build_claude_messages_url, build_gemini_content_url, build_openai_chat_url,
     build_openai_responses_url, build_passthrough_path_url, normalize_gemini_content_action_path,
-    openai_compatible_base_includes_api_root,
 };
 use crate::vertex::{
     build_vertex_api_key_gemini_content_url, build_vertex_api_key_gemini_embedding_url,
@@ -283,8 +285,26 @@ fn build_transport_hook_url(
         ));
     }
 
-    match aether_ai_formats::normalize_api_format_alias(params.provider_api_format).as_str() {
+    let normalized_provider_api_format =
+        aether_ai_formats::normalize_api_format_alias(params.provider_api_format);
+    match normalized_provider_api_format.as_str() {
         "gemini:generate_content" => {
+            if is_gemini_cli_provider_transport(transport) {
+                let query = params.request_query.map(|raw| {
+                    form_urlencoded::parse(raw.as_bytes())
+                        .into_owned()
+                        .collect::<BTreeMap<String, String>>()
+                });
+                return build_gemini_cli_v1internal_url(
+                    &transport.endpoint.base_url,
+                    if params.upstream_is_stream {
+                        GeminiCliRequestUrlAction::StreamGenerateContent
+                    } else {
+                        GeminiCliRequestUrlAction::GenerateContent
+                    },
+                    query.as_ref(),
+                );
+            }
             if let Some(auth) = resolve_local_vertex_api_key_query_auth(transport) {
                 return build_vertex_api_key_gemini_content_url(
                     params.mapped_model?,
@@ -338,6 +358,25 @@ fn build_transport_hook_url(
         );
     }
 
+    if is_gemini_cli_provider_transport(transport)
+        && normalized_provider_api_format == "gemini:generate_content"
+    {
+        let query = params.request_query.map(|raw| {
+            form_urlencoded::parse(raw.as_bytes())
+                .into_owned()
+                .collect::<BTreeMap<String, String>>()
+        });
+        return build_gemini_cli_v1internal_url(
+            &transport.endpoint.base_url,
+            if params.upstream_is_stream {
+                GeminiCliRequestUrlAction::StreamGenerateContent
+            } else {
+                GeminiCliRequestUrlAction::GenerateContent
+            },
+            query.as_ref(),
+        );
+    }
+
     None
 }
 
@@ -383,32 +422,18 @@ fn normalize_gemini_embedding_action_path(path: &str, batch: bool) -> String {
 }
 
 fn build_provider_embedding_v1_url(upstream_base_url: &str, query: Option<&str>) -> Option<String> {
-    build_provider_v1_url(upstream_base_url, "/embeddings", "/v1/embeddings", query)
+    build_provider_api_root_url(upstream_base_url, "/embeddings", query)
 }
 
 fn build_provider_rerank_v1_url(upstream_base_url: &str, query: Option<&str>) -> Option<String> {
-    build_provider_v1_url(upstream_base_url, "/rerank", "/v1/rerank", query)
+    build_provider_api_root_url(upstream_base_url, "/rerank", query)
 }
 
-fn build_provider_v1_url(
+fn build_provider_api_root_url(
     upstream_base_url: &str,
-    v1_path: &str,
-    default_path: &str,
+    path: &str,
     query: Option<&str>,
 ) -> Option<String> {
-    let base_without_query = upstream_base_url
-        .trim()
-        .split_once('?')
-        .map(|(base, _)| base)
-        .unwrap_or_else(|| upstream_base_url.trim())
-        .trim_end_matches('/');
-    let path = if base_without_query.ends_with("/v1")
-        || openai_compatible_base_includes_api_root(base_without_query)
-    {
-        v1_path
-    } else {
-        default_path
-    };
     build_passthrough_path_url(upstream_base_url, path, query, &[])
 }
 
@@ -580,6 +605,7 @@ mod tests {
                 expires_at_unix_secs: None,
                 proxy: None,
                 fingerprint: None,
+                upstream_metadata: None,
                 decrypted_api_key: "vertex-secret".to_string(),
                 decrypted_auth_config: None,
             },
@@ -689,6 +715,58 @@ mod tests {
         assert_eq!(
             url,
             "https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/publishers/google/models/gemini-embedding-2:predict?foo=bar"
+        );
+    }
+
+    #[test]
+    fn gemini_cli_generate_content_uses_v1internal_code_assist_url() {
+        let transport = sample_transport(
+            "gemini_cli",
+            "gemini:generate_content",
+            "https://cloudcode-pa.googleapis.com",
+            None,
+        );
+
+        assert_eq!(
+            build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "gemini:generate_content",
+                    mapped_model: Some("gemini-2.5-pro"),
+                    upstream_is_stream: false,
+                    request_query: Some("key=blocked&beta=true&foo=bar"),
+                    kiro_api_region: None,
+                },
+            )
+            .as_deref(),
+            Some("https://cloudcode-pa.googleapis.com/v1internal:generateContent?foo=bar")
+        );
+    }
+
+    #[test]
+    fn gemini_cli_stream_generate_content_uses_v1internal_code_assist_url() {
+        let transport = sample_transport(
+            "gemini_cli",
+            "gemini:generate_content",
+            "https://cloudcode-pa.googleapis.com",
+            None,
+        );
+
+        assert_eq!(
+            build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "gemini:generate_content",
+                    mapped_model: Some("gemini-2.5-pro"),
+                    upstream_is_stream: true,
+                    request_query: Some("foo=bar"),
+                    kiro_api_region: None,
+                },
+            )
+            .as_deref(),
+            Some(
+                "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse&foo=bar"
+            )
         );
     }
 
@@ -923,7 +1001,12 @@ mod tests {
             "https://api.openai.example/v1",
             None,
         );
-        let jina = sample_transport("jina", "jina:embedding", "https://api.jina.example", None);
+        let jina = sample_transport(
+            "jina",
+            "jina:embedding",
+            "https://api.jina.example/v1",
+            None,
+        );
         let gemini = sample_transport(
             "gemini",
             "gemini:embedding",
@@ -1128,7 +1211,7 @@ mod tests {
             "https://api.openai.example/v1",
             None,
         );
-        let jina = sample_transport("jina", "jina:rerank", "https://api.jina.example", None);
+        let jina = sample_transport("jina", "jina:rerank", "https://api.jina.example/v1", None);
 
         assert_eq!(
             build_transport_request_url(

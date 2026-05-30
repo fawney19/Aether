@@ -335,6 +335,11 @@ async fn fetch_gemini_cli_models(
                     if let Some(plan_type) = extract_gemini_cli_plan_type(&body_json) {
                         provider_meta.insert("plan_type".to_string(), Value::String(plan_type));
                     }
+                    for key in ["paidTier", "currentTier"] {
+                        if let Some(value) = extract_gemini_cli_tier_metadata(&body_json, key) {
+                            provider_meta.insert(key.to_string(), value);
+                        }
+                    }
                     if let Some(project_id) =
                         extract_gemini_cli_project_id(&body_json).or_else(|| {
                             transport_auth_config(transport)
@@ -1233,7 +1238,9 @@ fn normalize_api_format(value: &str) -> String {
 
 fn extract_gemini_cli_plan_type(body: &Value) -> Option<String> {
     for key in ["paidTier", "currentTier"] {
-        let tier = body.get(key)?;
+        let Some(tier) = body.get(key) else {
+            continue;
+        };
         let raw = if let Some(value) = tier.as_str() {
             value.trim().to_string()
         } else if let Some(value) = tier
@@ -1257,6 +1264,40 @@ fn extract_gemini_cli_plan_type(body: &Value) -> Option<String> {
         }
     }
     None
+}
+
+fn extract_gemini_cli_tier_metadata(body: &Value, key: &str) -> Option<Value> {
+    let tier = body.get(key)?;
+    if let Some(text) = tier
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(Value::String(text.to_string()));
+    }
+
+    let object = tier.as_object()?;
+    let mut out = serde_json::Map::new();
+    for field in [
+        "id",
+        "tierType",
+        "name",
+        "displayName",
+        "availableCredits",
+        "remainingCredits",
+        "consumedCredits",
+        "totalCredits",
+        "unlimited",
+        "hasCredits",
+    ] {
+        let Some(value) = object.get(field) else {
+            continue;
+        };
+        if value.is_string() || value.is_number() || value.is_boolean() || value.is_null() {
+            out.insert(field.to_string(), value.clone());
+        }
+    }
+    (!out.is_empty()).then_some(Value::Object(out))
 }
 
 fn extract_gemini_cli_project_id(body: &Value) -> Option<String> {
@@ -1468,6 +1509,7 @@ mod tests {
                 expires_at_unix_secs: None,
                 proxy: None,
                 fingerprint: None,
+                upstream_metadata: None,
                 decrypted_api_key: "vertex-secret".to_string(),
                 decrypted_auth_config: None,
             },
@@ -1510,6 +1552,16 @@ mod tests {
             }"#
             .to_string(),
         );
+        transport
+    }
+
+    fn sample_gemini_cli_transport() -> GatewayProviderTransportSnapshot {
+        let mut transport = sample_custom_aiplatform_transport();
+        transport.provider.provider_type = "gemini_cli".to_string();
+        transport.provider.name = "Gemini CLI".to_string();
+        transport.endpoint.base_url = "https://cloudcode-pa.googleapis.com".to_string();
+        transport.key.auth_type = "bearer".to_string();
+        transport.key.decrypted_api_key = "gemini-cli-access-token".to_string();
         transport
     }
 
@@ -1627,11 +1679,11 @@ mod tests {
             executed_urls: Arc::clone(&executed_urls),
             routes: vec![
                 (
-                    "https://bad.example.com/v1/models".to_string(),
+                    "https://bad.example.com/models".to_string(),
                     Err("connection reset".to_string()),
                 ),
                 (
-                    "https://chat.example.com/v1/models".to_string(),
+                    "https://chat.example.com/models".to_string(),
                     Ok((
                         200,
                         json!({
@@ -1640,7 +1692,7 @@ mod tests {
                     )),
                 ),
                 (
-                    "https://responses.example.com/v1/models".to_string(),
+                    "https://responses.example.com/models".to_string(),
                     Ok((
                         200,
                         json!({
@@ -1818,6 +1870,67 @@ mod tests {
         );
         assert_eq!(outcome.fetched_model_ids, vec!["gpt-5.4-upstream"]);
         assert_eq!(outcome.cached_models.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn gemini_cli_load_code_assist_preserves_paid_tier_credits() {
+        let executed_urls = Arc::new(Mutex::new(Vec::new()));
+        let runtime = TestRuntime {
+            executed_urls: Arc::clone(&executed_urls),
+            response_body: json!({
+                "cloudaicompanionProject": {
+                    "id": "project-from-load-code-assist"
+                },
+                "currentTier": {
+                    "id": "free-tier"
+                },
+                "paidTier": {
+                    "id": "g1-pro-tier",
+                    "availableCredits": 123.5,
+                    "consumedCredits": 7,
+                    "totalCredits": 200,
+                    "privateField": {
+                        "ignored": true
+                    }
+                }
+            }),
+            status_code: 200,
+        };
+        let outcome = fetch_models_from_transports(&runtime, &[sample_gemini_cli_transport()])
+            .await
+            .expect("models fetch should succeed");
+
+        let urls = executed_urls.lock().expect("executed_urls lock");
+        assert_eq!(
+            urls.as_slice(),
+            &["https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"]
+        );
+        assert_eq!(
+            outcome
+                .upstream_metadata
+                .as_ref()
+                .and_then(|value| value.pointer("/gemini_cli/project_id")),
+            Some(&json!("project-from-load-code-assist"))
+        );
+        assert_eq!(
+            outcome
+                .upstream_metadata
+                .as_ref()
+                .and_then(|value| value.pointer("/gemini_cli/plan_type")),
+            Some(&json!("g1-pro-tier"))
+        );
+        assert_eq!(
+            outcome
+                .upstream_metadata
+                .as_ref()
+                .and_then(|value| value.pointer("/gemini_cli/paidTier/availableCredits")),
+            Some(&json!(123.5))
+        );
+        assert!(outcome
+            .upstream_metadata
+            .as_ref()
+            .and_then(|value| value.pointer("/gemini_cli/paidTier/privateField"))
+            .is_none());
     }
 
     #[tokio::test]

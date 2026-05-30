@@ -34,12 +34,6 @@ pub const CLAUDE_CODE_PROVIDER_POOL_ADAPTER: UnsupportedQuotaProviderPoolAdapter
         "Claude Code 暂不支持自动刷新额度：上游没有稳定可用的账号额度查询接口",
     );
 
-pub const GEMINI_CLI_PROVIDER_POOL_ADAPTER: UnsupportedQuotaProviderPoolAdapter =
-    UnsupportedQuotaProviderPoolAdapter::new(
-        "gemini_cli",
-        "Gemini CLI 暂不支持自动刷新额度：当前只能通过模型同步/缓存快照展示已知配额信息",
-    );
-
 pub const VERTEX_AI_PROVIDER_POOL_ADAPTER: UnsupportedQuotaProviderPoolAdapter =
     UnsupportedQuotaProviderPoolAdapter::new(
         "vertex_ai",

@@ -172,7 +172,7 @@ async fn gateway_exposes_request_id_header_for_local_execution_response() {
         ]));
 
     let provider = Router::new().route(
-        "/v1/chat/completions",
+        "/chat/completions",
         any(|_request: Request| async move {
             Json(json!({
                 "id": "chatcmpl-direct-audit-123",

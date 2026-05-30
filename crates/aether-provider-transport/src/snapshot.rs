@@ -70,6 +70,7 @@ pub struct GatewayProviderTransportKey {
     pub expires_at_unix_secs: Option<u64>,
     pub proxy: Option<serde_json::Value>,
     pub fingerprint: Option<serde_json::Value>,
+    pub upstream_metadata: Option<serde_json::Value>,
     pub decrypted_api_key: String,
     pub decrypted_auth_config: Option<String>,
 }
@@ -398,6 +399,7 @@ mod tests {
                     expires_at_unix_secs: Some(1_800_000_000),
                     proxy: Some(serde_json::json!({"node_id":"proxy-node-1"})),
                     fingerprint: Some(serde_json::json!({"transport_profile":"chrome_136"})),
+                    upstream_metadata: None,
                     decrypted_api_key: "sk-live-openai".to_string(),
                     decrypted_auth_config: Some(
                         "{\"refresh_token\":\"rt-1\",\"project\":\"demo\"}".to_string(),

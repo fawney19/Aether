@@ -1572,7 +1572,7 @@ async fn gateway_returns_openai_responses_error_for_local_sync_failure() {
 }
 
 #[tokio::test]
-async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_sync_failure() {
+async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_cli_sync_failure() {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeSyncRequest {
         trace_id: String,
@@ -1580,7 +1580,9 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_sy
         authorization: String,
         endpoint_tag: String,
         has_contents: bool,
-        model: String,
+        outer_model: String,
+        user_prompt_id: String,
+        inner_model_present: bool,
     }
 
     fn hash_api_key(value: &str) -> String {
@@ -1598,7 +1600,7 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_sy
             "local".to_string(),
             true,
             false,
-            Some(serde_json::json!(["openai", "gemini"])),
+            Some(serde_json::json!(["openai", "gemini", "gemini_cli"])),
             Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
@@ -1609,7 +1611,7 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_sy
             Some(60),
             Some(5),
             Some(4_102_444_800_i64),
-            Some(serde_json::json!(["openai", "gemini"])),
+            Some(serde_json::json!(["openai", "gemini", "gemini_cli"])),
             Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
         )
@@ -1619,8 +1621,8 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_sy
     fn sample_candidate_row() -> StoredMinimalCandidateSelectionRow {
         StoredMinimalCandidateSelectionRow {
             provider_id: "provider-openai-cli-gemini-local-1".to_string(),
-            provider_name: "gemini".to_string(),
-            provider_type: "custom".to_string(),
+            provider_name: "gemini_cli".to_string(),
+            provider_type: "gemini_cli".to_string(),
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-openai-cli-gemini-local-1".to_string(),
@@ -1629,8 +1631,8 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_sy
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
             key_id: "key-openai-cli-gemini-local-1".to_string(),
-            key_name: "prod".to_string(),
-            key_auth_type: "bearer".to_string(),
+            key_name: "oauth".to_string(),
+            key_auth_type: "oauth".to_string(),
             key_is_active: true,
             key_api_formats: Some(vec!["gemini:generate_content".to_string()]),
             key_allowed_models: None,
@@ -1658,9 +1660,9 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_sy
     fn sample_provider_catalog_provider() -> StoredProviderCatalogProvider {
         StoredProviderCatalogProvider::new(
             "provider-openai-cli-gemini-local-1".to_string(),
-            "gemini".to_string(),
+            "gemini_cli".to_string(),
             Some("https://example.com".to_string()),
-            "custom".to_string(),
+            "gemini_cli".to_string(),
         )
         .expect("provider should build")
         .with_transport_fields(
@@ -1687,13 +1689,13 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_sy
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://generativelanguage.googleapis.com".to_string(),
+            "https://cloudcode-pa.googleapis.com".to_string(),
             Some(serde_json::json!([
                 {"action":"set","key":"x-endpoint-tag","value":"openai-cli-gemini-cross-format"}
             ])),
             None,
             Some(2),
-            Some("/custom/v1beta/models/gemini-cli-upstream:generateContent".to_string()),
+            None,
             None,
             None,
             None,
@@ -1705,8 +1707,8 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_sy
         StoredProviderCatalogKey::new(
             "key-openai-cli-gemini-local-1".to_string(),
             "provider-openai-cli-gemini-local-1".to_string(),
-            "prod".to_string(),
-            "bearer".to_string(),
+            "oauth".to_string(),
+            "oauth".to_string(),
             None,
             true,
         )
@@ -1806,15 +1808,29 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_sy
                     has_contents: payload
                         .get("body")
                         .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("request"))
                         .and_then(|value| value.get("contents"))
                         .is_some(),
-                    model: payload
+                    outer_model: payload
                         .get("body")
                         .and_then(|value| value.get("json_body"))
                         .and_then(|value| value.get("model"))
                         .and_then(|value| value.as_str())
                         .unwrap_or_default()
                         .to_string(),
+                    user_prompt_id: payload
+                        .get("body")
+                        .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("user_prompt_id"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    inner_model_present: payload
+                        .get("body")
+                        .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("request"))
+                        .and_then(|value| value.get("model"))
+                        .is_some(),
                 });
                 Json(json!({
                     "request_id": "trace-openai-cli-gemini-local-error-123",
@@ -1917,7 +1933,7 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_sy
     );
     assert_eq!(
         seen_execution_runtime_request.url,
-        "https://generativelanguage.googleapis.com/custom/v1beta/models/gemini-cli-upstream:generateContent"
+        "https://cloudcode-pa.googleapis.com/v1internal:generateContent"
     );
     assert_eq!(
         seen_execution_runtime_request.authorization,
@@ -1928,7 +1944,15 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_sy
         "openai-cli-gemini-cross-format"
     );
     assert!(seen_execution_runtime_request.has_contents);
-    assert_eq!(seen_execution_runtime_request.model, "gemini-cli-upstream");
+    assert_eq!(
+        seen_execution_runtime_request.outer_model,
+        "gemini-cli-upstream"
+    );
+    assert_eq!(
+        seen_execution_runtime_request.user_prompt_id,
+        "trace-openai-cli-gemini-local-error-123"
+    );
+    assert!(!seen_execution_runtime_request.inner_model_present);
 
     let stored_candidates = request_candidate_repository
         .list_by_request_id("trace-openai-cli-gemini-local-error-123")

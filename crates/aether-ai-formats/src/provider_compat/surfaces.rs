@@ -1,4 +1,5 @@
 pub const ANTIGRAVITY_PROVIDER_TYPE: &str = "antigravity";
+pub const GEMINI_CLI_PROVIDER_TYPE: &str = "gemini_cli";
 pub const KIRO_PROVIDER_TYPE: &str = "kiro";
 pub const WINDSURF_PROVIDER_TYPE: &str = "windsurf";
 pub const KIRO_ENVELOPE_NAME: &str = "kiro:generateAssistantResponse";
@@ -53,10 +54,10 @@ const PROVIDER_ADAPTATION_SURFACES: &[ProviderAdaptationDescriptor] = &[
     },
     ProviderAdaptationDescriptor {
         surface: ProviderAdaptationSurface::GeminiCliV1Internal,
-        provider_type: None,
+        provider_type: Some(GEMINI_CLI_PROVIDER_TYPE),
         envelope_name: GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME,
         anchor_api_format: "gemini:generate_content",
-        supports_request_bridge: false,
+        supports_request_bridge: true,
         supports_sync_finalize_bridge: true,
         supports_stream_bridge: true,
         requires_eventstream_accept: false,
@@ -153,9 +154,11 @@ pub fn provider_adaptation_should_unwrap_stream_envelope(
 mod tests {
     use super::{
         provider_adaptation_allows_sync_finalize_envelope, provider_adaptation_anchor_api_format,
+        provider_adaptation_descriptor_for_provider_type,
         provider_adaptation_requires_eventstream_accept,
         provider_adaptation_should_unwrap_stream_envelope, ANTIGRAVITY_V1INTERNAL_ENVELOPE_NAME,
-        GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME, KIRO_ENVELOPE_NAME, WINDSURF_ENVELOPE_NAME,
+        GEMINI_CLI_PROVIDER_TYPE, GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME, KIRO_ENVELOPE_NAME,
+        WINDSURF_ENVELOPE_NAME,
     };
 
     #[test]
@@ -194,6 +197,12 @@ mod tests {
             GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME,
             "gemini:generate_content"
         ));
+        let gemini_cli_descriptor = provider_adaptation_descriptor_for_provider_type(
+            GEMINI_CLI_PROVIDER_TYPE,
+            "gemini:generate_content",
+        )
+        .expect("gemini cli descriptor should resolve by provider type");
+        assert!(gemini_cli_descriptor.supports_request_bridge);
         assert!(provider_adaptation_requires_eventstream_accept(
             Some(KIRO_ENVELOPE_NAME),
             "claude:messages"
