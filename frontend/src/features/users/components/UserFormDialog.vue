@@ -105,6 +105,21 @@
         </div>
 
         <div class="space-y-2">
+          <Label
+            for="form-remark"
+            class="text-sm font-medium"
+          >备注</Label>
+          <Textarea
+            id="form-remark"
+            v-model="form.remark"
+            rows="3"
+            maxlength="500"
+            placeholder="可填写用户备注（选填）"
+            class="min-h-20 resize-none"
+          />
+        </div>
+
+        <div class="space-y-2">
           <Label class="text-sm font-medium">
             {{ isEditMode ? '新密码 (留空保持不变)' : '密码' }}
             <span
@@ -269,6 +284,7 @@ import {
   Input,
   Label,
   Switch,
+  Textarea,
   Select,
   SelectTrigger,
   SelectValue,
@@ -301,6 +317,7 @@ export interface UserFormData {
   id?: string
   username: string
   email: string
+  remark?: string | null
   initial_gift_usd?: number | null
   unlimited?: boolean
   role: 'admin' | 'user'
@@ -332,6 +349,7 @@ const form = ref({
   password: '',
   confirmPassword: '',
   email: '',
+  remark: '',
   initial_gift_usd: 10 as number | undefined,
   role: 'user' as 'admin' | 'user',
   unlimited: false,
@@ -360,6 +378,7 @@ function resetForm() {
     password: generatedPassword,
     confirmPassword: '',
     email: '',
+    remark: '',
     initial_gift_usd: 10,
     role: 'user',
     unlimited: false,
@@ -383,6 +402,7 @@ function loadUserData() {
     password: '',
     confirmPassword: '',
     email: props.user.email || '',
+    remark: props.user.remark || '',
     initial_gift_usd: undefined,
     role: props.user.role,
     unlimited: props.user.unlimited ?? false,
@@ -477,6 +497,7 @@ async function handleSubmit() {
     const data: UserFormData & { password?: string; unlimited: boolean } = {
       username: form.value.username,
       email: form.value.email.trim() || '',
+      remark: form.value.remark.trim() || null,
       unlimited: form.value.unlimited,
       role: form.value.role,
       group_ids: [...form.value.group_ids],
