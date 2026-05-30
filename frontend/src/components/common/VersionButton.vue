@@ -94,20 +94,32 @@
             v-else-if="isDownloadingUpdate"
             class="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2"
           >
-            <div class="flex items-center justify-between gap-3 text-xs text-primary">
-              <span class="truncate">{{ downloadProgressText }}</span>
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="text-[11px] font-semibold uppercase tracking-[0.18em] text-primary/80">
+                  在线更新
+                </div>
+                <div class="mt-1 flex items-center gap-2 text-xs font-medium text-primary">
+                  <Loader2 class="h-3.5 w-3.5 shrink-0 animate-spin" />
+                  <span class="truncate">{{ downloadProgressText }}</span>
+                </div>
+              </div>
               <span
                 v-if="downloadProgressPercent !== null"
-                class="shrink-0 font-mono"
+                class="shrink-0 rounded-full border border-primary/15 bg-background/70 px-2 py-0.5 font-mono text-[10px] text-primary"
               >
                 {{ downloadProgressPercent }}%
               </span>
             </div>
             <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-primary/15">
               <div
-                class="h-full rounded-full bg-primary transition-all duration-300"
+                class="version-update-progress-bar h-full rounded-full bg-primary transition-all duration-500"
+                :class="{ 'version-update-progress-bar--indeterminate': downloadProgressPercent === null }"
                 :style="{ width: progressBarWidth }"
               />
+            </div>
+            <div class="mt-1.5 text-[10px] text-muted-foreground">
+              当前服务保持运行，准备好后再确认切换。
             </div>
           </div>
 
@@ -334,7 +346,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { CheckUpdateResponse, ReleaseEntry } from '@/api/admin'
 import { adminApi } from '@/api/admin'
 import { Button, Dialog, Popover, PopoverContent, PopoverTrigger } from '@/components/ui'
@@ -343,7 +355,7 @@ import { formatDisplayVersion } from '@/utils/version'
 import { describeUpdateStatus } from '@/utils/updateStatus'
 import { sanitizeMarkdown } from '@/utils/sanitize'
 import { marked } from 'marked'
-import { ChevronRight, ExternalLink, Info, RefreshCw } from 'lucide-vue-next'
+import { ChevronRight, ExternalLink, Info, Loader2, RefreshCw } from 'lucide-vue-next'
 
 const props = defineProps<{
   status: CheckUpdateResponse | null
@@ -393,7 +405,7 @@ const downloadProgressPercent = computed(() => {
     : null
 })
 const progressBarWidth = computed(() => {
-  return downloadProgressPercent.value === null ? '35%' : `${downloadProgressPercent.value}%`
+  return downloadProgressPercent.value === null ? '44%' : `${downloadProgressPercent.value}%`
 })
 const updateBlockerText = computed(() => {
   if (!updateSupported.value) {
@@ -513,6 +525,12 @@ const selectedReleaseNotesHtml = computed(() => {
   }
 })
 
+watch(isOpen, (open) => {
+  if (open) {
+    showReleases.value = false
+  }
+})
+
 function formatDate(dateStr: string): string {
   try {
     const date = new Date(dateStr)
@@ -589,3 +607,38 @@ function handleRollback() {
   emit('rollback')
 }
 </script>
+
+<style scoped>
+.version-update-progress-bar {
+  position: relative;
+  overflow: hidden;
+}
+
+.version-update-progress-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.35), transparent);
+  transform: translateX(-100%);
+  animation: version-update-progress-sheen 1.7s ease-in-out infinite;
+}
+
+.version-update-progress-bar--indeterminate {
+  animation: version-update-progress-drift 1.4s ease-in-out infinite alternate;
+}
+
+@keyframes version-update-progress-sheen {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes version-update-progress-drift {
+  from {
+    transform: translateX(-8%);
+  }
+  to {
+    transform: translateX(118%);
+  }
+}
+</style>

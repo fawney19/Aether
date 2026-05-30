@@ -477,6 +477,11 @@ export interface SystemUpdateCapabilityResponse {
   data_dir?: string
   logs_dir?: string
   docker_update_command?: string | null
+  docker_prepare_command?: string | null
+  docker_apply_command?: string | null
+  docker_update_mode?: string | null
+  docker_auto_update_enabled?: boolean | null
+  docker_auto_update_supported?: boolean | null
   message: string
 }
 

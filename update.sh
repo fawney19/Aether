@@ -19,6 +19,7 @@ FORCE_RECREATE=false
 SHOW_LOGS=false
 LOCAL_BUILD=false
 PREPARE_ONLY=false
+APPLY_PREPARED=false
 BACKUP_ENABLED=true
 BACKUP_DIR=""
 POSTGRES_SERVICE="postgres"
@@ -47,6 +48,7 @@ Options:
   --service NAME          app service name, default: app
   --no-pull               skip docker compose pull
   --prepare               pull the latest app image only, do not recreate app
+  --apply-prepared        recreate app using the already pulled image
   --force-recreate        force recreate the app container
   --logs                  follow app logs after update
   --no-backup             skip the pre-update postgres pg_dump
@@ -61,6 +63,8 @@ Options:
 Examples:
   ./update.sh
   ./update.sh --mode single-node
+  ./update.sh --prepare
+  ./update.sh --apply-prepared
   ./update.sh --compose-dir /opt/aether/compose
   ./update.sh --mode local-build
   ./update.sh --dry-run
@@ -106,6 +110,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --prepare)
             PREPARE_ONLY=true
+            shift
+            ;;
+        --apply-prepared)
+            NO_PULL=true
+            APPLY_PREPARED=true
             shift
             ;;
         --force-recreate)
@@ -173,6 +182,7 @@ esac
 
 if [[ "${MODE}" == "local-build" || "${LOCAL_BUILD}" == "true" ]]; then
     [[ "${PREPARE_ONLY}" != "true" ]] || die "--prepare is only supported for Docker Compose deployments"
+    [[ "${APPLY_PREPARED}" != "true" ]] || die "--apply-prepared is only supported for Docker Compose deployments"
     deploy_script="${SCRIPT_DIR}/deploy.sh"
     [[ -f "${deploy_script}" ]] || die "local-build mode requires deploy.sh next to update.sh"
     args=()
@@ -273,7 +283,7 @@ echo ">>> Compose directory: ${COMPOSE_DIR}"
 echo ">>> App service: ${APP_SERVICE}"
 
 compose_pull_app() {
-    compose pull "${APP_SERVICE}"
+    COMPOSE_PROGRESS=plain BUILDKIT_PROGRESS=plain "${COMPOSE[@]}" "${COMPOSE_ARGS[@]}" pull "${APP_SERVICE}"
 }
 
 compose_up_app() {
@@ -408,7 +418,8 @@ if [[ "${PREPARE_ONLY}" == "true" ]]; then
     echo ">>> Preparing update by pulling latest image for ${APP_SERVICE}..."
     compose_pull_app
     echo ">>> Done."
-    echo ">>> Note: image is downloaded. Recreate ${APP_SERVICE} to apply the update."
+    echo ">>> Note: image is downloaded; ${APP_SERVICE} is still running on the current image."
+    echo ">>> Next: rerun the same command with --apply-prepared instead of --prepare for a quick cutover."
     exit 0
 fi
 
@@ -423,6 +434,10 @@ fi
 if [[ "${NO_PULL}" != "true" ]]; then
     echo ">>> Pulling latest image for ${APP_SERVICE}..."
     compose_pull_app
+elif [[ "${APPLY_PREPARED}" == "true" ]]; then
+    echo ">>> Applying previously prepared image for ${APP_SERVICE}; skipping pull before recreate."
+else
+    echo ">>> Skipping image pull for ${APP_SERVICE} (--no-pull)."
 fi
 
 echo ">>> Recreating ${APP_SERVICE}..."

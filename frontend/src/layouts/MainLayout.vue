@@ -415,6 +415,8 @@
       :update-blocker="updateInfo.update_blocker"
       :update-strategy="updateStrategy"
       :docker-update-command="dockerUpdateCommand"
+      :docker-prepare-command="dockerPrepareCommand"
+      :docker-apply-command="dockerApplyCommand"
       :reconnect-message="reconnectMessage"
       :rollback-available="rollbackAvailable"
       :rolling-back="rollingBack"
@@ -423,6 +425,7 @@
       :update-preflight-error="updatePreflightError"
       :download-progress-text="updateProgressText"
       :download-progress-percent="updateProgressPercent"
+      :update-task-phase="updateTaskStatus?.phase ?? null"
       @apply-update="handleApplySystemUpdate"
       @rollback="handleRollback"
     />
@@ -526,6 +529,8 @@ const updateSupported = ref(true)
 const updateStrategy = ref('manual')
 const updateCapabilityMessage = ref<string | null>(null)
 const dockerUpdateCommand = ref<string | null>(null)
+const dockerPrepareCommand = ref<string | null>(null)
+const dockerApplyCommand = ref<string | null>(null)
 const reconnectMessage = ref('等待服务恢复...')
 const rollbackAvailable = ref(false)
 const rollingBack = ref(false)
@@ -605,7 +610,23 @@ function removeSessionStorageItem(key: string) {
 
 function formatUpdateProgressText(status: UpdateTaskStatusResponse | null): string {
   if (!status) return '正在下载更新包...'
-  const label = status.progress_label ? `正在下载${status.progress_label}` : formatUpdateTaskPhase(status.phase)
+  const label = normalizeUpdateProgressLabel(status.progress_label)
+  if (label) {
+    switch (status.phase) {
+      case 'downloading':
+        return formatProgressTextWithBytes(`正在拉取${label}`, status)
+      case 'backing_up':
+        return formatProgressTextWithBytes(`正在备份${label}`, status)
+      case 'restarting':
+        return formatProgressTextWithBytes(`正在切换${label}`, status)
+      default:
+        return formatProgressTextWithBytes(`${formatUpdateTaskPhase(status.phase)} ${label}`, status)
+    }
+  }
+  return formatProgressTextWithBytes(formatUpdateTaskPhase(status.phase), status)
+}
+
+function formatProgressTextWithBytes(label: string, status: UpdateTaskStatusResponse): string {
   const downloaded = status.downloaded_bytes
   const total = status.total_bytes
   if (typeof downloaded === 'number' && typeof total === 'number' && total > 0) {
@@ -615,6 +636,20 @@ function formatUpdateProgressText(status: UpdateTaskStatusResponse | null): stri
     return `${label} ${formatFileSize(downloaded)}`
   }
   return label
+}
+
+function normalizeUpdateProgressLabel(label: string | null | undefined): string | null {
+  if (!label) return null
+  switch (label) {
+    case 'docker_image':
+      return 'Docker 镜像'
+    case 'container':
+      return '容器'
+    case 'database':
+      return '数据库'
+    default:
+      return label
+  }
 }
 
 function formatUpdateTaskPhase(phase: string): string {
@@ -627,8 +662,14 @@ function formatUpdateTaskPhase(phase: string): string {
       return '正在校验更新包'
     case 'extracting':
       return '正在解压更新包'
+    case 'backing_up':
+      return '正在备份'
+    case 'restarting':
+      return '正在切换'
     case 'prepared':
       return '更新包已准备完成'
+    case 'preparing':
+      return '正在准备更新'
     default:
       return '正在准备更新'
   }
@@ -758,6 +799,12 @@ function applyUpdateCapability(capability: SystemUpdateCapabilityResponse) {
   updateStrategy.value = capability.update_strategy || capability.strategy || 'manual'
   updateCapabilityMessage.value = capability.message || null
   dockerUpdateCommand.value = capability.docker_update_command || null
+  dockerPrepareCommand.value = capability.docker_prepare_command || null
+  dockerApplyCommand.value = capability.docker_apply_command || null
+}
+
+function shouldLoadUpdatePreflight(): boolean {
+  return updateSupported.value && updateStrategy.value !== 'docker'
 }
 
 function updateUnsupportedMessage(fallback = MANUAL_UPDATE_HINT): string {
@@ -822,7 +869,9 @@ function openReleaseUpdateDialog(release: ReleaseEntry) {
     preparedUpdateVersion.value = null
   }
   showUpdateDialog.value = true
-  void loadSystemUpdatePreflight(release.version)
+  if (shouldLoadUpdatePreflight()) {
+    void loadSystemUpdatePreflight(release.version)
+  }
 }
 
 async function handleApplySystemUpdate() {
@@ -926,6 +975,16 @@ async function pollHealthUntilReady() {
         signal: AbortSignal.timeout(3000),
       })
       if (resp.ok) {
+        try {
+          const status = await adminApi.getUpdateStatus()
+          if (status.phase === 'failed' && status.error) {
+            reconnectMessage.value = `更新失败: ${status.error}`
+            systemUpdatePhase.value = 'download'
+            return
+          }
+        } catch {
+          // the refreshed service may not expose task status yet; continue with reload
+        }
         reconnectMessage.value = '服务已恢复，正在刷新...'
         await new Promise(r => setTimeout(r, 500))
         window.location.replace(buildFreshReloadUrl())
@@ -1030,7 +1089,9 @@ async function checkForUpdate() {
       updatePreflight.value = null
       updatePreflightError.value = null
       showUpdateDialog.value = true
-      void loadSystemUpdatePreflight(result.latest_version)
+      if (shouldLoadUpdatePreflight()) {
+        void loadSystemUpdatePreflight(result.latest_version)
+      }
     }
   }
 }

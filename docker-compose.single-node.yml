@@ -9,7 +9,10 @@ services:
       TZ: Asia/Shanghai
       AETHER_BASE_DIR: /opt/aether
       AETHER_UPDATE_STRATEGY: docker
-      AETHER_DOCKER_UPDATE_COMMAND: ${AETHER_DOCKER_UPDATE_COMMAND:-./update.sh}
+      AETHER_DOCKER_UPDATE_COMMAND: ${AETHER_DOCKER_UPDATE_COMMAND:-bash ./update.sh}
+      AETHER_DOCKER_AUTO_UPDATE_ENABLED: ${AETHER_DOCKER_AUTO_UPDATE_ENABLED:-true}
+      AETHER_DOCKER_UPDATE_HELPER_URL: ${AETHER_DOCKER_UPDATE_HELPER_URL:-http://updater:18086}
+      AETHER_DOCKER_UPDATE_HELPER_TOKEN: ${AETHER_DOCKER_UPDATE_TOKEN:-aether}
       AETHER_DATABASE_DRIVER: sqlite
       AETHER_DATABASE_URL: sqlite:///opt/aether/data/aether.db
       AETHER_RUNTIME_BACKEND: memory
@@ -23,9 +26,30 @@ services:
       - "${APP_PORT:-8084}:${APP_PORT:-8084}"
     volumes:
       - ./data:/opt/aether/data
+    depends_on:
+      updater:
+        condition: service_started
     logging:
       driver: json-file
       options:
         max-size: "100m"
         max-file: "10"
+    restart: unless-stopped
+
+  updater:
+    image: ${AETHER_UPDATER_IMAGE:-aether-updater:local}
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: Dockerfile.updater
+    environment:
+      AETHER_DOCKER_UPDATE_TOKEN: ${AETHER_DOCKER_UPDATE_TOKEN:-aether}
+      AETHER_DOCKER_UPDATE_COMMAND: ${AETHER_DOCKER_UPDATE_COMMAND:-bash ./update.sh}
+      AETHER_DOCKER_UPDATE_WORKDIR: /workspace
+      AETHER_DOCKER_UPDATE_PORT: 18086
+      AETHER_DOCKER_UPDATE_TIMEOUT_SECS: ${AETHER_DOCKER_UPDATE_TIMEOUT_SECS:-900}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/workspace
+    working_dir: /workspace
     restart: unless-stopped

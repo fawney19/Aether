@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import type { SystemUpdatePreflightResponse } from '@/api/admin'
-import { isPreflightBlocking } from '../updateDialogLogic'
+import {
+  appendDockerUpdateFlag,
+  buildDockerGuidedCommands,
+  isPreflightBlocking,
+} from '../updateDialogLogic'
 
 function buildPreflight(
   overrides: Partial<SystemUpdatePreflightResponse> = {}
@@ -61,5 +65,51 @@ describe('isPreflightBlocking', () => {
         })
       )
     ).toBe(false)
+  })
+})
+
+describe('appendDockerUpdateFlag', () => {
+  it('trims the base command and appends the requested flag', () => {
+    expect(appendDockerUpdateFlag(' ./update.sh ', '--prepare')).toBe('./update.sh --prepare')
+  })
+
+  it('does not append the same flag twice', () => {
+    expect(appendDockerUpdateFlag('./update.sh --prepare', '--prepare')).toBe('./update.sh --prepare')
+  })
+
+  it('uses the default Docker update command when the base command is empty', () => {
+    expect(appendDockerUpdateFlag('', '--apply-prepared')).toBe('bash ./update.sh --apply-prepared')
+  })
+})
+
+describe('buildDockerGuidedCommands', () => {
+  it('returns null when no command is available', () => {
+    expect(buildDockerGuidedCommands({})).toBeNull()
+  })
+
+  it('builds prepare and apply commands from the base command', () => {
+    expect(
+      buildDockerGuidedCommands({
+        updateCommand: 'bash ./update.sh --mode single-node',
+      })
+    ).toEqual({
+      updateCommand: 'bash ./update.sh --mode single-node',
+      prepareCommand: 'bash ./update.sh --mode single-node --prepare',
+      applyCommand: 'bash ./update.sh --mode single-node --apply-prepared',
+    })
+  })
+
+  it('prefers explicit prepare and apply commands from the server', () => {
+    expect(
+      buildDockerGuidedCommands({
+        updateCommand: './update.sh',
+        prepareCommand: './update.sh --prepare --project-name aether',
+        applyCommand: './update.sh --apply-prepared --project-name aether',
+      })
+    ).toEqual({
+      updateCommand: './update.sh',
+      prepareCommand: './update.sh --prepare --project-name aether',
+      applyCommand: './update.sh --apply-prepared --project-name aether',
+    })
   })
 })

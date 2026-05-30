@@ -19,10 +19,12 @@ use crate::handlers::admin::system::shared::settings::{
 };
 use crate::handlers::admin::system::shared::smtp::build_admin_smtp_test_payload;
 use crate::handlers::admin::system::shared::update::{
-    build_admin_system_update_capability_payload, build_admin_system_update_preflight_payload,
-    current_self_update_blocker, prepare_admin_system_update_task, read_update_history,
-    read_update_task_status, self_update_supported, start_admin_system_rollback_task,
-    start_admin_system_update_task,
+    admin_system_update_supported, build_admin_system_update_capability_payload,
+    build_admin_system_update_preflight_payload, current_admin_update_blocker,
+    current_update_strategy, docker_auto_update_supported, prepare_admin_system_docker_update_task,
+    prepare_admin_system_update_task, read_update_history, read_update_task_status_for_response,
+    start_admin_system_docker_update_task, start_admin_system_rollback_task,
+    start_admin_system_update_task, UpdateStrategy,
 };
 use crate::important_notification::build_important_notification_test_payload;
 use crate::maintenance::{ManualUsageCleanupMode, ManualUsageCleanupOptions};
@@ -112,11 +114,26 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
         && request_method == http::Method::POST
         && request_path == "/api/admin/system/prepare-update"
     {
-        if !self_update_supported() {
+        if current_update_strategy() == UpdateStrategy::Docker && docker_auto_update_supported() {
+            return Ok(Some(
+                match prepare_admin_system_docker_update_task().await? {
+                    Ok(payload) => attach_admin_audit_response(
+                        Json(payload).into_response(),
+                        "admin_system_docker_update_prepared",
+                        "prepare_docker_system_update",
+                        "system_update",
+                        "global",
+                    ),
+                    Err((status, payload)) => (status, Json(payload)).into_response(),
+                },
+            ));
+        }
+
+        if !admin_system_update_supported() {
             return Ok(Some(
                 (
                     http::StatusCode::PRECONDITION_REQUIRED,
-                    Json(json!({ "detail": current_self_update_blocker() })),
+                    Json(json!({ "detail": current_admin_update_blocker() })),
                 )
                     .into_response(),
             ));
@@ -153,6 +170,21 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
         && request_method == http::Method::POST
         && request_path == "/api/admin/system/apply-update"
     {
+        if current_update_strategy() == UpdateStrategy::Docker && docker_auto_update_supported() {
+            return Ok(Some(
+                match start_admin_system_docker_update_task().await? {
+                    Ok(payload) => attach_admin_audit_response(
+                        Json(payload).into_response(),
+                        "admin_system_docker_update_started",
+                        "apply_docker_system_update",
+                        "system_update",
+                        "global",
+                    ),
+                    Err((status, payload)) => (status, Json(payload)).into_response(),
+                },
+            ));
+        }
+
         let version = request_body
             .filter(|b| !b.is_empty())
             .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
@@ -192,7 +224,7 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
         && request_method == http::Method::GET
         && request_path == "/api/admin/system/update-status"
     {
-        let status = read_update_task_status();
+        let status = read_update_task_status_for_response().await;
         return Ok(Some(
             Json(json!({
                 "phase": status.phase,

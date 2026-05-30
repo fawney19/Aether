@@ -13,12 +13,32 @@ cd Aether
 cp .env.example .env
 ./generate_keys.sh # 生成密钥, 并将生成的密钥填入 .env
 
-# 3. 首次部署（自动执行数据库迁移）
-docker compose pull && docker compose up -d
+# 3. 首次部署（自动执行数据库迁移，并默认启动在线更新执行器）
+docker compose pull && docker compose up -d --build
 
 # 4. 后续升级（自动 pg_dump 备份 + 失败回滚）
 ./update.sh
 # 加 --dry-run 可预览，--no-backup / --no-rollback 跳过对应步骤
+```
+
+如果你想把 Docker 更新做得更接近“只重启一下”的体验，可以先准备镜像，再在低峰期快速切换：
+
+```markdown
+# 阶段 1：拉取新镜像，不中断当前服务
+./update.sh --prepare
+
+# 阶段 2：跳过拉取，直接使用已准备好的镜像切换
+./update.sh --apply-prepared
+```
+
+Docker Compose 默认启动 updater sidecar，管理后台可以直接点按钮执行 Docker 更新。交互是两步确认：第一次点击“立即更新”只下载并准备镜像，当前服务保持运行，弹窗会显示实时进度且可以收起到后台；准备完成后再点击“立即重启”快速重建 app 容器，页面会在服务恢复后自动刷新。
+
+```markdown
+# .env
+AETHER_DOCKER_UPDATE_TOKEN=replace-with-strong-random-token
+
+# 启动 app + updater
+docker compose up -d --build
 ```
 
 ### 2. 本地开发

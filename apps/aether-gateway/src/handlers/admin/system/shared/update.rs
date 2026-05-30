@@ -3,7 +3,7 @@ use crate::handlers::admin::system::shared::update_client::build_update_http_cli
 use crate::GatewayError;
 use axum::http;
 use futures_util::StreamExt;
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::path::Component;
@@ -92,6 +92,24 @@ pub(crate) fn read_update_task_status() -> SystemUpdateTaskStatus {
         })
 }
 
+pub(crate) async fn read_update_task_status_for_response() -> SystemUpdateTaskStatus {
+    let status = read_update_task_status();
+    if current_update_strategy() != UpdateStrategy::Docker
+        || !docker_auto_update_supported()
+        || !matches!(status.phase, "preparing" | "restarting")
+    {
+        return status;
+    }
+
+    match call_docker_update_helper_json("status").await {
+        Ok(helper_status) => merge_docker_helper_status(status, &helper_status),
+        Err(err) => {
+            tracing::debug!(error = %err, "failed to read docker update helper status");
+            status
+        }
+    }
+}
+
 static PREPARED_VERSION: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
 
 fn prepared_version_lock() -> &'static Mutex<Option<String>> {
@@ -118,9 +136,13 @@ const MAX_EXTRACTED_RELEASE_BYTES: u64 = 1024 * 1024 * 1024;
 const UPDATE_PREFLIGHT_DISK_BUFFER_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_UPDATE_DOWNLOAD_TIMEOUT_SECS: u64 = 600;
 const DEFAULT_UPDATE_DOWNLOAD_IDLE_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_DOCKER_UPDATE_HELPER_TIMEOUT_SECS: u64 = 900;
+const DEFAULT_DOCKER_UPDATE_COMMAND: &str = "bash ./update.sh";
 const SOURCE_BUILD_UPDATE_BLOCKER: &str = "当前为源码构建，请使用 git pull 后重新编译。";
 const DOCKER_UPDATE_BLOCKER: &str =
-    "Docker 部署请使用镜像更新：进入 docker-compose.yml 所在目录执行 ./update.sh（默认自动 pg_dump 备份并在失败时回滚到上一镜像；支持 --dry-run 预览、--no-backup / --no-rollback 跳过、--project-name 指定 compose 项目名）。";
+    "Docker 部署请在宿主机执行镜像更新：可先运行 bash ./update.sh --prepare 拉取镜像且不中断服务，再运行 bash ./update.sh --apply-prepared 快速切换；也可直接执行 bash ./update.sh 一次完成。";
+const DOCKER_AUTO_UPDATE_BLOCKER: &str =
+    "Docker 后台更新执行器未启用。若希望管理后台按钮执行 Docker 更新，请启用 updater sidecar，并设置 AETHER_DOCKER_AUTO_UPDATE_ENABLED=true、AETHER_DOCKER_UPDATE_HELPER_URL 和 AETHER_DOCKER_UPDATE_HELPER_TOKEN。";
 const MANUAL_UPDATE_BLOCKER: &str =
     "当前部署策略不支持在线自更新，请手动下载 Release 或使用安装脚本更新。";
 const MULTI_NODE_UPDATE_BLOCKER: &str =
@@ -355,6 +377,67 @@ pub(crate) fn self_update_supported() -> bool {
     )
 }
 
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn docker_update_helper_url() -> Option<String> {
+    std::env::var("AETHER_DOCKER_UPDATE_HELPER_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn docker_update_helper_token() -> Option<String> {
+    std::env::var("AETHER_DOCKER_UPDATE_HELPER_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("AETHER_DOCKER_UPDATE_TOKEN").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn docker_auto_update_enabled() -> bool {
+    env_flag_enabled("AETHER_DOCKER_AUTO_UPDATE_ENABLED")
+}
+
+pub(crate) fn docker_auto_update_supported() -> bool {
+    is_release_build()
+        && current_update_strategy() == UpdateStrategy::Docker
+        && current_deployment_topology() == DeploymentTopology::SingleNode
+        && docker_auto_update_enabled()
+        && docker_update_helper_url().is_some()
+        && docker_update_helper_token().is_some()
+}
+
+pub(crate) fn admin_system_update_supported() -> bool {
+    self_update_supported() || docker_auto_update_supported()
+}
+
+pub(crate) fn current_admin_update_blocker() -> String {
+    if !is_release_build() {
+        return SOURCE_BUILD_UPDATE_BLOCKER.to_string();
+    }
+    if current_deployment_topology() == DeploymentTopology::MultiNode {
+        return MULTI_NODE_UPDATE_BLOCKER.to_string();
+    }
+    if current_update_strategy() == UpdateStrategy::Docker {
+        return if docker_auto_update_enabled() {
+            DOCKER_AUTO_UPDATE_BLOCKER.to_string()
+        } else {
+            DOCKER_UPDATE_BLOCKER.to_string()
+        };
+    }
+    current_self_update_blocker().to_string()
+}
+
 pub(crate) fn current_self_update_blocker() -> &'static str {
     if !is_release_build() {
         return SOURCE_BUILD_UPDATE_BLOCKER;
@@ -382,22 +465,57 @@ fn docker_update_command() -> String {
     std::env::var("AETHER_DOCKER_UPDATE_COMMAND")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "./update.sh".to_string())
+        .unwrap_or_else(|| DEFAULT_DOCKER_UPDATE_COMMAND.to_string())
+}
+
+fn docker_update_command_with_args(base_command: &str, args: &[&str]) -> String {
+    let command = base_command.trim();
+    let command = if command.is_empty() {
+        DEFAULT_DOCKER_UPDATE_COMMAND
+    } else {
+        command
+    };
+    if args.is_empty() {
+        command.to_string()
+    } else {
+        format!("{} {}", command, args.join(" "))
+    }
 }
 
 pub(crate) fn build_admin_system_update_capability_payload() -> serde_json::Value {
     let build_type = current_build_type();
     let update_strategy = current_update_strategy();
     let deployment_topology = current_deployment_topology();
-    let supported =
+    let self_supported =
         self_update_supported_for(is_release_build(), update_strategy, deployment_topology);
-    let rollback_available = supported && find_rollback_target().is_some();
+    let docker_auto_supported = docker_auto_update_supported();
+    let supported = self_supported || docker_auto_supported;
+    let rollback_available = self_supported && find_rollback_target().is_some();
     let task_status = read_update_task_status();
     let base_dir = aether_base_dir();
-    let docker_command = if update_strategy == UpdateStrategy::Docker {
-        Some(docker_update_command())
+    let docker_commands = if update_strategy == UpdateStrategy::Docker {
+        let command = docker_update_command();
+        Some((
+            command.clone(),
+            docker_update_command_with_args(&command, &["--prepare"]),
+            docker_update_command_with_args(&command, &["--apply-prepared"]),
+        ))
     } else {
         None
+    };
+    let docker_command = docker_commands
+        .as_ref()
+        .map(|(command, _, _)| command.clone());
+    let docker_prepare_command = docker_commands
+        .as_ref()
+        .map(|(_, command, _)| command.clone());
+    let docker_apply_command = docker_commands
+        .as_ref()
+        .map(|(_, _, command)| command.clone());
+    let message = if supported {
+        "一键更新可用".to_string()
+    } else {
+        current_admin_update_blocker()
     };
     let data_dir = base_dir.join("data");
     json!({
@@ -416,11 +534,24 @@ pub(crate) fn build_admin_system_update_capability_payload() -> serde_json::Valu
         "data_dir": data_dir,
         "logs_dir": update_logs_dir(),
         "docker_update_command": docker_command,
-        "message": if supported {
-            "一键更新可用"
+        "docker_prepare_command": docker_prepare_command,
+        "docker_apply_command": docker_apply_command,
+        "docker_update_mode": if update_strategy == UpdateStrategy::Docker {
+            Some("two_phase")
         } else {
-            current_self_update_blocker()
+            None
         },
+        "docker_auto_update_enabled": if update_strategy == UpdateStrategy::Docker {
+            Some(docker_auto_update_enabled())
+        } else {
+            None
+        },
+        "docker_auto_update_supported": if update_strategy == UpdateStrategy::Docker {
+            Some(docker_auto_supported)
+        } else {
+            None
+        },
+        "message": message,
     })
 }
 
@@ -504,6 +635,9 @@ pub(crate) async fn build_admin_system_update_preflight_payload(
     let build_type = current_build_type();
     let update_strategy = current_update_strategy();
     let deployment_topology = current_deployment_topology();
+    if update_strategy == UpdateStrategy::Docker {
+        return build_admin_system_docker_update_preflight_payload(target_version).await;
+    }
     let supported =
         self_update_supported_for(is_release_build(), update_strategy, deployment_topology);
     let base_dir = aether_base_dir();
@@ -551,6 +685,111 @@ pub(crate) async fn build_admin_system_update_preflight_payload(
         "warnings": warnings,
         "checks": checks.iter().map(SystemUpdatePreflightCheck::to_json).collect::<Vec<_>>(),
     }))
+}
+
+async fn build_admin_system_docker_update_preflight_payload(
+    target_version: Option<String>,
+) -> Result<serde_json::Value, GatewayError> {
+    let build_type = current_build_type();
+    let update_strategy = current_update_strategy();
+    let deployment_topology = current_deployment_topology();
+    let checks = vec![
+        build_preflight_docker_strategy_check(),
+        build_preflight_task_check(),
+        build_preflight_docker_helper_check().await,
+    ];
+    let overall_status = preflight_overall_status(&checks);
+    let pending_blockers = checks
+        .iter()
+        .filter(|check| check.status == SystemUpdatePreflightStatus::Blocked)
+        .count();
+    let warnings = checks
+        .iter()
+        .filter(|check| check.status == SystemUpdatePreflightStatus::Warning)
+        .count();
+
+    Ok(json!({
+        "overall_status": overall_status.as_str(),
+        "can_apply_update": overall_status != SystemUpdatePreflightStatus::Blocked,
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "current_version": option_env!("AETHER_BUILD_VERSION")
+            .filter(|version| !version.is_empty())
+            .unwrap_or(env!("CARGO_PKG_VERSION")),
+        "target_version": target_version.filter(|value| !value.trim().is_empty()),
+        "build_type": build_type,
+        "update_strategy": update_strategy.as_str(),
+        "strategy": update_strategy.as_str(),
+        "deployment_topology": deployment_topology.as_str(),
+        "topology": deployment_topology.as_str(),
+        "blockers": pending_blockers,
+        "warnings": warnings,
+        "checks": checks.iter().map(SystemUpdatePreflightCheck::to_json).collect::<Vec<_>>(),
+    }))
+}
+
+fn build_preflight_docker_strategy_check() -> SystemUpdatePreflightCheck {
+    if docker_auto_update_supported() {
+        return SystemUpdatePreflightCheck::ok(
+            "strategy",
+            "Docker 更新策略",
+            "已启用 Docker updater sidecar，可从管理后台触发更新",
+        )
+        .with_detail(json!({
+            "auto_update_enabled": true,
+            "helper_configured": true,
+            "deployment_topology": current_deployment_topology().as_str(),
+        }));
+    }
+
+    let mut blockers = Vec::new();
+    if !is_release_build() {
+        blockers.push(SOURCE_BUILD_UPDATE_BLOCKER.to_string());
+    }
+    if current_deployment_topology() == DeploymentTopology::MultiNode {
+        blockers.push(MULTI_NODE_UPDATE_BLOCKER.to_string());
+    }
+    if !docker_auto_update_enabled() {
+        blockers.push("未设置 AETHER_DOCKER_AUTO_UPDATE_ENABLED=true".to_string());
+    }
+    if docker_update_helper_url().is_none() {
+        blockers.push("未设置 AETHER_DOCKER_UPDATE_HELPER_URL".to_string());
+    }
+    if docker_update_helper_token().is_none() {
+        blockers.push("未设置 AETHER_DOCKER_UPDATE_HELPER_TOKEN".to_string());
+    }
+    if blockers.is_empty() {
+        blockers.push(DOCKER_AUTO_UPDATE_BLOCKER.to_string());
+    }
+
+    SystemUpdatePreflightCheck::blocked("strategy", "Docker 更新策略", blockers.join("；"))
+        .with_detail(json!({
+            "auto_update_enabled": docker_auto_update_enabled(),
+            "helper_url_configured": docker_update_helper_url().is_some(),
+            "helper_token_configured": docker_update_helper_token().is_some(),
+            "deployment_topology": current_deployment_topology().as_str(),
+        }))
+}
+
+async fn build_preflight_docker_helper_check() -> SystemUpdatePreflightCheck {
+    if !docker_auto_update_supported() {
+        return SystemUpdatePreflightCheck::blocked(
+            "docker_helper",
+            "更新执行器",
+            "updater sidecar 未启用或配置不完整",
+        );
+    }
+
+    match call_docker_update_helper("health").await {
+        Ok(output) => {
+            SystemUpdatePreflightCheck::ok("docker_helper", "更新执行器", "updater sidecar 可访问")
+                .with_detail(json!({ "output": output }))
+        }
+        Err(err) => SystemUpdatePreflightCheck::blocked(
+            "docker_helper",
+            "更新执行器",
+            format!("无法访问 updater sidecar: {err}"),
+        ),
+    }
 }
 
 fn build_preflight_strategy_check(
@@ -843,6 +1082,78 @@ fn find_rollback_target() -> Option<String> {
     }
 }
 
+pub(crate) async fn prepare_admin_system_docker_update_task(
+) -> Result<Result<serde_json::Value, (http::StatusCode, serde_json::Value)>, GatewayError> {
+    start_docker_update_helper_task("prepare").await
+}
+
+pub(crate) async fn start_admin_system_docker_update_task(
+) -> Result<Result<serde_json::Value, (http::StatusCode, serde_json::Value)>, GatewayError> {
+    start_docker_update_helper_task("apply").await
+}
+
+async fn start_docker_update_helper_task(
+    operation: &'static str,
+) -> Result<Result<serde_json::Value, (http::StatusCode, serde_json::Value)>, GatewayError> {
+    if !docker_auto_update_supported() {
+        return Ok(Err((
+            http::StatusCode::PRECONDITION_REQUIRED,
+            json!({ "detail": current_admin_update_blocker() }),
+        )));
+    }
+    let Some(guard) = SystemUpdateGuard::try_acquire() else {
+        return Ok(Err(update_already_running_response()));
+    };
+
+    let (phase, history_operation, success_message, need_restart) = match operation {
+        "prepare" => (
+            "preparing",
+            "docker_prepare",
+            "Docker 镜像准备任务已启动",
+            false,
+        ),
+        "apply" => (
+            "restarting",
+            "docker_apply",
+            "Docker 快速切换已启动，服务会短暂重建",
+            true,
+        ),
+        _ => {
+            return Ok(Err((
+                http::StatusCode::BAD_REQUEST,
+                json!({ "detail": format!("不支持的 Docker 更新操作: {operation}") }),
+            )));
+        }
+    };
+
+    set_update_task_phase(phase);
+    tokio::spawn(async move {
+        let _guard = guard;
+        match call_docker_update_helper(operation).await {
+            Ok(output) => {
+                if operation == "prepare" {
+                    set_update_task_phase("prepared");
+                    set_update_task_output(output.clone());
+                } else {
+                    set_update_task_output(output.clone());
+                }
+                append_update_history(history_operation, true, None, Some(&output));
+            }
+            Err(err) => {
+                tracing::error!(operation, error = %err, "docker update helper task failed");
+                set_update_task_failed(err.clone());
+                append_update_history(history_operation, false, Some(&err), None);
+            }
+        }
+    });
+
+    Ok(Ok(json!({
+        "message": success_message,
+        "started": true,
+        "need_restart": need_restart,
+    })))
+}
+
 pub(crate) async fn prepare_admin_system_update_task(
     version: String,
     tarball_url: String,
@@ -1009,6 +1320,21 @@ fn update_download_idle_timeout() -> std::time::Duration {
     )
 }
 
+fn docker_update_helper_timeout() -> std::time::Duration {
+    update_timeout_from_env(
+        "AETHER_DOCKER_UPDATE_HELPER_TIMEOUT_SECS",
+        DEFAULT_DOCKER_UPDATE_HELPER_TIMEOUT_SECS,
+    )
+}
+
+fn docker_update_helper_request_timeout(operation: &str) -> std::time::Duration {
+    if matches!(operation, "health" | "status") {
+        std::time::Duration::from_secs(5)
+    } else {
+        docker_update_helper_timeout()
+    }
+}
+
 fn update_timeout_from_env(key: &str, default_secs: u64) -> std::time::Duration {
     let secs = std::env::var(key)
         .ok()
@@ -1016,6 +1342,127 @@ fn update_timeout_from_env(key: &str, default_secs: u64) -> std::time::Duration 
         .filter(|value| *value > 0)
         .unwrap_or(default_secs);
     std::time::Duration::from_secs(secs)
+}
+
+async fn call_docker_update_helper_json(operation: &str) -> Result<Value, String> {
+    let base_url = docker_update_helper_url()
+        .ok_or_else(|| "缺少 AETHER_DOCKER_UPDATE_HELPER_URL".to_string())?;
+    let token = docker_update_helper_token()
+        .ok_or_else(|| "缺少 AETHER_DOCKER_UPDATE_HELPER_TOKEN".to_string())?;
+    let path = match operation {
+        "health" => "health",
+        "status" => "status",
+        "prepare" => "prepare",
+        "apply" => "apply",
+        "full" => "full",
+        other => return Err(format!("不支持的 Docker 更新操作: {other}")),
+    };
+    let url = format!("{base_url}/{path}");
+    let client = reqwest::Client::builder()
+        .timeout(docker_update_helper_request_timeout(operation))
+        .no_proxy()
+        .build()
+        .map_err(|err| format!("创建 Docker 更新客户端失败: {err}"))?;
+    let request = if matches!(operation, "health" | "status") {
+        client.get(&url)
+    } else {
+        client.post(&url)
+    }
+    .header("x-aether-update-token", token);
+
+    let response = request
+        .send()
+        .await
+        .map_err(|err| format!("请求 updater sidecar 失败: {err}"))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|err| format!("读取 updater sidecar 响应失败: {err}"))?;
+    if !status.is_success() {
+        return Err(format!("updater sidecar 返回 {status}: {text}"));
+    }
+
+    serde_json::from_str(&text)
+        .map_err(|err| format!("updater sidecar 响应不是 JSON: {err}; {text}"))
+}
+
+async fn call_docker_update_helper(operation: &str) -> Result<String, String> {
+    let parsed = call_docker_update_helper_json(operation).await?;
+    let output = parsed
+        .get("output")
+        .and_then(Value::as_str)
+        .or_else(|| parsed.get("detail").and_then(Value::as_str))
+        .unwrap_or("Docker 更新命令执行完成")
+        .to_string();
+    Ok(output)
+}
+
+fn merge_docker_helper_status(
+    mut status: SystemUpdateTaskStatus,
+    helper_status: &Value,
+) -> SystemUpdateTaskStatus {
+    let helper_result = helper_status.get("status").and_then(Value::as_str);
+    let helper_phase = helper_status.get("phase").and_then(Value::as_str);
+    status.phase = match helper_result {
+        Some("failed") | Some("timeout") => "failed",
+        Some("ok") => helper_phase_to_update_phase(helper_phase, "prepared"),
+        _ => helper_phase_to_update_phase(helper_phase, status.phase),
+    };
+    status.error = helper_status
+        .get("detail")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or(status.error);
+    status.output = helper_status
+        .get("output")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or(status.output);
+    status.progress_label = helper_status
+        .get("progress_label")
+        .and_then(Value::as_str)
+        .map(normalize_docker_progress_label)
+        .or(status.progress_label);
+    status.downloaded_bytes = helper_status
+        .get("downloaded_bytes")
+        .and_then(Value::as_u64)
+        .or(status.downloaded_bytes);
+    status.total_bytes = helper_status
+        .get("total_bytes")
+        .and_then(Value::as_u64)
+        .or(status.total_bytes);
+    status.progress_percent = helper_status
+        .get("progress_percent")
+        .and_then(Value::as_u64)
+        .map(|value| value.min(100) as u8)
+        .or(status.progress_percent);
+    status
+}
+
+fn helper_phase_to_update_phase(
+    helper_phase: Option<&str>,
+    fallback: &'static str,
+) -> &'static str {
+    match helper_phase {
+        Some("downloading") | Some("pulling") => "downloading",
+        Some("prepared") => "prepared",
+        Some("backing_up") => "backing_up",
+        Some("restarting") | Some("applying") => "restarting",
+        Some("failed") => "failed",
+        Some("idle") => "idle",
+        _ => fallback,
+    }
+}
+
+fn normalize_docker_progress_label(label: &str) -> String {
+    match label {
+        "docker_image" => "Docker 镜像".to_string(),
+        "container" => "容器".to_string(),
+        "database" => "数据库".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn validate_update_download_url(raw_url: &str) -> Result<(), String> {
@@ -1476,6 +1923,53 @@ mod tests {
             UpdateStrategy::from_env_value(Some("unknown"), true),
             UpdateStrategy::Manual
         );
+    }
+
+    #[test]
+    fn docker_update_command_with_args_appends_to_custom_base_command() {
+        assert_eq!(
+            docker_update_command_with_args("bash ./update.sh --mode single-node", &["--prepare"]),
+            "bash ./update.sh --mode single-node --prepare"
+        );
+        assert_eq!(
+            docker_update_command_with_args(" ./update.sh ", &["--apply-prepared"]),
+            "./update.sh --apply-prepared"
+        );
+        assert_eq!(
+            docker_update_command_with_args("", &["--prepare"]),
+            "bash ./update.sh --prepare"
+        );
+    }
+
+    #[test]
+    fn docker_helper_status_merges_progress_payload() {
+        let merged = merge_docker_helper_status(
+            SystemUpdateTaskStatus {
+                phase: "preparing",
+                error: None,
+                output: None,
+                progress_label: None,
+                downloaded_bytes: None,
+                total_bytes: None,
+                progress_percent: None,
+            },
+            &json!({
+                "status": "running",
+                "phase": "downloading",
+                "progress_label": "docker_image",
+                "downloaded_bytes": 1048576_u64,
+                "total_bytes": 2097152_u64,
+                "progress_percent": 50_u64,
+                "output": "pulling layer"
+            }),
+        );
+
+        assert_eq!(merged.phase, "downloading");
+        assert_eq!(merged.progress_label.as_deref(), Some("Docker 镜像"));
+        assert_eq!(merged.downloaded_bytes, Some(1048576));
+        assert_eq!(merged.total_bytes, Some(2097152));
+        assert_eq!(merged.progress_percent, Some(50));
+        assert_eq!(merged.output.as_deref(), Some("pulling layer"));
     }
 
     #[test]

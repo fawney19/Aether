@@ -1,8 +1,9 @@
 <template>
   <Dialog
     v-model="isOpen"
-    size="lg"
+    size="4xl"
     title=""
+    :close-on-backdrop="true"
   >
     <div class="flex flex-col items-center text-center py-2">
       <!-- Logo -->
@@ -66,93 +67,126 @@
           v-if="loadingUpdatePreflight || updatePreflight || updatePreflightError"
           class="w-full rounded-xl border border-border/60 bg-muted/20 px-4 py-3 text-left"
         >
-          <div class="flex items-center justify-between gap-3">
-            <div>
-              <div class="text-xs font-semibold text-foreground">
-                升级前检查
+          <button
+            type="button"
+            class="flex w-full items-center justify-between gap-3 text-left"
+            :aria-expanded="preflightExpanded"
+            @click="preflightExpanded = !preflightExpanded"
+          >
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 text-xs font-semibold text-foreground">
+                <span>升级前检查</span>
+                <ChevronDown
+                  class="h-3.5 w-3.5 text-muted-foreground transition-transform"
+                  :class="{ 'rotate-180': preflightExpanded }"
+                />
               </div>
               <div class="mt-0.5 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
                 Preflight
               </div>
             </div>
-            <div class="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <div class="flex shrink-0 items-center gap-2 text-[11px] text-muted-foreground">
               <span>通过 {{ preflightOkCount }}</span>
               <span v-if="preflightWarningCount">警告 {{ preflightWarningCount }}</span>
               <span v-if="preflightBlockedCount" class="text-destructive">阻塞 {{ preflightBlockedCount }}</span>
             </div>
-          </div>
+          </button>
 
-          <div
-            v-if="loadingUpdatePreflight"
-            class="mt-3 flex items-center gap-2 text-xs text-muted-foreground"
-          >
-            <Loader2 class="h-4 w-4 animate-spin" />
-            正在检查安装目录、磁盘空间和数据库状态...
-          </div>
-
-          <div
-            v-else-if="updatePreflightError"
-            class="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-amber-600 dark:text-amber-400"
-          >
-            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
-            <div class="space-y-1 text-xs leading-5">
-              <div class="font-medium text-foreground">
-                无法完成升级前检查
-              </div>
-              <p class="text-muted-foreground">
-                {{ updatePreflightError }}
-              </p>
-            </div>
-          </div>
-
-          <div
-            v-else-if="updatePreflight && updatePreflight.checks.length > 0"
-            class="mt-3 space-y-2"
-          >
+          <template v-if="preflightExpanded">
             <div
-              v-for="check in updatePreflight.checks"
-              :key="check.key"
-              class="flex flex-col gap-2 rounded-lg border px-3 py-2 sm:flex-row sm:items-start sm:justify-between"
-              :class="preflightStatusClass(check.status)"
+              v-if="loadingUpdatePreflight"
+              class="mt-3 flex items-center gap-2 text-xs text-muted-foreground"
             >
-              <div class="min-w-0 space-y-1">
-                <div class="flex items-center gap-2">
-                  <component
-                    :is="preflightStatusIcon(check.status)"
-                    class="h-4 w-4 shrink-0"
-                  />
-                  <span class="text-sm font-medium text-foreground">
-                    {{ check.label }}
+              <Loader2 class="h-4 w-4 animate-spin" />
+              正在检查安装目录、磁盘空间和数据库状态...
+            </div>
+
+            <div
+              v-else-if="updatePreflightError"
+              class="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-amber-600 dark:text-amber-400"
+            >
+              <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+              <div class="space-y-1 text-xs leading-5">
+                <div class="font-medium text-foreground">
+                  无法完成升级前检查
+                </div>
+                <p class="text-muted-foreground">
+                  {{ updatePreflightError }}
+                </p>
+              </div>
+            </div>
+
+            <div
+              v-else-if="updatePreflight && updatePreflight.checks.length > 0"
+              class="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3"
+            >
+              <div
+                v-for="check in updatePreflight.checks"
+                :key="check.key"
+                class="flex min-h-[92px] flex-col justify-between gap-2 rounded-lg border px-3 py-2"
+                :class="preflightStatusClass(check.status)"
+              >
+                <div class="flex items-start justify-between gap-2">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-background/70">
+                      <component
+                        :is="preflightStatusIcon(check.status)"
+                        class="h-3.5 w-3.5"
+                      />
+                    </span>
+                    <span class="truncate text-sm font-medium text-foreground">
+                      {{ check.label }}
+                    </span>
+                  </div>
+                  <span class="shrink-0 rounded-full border bg-background/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
+                    {{ check.status }}
                   </span>
                 </div>
-                <p class="text-xs leading-5 text-muted-foreground">
+                <p
+                  class="line-clamp-2 text-xs leading-5 text-muted-foreground"
+                  :title="check.message"
+                >
                   {{ check.message }}
                 </p>
               </div>
-              <span class="shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide">
-                {{ check.status }}
-              </span>
             </div>
-          </div>
+          </template>
         </div>
 
         <!-- Release Notes -->
         <div
           v-if="displayReleaseNotes"
-          class="w-full mt-3 mb-4"
+          class="mt-3 mb-4 w-full rounded-xl border border-border/60 bg-muted/20 px-4 py-3 text-left"
         >
-          <div
-            v-if="publishedAt"
-            class="mb-2 text-left text-xs text-muted-foreground"
+          <button
+            type="button"
+            class="flex w-full items-center justify-between gap-3 text-left"
+            :aria-expanded="releaseNotesExpanded"
+            @click="releaseNotesExpanded = !releaseNotesExpanded"
           >
-            发布于 {{ formattedPublishedAt }}
-          </div>
-          <div class="mb-2 text-left text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground/80">
-            更新内容
-          </div>
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground/80">
+                <span>更新内容</span>
+                <ChevronDown
+                  class="h-3.5 w-3.5 transition-transform"
+                  :class="{ 'rotate-180': releaseNotesExpanded }"
+                />
+              </div>
+              <div
+                v-if="publishedAt"
+                class="mt-1 text-xs text-muted-foreground"
+              >
+                发布于 {{ formattedPublishedAt }}
+              </div>
+            </div>
+            <span class="shrink-0 rounded-full border border-border/70 bg-background/60 px-2 py-0.5 text-[11px] text-muted-foreground">
+              {{ releaseNotesExpanded ? '收起' : '展开' }}
+            </span>
+          </button>
           <!-- eslint-disable vue/no-v-html -->
           <div
-            class="max-h-64 w-full overflow-y-auto rounded-xl border border-border/60 bg-muted/25 px-4 py-3 text-left text-sm leading-6 text-foreground/90 shadow-inner shadow-black/[0.02] max-w-none prose prose-sm dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-headings:font-semibold prose-headings:text-foreground prose-h3:text-sm prose-p:my-2 prose-ul:my-2 prose-ul:list-disc prose-ul:pl-5 prose-li:my-1 prose-li:marker:text-primary prose-a:text-primary prose-strong:text-foreground prose-code:rounded prose-code:bg-muted prose-code:px-1 prose-code:py-0.5"
+            v-if="releaseNotesExpanded"
+            class="mt-3 max-h-64 w-full overflow-y-auto rounded-xl border border-border/60 bg-background/50 px-4 py-3 text-sm leading-6 text-foreground/90 shadow-inner shadow-black/[0.02] max-w-none prose prose-sm dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-headings:font-semibold prose-headings:text-foreground prose-h3:text-sm prose-p:my-2 prose-ul:my-2 prose-ul:list-disc prose-ul:pl-5 prose-li:my-1 prose-li:marker:text-primary prose-a:text-primary prose-strong:text-foreground prose-code:rounded prose-code:bg-muted prose-code:px-1 prose-code:py-0.5"
             v-html="renderedReleaseNotes"
           />
           <!-- eslint-enable vue/no-v-html -->
@@ -166,31 +200,86 @@
           {{ fallbackDescriptionText }}
         </p>
 
-        <p
-          v-if="updatePhase === 'restart'"
-          class="mt-1 text-xs text-primary"
-        >
-          更新包已下载，点击"立即重启"完成安装
-        </p>
-
         <div
-          v-if="updating && updatePhase === 'download'"
-          class="mt-3 w-full max-w-sm"
+          v-if="showUpdateProgressPanel"
+          class="mt-4 w-full overflow-hidden rounded-xl border border-primary/15 bg-primary/[0.035] text-left shadow-sm shadow-primary/5"
         >
-          <div class="mb-1.5 flex items-center justify-between gap-3 text-xs text-muted-foreground">
-            <span class="truncate">{{ downloadProgressText }}</span>
-            <span
-              v-if="downloadProgressPercent !== null"
-              class="shrink-0 font-mono text-primary"
-            >
-              {{ downloadProgressPercent }}%
+          <div class="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-start sm:justify-between">
+            <div class="min-w-0">
+              <div class="text-[11px] font-semibold uppercase text-primary">
+                {{ progressPanelEyebrow }}
+              </div>
+              <div class="mt-1 flex items-center gap-2">
+                <Loader2
+                  v-if="updating"
+                  class="h-4 w-4 shrink-0 animate-spin text-primary"
+                />
+                <CheckCircle2
+                  v-else
+                  class="h-4 w-4 shrink-0 text-emerald-500"
+                />
+                <span class="truncate text-sm font-semibold text-foreground">
+                  {{ progressPanelTitle }}
+                </span>
+              </div>
+              <p class="mt-1 text-xs leading-5 text-muted-foreground">
+                {{ progressPanelDescription }}
+              </p>
+            </div>
+            <span class="shrink-0 rounded-full border border-primary/20 bg-background/70 px-2 py-0.5 font-mono text-[11px] text-primary">
+              {{ progressMetricText }}
             </span>
           </div>
-          <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+
+          <div class="px-4 pb-3">
+            <div class="h-2 w-full overflow-hidden rounded-full bg-primary/10">
+              <div
+                class="update-progress-bar h-full rounded-full bg-primary transition-all duration-500"
+                :class="{ 'update-progress-bar--indeterminate': isIndeterminateProgress }"
+                :style="{ width: progressBarWidth }"
+              />
+            </div>
+            <div class="mt-2 flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
+              <span class="min-w-0 truncate">{{ downloadProgressText }}</span>
+              <span
+                v-if="downloadProgressPercent !== null"
+                class="shrink-0 font-mono text-primary"
+              >
+                {{ downloadProgressPercent }}%
+              </span>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-3 border-t border-primary/10 bg-background/35">
             <div
-              class="h-full rounded-full bg-primary transition-all duration-300"
-              :style="{ width: progressBarWidth }"
-            />
+              v-for="step in updateProgressSteps"
+              :key="step.key"
+              class="relative px-3 py-2.5"
+            >
+              <div
+                class="mx-auto mb-1 flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold"
+                :class="progressStepClass(step.state)"
+              >
+                <CheckCircle2
+                  v-if="step.state === 'done'"
+                  class="h-3.5 w-3.5"
+                />
+                <Loader2
+                  v-else-if="step.state === 'active'"
+                  class="h-3.5 w-3.5 animate-spin"
+                />
+                <span v-else>{{ step.index }}</span>
+              </div>
+              <div
+                class="truncate text-center text-xs font-medium"
+                :class="step.state === 'pending' ? 'text-muted-foreground' : 'text-foreground'"
+              >
+                {{ step.label }}
+              </div>
+              <div class="mt-0.5 truncate text-center text-[10px] text-muted-foreground">
+                {{ step.detail }}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -202,7 +291,7 @@
           {{ updateBlockerText }}
         </p>
         <div
-          v-if="isDockerUpdate && dockerUpdateCommand"
+          v-if="isDockerUpdate && dockerGuidedCommands"
           class="mt-3 w-full rounded-xl border border-sky-500/20 bg-sky-500/[0.06] px-4 py-3 text-left"
         >
           <div class="flex items-start gap-3">
@@ -210,60 +299,128 @@
               <Terminal class="h-4 w-4" />
             </div>
             <div class="min-w-0 flex-1 space-y-3">
-              <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                <div class="min-w-0">
-                  <div class="text-sm font-semibold text-foreground">
-                    Docker 更新操作
-                  </div>
-                  <p class="mt-1 text-xs leading-5 text-muted-foreground">
-                    需要在宿主机的 compose 目录执行，页面不会直接操作容器。
-                  </p>
+              <div class="min-w-0">
+                <div class="text-sm font-semibold text-foreground">
+                  Docker 两阶段更新
                 </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  class="h-7 shrink-0 px-2 text-xs"
-                  @click="copyDockerUpdateCommand"
-                >
-                  <CheckCircle2
-                    v-if="dockerCommandCopied"
-                    class="mr-1.5 h-3.5 w-3.5 text-emerald-500"
-                  />
-                  <Copy
-                    v-else
-                    class="mr-1.5 h-3.5 w-3.5"
-                  />
-                  {{ dockerCommandCopied ? '已复制' : dockerCommandCopyError ? '复制失败' : '复制命令' }}
-                </Button>
+                <p class="mt-1 text-xs leading-5 text-muted-foreground">
+                  先在宿主机准备新镜像，确认时再快速重建 app 容器。
+                </p>
+              </div>
+
+              <div class="grid gap-2 sm:grid-cols-2">
+                <div class="rounded-lg border border-border/60 bg-background/55 px-3 py-2.5">
+                  <div class="flex items-start justify-between gap-2">
+                    <div class="min-w-0">
+                      <div class="flex items-center gap-2 text-sm font-medium text-foreground">
+                        <Download class="h-4 w-4 text-sky-600 dark:text-sky-300" />
+                        准备镜像
+                      </div>
+                      <p class="mt-1 text-xs leading-5 text-muted-foreground">
+                        拉取新 app 镜像，当前服务继续运行。
+                      </p>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      class="h-7 shrink-0 px-2 text-xs"
+                      @click="copyDockerUpdateCommand(dockerGuidedCommands.prepareCommand, 'prepare')"
+                    >
+                      <CheckCircle2
+                        v-if="dockerCommandCopied === 'prepare'"
+                        class="mr-1.5 h-3.5 w-3.5 text-emerald-500"
+                      />
+                      <Copy
+                        v-else
+                        class="mr-1.5 h-3.5 w-3.5"
+                      />
+                      {{ dockerCopyLabel('prepare') }}
+                    </Button>
+                  </div>
+                  <code class="mt-2 block break-all rounded-md bg-background/80 px-2 py-1.5 font-mono text-xs leading-5 text-foreground">
+                    {{ dockerGuidedCommands.prepareCommand }}
+                  </code>
+                </div>
+
+                <div class="rounded-lg border border-border/60 bg-background/55 px-3 py-2.5">
+                  <div class="flex items-start justify-between gap-2">
+                    <div class="min-w-0">
+                      <div class="flex items-center gap-2 text-sm font-medium text-foreground">
+                        <Rocket class="h-4 w-4 text-sky-600 dark:text-sky-300" />
+                        快速切换
+                      </div>
+                      <p class="mt-1 text-xs leading-5 text-muted-foreground">
+                        跳过拉取，执行备份、重建和健康检查。
+                      </p>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      class="h-7 shrink-0 px-2 text-xs"
+                      @click="copyDockerUpdateCommand(dockerGuidedCommands.applyCommand, 'apply')"
+                    >
+                      <CheckCircle2
+                        v-if="dockerCommandCopied === 'apply'"
+                        class="mr-1.5 h-3.5 w-3.5 text-emerald-500"
+                      />
+                      <Copy
+                        v-else
+                        class="mr-1.5 h-3.5 w-3.5"
+                      />
+                      {{ dockerCopyLabel('apply') }}
+                    </Button>
+                  </div>
+                  <code class="mt-2 block break-all rounded-md bg-background/80 px-2 py-1.5 font-mono text-xs leading-5 text-foreground">
+                    {{ dockerGuidedCommands.applyCommand }}
+                  </code>
+                </div>
+              </div>
+
+              <div class="overflow-hidden rounded-lg border border-border/60 bg-background/80">
+                <div class="flex items-center justify-between gap-2 border-b border-border/60 px-3 py-1.5 text-[11px] text-muted-foreground">
+                  <div class="flex items-center gap-2">
+                    <Terminal class="h-3.5 w-3.5" />
+                    一次性完整更新
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="h-6 px-2 text-[11px]"
+                    @click="copyDockerUpdateCommand(dockerGuidedCommands.updateCommand, 'full')"
+                  >
+                    <CheckCircle2
+                      v-if="dockerCommandCopied === 'full'"
+                      class="mr-1 h-3 w-3 text-emerald-500"
+                    />
+                    <Copy
+                      v-else
+                      class="mr-1 h-3 w-3"
+                    />
+                    {{ dockerCopyLabel('full') }}
+                  </Button>
+                </div>
+                <code class="block break-all px-3 py-2 font-mono text-xs leading-5 text-foreground">
+                  {{ dockerGuidedCommands.updateCommand }}
+                </code>
               </div>
 
               <div class="grid gap-2 text-xs sm:grid-cols-3">
                 <div class="rounded-lg border border-border/60 bg-background/55 px-3 py-2">
                   <span class="mr-1.5 font-mono text-sky-600 dark:text-sky-300">1</span>
-                  进入 docker-compose.yml 所在目录
+                  进入 compose 目录
                 </div>
                 <div class="rounded-lg border border-border/60 bg-background/55 px-3 py-2">
                   <span class="mr-1.5 font-mono text-sky-600 dark:text-sky-300">2</span>
-                  执行更新命令并等待镜像拉取
+                  先准备镜像
                 </div>
                 <div class="rounded-lg border border-border/60 bg-background/55 px-3 py-2">
                   <span class="mr-1.5 font-mono text-sky-600 dark:text-sky-300">3</span>
-                  容器健康后刷新管理端
+                  低峰快速切换
                 </div>
-              </div>
-
-              <div class="overflow-hidden rounded-lg border border-border/60 bg-background/80">
-                <div class="flex items-center gap-2 border-b border-border/60 px-3 py-1.5 text-[11px] text-muted-foreground">
-                  <Terminal class="h-3.5 w-3.5" />
-                  Shell
-                </div>
-                <code class="block break-all px-3 py-2 font-mono text-xs leading-5 text-foreground">
-                  {{ dockerUpdateCommand }}
-                </code>
               </div>
 
               <p class="text-[11px] leading-5 text-muted-foreground">
-                GitHub 检查代理走 AETHER_UPDATE_PROXY_URL；镜像拉取是否走代理取决于 Docker 守护进程配置。
+                切换阶段的中断主要来自容器重建和健康检查；代理变量只影响 GitHub 检查，镜像拉取代理取决于 Docker 守护进程配置。
               </p>
             </div>
           </div>
@@ -271,19 +428,28 @@
 
         <div class="mt-4 w-full rounded-xl border border-border/60 bg-muted/20 px-4 py-3 text-left">
           <div class="flex items-center justify-between gap-3">
-            <div class="flex items-center gap-3">
+            <button
+              type="button"
+              class="flex min-w-0 items-center gap-3 text-left"
+              :aria-expanded="updateHistoryExpanded"
+              @click="updateHistoryExpanded = !updateHistoryExpanded"
+            >
               <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
                 <History class="h-4 w-4" />
               </div>
-              <div>
-                <div class="text-sm font-semibold text-foreground">
-                  最近更新记录
+              <div class="min-w-0">
+                <div class="flex items-center gap-2 text-sm font-semibold text-foreground">
+                  <span>最近更新记录</span>
+                  <ChevronDown
+                    class="h-3.5 w-3.5 text-muted-foreground transition-transform"
+                    :class="{ 'rotate-180': updateHistoryExpanded }"
+                  />
                 </div>
                 <div class="mt-0.5 text-[11px] text-muted-foreground">
                   {{ updateHistorySummaryText }}
                 </div>
               </div>
-            </div>
+            </button>
             <Button
               variant="ghost"
               size="sm"
@@ -303,6 +469,7 @@
             </Button>
           </div>
 
+          <template v-if="updateHistoryExpanded">
           <div
             v-if="loadingUpdateHistory && visibleUpdateHistory.length === 0"
             class="mt-3 flex items-center gap-2 text-xs text-muted-foreground"
@@ -378,6 +545,7 @@
               </div>
             </div>
           </div>
+          </template>
         </div>
       </template>
     </div>
@@ -390,10 +558,10 @@
         <Button
           variant="outline"
           class="flex-1"
-          :disabled="updating || rollingBack"
-          @click="handleLater"
+          :disabled="rollingBack"
+          @click="handleSecondaryDismiss"
         >
-          稍后提醒
+          {{ secondaryDismissLabel }}
         </Button>
         <Button
           v-if="rollbackAvailable"
@@ -436,8 +604,24 @@ import { normalizeReleaseNotesForDisplay } from '@/utils/releaseNotes'
 import { sanitizeMarkdown } from '@/utils/sanitize'
 import { marked } from 'marked'
 import { adminApi, type SystemUpdatePreflightResponse, type UpdateHistoryEntry } from '@/api/admin'
-import { isPreflightBlocking } from './updateDialogLogic'
-import { AlertTriangle, CheckCircle2, Clock3, Copy, History, Loader2, RefreshCw, Terminal, XCircle } from 'lucide-vue-next'
+import {
+  buildDockerGuidedCommands,
+  isPreflightBlocking,
+} from './updateDialogLogic'
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  Clock3,
+  Copy,
+  Download,
+  History,
+  Loader2,
+  RefreshCw,
+  Rocket,
+  Terminal,
+  XCircle,
+} from 'lucide-vue-next'
 
 const props = defineProps<{
   modelValue: boolean
@@ -456,6 +640,8 @@ const props = defineProps<{
   updatable?: boolean
   updateBlocker?: string | null
   dockerUpdateCommand?: string | null
+  dockerPrepareCommand?: string | null
+  dockerApplyCommand?: string | null
   reconnectMessage?: string
   rollbackAvailable?: boolean
   rollingBack?: boolean
@@ -464,6 +650,7 @@ const props = defineProps<{
   updatePreflightError?: string | null
   downloadProgressText?: string | null
   downloadProgressPercent?: number | null
+  updateTaskPhase?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -472,6 +659,9 @@ const emit = defineEmits<{
   rollback: []
 }>()
 
+type DockerCommandKind = 'prepare' | 'apply' | 'full'
+type UpdateProgressStepState = 'done' | 'active' | 'pending'
+
 const SOURCE_BUILD_UPDATE_HINT = '当前为源码构建，请使用 git pull 后重新编译。'
 const UPDATE_HISTORY_LIMIT = 5
 
@@ -479,8 +669,11 @@ const isOpen = ref(props.modelValue)
 const updateHistory = ref<UpdateHistoryEntry[]>([])
 const loadingUpdateHistory = ref(false)
 const updateHistoryError = ref<string | null>(null)
-const dockerCommandCopied = ref(false)
-const dockerCommandCopyError = ref(false)
+const dockerCommandCopied = ref<DockerCommandKind | null>(null)
+const dockerCommandCopyError = ref<DockerCommandKind | null>(null)
+const preflightExpanded = ref(false)
+const releaseNotesExpanded = ref(false)
+const updateHistoryExpanded = ref(false)
 const updating = computed(() => props.updating ?? false)
 const updatePhase = computed(() => props.updatePhase ?? 'download')
 const updateSupported = computed(() => props.updateSupported ?? true)
@@ -491,7 +684,13 @@ const loadingUpdatePreflight = computed(() => props.loadingUpdatePreflight ?? fa
 const updatePreflightError = computed(() => props.updatePreflightError ?? null)
 const updateStrategy = computed(() => props.updateStrategy ?? 'manual')
 const isDockerUpdate = computed(() => updateStrategy.value === 'docker' && !canApplyUpdate.value)
-const dockerUpdateCommand = computed(() => props.dockerUpdateCommand || '')
+const dockerGuidedCommands = computed(() =>
+  buildDockerGuidedCommands({
+    updateCommand: props.dockerUpdateCommand,
+    prepareCommand: props.dockerPrepareCommand,
+    applyCommand: props.dockerApplyCommand,
+  })
+)
 const updateBlockerText = computed(() => {
   if (!updateSupported.value) return props.updateBlocker || SOURCE_BUILD_UPDATE_HINT
   return props.updateBlocker || '当前版本暂不支持在线更新'
@@ -500,6 +699,7 @@ const reconnectMessage = computed(() => props.reconnectMessage ?? '等待服务�
 const rollbackAvailable = computed(() => props.rollbackAvailable ?? false)
 const rollingBack = computed(() => props.rollingBack ?? false)
 const downloadProgressText = computed(() => props.downloadProgressText || '正在下载更新包...')
+const updateTaskPhase = computed(() => props.updateTaskPhase || null)
 const dialogTitleText = computed(() => props.dialogTitle ?? '发现新版本')
 const versionLabelText = computed(() => props.versionLabel ?? '最新版本')
 const releaseLinkLabelText = computed(() => props.releaseLinkLabel ?? '查看发布')
@@ -513,8 +713,100 @@ const downloadProgressPercent = computed(() => {
     ? Math.max(0, Math.min(100, Math.round(value)))
     : null
 })
+const showUpdateProgressPanel = computed(() => {
+  return updating.value || updatePhase.value === 'restart'
+})
+const isIndeterminateProgress = computed(() => {
+  return updating.value && updatePhase.value === 'download' && downloadProgressPercent.value === null
+})
 const progressBarWidth = computed(() => {
-  return downloadProgressPercent.value === null ? '35%' : `${downloadProgressPercent.value}%`
+  if (downloadProgressPercent.value !== null) return `${downloadProgressPercent.value}%`
+  if (updatePhase.value === 'restart') return updating.value ? '86%' : '100%'
+  return isIndeterminateProgress.value ? '46%' : '18%'
+})
+const progressPanelEyebrow = computed(() => {
+  return updateStrategy.value === 'docker' ? 'Docker 在线更新' : '在线更新'
+})
+const progressPanelTitle = computed(() => {
+  if (updatePhase.value === 'restart') {
+    return updating.value ? '正在快速切换' : '新版本已准备完成'
+  }
+  switch (updateTaskPhase.value) {
+    case 'downloading':
+      return updateStrategy.value === 'docker' ? '正在拉取镜像' : '正在下载安装包'
+    case 'downloading_checksum':
+      return '正在获取校验文件'
+    case 'verifying':
+      return '正在校验完整性'
+    case 'extracting':
+      return '正在解压更新包'
+    case 'backing_up':
+      return '正在备份数据'
+    case 'prepared':
+      return '新版本已准备完成'
+    case 'preparing':
+    default:
+      return updateStrategy.value === 'docker' ? '正在准备镜像' : '正在准备更新'
+  }
+})
+const progressPanelDescription = computed(() => {
+  if (updatePhase.value === 'restart') {
+    return updating.value
+      ? '正在重建应用容器并等待健康检查，页面会在服务恢复后自动刷新。'
+      : '新版本已经下载完成，当前服务仍在运行。点击立即重启后会快速切换。'
+  }
+  switch (updateTaskPhase.value) {
+    case 'downloading':
+      return updateStrategy.value === 'docker'
+        ? '后台正在拉取新 app 镜像，当前服务保持运行。'
+        : '后台正在下载更新包，当前服务保持运行。'
+    case 'downloading_checksum':
+    case 'verifying':
+      return '正在确认更新包来源和完整性，完成后会进入待重启状态。'
+    case 'extracting':
+      return '正在展开新版本文件，当前服务保持运行。'
+    case 'backing_up':
+      return '正在备份数据，随后会切换到新版本。'
+    default:
+      return '后台任务已启动，准备完成后会提示你确认重启。'
+  }
+})
+const progressMetricText = computed(() => {
+  if (downloadProgressPercent.value !== null) return `${downloadProgressPercent.value}%`
+  if (updatePhase.value === 'restart' && !updating.value) return '就绪'
+  return '进行中'
+})
+const updateProgressSteps = computed(() => {
+  const prepareState: UpdateProgressStepState = updatePhase.value === 'download'
+    ? (updating.value ? 'active' : 'pending')
+    : 'done'
+  const switchState: UpdateProgressStepState = updatePhase.value === 'restart'
+    ? (updating.value ? 'active' : 'pending')
+    : 'pending'
+
+  return [
+    {
+      key: 'prepare',
+      index: 1,
+      label: updateStrategy.value === 'docker' ? '准备镜像' : '下载更新',
+      detail: '不中断服务',
+      state: prepareState,
+    },
+    {
+      key: 'switch',
+      index: 2,
+      label: '快速切换',
+      detail: '确认后重启',
+      state: switchState,
+    },
+    {
+      key: 'refresh',
+      index: 3,
+      label: '自动刷新',
+      detail: '恢复后返回',
+      state: 'pending' as UpdateProgressStepState,
+    },
+  ]
 })
 const actionButtonLabel = computed(() => {
   if (updating.value) {
@@ -522,9 +814,18 @@ const actionButtonLabel = computed(() => {
   }
   return updatePhase.value === 'restart' ? '立即重启' : '立即更新'
 })
+const secondaryDismissLabel = computed(() => {
+  if (updating.value) return '收起后台'
+  return updatePhase.value === 'restart' ? '稍后重启' : '稍后提醒'
+})
 
 watch(() => props.modelValue, (val) => {
   isOpen.value = val
+  if (val) {
+    preflightExpanded.value = false
+    releaseNotesExpanded.value = false
+    updateHistoryExpanded.value = false
+  }
 })
 
 watch(isOpen, (val) => {
@@ -615,6 +916,16 @@ function preflightStatusClass(status: 'ok' | 'warning' | 'blocked'): string {
   return 'border-destructive/20 bg-destructive/10 text-destructive'
 }
 
+function progressStepClass(state: UpdateProgressStepState): string {
+  if (state === 'done') {
+    return 'border-emerald-500/25 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+  }
+  if (state === 'active') {
+    return 'border-primary/25 bg-primary/10 text-primary shadow-sm shadow-primary/10'
+  }
+  return 'border-border/70 bg-background/70 text-muted-foreground'
+}
+
 function preflightStatusIcon(status: 'ok' | 'warning' | 'blocked') {
   if (status === 'ok') return CheckCircle2
   if (status === 'warning') return AlertTriangle
@@ -629,6 +940,14 @@ function handleLater() {
   }
   localStorage.setItem(ignoreKey, JSON.stringify(ignoreData))
   isOpen.value = false
+}
+
+function handleSecondaryDismiss() {
+  if (updating.value) {
+    isOpen.value = false
+    return
+  }
+  handleLater()
 }
 
 function handleViewRelease() {
@@ -648,21 +967,31 @@ function handleRollback() {
   emit('rollback')
 }
 
-async function copyDockerUpdateCommand() {
-  dockerCommandCopied.value = false
-  dockerCommandCopyError.value = false
+async function copyDockerUpdateCommand(command: string, kind: DockerCommandKind) {
+  dockerCommandCopied.value = null
+  dockerCommandCopyError.value = null
   try {
-    await navigator.clipboard.writeText(dockerUpdateCommand.value)
-    dockerCommandCopied.value = true
+    await navigator.clipboard.writeText(command)
+    dockerCommandCopied.value = kind
     window.setTimeout(() => {
-      dockerCommandCopied.value = false
+      if (dockerCommandCopied.value === kind) {
+        dockerCommandCopied.value = null
+      }
     }, 1600)
   } catch {
-    dockerCommandCopyError.value = true
+    dockerCommandCopyError.value = kind
     window.setTimeout(() => {
-      dockerCommandCopyError.value = false
+      if (dockerCommandCopyError.value === kind) {
+        dockerCommandCopyError.value = null
+      }
     }, 1600)
   }
+}
+
+function dockerCopyLabel(kind: DockerCommandKind): string {
+  if (dockerCommandCopied.value === kind) return '已复制'
+  if (dockerCommandCopyError.value === kind) return '复制失败'
+  return '复制'
 }
 
 async function loadUpdateHistory(force = false) {
@@ -712,3 +1041,38 @@ function formatUpdateHistoryTime(value: string): string {
   }
 }
 </script>
+
+<style scoped>
+.update-progress-bar {
+  position: relative;
+  overflow: hidden;
+}
+
+.update-progress-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.38), transparent);
+  transform: translateX(-100%);
+  animation: update-progress-sheen 1.8s ease-in-out infinite;
+}
+
+.update-progress-bar--indeterminate {
+  animation: update-progress-drift 1.35s ease-in-out infinite alternate;
+}
+
+@keyframes update-progress-sheen {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes update-progress-drift {
+  from {
+    transform: translateX(-8%);
+  }
+  to {
+    transform: translateX(118%);
+  }
+}
+</style>
