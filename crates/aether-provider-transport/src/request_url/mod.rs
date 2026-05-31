@@ -17,7 +17,6 @@ use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::url::{
     build_claude_messages_url, build_gemini_content_url, build_openai_chat_url,
     build_openai_responses_url, build_passthrough_path_url, normalize_gemini_content_action_path,
-    openai_compatible_base_includes_api_root,
 };
 use crate::vertex::{
     build_vertex_api_key_gemini_content_url, build_vertex_api_key_gemini_embedding_url,
@@ -423,32 +422,18 @@ fn normalize_gemini_embedding_action_path(path: &str, batch: bool) -> String {
 }
 
 fn build_provider_embedding_v1_url(upstream_base_url: &str, query: Option<&str>) -> Option<String> {
-    build_provider_v1_url(upstream_base_url, "/embeddings", "/v1/embeddings", query)
+    build_provider_api_root_url(upstream_base_url, "/embeddings", query)
 }
 
 fn build_provider_rerank_v1_url(upstream_base_url: &str, query: Option<&str>) -> Option<String> {
-    build_provider_v1_url(upstream_base_url, "/rerank", "/v1/rerank", query)
+    build_provider_api_root_url(upstream_base_url, "/rerank", query)
 }
 
-fn build_provider_v1_url(
+fn build_provider_api_root_url(
     upstream_base_url: &str,
-    v1_path: &str,
-    default_path: &str,
+    path: &str,
     query: Option<&str>,
 ) -> Option<String> {
-    let base_without_query = upstream_base_url
-        .trim()
-        .split_once('?')
-        .map(|(base, _)| base)
-        .unwrap_or_else(|| upstream_base_url.trim())
-        .trim_end_matches('/');
-    let path = if base_without_query.ends_with("/v1")
-        || openai_compatible_base_includes_api_root(base_without_query)
-    {
-        v1_path
-    } else {
-        default_path
-    };
     build_passthrough_path_url(upstream_base_url, path, query, &[])
 }
 
@@ -1016,7 +1001,12 @@ mod tests {
             "https://api.openai.example/v1",
             None,
         );
-        let jina = sample_transport("jina", "jina:embedding", "https://api.jina.example", None);
+        let jina = sample_transport(
+            "jina",
+            "jina:embedding",
+            "https://api.jina.example/v1",
+            None,
+        );
         let gemini = sample_transport(
             "gemini",
             "gemini:embedding",
@@ -1221,7 +1211,7 @@ mod tests {
             "https://api.openai.example/v1",
             None,
         );
-        let jina = sample_transport("jina", "jina:rerank", "https://api.jina.example", None);
+        let jina = sample_transport("jina", "jina:rerank", "https://api.jina.example/v1", None);
 
         assert_eq!(
             build_transport_request_url(

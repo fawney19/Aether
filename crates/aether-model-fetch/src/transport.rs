@@ -790,7 +790,7 @@ mod tests {
             .await
             .expect("plan");
 
-        assert_eq!(plan.url, "https://example.com/v1/models");
+        assert_eq!(plan.url, "https://example.com/models");
         assert_eq!(
             plan.headers.get("user-agent").map(String::as_str),
             Some("openai-codex/1.0")
@@ -813,7 +813,7 @@ mod tests {
             .await
             .expect("plan");
 
-        assert_eq!(plan.url, "https://example.com/v1/models");
+        assert_eq!(plan.url, "https://example.com/models");
         assert_eq!(
             plan.headers.get("authorization").map(String::as_str),
             Some("Bearer secret")
@@ -915,7 +915,7 @@ mod tests {
 
         assert_eq!(
             plan.url,
-            "https://example.com/v1/models?limit=100&after_id=cursor-1"
+            "https://example.com/models?limit=100&after_id=cursor-1"
         );
         assert_eq!(
             plan.headers.get("anthropic-version").map(String::as_str),

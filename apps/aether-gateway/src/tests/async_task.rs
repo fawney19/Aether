@@ -540,7 +540,7 @@ async fn gateway_cancels_openai_video_task_via_internal_async_task_endpoint() {
                     "format_converted": false
                 },
                 "transport": {
-                    "upstream_base_url": "https://api.openai.example",
+                    "upstream_base_url": "https://api.openai.example/v1",
                     "provider_name": "openai-video",
                     "provider_id": "provider-1",
                     "endpoint_id": "endpoint-1",
@@ -670,6 +670,7 @@ async fn gateway_cancels_openai_video_task_via_internal_async_task_endpoint_with
     );
     task.external_task_id = Some("ext-video-task-123".to_string());
     let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let upstream_api_root = format!("{upstream_url}/v1");
     task.request_metadata = Some(json!({
         "rust_local_snapshot": {
             "OpenAi": {
@@ -702,7 +703,7 @@ async fn gateway_cancels_openai_video_task_via_internal_async_task_endpoint_with
                     "format_converted": false
                 },
                 "transport": {
-                    "upstream_base_url": upstream_url,
+                    "upstream_base_url": upstream_api_root,
                     "provider_name": "openai-video",
                     "provider_id": "provider-1",
                     "endpoint_id": "endpoint-1",

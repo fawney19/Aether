@@ -5,6 +5,11 @@ import { cachedRequest, buildCacheKey } from '@/utils/cache'
 import type { BillingSummary } from './auth'
 import type { UserSession } from '@/types/session'
 import type { FeatureSettingsMap } from '@/utils/featureSettings'
+import {
+  beginServerTimingSample,
+  withServerTiming,
+  type ServerTimedPayload,
+} from './serverTiming'
 
 const ACTIVITY_HEATMAP_CACHE_TTL_MS = 30 * 60 * 1000
 
@@ -142,7 +147,7 @@ export interface ApiFormatSummary {
 }
 
 // 使用统计响应接口
-export interface UsageResponse {
+export interface UsageResponse extends ServerTimedPayload {
   total_requests: number
   total_input_tokens: number
   total_output_tokens: number
@@ -321,12 +326,14 @@ export const meApi = {
     limit?: number
     offset?: number
   }): Promise<UsageResponse> {
+    const clientSendUnixMs = beginServerTimingSample()
     const response = await apiClient.get<UsageResponse>('/api/users/me/usage', { params })
-    return response.data
+    return withServerTiming(response, clientSendUnixMs)
   },
 
   // 获取活跃请求状态（用于轮询更新）
   async getActiveRequests(ids?: string): Promise<{
+    server_timing?: ServerTimedPayload['server_timing']
     requests: Array<{
       id: string
       status: 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
@@ -358,8 +365,9 @@ export const meApi = {
     }>
   }> {
     const params = ids ? { ids } : {}
+    const clientSendUnixMs = beginServerTimingSample()
     const response = await apiClient.get('/api/users/me/usage/active', { params })
-    return response.data
+    return withServerTiming(response, clientSendUnixMs)
   },
 
   // 获取可用的提供商

@@ -147,7 +147,7 @@
                     <Label class="text-xs text-muted-foreground">Base URL</Label>
                     <Input
                       :model-value="getEndpointEditState(endpoint.id)?.url ?? endpoint.base_url"
-                      :placeholder="provider?.website || 'https://api.example.com'"
+                      :placeholder="getEndpointBaseUrlPlaceholder(endpoint.api_format)"
                       :disabled="isFixedProvider"
                       @update:model-value="(v) => updateEndpointField(endpoint.id, 'url', v)"
                     />
@@ -965,7 +965,7 @@
                 <Input
                   v-model="newEndpoint.base_url"
                   size="sm"
-                  :placeholder="provider?.website || 'https://api.example.com'"
+                  :placeholder="newEndpointBaseUrlPlaceholder"
                 />
               </div>
               <div class="space-y-1.5">
@@ -1050,7 +1050,7 @@ import { log } from '@/utils/logger'
 import AlertDialog from '@/components/common/AlertDialog.vue'
 import EndpointConditionEditor from './EndpointConditionEditor.vue'
 import ProxyNodeSelect from './ProxyNodeSelect.vue'
-import { getDefaultEndpointPath, normalizeEndpointApiFormat } from './endpoint-default-paths'
+import { getDefaultEndpointBaseUrl, getDefaultEndpointPath, normalizeEndpointApiFormat } from './endpoint-default-paths'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import {
   createEndpoint,
@@ -1811,6 +1811,8 @@ const newEndpoint = ref({
 // API 格式列表
 const apiFormats = ref<Array<{ value: string; label: string; default_path: string }>>([])
 
+const fallbackEndpointBaseUrl = 'https://api.example.com'
+
 // 本地端点列表
 const localEndpoints = ref<ProviderEndpoint[]>([])
 
@@ -1885,6 +1887,27 @@ function getDefaultPath(apiFormat: string, baseUrl?: string): string {
 function getEndpointDefaultPath(endpoint: ProviderEndpoint): string {
   return getDefaultPath(endpoint.api_format, getEndpointEditState(endpoint.id)?.url ?? endpoint.base_url)
 }
+
+function getEndpointBaseUrlPlaceholder(apiFormat: string): string {
+  const seedBaseUrl = (props.provider?.website || fallbackEndpointBaseUrl).trim()
+  return getDefaultEndpointBaseUrl({
+    apiFormat,
+    baseUrl: seedBaseUrl,
+  }) || seedBaseUrl
+}
+
+function getNewEndpointBaseUrl(): string {
+  const typedBaseUrl = newEndpoint.value.base_url.trim()
+  if (typedBaseUrl) return typedBaseUrl
+  return getDefaultEndpointBaseUrl({
+    apiFormat: newEndpoint.value.api_format,
+    baseUrl: props.provider?.website || '',
+  })
+}
+
+const newEndpointBaseUrlPlaceholder = computed(() => {
+  return getEndpointBaseUrlPlaceholder(newEndpoint.value.api_format)
+})
 
 function getDisplayedPath(endpoint: ProviderEndpoint): string {
   return getEndpointEditState(endpoint.id)?.path ?? (endpoint.custom_path || '')
@@ -3117,8 +3140,8 @@ function getResponseHeaderValidationErrorForEndpoint(endpointId: string): string
 
 // 新端点选择的格式的默认路径
 const newEndpointDefaultPath = computed(() => {
-  // 使用填写的 base_url 或 provider 的 website 来判断是否是 Codex 端点
-  const baseUrl = newEndpoint.value.base_url || props.provider?.website || ''
+  // 使用填写的 base_url；留空时使用按格式规范化后的 provider website。
+  const baseUrl = getNewEndpointBaseUrl()
   return getDefaultPath(newEndpoint.value.api_format, baseUrl)
 })
 
@@ -3362,8 +3385,8 @@ async function handleCycleUpstreamStream(endpoint: ProviderEndpoint) {
 async function handleAddEndpoint() {
   if (!props.provider || !newEndpoint.value.api_format) return
 
-  // 如果没有输入 base_url，使用提供商的 website 作为默认值
-  const baseUrl = newEndpoint.value.base_url || props.provider.website
+  // 如果没有输入 base_url，使用按格式规范化后的提供商 website 作为默认值。
+  const baseUrl = getNewEndpointBaseUrl()
   if (!baseUrl) {
     showError('请输入 Base URL')
     return

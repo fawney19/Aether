@@ -1,3 +1,4 @@
+use aether_contracts::USAGE_SERVER_NOW_UNIX_MS_HEADER;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{self, HeaderValue, Response};
@@ -5,6 +6,8 @@ use axum::middleware::Next;
 
 use crate::headers::header_value_str;
 use crate::state::{AppState, FrontdoorCorsConfig};
+
+const FRONTDOOR_CREDENTIALS_EXPOSE_HEADERS: &str = "*, x-aether-server-now-unix-ms";
 
 fn append_vary(headers: &mut http::HeaderMap, value: &'static str) {
     headers.append(http::header::VARY, HeaderValue::from_static(value));
@@ -31,7 +34,11 @@ fn apply_frontdoor_cors_headers(
     );
     headers.insert(
         http::header::ACCESS_CONTROL_EXPOSE_HEADERS,
-        HeaderValue::from_static("*"),
+        HeaderValue::from_static(if cors.allow_credentials() {
+            FRONTDOOR_CREDENTIALS_EXPOSE_HEADERS
+        } else {
+            "*"
+        }),
     );
     if let Some(value) = requested_headers {
         if let Ok(value) = HeaderValue::from_str(value) {
@@ -108,4 +115,53 @@ pub(crate) async fn frontdoor_cors_middleware(
         requested_headers.as_deref(),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_exposes_header(value: &HeaderValue, expected: &str) {
+        let exposed_headers = value
+            .to_str()
+            .expect("expose headers should be valid ASCII");
+        assert!(
+            exposed_headers
+                .split(',')
+                .map(str::trim)
+                .any(|header| header.eq_ignore_ascii_case(expected)),
+            "{exposed_headers} should include {expected}"
+        );
+    }
+
+    #[test]
+    fn frontdoor_cors_explicitly_exposes_usage_server_time_for_credentials() {
+        let cors = FrontdoorCorsConfig::new(vec!["http://localhost:5173".to_string()], true)
+            .expect("cors config should build");
+        let mut headers = http::HeaderMap::new();
+
+        apply_frontdoor_cors_headers(&mut headers, &cors, "http://localhost:5173", None);
+
+        let expose_headers = headers
+            .get(http::header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .expect("expose headers should be set");
+        assert_exposes_header(expose_headers, "*");
+        assert_exposes_header(expose_headers, USAGE_SERVER_NOW_UNIX_MS_HEADER);
+    }
+
+    #[test]
+    fn frontdoor_cors_keeps_wildcard_expose_headers_without_credentials() {
+        let cors = FrontdoorCorsConfig::new(vec!["http://localhost:5173".to_string()], false)
+            .expect("cors config should build");
+        let mut headers = http::HeaderMap::new();
+
+        apply_frontdoor_cors_headers(&mut headers, &cors, "http://localhost:5173", None);
+
+        assert_eq!(
+            headers
+                .get(http::header::ACCESS_CONTROL_EXPOSE_HEADERS)
+                .expect("expose headers should be set"),
+            "*"
+        );
+    }
 }

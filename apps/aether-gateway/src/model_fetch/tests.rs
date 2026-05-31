@@ -271,7 +271,7 @@ async fn gateway_model_fetch_updates_key_and_syncs_provider_model_whitelist_asso
         .clone()
         .expect("execution runtime plan should be captured");
     assert_eq!(seen_plan.method, "GET");
-    assert_eq!(seen_plan.url, "https://api.openai.example/v1/models");
+    assert_eq!(seen_plan.url, "https://api.openai.example/models");
     assert_eq!(
         seen_plan.headers.get("authorization").map(String::as_str),
         Some("Bearer live-secret-api-key")
@@ -322,7 +322,7 @@ async fn gateway_model_fetch_updates_key_and_syncs_provider_model_whitelist_asso
     let seen_upstream = Arc::new(Mutex::new(None::<SeenUpstreamRequest>));
     let seen_upstream_clone = Arc::clone(&seen_upstream);
     let upstream = Router::new().route(
-        "/v1/models",
+        "/models",
         any(move |request: Request| {
             let seen_upstream_inner = Arc::clone(&seen_upstream_clone);
             async move {
@@ -538,7 +538,7 @@ async fn gateway_background_model_fetch_updates_key_and_syncs_provider_model_whi
         .expect("mutex should lock")
         .clone()
         .expect("execution runtime plan should be captured");
-    assert_eq!(seen_plan.url, "https://api.openai.example/v1/models");
+    assert_eq!(seen_plan.url, "https://api.openai.example/models");
 
     background_tasks.shutdown().await;
     execution_runtime_handle.abort();

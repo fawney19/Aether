@@ -1679,11 +1679,11 @@ mod tests {
             executed_urls: Arc::clone(&executed_urls),
             routes: vec![
                 (
-                    "https://bad.example.com/v1/models".to_string(),
+                    "https://bad.example.com/models".to_string(),
                     Err("connection reset".to_string()),
                 ),
                 (
-                    "https://chat.example.com/v1/models".to_string(),
+                    "https://chat.example.com/models".to_string(),
                     Ok((
                         200,
                         json!({
@@ -1692,7 +1692,7 @@ mod tests {
                     )),
                 ),
                 (
-                    "https://responses.example.com/v1/models".to_string(),
+                    "https://responses.example.com/models".to_string(),
                     Ok((
                         200,
                         json!({

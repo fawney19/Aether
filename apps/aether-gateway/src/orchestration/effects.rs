@@ -19,8 +19,7 @@ use tracing::warn;
 use super::{
     local_failover_error_message, project_local_adaptive_rate_limit,
     project_local_adaptive_success, project_local_failure_health, project_local_key_circuit_closed,
-    project_local_key_circuit_failure, project_local_key_circuit_open,
-    project_local_success_health, LocalFailoverClassification,
+    project_local_key_circuit_failure, project_local_success_health, LocalFailoverClassification,
 };
 use crate::ai_serving::extract_pool_sticky_session_token;
 use crate::client_session_affinity::{
@@ -29,7 +28,7 @@ use crate::client_session_affinity::{
 use crate::clock::current_unix_secs;
 use crate::handlers::shared::provider_pool::admin_provider_pool_config_from_config_value;
 use crate::handlers::shared::provider_pool::{
-    admin_provider_pool_key_circuit_breaker_reason, record_admin_provider_pool_error,
+    admin_provider_pool_key_terminal_error_reason, record_admin_provider_pool_error,
     record_admin_provider_pool_stream_timeout, record_admin_provider_pool_success,
     release_admin_provider_pool_key_lease, AdminProviderPoolConfig,
 };
@@ -574,6 +573,7 @@ async fn record_health_failure_effect(
     else {
         return;
     };
+    let is_pool_provider = local_execution_plan_uses_pool(state, context.plan).await;
     let observed_at_unix_secs = current_unix_secs();
     let Some(health_by_format) = project_local_failure_health(
         current_key.health_by_format.as_ref(),
@@ -589,16 +589,24 @@ async fn record_health_failure_effect(
         .and_then(|value| value.get("consecutive_failures"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let circuit_breaker_by_format = project_local_key_circuit_failure(
-        current_key.circuit_breaker_by_format.as_ref(),
-        api_format,
-        observed_at_unix_secs,
-        consecutive_failures,
-        current_key.max_probe_interval_minutes,
-    );
-    let circuit_breaker_update = circuit_breaker_by_format
-        .as_ref()
-        .or(current_key.circuit_breaker_by_format.as_ref());
+    let circuit_breaker_update_owned = if is_pool_provider {
+        None
+    } else {
+        project_local_key_circuit_failure(
+            current_key.circuit_breaker_by_format.as_ref(),
+            api_format,
+            observed_at_unix_secs,
+            consecutive_failures,
+            current_key.max_probe_interval_minutes,
+        )
+    };
+    let circuit_breaker_update = if is_pool_provider {
+        None
+    } else {
+        circuit_breaker_update_owned
+            .as_ref()
+            .or(current_key.circuit_breaker_by_format.as_ref())
+    };
 
     if let Err(err) = state
         .update_provider_catalog_key_health_state(
@@ -636,23 +644,35 @@ async fn record_health_success_effect(
     else {
         return;
     };
+    let is_pool_provider = local_execution_plan_uses_pool(state, context.plan).await;
     let Some(health_by_format) =
         project_local_success_health(current_key.health_by_format.as_ref(), api_format)
     else {
         return;
     };
-    let circuit_breaker_by_format = current_key
-        .circuit_breaker_by_format
-        .as_ref()
-        .and_then(|current| project_local_key_circuit_closed(Some(current), api_format));
+    let circuit_breaker_update_owned = if is_pool_provider {
+        None
+    } else {
+        current_key
+            .circuit_breaker_by_format
+            .as_ref()
+            .and_then(|current| project_local_key_circuit_closed(Some(current), api_format))
+    };
     if current_key.health_by_format.as_ref() == Some(&health_by_format)
-        && circuit_breaker_by_format.as_ref() == current_key.circuit_breaker_by_format.as_ref()
+        && ((is_pool_provider && current_key.circuit_breaker_by_format.is_none())
+            || (!is_pool_provider
+                && circuit_breaker_update_owned.as_ref()
+                    == current_key.circuit_breaker_by_format.as_ref()))
     {
         return;
     }
-    let circuit_breaker_update = circuit_breaker_by_format
-        .as_ref()
-        .or(current_key.circuit_breaker_by_format.as_ref());
+    let circuit_breaker_update = if is_pool_provider {
+        None
+    } else {
+        circuit_breaker_update_owned
+            .as_ref()
+            .or(current_key.circuit_breaker_by_format.as_ref())
+    };
 
     if let Err(err) = state
         .update_provider_catalog_key_health_state(
@@ -711,9 +731,9 @@ async fn record_pool_error_effect(
     context: LocalExecutionEffectContext<'_>,
     effect: LocalPoolErrorEffect<'_>,
 ) {
-    let circuit_reason =
-        admin_provider_pool_key_circuit_breaker_reason(effect.status_code, effect.error_body);
-    if circuit_reason.is_none()
+    let terminal_error_reason =
+        admin_provider_pool_key_terminal_error_reason(effect.status_code, effect.error_body);
+    if terminal_error_reason.is_none()
         && !local_candidate_failure_should_record_pool_error(
             effect.classification,
             effect.status_code,
@@ -726,10 +746,7 @@ async fn record_pool_error_effect(
         return;
     };
 
-    if let Some(reason) = circuit_reason {
-        open_pool_key_circuit_breaker(state, context, &reason).await;
-    }
-
+    clear_pool_key_circuit_breaker(state, context).await;
     record_admin_provider_pool_error(
         state.runtime_state.as_ref(),
         &context.plan.provider_id,
@@ -757,16 +774,10 @@ async fn record_pool_error_effect(
     .await;
 }
 
-async fn open_pool_key_circuit_breaker(
+async fn clear_pool_key_circuit_breaker(
     state: &AppState,
     context: LocalExecutionEffectContext<'_>,
-    reason: &str,
 ) {
-    let api_format = context.plan.provider_api_format.trim();
-    if api_format.is_empty() {
-        return;
-    }
-
     let Some(current_key) = state
         .read_provider_catalog_keys_by_ids(std::slice::from_ref(&context.plan.key_id))
         .await
@@ -775,27 +786,21 @@ async fn open_pool_key_circuit_breaker(
     else {
         return;
     };
-    let Some(circuit_breaker_by_format) = project_local_key_circuit_open(
-        current_key.circuit_breaker_by_format.as_ref(),
-        api_format,
-        reason,
-        current_unix_secs(),
-        current_key.max_probe_interval_minutes,
-    ) else {
+    if current_key.circuit_breaker_by_format.is_none() {
         return;
-    };
+    }
 
     if let Err(err) = state
         .update_provider_catalog_key_health_state(
             &context.plan.key_id,
             current_key.is_active,
             current_key.health_by_format.as_ref(),
-            Some(&circuit_breaker_by_format),
+            None,
         )
         .await
     {
         warn!(
-            "gateway orchestration effects: failed to open pool key circuit for provider {} endpoint {} key {}: {:?}",
+            "gateway orchestration effects: failed to clear pool key circuit for provider {} endpoint {} key {}: {:?}",
             context.plan.provider_id, context.plan.endpoint_id, context.plan.key_id, err
         );
     }
@@ -984,6 +989,10 @@ fn pool_score_hard_state_for_status(
     status_code: u16,
     error_body: Option<&str>,
 ) -> Option<PoolMemberHardState> {
+    if let Some(reason) = admin_provider_pool_key_terminal_error_reason(status_code, error_body) {
+        return Some(pool_score_hard_state_for_terminal_error_reason(&reason));
+    }
+
     match status_code {
         401 | 403 => Some(PoolMemberHardState::AuthInvalid),
         402 => Some(PoolMemberHardState::QuotaExhausted),
@@ -1003,6 +1012,16 @@ fn pool_score_hard_state_for_status(
                 None
             }
         }
+    }
+}
+
+fn pool_score_hard_state_for_terminal_error_reason(reason: &str) -> PoolMemberHardState {
+    if reason.starts_with("payment_required_") {
+        PoolMemberHardState::QuotaExhausted
+    } else if reason.starts_with("forbidden_") {
+        PoolMemberHardState::AuthInvalid
+    } else {
+        PoolMemberHardState::Banned
     }
 }
 
@@ -1028,6 +1047,7 @@ mod tests {
     use aether_data_contracts::repository::candidates::{
         RequestCandidateStatus, StoredRequestCandidate,
     };
+    use aether_data_contracts::repository::pool_scores::PoolMemberHardState;
     use aether_data_contracts::repository::provider_catalog::{
         StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
@@ -1036,9 +1056,10 @@ mod tests {
 
     use super::{
         apply_local_execution_effect, local_candidate_failure_should_record_pool_error,
-        LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
-        LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
-        LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
+        pool_score_hard_state_for_status, LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect,
+        LocalAttemptFailureEffect, LocalExecutionEffect, LocalExecutionEffectContext,
+        LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
+        LocalPoolErrorEffect,
     };
     use crate::data::{GatewayDataConfig, GatewayDataState};
     use crate::orchestration::LocalFailoverClassification;
@@ -1943,13 +1964,46 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn terminal_pool_account_errors_project_pool_hard_state() {
+        assert_eq!(
+            pool_score_hard_state_for_status(
+                400,
+                Some(r#"{"error":{"message":"deactivated_workspace"}}"#),
+            ),
+            Some(PoolMemberHardState::Banned)
+        );
+        assert_eq!(
+            pool_score_hard_state_for_status(
+                402,
+                Some(r#"{"error":{"message":"payment required"}}"#),
+            ),
+            Some(PoolMemberHardState::QuotaExhausted)
+        );
+    }
+
     #[tokio::test]
-    async fn pool_account_error_opens_key_circuit() {
+    async fn pool_account_error_does_not_open_key_circuit() {
         let Some(redis) = start_managed_redis_or_skip().await else {
             return;
         };
         let state = codex_state_with_redis(redis.redis_url(), "orchestration_pool_circuit");
         let plan = sample_codex_plan();
+        let legacy_circuit = json!({
+            "openai:responses": {
+                "open": true,
+                "reason": "legacy"
+            }
+        });
+        state
+            .update_provider_catalog_key_health_state(
+                &plan.key_id,
+                true,
+                None,
+                Some(&legacy_circuit),
+            )
+            .await
+            .expect("legacy circuit should seed");
 
         apply_local_execution_effect(
             &state,
@@ -1973,15 +2027,7 @@ mod tests {
             .into_iter()
             .next()
             .expect("stored key should exist");
-        let circuit = stored_key
-            .circuit_breaker_by_format
-            .as_ref()
-            .and_then(|value| value.get("openai:responses"))
-            .expect("format circuit should be stored");
-        assert_eq!(circuit["open"], json!(true));
-        assert_eq!(circuit["reason"], json!("account_deactivated_401"));
-        assert!(circuit["next_probe_at"].is_string());
-        assert!(circuit["next_probe_at_unix_secs"].as_u64().is_some());
+        assert_eq!(stored_key.circuit_breaker_by_format, None);
     }
 
     #[tokio::test]
@@ -2141,6 +2187,45 @@ mod tests {
                 .map(Vec::len)
                 .unwrap_or_default(),
             8
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_health_failure_does_not_open_key_circuit_after_eight_consecutive_failures() {
+        let state = pool_health_state();
+        let plan = sample_plan();
+
+        for _ in 0..8 {
+            apply_local_execution_effect(
+                &state,
+                LocalExecutionEffectContext {
+                    plan: &plan,
+                    report_context: None,
+                },
+                LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
+                    status_code: 503,
+                    classification: LocalFailoverClassification::RetryUpstreamFailure,
+                }),
+            )
+            .await;
+        }
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert_eq!(stored_key.circuit_breaker_by_format, None);
+        assert_eq!(
+            stored_key
+                .health_by_format
+                .as_ref()
+                .and_then(|value| value.get("openai:chat"))
+                .and_then(|value| value.get("consecutive_failures"))
+                .and_then(Value::as_u64),
+            Some(8)
         );
     }
 

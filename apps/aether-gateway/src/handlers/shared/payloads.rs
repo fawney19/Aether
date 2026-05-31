@@ -12,13 +12,21 @@ pub(crate) struct InternalTunnelHeartbeatRequest {
     #[serde(default)]
     pub(crate) total_requests: Option<i64>,
     #[serde(default)]
+    pub(crate) window_total_requests: Option<i64>,
+    #[serde(default)]
     pub(crate) avg_latency_ms: Option<f64>,
     #[serde(default)]
     pub(crate) failed_requests: Option<i64>,
     #[serde(default)]
+    pub(crate) window_failed_requests: Option<i64>,
+    #[serde(default)]
     pub(crate) dns_failures: Option<i64>,
     #[serde(default)]
+    pub(crate) window_dns_failures: Option<i64>,
+    #[serde(default)]
     pub(crate) stream_errors: Option<i64>,
+    #[serde(default)]
+    pub(crate) window_stream_errors: Option<i64>,
     #[serde(default)]
     pub(crate) proxy_metadata: Option<serde_json::Value>,
     #[serde(default)]

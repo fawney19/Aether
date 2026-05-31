@@ -224,13 +224,13 @@
                     </span>
                   </div>
                   <div
-                    v-if="currentAttempt.key_name || currentAttempt.key_id"
+                    v-if="currentAttemptKeyDisplay"
                     class="info-item"
                   >
                     <span class="info-label">{{ isOAuthType(currentAttempt.key_auth_type) ? '账号' : '密钥' }}</span>
                     <span class="info-value info-value-stacked">
                       <span class="key-name">
-                        {{ currentAttempt.key_name || '未知' }}
+                        {{ currentAttemptKeyDisplay }}
                         <span
                           v-if="currentAttempt.key_auth_type && currentAttempt.key_auth_type !== 'api_key'"
                           class="auth-type-tag"
@@ -666,6 +666,7 @@ const { isDark } = useDarkMode()
 const trace = computed(() => props.traceData ?? internalTrace.value)
 const selectedGroupIndex = ref(0)
 const selectedAttemptIndex = ref(0)
+const selectionPinnedByUser = ref(false)
 const hoveredGroupIndex = ref<number | null>(null)
 const traceLoadStarted = ref(false)
 let tracePollTimer: ReturnType<typeof setTimeout> | null = null
@@ -1345,6 +1346,12 @@ const currentAttemptRequestPathDisplay = computed(() => {
   return ''
 })
 
+const currentAttemptKeyDisplay = computed(() => {
+  const attempt = currentAttempt.value
+  if (!attempt) return ''
+  return attempt.key_account_label || attempt.key_name || attempt.key_id || ''
+})
+
 const currentAttemptKeyFormatsDisplay = computed(() => {
   const attempt = currentAttempt.value
   if (!attempt) return ''
@@ -1532,10 +1539,111 @@ const isGroupSelected = (group: NodeGroup) => {
   return selectedGroupIndex.value === groupedTimeline.value.findIndex(g => g.id === group.id && g.startIndex === group.startIndex)
 }
 
+const findGroupIndex = (groups: NodeGroup[], group: NodeGroup): number => {
+  return groups.findIndex(g => g.id === group.id && g.startIndex === group.startIndex)
+}
+
+const selectedAttemptFromGroups = (groups: NodeGroup[]): CandidateRecord | null => {
+  const group = groups[selectedGroupIndex.value]
+  if (!group) return null
+  return group.allAttempts[selectedAttemptIndex.value] || null
+}
+
+const groupHasSuccess = (group: NodeGroup): boolean => {
+  return group.allAttempts.some(attempt => getDisplayStatus(attempt) === 'success')
+}
+
+const groupsHaveSuccess = (groups: NodeGroup[]): boolean => {
+  return groups.some(groupHasSuccess)
+}
+
+const groupsHaveLiveCandidate = (groups: NodeGroup[]): boolean => {
+  return groups.some(group => group.allAttempts.some(isLiveCandidate))
+}
+
+const TERMINAL_ATTEMPT_STATUSES = ['failed', 'cancelled', 'stream_interrupted', 'skipped']
+
+const isTerminalResultAttempt = (attempt: CandidateRecord): boolean => {
+  return TERMINAL_ATTEMPT_STATUSES.includes(getDisplayStatus(attempt))
+}
+
+const groupsHaveTerminalResult = (groups: NodeGroup[]): boolean => {
+  return groups.some(group => group.allAttempts.some(isTerminalResultAttempt))
+}
+
+const selectedAttemptMatchesBestSilentState = (groups: NodeGroup[]): boolean => {
+  const attempt = selectedAttemptFromGroups(groups)
+  if (!attempt) return false
+
+  if (groupsHaveSuccess(groups)) {
+    return getDisplayStatus(attempt) === 'success'
+  }
+
+  if (groupsHaveLiveCandidate(groups)) {
+    return isLiveCandidate(attempt)
+  }
+
+  if (groupsHaveTerminalResult(groups)) {
+    return isTerminalResultAttempt(attempt)
+  }
+
+  return true
+}
+
+const selectMostRelevantGroup = (newGroups: NodeGroup[]) => {
+  if (!newGroups || newGroups.length === 0) return
+
+  // 查找成功的组
+  const successIdx = newGroups.findIndex(groupHasSuccess)
+  if (successIdx >= 0) {
+    selectedGroupIndex.value = successIdx
+    // 选中成功的尝试
+    const group = newGroups[successIdx]
+    const attemptIdx = group.allAttempts.findIndex(a => getDisplayStatus(a) === 'success')
+    selectedAttemptIndex.value = attemptIdx >= 0 ? attemptIdx : 0
+    return
+  }
+
+  // 查找正在进行的组
+  const activeIdx = newGroups.findIndex(g => g.allAttempts.some(isLiveCandidate))
+  if (activeIdx >= 0) {
+    selectedGroupIndex.value = activeIdx
+    // 选中正在进行的尝试，而非最后一个
+    const group = newGroups[activeIdx]
+    const attemptIdx = group.allAttempts.findIndex(isLiveCandidate)
+    selectedAttemptIndex.value = attemptIdx >= 0 ? attemptIdx : group.allAttempts.length - 1
+    return
+  }
+
+  // 查找最后一个有效结果的组（有实际执行过的状态：failed/cancelled/stream_interrupted/skipped）
+  // 从后往前找第一个有效状态的组
+  for (let i = newGroups.length - 1; i >= 0; i--) {
+    const group = newGroups[i]
+    if (TERMINAL_ATTEMPT_STATUSES.includes(group.primaryStatus)) {
+      selectedGroupIndex.value = i
+      // 选中最后一个有效状态的尝试（从后往前遍历）
+      let targetIdx = -1
+      for (let j = group.allAttempts.length - 1; j >= 0; j--) {
+        if (isTerminalResultAttempt(group.allAttempts[j])) {
+          targetIdx = j
+          break
+        }
+      }
+      selectedAttemptIndex.value = targetIdx >= 0 ? targetIdx : group.allAttempts.length - 1
+      return
+    }
+  }
+
+  // 都没有有效状态，选择第一个组（避免选到末尾的未执行节点）
+  selectedGroupIndex.value = 0
+  selectedAttemptIndex.value = 0
+}
+
 // 选中一个组
 const selectGroup = (group: NodeGroup) => {
-  const index = groupedTimeline.value.findIndex(g => g.id === group.id && g.startIndex === group.startIndex)
+  const index = findGroupIndex(groupedTimeline.value, group)
   if (index >= 0) {
+    selectionPinnedByUser.value = true
     selectedGroupIndex.value = index
     // 默认选中成功的尝试，或最后一个尝试
     const successIdx = group.allAttempts.findIndex(a => a.status === 'success')
@@ -1545,16 +1653,18 @@ const selectGroup = (group: NodeGroup) => {
 
 // 选中一个组的首次请求
 const selectFirstAttempt = (group: NodeGroup) => {
-  const index = groupedTimeline.value.findIndex(g => g.id === group.id && g.startIndex === group.startIndex)
+  const index = findGroupIndex(groupedTimeline.value, group)
   if (index >= 0) {
+    selectionPinnedByUser.value = true
     selectedGroupIndex.value = index
     selectedAttemptIndex.value = 0
   }
 }
 
 const selectAttemptInGroup = (group: NodeGroup, attemptIndex: number) => {
-  const groupIndex = groupedTimeline.value.findIndex(g => g.id === group.id && g.startIndex === group.startIndex)
+  const groupIndex = findGroupIndex(groupedTimeline.value, group)
   if (groupIndex < 0) return
+  selectionPinnedByUser.value = true
   selectedGroupIndex.value = groupIndex
   selectedAttemptIndex.value = attemptIndex
 }
@@ -1582,6 +1692,7 @@ const formatAttemptDotTitle = (attempt: CandidateRecord): string => {
 const navigateGroup = (direction: number) => {
   const newIndex = selectedGroupIndex.value + direction
   if (newIndex >= 0 && newIndex < groupedTimeline.value.length) {
+    selectionPinnedByUser.value = true
     selectedGroupIndex.value = newIndex
     const group = groupedTimeline.value[newIndex]
     // 默认选中成功的尝试，或最后一个尝试
@@ -1595,6 +1706,7 @@ const navigateAttempt = (direction: number) => {
   if (!group) return
   const newIndex = selectedAttemptIndex.value + direction
   if (newIndex >= 0 && newIndex < group.allAttempts.length) {
+    selectionPinnedByUser.value = true
     selectedAttemptIndex.value = newIndex
   }
 }
@@ -1678,57 +1790,20 @@ const scheduleTracePolling = () => {
 watch(groupedTimeline, (newGroups) => {
   if (!newGroups || newGroups.length === 0) return
 
-  // 静默刷新时不重置选中状态
+  // 静默刷新时保留用户手动选择；未手动选择时跟随成功/进行中的 Key。
   if (isSilentRefresh.value) {
     isSilentRefresh.value = false
-    return
-  }
-
-  // 查找成功的组
-  const successIdx = newGroups.findIndex(g => g.primaryStatus === 'success')
-  if (successIdx >= 0) {
-    selectedGroupIndex.value = successIdx
-    // 选中成功的尝试
-    const group = newGroups[successIdx]
-    const attemptIdx = group.allAttempts.findIndex(a => a.status === 'success')
-    selectedAttemptIndex.value = attemptIdx >= 0 ? attemptIdx : 0
-    return
-  }
-
-  // 查找正在进行的组
-  const activeIdx = newGroups.findIndex(g => g.allAttempts.some(isLiveCandidate))
-  if (activeIdx >= 0) {
-    selectedGroupIndex.value = activeIdx
-    // 选中正在进行的尝试，而非最后一个
-    const group = newGroups[activeIdx]
-    const attemptIdx = group.allAttempts.findIndex(isLiveCandidate)
-    selectedAttemptIndex.value = attemptIdx >= 0 ? attemptIdx : group.allAttempts.length - 1
-    return
-  }
-
-  // 查找最后一个有效结果的组（有实际执行过的状态：failed/cancelled/stream_interrupted/skipped）
-  // 从后往前找第一个有效状态的组
-  const activeStatuses = ['failed', 'cancelled', 'stream_interrupted', 'skipped']
-  for (let i = newGroups.length - 1; i >= 0; i--) {
-    const group = newGroups[i]
-    if (activeStatuses.includes(group.primaryStatus)) {
-      selectedGroupIndex.value = i
-      // 选中最后一个有效状态的尝试（从后往前遍历）
-      let targetIdx = -1
-      for (let j = group.allAttempts.length - 1; j >= 0; j--) {
-        if (activeStatuses.includes(getDisplayStatus(group.allAttempts[j]))) {
-          targetIdx = j
-          break
-        }
-      }
-      selectedAttemptIndex.value = targetIdx >= 0 ? targetIdx : group.allAttempts.length - 1
+    if (selectionPinnedByUser.value && selectedAttemptFromGroups(newGroups)) {
       return
     }
+    if (selectedAttemptMatchesBestSilentState(newGroups)) {
+      return
+    }
+    selectMostRelevantGroup(newGroups)
+    return
   }
 
-  // 都没有有效状态，选择第一个组（避免选到末尾的未执行节点）
-  selectedGroupIndex.value = 0
-  selectedAttemptIndex.value = 0
+  selectMostRelevantGroup(newGroups)
 }, { immediate: true })
 
 // 监听 requestId / 外部 trace 变化
@@ -1737,6 +1812,7 @@ watch(
   () => {
     selectedGroupIndex.value = 0
     selectedAttemptIndex.value = 0
+    selectionPinnedByUser.value = false
     traceLoadStarted.value = false
 
     if (props.traceData) {

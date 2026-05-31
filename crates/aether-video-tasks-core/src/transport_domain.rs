@@ -13,7 +13,7 @@ use crate::{
 impl LocalVideoTaskTransport {
     pub fn from_plan(plan: &ExecutionPlan) -> Option<Self> {
         let upstream_base_url = match plan.provider_api_format.as_str() {
-            "openai:video" => plan.url.split("/v1/videos").next()?.to_string(),
+            "openai:video" => trim_openai_video_resource_root(&plan.url)?,
             "gemini:video" => plan.url.split("/v1beta/").next()?.to_string(),
             _ => return None,
         };
@@ -53,6 +53,15 @@ impl LocalVideoTaskTransport {
             timeouts: input.timeouts,
         }
     }
+}
+
+fn trim_openai_video_resource_root(url: &str) -> Option<String> {
+    let base = url.split_once('?').map(|(base, _)| base).unwrap_or(url);
+    let (root, suffix) = base.rsplit_once("/videos")?;
+    if !suffix.is_empty() && !suffix.starts_with('/') {
+        return None;
+    }
+    Some(root.to_string())
 }
 
 impl LocalVideoTaskPersistence {

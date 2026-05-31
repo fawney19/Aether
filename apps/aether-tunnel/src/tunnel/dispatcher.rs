@@ -239,7 +239,10 @@ where
 
                 // Create body channel and spawn handler
                 let (body_tx, body_rx) = mpsc::channel::<Frame>(64);
-                streams.insert(frame.stream_id, body_tx);
+                let request_headers_end_stream = frame.is_end_stream();
+                if !request_headers_end_stream {
+                    streams.insert(frame.stream_id, body_tx);
+                }
 
                 let state_clone = Arc::clone(&state);
                 let server_clone = Arc::clone(&server);
@@ -326,8 +329,16 @@ where
         // Trigger every 64 frames OR when the count exceeds max_streams.
         frames_since_cleanup += 1;
         if frames_since_cleanup >= 64 || handler_handles.len() > max_streams {
+            let closed_streams = prune_closed_stream_senders(&mut streams);
+            if closed_streams > 0 {
+                debug!(closed_streams, "removed closed request body stream senders");
+            }
             handler_handles.retain(|h| !h.is_finished());
             frames_since_cleanup = 0;
+            if draining && streams.is_empty() {
+                info!("tunnel drained after cleanup");
+                break None;
+            }
         }
     };
 
@@ -395,6 +406,12 @@ fn try_send_stream_error(frame_tx: &FrameSender, stream_id: u32, message: &'stat
             "writer channel full, StreamError dropped while aborting stalled stream"
         );
     }
+}
+
+fn prune_closed_stream_senders(streams: &mut HashMap<u32, mpsc::Sender<Frame>>) -> usize {
+    let before = streams.len();
+    streams.retain(|_, tx| !tx.is_closed());
+    before.saturating_sub(streams.len())
 }
 
 /// Wait for all active stream handlers to finish (with a timeout).
@@ -469,5 +486,19 @@ mod tests {
             frame.payload,
             Bytes::from_static(b"tunnel request body dispatch stalled")
         );
+    }
+
+    #[test]
+    fn prune_closed_stream_senders_drops_streams_with_closed_receivers() {
+        let (closed_tx, closed_rx) = mpsc::channel::<Frame>(1);
+        let (open_tx, _open_rx) = mpsc::channel::<Frame>(1);
+        drop(closed_rx);
+        let mut streams = HashMap::from([(7, closed_tx), (9, open_tx)]);
+
+        let removed = prune_closed_stream_senders(&mut streams);
+
+        assert_eq!(removed, 1);
+        assert!(!streams.contains_key(&7));
+        assert!(streams.contains_key(&9));
     }
 }

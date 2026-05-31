@@ -1879,6 +1879,8 @@ mod tests {
     use crate::tunnel::{tunnel_protocol, TunnelProxyConn};
     use crate::AppState;
 
+    const LOCAL_HTTP_SUCCESS_TIMEOUT_MS: u64 = 15_000;
+
     #[test]
     fn gateway_frontdoor_self_loop_guard_matches_loopback_public_ai_route() {
         assert!(gateway_frontdoor_self_loop_guard_matches_with_port(
@@ -2244,7 +2246,7 @@ mod tests {
                 transport_profile: None,
                 timeouts: Some(ExecutionTimeouts {
                     connect_ms: Some(5_000),
-                    total_ms: Some(5_000),
+                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
                     ..ExecutionTimeouts::default()
                 }),
             })
@@ -2398,7 +2400,7 @@ mod tests {
                 format!("http://{addr}/chat"),
                 true,
                 ExecutionTimeouts {
-                    first_byte_ms: Some(5_000),
+                    first_byte_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
                     total_ms: Some(25),
                     ..ExecutionTimeouts::default()
                 },
@@ -2674,7 +2676,7 @@ mod tests {
                 })),
             }),
             timeouts: Some(ExecutionTimeouts {
-                total_ms: Some(5_000),
+                total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
                 ..ExecutionTimeouts::default()
             }),
         };
@@ -2797,7 +2799,7 @@ mod tests {
             transport_profile: None,
             timeouts: Some(ExecutionTimeouts {
                 connect_ms: Some(5_000),
-                total_ms: Some(5_000),
+                total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
                 ..ExecutionTimeouts::default()
             }),
         };
@@ -3156,7 +3158,7 @@ mod tests {
                 transport_profile: None,
                 timeouts: Some(ExecutionTimeouts {
                     connect_ms: Some(5_000),
-                    total_ms: Some(5_000),
+                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
                     ..ExecutionTimeouts::default()
                 }),
             })
@@ -3209,7 +3211,7 @@ mod tests {
             transport_profile: None,
             timeouts: Some(ExecutionTimeouts {
                 connect_ms: Some(5_000),
-                total_ms: Some(5_000),
+                total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
                 ..ExecutionTimeouts::default()
             }),
         };
@@ -3358,7 +3360,7 @@ mod tests {
                 transport_profile: None,
                 timeouts: Some(ExecutionTimeouts {
                     connect_ms: Some(5_000),
-                    total_ms: Some(5_000),
+                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
                     ..ExecutionTimeouts::default()
                 }),
             })
@@ -3437,7 +3439,7 @@ mod tests {
                 transport_profile: None,
                 timeouts: Some(ExecutionTimeouts {
                     connect_ms: Some(5_000),
-                    total_ms: Some(5_000),
+                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
                     ..ExecutionTimeouts::default()
                 }),
             })
@@ -3519,7 +3521,7 @@ mod tests {
                 }),
                 timeouts: Some(ExecutionTimeouts {
                     connect_ms: Some(5_000),
-                    total_ms: Some(5_000),
+                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
                     ..ExecutionTimeouts::default()
                 }),
             })
@@ -3579,7 +3581,7 @@ mod tests {
                 transport_profile: None,
                 timeouts: Some(ExecutionTimeouts {
                     connect_ms: Some(5_000),
-                    total_ms: Some(5_000),
+                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
                     ..ExecutionTimeouts::default()
                 }),
             })
@@ -3717,7 +3719,7 @@ mod tests {
                 transport_profile: None,
                 timeouts: Some(ExecutionTimeouts {
                     connect_ms: Some(5_000),
-                    total_ms: Some(5_000),
+                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
                     ..ExecutionTimeouts::default()
                 }),
             })
@@ -3778,7 +3780,7 @@ mod tests {
                 transport_profile: None,
                 timeouts: Some(ExecutionTimeouts {
                     connect_ms: Some(5_000),
-                    total_ms: Some(5_000),
+                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
                     ..ExecutionTimeouts::default()
                 }),
             })

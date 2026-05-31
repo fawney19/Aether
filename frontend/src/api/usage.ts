@@ -2,6 +2,11 @@ import apiClient from './client'
 import { cachedRequest, dedupedRequest, buildCacheKey } from '@/utils/cache'
 import type { ActivityHeatmap } from '@/types/activity'
 import type { ImageProgress } from './requestTrace'
+import {
+  beginServerTimingSample,
+  withServerTiming,
+  type ServerTimedPayload,
+} from './serverTiming'
 
 const ACTIVITY_HEATMAP_CACHE_TTL_MS = 30 * 60 * 1000
 const USAGE_ANALYTICS_CACHE_TTL_MS = 30 * 1000
@@ -127,7 +132,7 @@ export interface UsageRequestOptions {
   skipCache?: boolean
 }
 
-type UsageListResponse = {
+type UsageListResponse = ServerTimedPayload & {
   records?: unknown
   pagination?: {
     total?: unknown
@@ -199,6 +204,7 @@ function normalizeUsageRecordPage(
   total: number
   page: number
   page_size: number
+  server_timing?: ServerTimedPayload['server_timing']
 } {
   const records = assertUsageRecords(payload.records)
   const pagination = payload.pagination
@@ -220,6 +226,7 @@ function normalizeUsageRecordPage(
     total,
     page: resolvedPage,
     page_size: limit,
+    ...(payload.server_timing ? { server_timing: payload.server_timing } : {}),
   }
 }
 
@@ -366,10 +373,12 @@ export const usageApi = {
     total: number
     page: number
     page_size: number
+    server_timing?: ServerTimedPayload['server_timing']
   }> {
     const { params, pagination } = buildCurrentUserUsageParams(filters)
+    const clientSendUnixMs = beginServerTimingSample()
     const response = await apiClient.get<UsageListResponse>('/api/users/me/usage', { params })
-    return normalizeUsageRecordPage(response.data, pagination)
+    return normalizeUsageRecordPage(withServerTiming(response, clientSendUnixMs), pagination)
   },
 
   async getUsageStats(filters?: UsageFilters, options?: UsageRequestOptions): Promise<UsageStats> {
@@ -444,17 +453,25 @@ export const usageApi = {
   async getUserUsage(userId: string, filters?: UsageFilters): Promise<{
     records: UsageRecord[]
     stats: UsageStats
+    server_timing?: ServerTimedPayload['server_timing']
   }> {
     const statsParams = buildAdminUsageStatsParams(userId, filters)
     const { params: recordParams } = buildAdminUsageRecordParams(userId, filters)
+    const statsRequest = apiClient.get<UsageStats>('/api/admin/usage/stats', { params: statsParams })
+    const recordsClientSendUnixMs = beginServerTimingSample()
+    const recordsRequest = apiClient
+      .get<UsageListResponse>('/api/admin/usage/records', { params: recordParams })
+      .then(response => withServerTiming(response, recordsClientSendUnixMs))
+
     const [statsResponse, recordsResponse] = await Promise.all([
-      apiClient.get<UsageStats>('/api/admin/usage/stats', { params: statsParams }),
-      apiClient.get<UsageListResponse>('/api/admin/usage/records', { params: recordParams }),
+      statsRequest,
+      recordsRequest,
     ])
 
     return {
-      records: assertUsageRecords(recordsResponse.data.records),
+      records: assertUsageRecords(recordsResponse.records),
       stats: statsResponse.data,
+      ...(recordsResponse.server_timing ? { server_timing: recordsResponse.server_timing } : {}),
     }
   },
 
@@ -480,11 +497,13 @@ export const usageApi = {
     total: number
     limit: number
     offset: number
+    server_timing?: ServerTimedPayload['server_timing']
   }> {
     const key = buildCacheKey('usage:records', params as Record<string, unknown> | undefined)
     return dedupedRequest(key, async () => {
+      const clientSendUnixMs = beginServerTimingSample()
       const response = await apiClient.get('/api/admin/usage/records', { params })
-      return response.data
+      return withServerTiming(response, clientSendUnixMs)
     })
   },
 
@@ -496,6 +515,7 @@ export const usageApi = {
     ids?: string[],
     timeRange?: Pick<UsageFilters, 'start_date' | 'end_date' | 'preset' | 'timezone' | 'tz_offset_minutes'>
   ): Promise<{
+    server_timing?: ServerTimedPayload['server_timing']
     requests: Array<{
       id: string
       status: 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
@@ -549,8 +569,9 @@ export const usageApi = {
     if (typeof timeRange?.tz_offset_minutes === 'number') {
       params.tz_offset_minutes = timeRange.tz_offset_minutes
     }
+    const clientSendUnixMs = beginServerTimingSample()
     const response = await apiClient.get('/api/admin/usage/active', { params })
-    return response.data
+    return withServerTiming(response, clientSendUnixMs)
   },
 
   /**

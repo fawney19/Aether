@@ -107,8 +107,29 @@ pub(crate) fn parse_admin_pool_status_filter(query: Option<&str>) -> Result<Stri
         .trim()
         .to_ascii_lowercase();
     match value.as_str() {
-        "all" | "active" | "inactive" | "cooldown" => Ok(value),
-        _ => Err("status must be one of: all, active, cooldown, inactive".to_string()),
+        "all"
+        | "available"
+        | "cooldown"
+        | "inactive"
+        | "invalid"
+        | "expired"
+        | "account_banned"
+        | "quota_exhausted"
+        | "account_forbidden"
+        | "account_disabled"
+        | "workspace_deactivated"
+        | "account_verification"
+        | "account_quarantined"
+        | "account_blocked"
+        | "rate_limited"
+        | "cost_exhausted" => Ok(value),
+        // Backward compatibility for older links/localStorage. This filter used to
+        // be called "active", but the table status column displays the exact
+        // scheduling/account state. Treat it as the visible "可用" bucket.
+        "active" => Ok("available".to_string()),
+        _ => Err(
+            "status must be one of: all, available, cooldown, inactive, invalid, expired, account_banned, quota_exhausted, account_forbidden, account_disabled, workspace_deactivated, account_verification, account_quarantined, account_blocked, rate_limited, cost_exhausted".to_string(),
+        ),
     }
 }
 

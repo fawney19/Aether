@@ -10,15 +10,21 @@ use crate::tests::{
     to_bytes, AppState, Arc, Body, Json, Mutex, Request, Router, StatusCode, EXECUTION_PATH_HEADER,
     EXECUTION_PATH_LOCAL_AI_PUBLIC, EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS,
 };
+use aether_data::repository::global_models::InMemoryGlobalModelReadRepository;
 use aether_data::DataLayerError;
 use aether_data_contracts::repository::candidate_selection::{
     MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
     StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
     StoredRequestedModelCandidateRowsQuery,
 };
+use aether_data_contracts::repository::global_models::{
+    StoredAdminGlobalModel, UpdateAdminGlobalModelRecord,
+};
 use async_trait::async_trait;
 use axum::response::IntoResponse;
+use std::collections::HashMap;
 use std::future::pending;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn gemini_operation_status_label(status: VideoTaskStatus) -> &'static str {
     match status {
@@ -183,6 +189,120 @@ impl MinimalCandidateSelectionReadRepository for PendingMinimalCandidateSelectio
     }
 }
 
+struct CachedToggleMinimalCandidateSelectionReadRepository {
+    row: StoredMinimalCandidateSelectionRow,
+    active: AtomicBool,
+    cached_rows_by_api_format: Mutex<HashMap<String, Vec<StoredMinimalCandidateSelectionRow>>>,
+}
+
+impl CachedToggleMinimalCandidateSelectionReadRepository {
+    fn new(row: StoredMinimalCandidateSelectionRow) -> Self {
+        Self {
+            row,
+            active: AtomicBool::new(true),
+            cached_rows_by_api_format: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::SeqCst);
+    }
+
+    fn rows_for_api_format(&self, api_format: &str) -> Vec<StoredMinimalCandidateSelectionRow> {
+        let api_format = api_format.trim().to_string();
+        let mut cached = self
+            .cached_rows_by_api_format
+            .lock()
+            .expect("candidate row cache lock");
+        if let Some(rows) = cached.get(&api_format) {
+            return rows.clone();
+        }
+
+        let rows = if self.active.load(Ordering::SeqCst)
+            && self
+                .row
+                .endpoint_api_format
+                .eq_ignore_ascii_case(&api_format)
+        {
+            vec![self.row.clone()]
+        } else {
+            Vec::new()
+        };
+        cached.insert(api_format, rows.clone());
+        rows
+    }
+}
+
+#[async_trait]
+impl MinimalCandidateSelectionReadRepository
+    for CachedToggleMinimalCandidateSelectionReadRepository
+{
+    fn clear_local_cache(&self) {
+        self.cached_rows_by_api_format
+            .lock()
+            .expect("candidate row cache lock")
+            .clear();
+    }
+
+    async fn list_for_exact_api_format(
+        &self,
+        api_format: &str,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        Ok(self.rows_for_api_format(api_format))
+    }
+
+    async fn list_for_exact_api_format_and_global_model(
+        &self,
+        api_format: &str,
+        global_model_name: &str,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        Ok(self
+            .rows_for_api_format(api_format)
+            .into_iter()
+            .filter(|row| row.global_model_name == global_model_name)
+            .collect())
+    }
+
+    async fn list_for_exact_api_format_and_requested_model(
+        &self,
+        api_format: &str,
+        requested_model_name: &str,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        Ok(self
+            .rows_for_api_format(api_format)
+            .into_iter()
+            .filter(|row| row.global_model_name == requested_model_name)
+            .collect())
+    }
+
+    async fn list_for_exact_api_format_and_requested_model_page(
+        &self,
+        query: &StoredRequestedModelCandidateRowsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        Ok(self
+            .rows_for_api_format(&query.api_format)
+            .into_iter()
+            .filter(|row| row.global_model_name == query.requested_model_name)
+            .skip(query.offset as usize)
+            .take(query.limit as usize)
+            .collect())
+    }
+
+    async fn list_pool_key_rows_for_group(
+        &self,
+        _query: &StoredPoolKeyCandidateRowsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_pool_key_rows_for_group_key_ids(
+        &self,
+        _query: &StoredPoolKeyCandidateRowsByKeyIdsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        Ok(Vec::new())
+    }
+}
+
 #[tokio::test]
 async fn gateway_handles_public_openai_models_without_hitting_fallback_probe() {
     let fallback_probe_hits = Arc::new(Mutex::new(0usize));
@@ -238,6 +358,102 @@ async fn gateway_handles_public_openai_models_without_hitting_fallback_probe() {
 
     gateway_handle.abort();
     fallback_probe_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_openai_models_list_drops_disabled_global_model_after_cache_invalidation() {
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-openai-models-cache")),
+        unrestricted_models_snapshot("key-models-cache", "user-models-cache"),
+    )]));
+    let row = sample_models_candidate_row(
+        "provider-openai-cache",
+        "openai",
+        "openai:chat",
+        "gpt-5",
+        10,
+    );
+    let global_model_id = row.global_model_id.clone();
+    let candidate_repository = Arc::new(CachedToggleMinimalCandidateSelectionReadRepository::new(
+        row.clone(),
+    ));
+    let global_model_repository = Arc::new(
+        InMemoryGlobalModelReadRepository::seed(Vec::new()).with_admin_global_models(vec![
+            StoredAdminGlobalModel::new(
+                global_model_id.clone(),
+                row.global_model_name.clone(),
+                "GPT 5".to_string(),
+                true,
+                None,
+                None,
+                None,
+                None,
+                0,
+                1,
+                0,
+                Some(1_711_000_000),
+                Some(1_711_000_000),
+            )
+            .expect("global model should build"),
+        ]),
+    );
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
+                candidate_repository.clone(),
+                auth_repository,
+            )
+            .with_global_model_repository_for_tests(global_model_repository),
+        );
+    let gateway = build_router_with_state(state.clone());
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(format!("{gateway_url}/v1/models"))
+        .header("authorization", "Bearer sk-openai-models-cache")
+        .send()
+        .await
+        .expect("initial models request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["data"][0]["id"], "gpt-5");
+
+    candidate_repository.set_active(false);
+    let disabled_global_model = UpdateAdminGlobalModelRecord::new(
+        global_model_id,
+        "GPT 5".to_string(),
+        false,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("global model update record should build");
+    state
+        .update_admin_global_model(&disabled_global_model)
+        .await
+        .expect("global model update should succeed")
+        .expect("global model should update");
+
+    let response = client
+        .get(format!("{gateway_url}/v1/models"))
+        .header("authorization", "Bearer sk-openai-models-cache")
+        .send()
+        .await
+        .expect("models request after disable should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(
+        payload["data"]
+            .as_array()
+            .expect("data should be an array")
+            .len(),
+        0
+    );
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]

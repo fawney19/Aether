@@ -52,17 +52,12 @@
                 <SelectValue placeholder="状态" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">
-                  全部
-                </SelectItem>
-                <SelectItem value="active">
-                  可调度
-                </SelectItem>
-                <SelectItem value="cooldown">
-                  冷却中
-                </SelectItem>
-                <SelectItem value="inactive">
-                  禁用
+                <SelectItem
+                  v-for="item in poolKeyStatusFilterOptions"
+                  :key="`mobile-${item.value}`"
+                  :value="item.value"
+                >
+                  {{ item.label }}
                 </SelectItem>
               </SelectContent>
             </Select>
@@ -1695,9 +1690,21 @@ const showDemandMetricsDialog = ref(false)
 const providerDemandMetricSamples = ref<PoolDemandMetricSample[]>([])
 const poolKeyStatusFilterOptions: Array<{ value: PoolManagementViewState['status'], label: string }> = [
   { value: 'all', label: '全部状态' },
-  { value: 'active', label: '可调度' },
+  { value: 'available', label: '可用' },
   { value: 'cooldown', label: '冷却中' },
-  { value: 'inactive', label: '禁用' },
+  { value: 'inactive', label: '已禁用' },
+  { value: 'invalid', label: '已失效' },
+  { value: 'expired', label: '已过期' },
+  { value: 'account_banned', label: '账号封禁' },
+  { value: 'quota_exhausted', label: '额度耗尽' },
+  { value: 'account_forbidden', label: '访问受限' },
+  { value: 'account_disabled', label: '账号停用' },
+  { value: 'workspace_deactivated', label: '工作区停用' },
+  { value: 'account_verification', label: '需要验证' },
+  { value: 'account_quarantined', label: '账号隔离' },
+  { value: 'account_blocked', label: '账号异常' },
+  { value: 'rate_limited', label: '速率受限' },
+  { value: 'cost_exhausted', label: '超限' },
 ]
 const poolScoreHardStateOptions = [
   { value: 'all', label: '全部状态' },
@@ -2667,7 +2674,7 @@ async function loadKeys(options: { cacheTtlMs?: number } = {}) {
   const page = currentPage.value
   const pageSizeValue = pageSize.value
   const search = searchQuery.value || undefined
-  const status = statusFilter.value as 'all' | 'active' | 'cooldown' | 'inactive'
+  const status = statusFilter.value
   const sortByValue = sortBy.value || undefined
   keysLoading.value = true
   try {
@@ -3427,6 +3434,7 @@ function getVisibleSchedulingReasons(key: PoolKeyDetail) {
 
 function getSchedulingStatus(key: PoolKeyDetail): 'available' | 'degraded' | 'blocked' {
   if (getAccountAlertLabel(key)) return 'blocked'
+  if (getBlockingOAuthStatusLabel(key)) return 'blocked'
 
   const status = key.scheduling_status
   if (
@@ -3472,9 +3480,23 @@ function getOAuthStatusBadgeLabel(status: ReturnType<typeof getVisibleOAuthState
   return '有效'
 }
 
+function getBlockingOAuthStatusLabel(key: PoolKeyDetail): string | null {
+  const oauthState = getVisibleOAuthState(key)
+  if (!oauthState?.isInvalid && !oauthState?.isExpired) return null
+  return getOAuthStatusBadgeLabel(oauthState)
+}
+
+function isPoolKeyCostExhausted(key: PoolKeyDetail): boolean {
+  return key.cost_limit != null
+    && key.cost_limit > 0
+    && key.cost_window_usage >= key.cost_limit
+}
+
 function getSchedulingBadgeLabel(key: PoolKeyDetail): string {
   const accountAlert = getAccountAlertLabel(key)
   if (accountAlert) return compactPoolStatusLabel(accountAlert) || accountAlert
+  const oauthAlert = getBlockingOAuthStatusLabel(key)
+  if (oauthAlert) return oauthAlert
 
   const rawLabel = String(key.scheduling_label || '').trim()
   if (
@@ -3482,24 +3504,28 @@ function getSchedulingBadgeLabel(key: PoolKeyDetail): string {
     && !isHealthDerivedSchedulingReason(key.scheduling_reason)
     && !isHealthDerivedSchedulingLabel(rawLabel)
   ) {
+    if ((rawLabel === '可用' || key.scheduling_reason === 'available') && isPoolKeyCostExhausted(key)) {
+      return '超限'
+    }
     if (rawLabel === '禁用' || rawLabel === '停用') return '禁用'
     return compactPoolStatusLabel(rawLabel) || rawLabel
   }
 
-  if (!key.is_active) return '禁用'
+  if (!key.is_active) return '已禁用'
   if (key.cooldown_reason) return '冷却中'
-  if (key.cost_limit != null && key.cost_limit > 0 && key.cost_window_usage >= key.cost_limit) return '超限'
   return '可用'
 }
 
 function getSchedulingBadgeVariant(key: PoolKeyDetail): PoolStatusVariant {
   if (getAccountAlertLabel(key)) return 'destructive'
+  if (getBlockingOAuthStatusLabel(key)) return 'destructive'
 
   const reason = getVisibleSchedulingReason(key)
   if (reason === 'manual_disabled' || reason === 'inactive') return 'secondary'
   if (reason === 'account_blocked' || reason === 'account_quota_exhausted' || reason === 'cost_exhausted') return 'destructive'
   if (reason === 'cooldown') return 'warning'
   if (reason === 'cost_soft' || reason === 'cost') return 'warning'
+  if (isPoolKeyCostExhausted(key)) return 'destructive'
   if (reason === 'available') return 'default'
   if (!reason && !key.is_active) return 'secondary'
 
@@ -3512,6 +3538,7 @@ function getSchedulingBadgeVariant(key: PoolKeyDetail): PoolStatusVariant {
 function getSchedulingTitle(key: PoolKeyDetail): string {
   const accountAlertTitle = getAccountAlertTitle(key)
   if (accountAlertTitle) return accountAlertTitle
+  if (getBlockingOAuthStatusLabel(key)) return getOAuthStatusTitle(key)
 
   const reasons = getVisibleSchedulingReasons(key)
   if (reasons.length > 0) {
@@ -3526,6 +3553,7 @@ function getSchedulingTitle(key: PoolKeyDetail): string {
     const ttl = key.cooldown_ttl_seconds ? ` (${formatTTL(key.cooldown_ttl_seconds)})` : ''
     return `${formatCooldownReason(key.cooldown_reason)}${ttl}`
   }
+  if (isPoolKeyCostExhausted(key)) return '超限'
   return getSchedulingBadgeLabel(key)
 }
 

@@ -9,6 +9,36 @@ use http::header::{HeaderName, HeaderValue};
 use http::StatusCode;
 use serde_json::json;
 
+fn run_async_test_on_large_stack<F>(name: &'static str, future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime should build")
+                .block_on(future);
+        })
+        .expect("large-stack sync chat test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+macro_rules! large_stack_async_test {
+    ($test_name:ident, $impl_name:ident) => {
+        #[test]
+        fn $test_name() {
+            run_async_test_on_large_stack(stringify!($test_name), $impl_name());
+        }
+    };
+}
+
 use crate::constants::{
     CONTROL_EXECUTED_HEADER, CONTROL_EXECUTE_FALLBACK_HEADER, DEPENDENCY_REASON_HEADER,
     EXECUTION_PATH_EXECUTION_RUNTIME_STREAM, EXECUTION_PATH_EXECUTION_RUNTIME_SYNC,
@@ -39,30 +69,6 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use sha2::{Digest, Sha256};
-
-const OPENAI_CHAT_SYNC_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
-
-fn run_openai_chat_sync_test<F, Fut>(test_name: &'static str, make_future: F)
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()> + 'static,
-{
-    let handle = std::thread::Builder::new()
-        .name(test_name.to_string())
-        .stack_size(OPENAI_CHAT_SYNC_TEST_STACK_BYTES)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("test runtime should build");
-            runtime.block_on(make_future());
-        })
-        .expect("openai chat sync test thread should spawn");
-
-    if let Err(payload) = handle.join() {
-        std::panic::resume_unwind(payload);
-    }
-}
 
 mod failover;
 mod local_decision;

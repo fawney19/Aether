@@ -621,10 +621,10 @@ fn build_claude_models_url(base_url: &str) -> Option<String> {
         return None;
     }
 
-    let mut url = if trimmed_base_url.ends_with("/v1") {
-        format!("{trimmed_base_url}/models")
+    let mut url = if trimmed_base_url.ends_with("/models") {
+        trimmed_base_url.to_string()
     } else {
-        format!("{trimmed_base_url}/v1/models")
+        format!("{trimmed_base_url}/models")
     };
     if let Some(query) = base_query.filter(|value| !value.trim().is_empty()) {
         url.push('?');
@@ -991,7 +991,7 @@ mod tests {
         assert_eq!(
             build_models_fetch_url("openai", "openai:responses", "https://example.com"),
             Some((
-                "https://example.com/v1/models".to_string(),
+                "https://example.com/models".to_string(),
                 "openai:responses".to_string()
             ))
         );
@@ -1058,7 +1058,14 @@ mod tests {
         assert_eq!(
             build_models_fetch_url("openai", "openai:chat", "https://proxy.example.com"),
             Some((
-                "https://proxy.example.com/v1/models".to_string(),
+                "https://proxy.example.com/models".to_string(),
+                "openai:chat".to_string()
+            ))
+        );
+        assert_eq!(
+            build_models_fetch_url("openai", "openai:chat", "https://api.deepseek.com"),
+            Some((
+                "https://api.deepseek.com/models".to_string(),
                 "openai:chat".to_string()
             ))
         );
@@ -1076,7 +1083,7 @@ mod tests {
                 "https://proxy.example.com/api"
             ),
             Some((
-                "https://proxy.example.com/api/v1/models".to_string(),
+                "https://proxy.example.com/api/models".to_string(),
                 "claude:messages".to_string()
             ))
         );

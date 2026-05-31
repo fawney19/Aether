@@ -52,11 +52,15 @@ async fn gateway_handles_internal_tunnel_heartbeat_locally_with_loopback() {
             "heartbeat_id": 77,
             "heartbeat_interval": 45,
             "active_connections": 5,
-            "total_requests": 9,
+            "total_requests": 100,
             "avg_latency_ms": 12.5,
-            "failed_requests": 1,
-            "dns_failures": 2,
-            "stream_errors": 3,
+            "failed_requests": 20,
+            "dns_failures": 30,
+            "stream_errors": 40,
+            "window_total_requests": 9,
+            "window_failed_requests": 1,
+            "window_dns_failures": 2,
+            "window_stream_errors": 3,
             "proxy_metadata": {"arch": "arm64"},
             "proxy_version": "2.0.0",
         }))
@@ -71,6 +75,15 @@ async fn gateway_handles_internal_tunnel_heartbeat_locally_with_loopback() {
     assert_eq!(payload["upgrade_to"], "1.2.3");
     assert_eq!(payload["remote_config"]["allowed_ports"][0], 443);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+    let node = repository
+        .find_proxy_node("node-123")
+        .await
+        .expect("node lookup should succeed")
+        .expect("node should exist");
+    assert_eq!(node.total_requests, 9);
+    assert_eq!(node.failed_requests, 1);
+    assert_eq!(node.dns_failures, 2);
+    assert_eq!(node.stream_errors, 3);
 
     gateway_handle.abort();
     upstream_handle.abort();

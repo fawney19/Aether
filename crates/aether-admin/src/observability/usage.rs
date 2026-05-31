@@ -19,7 +19,23 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use url::form_urlencoded;
 
+pub use aether_contracts::USAGE_SERVER_NOW_UNIX_MS_HEADER;
+
 pub const ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL: &str = "Admin usage data unavailable";
+
+pub fn usage_server_now_unix_ms() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default()
+}
+
+pub fn attach_usage_server_now_header(mut response: Response<Body>) -> Response<Body> {
+    if let Ok(value) = http::HeaderValue::from_str(&usage_server_now_unix_ms().to_string()) {
+        response.headers_mut().insert(
+            http::HeaderName::from_static(USAGE_SERVER_NOW_UNIX_MS_HEADER),
+            value,
+        );
+    }
+    response
+}
 
 pub fn admin_usage_data_unavailable_response(detail: &'static str) -> Response<Body> {
     (
@@ -2275,7 +2291,7 @@ pub fn build_admin_usage_active_requests_response(
         })
         .collect();
 
-    Json(json!({ "requests": payload })).into_response()
+    attach_usage_server_now_header(Json(json!({ "requests": payload })).into_response())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2305,13 +2321,15 @@ pub fn build_admin_usage_records_response(
         })
         .collect();
 
-    Json(json!({
-        "records": records,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-    }))
-    .into_response()
+    attach_usage_server_now_header(
+        Json(json!({
+            "records": records,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }))
+        .into_response(),
+    )
 }
 
 pub fn build_admin_usage_curl_response(
@@ -2503,6 +2521,7 @@ pub fn build_admin_usage_replay_plan_response(
 mod tests {
     use std::collections::BTreeMap;
 
+    use axum::{body::Body, response::Response};
     use serde_json::json;
 
     use super::{
@@ -2510,7 +2529,10 @@ mod tests {
         admin_usage_has_fallback, admin_usage_is_failed, admin_usage_is_success,
         admin_usage_matches_search, admin_usage_matches_status, admin_usage_matches_username,
         admin_usage_record_json, admin_usage_resolve_request_capture_body,
-        admin_usage_total_tokens, admin_usage_upstream_is_stream, build_admin_usage_detail_payload,
+        admin_usage_total_tokens, admin_usage_upstream_is_stream,
+        build_admin_usage_active_requests_response, build_admin_usage_detail_payload,
+        build_admin_usage_records_response, usage_server_now_unix_ms,
+        USAGE_SERVER_NOW_UNIX_MS_HEADER,
     };
     use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageBodyField};
 
@@ -2558,6 +2580,62 @@ mod tests {
             Some(102),
         )
         .expect("usage should build")
+    }
+
+    #[test]
+    fn usage_server_now_unix_ms_uses_epoch_millis() {
+        let before = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
+        let value = usage_server_now_unix_ms();
+        let after = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
+
+        assert!(value >= before);
+        assert!(value <= after);
+        assert!(value > 1_000_000_000_000);
+    }
+
+    fn assert_usage_server_now_header(response: &Response<Body>) {
+        let value = response
+            .headers()
+            .get(USAGE_SERVER_NOW_UNIX_MS_HEADER)
+            .expect("usage response should include server now header")
+            .to_str()
+            .expect("server now header should be valid ASCII")
+            .parse::<u64>()
+            .expect("server now header should be epoch millis");
+
+        assert!(value > 1_000_000_000_000);
+    }
+
+    #[test]
+    fn admin_usage_records_response_sets_server_now_header() {
+        let item = sample_usage("completed", Some(200), None);
+        let response = build_admin_usage_records_response(
+            &[item],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            true,
+            true,
+            &BTreeMap::new(),
+            1,
+            20,
+            0,
+        );
+
+        assert_usage_server_now_header(&response);
+    }
+
+    #[test]
+    fn admin_usage_active_response_sets_server_now_header() {
+        let item = sample_usage("streaming", Some(200), None);
+        let response = build_admin_usage_active_requests_response(
+            &[item],
+            &BTreeMap::new(),
+            true,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+
+        assert_usage_server_now_header(&response);
     }
 
     #[test]

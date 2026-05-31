@@ -486,7 +486,7 @@ async fn gateway_converts_gemini_image_sync_to_openai_image_provider_impl() {
         StoredProviderCatalogProvider::new(
             "provider-openai-image-bridge-1".to_string(),
             "openai".to_string(),
-            Some("https://api.openai.com".to_string()),
+            Some("https://api.openai.com/v1".to_string()),
             "openai".to_string(),
         )
         .expect("provider should build")
@@ -514,7 +514,7 @@ async fn gateway_converts_gemini_image_sync_to_openai_image_provider_impl() {
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://api.openai.com".to_string(),
+            "https://api.openai.com/v1".to_string(),
             None,
             None,
             Some(2),

@@ -53,6 +53,16 @@ pub(super) async fn resolve_cached_transport_ranking_facts<'a>(
     facts
 }
 
+pub(super) async fn candidate_keeps_priority_on_conversion(
+    state: PlannerAppState<'_>,
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    ordering_config: SchedulerOrderingConfig,
+) -> bool {
+    resolve_candidate_transport_ranking_facts(state, candidate, ordering_config)
+        .await
+        .keep_priority_on_conversion
+}
+
 async fn resolve_candidate_transport_ranking_facts(
     state: PlannerAppState<'_>,
     candidate: &SchedulerMinimalCandidateSelectionCandidate,

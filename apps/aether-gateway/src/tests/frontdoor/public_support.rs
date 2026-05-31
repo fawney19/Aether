@@ -11,10 +11,10 @@ use super::{
 };
 use crate::data::GatewayDataState;
 use crate::tests::{
-    any, build_router, build_router_with_state, json, start_server, to_bytes, AppState, Arc, Body,
-    Json, Mutex, Request, Router, StatusCode, CONTROL_ROUTE_FAMILY_HEADER,
-    CONTROL_ROUTE_KIND_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
-    TRUSTED_ADMIN_USER_ROLE_HEADER,
+    any, assert_usage_server_now_header_between, build_router, build_router_with_state, json,
+    start_server, to_bytes, unix_epoch_millis_for_tests, AppState, Arc, Body, Json, Mutex, Request,
+    Router, StatusCode, CONTROL_ROUTE_FAMILY_HEADER, CONTROL_ROUTE_KIND_HEADER,
+    TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER, TRUSTED_ADMIN_USER_ROLE_HEADER,
 };
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::announcements::{AnnouncementListQuery, AnnouncementReadRepository};
@@ -1932,7 +1932,7 @@ async fn gateway_handles_public_test_connection_without_hitting_fallback_probe()
     let provider_hits = Arc::new(Mutex::new(0usize));
     let provider_hits_clone = Arc::clone(&provider_hits);
     let provider = Router::new().route(
-        "/v1/chat/completions",
+        "/chat/completions",
         any(move |request: Request| {
             let provider_hits_inner = Arc::clone(&provider_hits_clone);
             async move {
@@ -5345,6 +5345,7 @@ async fn gateway_handles_users_me_usage_locally_without_proxying_upstream() {
         })
         .await;
 
+    let client_send_unix_ms = unix_epoch_millis_for_tests();
     let response = reqwest::Client::new()
         .get(format!(
             "{gateway_url}/api/users/me/usage?limit=10&offset=0&search=renamed-key"
@@ -5355,9 +5356,17 @@ async fn gateway_handles_users_me_usage_locally_without_proxying_upstream() {
         .send()
         .await
         .expect("request should succeed");
+    let client_receive_unix_ms = unix_epoch_millis_for_tests();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let response_headers = response.headers().clone();
+    assert_usage_server_now_header_between(
+        &response_headers,
+        client_send_unix_ms,
+        client_receive_unix_ms,
+    );
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert!(payload.get("server_now_unix_ms").is_none());
     assert_eq!(payload["total_requests"], 2);
     assert_eq!(payload["total_input_tokens"], 240);
     assert_eq!(payload["pagination"]["total"], 3);
@@ -5667,6 +5676,7 @@ async fn gateway_handles_users_me_usage_active_locally_without_proxying_upstream
         )
         .await;
 
+    let client_send_unix_ms = unix_epoch_millis_for_tests();
     let response = reqwest::Client::new()
         .get(format!("{gateway_url}/api/users/me/usage/active"))
         .header("authorization", format!("Bearer {access_token}"))
@@ -5675,9 +5685,17 @@ async fn gateway_handles_users_me_usage_active_locally_without_proxying_upstream
         .send()
         .await
         .expect("request should succeed");
+    let client_receive_unix_ms = unix_epoch_millis_for_tests();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let response_headers = response.headers().clone();
+    assert_usage_server_now_header_between(
+        &response_headers,
+        client_send_unix_ms,
+        client_receive_unix_ms,
+    );
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert!(payload.get("server_now_unix_ms").is_none());
     let requests = payload["requests"].as_array().expect("requests array");
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0]["status"], "streaming");

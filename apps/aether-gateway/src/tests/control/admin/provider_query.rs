@@ -175,7 +175,7 @@ async fn gateway_handles_admin_provider_query_models_fetches_upstream_for_select
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://api.openai.example".to_string(),
+            "https://api.openai.example/v1".to_string(),
             None,
             None,
             None,
@@ -432,7 +432,7 @@ async fn gateway_handles_admin_provider_query_models_with_openai_responses_endpo
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://api.openai.example".to_string(),
+            "https://api.openai.example/v1".to_string(),
             None,
             None,
             None,
@@ -649,7 +649,7 @@ async fn gateway_handles_admin_provider_query_models_respecting_key_api_formats(
             )
             .expect("endpoint should build")
             .with_transport_fields(
-                "https://api.openai.example".to_string(),
+                "https://api.openai.example/v1".to_string(),
                 None,
                 None,
                 None,
@@ -669,7 +669,7 @@ async fn gateway_handles_admin_provider_query_models_respecting_key_api_formats(
             )
             .expect("endpoint should build")
             .with_transport_fields(
-                "https://api.openai.example".to_string(),
+                "https://api.openai.example/v1".to_string(),
                 None,
                 None,
                 None,
@@ -798,7 +798,7 @@ async fn gateway_handles_admin_provider_query_models_aggregating_active_keys() {
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://api.openai.example".to_string(),
+            "https://api.openai.example/v1".to_string(),
             None,
             None,
             None,
@@ -1007,7 +1007,7 @@ async fn gateway_handles_admin_provider_query_test_model_locally_with_trusted_ad
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![sample_key(
             "key-openai-primary",
@@ -1066,7 +1066,7 @@ async fn gateway_handles_admin_provider_query_embedding_model_test() {
             assert_eq!(plan.key_id, "key-siliconflow-embedding");
             assert_eq!(plan.client_api_format, "openai:embedding");
             assert_eq!(plan.provider_api_format, "openai:embedding");
-            assert_eq!(plan.url, "https://api.siliconflow.example/v1/embeddings");
+            assert_eq!(plan.url, "https://api.siliconflow.example/embeddings");
             assert_eq!(plan.model_name.as_deref(), Some("Qwen/Qwen3-Embedding-4B"));
             assert!(!plan.stream);
             assert_eq!(
@@ -1546,7 +1546,7 @@ async fn gateway_handles_admin_provider_query_jina_embedding_model_test() {
             assert_eq!(plan.key_id, "key-jina-embedding");
             assert_eq!(plan.client_api_format, "openai:embedding");
             assert_eq!(plan.provider_api_format, "jina:embedding");
-            assert_eq!(plan.url, "https://api.jina.example/v1/embeddings");
+            assert_eq!(plan.url, "https://api.jina.example/embeddings");
             assert_eq!(plan.model_name.as_deref(), Some("jina-embeddings-v3"));
             assert!(!plan.stream);
             assert_eq!(
@@ -1775,7 +1775,7 @@ async fn gateway_handles_admin_provider_query_rerank_model_test() {
             assert_eq!(plan.key_id, "key-jina-rerank");
             assert_eq!(plan.client_api_format, "openai:rerank");
             assert_eq!(plan.provider_api_format, "jina:rerank");
-            assert_eq!(plan.url, "https://api.jina.example/v1/rerank");
+            assert_eq!(plan.url, "https://api.jina.example/rerank");
             assert_eq!(
                 plan.model_name.as_deref(),
                 Some("jina-reranker-v2-base-multilingual")
@@ -2736,7 +2736,7 @@ async fn gateway_handles_admin_provider_query_test_model_failover_locally_with_t
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![
             sample_key(
@@ -3504,7 +3504,7 @@ async fn gateway_handles_non_kiro_multi_model_failover_locally() {
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![sample_key(
             "key-openai-primary",
@@ -3799,7 +3799,7 @@ async fn gateway_handles_openai_image_test_model_locally() {
             "endpoint-openai-image",
             "provider-openai",
             "openai:image",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![sample_key(
             "key-openai-image",
@@ -4112,13 +4112,13 @@ async fn gateway_prefers_supported_non_kiro_endpoint_when_api_format_is_omitted(
                 "endpoint-openai-cli",
                 "provider-openai",
                 "openai:responses",
-                "https://api.openai.example",
+                "https://api.openai.example/v1",
             ),
             sample_endpoint(
                 "endpoint-openai-chat",
                 "provider-openai",
                 "openai:chat",
-                "https://api.openai.example",
+                "https://api.openai.example/v1",
             ),
         ],
         vec![
@@ -4215,7 +4215,7 @@ async fn gateway_prefers_transport_supported_non_kiro_endpoint_when_api_format_i
         "endpoint-openai-chat-unsupported",
         "provider-openai",
         "openai:chat",
-        "https://api.openai.example",
+        "https://api.openai.example/v1",
     );
     unsupported_endpoint.header_rules = Some(json!({"invalid": true}));
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
@@ -4226,7 +4226,7 @@ async fn gateway_prefers_transport_supported_non_kiro_endpoint_when_api_format_i
                 "endpoint-openai-chat-supported",
                 "provider-openai",
                 "openai:chat",
-                "https://api.openai.example",
+                "https://api.openai.example/v1",
             ),
         ],
         vec![sample_key(
@@ -4322,7 +4322,7 @@ async fn gateway_prefers_supported_non_kiro_endpoint_with_compatible_key_when_ap
                 "endpoint-openai-chat",
                 "provider-openai",
                 "openai:chat",
-                "https://api.openai.example",
+                "https://api.openai.example/v1",
             ),
         ],
         vec![sample_key(
@@ -4411,13 +4411,13 @@ async fn gateway_uses_compatible_cli_endpoint_when_api_format_is_omitted() {
                 "endpoint-openai-chat",
                 "provider-openai",
                 "openai:chat",
-                "https://api.openai.example",
+                "https://api.openai.example/v1",
             ),
             sample_endpoint(
                 "endpoint-openai-cli",
                 "provider-openai",
                 "openai:responses",
-                "https://api.openai.example",
+                "https://api.openai.example/v1",
             ),
         ],
         vec![sample_key(
@@ -4503,14 +4503,14 @@ async fn gateway_uses_runnable_cli_endpoint_after_chat_preference_when_api_forma
         "endpoint-openai-chat-unsupported",
         "provider-openai",
         "openai:chat",
-        "https://api.openai.example",
+        "https://api.openai.example/v1",
     );
     unsupported_chat_endpoint.header_rules = Some(json!({"invalid": true}));
     let cli_endpoint = sample_endpoint(
         "endpoint-openai-cli-runnable",
         "provider-openai",
         "openai:responses",
-        "https://api.openai.example",
+        "https://api.openai.example/v1",
     );
     let mut shared_key = sample_key(
         "key-openai-shared",
@@ -4604,7 +4604,7 @@ async fn gateway_handles_openai_responses_test_model_failover_locally() {
             "endpoint-openai-cli",
             "provider-openai",
             "openai:responses",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![sample_key(
             "key-openai-cli",
@@ -4698,7 +4698,7 @@ async fn gateway_handles_claude_cli_test_model_locally() {
             "endpoint-claude-cli",
             "provider-claude",
             "claude:messages",
-            "https://api.anthropic.example",
+            "https://api.anthropic.example/v1",
         )],
         vec![sample_key(
             "key-claude-cli",
@@ -4786,7 +4786,7 @@ async fn gateway_uses_compatible_claude_cli_endpoint_when_api_format_is_omitted(
             "endpoint-claude-cli",
             "provider-claude",
             "claude:messages",
-            "https://api.anthropic.example",
+            "https://api.anthropic.example/v1",
         )],
         vec![sample_key(
             "key-claude-cli",
@@ -4875,7 +4875,7 @@ async fn gateway_handles_claude_cli_test_model_failover_locally() {
             "endpoint-claude-cli",
             "provider-claude",
             "claude:messages",
-            "https://api.anthropic.example",
+            "https://api.anthropic.example/v1",
         )],
         vec![sample_key(
             "key-claude-cli",
@@ -5653,7 +5653,7 @@ async fn gateway_handles_admin_provider_query_test_model_failover_with_single_mo
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![sample_key(
             "key-openai-alias",
@@ -5766,7 +5766,7 @@ async fn gateway_retries_non_kiro_failover_after_http_error_without_message() {
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![
             sample_key(
@@ -5886,7 +5886,7 @@ async fn gateway_retries_non_kiro_failover_after_success_status_without_body() {
             "endpoint-openai-chat",
             "provider-openai",
             "openai:chat",
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![
             sample_key(

@@ -1068,7 +1068,7 @@ async fn gateway_routes_openai_responses_stream_image_intent_to_openai_image_pla
             "responses-stream-image-bridge",
             "image-provider",
             "custom",
-            "https://images.example.com",
+            "https://images.example.com/v1",
             execution_runtime_url,
         )
         .await;

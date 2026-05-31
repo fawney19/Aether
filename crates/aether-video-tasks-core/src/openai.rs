@@ -15,6 +15,14 @@ use crate::{
     DEFAULT_VIDEO_TASK_POLL_INTERVAL_SECONDS,
 };
 
+fn openai_video_resource_url(api_root: &str, suffix: &str) -> String {
+    format!(
+        "{}/videos/{}",
+        api_root.trim_end_matches('/'),
+        suffix.trim_start_matches('/')
+    )
+}
+
 pub fn map_openai_stored_task_to_read_response(
     task: StoredVideoTask,
 ) -> LocalVideoTaskReadResponse {
@@ -187,10 +195,9 @@ impl OpenAiVideoTaskSeed {
                 headers.remove("content-type");
                 headers.remove("content-length");
                 (
-                    format!(
-                        "{}/v1/videos/{}/content",
-                        self.transport.upstream_base_url.trim_end_matches('/'),
-                        self.upstream_task_id
+                    openai_video_resource_url(
+                        &self.transport.upstream_base_url,
+                        format!("{}/content", self.upstream_task_id).as_str(),
                     ),
                     headers,
                 )
@@ -200,10 +207,9 @@ impl OpenAiVideoTaskSeed {
             headers.remove("content-type");
             headers.remove("content-length");
             (
-                format!(
-                    "{}/v1/videos/{}/content?variant={variant}",
-                    self.transport.upstream_base_url.trim_end_matches('/'),
-                    self.upstream_task_id
+                openai_video_resource_url(
+                    &self.transport.upstream_base_url,
+                    format!("{}/content?variant={variant}", self.upstream_task_id).as_str(),
                 ),
                 headers,
             )
@@ -322,10 +328,9 @@ impl OpenAiVideoTaskSeed {
                 endpoint_id: self.transport.endpoint_id.clone(),
                 key_id: self.transport.key_id.clone(),
                 method: "DELETE".to_string(),
-                url: format!(
-                    "{}/v1/videos/{}",
-                    self.transport.upstream_base_url.trim_end_matches('/'),
-                    self.upstream_task_id
+                url: openai_video_resource_url(
+                    &self.transport.upstream_base_url,
+                    &self.upstream_task_id,
                 ),
                 headers,
                 content_type: None,
@@ -384,10 +389,9 @@ impl OpenAiVideoTaskSeed {
             endpoint_id: self.transport.endpoint_id.clone(),
             key_id: self.transport.key_id.clone(),
             method: "GET".to_string(),
-            url: format!(
-                "{}/v1/videos/{}",
-                self.transport.upstream_base_url.trim_end_matches('/'),
-                self.upstream_task_id
+            url: openai_video_resource_url(
+                &self.transport.upstream_base_url,
+                &self.upstream_task_id,
             ),
             headers,
             content_type: None,
@@ -448,10 +452,9 @@ impl OpenAiVideoTaskSeed {
                 endpoint_id: self.transport.endpoint_id.clone(),
                 key_id: self.transport.key_id.clone(),
                 method: "DELETE".to_string(),
-                url: format!(
-                    "{}/v1/videos/{}",
-                    self.transport.upstream_base_url.trim_end_matches('/'),
-                    self.upstream_task_id
+                url: openai_video_resource_url(
+                    &self.transport.upstream_base_url,
+                    &self.upstream_task_id,
                 ),
                 headers,
                 content_type: None,
@@ -547,10 +550,9 @@ impl OpenAiVideoTaskSeed {
                 endpoint_id: self.transport.endpoint_id.clone(),
                 key_id: self.transport.key_id.clone(),
                 method: "POST".to_string(),
-                url: format!(
-                    "{}/v1/videos/{}/remix",
-                    self.transport.upstream_base_url.trim_end_matches('/'),
-                    self.upstream_task_id
+                url: openai_video_resource_url(
+                    &self.transport.upstream_base_url,
+                    format!("{}/remix", self.upstream_task_id).as_str(),
                 ),
                 headers,
                 content_type: Some(content_type),

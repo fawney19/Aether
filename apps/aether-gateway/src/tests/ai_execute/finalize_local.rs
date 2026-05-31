@@ -365,7 +365,7 @@ async fn gateway_executes_openai_chat_sync_upstream_stream_via_local_finalize_re
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![sample_provider_catalog_provider()],
         vec![sample_provider_catalog_endpoint(
-            "https://api.openai.example",
+            "https://api.openai.example/v1",
         )],
         vec![sample_provider_catalog_key()],
     ));

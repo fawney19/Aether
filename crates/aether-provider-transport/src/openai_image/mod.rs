@@ -132,7 +132,7 @@ mod tests {
                 api_family: None,
                 endpoint_kind: None,
                 is_active: true,
-                base_url: "https://api.openai.com".to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
                 header_rules: None,
                 body_rules: None,
                 max_retries: None,

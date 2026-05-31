@@ -11,6 +11,7 @@ const MAX_ENTRIES: usize = 2048;
 const PREFIX_LOOKBACK_LIMIT: usize = 10;
 const TOKENS_PER_TOOL: u64 = 150;
 const TOKENS_PER_MESSAGE: u64 = 4;
+const INLINE_IMAGE_DATA_TOKEN_PLACEHOLDER: &str = "[inline-image-data]";
 pub(crate) const KIRO_SIMULATED_CACHE_ENABLED_CONTEXT_FIELD: &str = "kiro_simulated_cache_enabled";
 
 static KIRO_PROMPT_CACHE_TRACKER: OnceLock<KiroPromptCacheTracker> = OnceLock::new();
@@ -55,6 +56,12 @@ struct PendingBlock {
     is_message_end: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrefixCandidate {
+    fingerprint: [u8; 32],
+    cumulative_tokens: u64,
+}
+
 pub(crate) fn kiro_prompt_cache_tracker() -> &'static KiroPromptCacheTracker {
     KIRO_PROMPT_CACHE_TRACKER.get_or_init(KiroPromptCacheTracker::default)
 }
@@ -85,6 +92,7 @@ pub(crate) fn build_kiro_prompt_cache_profile(
     let mut active_ttl: Option<Duration> = None;
     let mut breakpoints = Vec::new();
     let mut seen_fingerprints = std::collections::BTreeSet::<[u8; 32]>::new();
+    let mut lookback_candidates = Vec::new();
 
     for block in flattened {
         cumulative_tokens = cumulative_tokens.saturating_add(block.tokens);
@@ -97,6 +105,12 @@ pub(crate) fn build_kiro_prompt_cache_profile(
         prefix_hasher.update(fingerprint);
 
         if let Some(ttl) = block.breakpoint_ttl {
+            push_lookback_breakpoints(
+                &mut breakpoints,
+                &mut seen_fingerprints,
+                &lookback_candidates,
+                ttl,
+            );
             active_ttl = Some(ttl);
             push_breakpoint(
                 &mut breakpoints,
@@ -117,6 +131,7 @@ pub(crate) fn build_kiro_prompt_cache_profile(
                 );
             }
         }
+        push_prefix_candidate(&mut lookback_candidates, fingerprint, cumulative_tokens);
     }
 
     let min_cacheable_tokens = minimum_cacheable_tokens_for_model(model);
@@ -180,10 +195,62 @@ fn count_messages_tokens(messages: &[Value]) -> u64 {
     if messages.is_empty() {
         return 0;
     }
-    serde_json::to_string(messages)
+    let token_estimation_messages = messages
+        .iter()
+        .map(redact_inline_image_data_for_token_estimation)
+        .collect::<Vec<_>>();
+    serde_json::to_string(&token_estimation_messages)
         .map(|value| count_text_tokens(&value))
         .unwrap_or_else(|_| messages.iter().map(count_message_tokens).sum::<u64>())
         .saturating_add(messages.len() as u64 * TOKENS_PER_MESSAGE)
+}
+
+fn redact_inline_image_data_for_token_estimation(value: &Value) -> Value {
+    redact_inline_image_data_value(value, false)
+}
+
+fn redact_inline_image_data_value(value: &Value, inside_image_source: bool) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| redact_inline_image_data_value(item, inside_image_source))
+                .collect(),
+        ),
+        Value::Object(object) => {
+            let image_block = object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("image"));
+            let image_source = inside_image_source || object_has_image_media_type(object);
+            let mut out = serde_json::Map::new();
+            for (key, inner) in object {
+                let redacted =
+                    if image_source && is_inline_image_data_key(key) && inner.as_str().is_some() {
+                        Value::String(INLINE_IMAGE_DATA_TOKEN_PLACEHOLDER.to_string())
+                    } else {
+                        let child_inside_image_source =
+                            image_block && key.eq_ignore_ascii_case("source");
+                        redact_inline_image_data_value(inner, child_inside_image_source)
+                    };
+                out.insert(key.clone(), redacted);
+            }
+            Value::Object(out)
+        }
+        other => other.clone(),
+    }
+}
+
+fn object_has_image_media_type(object: &serde_json::Map<String, Value>) -> bool {
+    object
+        .get("media_type")
+        .or_else(|| object.get("mediaType"))
+        .and_then(Value::as_str)
+        .is_some_and(|media_type| media_type.trim().to_ascii_lowercase().starts_with("image/"))
+}
+
+fn is_inline_image_data_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("data") || key.eq_ignore_ascii_case("bytes")
 }
 
 fn push_breakpoint(
@@ -199,6 +266,37 @@ fn push_breakpoint(
             cumulative_tokens,
             ttl,
         });
+    }
+}
+
+fn push_lookback_breakpoints(
+    breakpoints: &mut Vec<KiroPromptCacheBreakpoint>,
+    seen_fingerprints: &mut std::collections::BTreeSet<[u8; 32]>,
+    candidates: &[PrefixCandidate],
+    ttl: Duration,
+) {
+    for candidate in candidates {
+        push_breakpoint(
+            breakpoints,
+            seen_fingerprints,
+            candidate.fingerprint,
+            candidate.cumulative_tokens,
+            ttl,
+        );
+    }
+}
+
+fn push_prefix_candidate(
+    candidates: &mut Vec<PrefixCandidate>,
+    fingerprint: [u8; 32],
+    cumulative_tokens: u64,
+) {
+    candidates.push(PrefixCandidate {
+        fingerprint,
+        cumulative_tokens,
+    });
+    if candidates.len() > PREFIX_LOOKBACK_LIMIT {
+        candidates.remove(0);
     }
 }
 
@@ -536,7 +634,12 @@ impl KiroPromptCacheTracker {
         };
 
         let mut matched_tokens = 0;
-        for breakpoint in profile.breakpoints.iter().rev().take(PREFIX_LOOKBACK_LIMIT) {
+        for breakpoint in profile
+            .breakpoints
+            .iter()
+            .rev()
+            .take(PREFIX_LOOKBACK_LIMIT.saturating_add(1))
+        {
             let key = (credential_id.clone(), breakpoint.fingerprint);
             let Some(entry) = entries.get(&key) else {
                 continue;
@@ -706,6 +809,65 @@ mod tests {
     }
 
     #[test]
+    fn tracker_reads_cached_prefix_when_cache_control_moves_to_new_tail() {
+        let first = serde_json::json!({
+            "model": "claude-sonnet-4.6",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": long_text("shared first turn"),
+                    "cache_control": {"type": "ephemeral"}
+                }]
+            }]
+        });
+        let second = serde_json::json!({
+            "model": "claude-sonnet-4.6",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": long_text("shared first turn")
+                    }]
+                },
+                {
+                    "role": "assistant",
+                    "content": "cached response"
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": long_text("new tail turn"),
+                        "cache_control": {"type": "ephemeral"}
+                    }]
+                }
+            ]
+        });
+        let first_profile =
+            build_kiro_prompt_cache_profile(&first, estimate_kiro_prompt_input_tokens(&first))
+                .expect("first request should be cacheable");
+        let second_profile =
+            build_kiro_prompt_cache_profile(&second, estimate_kiro_prompt_input_tokens(&second))
+                .expect("second request should be cacheable");
+        let tracker = KiroPromptCacheTracker::default();
+        let start = Instant::now();
+
+        let created = tracker.compute_and_update_at("cred".to_string(), &first_profile, start);
+        assert!(created.cache_creation_input_tokens > 0);
+        assert_eq!(created.cache_read_input_tokens, 0);
+
+        let hit = tracker.compute_and_update_at(
+            "cred".to_string(),
+            &second_profile,
+            start + Duration::from_secs(60),
+        );
+        assert!(hit.cache_read_input_tokens > 0);
+        assert!(hit.cache_creation_input_tokens > 0);
+    }
+
+    #[test]
     fn billed_input_tokens_subtracts_cache_usage() {
         assert_eq!(
             billed_input_tokens(
@@ -817,6 +979,37 @@ mod tests {
 
         assert!(estimated > last_breakpoint_tokens);
         assert!(billed_input_tokens(estimated, usage) > 0);
+    }
+
+    #[test]
+    fn estimated_input_tokens_do_not_count_inline_image_base64_as_text() {
+        let request = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Please inspect this screenshot."
+                    },
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "a".repeat(200_000)
+                        }
+                    }
+                ]
+            }]
+        });
+
+        let estimated = estimate_kiro_prompt_input_tokens(&request);
+
+        assert!(
+            estimated < 1_000,
+            "estimated input tokens should ignore inline image bytes, got {estimated}"
+        );
     }
 
     #[test]

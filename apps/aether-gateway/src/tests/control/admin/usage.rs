@@ -33,6 +33,7 @@ use crate::constants::{
 };
 use crate::control::resolve_public_request_context;
 use crate::data::GatewayDataState;
+use crate::tests::{assert_usage_server_now_header_between, unix_epoch_millis_for_tests};
 
 const ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL: &str = "Admin usage data unavailable";
 const DAY_1_UNIX_SECS: i64 = 1_711_000_000;
@@ -1014,6 +1015,7 @@ async fn gateway_handles_admin_usage_active_locally_with_trusted_admin_principal
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
+    let client_send_unix_ms = unix_epoch_millis_for_tests();
     let response =
         admin_request(reqwest::Client::new().get(format!(
             "{gateway_url}/api/admin/usage/active?start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0"
@@ -1021,9 +1023,17 @@ async fn gateway_handles_admin_usage_active_locally_with_trusted_admin_principal
         .send()
         .await
         .expect("request should succeed");
+    let client_receive_unix_ms = unix_epoch_millis_for_tests();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let response_headers = response.headers().clone();
+    assert_usage_server_now_header_between(
+        &response_headers,
+        client_send_unix_ms,
+        client_receive_unix_ms,
+    );
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert!(payload.get("server_now_unix_ms").is_none());
     assert_eq!(payload["requests"].as_array().expect("array").len(), 1);
     assert_eq!(payload["requests"][0]["id"], "usage-pending");
     assert_eq!(payload["requests"][0]["effective_input_tokens"], 5);
@@ -1233,15 +1243,24 @@ async fn gateway_handles_admin_usage_records_locally_with_trusted_admin_principa
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
+    let client_send_unix_ms = unix_epoch_millis_for_tests();
     let response = admin_request(reqwest::Client::new().get(format!(
         "{gateway_url}/api/admin/usage/records?start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0&status=failed&provider=Anthropic&limit=10&offset=0"
     )))
     .send()
     .await
     .expect("request should succeed");
+    let client_receive_unix_ms = unix_epoch_millis_for_tests();
 
     assert_eq!(response.status(), StatusCode::OK);
+    let response_headers = response.headers().clone();
+    assert_usage_server_now_header_between(
+        &response_headers,
+        client_send_unix_ms,
+        client_receive_unix_ms,
+    );
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert!(payload.get("server_now_unix_ms").is_none());
     assert_eq!(payload["total"], 1);
     assert_eq!(payload["records"][0]["id"], "usage-b");
     assert_eq!(payload["records"][0]["username"], "bob");
@@ -2516,7 +2535,7 @@ async fn gateway_handles_admin_usage_curl_locally_with_trusted_admin_principal()
     assert_eq!(payload["method"], "POST");
     assert_eq!(
         payload["url"],
-        "https://api.openai.example/v1/chat/completions"
+        "https://api.openai.example/chat/completions"
     );
     assert_eq!(payload["headers"]["Content-Type"], "application/json");
     assert_eq!(payload["headers"]["Authorization"], "Bearer provider-real");
@@ -2536,7 +2555,7 @@ async fn gateway_handles_admin_usage_curl_locally_with_trusted_admin_principal()
     );
     let curl = payload["curl"].as_str().expect("curl should be string");
     assert!(curl.contains("curl"));
-    assert!(curl.contains("https://api.openai.example/v1/chat/completions"));
+    assert!(curl.contains("https://api.openai.example/chat/completions"));
     assert!(curl.contains("Content-Type: application/json"));
     assert!(curl.contains("Authorization: Bearer provider-real"));
     assert!(curl.contains("\"model\":\"gpt-5-target\""));

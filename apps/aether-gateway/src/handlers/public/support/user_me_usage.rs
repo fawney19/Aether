@@ -4,6 +4,7 @@ use aether_ai_serving::UPSTREAM_IS_STREAM_KEY;
 use aether_billing::{
     normalize_input_tokens_for_billing, normalize_total_input_context_for_cache_hit_rate,
 };
+use aether_contracts::USAGE_SERVER_NOW_UNIX_MS_HEADER;
 use aether_data_contracts::repository::usage::{
     StoredRequestUsageAudit, StoredUsageBreakdownSummaryRow, StoredUsageDailySummary,
     UsageAuditKeywordSearchQuery, UsageAuditListQuery, UsageBreakdownGroupBy,
@@ -28,6 +29,21 @@ use super::{
 };
 
 const USERS_ME_USAGE_DATA_UNAVAILABLE_DETAIL: &str = "用户用量数据暂不可用";
+
+fn users_me_usage_server_now_unix_ms() -> u64 {
+    u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default()
+}
+
+fn attach_users_me_usage_server_now_header(mut response: Response<Body>) -> Response<Body> {
+    if let Ok(value) = http::HeaderValue::from_str(&users_me_usage_server_now_unix_ms().to_string())
+    {
+        response.headers_mut().insert(
+            http::HeaderName::from_static(USAGE_SERVER_NOW_UNIX_MS_HEADER),
+            value,
+        );
+    }
+    response
+}
 
 fn build_users_me_usage_reader_unavailable_response() -> Response<Body> {
     build_auth_error_response(
@@ -1094,7 +1110,7 @@ pub(super) async fn handle_users_me_usage_get(
             &summary_by_provider
         ));
     }
-    Json(payload).into_response()
+    attach_users_me_usage_server_now_header(Json(payload).into_response())
 }
 
 pub(super) async fn handle_users_me_usage_active_get(
@@ -1169,13 +1185,15 @@ pub(super) async fn handle_users_me_usage_active_get(
             .collect::<Vec<_>>()
     };
 
-    Json(json!({
-        "requests": items
-            .iter()
-            .map(build_users_me_usage_active_payload)
-            .collect::<Vec<_>>(),
-    }))
-    .into_response()
+    attach_users_me_usage_server_now_header(
+        Json(json!({
+            "requests": items
+                .iter()
+                .map(build_users_me_usage_active_payload)
+                .collect::<Vec<_>>(),
+        }))
+        .into_response(),
+    )
 }
 
 pub(super) async fn handle_users_me_usage_interval_timeline_get(
@@ -1364,12 +1382,20 @@ async fn build_usage_heatmap_summaries(
 mod tests {
     use std::collections::BTreeMap;
 
+    use aether_contracts::USAGE_SERVER_NOW_UNIX_MS_HEADER;
     use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
+    use axum::{
+        body::Body,
+        response::{IntoResponse, Response},
+        Json,
+    };
+    use chrono::Utc;
     use serde_json::json;
 
     use super::{
-        build_users_me_usage_active_payload, build_users_me_usage_record_payload,
-        users_me_usage_client_is_stream, users_me_usage_is_failed,
+        attach_users_me_usage_server_now_header, build_users_me_usage_active_payload,
+        build_users_me_usage_record_payload, users_me_usage_client_is_stream,
+        users_me_usage_is_failed, users_me_usage_server_now_unix_ms,
         users_me_usage_upstream_is_stream,
     };
 
@@ -1413,6 +1439,39 @@ mod tests {
             Some(102),
         )
         .expect("usage should build")
+    }
+
+    #[test]
+    fn users_me_usage_server_now_unix_ms_uses_epoch_millis() {
+        let before = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
+        let value = users_me_usage_server_now_unix_ms();
+        let after = u64::try_from(Utc::now().timestamp_millis()).unwrap_or_default();
+
+        assert!(value >= before);
+        assert!(value <= after);
+        assert!(value > 1_000_000_000_000);
+    }
+
+    fn assert_users_me_usage_server_now_header(response: &Response<Body>) {
+        let value = response
+            .headers()
+            .get(USAGE_SERVER_NOW_UNIX_MS_HEADER)
+            .expect("user usage response should include server now header")
+            .to_str()
+            .expect("server now header should be valid ASCII")
+            .parse::<u64>()
+            .expect("server now header should be epoch millis");
+
+        assert!(value > 1_000_000_000_000);
+    }
+
+    #[test]
+    fn users_me_usage_server_now_header_is_added_to_response() {
+        let response = attach_users_me_usage_server_now_header(
+            Json(json!({ "requests": [] })).into_response(),
+        );
+
+        assert_users_me_usage_server_now_header(&response);
     }
 
     #[test]

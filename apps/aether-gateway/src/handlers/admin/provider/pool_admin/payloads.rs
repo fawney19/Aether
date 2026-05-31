@@ -13,7 +13,6 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
 };
 use aether_data_contracts::repository::usage::StoredProviderApiKeyWindowUsageSummary;
-use aether_scheduler_core::provider_key_circuit_payload_is_active_open_at;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -934,18 +933,6 @@ fn admin_pool_health_score(key: &StoredProviderCatalogKey) -> f64 {
     }
 }
 
-fn admin_pool_circuit_breaker_open(key: &StoredProviderCatalogKey, now_unix_secs: u64) -> bool {
-    key.circuit_breaker_by_format
-        .as_ref()
-        .and_then(serde_json::Value::as_object)
-        .map(|formats| {
-            formats
-                .values()
-                .any(|item| provider_key_circuit_payload_is_active_open_at(item, now_unix_secs))
-        })
-        .unwrap_or(false)
-}
-
 fn admin_pool_scheduling_payload(
     key: &StoredProviderCatalogKey,
     cooldown_reason: Option<&str>,
@@ -956,6 +943,10 @@ fn admin_pool_scheduling_payload(
     account_status_reason: Option<&str>,
     account_status_source: Option<&str>,
     account_quota_exhausted: bool,
+    oauth_status_code: Option<&str>,
+    oauth_status_label: Option<&str>,
+    oauth_status_reason: Option<&str>,
+    oauth_status_source: Option<&str>,
 ) -> (String, String, String, Vec<serde_json::Value>) {
     if !key.is_active {
         return (
@@ -1002,6 +993,26 @@ fn admin_pool_scheduling_payload(
             })],
         );
     }
+    if matches!(oauth_status_code, Some("invalid" | "expired")) {
+        let label = oauth_status_label.unwrap_or(if oauth_status_code == Some("expired") {
+            "已过期"
+        } else {
+            "已失效"
+        });
+        return (
+            "blocked".to_string(),
+            oauth_status_code.unwrap_or("invalid").to_string(),
+            label.to_string(),
+            vec![json!({
+                "code": oauth_status_code.unwrap_or("invalid"),
+                "label": label,
+                "blocking": true,
+                "source": oauth_status_source.unwrap_or("oauth"),
+                "ttl_seconds": serde_json::Value::Null,
+                "detail": oauth_status_reason,
+            })],
+        );
+    }
     if let Some(reason) = cooldown_reason {
         return (
             "degraded".to_string(),
@@ -1040,7 +1051,7 @@ pub(super) fn build_admin_pool_key_payload(
         .as_ref()
         .and_then(|_| runtime.cooldown_ttl_by_key.get(&key.id).copied());
     let health_score = admin_pool_health_score(key);
-    let circuit_breaker_open = admin_pool_circuit_breaker_open(key, now_unix_secs);
+    let circuit_breaker_open = false;
     let auth_semantics = provider_key_auth_semantics(key, provider_type);
     let account_quota_exhausted = pool_config
         .as_ref()
@@ -1118,6 +1129,13 @@ pub(super) fn build_admin_pool_key_payload(
         .unwrap_or(false);
     let account_status_source =
         admin_pool_trimmed_string(account_snapshot.and_then(|item| item.get("source")));
+    let oauth_status_code = admin_pool_trimmed_string_from_map(oauth_snapshot, "code");
+    let oauth_status_label =
+        admin_pool_trimmed_string(oauth_snapshot.and_then(|item| item.get("label")));
+    let oauth_status_reason =
+        admin_pool_trimmed_string(oauth_snapshot.and_then(|item| item.get("reason")));
+    let oauth_status_source =
+        admin_pool_trimmed_string(oauth_snapshot.and_then(|item| item.get("source")));
     let (scheduling_status, scheduling_reason, scheduling_label, scheduling_reasons) =
         admin_pool_scheduling_payload(
             key,
@@ -1129,6 +1147,10 @@ pub(super) fn build_admin_pool_key_payload(
             account_status_reason.as_deref(),
             account_status_source.as_deref(),
             account_quota_exhausted,
+            oauth_status_code.as_deref(),
+            oauth_status_label.as_deref(),
+            oauth_status_reason.as_deref(),
+            oauth_status_source.as_deref(),
         );
 
     let mut payload = serde_json::Map::new();

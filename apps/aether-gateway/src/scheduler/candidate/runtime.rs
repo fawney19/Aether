@@ -128,6 +128,7 @@ pub(super) fn is_candidate_selectable(
                 .get(candidate.key_id.as_str())
                 .copied()
                 .unwrap_or(false),
+        enforce_key_circuit_breaker: !pool_group,
         rpm_reset_at: (!pool_group)
             .then(|| {
                 snapshot
@@ -182,6 +183,7 @@ pub(super) fn current_candidate_runtime_skip_reason(
                 .get(candidate.key_id.as_str())
                 .copied()
                 .unwrap_or(false),
+        enforce_key_circuit_breaker: !pool_group,
         rpm_reset_at,
     })
 }

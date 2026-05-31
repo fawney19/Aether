@@ -112,7 +112,7 @@ fn assert_rerank_execution_plan(plan: &ExecutionPlan) {
     assert_eq!(plan.client_api_format, "openai:rerank");
     assert_eq!(plan.provider_api_format, "openai:rerank");
     assert_eq!(plan.method, "POST");
-    assert_eq!(plan.url, "https://api.openai.example/v1/rerank");
+    assert_eq!(plan.url, "https://api.openai.example/rerank");
     assert_eq!(plan.model_name.as_deref(), Some("bge-reranker-base"));
     let body = plan.body.json_body.as_ref().expect("json request body");
     assert_eq!(body["model"], "upstream-rerank");

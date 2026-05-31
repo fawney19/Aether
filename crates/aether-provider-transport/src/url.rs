@@ -1,17 +1,12 @@
 use std::collections::BTreeMap;
 
-use super::provider_types::is_codex_cli_backend_url;
 use url::form_urlencoded;
 use url::Url;
 
 pub fn build_openai_chat_url(upstream_base_url: &str, query: Option<&str>) -> String {
     let (trimmed, base_query) = split_base_url_query(upstream_base_url);
     let trimmed = trimmed.trim_end_matches('/');
-    let mut url = if openai_compatible_base_includes_api_root(trimmed) {
-        format!("{trimmed}/chat/completions")
-    } else {
-        format!("{trimmed}/v1/chat/completions")
-    };
+    let mut url = format!("{trimmed}/chat/completions");
     append_merged_query(&mut url, base_query, None, query, &[]);
     url
 }
@@ -28,14 +23,7 @@ pub fn build_openai_responses_url(
     } else {
         "/responses"
     };
-    let mut url = if is_codex_cli_backend_url(trimmed)
-        || trimmed.ends_with("/codex")
-        || openai_compatible_base_includes_api_root(trimmed)
-    {
-        format!("{trimmed}{suffix}")
-    } else {
-        format!("{trimmed}/v1{suffix}")
-    };
+    let mut url = format!("{trimmed}{suffix}");
     append_merged_query(&mut url, base_query, None, query, &[]);
     url
 }
@@ -50,10 +38,8 @@ pub fn build_openai_image_url(
     let suffix = openai_image_path_suffix(request_path);
     let mut url = if openai_image_base_includes_operation_path(trimmed) {
         trimmed.to_string()
-    } else if openai_compatible_base_includes_api_root(trimmed) {
-        format!("{trimmed}{suffix}")
     } else {
-        format!("{trimmed}/v1{suffix}")
+        format!("{trimmed}{suffix}")
     };
     append_merged_query(&mut url, base_query, None, query, &[]);
     url
@@ -80,11 +66,7 @@ fn openai_image_base_includes_operation_path(base_url: &str) -> bool {
 pub fn build_claude_messages_url(upstream_base_url: &str, query: Option<&str>) -> String {
     let (trimmed, base_query) = split_base_url_query(upstream_base_url);
     let trimmed = trimmed.trim_end_matches('/');
-    let mut url = if trimmed.ends_with("/v1") {
-        format!("{trimmed}/messages")
-    } else {
-        format!("{trimmed}/v1/messages")
-    };
+    let mut url = format!("{trimmed}/messages");
     append_merged_query(&mut url, base_query, None, query, &[]);
     url
 }
@@ -230,10 +212,10 @@ pub fn build_openai_compatible_models_url(upstream_base_url: &str) -> Option<Str
         return None;
     }
 
-    let mut url = if openai_compatible_base_includes_api_root(trimmed_base_url) {
-        format!("{trimmed_base_url}/models")
+    let mut url = if trimmed_base_url.ends_with("/models") {
+        trimmed_base_url.to_string()
     } else {
-        format!("{trimmed_base_url}/v1/models")
+        format!("{trimmed_base_url}/models")
     };
     append_merged_query(&mut url, base_query, None, None, &[]);
     Some(url)
@@ -500,11 +482,19 @@ mod tests {
         );
         assert_eq!(
             build_openai_chat_url("https://proxy.example.com", None),
-            "https://proxy.example.com/v1/chat/completions"
+            "https://proxy.example.com/chat/completions"
+        );
+        assert_eq!(
+            build_openai_chat_url("https://api.deepseek.com", None),
+            "https://api.deepseek.com/chat/completions"
         );
         assert_eq!(
             build_openai_responses_url("https://proxy.example.com/api", None, false),
             "https://proxy.example.com/api/responses"
+        );
+        assert_eq!(
+            build_openai_responses_url("https://api.deepseek.com", None, false),
+            "https://api.deepseek.com/responses"
         );
         assert_eq!(
             build_openai_image_url(
@@ -524,15 +514,15 @@ mod tests {
         );
         assert_eq!(
             build_claude_messages_url("https://proxy.example.com/api", None),
-            "https://proxy.example.com/api/v1/messages"
+            "https://proxy.example.com/api/messages"
         );
         assert_eq!(
             build_claude_messages_url("https://proxy.example.com/anthropic", None),
-            "https://proxy.example.com/anthropic/v1/messages"
+            "https://proxy.example.com/anthropic/messages"
         );
         assert_eq!(
             build_claude_messages_url("https://api.anthropic.example", None),
-            "https://api.anthropic.example/v1/messages"
+            "https://api.anthropic.example/messages"
         );
     }
 
@@ -565,7 +555,7 @@ mod tests {
         );
         assert_eq!(
             build_openai_compatible_models_url("https://proxy.example.com").as_deref(),
-            Some("https://proxy.example.com/v1/models")
+            Some("https://proxy.example.com/models")
         );
     }
 
@@ -592,7 +582,11 @@ mod tests {
             "https://api.openai.example/v1/images/generations?tenant=demo&trace=1"
         );
         assert_eq!(
-            build_openai_image_url("https://api.openai.example", Some("/v1/images/edits"), None),
+            build_openai_image_url(
+                "https://api.openai.example/v1",
+                Some("/v1/images/edits"),
+                None
+            ),
             "https://api.openai.example/v1/images/edits"
         );
     }

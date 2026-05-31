@@ -203,27 +203,52 @@
               <!-- 费用与性能概览 -->
               <Card>
                 <div class="p-3 sm:p-4">
-                  <div class="mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-                    <span class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground/70">{{ priceSourceLabel }}</span>
-                    <span class="text-muted-foreground">|</span>
-                    <span class="whitespace-nowrap">
-                      <span class="text-muted-foreground">总费用</span>
-                      <span class="ml-1 font-bold text-green-600 dark:text-green-400">
-                        ${{ ((typeof detail.cost === 'object' ? detail.cost?.total : detail.cost) || detail.total_cost || 0).toFixed(6) }}
+                  <div class="mb-4 text-sm">
+                    <div class="sm:hidden">
+                      <span class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground/70">{{ priceSourceLabel }}</span>
+                    </div>
+                    <div class="mt-2 grid grid-cols-[max-content_max-content_max-content_max-content_max-content] items-center gap-x-2 overflow-x-auto whitespace-nowrap text-xs sm:hidden">
+                      <span>
+                        <span class="text-muted-foreground">总费用</span>
+                        <span class="ml-1 font-bold text-green-600 dark:text-green-400">
+                          ${{ ((typeof detail.cost === 'object' ? detail.cost?.total : detail.cost) || detail.total_cost || 0).toFixed(6) }}
+                        </span>
                       </span>
-                    </span>
-                    <span class="text-muted-foreground">|</span>
-                    <span class="whitespace-nowrap">
-                      <span class="text-muted-foreground">耗时</span>
-                      <span class="ml-1 font-bold">
-                        {{ formatDurationMs(detail.first_byte_time_ms) }} / {{ formatDurationMs(detail.response_time_ms) }}
+                      <span class="text-muted-foreground">|</span>
+                      <span>
+                        <span class="text-muted-foreground">耗时</span>
+                        <span class="ml-1 font-bold">
+                          {{ formatDurationMs(detail.first_byte_time_ms) }} / {{ formatDurationMs(detail.response_time_ms) }}
+                        </span>
                       </span>
-                    </span>
-                    <span class="text-muted-foreground">|</span>
-                    <span class="whitespace-nowrap">
-                      <span class="text-muted-foreground">输出速度</span>
-                      <span class="ml-1 font-bold text-primary">{{ formatOutputRateValue(detailOutputRate) }}tps</span>
-                    </span>
+                      <span class="text-muted-foreground">|</span>
+                      <span>
+                        <span class="text-muted-foreground">输出速度</span>
+                        <span class="ml-1 font-bold text-primary">{{ formatOutputRateValue(detailOutputRate) }}tps</span>
+                      </span>
+                    </div>
+                    <div class="hidden flex-wrap items-center gap-x-2 gap-y-1 sm:flex">
+                      <span class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground/70">{{ priceSourceLabel }}</span>
+                      <span class="text-muted-foreground">|</span>
+                      <span class="whitespace-nowrap">
+                        <span class="text-muted-foreground">总费用</span>
+                        <span class="ml-1 font-bold text-green-600 dark:text-green-400">
+                          ${{ ((typeof detail.cost === 'object' ? detail.cost?.total : detail.cost) || detail.total_cost || 0).toFixed(6) }}
+                        </span>
+                      </span>
+                      <span class="text-muted-foreground">|</span>
+                      <span class="whitespace-nowrap">
+                        <span class="text-muted-foreground">耗时</span>
+                        <span class="ml-1 font-bold">
+                          {{ formatDurationMs(detail.first_byte_time_ms) }} / {{ formatDurationMs(detail.response_time_ms) }}
+                        </span>
+                      </span>
+                      <span class="text-muted-foreground">|</span>
+                      <span class="whitespace-nowrap">
+                        <span class="text-muted-foreground">输出速度</span>
+                        <span class="ml-1 font-bold text-primary">{{ formatOutputRateValue(detailOutputRate) }}tps</span>
+                      </span>
+                    </div>
                   </div>
 
                   <!-- 分隔线 -->
@@ -278,7 +303,37 @@
                           </Badge>
                         </div>
                         <!-- 单价信息 -->
-                        <div class="text-muted-foreground flex items-center gap-2 flex-wrap">
+                        <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground sm:hidden">
+                          <div class="grid grid-cols-[max-content_1fr] items-baseline gap-x-1">
+                            <span>输入</span>
+                            <span class="text-right">${{ formatPrice(tier.input_price_per_1m) }}/M</span>
+                          </div>
+                          <div
+                            class="grid grid-cols-[max-content_1fr] items-baseline gap-x-1"
+                          >
+                            <span>输出</span>
+                            <span class="text-right">${{ formatPrice(tier.output_price_per_1m) }}/M</span>
+                          </div>
+                          <template v-if="getTierActiveCacheCreationDisplay(tier) || shouldShowCacheReadPrice(tier)">
+                            <div
+                              v-if="getTierActiveCacheCreationDisplay(tier)"
+                              class="grid grid-cols-[max-content_1fr] items-baseline gap-x-1"
+                            >
+                              <span>{{ getTierActiveCacheCreationDisplay(tier)?.label }}</span>
+                              <span class="text-right">${{ formatPrice(getTierActiveCacheCreationDisplay(tier)?.price || 0) }}/M</span>
+                            </div>
+                            <div v-else />
+                            <div
+                              v-if="shouldShowCacheReadPrice(tier)"
+                              class="grid grid-cols-[max-content_1fr] items-baseline gap-x-1"
+                            >
+                              <span>缓存读取</span>
+                              <span class="text-right">${{ formatPrice(getTierActiveCacheReadPrice(tier) ?? 0) }}/M</span>
+                            </div>
+                            <div v-else />
+                          </template>
+                        </div>
+                        <div class="text-muted-foreground hidden items-center gap-2 flex-wrap sm:flex">
                           <span>输入 ${{ formatPrice(tier.input_price_per_1m) }}/M</span>
                           <span>输出 ${{ formatPrice(tier.output_price_per_1m) }}/M</span>
                           <span v-if="getTierActiveCacheCreationDisplay(tier)">
@@ -293,8 +348,30 @@
 
                       <!-- 当前阶梯的详细计算 -->
                       <template v-if="index === currentTierIndex">
+                        <div class="grid gap-y-2 sm:hidden">
+                          <div class="grid grid-cols-[64px_minmax(0,1fr)_92px] items-center gap-x-2">
+                            <span class="text-xs text-muted-foreground">输入</span>
+                            <span class="text-sm font-semibold font-mono text-right tabular-nums">{{ displayInputTokens }}</span>
+                            <span class="text-xs font-mono text-right tabular-nums">${{ effectiveInputCost.toFixed(6) }}</span>
+                          </div>
+                          <div class="grid grid-cols-[64px_minmax(0,1fr)_92px] items-center gap-x-2">
+                            <span class="text-xs text-muted-foreground">输出</span>
+                            <span class="text-sm font-semibold font-mono text-right tabular-nums">{{ detail.tokens?.output || detail.output_tokens || 0 }}</span>
+                            <span class="text-xs font-mono text-right tabular-nums">${{ effectiveOutputCost.toFixed(6) }}</span>
+                          </div>
+                          <div class="grid grid-cols-[64px_minmax(0,1fr)_92px] items-center gap-x-2">
+                            <span class="text-xs text-muted-foreground">缓存创建</span>
+                            <span class="text-sm font-semibold font-mono text-right tabular-nums">{{ totalCacheCreationTokens }}</span>
+                            <span class="text-xs font-mono text-right tabular-nums">${{ effectiveCacheCreationCost.toFixed(6) }}</span>
+                          </div>
+                          <div class="grid grid-cols-[64px_minmax(0,1fr)_92px] items-center gap-x-2">
+                            <span class="text-xs text-muted-foreground">缓存读取</span>
+                            <span class="text-sm font-semibold font-mono text-right tabular-nums">{{ detail.cache_read_input_tokens || 0 }}</span>
+                            <span class="text-xs font-mono text-right tabular-nums">${{ effectiveCacheReadCost.toFixed(6) }}</span>
+                          </div>
+                        </div>
                         <!-- 输入 输出 -->
-                        <div class="flex items-center">
+                        <div class="hidden items-center sm:flex">
                           <div class="flex items-center flex-1">
                             <span class="text-xs text-muted-foreground w-[56px]">输入</span>
                             <span class="text-sm font-semibold font-mono flex-1 text-center">{{ displayInputTokens }}</span>
@@ -311,7 +388,7 @@
                           </div>
                         </div>
                         <!-- 缓存创建 缓存读取 -->
-                        <div class="flex items-center">
+                        <div class="hidden items-center sm:flex">
                           <div class="flex items-center flex-1">
                             <span class="text-xs text-muted-foreground w-[56px]">{{ cacheCreationSplitRows.length > 0 ? '创建合计' : '缓存创建' }}</span>
                             <span class="text-sm font-semibold font-mono flex-1 text-center">{{ totalCacheCreationTokens }}</span>
@@ -330,7 +407,32 @@
                         <!-- 缓存创建 5m/1h 细分 -->
                         <div
                           v-if="cacheCreationSplitRows.length > 0"
-                          class="space-y-1 pl-[56px]"
+                          class="grid gap-y-1 sm:hidden"
+                        >
+                          <div
+                            v-for="row in cacheCreationSplitRows"
+                            :key="row.key"
+                            class="grid grid-cols-[64px_minmax(0,1fr)_68px_92px] items-center gap-x-2 text-xs text-muted-foreground/70"
+                          >
+                            <span>{{ row.label }}</span>
+                            <span class="font-mono text-right tabular-nums text-foreground/90">{{ formatNumber(row.tokens) }}</span>
+                            <span
+                              class="text-right"
+                              :class="row.pricePer1M === null ? 'invisible' : ''"
+                            >
+                              {{ row.pricePer1M !== null ? `$${formatPrice(row.pricePer1M)}/M` : '-' }}
+                            </span>
+                            <span
+                              class="font-mono text-right tabular-nums"
+                              :class="row.cost === null ? 'invisible' : ''"
+                            >
+                              {{ row.cost !== null ? `$${row.cost.toFixed(6)}` : '-' }}
+                            </span>
+                          </div>
+                        </div>
+                        <div
+                          v-if="cacheCreationSplitRows.length > 0"
+                          class="hidden space-y-1 pl-[56px] sm:block"
                         >
                           <div
                             v-for="row in cacheCreationSplitRows"

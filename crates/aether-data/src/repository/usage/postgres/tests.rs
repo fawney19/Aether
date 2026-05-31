@@ -452,14 +452,32 @@ fn usage_sql_daily_cutoff_falls_back_to_imported_stats_daily() {
 #[test]
 fn usage_sql_dashboard_daily_breakdown_falls_back_to_daily_totals() {
     let source = include_str!("mod.rs");
-    assert!(source.contains("list_dashboard_daily_breakdown_aggregate_segments"));
     assert!(source.contains("list_dashboard_daily_breakdown_from_daily_totals"));
     assert!(source.contains("'aggregate'::TEXT AS model"));
     assert!(source.contains("FROM stats_daily"));
     assert!(source.contains("FROM stats_user_daily"));
     assert!(source.contains("detailed_dates.contains(&item.date)"));
     assert!(source.contains("query.tz_offset_minutes != 0"));
-    assert!(source.contains("aggregate_dates.insert(item.date.clone())"));
+    assert!(source.contains("return self.list_dashboard_daily_breakdown_raw(query).await;"));
+    assert!(!source.contains("aggregate_dates.insert(item.date.clone())"));
+}
+
+#[test]
+fn usage_sql_dashboard_daily_breakdown_keeps_all_local_day_model_provider_rows() {
+    let source = include_str!("mod.rs");
+    let raw_breakdown = source
+        .split("async fn list_dashboard_daily_breakdown_raw")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub async fn list_dashboard_daily_breakdown")
+                .next()
+        })
+        .expect("raw daily breakdown function should be present");
+    assert!(raw_breakdown.contains("GROUP BY date, \"usage\".model, \"usage\".provider_name"));
+    assert!(raw_breakdown.contains("ORDER BY date ASC, total_cost_usd DESC"));
+    assert!(raw_breakdown.contains("(\"usage\".created_at AT TIME ZONE 'UTC')"));
+    assert!(!raw_breakdown.contains("date_trunc('day', \"usage\".created_at +"));
+    assert!(!source.contains("if aggregate_dates.insert(item.date.clone())"));
 }
 
 #[test]

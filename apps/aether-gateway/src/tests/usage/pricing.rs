@@ -68,7 +68,7 @@ const OPENAI_SPEC: ProviderSpec = ProviderSpec {
     global_model_id: "global-model-openai-usage-pricing-1",
     global_model_name: "gpt-5",
     provider_model_name: "gpt-5-upstream",
-    upstream_base_url: "https://api.openai.example",
+    upstream_base_url: "https://api.openai.example/v1",
     upstream_secret: "sk-upstream-openai-usage-pricing",
 };
 
@@ -82,7 +82,7 @@ const CLAUDE_SPEC: ProviderSpec = ProviderSpec {
     global_model_id: "global-model-claude-usage-pricing-1",
     global_model_name: "claude-sonnet-4-5",
     provider_model_name: "claude-sonnet-4-5-upstream",
-    upstream_base_url: "https://api.anthropic.example",
+    upstream_base_url: "https://api.anthropic.example/v1",
     upstream_secret: "sk-upstream-claude-usage-pricing",
 };
 

@@ -308,7 +308,7 @@ async fn run_sync_redaction_case_with_system_config(
     let seen_provider_request = Arc::new(Mutex::new(None::<SeenProviderRequest>));
     let seen_provider_request_clone = Arc::clone(&seen_provider_request);
     let provider_app = Router::new().route(
-        "/v1/chat/completions",
+        "/chat/completions",
         any(move |request: Request| {
             let seen_provider_request_inner = Arc::clone(&seen_provider_request_clone);
             async move {
@@ -489,8 +489,12 @@ fn rich_pii_request() -> serde_json::Value {
     })
 }
 
-#[tokio::test]
-async fn ai_execute_sync_pii_redaction_round_trip() {
+large_stack_async_test!(
+    ai_execute_sync_pii_redaction_round_trip,
+    ai_execute_sync_pii_redaction_round_trip_impl
+);
+
+async fn ai_execute_sync_pii_redaction_round_trip_impl() {
     let (response_json, seen) = run_sync_redaction_case(
         "ai-execute-sync-pii-redaction-round-trip",
         true,
@@ -536,8 +540,12 @@ async fn ai_execute_sync_pii_redaction_round_trip() {
     assert!(!response_content.contains("<AETHER:"));
 }
 
-#[tokio::test]
-async fn ai_execute_pii_redaction_disabled_module_passes_original_chat_through() {
+large_stack_async_test!(
+    ai_execute_pii_redaction_disabled_module_passes_original_chat_through,
+    ai_execute_pii_redaction_disabled_module_passes_original_chat_through_impl
+);
+
+async fn ai_execute_pii_redaction_disabled_module_passes_original_chat_through_impl() {
     let (response_json, seen) = run_sync_redaction_case(
         "ai-execute-pii-redaction-disabled-module",
         false,
@@ -559,8 +567,12 @@ async fn ai_execute_pii_redaction_disabled_module_passes_original_chat_through()
     );
 }
 
-#[tokio::test]
-async fn ai_execute_pii_redaction_disabled_feature_passes_original_chat_through() {
+large_stack_async_test!(
+    ai_execute_pii_redaction_disabled_feature_passes_original_chat_through,
+    ai_execute_pii_redaction_disabled_feature_passes_original_chat_through_impl
+);
+
+async fn ai_execute_pii_redaction_disabled_feature_passes_original_chat_through_impl() {
     let (response_json, seen) = run_sync_redaction_case(
         "ai-execute-pii-redaction-disabled-provider",
         true,
@@ -582,8 +594,12 @@ async fn ai_execute_pii_redaction_disabled_feature_passes_original_chat_through(
     );
 }
 
-#[tokio::test]
-async fn ai_execute_pii_redaction_empty_rules_passes_original_chat_through() {
+large_stack_async_test!(
+    ai_execute_pii_redaction_empty_rules_passes_original_chat_through,
+    ai_execute_pii_redaction_empty_rules_passes_original_chat_through_impl
+);
+
+async fn ai_execute_pii_redaction_empty_rules_passes_original_chat_through_impl() {
     let (response_json, seen) = run_sync_redaction_case_with_system_config(
         "ai-execute-pii-redaction-empty-entities",
         true,
@@ -605,8 +621,12 @@ async fn ai_execute_pii_redaction_empty_rules_passes_original_chat_through() {
     );
 }
 
-#[tokio::test]
-async fn ai_execute_pii_redaction_unknown_sentinel_like_output_is_not_restored() {
+large_stack_async_test!(
+    ai_execute_pii_redaction_unknown_sentinel_like_output_is_not_restored,
+    ai_execute_pii_redaction_unknown_sentinel_like_output_is_not_restored_impl
+);
+
+async fn ai_execute_pii_redaction_unknown_sentinel_like_output_is_not_restored_impl() {
     let (response_json, seen) = run_sync_redaction_case(
         "ai-execute-pii-redaction-unknown-sentinel",
         true,
@@ -625,13 +645,17 @@ async fn ai_execute_pii_redaction_unknown_sentinel_like_output_is_not_restored()
     );
 }
 
-#[tokio::test]
-async fn ai_execute_pii_redaction_restores_executed_candidate_session_after_later_candidate_planning(
+large_stack_async_test!(
+    ai_execute_pii_redaction_restores_executed_candidate_session_after_later_candidate_planning,
+    ai_execute_pii_redaction_restores_executed_candidate_session_after_later_candidate_planning_impl
+);
+
+async fn ai_execute_pii_redaction_restores_executed_candidate_session_after_later_candidate_planning_impl(
 ) {
     let seen_provider_request = Arc::new(Mutex::new(None::<SeenProviderRequest>));
     let seen_provider_request_clone = Arc::clone(&seen_provider_request);
     let provider_app = Router::new().route(
-        "/v1/chat/completions",
+        "/chat/completions",
         any(move |request: Request| {
             let seen_provider_request_inner = Arc::clone(&seen_provider_request_clone);
             async move {
@@ -770,8 +794,12 @@ async fn ai_execute_pii_redaction_restores_executed_candidate_session_after_late
     provider_handle.abort();
 }
 
-#[tokio::test]
-async fn pii_redaction_performance_limits_do_not_forward_unredacted_body_upstream() {
+large_stack_async_test!(
+    pii_redaction_performance_limits_do_not_forward_unredacted_body_upstream,
+    pii_redaction_performance_limits_do_not_forward_unredacted_body_upstream_impl
+);
+
+async fn pii_redaction_performance_limits_do_not_forward_unredacted_body_upstream_impl() {
     let provider_hits = Arc::new(AtomicUsize::new(0));
     let provider_hits_clone = Arc::clone(&provider_hits);
     let provider_app = Router::new().route(
@@ -845,8 +873,12 @@ async fn pii_redaction_performance_limits_do_not_forward_unredacted_body_upstrea
     provider_handle.abort();
 }
 
-#[tokio::test]
-async fn ai_execute_pii_redaction_missing_encryption_key_fails_closed_before_provider() {
+large_stack_async_test!(
+    ai_execute_pii_redaction_missing_encryption_key_fails_closed_before_provider,
+    ai_execute_pii_redaction_missing_encryption_key_fails_closed_before_provider_impl
+);
+
+async fn ai_execute_pii_redaction_missing_encryption_key_fails_closed_before_provider_impl() {
     let execution_runtime_hits = Arc::new(AtomicUsize::new(0));
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
     let execution_runtime = Router::new().route(

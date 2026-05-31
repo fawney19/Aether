@@ -92,8 +92,15 @@ vi.mock('lucide-vue-next', async () => {
 vi.mock('../ElapsedTimeText.vue', () => ({
   default: defineComponent({
     name: 'ElapsedTimeTextStub',
-    setup() {
-      return () => h('span', 'elapsed')
+    props: {
+      displayNowMs: {
+        type: Number,
+      },
+    },
+    setup(props) {
+      return () => h('span', {
+        'data-display-now-ms': props.displayNowMs == null ? 'missing' : String(props.displayNowMs),
+      }, 'elapsed')
     },
   }),
 }))
@@ -243,6 +250,16 @@ describe('UsageRecordsTable', () => {
     expect(root.textContent).toContain('elapsed')
     expect(root.textContent).not.toContain('等待首字')
     expect(root.querySelector('[data-active-latency-state="waiting-first-byte"]')).toBeNull()
+  })
+
+  it('leaves shared clock subscription inside active elapsed text', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      status: 'streaming',
+      response_time_ms: null,
+      first_byte_time_ms: 500,
+    })])
+
+    expect(root.querySelector('[data-display-now-ms="missing"]')).not.toBeNull()
   })
 
   it('shows failed when Codex image progress fails before the usage record finalizes', () => {

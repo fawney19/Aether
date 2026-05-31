@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { getMock, cachedRequestMock, dedupedRequestMock, buildCacheKeyMock } = vi.hoisted(() => ({
   getMock: vi.fn(),
@@ -27,6 +27,10 @@ describe('usageApi contract alignment', () => {
     cachedRequestMock.mockClear()
     dedupedRequestMock.mockClear()
     buildCacheKeyMock.mockClear()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
 
   it('loads current-user usage records from the Rust usage endpoint and normalizes pagination', async () => {
@@ -112,6 +116,56 @@ describe('usageApi contract alignment', () => {
         total_cost: 12.34,
         avg_response_time: 456,
       },
+    })
+  })
+
+  it('captures admin user usage server timing when the records request resolves', async () => {
+    let now = 1_000
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+
+    let resolveStats: ((value: unknown) => void) | null = null
+    getMock.mockImplementation((url: string) => {
+      if (url === '/api/admin/usage/stats') {
+        return new Promise(resolve => {
+          resolveStats = resolve
+        })
+      }
+      if (url === '/api/admin/usage/records') {
+        return Promise.resolve({
+          headers: {
+            'x-aether-server-now-unix-ms': '10050',
+          },
+          data: {
+            records: [{ id: 'record-3' }],
+            total: 1,
+            limit: 25,
+            offset: 0,
+          },
+        })
+      }
+      return Promise.reject(new Error(`unexpected url: ${url}`))
+    })
+
+    const resultPromise = usageApi.getUserUsage('user-123', { page: 1, page_size: 25 })
+    now = 1_100
+    await Promise.resolve()
+    now = 20_000
+    resolveStats?.({
+      data: {
+        total_requests: 1,
+        total_tokens: 10,
+        total_cost: 0.1,
+        avg_response_time: 500,
+      },
+    })
+
+    const result = await resultPromise
+
+    expect(result.server_timing).toEqual({
+      server_now_unix_ms: 10_050,
+      client_send_unix_ms: 1_000,
+      client_receive_unix_ms: 1_100,
+      round_trip_ms: 100,
     })
   })
 

@@ -1,4 +1,20 @@
-export type PoolManagementStatus = 'all' | 'active' | 'cooldown' | 'inactive'
+export type PoolManagementStatus =
+  | 'all'
+  | 'available'
+  | 'cooldown'
+  | 'inactive'
+  | 'invalid'
+  | 'expired'
+  | 'account_banned'
+  | 'quota_exhausted'
+  | 'account_forbidden'
+  | 'account_disabled'
+  | 'workspace_deactivated'
+  | 'account_verification'
+  | 'account_quarantined'
+  | 'account_blocked'
+  | 'rate_limited'
+  | 'cost_exhausted'
 export type PoolManagementSortBy = 'imported_at' | 'last_used_at' | 'score'
 export type PoolManagementSortOrder = 'asc' | 'desc'
 export type PoolManagementStatsMode = 'current_cycle' | 'account_total'
@@ -58,7 +74,26 @@ function normalizeSearch(value: unknown): string {
 }
 
 function normalizeStatus(value: unknown): PoolManagementStatus {
-  if (value === 'active' || value === 'cooldown' || value === 'inactive') {
+  if (value === 'active') {
+    return 'available'
+  }
+  if (
+    value === 'available'
+    || value === 'cooldown'
+    || value === 'inactive'
+    || value === 'invalid'
+    || value === 'expired'
+    || value === 'account_banned'
+    || value === 'quota_exhausted'
+    || value === 'account_forbidden'
+    || value === 'account_disabled'
+    || value === 'workspace_deactivated'
+    || value === 'account_verification'
+    || value === 'account_quarantined'
+    || value === 'account_blocked'
+    || value === 'rate_limited'
+    || value === 'cost_exhausted'
+  ) {
     return value
   }
   return 'all'

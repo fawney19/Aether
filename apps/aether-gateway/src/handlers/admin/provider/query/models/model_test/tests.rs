@@ -3,6 +3,11 @@ use crate::handlers::admin::request::AdminGatewayProviderTransportSnapshot;
 use serde_json::json;
 
 fn sample_openai_image_transport(provider_type: &str) -> AdminGatewayProviderTransportSnapshot {
+    let base_url = if provider_type == "custom" {
+        "https://grok.com/v1/"
+    } else {
+        "https://grok.com/"
+    };
     AdminGatewayProviderTransportSnapshot {
         provider: crate::provider_transport::snapshot::GatewayProviderTransportProvider {
             id: "provider-1".to_string(),
@@ -26,7 +31,7 @@ fn sample_openai_image_transport(provider_type: &str) -> AdminGatewayProviderTra
             api_family: None,
             endpoint_kind: None,
             is_active: true,
-            base_url: "https://grok.com/".to_string(),
+            base_url: base_url.to_string(),
             header_rules: None,
             body_rules: None,
             max_retries: None,

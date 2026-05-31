@@ -708,7 +708,6 @@ function getMockEndpointExtras(apiFormat: string) {
       { action: 'regex_replace', path: 'messages[0].content', pattern: '\\s+', replacement: ' ', flags: 'm', condition: { path: 'metadata.source', op: 'eq', value: 'internal' } }
     ]
   } else if (normalizedFormat === 'openai:chat') {
-    extras.custom_path = '/v1/chat/completions'
     extras.header_rules = [
       { action: 'set', key: 'x-client', value: 'demo' }
     ]
@@ -720,13 +719,11 @@ function getMockEndpointExtras(apiFormat: string) {
   } else if (normalizedFormat === 'openai:responses') {
     extras.config = { upstream_stream_policy: 'force_non_stream' }
   } else if (normalizedFormat === 'openai:embedding') {
-    extras.custom_path = '/v1/embeddings'
     extras.config = { route_kind: 'embedding' }
   } else if (normalizedFormat === 'openai:rerank' || normalizedFormat === 'jina:rerank') {
-    extras.custom_path = '/v1/rerank'
     extras.config = { route_kind: 'rerank' }
   } else if (normalizedFormat === 'gemini:generate_content') {
-    extras.custom_path = '/v1beta/models/gemini-3-pro-preview:generateContent'
+    extras.custom_path = '/models/gemini-3-pro-preview:generateContent'
     extras.body_rules = [
       { action: 'drop', path: 'metadata.debug' }
     ]
@@ -745,9 +742,9 @@ const MOCK_ENDPOINT_KEYS = [
 
 // Mock Endpoints
 const MOCK_ENDPOINTS = [
-  { id: 'ep-001', provider_id: 'provider-001', provider_name: 'anthropic', api_format: 'claude:messages', base_url: 'https://api.anthropic.com', max_retries: 2, is_active: true, total_keys: 2, active_keys: 2, created_at: '2024-01-01T00:00:00Z', updated_at: new Date().toISOString(), ...getMockEndpointExtras('claude:messages') },
-  { id: 'ep-002', provider_id: 'provider-002', provider_name: 'openai', api_format: 'openai:chat', base_url: 'https://api.openai.com', max_retries: 2, is_active: true, total_keys: 1, active_keys: 1, created_at: '2024-01-01T00:00:00Z', updated_at: new Date().toISOString(), ...getMockEndpointExtras('openai:chat') },
-  { id: 'ep-003', provider_id: 'provider-003', provider_name: 'google', api_format: 'gemini:generate_content', base_url: 'https://generativelanguage.googleapis.com', max_retries: 2, is_active: true, total_keys: 1, active_keys: 1, created_at: '2024-01-15T00:00:00Z', updated_at: new Date().toISOString(), ...getMockEndpointExtras('gemini:generate_content') }
+  { id: 'ep-001', provider_id: 'provider-001', provider_name: 'anthropic', api_format: 'claude:messages', base_url: 'https://api.anthropic.com/v1', max_retries: 2, is_active: true, total_keys: 2, active_keys: 2, created_at: '2024-01-01T00:00:00Z', updated_at: new Date().toISOString(), ...getMockEndpointExtras('claude:messages') },
+  { id: 'ep-002', provider_id: 'provider-002', provider_name: 'openai', api_format: 'openai:chat', base_url: 'https://api.openai.com/v1', max_retries: 2, is_active: true, total_keys: 1, active_keys: 1, created_at: '2024-01-01T00:00:00Z', updated_at: new Date().toISOString(), ...getMockEndpointExtras('openai:chat') },
+  { id: 'ep-003', provider_id: 'provider-003', provider_name: 'google', api_format: 'gemini:generate_content', base_url: 'https://generativelanguage.googleapis.com/v1beta', max_retries: 2, is_active: true, total_keys: 1, active_keys: 1, created_at: '2024-01-15T00:00:00Z', updated_at: new Date().toISOString(), ...getMockEndpointExtras('gemini:generate_content') }
 ]
 
 // Mock 能力定义
@@ -1737,9 +1734,10 @@ function generateMockEndpointsForProvider(providerId: string) {
   return provider.api_formats.map((format, index) => {
     const normalizedFormat = normalizeApiFormat(format)
     const healthDetail = provider.endpoint_health_details.find(h => h.api_format === format)
-    const baseUrl = normalizedFormat.includes('claude') ? 'https://api.anthropic.com' :
-      normalizedFormat.includes('openai') ? 'https://api.openai.com' :
-        'https://generativelanguage.googleapis.com'
+    const baseUrl = normalizedFormat.includes('claude') ? 'https://api.anthropic.com/v1' :
+      normalizedFormat.includes('openai') ? 'https://api.openai.com/v1' :
+        normalizedFormat.includes('jina') ? 'https://api.jina.ai/v1' :
+          'https://generativelanguage.googleapis.com'
     return {
       id: `ep-${providerId}-${index + 1}`,
       provider_id: providerId,

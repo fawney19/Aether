@@ -1595,7 +1595,7 @@ async fn gateway_ignores_health_signals_in_pool_scheduling_status() {
 
     assert_eq!(keys.len(), 2);
     assert_eq!(keys[0]["key_name"], json!("circuit-open"));
-    assert_eq!(keys[0]["circuit_breaker_open"], json!(true));
+    assert_eq!(keys[0]["circuit_breaker_open"], json!(false));
     assert_eq!(keys[0]["scheduling_status"], json!("available"));
     assert_eq!(keys[0]["scheduling_reason"], json!("available"));
     assert_eq!(keys[0]["scheduling_label"], json!("可用"));

@@ -4,6 +4,14 @@ import { createApp, defineComponent, h, nextTick, type App } from 'vue'
 import type { CandidateRecord, RequestTrace } from '@/api/requestTrace'
 import HorizontalRequestTimeline from '../HorizontalRequestTimeline.vue'
 
+const requestTraceApiMock = vi.hoisted(() => ({
+  getRequestTrace: vi.fn(),
+}))
+
+vi.mock('@/api/requestTrace', () => ({
+  requestTraceApi: requestTraceApiMock,
+}))
+
 vi.mock('@/components/ui/card.vue', async () => {
   const { defineComponent, h } = await import('vue')
   return {
@@ -75,6 +83,7 @@ vi.mock('lucide-vue-next', async () => {
 })
 
 const mountedApps: Array<{ app: App, root: HTMLElement }> = []
+type TimelineExpose = { refresh: () => Promise<void> | undefined }
 
 function buildCandidate(overrides: Partial<CandidateRecord> = {}): CandidateRecord {
   return {
@@ -105,6 +114,13 @@ function buildTrace(candidates: CandidateRecord[]): RequestTrace {
   }
 }
 
+async function flushPendingUpdates() {
+  await Promise.resolve()
+  await nextTick()
+  await Promise.resolve()
+  await nextTick()
+}
+
 function mountTimeline(
   traceData: RequestTrace,
   extraProps: Record<string, unknown> = {},
@@ -121,7 +137,39 @@ function mountTimeline(
   return root
 }
 
+function mountTimelineFromApi(
+  requestId: string,
+  extraProps: Record<string, unknown> = {},
+) {
+  const root = document.createElement('div')
+  document.body.appendChild(root)
+  let timeline: TimelineExpose | null = null
+  const Host = defineComponent({
+    setup() {
+      return () => h(HorizontalRequestTimeline, {
+        ref: (value: unknown) => {
+          timeline = value as TimelineExpose | null
+        },
+        requestId,
+        ...extraProps,
+      })
+    },
+  })
+  const app = createApp(Host)
+  app.mount(root)
+  mountedApps.push({ app, root })
+  return {
+    root,
+    refresh: async () => {
+      await timeline?.refresh()
+      await flushPendingUpdates()
+    },
+  }
+}
+
 afterEach(() => {
+  requestTraceApiMock.getRequestTrace.mockReset()
+  vi.useRealTimers()
   for (const { app, root } of mountedApps.splice(0)) {
     app.unmount()
     root.remove()
@@ -549,5 +597,87 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).toContain('execution runtime stream ended before provider terminal event')
     expect(root.querySelector('.error-block .error-json')).toBeNull()
     expect(root.textContent).not.toContain('"body_state":"none"')
+  })
+
+  it('falls back to key id while an active candidate is missing key name', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-active-key-id',
+        provider_id: 'provider-active',
+        provider_name: 'Provider Active',
+        key_id: 'key-active-id',
+        key_name: undefined,
+        candidate_index: 0,
+        status: 'pending',
+        finished_at: undefined,
+      }),
+    ])
+    trace.final_status = 'pending'
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    const detailText = root.querySelector('.detail-panel')?.textContent ?? ''
+    expect(detailText).toContain('key-active-id')
+    expect(detailText).not.toContain('未知')
+  })
+
+  it('follows the active key when silent polling updates the trace', async () => {
+    const initialTrace = buildTrace([
+      buildCandidate({
+        id: 'cand-available-a',
+        provider_id: 'provider-a',
+        provider_name: 'Provider A',
+        key_id: 'key-a',
+        key_name: 'Available Key',
+        candidate_index: 0,
+        status: 'available',
+        started_at: undefined,
+        finished_at: undefined,
+      }),
+      buildCandidate({
+        id: 'cand-available-b',
+        provider_id: 'provider-b',
+        provider_name: 'Provider B',
+        key_id: 'key-b',
+        key_name: 'Streaming Key',
+        candidate_index: 1,
+        status: 'available',
+        started_at: undefined,
+        finished_at: undefined,
+      }),
+    ])
+    initialTrace.final_status = 'pending'
+
+    const activeTrace = buildTrace([
+      initialTrace.candidates[0],
+      buildCandidate({
+        id: 'cand-streaming-b',
+        provider_id: 'provider-b',
+        provider_name: 'Provider B',
+        key_id: 'key-b',
+        key_name: 'Streaming Key',
+        candidate_index: 1,
+        status: 'pending',
+        started_at: '2026-05-06T12:00:02.000Z',
+        finished_at: undefined,
+      }),
+    ])
+    activeTrace.final_status = 'streaming'
+
+    requestTraceApiMock.getRequestTrace.mockResolvedValueOnce(initialTrace)
+    const { root, refresh } = mountTimelineFromApi('req-1', {
+      requestStatus: 'streaming',
+    })
+    await flushPendingUpdates()
+
+    expect(root.querySelector('.detail-panel')?.textContent).toContain('Available Key')
+
+    requestTraceApiMock.getRequestTrace.mockResolvedValueOnce(activeTrace)
+    await refresh()
+
+    const detailText = root.querySelector('.detail-panel')?.textContent ?? ''
+    expect(detailText).toContain('Streaming Key')
+    expect(detailText).toContain('进行中')
   })
 })
