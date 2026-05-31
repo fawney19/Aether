@@ -1,0 +1,5 @@
+*.sh text eol=lf
+update.sh text eol=lf
+deploy.sh text eol=lf
+install.sh text eol=lf
+generate_keys.sh text eol=lf

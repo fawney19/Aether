@@ -202,6 +202,52 @@ async fn gateway_handles_admin_system_update_capability_locally() {
 }
 
 #[tokio::test]
+async fn gateway_handles_admin_system_update_preflight_locally() {
+    let _lock = SYSTEM_UPDATE_TEST_MUTEX.lock().await;
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/api/admin/system/update-preflight",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }
+        }),
+    );
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(AppState::new().expect("gateway should build"));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/system/update-preflight?version=v9.9.9"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert!(payload["overall_status"].is_string());
+    assert!(payload["can_apply_update"].is_boolean());
+    assert_eq!(payload["target_version"], json!("v9.9.9"));
+    assert!(payload["checks"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_prepares_admin_system_update_locally() {
     let _lock = SYSTEM_UPDATE_TEST_MUTEX.lock().await;
     let upstream_hits = Arc::new(Mutex::new(0usize));

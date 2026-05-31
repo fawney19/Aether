@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1
+# Aether Docker update helper.
+# Runs update.sh from the mounted deployment directory with Docker CLI access.
+
+FROM docker:27-cli
+
+RUN apk add --no-cache bash python3
+
+COPY scripts/docker-update-helper.py /usr/local/bin/aether-docker-update-helper
+RUN chmod 0755 /usr/local/bin/aether-docker-update-helper
+
+WORKDIR /workspace
+
+EXPOSE 18086
+
+ENTRYPOINT ["python3", "/usr/local/bin/aether-docker-update-helper"]

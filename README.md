@@ -50,9 +50,9 @@ cp .env.example .env
 
 # 3. 首次部署 / 更新 (从以下部署形态任选其一)
 # Postgres + Redis (适用于企业或多人使用)
-docker compose pull && docker compose up -d
+docker compose pull && docker compose up -d --build
 # Single Node (适用于个人用户或朋友分享)
-docker compose -f docker-compose.single-node.yml pull && docker compose -f docker-compose.single-node.yml up -d
+docker compose -f docker-compose.single-node.yml pull && docker compose -f docker-compose.single-node.yml up -d --build
 ```
 
 ### 一键更新
@@ -63,17 +63,37 @@ Docker Compose 部署后，可在部署目录直接执行：
 ./update.sh
 ```
 
-`update.sh` 会拉取最新 `app` 镜像并重建 `app` 容器，Docker named volumes、`./data` 和 `./logs` 不会被删除。Single Node 部署也可显式指定：
+`update.sh` 会拉取最新 `app` 镜像并重建 `app` 容器，Docker named volumes、`./data` 和 `./logs` 不会被删除。默认会先 `pg_dump | gzip` 备份 Postgres 到 `./backups/`，并在 `compose up` 失败时自动 `docker tag` 上一镜像并重建以回滚；支持 `--dry-run` 预览、`--no-backup` / `--no-rollback` 跳过对应步骤、`--project-name NAME` 适配自定义 compose project。Single Node 部署也可显式指定：
 
 ```bash
 ./update.sh --mode single-node
 ```
 
+如果想把停机感压到接近“只重启一下”的体验，推荐两阶段执行：先在任意时间准备镜像，这一步不会重建容器；再在低峰期快速切换，跳过拉取镜像，主要等待备份、容器重建和健康检查。
+
+```bash
+# 阶段 1：拉取新镜像，不中断当前服务
+./update.sh --prepare
+
+# 阶段 2：使用已拉好的镜像快速切换
+./update.sh --apply-prepared
+```
+
+Docker Compose 默认会启动 updater sidecar，管理后台按钮也会执行上述两阶段命令。交互仍是两步确认：第一次点击“立即更新”准备镜像，弹窗会显示正在拉取 Docker 镜像的实时进度；准备完成后再点击“立即重启”快速切换。updater 会挂载宿主机 Docker socket 和当前部署目录，因此请只在可信服务器上启用，并在生产环境为 `AETHER_DOCKER_UPDATE_TOKEN` 设置强随机值；如需关闭后台按钮执行，可设置 `AETHER_DOCKER_AUTO_UPDATE_ENABLED=false`。
+
+```bash
+# .env
+AETHER_DOCKER_UPDATE_TOKEN=replace-with-strong-random-token
+
+# 可用 openssl rand -hex 32 生成 token，然后启动 app + updater
+docker compose up -d --build
+```
+
 仓库自带的 Docker Compose 默认把应用日志输出到容器 `stdout/stderr`，直接用 `docker compose logs -f app` 查看，并由 Docker 轮转日志，避免正式发布镜像切换到非 root 用户后再被宿主机挂载日志目录的权限问题拖垮启动。如果你确实需要文件日志，需要在 compose 里把 `AETHER_LOG_DESTINATION` 改成 `file|both`，并额外挂载一个容器用户可写的目录到 `/opt/aether/logs`。
 
-管理后台右上角“版本信息”会检测新版本。Docker Compose 部署只提示版本，实际更新继续执行 `./update.sh`；systemd / launchd / 二进制部署才使用后台自更新，流程是下载对应平台的 GitHub Release 包、强制校验 `SHA256SUMS`、解压到 `/opt/aether/releases/<version>`，再切换 `/opt/aether/current` 并退出进程，交给 systemd / launchd 拉起新版本。
+管理后台右上角“版本信息”会检测新版本。Docker Compose 默认通过 updater sidecar 提供在线更新，界面是两步确认：第一次点击“立即更新”只负责下载并准备镜像，弹窗会实时显示下载进度；准备完成后再点击“立即重启”快速切换到新容器。这个过程中可以直接收起弹窗，后台任务继续跑，切换阶段才会有一次短暂重建和健康检查窗口。若 updater 不可用或被关闭，界面会回退显示 `bash ./update.sh --prepare`、`bash ./update.sh --apply-prepared` 和一次性 `bash ./update.sh` 命令。systemd / launchd / 二进制部署才使用后台自更新，流程是下载对应平台的 GitHub Release 包、强制校验 `SHA256SUMS`、解压到 `/opt/aether/releases/<version>`，再切换 `/opt/aether/current` 并退出进程，交给 systemd / launchd 拉起新版本。
 
-源码或本地构建版本不会启用后台在线更新，请继续使用源码更新流程。Docker Compose 用户如果希望“容器重建后也保持镜像层面的新版本”，仍建议定期运行 `./update.sh` 拉取并重建 app 镜像。服务器访问 GitHub 需要代理时，可设置 `AETHER_UPDATE_PROXY_URL`，也兼容 `UPDATE_PROXY_URL`、`HTTPS_PROXY`、`ALL_PROXY`、`HTTP_PROXY` 以及 `NO_PROXY`。共享出口触发 GitHub API 限流时，可设置只读 `AETHER_UPDATE_GITHUB_TOKEN`，也兼容 `GITHUB_TOKEN` / `GH_TOKEN`。下载总超时默认 600 秒，连续无响应/无数据默认 30 秒，可通过 `AETHER_UPDATE_DOWNLOAD_TIMEOUT_SECS` 和 `AETHER_UPDATE_DOWNLOAD_IDLE_TIMEOUT_SECS` 调整。
+源码或本地构建版本不会启用后台在线更新，请继续使用源码更新流程。Docker Compose 后台按钮和命令行 `./update.sh` 走同一套镜像更新脚本，都会让容器重建后保持镜像层面的新版本。服务器访问 GitHub 需要代理时，可设置 `AETHER_UPDATE_PROXY_URL`，也兼容 `UPDATE_PROXY_URL`、`HTTPS_PROXY`、`ALL_PROXY`、`HTTP_PROXY` 以及 `NO_PROXY`。共享出口触发 GitHub API 限流时，可设置只读 `AETHER_UPDATE_GITHUB_TOKEN`，也兼容 `GITHUB_TOKEN` / `GH_TOKEN`。下载总超时默认 600 秒，连续无响应/无数据默认 30 秒，可通过 `AETHER_UPDATE_DOWNLOAD_TIMEOUT_SECS` 和 `AETHER_UPDATE_DOWNLOAD_IDLE_TIMEOUT_SECS` 调整。
 
 标准 Docker Compose 使用 Docker named volumes 存放 Postgres/Redis/MySQL 数据；Single Node 使用部署目录下的 `./data` 存放 SQLite 数据。
 
@@ -89,7 +109,7 @@ Docker Compose 部署后，可在部署目录直接执行：
 docker compose -f docker-compose.release-local.yml up -d --build
 ```
 
-这套环境会用当前源码构建一个本地测试镜像，但编译为 `release` 类型，并默认伪装成 `v0.7.0`，这样后台会按正式发布版逻辑开放“立即更新”。默认监听 `http://127.0.0.1:18085`，数据目录使用 `./data-release-local`；日志默认走 `docker logs`，不会影响你正在跑的源码构建容器。
+这套环境会用当前源码构建一个本地测试镜像，但编译为 `release` 类型，并默认伪装成 `v0.7.0`，这样后台会按正式发布版逻辑开放“立即更新”。默认监听 `http://127.0.0.1:18085`，数据目录使用 `./data-release-local`；日志默认走 `docker logs`，不会影响你正在跑的源码构建容器。这个环境适合直接验证“下载进度 -> 收起弹窗 -> 点击重启 -> 页面自动恢复”的完整在线更新体验。
 
 如果这套容器在 `prepare-update` 时访问 GitHub 失败，而你本机是通过代理出网，请在 `.env` 里把 `AETHER_UPDATE_PROXY_URL` 写成宿主机地址，例如 `http://host.docker.internal:7890`；容器内的 `127.0.0.1` 指向容器自身，不是宿主机。
 

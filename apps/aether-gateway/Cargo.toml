@@ -60,6 +60,7 @@ sha1 = "0.10"
 sha2 = { workspace = true, features = ["oid"] }
 tar.workspace = true
 sqlx.workspace = true
+sysinfo = "0.32"
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
