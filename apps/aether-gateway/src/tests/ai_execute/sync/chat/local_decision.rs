@@ -1,13 +1,13 @@
 use super::{
     any, build_router_with_state, build_state_with_execution_runtime_override,
-    encrypt_python_fernet_plaintext, json, start_server, to_bytes, AppState, Arc, Body, Digest,
-    InMemoryAuthApiKeySnapshotRepository, InMemoryMinimalCandidateSelectionReadRepository,
-    InMemoryProviderCatalogReadRepository, InMemoryRequestCandidateRepository, Json, Mutex,
-    Request, RequestCandidateReadRepository, RequestCandidateStatus, Router, Sha256, StatusCode,
-    StoredAuthApiKeySnapshot, StoredMinimalCandidateSelectionRow, StoredProviderCatalogEndpoint,
-    StoredProviderCatalogKey, StoredProviderCatalogProvider, StoredProviderModelMapping,
-    DEVELOPMENT_ENCRYPTION_KEY, EXECUTION_PATH_EXECUTION_RUNTIME_SYNC, EXECUTION_PATH_HEADER,
-    TRACE_ID_HEADER,
+    encrypt_python_fernet_plaintext, json, run_openai_chat_sync_test, start_server, to_bytes,
+    AppState, Arc, Body, Digest, InMemoryAuthApiKeySnapshotRepository,
+    InMemoryMinimalCandidateSelectionReadRepository, InMemoryProviderCatalogReadRepository,
+    InMemoryRequestCandidateRepository, Json, Mutex, Request, RequestCandidateReadRepository,
+    RequestCandidateStatus, Router, Sha256, StatusCode, StoredAuthApiKeySnapshot,
+    StoredMinimalCandidateSelectionRow, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    StoredProviderCatalogProvider, StoredProviderModelMapping, DEVELOPMENT_ENCRYPTION_KEY,
+    EXECUTION_PATH_EXECUTION_RUNTIME_SYNC, EXECUTION_PATH_HEADER, TRACE_ID_HEADER,
 };
 
 #[tokio::test]
@@ -377,8 +377,15 @@ async fn proxy_pii_redaction_local_openai_chat_runtime_masks_headers_and_restore
     provider_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_executes_openai_chat_sync_via_local_decision_gate_without_execution_runtime_override(
+#[test]
+fn gateway_executes_openai_chat_sync_via_local_decision_gate_without_execution_runtime_override() {
+    run_openai_chat_sync_test(
+        "gateway_executes_openai_chat_sync_via_local_decision_gate_without_execution_runtime_override",
+        gateway_executes_openai_chat_sync_via_local_decision_gate_without_execution_runtime_override_impl,
+    );
+}
+
+async fn gateway_executes_openai_chat_sync_via_local_decision_gate_without_execution_runtime_override_impl(
 ) {
     #[derive(Debug, Clone)]
     struct SeenUpstreamSyncRequest {

@@ -40,6 +40,30 @@ use aether_data_contracts::repository::provider_catalog::{
 };
 use sha2::{Digest, Sha256};
 
+const OPENAI_CHAT_SYNC_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_openai_chat_sync_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(OPENAI_CHAT_SYNC_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("openai chat sync test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 mod failover;
 mod local_decision;
 mod pii_redaction;
