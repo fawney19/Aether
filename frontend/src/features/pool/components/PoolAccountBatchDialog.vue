@@ -15,7 +15,7 @@
             variant="ghost"
             size="sm"
             class="h-7 px-2 text-[11px]"
-            :disabled="loading || executing || !hasActiveFilters"
+            :disabled="interactionBusy || !hasActiveFilters"
             @click="clearFilters"
           >
             重置筛选
@@ -30,7 +30,7 @@
             size="sm"
             class="h-8 px-2.5 text-[11px]"
             :class="activeQuickSelectorSet.has(option.value) ? 'border-primary/70 bg-primary/10 text-primary' : ''"
-            :disabled="loading || executing"
+            :disabled="interactionBusy"
             @click="toggleQuickSelector(option.value)"
           >
             {{ option.label }}
@@ -43,13 +43,14 @@
               :model-value="searchText"
               placeholder="搜索账号名 / 套餐 / 额度 / 代理状态"
               class="h-8 flex-1"
+              :disabled="interactionBusy"
               @update:model-value="(v) => searchText = String(v || '')"
             />
             <Button
               variant="ghost"
               size="icon"
               class="h-8 w-8 shrink-0"
-              :disabled="loading || executing"
+              :disabled="interactionBusy || selectAllFiltered"
               @click="loadKeysPage()"
             >
               <RefreshCw
@@ -68,7 +69,7 @@
                 <Checkbox
                   :checked="isAllFilteredSelected"
                   :indeterminate="isPartiallyFilteredSelected"
-                  :disabled="filteredTotal === 0 || loading || executing"
+                  :disabled="filteredTotal === 0 || interactionBusy"
                   @update:checked="toggleSelectFiltered"
                 />
                 <span class="text-muted-foreground">全选筛选结果</span>
@@ -77,7 +78,7 @@
                 variant="ghost"
                 size="sm"
                 class="h-7 px-2 text-[11px]"
-                :disabled="pageKeyRows.length === 0 || loading || executing || selectAllFiltered"
+                :disabled="pageKeyRows.length === 0 || interactionBusy || selectAllFiltered"
                 @click="toggleSelectCurrentPage"
               >
                 {{ isCurrentPageFullySelected ? '取消本页全选' : '本页全选' }}
@@ -86,12 +87,19 @@
                 variant="ghost"
                 size="sm"
                 class="h-7 px-2 text-[11px]"
-                :disabled="!canClearSelection || loading || executing"
+                :disabled="!canClearSelection || interactionBusy"
                 @click="clearSelection"
               >
                 清空选择
               </Button>
             </div>
+          </div>
+          <div
+            v-if="selectingAllFiltered"
+            class="flex items-center gap-2 rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-primary"
+          >
+            <RefreshCw class="h-3.5 w-3.5 animate-spin" />
+            <span>正在生成筛选结果快照...</span>
           </div>
         </div>
       </div>
@@ -118,7 +126,7 @@
             >
               <Checkbox
                 :checked="selectAllFiltered || selectedIdSet.has(row.key.key_id)"
-                :disabled="executing || selectAllFiltered"
+                :disabled="interactionBusy || selectAllFiltered"
                 @update:checked="(checked) => toggleOne(row.key.key_id, checked === true)"
               />
               <div class="min-w-0 flex-1">
@@ -169,7 +177,7 @@
                 variant="ghost"
                 size="icon"
                 class="h-7 w-7"
-                :disabled="currentPage <= 1"
+                :disabled="currentPage <= 1 || interactionBusy || selectAllFiltered"
                 @click="goToPage(1)"
               >
                 <ChevronsLeft class="h-3.5 w-3.5" />
@@ -178,7 +186,7 @@
                 variant="ghost"
                 size="icon"
                 class="h-7 w-7"
-                :disabled="currentPage <= 1"
+                :disabled="currentPage <= 1 || interactionBusy || selectAllFiltered"
                 @click="goToPage(currentPage - 1)"
               >
                 <ChevronLeft class="h-3.5 w-3.5" />
@@ -187,7 +195,7 @@
                 variant="ghost"
                 size="icon"
                 class="h-7 w-7"
-                :disabled="currentPage >= totalPages"
+                :disabled="currentPage >= totalPages || interactionBusy || selectAllFiltered"
                 @click="goToPage(currentPage + 1)"
               >
                 <ChevronRight class="h-3.5 w-3.5" />
@@ -196,7 +204,7 @@
                 variant="ghost"
                 size="icon"
                 class="h-7 w-7"
-                :disabled="currentPage >= totalPages"
+                :disabled="currentPage >= totalPages || interactionBusy || selectAllFiltered"
                 @click="goToPage(totalPages)"
               >
                 <ChevronsRight class="h-3.5 w-3.5" />
@@ -216,6 +224,7 @@
             <ProxyNodeSelect
               :model-value="proxyNodeIdForAction"
               trigger-class="h-8"
+              :disabled="interactionBusy"
               @update:model-value="(v: string) => proxyNodeIdForAction = v"
             />
             <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
@@ -260,7 +269,7 @@
     <template #footer>
       <Button
         variant="outline"
-        :disabled="executing"
+        :disabled="executing || selectingAllFiltered"
         @click="emit('update:modelValue', false)"
       >
         关闭
@@ -279,11 +288,13 @@ import { useConfirm } from '@/composables/useConfirm'
 import { parseApiError } from '@/utils/errorParser'
 import {
   listPoolKeys,
+  createPoolKeySelectionSnapshot,
   batchActionPoolKeys,
   getPoolBatchDeleteTask,
   resolvePoolKeySelection,
   type PoolKeyDetail,
   type PoolKeySelectionItem,
+  type PoolSelectionSnapshot,
 } from '@/api/endpoints/pool'
 import { exportKey, refreshProviderQuota } from '@/api/endpoints/keys'
 import { refreshProviderOAuth } from '@/api/endpoints/provider_oauth'
@@ -379,6 +390,13 @@ const ACTION_OPTIONS: BatchActionOption[] = [
   { value: 'export', label: '导出凭据', hint: '仅导出 OAuth 凭据，其他类型账号将被跳过。' },
   { value: 'delete', label: '删除账号', hint: '永久删除账号数据，执行后不可恢复。', destructive: true },
 ]
+const SNAPSHOT_BACKED_ACTIONS = new Set<BatchActionValue>([
+  'delete',
+  'enable',
+  'disable',
+  'clear_proxy',
+  'set_proxy',
+])
 
 const { success, warning, error: showError } = useToast()
 const { confirm } = useConfirm()
@@ -386,8 +404,11 @@ const proxyNodesStore = useProxyNodesStore()
 
 const loading = ref(false)
 const executing = ref(false)
+const selectingAllFiltered = ref(false)
 const pageKeys = ref<PoolKeyDetail[]>([])
 const filteredTotal = ref(0)
+const selectedSelectionSnapshot = ref<PoolSelectionSnapshot | null>(null)
+const loadedPageSignature = ref('')
 const selectedKeyIds = ref<string[]>([])
 const knownKeysById = ref<Record<string, PoolKeyDetail>>({})
 const selectAllFiltered = ref(false)
@@ -414,11 +435,14 @@ const dialogDescription = computed(() => {
 })
 
 const selectedIdSet = computed(() => new Set(selectedKeyIds.value))
-const selectedCount = computed(() => (selectAllFiltered.value ? filteredTotal.value : selectedKeyIds.value.length))
+const selectedCount = computed(() => (
+  selectAllFiltered.value ? (selectedSelectionSnapshot.value?.total || 0) : selectedKeyIds.value.length
+))
 const totalPages = computed(() => Math.max(1, Math.ceil(filteredTotal.value / PAGE_SIZE)))
 const isAllFilteredSelected = computed(() => selectAllFiltered.value && filteredTotal.value > 0)
 const isPartiallyFilteredSelected = computed(() => !selectAllFiltered.value && selectedKeyIds.value.length > 0)
 const hasActiveFilters = computed(() => searchText.value.trim().length > 0 || activeQuickSelectors.value.length > 0)
+const interactionBusy = computed(() => loading.value || executing.value || selectingAllFiltered.value)
 const pageKeyRows = computed<PageKeyRow[]>(() => pageKeys.value.map((key) => {
   const statusBadgeLabel = getStatusBadgeLabel(key)
   const quotaText = getQuotaText(key)
@@ -566,28 +590,64 @@ function rememberPageKeys(keys: PoolKeyDetail[]): void {
 
 function resetSelection(clearKnown = false): void {
   selectAllFiltered.value = false
+  selectedSelectionSnapshot.value = null
   selectedKeyIds.value = []
   if (clearKnown) knownKeysById.value = {}
 }
 
-function buildSelectionFilters(): { search?: string; quick_selectors?: string[] } {
-  const search = searchText.value.trim()
-  const quickSelectors = activeQuickSelectors.value.map((value) => String(value))
+function currentFilterSignature(): string {
+  return JSON.stringify({
+    providerId: props.providerId,
+    search: searchText.value.trim(),
+    quickSelectors: [...activeQuickSelectors.value].sort(),
+    status: 'all',
+    searchScope: 'full',
+  })
+}
+
+function invalidateCurrentSelectionSnapshot(): void {
+  loadedPageSignature.value = ''
+}
+
+function normalizeSelectionSnapshot(
+  snapshot: PoolSelectionSnapshot | null | undefined,
+): PoolSelectionSnapshot | null {
+  if (!snapshot || typeof snapshot.id !== 'string' || snapshot.id.trim().length === 0) return null
+  const snapshotTotal = Number(snapshot.total)
+  if (!Number.isFinite(snapshotTotal) || snapshotTotal < 0) return null
   return {
-    ...(search ? { search } : {}),
-    ...(quickSelectors.length > 0 ? { quick_selectors: quickSelectors } : {}),
+    ...snapshot,
+    id: snapshot.id.trim(),
+    total: snapshotTotal,
   }
 }
 
-async function loadKeysPage(): Promise<void> {
+function lockSelectionSnapshot(snapshot: PoolSelectionSnapshot): void {
+  selectAllFiltered.value = true
+  selectedSelectionSnapshot.value = { ...snapshot }
+  selectedKeyIds.value = []
+}
+
+type LoadKeysPageOptions = {
+  preserveOnError?: boolean
+  errorFallback?: string
+}
+
+async function loadKeysPage(options: LoadKeysPageOptions = {}): Promise<boolean> {
+  if (selectAllFiltered.value && !executing.value) {
+    resetSelection()
+  }
+
   if (!props.providerId) {
     pageKeys.value = []
     filteredTotal.value = 0
+    invalidateCurrentSelectionSnapshot()
     resetSelection(true)
-    return
+    return false
   }
 
   const requestId = ++loadRequestId
+  const requestedFilterSignature = currentFilterSignature()
   loading.value = true
   const startedAt = performance.now()
   let ok = false
@@ -600,17 +660,23 @@ async function loadKeysPage(): Promise<void> {
       quick_selectors: activeQuickSelectors.value,
       search_scope: 'full',
     })
-    if (requestId !== loadRequestId) return
+    if (requestId !== loadRequestId) return false
 
     pageKeys.value = Array.isArray(res.keys) ? res.keys : []
     filteredTotal.value = Number(res.total || 0)
+    loadedPageSignature.value = requestedFilterSignature
     rememberPageKeys(pageKeys.value)
     ok = true
+    return true
   } catch (err) {
-    if (requestId !== loadRequestId) return
-    pageKeys.value = []
-    filteredTotal.value = 0
-    showError(parseApiError(err, '加载账号列表失败'))
+    if (requestId !== loadRequestId) return false
+    if (!options.preserveOnError) {
+      pageKeys.value = []
+      filteredTotal.value = 0
+    }
+    invalidateCurrentSelectionSnapshot()
+    showError(parseApiError(err, options.errorFallback || '加载账号列表失败'))
+    return false
   } finally {
     if (requestId === loadRequestId) {
       loading.value = false
@@ -634,6 +700,7 @@ function requestFilteredReload(debounceMs = 0): void {
   if (!props.modelValue) return
   clearSearchDebounce()
   resetSelection()
+  invalidateCurrentSelectionSnapshot()
   lastResultMessage.value = ''
   const run = () => {
     searchDebounceTimer = null
@@ -648,26 +715,101 @@ function requestFilteredReload(debounceMs = 0): void {
 }
 
 async function goToPage(page: number): Promise<void> {
+  if (selectingAllFiltered.value) return
   const nextPage = Math.min(Math.max(1, page), totalPages.value)
   currentPage.value = nextPage
   await loadKeysPage()
 }
 
+async function createSelectionSnapshotForCurrentFilters(): Promise<PoolSelectionSnapshot | null> {
+  if (!props.providerId || filteredTotal.value <= 0) return null
+
+  const expectedTotal = filteredTotal.value
+  const expectedPageKeyIds = pageKeys.value.map((key) => key.key_id)
+  try {
+    const result = await createPoolKeySelectionSnapshot(props.providerId, {
+      page: currentPage.value,
+      page_size: PAGE_SIZE,
+      status: 'all',
+      search: searchText.value.trim() || undefined,
+      quick_selectors: activeQuickSelectors.value,
+      search_scope: 'full',
+      sort_by: 'imported_at',
+      sort_order: 'desc',
+      expected_total: expectedTotal,
+      expected_page_key_ids: expectedPageKeyIds,
+    })
+    const snapshot = normalizeSelectionSnapshot(result.selection_snapshot)
+    if (!snapshot) {
+      warning('当前筛选快照不可用，请刷新列表后重试')
+      return null
+    }
+    filteredTotal.value = snapshot.total
+
+    if (result.selection_snapshot_mismatch || snapshot.total !== expectedTotal) {
+      const expected = Number(result.selection_snapshot_mismatch?.expected_total ?? expectedTotal)
+      const actual = Number(result.selection_snapshot_mismatch?.actual_total ?? snapshot.total)
+      warning(
+        Number.isFinite(expected) && Number.isFinite(actual)
+          ? `筛选结果已从 ${expected} 个变为 ${actual} 个，已按最新结果全选`
+          : `筛选结果已变化，已按最新结果全选 ${snapshot.total} 个`,
+      )
+    }
+
+    return snapshot
+  } catch (err) {
+    showError(parseApiError(err, '生成筛选快照失败'))
+    return null
+  }
+}
+
 function toggleOne(keyId: string, checked: boolean): void {
+  if (interactionBusy.value || selectAllFiltered.value) return
   const set = new Set(selectedKeyIds.value)
   if (checked) set.add(keyId)
   else set.delete(keyId)
   selectedKeyIds.value = [...set]
 }
 
-function toggleSelectFiltered(checked: boolean | 'indeterminate'): void {
-  selectAllFiltered.value = checked === true
-  if (selectAllFiltered.value) {
-    selectedKeyIds.value = []
+async function toggleSelectFiltered(checked: boolean | 'indeterminate'): Promise<void> {
+  if (selectingAllFiltered.value) return
+  if (checked !== true) {
+    selectAllFiltered.value = false
+    selectedSelectionSnapshot.value = null
+    return
+  }
+
+  selectingAllFiltered.value = true
+  lastResultMessage.value = ''
+  try {
+    if (loadedPageSignature.value !== currentFilterSignature()) {
+      clearSearchDebounce()
+      const loaded = await loadKeysPage({
+        preserveOnError: true,
+        errorFallback: '刷新筛选结果失败',
+      })
+      if (!loaded) {
+        selectAllFiltered.value = false
+        selectedSelectionSnapshot.value = null
+        return
+      }
+    }
+
+    const snapshot = await createSelectionSnapshotForCurrentFilters()
+    if (!snapshot) {
+      selectAllFiltered.value = false
+      selectedSelectionSnapshot.value = null
+      return
+    }
+
+    lockSelectionSnapshot(snapshot)
+  } finally {
+    selectingAllFiltered.value = false
   }
 }
 
 function toggleSelectCurrentPage(): void {
+  if (interactionBusy.value) return
   if (selectAllFiltered.value || pageKeys.value.length === 0) return
   const set = new Set(selectedKeyIds.value)
   const pageIds = pageKeys.value.map((key) => key.key_id)
@@ -680,10 +822,12 @@ function toggleSelectCurrentPage(): void {
 }
 
 function clearSelection(): void {
+  if (interactionBusy.value) return
   resetSelection()
 }
 
 function clearFilters(): void {
+  if (interactionBusy.value) return
   if (!hasActiveFilters.value) return
   clearSearchDebounce()
   suppressFilterWatch = true
@@ -694,6 +838,7 @@ function clearFilters(): void {
 }
 
 function toggleQuickSelector(selector: QuickSelectorValue): void {
+  if (interactionBusy.value) return
   const idx = activeQuickSelectors.value.indexOf(selector)
   if (idx >= 0) {
     activeQuickSelectors.value.splice(idx, 1)
@@ -704,7 +849,7 @@ function toggleQuickSelector(selector: QuickSelectorValue): void {
 }
 
 function canExecuteSpecifiedAction(action: BatchActionValue): boolean {
-  if (executing.value || loading.value || selectedCount.value === 0) return false
+  if (interactionBusy.value || selectedCount.value === 0) return false
   if (action === 'set_proxy') return Boolean(proxyNodeIdForAction.value)
   return true
 }
@@ -715,6 +860,7 @@ function getActionButtonVariant(option: BatchActionOption): 'default' | 'destruc
 }
 
 async function confirmAndExecuteAction(action: BatchActionValue): Promise<void> {
+  if (selectingAllFiltered.value) return
   selectedAction.value = action
   if (selectedCount.value === 0) {
     warning('请先选择账号')
@@ -773,8 +919,17 @@ async function resolveSelectedItems(): Promise<PoolKeySelectionItem[]> {
   if (!props.providerId) return []
 
   if (selectAllFiltered.value) {
-    progressLabel.value = '正在解析筛选结果...'
-    const result = await resolvePoolKeySelection(props.providerId, buildSelectionFilters())
+    const snapshot = selectedSelectionSnapshot.value
+    if (!snapshot) return []
+    progressLabel.value = '正在读取已选账号快照...'
+    const result = await resolvePoolKeySelection(props.providerId, {
+      snapshot_id: snapshot.id,
+      expected_total: snapshot.total,
+    })
+    const missingCount = Number(result.missing_count || 0)
+    if (Number.isFinite(missingCount) && missingCount > 0) {
+      warning(`有 ${missingCount} 个已选账号已不存在，已自动跳过`)
+    }
     return Array.isArray(result.items) ? result.items : []
   }
 
@@ -826,18 +981,52 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
   lastResultMessage.value = ''
 
   try {
-    const selectedKeys = await resolveSelectedItems()
-    resolvedCount = selectedKeys.length
-    if (selectedKeys.length === 0) {
-      warning('未找到可执行账号，请刷新列表重试')
-      return
-    }
+    const snapshot = selectAllFiltered.value ? selectedSelectionSnapshot.value : null
+    const canUseSnapshotBatchAction = Boolean(snapshot && SNAPSHOT_BACKED_ACTIONS.has(selectedAction.value))
 
-    progressDone.value = 0
-    progressTotal.value = selectedKeys.length
-    progressLabel.value = `正在${actionLabel}...`
+    if (canUseSnapshotBatchAction && snapshot) {
+      resolvedCount = snapshot.total
+      progressDone.value = 0
+      progressTotal.value = snapshot.total
+      progressLabel.value = `正在${actionLabel}...`
 
-    if (selectedAction.value === 'refresh_quota') {
+      const payload = selectedAction.value === 'set_proxy'
+        ? { node_id: proxyNodeIdForAction.value, enabled: true }
+        : undefined
+      const result = await batchActionPoolKeys(props.providerId, {
+        selection: {
+          type: 'snapshot',
+          snapshot_id: snapshot.id,
+          expected_total: snapshot.total,
+        },
+        action: selectedAction.value as 'enable' | 'disable' | 'delete' | 'clear_proxy' | 'set_proxy',
+        ...(payload ? { payload } : {}),
+      })
+
+      if (selectedAction.value === 'delete' && result.task_id) {
+        progressLabel.value = `正在${actionLabel}...（后台执行中）`
+        const taskResult = await pollDeleteTask(props.providerId, result.task_id, 0)
+        successCount += taskResult.deleted
+        if (taskResult.status === 'failed') {
+          failedCount += snapshot.total - taskResult.deleted
+        }
+      } else {
+        successCount += result.affected
+        progressDone.value = snapshot.total
+      }
+    } else {
+      const selectedKeys = await resolveSelectedItems()
+      resolvedCount = selectedKeys.length
+      if (selectedKeys.length === 0) {
+        warning('未找到可执行账号，请刷新列表重试')
+        return
+      }
+
+      progressDone.value = 0
+      progressTotal.value = selectedKeys.length
+      progressLabel.value = `正在${actionLabel}...`
+
+      if (selectedAction.value === 'refresh_quota') {
       const targetIds = selectedKeys.map((key) => key.key_id)
       const BATCH_SIZE = 20
       const counts = await runChunkedBatchAction({
@@ -989,6 +1178,7 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
       }
       const workers = Array.from({ length: Math.min(CONCURRENCY, tasks.length) }, () => runNext())
       await Promise.all(workers)
+      }
     }
 
     lastResultMessage.value = `执行完成：成功 ${successCount}，失败 ${failedCount}，跳过 ${skippedCount}`
@@ -998,9 +1188,7 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
     actionPhaseMs = performance.now() - actionStartedAt
     if (selectedAction.value !== 'export') {
       const reloadStartedAt = performance.now()
-      if (selectedAction.value === 'delete' && successCount > 0) {
-        resetSelection(true)
-      }
+      resetSelection(selectedAction.value === 'delete' && successCount > 0)
       await loadKeysPage()
       if (pageKeys.value.length === 0 && filteredTotal.value > 0 && currentPage.value > totalPages.value) {
         await goToPage(totalPages.value)
@@ -1051,6 +1239,7 @@ watch(
     proxyNodeIdForAction.value = ''
     resetSelection(true)
     filteredTotal.value = 0
+    invalidateCurrentSelectionSnapshot()
     pageKeys.value = []
     currentPage.value = 1
     suppressFilterWatch = false
@@ -1067,6 +1256,7 @@ watch(
     suppressFilterWatch = true
     resetSelection(true)
     filteredTotal.value = 0
+    invalidateCurrentSelectionSnapshot()
     pageKeys.value = []
     currentPage.value = 1
     suppressFilterWatch = false

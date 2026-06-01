@@ -2,7 +2,7 @@
   <div class="space-y-1.5">
     <Select
       :model-value="modelValue"
-      :disabled="proxyNodesStore.loading || nodeOptions.length === 0"
+      :disabled="disabled || proxyNodesStore.loading || nodeOptions.length === 0"
       @update:model-value="(v: string) => $emit('update:modelValue', v)"
     >
       <SelectTrigger :class="triggerClass">
@@ -42,6 +42,7 @@ import { formatRegion } from '@/utils/region'
 const props = defineProps<{
   modelValue: string
   triggerClass?: string
+  disabled?: boolean
 }>()
 
 defineEmits<{

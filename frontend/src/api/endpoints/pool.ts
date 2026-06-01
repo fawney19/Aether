@@ -202,6 +202,24 @@ export interface PoolKeysPageResponse {
   page: number
   page_size: number
   keys: PoolKeyDetail[]
+  selection_snapshot?: PoolSelectionSnapshot | null
+  selection_snapshot_mismatch?: PoolSelectionSnapshotMismatch | null
+}
+
+export interface PoolSelectionSnapshot {
+  id: string
+  total: number
+  status: 'ready' | 'expired' | string
+  created_at_unix_secs?: number
+  created_at?: string | null
+  expires_at_unix_secs?: number
+  expires_at?: string | null
+}
+
+export interface PoolSelectionSnapshotMismatch {
+  reason?: 'total_changed' | 'page_keys_changed' | string
+  expected_total: number
+  actual_total: number
 }
 
 export interface PoolKeyScoreDetail {
@@ -306,6 +324,29 @@ export interface PoolScoresQuery {
 export interface PoolKeySelectionRequest {
   search?: string
   quick_selectors?: string[]
+  snapshot_id?: string
+  expected_total?: number
+}
+
+export interface PoolKeySelectionSnapshotRequest {
+  page?: number
+  page_size?: number
+  search?: string
+  status?: PoolKeysQuery['status']
+  quick_selectors?: string[]
+  search_scope?: PoolKeysQuery['search_scope']
+  sort_by?: PoolKeysQuery['sort_by']
+  sort_order?: PoolKeysQuery['sort_order']
+  expected_total: number
+  expected_page_key_ids: string[]
+}
+
+export interface PoolKeySelectionSnapshotResponse {
+  total: number
+  page: number
+  page_size: number
+  selection_snapshot?: PoolSelectionSnapshot | null
+  selection_snapshot_mismatch?: PoolSelectionSnapshotMismatch | null
 }
 
 export interface PoolKeySelectionItem {
@@ -324,11 +365,18 @@ export interface PoolKeySelectionItem {
 
 export interface PoolKeySelectionResponse {
   total: number
+  snapshot_total?: number
+  missing_count?: number
   items: PoolKeySelectionItem[]
 }
 
 export interface PoolBatchAction {
-  key_ids: string[]
+  key_ids?: string[]
+  selection?: {
+    type: 'snapshot'
+    snapshot_id: string
+    expected_total: number
+  }
   action:
     | 'enable'
     | 'disable'
@@ -391,6 +439,18 @@ export async function listPoolKeys(
     },
     options.cacheTtlMs ?? 0,
   )
+}
+
+export async function createPoolKeySelectionSnapshot(
+  providerId: string,
+  body: PoolKeySelectionSnapshotRequest,
+): Promise<PoolKeySelectionSnapshotResponse> {
+  const response = await client.post<PoolKeySelectionSnapshotResponse>(
+    `/api/admin/pool/${providerId}/keys/selection-snapshot`,
+    body,
+    { timeout: POOL_BATCH_ACTION_TIMEOUT_MS },
+  )
+  return response.data
 }
 
 export async function listPoolScores(
