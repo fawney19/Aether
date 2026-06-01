@@ -10,6 +10,8 @@ use axum::{
 };
 use serde_json::json;
 
+const ADMIN_POOL_BATCH_KEY_FETCH_CHUNK_SIZE: usize = 500;
+
 impl<'a> AdminAppState<'a> {
     pub(crate) async fn clear_admin_provider_pool_cooldown(&self, provider_id: &str, key_id: &str) {
         crate::handlers::admin::provider::pool::runtime::clear_admin_provider_pool_cooldown(
@@ -306,9 +308,7 @@ impl<'a> AdminAppState<'a> {
         provider_id: &str,
         payload: aether_admin::provider::pool::AdminPoolBatchActionRequest,
     ) -> Result<Response<Body>, GatewayError> {
-        use aether_admin::provider::pool::{
-            self as admin_provider_pool_pure, AdminPoolBatchActionKind,
-        };
+        use aether_admin::provider::pool as admin_provider_pool_pure;
 
         let Some(provider) = self
             .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id.to_string()))
@@ -334,12 +334,36 @@ impl<'a> AdminAppState<'a> {
             }
         };
 
-        let keys = self
-            .read_provider_catalog_keys_by_ids(&plan.key_ids)
-            .await?
-            .into_iter()
-            .filter(|key| key.provider_id == provider.id)
-            .collect::<Vec<_>>();
+        let action_label = plan.action_label;
+        let affected = self
+            .execute_admin_pool_batch_action_plan(&provider, plan)
+            .await?;
+
+        Ok(Json(
+            admin_provider_pool_pure::build_admin_pool_batch_action_result_payload(
+                affected,
+                action_label,
+            ),
+        )
+        .into_response())
+    }
+
+    pub(crate) async fn execute_admin_pool_batch_action_plan(
+        &self,
+        provider: &StoredProviderCatalogProvider,
+        plan: aether_admin::provider::pool::AdminPoolBatchActionPlan,
+    ) -> Result<usize, GatewayError> {
+        use aether_admin::provider::pool::AdminPoolBatchActionKind;
+
+        let mut keys = Vec::new();
+        for chunk in plan.key_ids.chunks(ADMIN_POOL_BATCH_KEY_FETCH_CHUNK_SIZE) {
+            keys.extend(
+                self.read_provider_catalog_keys_by_ids(chunk)
+                    .await?
+                    .into_iter()
+                    .filter(|key| key.provider_id == provider.id),
+            );
+        }
 
         if plan.action == AdminPoolBatchActionKind::Delete {
             let deleted_key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
@@ -359,13 +383,7 @@ impl<'a> AdminAppState<'a> {
             self.cleanup_deleted_provider_catalog_refs(&provider.id, &[], &deleted_key_ids)
                 .await?;
 
-            return Ok(Json(
-                admin_provider_pool_pure::build_admin_pool_batch_action_result_payload(
-                    affected,
-                    plan.action_label,
-                ),
-            )
-            .into_response());
+            return Ok(affected);
         }
 
         let mut affected = 0usize;
@@ -386,12 +404,6 @@ impl<'a> AdminAppState<'a> {
             }
         }
 
-        Ok(Json(
-            admin_provider_pool_pure::build_admin_pool_batch_action_result_payload(
-                affected,
-                plan.action_label,
-            ),
-        )
-        .into_response())
+        Ok(affected)
     }
 }
