@@ -35,6 +35,12 @@ pub(crate) struct AdminPoolKeySort {
     pub direction: AdminPoolKeySortDirection,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AdminPoolSearchScope {
+    Name,
+    Full,
+}
+
 impl Default for AdminPoolKeySort {
     fn default() -> Self {
         Self {
@@ -52,34 +58,40 @@ pub(crate) fn build_admin_pool_error_response(
 }
 
 pub(crate) fn parse_admin_pool_page(query: Option<&str>) -> Result<usize, String> {
-    match query_param_value(query, "page") {
-        None => Ok(1),
-        Some(value) => {
-            let parsed = value
+    let value = query_param_value(query, "page")
+        .map(|value| {
+            value
                 .parse::<usize>()
-                .map_err(|_| "page must be an integer between 1 and 10000".to_string())?;
-            if (1..=10_000).contains(&parsed) {
-                Ok(parsed)
-            } else {
-                Err("page must be an integer between 1 and 10000".to_string())
-            }
-        }
+                .map_err(|_| "page must be an integer between 1 and 10000".to_string())
+        })
+        .transpose()?;
+    parse_admin_pool_page_value(value)
+}
+
+pub(crate) fn parse_admin_pool_page_value(value: Option<usize>) -> Result<usize, String> {
+    match value {
+        None => Ok(1),
+        Some(value) if (1..=10_000).contains(&value) => Ok(value),
+        Some(_) => Err("page must be an integer between 1 and 10000".to_string()),
     }
 }
 
 pub(crate) fn parse_admin_pool_page_size(query: Option<&str>) -> Result<usize, String> {
-    match query_param_value(query, "page_size") {
-        None => Ok(50),
-        Some(value) => {
-            let parsed = value
+    let value = query_param_value(query, "page_size")
+        .map(|value| {
+            value
                 .parse::<usize>()
-                .map_err(|_| "page_size must be an integer between 1 and 200".to_string())?;
-            if (1..=200).contains(&parsed) {
-                Ok(parsed)
-            } else {
-                Err("page_size must be an integer between 1 and 200".to_string())
-            }
-        }
+                .map_err(|_| "page_size must be an integer between 1 and 200".to_string())
+        })
+        .transpose()?;
+    parse_admin_pool_page_size_value(value)
+}
+
+pub(crate) fn parse_admin_pool_page_size_value(value: Option<usize>) -> Result<usize, String> {
+    match value {
+        None => Ok(50),
+        Some(value) if (1..=200).contains(&value) => Ok(value),
+        Some(_) => Err("page_size must be an integer between 1 and 200".to_string()),
     }
 }
 
@@ -87,6 +99,27 @@ pub(crate) fn parse_admin_pool_search(query: Option<&str>) -> Option<String> {
     query_param_value(query, "search")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn parse_admin_pool_search_scope(
+    query: Option<&str>,
+) -> Result<AdminPoolSearchScope, String> {
+    let value = query_param_value(query, "search_scope");
+    parse_admin_pool_search_scope_value(value.as_deref())
+}
+
+pub(crate) fn parse_admin_pool_search_scope_value(
+    value: Option<&str>,
+) -> Result<AdminPoolSearchScope, String> {
+    match value
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .as_deref()
+    {
+        None | Some("name") => Ok(AdminPoolSearchScope::Name),
+        Some("full") => Ok(AdminPoolSearchScope::Full),
+        Some(_) => Err("search_scope must be one of: name, full".to_string()),
+    }
 }
 
 pub(crate) fn parse_admin_pool_quick_selectors(query: Option<&str>) -> Vec<String> {
@@ -102,10 +135,12 @@ pub(crate) fn parse_admin_pool_quick_selectors(query: Option<&str>) -> Vec<Strin
 }
 
 pub(crate) fn parse_admin_pool_status_filter(query: Option<&str>) -> Result<String, String> {
-    let value = query_param_value(query, "status")
-        .unwrap_or_else(|| "all".to_string())
-        .trim()
-        .to_ascii_lowercase();
+    let value = query_param_value(query, "status");
+    parse_admin_pool_status_filter_value(value.as_deref())
+}
+
+pub(crate) fn parse_admin_pool_status_filter_value(value: Option<&str>) -> Result<String, String> {
+    let value = value.unwrap_or("all").trim().to_ascii_lowercase();
     match value.as_str() {
         "all"
         | "available"
@@ -134,7 +169,16 @@ pub(crate) fn parse_admin_pool_status_filter(query: Option<&str>) -> Result<Stri
 }
 
 pub(crate) fn parse_admin_pool_key_sort(query: Option<&str>) -> Result<AdminPoolKeySort, String> {
-    let field = match query_param_value(query, "sort_by")
+    let sort_by = query_param_value(query, "sort_by");
+    let sort_order = query_param_value(query, "sort_order");
+    parse_admin_pool_key_sort_values(sort_by.as_deref(), sort_order.as_deref())
+}
+
+pub(crate) fn parse_admin_pool_key_sort_values(
+    sort_by: Option<&str>,
+    sort_order: Option<&str>,
+) -> Result<AdminPoolKeySort, String> {
+    let field = match sort_by
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty())
         .as_deref()
@@ -150,7 +194,7 @@ pub(crate) fn parse_admin_pool_key_sort(query: Option<&str>) -> Result<AdminPool
             );
         }
     };
-    let direction = match query_param_value(query, "sort_order")
+    let direction = match sort_order
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty())
         .as_deref()
@@ -212,6 +256,10 @@ pub(crate) fn is_admin_pool_route(request_context: &AdminRequestContext<'_>) -> 
         || (request_context.method() == http::Method::POST
             && path.starts_with("/api/admin/pool/")
             && path.ends_with("/keys/batch-action")
+            && path.matches('/').count() == 6)
+        || (request_context.method() == http::Method::POST
+            && path.starts_with("/api/admin/pool/")
+            && path.ends_with("/keys/selection-snapshot")
             && path.matches('/').count() == 6)
         || (request_context.method() == http::Method::POST
             && path.starts_with("/api/admin/pool/")

@@ -14,6 +14,34 @@ pub struct AdminPoolResolveSelectionRequest {
     pub search: String,
     #[serde(default)]
     pub quick_selectors: Vec<String>,
+    #[serde(default)]
+    pub snapshot_id: Option<String>,
+    #[serde(default)]
+    pub expected_total: Option<usize>,
+}
+
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+pub struct AdminPoolCreateSelectionSnapshotRequest {
+    #[serde(default)]
+    pub page: Option<usize>,
+    #[serde(default)]
+    pub page_size: Option<usize>,
+    #[serde(default)]
+    pub search: String,
+    #[serde(default)]
+    pub quick_selectors: Vec<String>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub search_scope: String,
+    #[serde(default)]
+    pub sort_by: Option<String>,
+    #[serde(default)]
+    pub sort_order: Option<String>,
+    #[serde(default)]
+    pub expected_total: Option<usize>,
+    #[serde(default)]
+    pub expected_page_key_ids: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, serde::Deserialize)]
@@ -21,9 +49,21 @@ pub struct AdminPoolBatchActionRequest {
     #[serde(default)]
     pub key_ids: Vec<String>,
     #[serde(default)]
+    pub selection: Option<AdminPoolBatchSelectionRequest>,
+    #[serde(default)]
     pub action: String,
     #[serde(default)]
     pub payload: Option<Value>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AdminPoolBatchSelectionRequest {
+    Snapshot {
+        snapshot_id: String,
+        #[serde(default)]
+        expected_total: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -377,6 +417,7 @@ pub fn build_admin_pool_batch_action_plan(
         }
     };
 
+    let has_unresolved_selection = payload.selection.is_some();
     let key_ids = payload
         .key_ids
         .into_iter()
@@ -386,6 +427,9 @@ pub fn build_admin_pool_batch_action_plan(
         .into_iter()
         .collect::<Vec<_>>();
     if key_ids.is_empty() {
+        if has_unresolved_selection {
+            return Err("selection should be resolved to key_ids before execution".to_string());
+        }
         return Err("key_ids should not be empty".to_string());
     }
 
