@@ -27,6 +27,7 @@ mod read_resolve_selection;
 #[path = "read_routes/scores.rs"]
 mod read_scores;
 pub(crate) mod selection;
+mod selection_snapshots;
 mod support;
 
 pub(crate) use self::batch_shared::{
@@ -35,12 +36,24 @@ pub(crate) use self::batch_shared::{
     build_admin_pool_batch_delete_task_payload, AdminPoolBatchActionRequest,
     AdminPoolBatchImportRequest,
 };
+pub(crate) use self::selection_snapshots::{
+    admin_pool_selection_snapshot_key, read_admin_pool_selection_snapshot,
+    resolve_admin_pool_selection_snapshot_key_ids, store_admin_pool_selection_snapshot,
+    validate_admin_pool_selection_snapshot_reference, AdminPoolSelectionSnapshot,
+    AdminPoolSelectionSnapshotItem, AdminPoolSelectionSnapshotReference,
+    ADMIN_POOL_SELECTION_SNAPSHOT_ITEM_PAGE_SIZE,
+    ADMIN_POOL_SELECTION_SNAPSHOT_MAX_ACTIVE_PER_ADMIN_PROVIDER,
+    ADMIN_POOL_SELECTION_SNAPSHOT_MAX_TOTAL,
+};
 pub(crate) use self::support::{
     admin_pool_provider_id_from_path, admin_pool_provider_id_from_scores_path,
-    parse_admin_pool_key_sort, parse_admin_pool_page, parse_admin_pool_page_size,
-    parse_admin_pool_quick_selectors, parse_admin_pool_search, parse_admin_pool_status_filter,
-    AdminPoolKeySort, AdminPoolKeySortDirection, AdminPoolKeySortField,
-    AdminPoolResolveSelectionRequest, ADMIN_POOL_BANNED_KEY_CLEANUP_EMPTY_MESSAGE,
+    parse_admin_pool_key_sort, parse_admin_pool_key_sort_values, parse_admin_pool_page,
+    parse_admin_pool_page_size, parse_admin_pool_page_size_value, parse_admin_pool_page_value,
+    parse_admin_pool_quick_selectors, parse_admin_pool_search, parse_admin_pool_search_scope,
+    parse_admin_pool_search_scope_value, parse_admin_pool_status_filter,
+    parse_admin_pool_status_filter_value, AdminPoolKeySort, AdminPoolKeySortDirection,
+    AdminPoolKeySortField, AdminPoolResolveSelectionRequest, AdminPoolSearchScope,
+    ADMIN_POOL_BANNED_KEY_CLEANUP_EMPTY_MESSAGE,
     ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
     ADMIN_POOL_PROVIDER_CATALOG_WRITER_UNAVAILABLE_DETAIL,
 };
@@ -103,6 +116,16 @@ pub(crate) async fn maybe_build_local_admin_pool_response(
         Some("list_keys") => {
             return Ok(Some(
                 read_keys::build_admin_pool_list_keys_response(state, request_context).await?,
+            ));
+        }
+        Some("create_selection_snapshot") => {
+            return Ok(Some(
+                read_keys::build_admin_pool_create_selection_snapshot_response(
+                    state,
+                    request_context,
+                    request_body,
+                )
+                .await?,
             ));
         }
         Some("scores") => {

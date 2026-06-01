@@ -290,6 +290,18 @@ pub(super) fn classify_admin_observability_family_route(
         ))
     } else if method == http::Method::POST
         && normalized_path_no_trailing.starts_with("/api/admin/pool/")
+        && normalized_path_no_trailing.ends_with("/keys/selection-snapshot")
+        && normalized_path_no_trailing.matches('/').count() == 6
+    {
+        Some(classified(
+            "admin_proxy",
+            "pool_manage",
+            "create_selection_snapshot",
+            "admin:pool",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && normalized_path_no_trailing.starts_with("/api/admin/pool/")
         && normalized_path_no_trailing.ends_with("/keys/resolve-selection")
         && normalized_path_no_trailing.matches('/').count() == 6
     {

@@ -1,28 +1,34 @@
 use super::{
     admin_pool_provider_id_from_path, admin_provider_pool_config, build_admin_pool_error_response,
-    parse_admin_pool_key_sort, parse_admin_pool_page, parse_admin_pool_page_size,
-    parse_admin_pool_quick_selectors, parse_admin_pool_search, parse_admin_pool_status_filter,
-    pool_payloads, pool_selection, read_admin_provider_pool_runtime_state, AdminPoolKeySort,
-    AdminPoolKeySortDirection, AdminPoolKeySortField, AdminProviderPoolRuntimeState,
-    ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
-    ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
+    parse_admin_pool_key_sort, parse_admin_pool_key_sort_values, parse_admin_pool_page,
+    parse_admin_pool_page_size, parse_admin_pool_page_size_value, parse_admin_pool_page_value,
+    parse_admin_pool_quick_selectors, parse_admin_pool_search, parse_admin_pool_search_scope,
+    parse_admin_pool_search_scope_value, parse_admin_pool_status_filter,
+    parse_admin_pool_status_filter_value, pool_payloads, pool_selection,
+    read_admin_provider_pool_runtime_state, store_admin_pool_selection_snapshot, AdminPoolKeySort,
+    AdminPoolKeySortDirection, AdminPoolKeySortField, AdminPoolSearchScope,
+    AdminPoolSelectionSnapshotItem, AdminProviderPoolRuntimeState, ProviderCatalogKeyListOrder,
+    ProviderCatalogKeyListQuery, ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
+    ADMIN_POOL_SELECTION_SNAPSHOT_MAX_TOTAL,
 };
 use crate::ai_serving::{provider_key_pool_score_id, provider_key_pool_score_scope};
 use crate::handlers::admin::provider::shared::support::AdminProviderPoolConfig;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
-use crate::handlers::admin::shared::provider_key_status_snapshot_payload;
+use crate::handlers::admin::shared::{provider_key_status_snapshot_payload, unix_secs_to_rfc3339};
 use crate::provider_key_auth::provider_key_auth_semantics;
 use crate::GatewayError;
 use aether_admin::provider::pool as admin_provider_pool_pure;
 use aether_data_contracts::repository::pool_scores::{
     GetPoolMemberScoresByIdsQuery, PoolMemberIdentity, StoredPoolMemberScore,
 };
-use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
+use aether_data_contracts::repository::provider_catalog::{
+    StoredProviderCatalogKey, StoredProviderCatalogProvider,
+};
 use aether_data_contracts::repository::usage::{
     ProviderApiKeyWindowUsageRequest, StoredProviderApiKeyWindowUsageSummary,
 };
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     http,
     response::{IntoResponse, Response},
     Json,
@@ -33,6 +39,8 @@ use std::{
     collections::BTreeMap,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+const ADMIN_POOL_SELECTION_SNAPSHOT_TTL_SECONDS: u64 = 15 * 60;
 
 type AdminPoolCodexCycleUsageByKey =
     BTreeMap<String, BTreeMap<String, StoredProviderApiKeyWindowUsageSummary>>;
@@ -293,6 +301,164 @@ fn admin_pool_repository_key_order(sort: AdminPoolKeySort) -> ProviderCatalogKey
     }
 }
 
+fn admin_pool_key_matches_name_search(
+    key: &StoredProviderCatalogKey,
+    search: Option<&str>,
+) -> bool {
+    let Some(search) = search else {
+        return true;
+    };
+    let search = search.trim().to_ascii_lowercase();
+    if search.is_empty() {
+        return true;
+    }
+    key.name.to_ascii_lowercase().contains(&search) || key.id.to_ascii_lowercase().contains(&search)
+}
+
+fn admin_pool_normalized_expected_page_key_ids(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn admin_pool_sort_field_label(field: AdminPoolKeySortField) -> &'static str {
+    match field {
+        AdminPoolKeySortField::Default => "name",
+        AdminPoolKeySortField::ImportedAt => "imported_at",
+        AdminPoolKeySortField::LastUsedAt => "last_used_at",
+        AdminPoolKeySortField::Score => "score",
+    }
+}
+
+fn admin_pool_sort_direction_label(direction: AdminPoolKeySortDirection) -> &'static str {
+    match direction {
+        AdminPoolKeySortDirection::Asc => "asc",
+        AdminPoolKeySortDirection::Desc => "desc",
+    }
+}
+
+async fn build_admin_pool_selection_snapshot_payload(
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
+    provider_id: &str,
+    search: Option<&str>,
+    quick_selectors: &[String],
+    status: &str,
+    search_scope: AdminPoolSearchScope,
+    sort: AdminPoolKeySort,
+    now_unix_secs: u64,
+    keys: &[StoredProviderCatalogKey],
+) -> Result<Value, GatewayError> {
+    let mut items = Vec::with_capacity(keys.len());
+    for (ordinal, key) in keys.iter().enumerate() {
+        let ordinal = u64::try_from(ordinal).map_err(|_| {
+            GatewayError::Internal("pool selection snapshot ordinal overflow".to_string())
+        })?;
+        items.push(AdminPoolSelectionSnapshotItem {
+            ordinal,
+            key_id: key.id.clone(),
+            key_updated_at_unix_secs: key.updated_at_unix_secs,
+        });
+    }
+
+    let snapshot = store_admin_pool_selection_snapshot(
+        state,
+        request_context,
+        provider_id,
+        Some(json!({
+            "provider_id": provider_id,
+            "search": search,
+            "search_scope": match search_scope {
+                AdminPoolSearchScope::Name => "name",
+                AdminPoolSearchScope::Full => "full",
+            },
+            "quick_selectors": quick_selectors,
+            "status": status,
+            "sort_by": admin_pool_sort_field_label(sort.field),
+            "sort_order": admin_pool_sort_direction_label(sort.direction),
+        })),
+        now_unix_secs,
+        ADMIN_POOL_SELECTION_SNAPSHOT_TTL_SECONDS,
+        items,
+    )
+    .await?;
+
+    Ok(json!({
+        "id": snapshot.id,
+        "total": snapshot.total,
+        "status": snapshot.status,
+        "created_at_unix_secs": snapshot.created_at_unix_secs,
+        "created_at": unix_secs_to_rfc3339(snapshot.created_at_unix_secs),
+        "expires_at_unix_secs": snapshot.expires_at_unix_secs,
+        "expires_at": unix_secs_to_rfc3339(snapshot.expires_at_unix_secs),
+    }))
+}
+
+async fn maybe_build_admin_pool_selection_snapshot_payload(
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
+    provider_id: &str,
+    search: Option<&str>,
+    quick_selectors: &[String],
+    status: &str,
+    search_scope: AdminPoolSearchScope,
+    sort: AdminPoolKeySort,
+    now_unix_secs: u64,
+    keys: &[StoredProviderCatalogKey],
+    page_offset: usize,
+    page_size: usize,
+    expected_total: Option<usize>,
+    expected_page_key_ids: Option<&[String]>,
+) -> Result<(Option<Value>, Option<Value>), GatewayError> {
+    let total = keys.len();
+    let mut mismatch = None;
+    if let Some(expected_total) = expected_total {
+        if expected_total != total {
+            mismatch = Some(json!({
+                "reason": "total_changed",
+                "expected_total": expected_total,
+                "actual_total": total,
+            }));
+        }
+    }
+    if let Some(expected_page_key_ids) = expected_page_key_ids {
+        let actual_page_key_ids = keys
+            .iter()
+            .skip(page_offset)
+            .take(page_size)
+            .map(|key| key.id.clone())
+            .collect::<Vec<_>>();
+        if expected_page_key_ids != actual_page_key_ids.as_slice() {
+            mismatch = Some(json!({
+                "reason": "page_keys_changed",
+                "expected_total": expected_total.unwrap_or(total),
+                "actual_total": total,
+            }));
+        }
+    }
+
+    Ok((
+        Some(
+            build_admin_pool_selection_snapshot_payload(
+                state,
+                request_context,
+                provider_id,
+                search,
+                quick_selectors,
+                status,
+                search_scope,
+                sort,
+                now_unix_secs,
+                keys,
+            )
+            .await?,
+        ),
+        mismatch,
+    ))
+}
+
 fn admin_pool_trimmed_string(value: Option<&Value>) -> Option<String> {
     value
         .and_then(Value::as_str)
@@ -491,6 +657,91 @@ fn admin_pool_key_visible_status_filter(
     "available"
 }
 
+async fn read_admin_pool_filtered_sorted_keys(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    pool_config: Option<&AdminProviderPoolConfig>,
+    search: Option<&str>,
+    search_scope: AdminPoolSearchScope,
+    quick_selectors: &[String],
+    status: &str,
+    sort: AdminPoolKeySort,
+    now_unix_secs: u64,
+) -> Result<
+    (
+        Vec<StoredProviderCatalogKey>,
+        Option<BTreeMap<String, StoredPoolMemberScore>>,
+    ),
+    GatewayError,
+> {
+    let mut keys = state
+        .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
+        .await?
+        .into_iter()
+        .filter(|key| match search_scope {
+            AdminPoolSearchScope::Name => admin_pool_key_matches_name_search(key, search),
+            AdminPoolSearchScope::Full if search.is_some() => {
+                pool_selection::admin_pool_matches_search(
+                    state,
+                    key,
+                    &provider.provider_type,
+                    search,
+                )
+            }
+            AdminPoolSearchScope::Full => true,
+        })
+        .filter(|key| {
+            quick_selectors.iter().all(|selector| {
+                pool_selection::admin_pool_matches_quick_selector(
+                    state,
+                    key,
+                    &provider.provider_type,
+                    selector,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if status != "all" {
+        let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
+        let runtime = match pool_config {
+            Some(pool_config) if !key_ids.is_empty() => {
+                read_admin_provider_pool_runtime_state(
+                    state.runtime_state(),
+                    &provider.id,
+                    &key_ids,
+                    pool_config,
+                    None,
+                )
+                .await
+            }
+            _ => AdminProviderPoolRuntimeState::default(),
+        };
+        keys.retain(|key| {
+            admin_pool_key_visible_status_filter(
+                state,
+                key,
+                &provider.provider_type,
+                pool_config,
+                &runtime,
+                now_unix_secs,
+            ) == status
+        });
+    }
+
+    if matches!(sort.field, AdminPoolKeySortField::Score) {
+        let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
+        let scores = read_admin_pool_scores_by_key_id(state, &provider.id, &key_ids)
+            .await
+            .unwrap_or_default();
+        admin_pool_sort_keys_by_score(&mut keys, &scores, sort.direction);
+        Ok((keys, Some(scores)))
+    } else {
+        admin_pool_sort_keys_for_request(&mut keys, sort);
+        Ok((keys, None))
+    }
+}
+
 pub(super) async fn build_admin_pool_list_keys_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
@@ -528,6 +779,15 @@ pub(super) async fn build_admin_pool_list_keys_response(
         }
     };
     let search = parse_admin_pool_search(query).map(|value| value.to_ascii_lowercase());
+    let search_scope = match parse_admin_pool_search_scope(query) {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok(build_admin_pool_error_response(
+                http::StatusCode::BAD_REQUEST,
+                detail,
+            ));
+        }
+    };
     let quick_selectors = admin_provider_pool_pure::admin_pool_sanitize_quick_selectors(
         parse_admin_pool_quick_selectors(query),
     );
@@ -567,113 +827,23 @@ pub(super) async fn build_admin_pool_list_keys_response(
     let sort_by_score = matches!(sort.field, AdminPoolKeySortField::Score);
     let now_unix_secs = admin_pool_current_unix_secs();
 
-    let (keys, total, preloaded_pool_scores_by_key_id) = if status != "all" {
-        let mut keys = state
-            .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
-            .await?
-            .into_iter()
-            .collect::<Vec<_>>();
-        if let Some(keyword) = search.as_ref() {
-            keys.retain(|key| {
-                pool_selection::admin_pool_matches_search(
-                    state,
-                    key,
-                    &provider.provider_type,
-                    Some(keyword),
-                )
-            });
-        }
-        if !quick_selectors.is_empty() {
-            keys.retain(|key| {
-                quick_selectors.iter().all(|selector| {
-                    pool_selection::admin_pool_matches_quick_selector(
-                        state,
-                        key,
-                        &provider.provider_type,
-                        selector,
-                    )
-                })
-            });
-        }
-
-        let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
-        let runtime = match pool_config.as_ref() {
-            Some(pool_config) if !key_ids.is_empty() => {
-                read_admin_provider_pool_runtime_state(
-                    state.runtime_state(),
-                    &provider.id,
-                    &key_ids,
-                    pool_config,
-                    None,
-                )
-                .await
-            }
-            _ => AdminProviderPoolRuntimeState::default(),
-        };
-        keys.retain(|key| {
-            admin_pool_key_visible_status_filter(
-                state,
-                key,
-                &provider.provider_type,
-                pool_config.as_ref(),
-                &runtime,
-                now_unix_secs,
-            ) == status
-        });
-
-        let preloaded_pool_scores_by_key_id = if sort_by_score {
-            let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
-            let scores = read_admin_pool_scores_by_key_id(state, &provider.id, &key_ids)
-                .await
-                .unwrap_or_default();
-            admin_pool_sort_keys_by_score(&mut keys, &scores, sort.direction);
-            Some(scores)
-        } else {
-            admin_pool_sort_keys_for_request(&mut keys, sort);
-            None
-        };
-        let total = keys.len();
-        let keys = keys
-            .into_iter()
-            .skip(page_offset)
-            .take(page_size)
-            .collect::<Vec<_>>();
-        (keys, total, preloaded_pool_scores_by_key_id)
-    } else if !quick_selectors.is_empty() || sort_by_score {
-        let mut keys = state
-            .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
-            .await?
-            .into_iter()
-            .filter(|key| {
-                pool_selection::admin_pool_matches_search(
-                    state,
-                    key,
-                    &provider.provider_type,
-                    search.as_deref(),
-                )
-            })
-            .filter(|key| {
-                quick_selectors.iter().all(|selector| {
-                    pool_selection::admin_pool_matches_quick_selector(
-                        state,
-                        key,
-                        &provider.provider_type,
-                        selector,
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        let preloaded_pool_scores_by_key_id = if sort_by_score {
-            let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
-            let scores = read_admin_pool_scores_by_key_id(state, &provider.id, &key_ids)
-                .await
-                .unwrap_or_default();
-            admin_pool_sort_keys_by_score(&mut keys, &scores, sort.direction);
-            Some(scores)
-        } else {
-            admin_pool_sort_keys_for_request(&mut keys, sort);
-            None
-        };
+    let (keys, total, preloaded_pool_scores_by_key_id) = if status != "all"
+        || !quick_selectors.is_empty()
+        || sort_by_score
+        || (matches!(search_scope, AdminPoolSearchScope::Full) && search.is_some())
+    {
+        let (keys, preloaded_pool_scores_by_key_id) = read_admin_pool_filtered_sorted_keys(
+            state,
+            &provider,
+            pool_config.as_ref(),
+            search.as_deref(),
+            search_scope,
+            &quick_selectors,
+            &status,
+            sort,
+            now_unix_secs,
+        )
+        .await?;
         let total = keys.len();
         let keys = keys
             .into_iter()
@@ -743,13 +913,193 @@ pub(super) async fn build_admin_pool_list_keys_response(
         })
         .collect::<Vec<_>>();
 
-    Ok(Json(json!({
+    let payload = json!({
         "total": total,
         "page": page,
         "page_size": page_size,
         "keys": items,
-    }))
-    .into_response())
+    });
+
+    Ok(Json(payload).into_response())
+}
+
+pub(super) async fn build_admin_pool_create_selection_snapshot_response(
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
+    request_body: Option<&Bytes>,
+) -> Result<Response<Body>, GatewayError> {
+    if !state.has_provider_catalog_data_reader() {
+        return Ok(build_admin_pool_error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
+        ));
+    }
+
+    let Some(provider_id) = admin_pool_provider_id_from_path(request_context.path()) else {
+        return Ok(build_admin_pool_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "provider_id 无效",
+        ));
+    };
+    let payload = match request_body {
+        Some(body) if !body.is_empty() => {
+            match serde_json::from_slice::<
+                admin_provider_pool_pure::AdminPoolCreateSelectionSnapshotRequest,
+            >(body)
+            {
+                Ok(value) => value,
+                Err(_) => {
+                    return Ok(build_admin_pool_error_response(
+                        http::StatusCode::BAD_REQUEST,
+                        "Invalid JSON request body",
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Ok(build_admin_pool_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "Invalid JSON request body",
+            ));
+        }
+    };
+
+    let page = match parse_admin_pool_page_value(payload.page) {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok(build_admin_pool_error_response(
+                http::StatusCode::BAD_REQUEST,
+                detail,
+            ));
+        }
+    };
+    let page_size = match parse_admin_pool_page_size_value(payload.page_size) {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok(build_admin_pool_error_response(
+                http::StatusCode::BAD_REQUEST,
+                detail,
+            ));
+        }
+    };
+    let search = payload.search.trim().to_ascii_lowercase();
+    let search = (!search.is_empty()).then_some(search);
+    let search_scope = match parse_admin_pool_search_scope_value(
+        (!payload.search_scope.trim().is_empty()).then_some(payload.search_scope.as_str()),
+    ) {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok(build_admin_pool_error_response(
+                http::StatusCode::BAD_REQUEST,
+                detail,
+            ));
+        }
+    };
+    let quick_selectors =
+        admin_provider_pool_pure::admin_pool_sanitize_quick_selectors(payload.quick_selectors);
+    let status_value = payload.status.trim();
+    let status = match parse_admin_pool_status_filter_value(
+        (!status_value.is_empty()).then_some(status_value),
+    ) {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok(build_admin_pool_error_response(
+                http::StatusCode::BAD_REQUEST,
+                detail,
+            ));
+        }
+    };
+    let sort = match parse_admin_pool_key_sort_values(
+        payload.sort_by.as_deref(),
+        payload.sort_order.as_deref(),
+    ) {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok(build_admin_pool_error_response(
+                http::StatusCode::BAD_REQUEST,
+                detail,
+            ));
+        }
+    };
+    let Some(expected_total) = payload.expected_total else {
+        return Ok(build_admin_pool_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "expected_total is required",
+        ));
+    };
+    let expected_page_key_ids =
+        admin_pool_normalized_expected_page_key_ids(payload.expected_page_key_ids);
+
+    let Some(provider) = state
+        .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(build_admin_pool_error_response(
+            http::StatusCode::NOT_FOUND,
+            format!("Provider {provider_id} 不存在"),
+        ));
+    };
+
+    let pool_config = admin_provider_pool_config(&provider);
+    let page_offset = page.saturating_sub(1).saturating_mul(page_size);
+    let now_unix_secs = admin_pool_current_unix_secs();
+    let (keys, _) = read_admin_pool_filtered_sorted_keys(
+        state,
+        &provider,
+        pool_config.as_ref(),
+        search.as_deref(),
+        search_scope,
+        &quick_selectors,
+        &status,
+        sort,
+        now_unix_secs,
+    )
+    .await?;
+    let total = keys.len();
+    if total > ADMIN_POOL_SELECTION_SNAPSHOT_MAX_TOTAL {
+        return Ok(build_admin_pool_error_response(
+            http::StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "筛选结果过大（最多支持 {} 个账号），请缩小筛选范围后重试",
+                ADMIN_POOL_SELECTION_SNAPSHOT_MAX_TOTAL
+            ),
+        ));
+    }
+
+    let (selection_snapshot, selection_snapshot_mismatch) =
+        maybe_build_admin_pool_selection_snapshot_payload(
+            state,
+            request_context,
+            &provider.id,
+            search.as_deref(),
+            &quick_selectors,
+            &status,
+            search_scope,
+            sort,
+            now_unix_secs,
+            &keys,
+            page_offset,
+            page_size,
+            Some(expected_total),
+            Some(expected_page_key_ids.as_slice()),
+        )
+        .await?;
+
+    let mut response_payload = json!({
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    });
+    if let Some(selection_snapshot) = selection_snapshot {
+        response_payload["selection_snapshot"] = selection_snapshot;
+    }
+    if let Some(selection_snapshot_mismatch) = selection_snapshot_mismatch {
+        response_payload["selection_snapshot_mismatch"] = selection_snapshot_mismatch;
+    }
+
+    Ok(Json(response_payload).into_response())
 }
 
 #[cfg(test)]
