@@ -1,4 +1,6 @@
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::pool_scores::InMemoryPoolMemberScoreRepository;
@@ -7,7 +9,9 @@ use aether_data::repository::usage::InMemoryUsageReadRepository;
 use aether_data_contracts::repository::pool_scores::{
     PoolMemberHardState, PoolMemberIdentity, PoolMemberProbeStatus, StoredPoolMemberScore,
 };
-use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
+use aether_data_contracts::repository::provider_catalog::{
+    ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
+};
 use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
 use axum::body::{to_bytes, Body, Bytes};
 use axum::routing::{any, get, post};
@@ -18,7 +22,12 @@ use serde_json::json;
 use super::super::{
     build_router_with_state, sample_endpoint, sample_key, sample_provider, start_server, AppState,
 };
-use crate::admin_api::{maybe_build_local_admin_pool_response, AdminAppState, AdminRequestContext};
+use crate::admin_api::{
+    admin_pool_selection_snapshot_key, maybe_build_local_admin_pool_response, AdminAppState,
+    AdminPoolSelectionSnapshot, AdminPoolSelectionSnapshotItem, AdminRequestContext,
+    ADMIN_POOL_SELECTION_SNAPSHOT_MAX_ACTIVE_PER_ADMIN_PROVIDER,
+    ADMIN_POOL_SELECTION_SNAPSHOT_MAX_TOTAL,
+};
 use crate::ai_serving::{provider_key_pool_score_id, provider_key_pool_score_scope};
 use crate::audit::AdminAuditEvent;
 use crate::constants::{
@@ -75,6 +84,77 @@ async fn local_admin_pool_response(
     .await
     .expect("local pool response should build")
     .expect("pool route should resolve locally")
+}
+
+fn pool_test_state(
+    provider_catalog_repository: Arc<InMemoryProviderCatalogReadRepository>,
+) -> AppState {
+    AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog_repository,
+            ),
+        )
+}
+
+async fn response_json(response: axum::response::Response<Body>) -> serde_json::Value {
+    serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse")
+}
+
+fn list_payload_key_ids(payload: &serde_json::Value) -> Vec<String> {
+    payload["keys"]
+        .as_array()
+        .expect("keys should be array")
+        .iter()
+        .filter_map(|item| item["key_id"].as_str())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+async fn create_pool_selection_snapshot_payload(
+    state: &AppState,
+    provider_id: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let response = local_admin_pool_response(
+        state,
+        http::Method::POST,
+        &format!("/api/admin/pool/{provider_id}/keys/selection-snapshot"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response_json(response).await
+}
+
+async fn read_runtime_pool_selection_snapshot(
+    state: &AppState,
+    snapshot_id: &str,
+) -> Option<AdminPoolSelectionSnapshot> {
+    state
+        .runtime_kv_get(&admin_pool_selection_snapshot_key(snapshot_id))
+        .await
+        .expect("snapshot runtime lookup should succeed")
+        .map(|raw| serde_json::from_str(&raw).expect("snapshot runtime payload should parse"))
+}
+
+async fn write_runtime_pool_selection_snapshot(
+    state: &AppState,
+    snapshot: AdminPoolSelectionSnapshot,
+) {
+    let key = admin_pool_selection_snapshot_key(&snapshot.id);
+    let value = serde_json::to_string(&snapshot).expect("snapshot should serialize");
+    state
+        .runtime_state()
+        .kv_set(&key, value, Some(Duration::from_secs(60 * 60)))
+        .await
+        .expect("snapshot runtime write should succeed");
 }
 
 fn sample_pool_member_score(provider_id: &str, key_id: &str, score: f64) -> StoredPoolMemberScore {
@@ -916,6 +996,1330 @@ async fn gateway_handles_admin_pool_list_keys_locally_with_trusted_admin_princip
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_pool_create_selection_snapshot_freezes_filtered_result() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut first_key = sample_key("key-openai-a", "provider-openai", "openai:chat", "sk-a");
+    first_key.name = "alpha first".to_string();
+    let mut second_key = sample_key("key-openai-b", "provider-openai", "openai:chat", "sk-b");
+    second_key.name = "alpha second".to_string();
+    let mut other_key = sample_key("key-openai-c", "provider-openai", "openai:chat", "sk-c");
+    other_key.name = "beta other".to_string();
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![first_key, second_key, other_key],
+    ));
+    let state = pool_test_state(Arc::clone(&provider_catalog_repository));
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=1&search=alpha&status=all",
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    assert_eq!(payload["total"], json!(2));
+    assert_eq!(payload["keys"].as_array().map(Vec::len), Some(1));
+    assert!(payload.get("selection_snapshot").is_none());
+
+    let snapshot_payload = create_pool_selection_snapshot_payload(
+        &state,
+        "provider-openai",
+        json!({
+            "page": 1,
+            "page_size": 1,
+            "search": "alpha",
+            "status": "all",
+            "expected_total": payload["total"],
+            "expected_page_key_ids": list_payload_key_ids(&payload),
+        }),
+    )
+    .await;
+    assert_eq!(snapshot_payload["selection_snapshot"]["total"], json!(2));
+    assert_eq!(
+        snapshot_payload["selection_snapshot"]["status"],
+        json!("ready")
+    );
+    let snapshot_id = snapshot_payload["selection_snapshot"]["id"]
+        .as_str()
+        .expect("snapshot id should be present")
+        .to_string();
+
+    let mut new_key = sample_key("key-openai-d", "provider-openai", "openai:chat", "sk-d");
+    new_key.name = "alpha newly imported".to_string();
+    provider_catalog_repository
+        .create_key(&new_key)
+        .await
+        .expect("new matching key should be stored");
+
+    let snapshot = read_runtime_pool_selection_snapshot(&state, &snapshot_id)
+        .await
+        .expect("snapshot should exist");
+    assert_eq!(snapshot.total, 2);
+    assert_eq!(snapshot.created_by.as_deref(), Some("admin-user-123"));
+
+    let snapshot_key_ids = snapshot
+        .items
+        .iter()
+        .map(|item| item.key_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(snapshot_key_ids.len(), 2);
+    assert!(!snapshot_key_ids.contains(&"key-openai-d"));
+
+    let resolve_response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-openai/keys/resolve-selection",
+        Some(json!({
+            "snapshot_id": snapshot_id,
+            "expected_total": 2
+        })),
+    )
+    .await;
+    assert_eq!(resolve_response.status(), StatusCode::OK);
+    let resolve_payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(resolve_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    let resolved_ids = resolve_payload["items"]
+        .as_array()
+        .expect("resolved items should be array")
+        .iter()
+        .filter_map(|item| item["key_id"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(resolve_payload["total"], json!(2));
+    assert_eq!(resolved_ids.len(), 2);
+    assert!(!resolved_ids.contains(&"key-openai-d"));
+}
+
+#[tokio::test]
+async fn gateway_pool_list_keys_stays_read_only_for_legacy_snapshot_query_params() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut key = sample_key("key-openai-a", "provider-openai", "openai:chat", "sk-a");
+    key.name = "alpha first".to_string();
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog_repository,
+            ),
+        );
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=1&search=alpha&status=all&include_selection_snapshot=true",
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = response_json(response).await;
+    assert_eq!(payload["total"], json!(1));
+    assert!(payload.get("selection_snapshot").is_none());
+    assert!(payload.get("selection_snapshot_mismatch").is_none());
+}
+
+#[tokio::test]
+async fn gateway_pool_selection_snapshot_uses_same_full_search_scope_as_list() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut oauth_key = sample_key("key-openai-oauth", "provider-openai", "openai:chat", "sk-a");
+    oauth_key.name = "plain account".to_string();
+    oauth_key.auth_type = "oauth".to_string();
+    let mut note_key = sample_key("key-openai-note", "provider-openai", "openai:chat", "sk-b");
+    note_key.name = "ordinary account".to_string();
+    note_key.note = Some("contains-search-marker".to_string());
+    let mut other_key = sample_key("key-openai-other", "provider-openai", "openai:chat", "sk-c");
+    other_key.name = "unrelated account".to_string();
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![oauth_key, note_key, other_key],
+    ));
+    let state = pool_test_state(Arc::clone(&provider_catalog_repository));
+
+    let list_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=10&search=oauth&search_scope=full&status=all",
+        None,
+    )
+    .await;
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_payload = response_json(list_response).await;
+    assert_eq!(list_payload["total"], json!(1));
+    assert_eq!(
+        list_payload_key_ids(&list_payload),
+        vec!["key-openai-oauth"]
+    );
+
+    let snapshot_payload = create_pool_selection_snapshot_payload(
+        &state,
+        "provider-openai",
+        json!({
+            "page": 1,
+            "page_size": 10,
+            "search": "oauth",
+            "search_scope": "full",
+            "status": "all",
+            "expected_total": list_payload["total"],
+            "expected_page_key_ids": list_payload_key_ids(&list_payload),
+        }),
+    )
+    .await;
+    assert!(snapshot_payload
+        .get("selection_snapshot_mismatch")
+        .is_none());
+    assert_eq!(snapshot_payload["selection_snapshot"]["total"], json!(1));
+
+    let snapshot_id = snapshot_payload["selection_snapshot"]["id"]
+        .as_str()
+        .expect("snapshot id should be present");
+    let snapshot = read_runtime_pool_selection_snapshot(&state, snapshot_id)
+        .await
+        .expect("snapshot should exist");
+    assert_eq!(snapshot.items.len(), 1);
+    assert_eq!(snapshot.items[0].key_id, "key-openai-oauth");
+}
+
+#[tokio::test]
+async fn gateway_pool_selection_snapshot_reports_drift_while_writing_current_snapshot() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut first_key = sample_key("key-openai-a", "provider-openai", "openai:chat", "sk-a");
+    first_key.name = "alpha first".to_string();
+    let mut second_key = sample_key("key-openai-b", "provider-openai", "openai:chat", "sk-b");
+    second_key.name = "alpha second".to_string();
+    let mut third_key = sample_key("key-openai-c", "provider-openai", "openai:chat", "sk-c");
+    third_key.name = "alpha third".to_string();
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![first_key, second_key, third_key],
+    ));
+    let state = pool_test_state(Arc::clone(&provider_catalog_repository));
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-openai/keys/selection-snapshot",
+        Some(json!({
+            "page": 1,
+            "page_size": 2,
+            "search": "alpha",
+            "status": "all",
+            "expected_total": 2,
+            "expected_page_key_ids": ["key-openai-a", "key-openai-b"],
+        })),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = response_json(response).await;
+    assert_eq!(payload["total"], json!(3));
+    assert_eq!(payload["selection_snapshot"]["total"], json!(3));
+    assert_eq!(
+        payload["selection_snapshot_mismatch"],
+        json!({
+            "reason": "total_changed",
+            "expected_total": 2,
+            "actual_total": 3,
+        })
+    );
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-openai/keys/selection-snapshot",
+        Some(json!({
+            "page": 1,
+            "page_size": 2,
+            "search": "alpha",
+            "status": "all",
+            "expected_total": 3,
+            "expected_page_key_ids": ["key-openai-b", "key-openai-a"],
+        })),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = response_json(response).await;
+    assert_eq!(payload["total"], json!(3));
+    assert_eq!(payload["selection_snapshot"]["total"], json!(3));
+    assert_eq!(
+        payload["selection_snapshot_mismatch"],
+        json!({
+            "reason": "page_keys_changed",
+            "expected_total": 3,
+            "actual_total": 3,
+        })
+    );
+
+    let snapshot_id = payload["selection_snapshot"]["id"]
+        .as_str()
+        .expect("snapshot id should be present");
+    assert!(
+        read_runtime_pool_selection_snapshot(&state, snapshot_id)
+            .await
+            .is_some(),
+        "drifted selections should still write snapshots"
+    );
+}
+
+#[tokio::test]
+async fn gateway_pool_selection_snapshot_uses_same_default_page_order_as_list() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut alpha_key = sample_key("key-openai-alpha", "provider-openai", "openai:chat", "sk-a");
+    alpha_key.name = "Alpha same timestamp".to_string();
+    alpha_key.created_at_unix_ms = Some(2_000);
+    let mut beta_key = sample_key("key-openai-beta", "provider-openai", "openai:chat", "sk-b");
+    beta_key.name = "beta same timestamp".to_string();
+    beta_key.created_at_unix_ms = Some(2_000);
+    let mut older_key = sample_key("key-openai-older", "provider-openai", "openai:chat", "sk-c");
+    older_key.name = "older account".to_string();
+    older_key.created_at_unix_ms = Some(1_000);
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![older_key, beta_key, alpha_key],
+    ));
+    let state = pool_test_state(Arc::clone(&provider_catalog_repository));
+
+    let list_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=2&status=all",
+        None,
+    )
+    .await;
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_payload = response_json(list_response).await;
+    assert_eq!(list_payload["total"], json!(3));
+    let list_page_key_ids = list_payload_key_ids(&list_payload);
+    assert_eq!(list_page_key_ids.len(), 2);
+
+    let snapshot_payload = create_pool_selection_snapshot_payload(
+        &state,
+        "provider-openai",
+        json!({
+            "page": 1,
+            "page_size": 2,
+            "status": "all",
+            "expected_total": list_payload["total"],
+            "expected_page_key_ids": list_page_key_ids,
+        }),
+    )
+    .await;
+    assert!(snapshot_payload
+        .get("selection_snapshot_mismatch")
+        .is_none());
+    assert_eq!(snapshot_payload["selection_snapshot"]["total"], json!(3));
+
+    let snapshot_id = snapshot_payload["selection_snapshot"]["id"]
+        .as_str()
+        .expect("snapshot id should be present");
+    let snapshot = read_runtime_pool_selection_snapshot(&state, snapshot_id)
+        .await
+        .expect("snapshot should exist");
+    let snapshot_first_page_ids = snapshot
+        .items
+        .into_iter()
+        .take(2)
+        .map(|item| item.key_id)
+        .collect::<Vec<_>>();
+    assert_eq!(snapshot_first_page_ids, list_payload_key_ids(&list_payload));
+}
+
+#[tokio::test]
+async fn gateway_pool_batch_action_uses_selection_snapshot_targets() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut first_key = sample_key("key-openai-a", "provider-openai", "openai:chat", "sk-a");
+    first_key.name = "alpha first".to_string();
+    let mut second_key = sample_key("key-openai-b", "provider-openai", "openai:chat", "sk-b");
+    second_key.name = "alpha second".to_string();
+    let mut other_key = sample_key("key-openai-c", "provider-openai", "openai:chat", "sk-c");
+    other_key.name = "beta other".to_string();
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![first_key, second_key, other_key],
+    ));
+    let state = pool_test_state(Arc::clone(&provider_catalog_repository));
+
+    let list_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=1&search=alpha&status=all",
+        None,
+    )
+    .await;
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(list_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    let snapshot_payload = create_pool_selection_snapshot_payload(
+        &state,
+        "provider-openai",
+        json!({
+            "page": 1,
+            "page_size": 1,
+            "search": "alpha",
+            "status": "all",
+            "expected_total": list_payload["total"],
+            "expected_page_key_ids": list_payload_key_ids(&list_payload),
+        }),
+    )
+    .await;
+    let snapshot_id = snapshot_payload["selection_snapshot"]["id"]
+        .as_str()
+        .expect("snapshot id should be present")
+        .to_string();
+    assert_eq!(snapshot_payload["selection_snapshot"]["total"], json!(2));
+
+    let mismatch_response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-openai/keys/batch-action",
+        Some(json!({
+            "selection": {
+                "type": "snapshot",
+                "snapshot_id": snapshot_id.clone(),
+                "expected_total": 3
+            },
+            "action": "disable"
+        })),
+    )
+    .await;
+    assert_eq!(mismatch_response.status(), StatusCode::CONFLICT);
+
+    let mut new_key = sample_key("key-openai-d", "provider-openai", "openai:chat", "sk-d");
+    new_key.name = "alpha newly imported".to_string();
+    provider_catalog_repository
+        .create_key(&new_key)
+        .await
+        .expect("new matching key should be stored");
+
+    let action_response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-openai/keys/batch-action",
+        Some(json!({
+            "selection": {
+                "type": "snapshot",
+                "snapshot_id": snapshot_id,
+                "expected_total": 2
+            },
+            "action": "disable"
+        })),
+    )
+    .await;
+    assert_eq!(action_response.status(), StatusCode::OK);
+    let action_payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(action_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    assert_eq!(action_payload["affected"], json!(2));
+
+    let stored_keys = provider_catalog_repository
+        .list_keys_by_ids(&[
+            "key-openai-a".to_string(),
+            "key-openai-b".to_string(),
+            "key-openai-d".to_string(),
+        ])
+        .await
+        .expect("keys should list")
+        .into_iter()
+        .map(|key| (key.id, key.is_active))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(stored_keys.get("key-openai-a"), Some(&false));
+    assert_eq!(stored_keys.get("key-openai-b"), Some(&false));
+    assert_eq!(stored_keys.get("key-openai-d"), Some(&true));
+}
+
+#[tokio::test]
+async fn gateway_pool_selection_snapshot_keeps_only_recent_runtime_snapshots() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut key = sample_key("key-openai-a", "provider-openai", "openai:chat", "sk-a");
+    key.name = "alpha only".to_string();
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let state = pool_test_state(Arc::clone(&provider_catalog_repository));
+
+    let mut snapshot_ids = Vec::new();
+    for _ in 0..=ADMIN_POOL_SELECTION_SNAPSHOT_MAX_ACTIVE_PER_ADMIN_PROVIDER {
+        let snapshot_payload = create_pool_selection_snapshot_payload(
+            &state,
+            "provider-openai",
+            json!({
+                "page": 1,
+                "page_size": 1,
+                "search": "alpha",
+                "status": "all",
+                "expected_total": 1,
+                "expected_page_key_ids": ["key-openai-a"],
+            }),
+        )
+        .await;
+        snapshot_ids.push(
+            snapshot_payload["selection_snapshot"]["id"]
+                .as_str()
+                .expect("snapshot id should be present")
+                .to_string(),
+        );
+    }
+
+    assert!(
+        read_runtime_pool_selection_snapshot(&state, &snapshot_ids[0])
+            .await
+            .is_none(),
+        "oldest runtime snapshot should be pruned"
+    );
+    assert!(
+        read_runtime_pool_selection_snapshot(
+            &state,
+            snapshot_ids
+                .last()
+                .expect("latest snapshot id should exist"),
+        )
+        .await
+        .is_some(),
+        "latest runtime snapshot should remain"
+    );
+}
+
+#[tokio::test]
+async fn gateway_pool_snapshot_batch_action_uses_runtime_snapshot_blob_membership() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut first_key = sample_key("key-openai-a", "provider-openai", "openai:chat", "sk-a");
+    first_key.name = "alpha first".to_string();
+    let mut second_key = sample_key("key-openai-b", "provider-openai", "openai:chat", "sk-b");
+    second_key.name = "alpha second".to_string();
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![first_key, second_key],
+    ));
+    let state = pool_test_state(Arc::clone(&provider_catalog_repository));
+    write_runtime_pool_selection_snapshot(
+        &state,
+        AdminPoolSelectionSnapshot {
+            id: "snapshot-runtime".to_string(),
+            provider_id: "provider-openai".to_string(),
+            created_by: Some("admin-user-123".to_string()),
+            filter_json: None,
+            total: 2,
+            status: "ready".to_string(),
+            created_at_unix_secs: 100,
+            expires_at_unix_secs: 4_000_000_000,
+            items: vec![
+                AdminPoolSelectionSnapshotItem {
+                    ordinal: 0,
+                    key_id: "key-openai-a".to_string(),
+                    key_updated_at_unix_secs: None,
+                },
+                AdminPoolSelectionSnapshotItem {
+                    ordinal: 1,
+                    key_id: "key-openai-b".to_string(),
+                    key_updated_at_unix_secs: None,
+                },
+            ],
+        },
+    )
+    .await;
+
+    let action_response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-openai/keys/batch-action",
+        Some(json!({
+            "selection": {
+                "type": "snapshot",
+                "snapshot_id": "snapshot-runtime",
+                "expected_total": 2
+            },
+            "action": "disable"
+        })),
+    )
+    .await;
+    assert_eq!(action_response.status(), StatusCode::OK);
+    let action_payload = response_json(action_response).await;
+    assert_eq!(action_payload["affected"], json!(2));
+
+    let stored_keys = provider_catalog_repository
+        .list_keys_by_ids(&["key-openai-a".to_string(), "key-openai-b".to_string()])
+        .await
+        .expect("keys should list")
+        .into_iter()
+        .map(|key| (key.id, key.is_active))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(stored_keys.get("key-openai-a"), Some(&false));
+    assert_eq!(stored_keys.get("key-openai-b"), Some(&false));
+}
+
+#[tokio::test]
+async fn gateway_pool_selection_snapshot_handles_large_result_sets_consistently() {
+    const KEY_COUNT: usize = 5_000;
+
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut keys = Vec::with_capacity(KEY_COUNT + 25);
+    for index in 0..KEY_COUNT {
+        let key_id = format!("key-openai-bulk-{index:05}");
+        let mut key = sample_key(
+            &key_id,
+            "provider-openai",
+            "openai:chat",
+            &format!("sk-bulk-{index:05}"),
+        );
+        key.name = format!("bulk alpha {index:05}");
+        key.updated_at_unix_secs = Some(1_700_000_000 + index as u64);
+        keys.push(key);
+    }
+    for index in 0..25 {
+        let key_id = format!("key-openai-noise-{index:05}");
+        let mut key = sample_key(
+            &key_id,
+            "provider-openai",
+            "openai:chat",
+            &format!("sk-noise-{index:05}"),
+        );
+        key.name = format!("noise beta {index:05}");
+        keys.push(key);
+    }
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        keys,
+    ));
+    let state = pool_test_state(Arc::clone(&provider_catalog_repository));
+
+    let list_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=25&search=bulk%20alpha&status=all",
+        None,
+    )
+    .await;
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_payload = response_json(list_response).await;
+    assert_eq!(list_payload["total"], json!(KEY_COUNT));
+    assert_eq!(list_payload["keys"].as_array().map(Vec::len), Some(25));
+    let snapshot_payload = create_pool_selection_snapshot_payload(
+        &state,
+        "provider-openai",
+        json!({
+            "page": 1,
+            "page_size": 25,
+            "search": "bulk alpha",
+            "status": "all",
+            "expected_total": list_payload["total"],
+            "expected_page_key_ids": list_payload_key_ids(&list_payload),
+        }),
+    )
+    .await;
+    assert_eq!(
+        snapshot_payload["selection_snapshot"]["total"],
+        json!(KEY_COUNT)
+    );
+    let snapshot_id = snapshot_payload["selection_snapshot"]["id"]
+        .as_str()
+        .expect("snapshot id should be present")
+        .to_string();
+
+    let snapshot = read_runtime_pool_selection_snapshot(&state, &snapshot_id)
+        .await
+        .expect("snapshot should exist");
+    let first_page = snapshot.items.iter().take(1_000).collect::<Vec<_>>();
+    assert_eq!(first_page.len(), 1_000);
+    assert_eq!(first_page.first().map(|item| item.ordinal), Some(0));
+    assert_eq!(
+        first_page.first().map(|item| item.key_id.as_str()),
+        Some("key-openai-bulk-00000")
+    );
+    assert_eq!(first_page.last().map(|item| item.ordinal), Some(999));
+
+    let tail_page = snapshot
+        .items
+        .iter()
+        .skip(4_000)
+        .take(1_100)
+        .collect::<Vec<_>>();
+    assert_eq!(tail_page.len(), 1_000);
+    assert_eq!(tail_page.first().map(|item| item.ordinal), Some(4_000));
+    assert_eq!(
+        tail_page.last().map(|item| item.key_id.as_str()),
+        Some("key-openai-bulk-04999")
+    );
+
+    let resolve_response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-openai/keys/resolve-selection",
+        Some(json!({
+            "snapshot_id": snapshot_id,
+            "expected_total": KEY_COUNT
+        })),
+    )
+    .await;
+    assert_eq!(resolve_response.status(), StatusCode::OK);
+    let resolve_payload = response_json(resolve_response).await;
+    let resolved_items = resolve_payload["items"]
+        .as_array()
+        .expect("resolved items should be array");
+    assert_eq!(resolve_payload["total"], json!(KEY_COUNT));
+    assert_eq!(resolved_items.len(), KEY_COUNT);
+    assert_eq!(resolved_items[0]["key_id"], json!("key-openai-bulk-00000"));
+    assert_eq!(
+        resolved_items[KEY_COUNT - 1]["key_id"],
+        json!("key-openai-bulk-04999")
+    );
+
+    let snapshot_id = snapshot_payload["selection_snapshot"]["id"]
+        .as_str()
+        .expect("snapshot id should be present")
+        .to_string();
+    let action_response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-openai/keys/batch-action",
+        Some(json!({
+            "selection": {
+                "type": "snapshot",
+                "snapshot_id": snapshot_id,
+                "expected_total": KEY_COUNT
+            },
+            "action": "disable"
+        })),
+    )
+    .await;
+    assert_eq!(action_response.status(), StatusCode::OK);
+    let action_payload = response_json(action_response).await;
+    assert_eq!(action_payload["affected"], json!(KEY_COUNT));
+
+    let sampled_keys = provider_catalog_repository
+        .list_keys_by_ids(&[
+            "key-openai-bulk-00000".to_string(),
+            "key-openai-bulk-02500".to_string(),
+            "key-openai-bulk-04999".to_string(),
+            "key-openai-noise-00000".to_string(),
+        ])
+        .await
+        .expect("sampled keys should list")
+        .into_iter()
+        .map(|key| (key.id, key.is_active))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(sampled_keys.get("key-openai-bulk-00000"), Some(&false));
+    assert_eq!(sampled_keys.get("key-openai-bulk-02500"), Some(&false));
+    assert_eq!(sampled_keys.get("key-openai-bulk-04999"), Some(&false));
+    assert_eq!(sampled_keys.get("key-openai-noise-00000"), Some(&true));
+}
+
+#[tokio::test]
+async fn gateway_pool_selection_snapshot_rejects_results_above_runtime_limit() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut keys = Vec::with_capacity(ADMIN_POOL_SELECTION_SNAPSHOT_MAX_TOTAL + 1);
+    for index in 0..=ADMIN_POOL_SELECTION_SNAPSHOT_MAX_TOTAL {
+        let key_id = format!("key-openai-over-limit-{index:05}");
+        let mut key = sample_key(
+            &key_id,
+            "provider-openai",
+            "openai:chat",
+            &format!("sk-over-limit-{index:05}"),
+        );
+        key.name = format!("over limit alpha {index:05}");
+        keys.push(key);
+    }
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        keys,
+    ));
+    let state = pool_test_state(Arc::clone(&provider_catalog_repository));
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-openai/keys/selection-snapshot",
+        Some(json!({
+            "page": 1,
+            "page_size": 50,
+            "search": "over limit alpha",
+            "status": "all",
+            "expected_total": ADMIN_POOL_SELECTION_SNAPSHOT_MAX_TOTAL + 1,
+            "expected_page_key_ids": (0..50)
+                .map(|index| format!("key-openai-over-limit-{index:05}"))
+                .collect::<Vec<_>>(),
+        })),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gateway_pool_selection_snapshot_stays_consistent_under_concurrent_growth() {
+    const INITIAL_KEYS: usize = 80;
+    const ADDED_KEYS: usize = 120;
+    const SNAPSHOT_REQUESTS: usize = 24;
+
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut keys = Vec::with_capacity(INITIAL_KEYS);
+    for index in 0..INITIAL_KEYS {
+        let key_id = format!("key-openai-initial-{index:03}");
+        let mut key = sample_key(
+            &key_id,
+            "provider-openai",
+            "openai:chat",
+            &format!("sk-initial-{index:03}"),
+        );
+        key.name = format!("alpha concurrent initial {index:03}");
+        keys.push(key);
+    }
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        keys,
+    ));
+    let state = pool_test_state(Arc::clone(&provider_catalog_repository));
+    let start_barrier = Arc::new(tokio::sync::Barrier::new(SNAPSHOT_REQUESTS + 1));
+
+    let writer = tokio::spawn({
+        let provider_catalog_repository = Arc::clone(&provider_catalog_repository);
+        let start_barrier = Arc::clone(&start_barrier);
+        async move {
+            start_barrier.wait().await;
+            for index in 0..ADDED_KEYS {
+                let key_id = format!("key-openai-added-{index:03}");
+                let mut key = sample_key(
+                    &key_id,
+                    "provider-openai",
+                    "openai:chat",
+                    &format!("sk-added-{index:03}"),
+                );
+                key.name = format!("alpha concurrent added {index:03}");
+                provider_catalog_repository
+                    .create_key(&key)
+                    .await
+                    .expect("concurrent key should be stored");
+                if index % 5 == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+    });
+
+    let mut handles = Vec::with_capacity(SNAPSHOT_REQUESTS);
+    for _ in 0..SNAPSHOT_REQUESTS {
+        let state = state.clone();
+        let start_barrier = Arc::clone(&start_barrier);
+        handles.push(tokio::spawn(async move {
+            start_barrier.wait().await;
+            for _attempt in 0..20 {
+                let response = local_admin_pool_response(
+                    &state,
+                    http::Method::GET,
+                    "/api/admin/pool/provider-openai/keys?page=1&page_size=7&search=alpha%20concurrent&status=all",
+                    None,
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let payload = response_json(response).await;
+                let total = payload["total"]
+                    .as_u64()
+                    .expect("total should be numeric") as usize;
+                let snapshot_payload = create_pool_selection_snapshot_payload(
+                    &state,
+                    "provider-openai",
+                    json!({
+                        "page": 1,
+                        "page_size": 7,
+                        "search": "alpha concurrent",
+                        "status": "all",
+                        "expected_total": total,
+                        "expected_page_key_ids": list_payload_key_ids(&payload),
+                    }),
+                )
+                .await;
+                if let Some(snapshot) = snapshot_payload.get("selection_snapshot") {
+                    let snapshot_total = snapshot["total"]
+                        .as_u64()
+                        .expect("snapshot total should be numeric")
+                        as usize;
+                    assert!(
+                        (total..=INITIAL_KEYS + ADDED_KEYS).contains(&snapshot_total),
+                        "snapshot total {snapshot_total} should include the listed {total} items and stay within growth bounds"
+                    );
+                    let snapshot_id = snapshot["id"]
+                        .as_str()
+                        .expect("snapshot id should be present")
+                        .to_string();
+                    return (snapshot_id, snapshot_total);
+                }
+                tokio::task::yield_now().await;
+            }
+            panic!("selection snapshot should eventually stabilize")
+        }));
+    }
+
+    let mut snapshots = Vec::with_capacity(SNAPSHOT_REQUESTS);
+    for handle in handles {
+        snapshots.push(handle.await.expect("snapshot request should join"));
+    }
+    writer.await.expect("concurrent writer should join");
+
+    let mut retained_snapshots = 0usize;
+    for (snapshot_id, total) in snapshots {
+        assert!(
+            (INITIAL_KEYS..=INITIAL_KEYS + ADDED_KEYS).contains(&total),
+            "snapshot {snapshot_id} total {total} should stay within concurrent growth bounds"
+        );
+        let Some(snapshot) = read_runtime_pool_selection_snapshot(&state, &snapshot_id).await
+        else {
+            continue;
+        };
+        retained_snapshots = retained_snapshots.saturating_add(1);
+        assert_eq!(snapshot.items.len(), total);
+        let unique_ids = snapshot
+            .items
+            .iter()
+            .map(|item| item.key_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(unique_ids.len(), total);
+    }
+    assert!(
+        (1..=ADMIN_POOL_SELECTION_SNAPSHOT_MAX_ACTIVE_PER_ADMIN_PROVIDER)
+            .contains(&retained_snapshots),
+        "runtime should retain a bounded number of recent snapshots"
+    );
+
+    let final_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=10&search=alpha%20concurrent&status=all",
+        None,
+    )
+    .await;
+    assert_eq!(final_response.status(), StatusCode::OK);
+    let final_payload = response_json(final_response).await;
+    assert_eq!(final_payload["total"], json!(INITIAL_KEYS + ADDED_KEYS));
+    let final_snapshot_payload = create_pool_selection_snapshot_payload(
+        &state,
+        "provider-openai",
+        json!({
+            "page": 1,
+            "page_size": 10,
+            "search": "alpha concurrent",
+            "status": "all",
+            "expected_total": final_payload["total"],
+            "expected_page_key_ids": list_payload_key_ids(&final_payload),
+        }),
+    )
+    .await;
+    assert_eq!(
+        final_snapshot_payload["selection_snapshot"]["total"],
+        json!(INITIAL_KEYS + ADDED_KEYS)
+    );
+}
+
+#[tokio::test]
+async fn gateway_pool_selection_snapshot_batch_action_uses_frozen_membership_after_churn() {
+    const ORIGINAL_KEYS: usize = 10;
+
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut keys = Vec::with_capacity(ORIGINAL_KEYS);
+    let mut original_ids = Vec::with_capacity(ORIGINAL_KEYS);
+    for index in 0..ORIGINAL_KEYS {
+        let key_id = format!("key-openai-freeze-{index:02}");
+        let mut key = sample_key(
+            &key_id,
+            "provider-openai",
+            "openai:chat",
+            &format!("sk-freeze-{index:02}"),
+        );
+        key.name = format!("alpha frozen member {index:02}");
+        original_ids.push(key_id);
+        keys.push(key);
+    }
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        keys,
+    ));
+    let state = pool_test_state(Arc::clone(&provider_catalog_repository));
+
+    let list_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=5&search=alpha%20frozen&status=all",
+        None,
+    )
+    .await;
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_payload = response_json(list_response).await;
+    assert_eq!(list_payload["total"], json!(ORIGINAL_KEYS));
+    let snapshot_payload = create_pool_selection_snapshot_payload(
+        &state,
+        "provider-openai",
+        json!({
+            "page": 1,
+            "page_size": 5,
+            "search": "alpha frozen",
+            "status": "all",
+            "expected_total": list_payload["total"],
+            "expected_page_key_ids": list_payload_key_ids(&list_payload),
+        }),
+    )
+    .await;
+    assert_eq!(
+        snapshot_payload["selection_snapshot"]["total"],
+        json!(ORIGINAL_KEYS)
+    );
+    let snapshot_id = snapshot_payload["selection_snapshot"]["id"]
+        .as_str()
+        .expect("snapshot id should be present")
+        .to_string();
+
+    for index in 0..3 {
+        let key_id = format!("key-openai-new-match-{index:02}");
+        let mut key = sample_key(
+            &key_id,
+            "provider-openai",
+            "openai:chat",
+            &format!("sk-new-match-{index:02}"),
+        );
+        key.name = format!("alpha frozen newly imported {index:02}");
+        provider_catalog_repository
+            .create_key(&key)
+            .await
+            .expect("new matching key should be stored");
+    }
+    provider_catalog_repository
+        .delete_key(&original_ids[0])
+        .await
+        .expect("first original should delete");
+    provider_catalog_repository
+        .delete_key(&original_ids[1])
+        .await
+        .expect("second original should delete");
+
+    let mut renamed_original = provider_catalog_repository
+        .list_keys_by_ids(&[original_ids[2].clone()])
+        .await
+        .expect("renamed original should list")
+        .into_iter()
+        .next()
+        .expect("renamed original should exist");
+    renamed_original.name = "beta renamed after selection".to_string();
+    provider_catalog_repository
+        .update_key(&renamed_original)
+        .await
+        .expect("renamed original should update");
+
+    let live_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=20&search=alpha%20frozen&status=all",
+        None,
+    )
+    .await;
+    assert_eq!(live_response.status(), StatusCode::OK);
+    let live_payload = response_json(live_response).await;
+    assert_eq!(live_payload["total"], json!(ORIGINAL_KEYS));
+
+    let action_response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-openai/keys/batch-action",
+        Some(json!({
+            "selection": {
+                "type": "snapshot",
+                "snapshot_id": snapshot_id,
+                "expected_total": ORIGINAL_KEYS
+            },
+            "action": "disable"
+        })),
+    )
+    .await;
+    assert_eq!(action_response.status(), StatusCode::OK);
+    let action_payload = response_json(action_response).await;
+    assert_eq!(action_payload["affected"], json!(ORIGINAL_KEYS - 2));
+
+    let mut ids_to_check = original_ids[2..].to_vec();
+    ids_to_check.extend((0..3).map(|index| format!("key-openai-new-match-{index:02}")));
+    let stored_keys = provider_catalog_repository
+        .list_keys_by_ids(&ids_to_check)
+        .await
+        .expect("post-action keys should list")
+        .into_iter()
+        .map(|key| (key.id, key.is_active))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    for key_id in &original_ids[2..] {
+        assert_eq!(stored_keys.get(key_id), Some(&false));
+    }
+    for index in 0..3 {
+        assert_eq!(
+            stored_keys.get(&format!("key-openai-new-match-{index:02}")),
+            Some(&true)
+        );
+    }
+}
+
+#[tokio::test]
+async fn gateway_pool_resolve_selection_reports_missing_snapshot_members_consistently() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut keys = Vec::new();
+    for index in 0..3 {
+        let key_id = format!("key-openai-resolve-{index}");
+        let mut key = sample_key(
+            &key_id,
+            "provider-openai",
+            "openai:chat",
+            &format!("sk-resolve-{index}"),
+        );
+        key.name = format!("alpha resolve member {index}");
+        keys.push(key);
+    }
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        keys,
+    ));
+    let state = pool_test_state(Arc::clone(&provider_catalog_repository));
+
+    let list_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=2&search=alpha%20resolve&status=all",
+        None,
+    )
+    .await;
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_payload = response_json(list_response).await;
+    assert_eq!(list_payload["total"], json!(3));
+    let snapshot_payload = create_pool_selection_snapshot_payload(
+        &state,
+        "provider-openai",
+        json!({
+            "page": 1,
+            "page_size": 2,
+            "search": "alpha resolve",
+            "status": "all",
+            "expected_total": list_payload["total"],
+            "expected_page_key_ids": list_payload_key_ids(&list_payload),
+        }),
+    )
+    .await;
+    assert_eq!(snapshot_payload["selection_snapshot"]["total"], json!(3));
+    let snapshot_id = snapshot_payload["selection_snapshot"]["id"]
+        .as_str()
+        .expect("snapshot id should be present")
+        .to_string();
+
+    provider_catalog_repository
+        .delete_key("key-openai-resolve-1")
+        .await
+        .expect("snapshot member should delete");
+
+    let resolve_response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-openai/keys/resolve-selection",
+        Some(json!({
+            "snapshot_id": snapshot_id,
+            "expected_total": 3
+        })),
+    )
+    .await;
+    assert_eq!(resolve_response.status(), StatusCode::OK);
+    let resolve_payload = response_json(resolve_response).await;
+    assert_eq!(resolve_payload["total"], json!(2));
+    assert_eq!(resolve_payload["snapshot_total"], json!(3));
+    assert_eq!(resolve_payload["missing_count"], json!(1));
+    assert_eq!(resolve_payload["items"].as_array().map(Vec::len), Some(2));
+}
+
+#[tokio::test]
+async fn gateway_pool_selection_snapshot_rejects_stale_or_invalid_references() {
+    fn snapshot(
+        id: &str,
+        provider_id: &str,
+        created_by: Option<&str>,
+        status: &str,
+        expires_at_unix_secs: u64,
+        items: Vec<AdminPoolSelectionSnapshotItem>,
+    ) -> AdminPoolSelectionSnapshot {
+        AdminPoolSelectionSnapshot {
+            id: id.to_string(),
+            provider_id: provider_id.to_string(),
+            created_by: created_by.map(ToOwned::to_owned),
+            filter_json: None,
+            total: items.len(),
+            status: status.to_string(),
+            created_at_unix_secs: 100,
+            expires_at_unix_secs,
+            items,
+        }
+    }
+
+    fn item(ordinal: u64, key_id: &str) -> AdminPoolSelectionSnapshotItem {
+        AdminPoolSelectionSnapshotItem {
+            ordinal,
+            key_id: key_id.to_string(),
+            key_updated_at_unix_secs: None,
+        }
+    }
+
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let other_provider = sample_provider("provider-other", "openai", 20);
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider, other_provider],
+        Vec::new(),
+        vec![
+            sample_key("key-openai-a", "provider-openai", "openai:chat", "sk-a"),
+            sample_key("key-openai-b", "provider-openai", "openai:chat", "sk-b"),
+        ],
+    ));
+    let state = pool_test_state(Arc::clone(&provider_catalog_repository));
+    for snapshot in [
+        snapshot(
+            "snapshot-ready",
+            "provider-openai",
+            Some("admin-user-123"),
+            "ready",
+            4_000_000_000,
+            vec![item(0, "key-openai-a")],
+        ),
+        snapshot(
+            "snapshot-other-provider",
+            "provider-other",
+            Some("admin-user-123"),
+            "ready",
+            4_000_000_000,
+            vec![item(0, "key-openai-a")],
+        ),
+        snapshot(
+            "snapshot-expired",
+            "provider-openai",
+            Some("admin-user-123"),
+            "expired",
+            4_000_000_000,
+            vec![item(0, "key-openai-a")],
+        ),
+        snapshot(
+            "snapshot-other-admin",
+            "provider-openai",
+            Some("admin-user-456"),
+            "ready",
+            4_000_000_000,
+            vec![item(0, "key-openai-a")],
+        ),
+        snapshot(
+            "snapshot-duplicate",
+            "provider-openai",
+            Some("admin-user-123"),
+            "ready",
+            4_000_000_000,
+            vec![item(0, "key-openai-a"), item(1, "key-openai-a")],
+        ),
+    ] {
+        write_runtime_pool_selection_snapshot(&state, snapshot).await;
+    }
+    let mut incomplete_snapshot = snapshot(
+        "snapshot-incomplete",
+        "provider-openai",
+        Some("admin-user-123"),
+        "ready",
+        4_000_000_000,
+        vec![item(0, "key-openai-a")],
+    );
+    incomplete_snapshot.total = 2;
+    write_runtime_pool_selection_snapshot(&state, incomplete_snapshot).await;
+
+    let selection_with_key_ids_response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-openai/keys/batch-action",
+        Some(json!({
+            "key_ids": ["key-openai-b"],
+            "selection": {
+                "type": "snapshot",
+                "snapshot_id": "snapshot-ready",
+                "expected_total": 1
+            },
+            "action": "disable"
+        })),
+    )
+    .await;
+    assert_eq!(
+        selection_with_key_ids_response.status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    for (snapshot_id, expected_total, expected_status) in [
+        ("snapshot-missing", 1usize, StatusCode::NOT_FOUND),
+        ("snapshot-other-provider", 1usize, StatusCode::CONFLICT),
+        ("snapshot-expired", 1usize, StatusCode::CONFLICT),
+        ("snapshot-other-admin", 1usize, StatusCode::FORBIDDEN),
+        ("snapshot-duplicate", 2usize, StatusCode::CONFLICT),
+        ("snapshot-incomplete", 2usize, StatusCode::CONFLICT),
+    ] {
+        let response = local_admin_pool_response(
+            &state,
+            http::Method::POST,
+            "/api/admin/pool/provider-openai/keys/batch-action",
+            Some(json!({
+                "selection": {
+                    "type": "snapshot",
+                    "snapshot_id": snapshot_id,
+                    "expected_total": expected_total
+                },
+                "action": "disable"
+            })),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            expected_status,
+            "{snapshot_id} should be rejected with {expected_status}"
+        );
+    }
 }
 
 #[tokio::test]

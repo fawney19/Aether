@@ -1,6 +1,8 @@
 use http::Uri;
 
-use super::{classify_control_route, headers};
+use crate::handlers::shared::local_proxy_route_requires_buffered_body;
+
+use super::{classify_control_route, headers, GatewayPublicRequestContext};
 
 #[test]
 fn classifies_admin_pool_overview_as_admin_proxy_route() {
@@ -82,6 +84,21 @@ fn classifies_admin_pool_provider_key_routes_as_admin_proxy_route() {
         Some("batch_action_keys")
     );
 
+    let selection_snapshot_uri: Uri = "/api/admin/pool/provider-1/keys/selection-snapshot"
+        .parse()
+        .expect("uri should parse");
+    let selection_snapshot =
+        classify_control_route(&http::Method::POST, &selection_snapshot_uri, &headers)
+            .expect("route should classify");
+    assert_eq!(
+        selection_snapshot.route_family.as_deref(),
+        Some("pool_manage")
+    );
+    assert_eq!(
+        selection_snapshot.route_kind.as_deref(),
+        Some("create_selection_snapshot")
+    );
+
     let resolve_selection_uri: Uri = "/api/admin/pool/provider-1/keys/resolve-selection"
         .parse()
         .expect("uri should parse");
@@ -129,6 +146,25 @@ fn classifies_admin_pool_provider_key_routes_as_admin_proxy_route() {
 }
 
 #[test]
+fn admin_pool_selection_snapshot_buffers_request_body() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/admin/pool/provider-1/keys/selection-snapshot"
+        .parse()
+        .expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::POST, &uri, &headers).expect("route should classify");
+    let context = GatewayPublicRequestContext::from_request_parts(
+        "trace-pool-selection-snapshot",
+        &http::Method::POST,
+        &uri,
+        &headers,
+        Some(decision),
+    );
+
+    assert!(local_proxy_route_requires_buffered_body(&context));
+}
+
+#[test]
 fn classifies_admin_pool_trailing_slash_routes_as_admin_proxy_route() {
     let headers = headers(&[]);
 
@@ -139,6 +175,21 @@ fn classifies_admin_pool_trailing_slash_routes_as_admin_proxy_route() {
         .expect("route should classify");
     assert_eq!(list.route_family.as_deref(), Some("pool_manage"));
     assert_eq!(list.route_kind.as_deref(), Some("list_keys"));
+
+    let selection_snapshot_uri: Uri = "/api/admin/pool/provider-1/keys/selection-snapshot/"
+        .parse()
+        .expect("uri should parse");
+    let selection_snapshot =
+        classify_control_route(&http::Method::POST, &selection_snapshot_uri, &headers)
+            .expect("route should classify");
+    assert_eq!(
+        selection_snapshot.route_family.as_deref(),
+        Some("pool_manage")
+    );
+    assert_eq!(
+        selection_snapshot.route_kind.as_deref(),
+        Some("create_selection_snapshot")
+    );
 
     let resolve_selection_uri: Uri = "/api/admin/pool/provider-1/keys/resolve-selection/"
         .parse()

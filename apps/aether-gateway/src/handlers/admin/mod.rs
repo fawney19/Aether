@@ -39,7 +39,12 @@ pub(crate) use self::provider::oauth::runtime::{
 pub(crate) use self::provider::ops::providers::actions::admin_provider_ops_local_action_response;
 pub(crate) use self::provider::ops::providers::store_admin_provider_ops_balance_cache;
 pub(crate) use self::provider::pool::config::admin_provider_pool_config;
-pub(crate) use self::provider::pool_admin::maybe_build_local_admin_pool_response;
+pub(crate) use self::provider::pool_admin::{
+    admin_pool_selection_snapshot_key, maybe_build_local_admin_pool_response,
+    AdminPoolSelectionSnapshot, AdminPoolSelectionSnapshotItem,
+    ADMIN_POOL_SELECTION_SNAPSHOT_MAX_ACTIVE_PER_ADMIN_PROVIDER,
+    ADMIN_POOL_SELECTION_SNAPSHOT_MAX_TOTAL,
+};
 pub(crate) use self::provider::shared::payloads::{
     OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_REQUEST_FAILED_PREFIX,
 };
