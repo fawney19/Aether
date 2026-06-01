@@ -339,6 +339,22 @@ fn admin_pool_sort_direction_label(direction: AdminPoolKeySortDirection) -> &'st
     }
 }
 
+fn admin_pool_effective_search_scope(
+    requested_scope: AdminPoolSearchScope,
+    status: &str,
+    quick_selectors: &[String],
+    sort: AdminPoolKeySort,
+) -> AdminPoolSearchScope {
+    let legacy_full_search_path = status != "all"
+        || !quick_selectors.is_empty()
+        || matches!(sort.field, AdminPoolKeySortField::Score);
+    match (requested_scope, legacy_full_search_path) {
+        (AdminPoolSearchScope::Auto, true) => AdminPoolSearchScope::Full,
+        (AdminPoolSearchScope::Auto, false) => AdminPoolSearchScope::Name,
+        (scope, _) => scope,
+    }
+}
+
 async fn build_admin_pool_selection_snapshot_payload(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
@@ -371,6 +387,7 @@ async fn build_admin_pool_selection_snapshot_payload(
             "provider_id": provider_id,
             "search": search,
             "search_scope": match search_scope {
+                AdminPoolSearchScope::Auto => "auto",
                 AdminPoolSearchScope::Name => "name",
                 AdminPoolSearchScope::Full => "full",
             },
@@ -679,7 +696,9 @@ async fn read_admin_pool_filtered_sorted_keys(
         .await?
         .into_iter()
         .filter(|key| match search_scope {
-            AdminPoolSearchScope::Name => admin_pool_key_matches_name_search(key, search),
+            AdminPoolSearchScope::Auto | AdminPoolSearchScope::Name => {
+                admin_pool_key_matches_name_search(key, search)
+            }
             AdminPoolSearchScope::Full if search.is_some() => {
                 pool_selection::admin_pool_matches_search(
                     state,
@@ -826,6 +845,8 @@ pub(super) async fn build_admin_pool_list_keys_response(
     let page_offset = page.saturating_sub(1).saturating_mul(page_size);
     let sort_by_score = matches!(sort.field, AdminPoolKeySortField::Score);
     let now_unix_secs = admin_pool_current_unix_secs();
+    let search_scope =
+        admin_pool_effective_search_scope(search_scope, &status, &quick_selectors, sort);
 
     let (keys, total, preloaded_pool_scores_by_key_id) = if status != "all"
         || !quick_selectors.is_empty()
@@ -1045,6 +1066,8 @@ pub(super) async fn build_admin_pool_create_selection_snapshot_response(
     let pool_config = admin_provider_pool_config(&provider);
     let page_offset = page.saturating_sub(1).saturating_mul(page_size);
     let now_unix_secs = admin_pool_current_unix_secs();
+    let search_scope =
+        admin_pool_effective_search_scope(search_scope, &status, &quick_selectors, sort);
     let (keys, _) = read_admin_pool_filtered_sorted_keys(
         state,
         &provider,

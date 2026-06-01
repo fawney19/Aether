@@ -999,6 +999,61 @@ async fn gateway_handles_admin_pool_list_keys_locally_with_trusted_admin_princip
 }
 
 #[tokio::test]
+async fn gateway_pool_list_keys_keeps_legacy_full_search_for_default_filtered_scope() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut inactive_note_key = sample_key(
+        "key-openai-note",
+        "provider-openai",
+        "openai:chat",
+        "sk-note",
+    );
+    inactive_note_key.name = "plain inactive account".to_string();
+    inactive_note_key.note = Some("legacy-search-marker".to_string());
+    inactive_note_key.is_active = false;
+    let mut active_note_key = sample_key(
+        "key-openai-active",
+        "provider-openai",
+        "openai:chat",
+        "sk-active",
+    );
+    active_note_key.name = "plain active account".to_string();
+    active_note_key.note = Some("legacy-search-marker".to_string());
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![inactive_note_key, active_note_key],
+    ));
+    let state = pool_test_state(provider_catalog_repository);
+
+    let legacy_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=10&search=legacy-search-marker&status=inactive",
+        None,
+    )
+    .await;
+    assert_eq!(legacy_response.status(), StatusCode::OK);
+    let legacy_payload = response_json(legacy_response).await;
+    assert_eq!(legacy_payload["total"], json!(1));
+    assert_eq!(
+        list_payload_key_ids(&legacy_payload),
+        vec!["key-openai-note"]
+    );
+
+    let name_scope_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=10&search=legacy-search-marker&status=inactive&search_scope=name",
+        None,
+    )
+    .await;
+    assert_eq!(name_scope_response.status(), StatusCode::OK);
+    let name_scope_payload = response_json(name_scope_response).await;
+    assert_eq!(name_scope_payload["total"], json!(0));
+}
+
+#[tokio::test]
 async fn gateway_pool_create_selection_snapshot_freezes_filtered_result() {
     let provider = sample_provider("provider-openai", "openai", 10);
     let mut first_key = sample_key("key-openai-a", "provider-openai", "openai:chat", "sk-a");

@@ -37,6 +37,7 @@ pub(crate) struct AdminPoolKeySort {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AdminPoolSearchScope {
+    Auto,
     Name,
     Full,
 }
@@ -116,7 +117,8 @@ pub(crate) fn parse_admin_pool_search_scope_value(
         .filter(|value| !value.is_empty())
         .as_deref()
     {
-        None | Some("name") => Ok(AdminPoolSearchScope::Name),
+        None => Ok(AdminPoolSearchScope::Auto),
+        Some("name") => Ok(AdminPoolSearchScope::Name),
         Some("full") => Ok(AdminPoolSearchScope::Full),
         Some(_) => Err("search_scope must be one of: name, full".to_string()),
     }
