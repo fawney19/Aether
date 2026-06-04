@@ -1234,6 +1234,14 @@ mod tests {
     }
 
     #[test]
+    fn preset_models_for_provider_returns_none_for_free_providers() {
+        assert!(preset_models_for_provider("opencode_free").is_none());
+        assert!(preset_models_for_provider("kilo_free").is_none());
+        assert!(preset_models_for_provider("OPENCODE_FREE").is_none());
+        assert!(preset_models_for_provider(" Kilo_Free ").is_none());
+    }
+
+    #[test]
     fn preset_models_cover_codex_catalog() {
         let models = preset_models_for_provider("codex").expect("preset models should exist");
         let model_ids = models
