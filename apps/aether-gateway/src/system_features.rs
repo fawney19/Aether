@@ -124,7 +124,7 @@ pub(crate) async fn reasoning_model_directive_mapping_for_api_format_and_model(
 }
 
 const DEFAULT_MODEL_DIRECTIVE_SUFFIXES: &[&str] =
-    &["low", "medium", "high", "xhigh", "max", "fast"];
+    &["low", "medium", "high", "xhigh", "extra", "max", "fast"];
 
 #[derive(Debug, Clone, Default)]
 struct ReasoningModelDirectiveSettings {
@@ -236,7 +236,7 @@ enum ModelDirectiveSuffixKind {
 
 fn model_directive_suffix_kind(suffix: &str) -> Option<ModelDirectiveSuffixKind> {
     match suffix {
-        "low" | "medium" | "high" | "xhigh" | "max" => {
+        "low" | "medium" | "high" | "xhigh" | "extra" | "max" => {
             Some(ModelDirectiveSuffixKind::ReasoningEffort)
         }
         "fast" => Some(ModelDirectiveSuffixKind::ServiceTier),
@@ -355,7 +355,7 @@ fn openai_reasoning_effort_value(suffix: &str) -> Option<&'static str> {
         "low" => Some("low"),
         "medium" => Some("medium"),
         "high" => Some("high"),
-        "xhigh" | "max" => Some("xhigh"),
+        "xhigh" | "extra" | "max" => Some("xhigh"),
         _ => None,
     }
 }
@@ -434,6 +434,29 @@ mod tests {
             Some(json!({ "thinking": { "type": "enabled", "budget_tokens": 32768 } }))
         );
         assert_eq!(settings.api_format_enabled("gemini:generate_content"), None);
+    }
+
+    #[test]
+    fn default_extra_suffix_maps_to_openai_xhigh_effort() {
+        let suffixes = model_directive_suffixes_from_model("gpt-5.4-extra")
+            .expect("extra suffix should parse");
+        assert_eq!(suffixes, vec!["extra".to_string()]);
+        assert_eq!(
+            default_reasoning_mapping("openai:chat", "extra"),
+            Some(json!({ "reasoning_effort": "xhigh" }))
+        );
+        assert_eq!(
+            model_directive_mapping_for_suffixes("openai:chat", &suffixes, None),
+            Some(json!({ "reasoning_effort": "xhigh" }))
+        );
+        assert_eq!(
+            default_reasoning_mapping("openai:responses", "extra"),
+            Some(json!({ "reasoning": { "effort": "xhigh" } }))
+        );
+        assert_eq!(
+            default_reasoning_mapping("openai:responses:compact", "extra"),
+            Some(json!({ "reasoning": { "effort": "xhigh" } }))
+        );
     }
 
     #[test]
