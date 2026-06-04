@@ -219,14 +219,13 @@ fn request_direct_auth_for_provider_format(
         "openai:chat" if is_windsurf_provider_transport(transport) => {
             resolve_windsurf_cascade_auth(transport)
         }
+        "openai:embedding" | "openai:rerank" => resolve_local_standard_auth(transport),
         "openai:chat"
         | "openai:responses"
         | "openai:responses:compact"
-        | "openai:embedding"
         | "jina:embedding"
         | "doubao:embedding"
         | "aliyun:multimodal_embedding"
-        | "openai:rerank"
         | "jina:rerank" => resolve_local_openai_bearer_auth(transport),
         "gemini:generate_content" | "gemini:embedding" => {
             if is_vertex_api_key_transport_context(transport) {
