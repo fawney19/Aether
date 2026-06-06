@@ -199,20 +199,28 @@ function key(id: string, name: string) {
   }
 }
 
-function pageResponse(total: number) {
+function pageResponse(
+  total: number,
+  keys = [key('key-visible-1', 'visible account')],
+) {
   return {
     total,
     page: 1,
     page_size: 50,
-    keys: [key('key-visible-1', 'visible account')],
+    keys,
   }
 }
 
-function snapshotResponse(snapshotId: string, total: number) {
+function snapshotResponse(
+  snapshotId: string,
+  total: number,
+  keys = [key('key-visible-1', 'visible account')],
+) {
   return {
     total,
     page: 1,
     page_size: 50,
+    keys,
     selection_snapshot: {
       id: snapshotId,
       total,
@@ -221,9 +229,14 @@ function snapshotResponse(snapshotId: string, total: number) {
   }
 }
 
-function driftedSnapshotResponse(snapshotId: string, expectedTotal: number, actualTotal: number) {
+function driftedSnapshotResponse(
+  snapshotId: string,
+  expectedTotal: number,
+  actualTotal: number,
+  keys = [key('key-visible-1', 'visible account')],
+) {
   return {
-    ...snapshotResponse(snapshotId, actualTotal),
+    ...snapshotResponse(snapshotId, actualTotal, keys),
     selection_snapshot_mismatch: {
       reason: 'total_changed',
       expected_total: expectedTotal,
@@ -394,6 +407,47 @@ describe('PoolAccountBatchDialog selection snapshots', () => {
     )
     expect(mounted.root.textContent).toContain('已选 12 个')
     expect(mounted.root.textContent).toContain('共 12 个匹配账号')
+    mounted.app.unmount()
+  })
+
+  it('updates the current page rows from the snapshot response when filtered results drift', async () => {
+    const initialKeys = [
+      key('key-visible-1', 'visible account 1'),
+      key('key-visible-2', 'visible account 2'),
+      key('key-visible-3', 'visible account 3'),
+      key('key-visible-4', 'visible account 4'),
+    ]
+    const snapshotKeys = [
+      ...initialKeys,
+      key('key-visible-5', 'visible account 5'),
+    ]
+    poolApiMocks.listPoolKeys.mockResolvedValueOnce(pageResponse(4, initialKeys))
+    poolApiMocks.createPoolKeySelectionSnapshot.mockResolvedValueOnce(
+      driftedSnapshotResponse('snapshot-grown', 4, 5, snapshotKeys),
+    )
+
+    const mounted = await mountDialog()
+    expect(mounted.root.textContent).toContain('共 4 个匹配账号，当前页 4 个，已选 0 个')
+
+    const checkbox = firstCheckbox(mounted.root)
+    checkbox.checked = true
+    checkbox.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushAsync()
+
+    expect(poolApiMocks.createPoolKeySelectionSnapshot).toHaveBeenCalledWith(
+      'provider-1',
+      expect.objectContaining({
+        expected_total: 4,
+        expected_page_key_ids: [
+          'key-visible-1',
+          'key-visible-2',
+          'key-visible-3',
+          'key-visible-4',
+        ],
+      }),
+    )
+    expect(mounted.root.textContent).toContain('共 5 个匹配账号，当前页 5 个，已选 5 个')
+    expect(mounted.root.textContent).toContain('visible account 5')
     mounted.app.unmount()
   })
 

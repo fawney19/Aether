@@ -1342,6 +1342,70 @@ async fn gateway_pool_selection_snapshot_reports_drift_while_writing_current_sna
 }
 
 #[tokio::test]
+async fn gateway_pool_selection_snapshot_returns_current_page_keys_after_drift() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut keys = Vec::new();
+    for index in 0..5 {
+        let key_id = format!("key-openai-{index}");
+        let mut key = sample_key(
+            &key_id,
+            "provider-openai",
+            "openai:chat",
+            &format!("sk-{index}"),
+        );
+        key.name = format!("alpha {index:03}");
+        keys.push(key);
+    }
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        keys,
+    ));
+    let state = pool_test_state(Arc::clone(&provider_catalog_repository));
+
+    let payload = create_pool_selection_snapshot_payload(
+        &state,
+        "provider-openai",
+        json!({
+            "page": 1,
+            "page_size": 50,
+            "search": "alpha",
+            "status": "all",
+            "expected_total": 4,
+            "expected_page_key_ids": [
+                "key-openai-0",
+                "key-openai-1",
+                "key-openai-2",
+                "key-openai-3",
+            ],
+        }),
+    )
+    .await;
+
+    assert_eq!(payload["total"], json!(5));
+    assert_eq!(payload["selection_snapshot"]["total"], json!(5));
+    assert_eq!(
+        list_payload_key_ids(&payload),
+        vec![
+            "key-openai-0",
+            "key-openai-1",
+            "key-openai-2",
+            "key-openai-3",
+            "key-openai-4",
+        ]
+    );
+    assert_eq!(
+        payload["selection_snapshot_mismatch"],
+        json!({
+            "reason": "page_keys_changed",
+            "expected_total": 4,
+            "actual_total": 5,
+        })
+    );
+}
+
+#[tokio::test]
 async fn gateway_pool_selection_snapshot_uses_same_default_page_order_as_list() {
     let provider = sample_provider("provider-openai", "openai", 10);
     let mut alpha_key = sample_key("key-openai-alpha", "provider-openai", "openai:chat", "sk-a");

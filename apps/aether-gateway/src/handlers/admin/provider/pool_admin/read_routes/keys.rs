@@ -413,6 +413,63 @@ async fn build_admin_pool_selection_snapshot_payload(
     }))
 }
 
+async fn build_admin_pool_key_payload_items(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    pool_config: Option<AdminProviderPoolConfig>,
+    keys: Vec<StoredProviderCatalogKey>,
+    preloaded_pool_scores_by_key_id: Option<BTreeMap<String, StoredPoolMemberScore>>,
+    now_unix_secs: u64,
+) -> Result<Vec<Value>, GatewayError> {
+    let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
+    let pool_scores_by_key_id = match preloaded_pool_scores_by_key_id {
+        Some(scores) => scores,
+        None => read_admin_pool_scores_by_key_id(state, &provider.id, &key_ids)
+            .await
+            .unwrap_or_default(),
+    };
+    let endpoints = state
+        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider.id))
+        .await?;
+    let runtime = match pool_config.as_ref() {
+        Some(pool_config) if !key_ids.is_empty() => {
+            read_admin_provider_pool_runtime_state(
+                state.runtime_state(),
+                &provider.id,
+                &key_ids,
+                pool_config,
+                None,
+            )
+            .await
+        }
+        _ => AdminProviderPoolRuntimeState::default(),
+    };
+    let codex_cycle_usage_by_key = read_admin_pool_codex_cycle_usage_by_key(
+        state,
+        &provider.provider_type,
+        &keys,
+        now_unix_secs,
+    )
+    .await?;
+
+    Ok(keys
+        .into_iter()
+        .map(|key| {
+            pool_payloads::build_admin_pool_key_payload(
+                state,
+                &provider.provider_type,
+                &endpoints,
+                &key,
+                &runtime,
+                pool_config.clone(),
+                pool_scores_by_key_id.get(&key.id),
+                codex_cycle_usage_by_key.get(&key.id),
+                now_unix_secs,
+            )
+        })
+        .collect::<Vec<_>>())
+}
+
 async fn maybe_build_admin_pool_selection_snapshot_payload(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
@@ -886,53 +943,15 @@ pub(super) async fn build_admin_pool_list_keys_response(
         (key_page.items, key_page.total, None)
     };
 
-    let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
-    let pool_scores_by_key_id = match preloaded_pool_scores_by_key_id {
-        Some(scores) => scores,
-        None => read_admin_pool_scores_by_key_id(state, &provider.id, &key_ids)
-            .await
-            .unwrap_or_default(),
-    };
-    let endpoints = state
-        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider.id))
-        .await?;
-    let runtime = match pool_config.as_ref() {
-        Some(pool_config) if !key_ids.is_empty() => {
-            read_admin_provider_pool_runtime_state(
-                state.runtime_state(),
-                &provider.id,
-                &key_ids,
-                pool_config,
-                None,
-            )
-            .await
-        }
-        _ => AdminProviderPoolRuntimeState::default(),
-    };
-    let codex_cycle_usage_by_key = read_admin_pool_codex_cycle_usage_by_key(
+    let items = build_admin_pool_key_payload_items(
         state,
-        &provider.provider_type,
-        &keys,
+        &provider,
+        pool_config,
+        keys,
+        preloaded_pool_scores_by_key_id,
         now_unix_secs,
     )
     .await?;
-
-    let items = keys
-        .into_iter()
-        .map(|key| {
-            pool_payloads::build_admin_pool_key_payload(
-                state,
-                &provider.provider_type,
-                &endpoints,
-                &key,
-                &runtime,
-                pool_config.clone(),
-                pool_scores_by_key_id.get(&key.id),
-                codex_cycle_usage_by_key.get(&key.id),
-                now_unix_secs,
-            )
-        })
-        .collect::<Vec<_>>();
 
     let payload = json!({
         "total": total,
@@ -1068,7 +1087,7 @@ pub(super) async fn build_admin_pool_create_selection_snapshot_response(
     let now_unix_secs = admin_pool_current_unix_secs();
     let search_scope =
         admin_pool_effective_search_scope(search_scope, &status, &quick_selectors, sort);
-    let (keys, _) = read_admin_pool_filtered_sorted_keys(
+    let (keys, preloaded_pool_scores_by_key_id) = read_admin_pool_filtered_sorted_keys(
         state,
         &provider,
         pool_config.as_ref(),
@@ -1110,10 +1129,27 @@ pub(super) async fn build_admin_pool_create_selection_snapshot_response(
         )
         .await?;
 
+    let page_keys = keys
+        .iter()
+        .skip(page_offset)
+        .take(page_size)
+        .cloned()
+        .collect::<Vec<_>>();
+    let page_items = build_admin_pool_key_payload_items(
+        state,
+        &provider,
+        pool_config,
+        page_keys,
+        preloaded_pool_scores_by_key_id,
+        now_unix_secs,
+    )
+    .await?;
+
     let mut response_payload = json!({
         "total": total,
         "page": page,
         "page_size": page_size,
+        "keys": page_items,
     });
     if let Some(selection_snapshot) = selection_snapshot {
         response_payload["selection_snapshot"] = selection_snapshot;

@@ -345,6 +345,7 @@ export interface PoolKeySelectionSnapshotResponse {
   total: number
   page: number
   page_size: number
+  keys?: PoolKeyDetail[]
   selection_snapshot?: PoolSelectionSnapshot | null
   selection_snapshot_mismatch?: PoolSelectionSnapshotMismatch | null
 }

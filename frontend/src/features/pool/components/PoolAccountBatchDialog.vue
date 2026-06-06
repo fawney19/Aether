@@ -745,6 +745,11 @@ async function createSelectionSnapshotForCurrentFilters(): Promise<PoolSelection
       return null
     }
     filteredTotal.value = snapshot.total
+    if (Array.isArray(result.keys)) {
+      pageKeys.value = result.keys
+      rememberPageKeys(result.keys)
+      loadedPageSignature.value = currentFilterSignature()
+    }
 
     if (result.selection_snapshot_mismatch || snapshot.total !== expectedTotal) {
       const expected = Number(result.selection_snapshot_mismatch?.expected_total ?? expectedTotal)
