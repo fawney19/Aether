@@ -919,6 +919,7 @@ mod tests {
             api_key_id: "key-1".to_string(),
             username: Some("alice".to_string()),
             api_key_name: Some("default".to_string()),
+            api_key_billing_multiplier: 1.0,
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,

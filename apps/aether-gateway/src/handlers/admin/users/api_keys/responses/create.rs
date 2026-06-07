@@ -6,7 +6,8 @@ use super::super::super::{
 use super::super::helpers::{
     attach_audit_response, default_admin_user_api_key_name, format_optional_unix_secs_iso8601,
     generate_admin_user_api_key_plaintext, hash_admin_user_api_key, masked_user_api_key_display,
-    normalize_admin_api_key_providers, normalize_admin_optional_api_key_name,
+    normalize_admin_api_key_billing_multiplier, normalize_admin_api_key_providers,
+    normalize_admin_optional_api_key_name,
 };
 use super::super::paths::admin_user_id_from_api_keys_path;
 
@@ -71,7 +72,7 @@ pub(crate) async fn build_admin_create_user_api_key_response(
     {
         return Ok((
             http::StatusCode::BAD_REQUEST,
-            Json(json!({ "detail": "当前仅支持 name、rate_limit、concurrent_limit、allowed_providers、ip_rules 字段" })),
+            Json(json!({ "detail": "当前仅支持 name、rate_limit、concurrent_limit、billing_multiplier、allowed_providers、ip_rules 字段" })),
         )
             .into_response());
     }
@@ -136,6 +137,17 @@ pub(crate) async fn build_admin_create_user_api_key_response(
                     .into_response());
             }
         };
+    let billing_multiplier =
+        match normalize_admin_api_key_billing_multiplier(payload.billing_multiplier) {
+            Ok(value) => value,
+            Err(detail) => {
+                return Ok((
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": detail })),
+                )
+                    .into_response());
+            }
+        };
 
     let plaintext_key = generate_admin_user_api_key_plaintext();
     let Some(key_encrypted) = state.encrypt_catalog_secret_with_fallbacks(&plaintext_key) else {
@@ -166,6 +178,7 @@ pub(crate) async fn build_admin_create_user_api_key_response(
             total_requests: 0,
             total_tokens: 0,
             total_cost_usd: 0.0,
+            billing_multiplier,
         })
         .await?
     else {
@@ -207,6 +220,7 @@ pub(crate) async fn build_admin_create_user_api_key_response(
             "key_display": masked_user_api_key_display(state, created.key_encrypted.as_deref()),
             "rate_limit": created.rate_limit,
             "concurrent_limit": created.concurrent_limit,
+            "billing_multiplier": created.billing_multiplier,
             "ip_rules": created.ip_rules,
             "expires_at": format_optional_unix_secs_iso8601(created.expires_at_unix_secs),
             "last_used_at": format_optional_unix_secs_iso8601(created.last_used_at_unix_secs),

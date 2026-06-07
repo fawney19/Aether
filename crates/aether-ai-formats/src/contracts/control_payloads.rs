@@ -61,6 +61,7 @@ mod tests {
                 api_key_id: "key-1".to_string(),
                 username: None,
                 api_key_name: None,
+                api_key_billing_multiplier: 1.0,
                 balance_remaining: Some(12.5),
                 access_allowed: true,
                 api_key_is_standalone: false,

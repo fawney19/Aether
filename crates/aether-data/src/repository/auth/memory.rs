@@ -5,8 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 
 use super::types::{
-    AuthApiKeyExportSummary, AuthApiKeyLookupKey, AuthApiKeyReadRepository,
-    AuthApiKeyWriteRepository, CreateStandaloneApiKeyRecord, CreateUserApiKeyRecord,
+    normalize_api_key_billing_multiplier, AuthApiKeyExportSummary, AuthApiKeyLookupKey,
+    AuthApiKeyReadRepository, AuthApiKeyWriteRepository, CreateStandaloneApiKeyRecord,
+    CreateUserApiKeyRecord,
     StandaloneApiKeyExportListQuery, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
     UpdateStandaloneApiKeyBasicRecord, UpdateUserApiKeyBasicRecord,
 };
@@ -78,6 +79,9 @@ impl InMemoryAuthApiKeySnapshotRepository {
                     0.0,
                     snapshot.api_key_is_standalone,
                 )
+                .and_then(|record| {
+                    record.with_billing_multiplier(Some(snapshot.api_key_billing_multiplier))
+                })
                 .and_then(|record| {
                     record.with_ip_rules(
                         snapshot
@@ -491,6 +495,8 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             .values()
             .find(|snapshot| snapshot.user_id == record.user_id)
             .cloned();
+        let billing_multiplier =
+            normalize_api_key_billing_multiplier(Some(record.billing_multiplier))?;
         let snapshot = if let Some(template) = template {
             StoredAuthApiKeySnapshot {
                 api_key_id: record.api_key_id.clone(),
@@ -505,6 +511,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 api_key_allowed_api_formats: record.allowed_api_formats.clone(),
                 api_key_allowed_models: record.allowed_models.clone(),
                 api_key_ip_rules: record.ip_rules.clone(),
+                api_key_billing_multiplier: billing_multiplier,
                 ..template
             }
         } else {
@@ -549,6 +556,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                     .as_ref()
                     .map(|value| serde_json::json!(value)),
             )?
+            .with_api_key_billing_multiplier(Some(billing_multiplier))?
         };
 
         let now_unix_secs = current_unix_secs() as i64;
@@ -581,6 +589,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             record.total_cost_usd,
             false,
         )?
+        .with_billing_multiplier(Some(billing_multiplier))?
         .with_ip_rules(
             record
                 .ip_rules
@@ -627,6 +636,8 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             .values()
             .find(|snapshot| snapshot.user_id == record.user_id)
             .cloned();
+        let billing_multiplier =
+            normalize_api_key_billing_multiplier(Some(record.billing_multiplier))?;
         let snapshot = if let Some(template) = template {
             StoredAuthApiKeySnapshot {
                 api_key_id: record.api_key_id.clone(),
@@ -641,6 +652,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 api_key_allowed_api_formats: record.allowed_api_formats.clone(),
                 api_key_allowed_models: record.allowed_models.clone(),
                 api_key_ip_rules: record.ip_rules.clone(),
+                api_key_billing_multiplier: billing_multiplier,
                 ..template
             }
         } else {
@@ -685,6 +697,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                     .as_ref()
                     .map(|value| serde_json::json!(value)),
             )?
+            .with_api_key_billing_multiplier(Some(billing_multiplier))?
         };
 
         let now_unix_secs = current_unix_secs() as i64;
@@ -717,6 +730,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             record.total_cost_usd,
             true,
         )?
+        .with_billing_multiplier(Some(billing_multiplier))?
         .with_ip_rules(
             record
                 .ip_rules
@@ -781,6 +795,16 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             }
             if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
                 export.ip_rules = ip_rules;
+            }
+        }
+        if record.billing_multiplier_present {
+            let billing_multiplier =
+                normalize_api_key_billing_multiplier(record.billing_multiplier)?;
+            if let Some(snapshot) = index.by_api_key_id.get_mut(&record.api_key_id) {
+                snapshot.api_key_billing_multiplier = billing_multiplier;
+            }
+            if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
+                export.billing_multiplier = billing_multiplier;
             }
         }
         Ok(index.export_by_api_key_id.get(&record.api_key_id).cloned())
@@ -867,6 +891,16 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
         if record.auto_delete_on_expiry_present {
             if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
                 export.auto_delete_on_expiry = record.auto_delete_on_expiry;
+            }
+        }
+        if record.billing_multiplier_present {
+            let billing_multiplier =
+                normalize_api_key_billing_multiplier(record.billing_multiplier)?;
+            if let Some(snapshot) = index.by_api_key_id.get_mut(&record.api_key_id) {
+                snapshot.api_key_billing_multiplier = billing_multiplier;
+            }
+            if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
+                export.billing_multiplier = billing_multiplier;
             }
         }
         Ok(index.export_by_api_key_id.get(&record.api_key_id).cloned())
@@ -1310,6 +1344,8 @@ mod tests {
                 rate_limit: None,
                 concurrent_limit: Some(11),
                 ip_rules: None,
+                billing_multiplier_present: false,
+                billing_multiplier: None,
             })
             .await
             .expect("update should succeed")
@@ -1349,6 +1385,8 @@ mod tests {
                 expires_at_unix_secs: None,
                 auto_delete_on_expiry_present: false,
                 auto_delete_on_expiry: false,
+                billing_multiplier_present: false,
+                billing_multiplier: None,
             })
             .await
             .expect("update should succeed")

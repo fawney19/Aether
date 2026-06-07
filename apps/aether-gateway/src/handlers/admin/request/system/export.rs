@@ -386,6 +386,7 @@ impl<'a> AdminAppState<'a> {
             ("total_requests".to_string(), json!(key.total_requests)),
             ("total_tokens".to_string(), json!(key.total_tokens)),
             ("total_cost_usd".to_string(), json!(key.total_cost_usd)),
+            ("billing_multiplier".to_string(), json!(key.billing_multiplier)),
             (
                 "wallet".to_string(),
                 serialize_admin_system_users_export_wallet(wallet)

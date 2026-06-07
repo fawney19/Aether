@@ -1,10 +1,10 @@
 use super::super::super::{
     build_admin_users_bad_request_response, build_admin_users_read_only_response,
-    normalize_admin_feature_settings, normalize_admin_user_ip_rules, AdminUpdateUserApiKeyRequest,
+    normalize_admin_feature_settings, normalize_admin_user_ip_rules, AdminUpdateUserApiKeyPatch,
 };
 use super::super::helpers::{
     attach_audit_response, build_admin_user_api_key_detail_payload,
-    normalize_admin_optional_api_key_name,
+    normalize_admin_api_key_billing_multiplier, normalize_admin_optional_api_key_name,
 };
 use super::super::paths::admin_user_api_key_parts;
 
@@ -42,7 +42,17 @@ pub(crate) async fn build_admin_update_user_api_key_response(
         )
             .into_response());
     };
-    let payload = match serde_json::from_slice::<AdminUpdateUserApiKeyRequest>(request_body) {
+    let raw_payload = match serde_json::from_slice::<serde_json::Value>(request_body) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => {
+            return Ok((
+                http::StatusCode::BAD_REQUEST,
+                Json(json!({ "detail": "请求数据验证失败" })),
+            )
+                .into_response());
+        }
+    };
+    let patch = match AdminUpdateUserApiKeyPatch::from_object(raw_payload) {
         Ok(value) => value,
         Err(_) => {
             return Ok((
@@ -52,8 +62,9 @@ pub(crate) async fn build_admin_update_user_api_key_response(
                 .into_response());
         }
     };
-    let feature_settings = if let Some(feature_settings) = payload.feature_settings {
-        match normalize_admin_feature_settings(feature_settings) {
+    let (field_presence, payload) = patch.into_parts();
+    let feature_settings = if field_presence.contains("feature_settings") {
+        match normalize_admin_feature_settings(payload.feature_settings.flatten()) {
             Ok(value) => Some(value),
             Err(detail) => {
                 return Ok((
@@ -107,6 +118,17 @@ pub(crate) async fn build_admin_update_user_api_key_response(
         },
         None => None,
     };
+    let billing_multiplier =
+        match normalize_admin_api_key_billing_multiplier(payload.billing_multiplier) {
+            Ok(value) => value,
+            Err(detail) => {
+                return Ok((
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": detail })),
+                )
+                    .into_response());
+            }
+        };
 
     let Some(updated) = state
         .update_user_api_key_basic(aether_data::repository::auth::UpdateUserApiKeyBasicRecord {
@@ -116,6 +138,8 @@ pub(crate) async fn build_admin_update_user_api_key_response(
             rate_limit: payload.rate_limit,
             concurrent_limit,
             ip_rules,
+            billing_multiplier_present: field_presence.contains("billing_multiplier"),
+            billing_multiplier: Some(billing_multiplier),
         })
         .await?
     else {

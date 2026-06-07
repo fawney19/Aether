@@ -28,6 +28,8 @@ pub struct UsageEventData {
     pub username: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_billing_multiplier: Option<f64>,
     pub provider_name: String,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

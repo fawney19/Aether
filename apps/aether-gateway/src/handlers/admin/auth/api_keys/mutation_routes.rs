@@ -60,6 +60,13 @@ fn normalize_standalone_initial_balance(
     Ok((initial_balance_usd, false))
 }
 
+fn normalize_admin_standalone_api_key_billing_multiplier(
+    value: Option<f64>,
+) -> Result<f64, String> {
+    aether_data::repository::auth::normalize_api_key_billing_multiplier(value)
+        .map_err(|_| "billing_multiplier 必须在 0 到 1000 之间".to_string())
+}
+
 pub(super) async fn build_admin_create_api_key_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
@@ -124,6 +131,11 @@ pub(super) async fn build_admin_create_api_key_response(
             Ok(value) => value,
             Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
         };
+    let billing_multiplier =
+        match normalize_admin_standalone_api_key_billing_multiplier(payload.billing_multiplier) {
+            Ok(value) => value,
+            Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+        };
     let (initial_balance_usd, unlimited_balance) = match normalize_standalone_initial_balance(
         payload.initial_balance_usd,
         payload.unlimited_balance,
@@ -177,6 +189,7 @@ pub(super) async fn build_admin_create_api_key_response(
                 total_requests: 0,
                 total_tokens: 0,
                 total_cost_usd: 0.0,
+                billing_multiplier,
             },
         )
         .await?
@@ -209,6 +222,7 @@ pub(super) async fn build_admin_create_api_key_response(
             "is_active": created.is_active,
             "rate_limit": created.rate_limit,
             "concurrent_limit": created.concurrent_limit,
+            "billing_multiplier": created.billing_multiplier,
             "allowed_providers": created.allowed_providers,
             "allowed_api_formats": created.allowed_api_formats,
             "allowed_models": created.allowed_models,
@@ -306,6 +320,11 @@ pub(super) async fn build_admin_update_api_key_response(
     }
     let concurrent_limit =
         match normalize_optional_api_key_concurrent_limit(payload.concurrent_limit) {
+            Ok(value) => value,
+            Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+        };
+    let billing_multiplier =
+        match normalize_admin_standalone_api_key_billing_multiplier(payload.billing_multiplier) {
             Ok(value) => value,
             Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
         };
@@ -422,6 +441,8 @@ pub(super) async fn build_admin_update_api_key_response(
                 },
                 auto_delete_on_expiry_present: field_presence.contains("auto_delete_on_expiry"),
                 auto_delete_on_expiry: effective_auto_delete_on_expiry,
+                billing_multiplier_present: field_presence.contains("billing_multiplier"),
+                billing_multiplier: Some(billing_multiplier),
             },
         )
         .await?

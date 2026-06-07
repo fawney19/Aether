@@ -175,6 +175,7 @@ export interface ApiKey {
   created_at?: string | null
   total_requests?: number
   total_cost_usd?: number
+  billing_multiplier?: number
   rate_limit?: number | null
   concurrent_limit?: number | null
   ip_rules?: string[] | null

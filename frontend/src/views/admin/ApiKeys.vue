@@ -243,6 +243,12 @@
                       </span>
                     </div>
                     <div class="flex items-center gap-1 text-muted-foreground">
+                      <span>倍率:</span>
+                      <span class="font-medium text-foreground">
+                        {{ formatBillingMultiplier(apiKey.billing_multiplier) }}
+                      </span>
+                    </div>
+                    <div class="flex items-center gap-1 text-muted-foreground">
                       <span>并发:</span>
                       <Badge
                         v-if="isConcurrentLimitInherited(apiKey.concurrent_limit) || isConcurrentLimitUnlimited(apiKey.concurrent_limit)"
@@ -444,6 +450,12 @@
                     class="h-5 px-1.5 py-0 text-[10px] font-medium"
                   >
                     {{ formatConcurrentLimitInheritable(apiKey.concurrent_limit) }}
+                  </Badge>
+                  <Badge
+                    variant="secondary"
+                    class="h-5 px-1.5 py-0 text-[10px] font-medium"
+                  >
+                    {{ formatBillingMultiplier(apiKey.billing_multiplier) }}
                   </Badge>
                   <Badge
                     v-if="apiKey.auto_delete_on_expiry"
@@ -1203,6 +1215,7 @@ function editApiKey(apiKey: AdminApiKey) {
     expires_at: expiresAt,
     rate_limit: apiKey.rate_limit ?? undefined,
     concurrent_limit: apiKey.concurrent_limit ?? undefined,
+    billing_multiplier: apiKey.billing_multiplier ?? 1,
     auto_delete_on_expiry: apiKey.auto_delete_on_expiry || false,
     allowed_providers: apiKey.allowed_providers == null ? null : [...apiKey.allowed_providers],
     allowed_api_formats: apiKey.allowed_api_formats == null ? null : [...apiKey.allowed_api_formats],
@@ -1249,6 +1262,11 @@ function formatConcurrentLimitInheritable(concurrentLimit?: number | null): stri
   if (concurrentLimit == null) return '不限并发'
   if (concurrentLimit === 0) return '不限并发'
   return `${concurrentLimit} 并发`
+}
+
+function formatBillingMultiplier(multiplier?: number | null): string {
+  const value = typeof multiplier === 'number' && Number.isFinite(multiplier) ? multiplier : 1
+  return `${value.toLocaleString(undefined, { maximumFractionDigits: 4 })}x`
 }
 
 function isConcurrentLimitInherited(concurrentLimit?: number | null): boolean {
@@ -1414,6 +1432,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
         unlimited_balance: Boolean(data.unlimited_balance),
         rate_limit: data.rate_limit ?? null,  // undefined = 跟随系统默认，显式传 null
         concurrent_limit: data.concurrent_limit ?? null,
+        billing_multiplier: data.billing_multiplier ?? 1,
         expires_at: serializeExpiryDate(data.expires_at),
         auto_delete_on_expiry: data.auto_delete_on_expiry,
         // 空数组表示清除限制（允许全部），后端会将空数组存为 NULL
@@ -1446,6 +1465,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
         initial_balance_usd: isUnlimited ? null : (data.initial_balance_usd as number),
         rate_limit: data.rate_limit ?? null,  // undefined = 跟随系统默认，显式传 null
         concurrent_limit: data.concurrent_limit ?? null,
+        billing_multiplier: data.billing_multiplier ?? 1,
         expires_at: serializeExpiryDate(data.expires_at),
         auto_delete_on_expiry: data.auto_delete_on_expiry,
         // 空数组表示不设置限制（允许全部），后端会将空数组存为 NULL

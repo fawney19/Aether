@@ -42,6 +42,7 @@ pub(super) fn build_admin_user_api_key_detail_payload(
         "is_locked": is_locked,
         "total_requests": record.total_requests,
         "total_cost_usd": record.total_cost_usd,
+        "billing_multiplier": record.billing_multiplier,
         "rate_limit": record.rate_limit,
         "concurrent_limit": record.concurrent_limit,
         "ip_rules": record.ip_rules,
@@ -101,6 +102,13 @@ pub(crate) fn hash_admin_user_api_key(value: &str) -> String {
 
 pub(crate) fn default_admin_user_api_key_name() -> String {
     format!("API Key {}", chrono::Utc::now().format("%Y%m%d%H%M%S"))
+}
+
+pub(super) fn normalize_admin_api_key_billing_multiplier(
+    value: Option<f64>,
+) -> Result<f64, String> {
+    aether_data::repository::auth::normalize_api_key_billing_multiplier(value)
+        .map_err(|_| "billing_multiplier 必须在 0 到 1000 之间".to_string())
 }
 
 pub(super) fn attach_audit_response(

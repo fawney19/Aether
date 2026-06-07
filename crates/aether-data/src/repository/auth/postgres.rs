@@ -3,8 +3,9 @@ use futures_util::{stream::TryStream, TryStreamExt};
 use sqlx::{postgres::PgRow, PgPool, Row};
 
 use super::types::{
-    AuthApiKeyExportSummary, AuthApiKeyLookupKey, AuthApiKeyReadRepository,
-    AuthApiKeyWriteRepository, CreateStandaloneApiKeyRecord, CreateUserApiKeyRecord,
+    normalize_api_key_billing_multiplier, AuthApiKeyExportSummary, AuthApiKeyLookupKey,
+    AuthApiKeyReadRepository, AuthApiKeyWriteRepository, CreateStandaloneApiKeyRecord,
+    CreateUserApiKeyRecord,
     StandaloneApiKeyExportListQuery, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
     UpdateStandaloneApiKeyBasicRecord, UpdateUserApiKeyBasicRecord,
 };
@@ -37,7 +38,8 @@ SELECT
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
-  api_keys.ip_rules AS api_key_ip_rules
+  api_keys.ip_rules AS api_key_ip_rules,
+  COALESCE(CAST(api_keys.billing_multiplier AS DOUBLE PRECISION), 1.0) AS api_key_billing_multiplier
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 WHERE api_keys.key_hash = $1
@@ -68,7 +70,8 @@ SELECT
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
-  api_keys.ip_rules AS api_key_ip_rules
+  api_keys.ip_rules AS api_key_ip_rules,
+  COALESCE(CAST(api_keys.billing_multiplier AS DOUBLE PRECISION), 1.0) AS api_key_billing_multiplier
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 WHERE api_keys.id = $1
@@ -99,7 +102,8 @@ SELECT
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
-  api_keys.ip_rules AS api_key_ip_rules
+  api_keys.ip_rules AS api_key_ip_rules,
+  COALESCE(CAST(api_keys.billing_multiplier AS DOUBLE PRECISION), 1.0) AS api_key_billing_multiplier
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 WHERE api_keys.id = $1 AND users.id = $2
@@ -130,7 +134,8 @@ SELECT
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
-  api_keys.ip_rules AS api_key_ip_rules
+  api_keys.ip_rules AS api_key_ip_rules,
+  COALESCE(CAST(api_keys.billing_multiplier AS DOUBLE PRECISION), 1.0) AS api_key_billing_multiplier
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 WHERE api_keys.id = ANY($1::TEXT[])
@@ -158,6 +163,7 @@ SELECT
   api_keys.total_requests,
   COALESCE(api_keys.total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(api_keys.total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(api_keys.billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM api_keys.last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM api_keys.created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM api_keys.updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -189,6 +195,7 @@ SELECT
   api_keys.total_requests,
   COALESCE(api_keys.total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(api_keys.total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(api_keys.billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM api_keys.last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM api_keys.created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM api_keys.updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -219,6 +226,7 @@ SELECT
   api_keys.total_requests,
   COALESCE(api_keys.total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(api_keys.total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(api_keys.billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM api_keys.last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM api_keys.created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM api_keys.updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -249,6 +257,7 @@ SELECT
   api_keys.total_requests,
   COALESCE(api_keys.total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(api_keys.total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(api_keys.billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM api_keys.last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM api_keys.created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM api_keys.updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -279,6 +288,7 @@ SELECT
   api_keys.total_requests,
   COALESCE(api_keys.total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(api_keys.total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(api_keys.billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM api_keys.last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM api_keys.created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM api_keys.updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -353,6 +363,7 @@ SELECT
   api_keys.total_requests,
   COALESCE(api_keys.total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(api_keys.total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(api_keys.billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM api_keys.last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM api_keys.created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM api_keys.updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -392,6 +403,7 @@ INSERT INTO api_keys (
   total_requests,
   total_tokens,
   total_cost_usd,
+  billing_multiplier,
   created_at,
   updated_at
 )
@@ -417,6 +429,7 @@ VALUES (
   $16,
   $17,
   $18,
+  $19,
   NOW(),
   NOW()
 )
@@ -440,6 +453,7 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -469,6 +483,7 @@ INSERT INTO api_keys (
   total_requests,
   total_tokens,
   total_cost_usd,
+  billing_multiplier,
   created_at,
   updated_at
 )
@@ -494,6 +509,7 @@ VALUES (
   $16,
   $17,
   $18,
+  $19,
   NOW(),
   NOW()
 )
@@ -517,6 +533,7 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -530,6 +547,7 @@ SET
   rate_limit = COALESCE($4, rate_limit),
   concurrent_limit = COALESCE($5, concurrent_limit),
   ip_rules = CASE WHEN $6 THEN $7::jsonb ELSE ip_rules END,
+  billing_multiplier = CASE WHEN $8 THEN $9 ELSE billing_multiplier END,
   updated_at = NOW()
 WHERE user_id = $1
   AND id = $2
@@ -554,6 +572,7 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -572,6 +591,7 @@ SET
   ip_rules = CASE WHEN $13 THEN $14::jsonb ELSE ip_rules END,
   expires_at = CASE WHEN $15 THEN $16::timestamptz ELSE expires_at END,
   auto_delete_on_expiry = CASE WHEN $17 THEN $18 ELSE auto_delete_on_expiry END,
+  billing_multiplier = CASE WHEN $19 THEN $20 ELSE billing_multiplier END,
   updated_at = NOW()
 WHERE id = $1
   AND is_standalone = TRUE
@@ -595,6 +615,7 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -629,6 +650,7 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -662,6 +684,7 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -696,6 +719,7 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -740,6 +764,7 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -763,6 +788,7 @@ RETURNING
   allowed_providers,
   allowed_api_formats,
   allowed_models,
+  ip_rules,
   rate_limit,
   concurrent_limit,
   force_capabilities,
@@ -773,6 +799,7 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST(billing_multiplier AS DOUBLE PRECISION), 1.0) AS billing_multiplier,
   CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
@@ -1192,6 +1219,8 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
                 })
             })
             .transpose()?;
+        let billing_multiplier =
+            normalize_api_key_billing_multiplier(Some(record.billing_multiplier))?;
         let row = sqlx::query(CREATE_USER_API_KEY_SQL)
             .bind(record.api_key_id)
             .bind(record.user_id)
@@ -1211,6 +1240,7 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(record.total_requests as i64)
             .bind(record.total_tokens as i64)
             .bind(record.total_cost_usd)
+            .bind(billing_multiplier)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -1249,6 +1279,8 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
                 })
             })
             .transpose()?;
+        let billing_multiplier =
+            normalize_api_key_billing_multiplier(Some(record.billing_multiplier))?;
         let row = sqlx::query(CREATE_STANDALONE_API_KEY_SQL)
             .bind(record.api_key_id)
             .bind(record.user_id)
@@ -1268,6 +1300,7 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(record.total_requests as i64)
             .bind(record.total_tokens as i64)
             .bind(record.total_cost_usd)
+            .bind(billing_multiplier)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -1285,6 +1318,8 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .map(serde_json::to_value)
             .transpose()
             .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let billing_multiplier =
+            normalize_api_key_billing_multiplier(record.billing_multiplier)?;
         let row = sqlx::query(UPDATE_USER_API_KEY_BASIC_SQL)
             .bind(record.user_id)
             .bind(record.api_key_id)
@@ -1293,6 +1328,8 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(record.concurrent_limit)
             .bind(record.ip_rules.is_some())
             .bind(ip_rules)
+            .bind(record.billing_multiplier_present)
+            .bind(billing_multiplier)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -1339,6 +1376,8 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
                 })
             })
             .transpose()?;
+        let billing_multiplier =
+            normalize_api_key_billing_multiplier(record.billing_multiplier)?;
         let row = sqlx::query(UPDATE_STANDALONE_API_KEY_BASIC_SQL)
             .bind(record.api_key_id)
             .bind(record.name)
@@ -1358,6 +1397,8 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(expires_at)
             .bind(record.auto_delete_on_expiry_present)
             .bind(record.auto_delete_on_expiry)
+            .bind(record.billing_multiplier_present)
+            .bind(billing_multiplier)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -1602,6 +1643,8 @@ fn map_auth_api_key_snapshot_row(
         row_get(row, "api_key_allowed_models")?,
     )?
     .with_api_key_ip_rules(row_get(row, "api_key_ip_rules")?)?;
+    let snapshot =
+        snapshot.with_api_key_billing_multiplier(Some(row_get(row, "api_key_billing_multiplier")?))?;
     Ok(snapshot.with_user_rate_limit(row_get(row, "user_rate_limit")?))
 }
 
@@ -1630,6 +1673,7 @@ fn map_auth_api_key_export_row(
         row_get(row, "is_standalone")?,
     )
     .and_then(|record| record.with_ip_rules(row_get(row, "ip_rules")?))
+    .and_then(|record| record.with_billing_multiplier(Some(row_get(row, "billing_multiplier")?)))
     .map(|record| record.with_feature_settings(feature_settings))
     .and_then(|record| {
         record.with_activity_timestamps(

@@ -49,6 +49,7 @@ pub(crate) struct LocalExecutionRuntimeMissContext {
     pub(crate) auth_api_key_id: Option<String>,
     pub(crate) auth_username: Option<String>,
     pub(crate) auth_api_key_name: Option<String>,
+    pub(crate) auth_api_key_billing_multiplier: Option<f64>,
     candidate_contexts: Vec<RuntimeMissCandidateContext>,
 }
 
@@ -185,6 +186,7 @@ pub(crate) async fn build_local_execution_runtime_miss_context(
         auth_api_key_id: auth_context.map(|value| value.api_key_id.clone()),
         auth_username: auth_context.and_then(|value| value.username.clone()),
         auth_api_key_name: auth_context.and_then(|value| value.api_key_name.clone()),
+        auth_api_key_billing_multiplier: auth_context.map(|value| value.api_key_billing_multiplier),
         candidate_contexts: load_runtime_miss_candidate_contexts_with_retry(
             state, request_id, decision,
         )
@@ -357,6 +359,7 @@ pub(crate) async fn record_failed_usage_for_runtime_miss_request(
         api_key_id: context.auth_api_key_id.clone(),
         username: context.auth_username.clone(),
         api_key_name: context.auth_api_key_name.clone(),
+        api_key_billing_multiplier: context.auth_api_key_billing_multiplier,
         provider_name,
         model,
         target_model,

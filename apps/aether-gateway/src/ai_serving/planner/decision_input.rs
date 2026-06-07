@@ -603,6 +603,7 @@ mod tests {
             api_key_id: "api-key-1".to_string(),
             username: None,
             api_key_name: None,
+            api_key_billing_multiplier: 1.0,
             balance_remaining: None,
             access_allowed: true,
             api_key_is_standalone: false,

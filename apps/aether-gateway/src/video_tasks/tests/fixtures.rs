@@ -46,6 +46,7 @@ pub(super) fn sample_auth_context() -> GatewayControlAuthContext {
         api_key_id: "key-123".to_string(),
         username: None,
         api_key_name: None,
+        api_key_billing_multiplier: 1.0,
         balance_remaining: None,
         access_allowed: true,
         user_rate_limit: None,

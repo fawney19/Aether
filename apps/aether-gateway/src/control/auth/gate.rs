@@ -149,8 +149,15 @@ async fn balance_capacity_rejection(
         return Ok(None);
     };
     let Some(estimated_cost_usd) =
-        estimate_request_cost_upper_bound_usd(state, decision, requested_model, headers, body)
-            .await?
+        estimate_request_cost_upper_bound_usd(
+            state,
+            decision,
+            requested_model,
+            headers,
+            body,
+            auth_context.api_key_billing_multiplier,
+        )
+        .await?
     else {
         return Ok(None);
     };
@@ -179,6 +186,7 @@ async fn estimate_request_cost_upper_bound_usd(
     requested_model: &str,
     headers: &http::HeaderMap,
     body: &Bytes,
+    api_key_billing_multiplier: f64,
 ) -> Result<Option<f64>, GatewayError> {
     let Some(api_format) = decision
         .auth_endpoint_signature
@@ -231,7 +239,16 @@ async fn estimate_request_cost_upper_bound_usd(
         };
         max_estimate = Some(max_estimate.map_or(estimate, |current| current.max(estimate)));
     }
-    Ok(max_estimate.filter(|value| value.is_finite() && *value >= 0.0))
+    let api_key_billing_multiplier = if api_key_billing_multiplier.is_finite()
+        && api_key_billing_multiplier >= 0.0
+    {
+        api_key_billing_multiplier
+    } else {
+        1.0
+    };
+    Ok(max_estimate
+        .map(|value| value * api_key_billing_multiplier)
+        .filter(|value| value.is_finite() && *value >= 0.0))
 }
 
 fn estimate_cost_from_billing_context(
@@ -567,6 +584,7 @@ mod tests {
             api_key_id: "api-key-1".to_string(),
             username: None,
             api_key_name: None,
+            api_key_billing_multiplier: 1.0,
             balance_remaining: None,
             access_allowed: true,
             user_rate_limit: None,
