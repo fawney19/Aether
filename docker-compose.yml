@@ -86,6 +86,8 @@ services:
       AETHER_BASE_DIR: /opt/aether
       AETHER_UPDATE_STRATEGY: docker
       AETHER_DOCKER_UPDATE_COMMAND: ${AETHER_DOCKER_UPDATE_COMMAND:-./update.sh}
+      AETHER_DOCKER_UPDATER_URL: http://updater:8099
+      AETHER_UPDATER_TOKEN: ${AETHER_UPDATER_TOKEN:-change-this-updater-token}
       AETHER_LOG_DESTINATION: stdout
       AETHER_LOG_FORMAT: ${AETHER_LOG_FORMAT:-pretty}
       APP_PORT: ${APP_PORT:-8084}
@@ -95,6 +97,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      updater:
+        condition: service_started
     ports:
       - "${APP_PORT:-8084}:${APP_PORT:-8084}"
     logging:
@@ -102,6 +106,30 @@ services:
       options:
         max-size: "100m"
         max-file: "10"
+    restart: unless-stopped
+
+  updater:
+    image: ${UPDATER_IMAGE:-ghcr.io/fawney19/aether-updater:latest}
+    container_name: aether-updater
+    environment:
+      TZ: Asia/Shanghai
+      AETHER_UPDATER_TOKEN: ${AETHER_UPDATER_TOKEN:-change-this-updater-token}
+      AETHER_UPDATER_SCRIPT: ${AETHER_DEPLOY_DIR:-${PWD}}/update.sh
+      AETHER_UPDATER_WORKDIR: ${AETHER_DEPLOY_DIR:-${PWD}}
+      RUST_LOG: ${AETHER_UPDATER_LOG:-aether_updater=info}
+    volumes:
+      - ${AETHER_DEPLOY_DIR:-${PWD}}:${AETHER_DEPLOY_DIR:-${PWD}}:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: [ "CMD-SHELL", "wget -qO- http://127.0.0.1:8099/health >/dev/null" ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     restart: unless-stopped
 
 volumes:

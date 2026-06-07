@@ -1,7 +1,7 @@
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::build_admin_usage_counter_health_payload;
 use crate::handlers::admin::system::shared::update::{
-    current_self_update_blocker, self_update_supported,
+    current_web_update_blocker, web_update_supported,
 };
 use crate::handlers::admin::system::shared::update_client::{
     build_direct_update_http_client, build_update_http_client, has_explicit_update_proxy_env,
@@ -55,7 +55,7 @@ pub(crate) fn build_admin_system_check_update_payload_from_release(
         latest_release,
         error,
     );
-    apply_self_update_check_update_override(&mut payload, self_update_supported());
+    apply_self_update_check_update_override(&mut payload, web_update_supported());
     payload
 }
 
@@ -65,7 +65,7 @@ pub(crate) fn build_admin_system_releases_list_payload(
 ) -> serde_json::Value {
     let mut payload =
         build_admin_system_releases_payload(current_aether_version(), releases, error);
-    apply_self_update_releases_override(&mut payload, self_update_supported());
+    apply_self_update_releases_override(&mut payload, web_update_supported());
     payload
 }
 
@@ -77,7 +77,7 @@ fn apply_self_update_check_update_override(payload: &mut Value, supported: bool)
     apply_self_update_check_update_override_with_blocker(
         payload,
         supported,
-        current_self_update_blocker(),
+        current_web_update_blocker(),
     );
 }
 
@@ -129,15 +129,14 @@ fn apply_self_update_releases_override_with_blocker(
 }
 
 fn current_self_update_release_blocker() -> &'static str {
+    if web_update_supported() {
+        return "";
+    }
     if !current_build_is_release() {
         return SOURCE_BUILD_RELEASE_BLOCKER;
     }
 
-    if self_update_supported() {
-        ""
-    } else {
-        current_self_update_blocker()
-    }
+    current_web_update_blocker()
 }
 
 #[cfg(not(test))]

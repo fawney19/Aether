@@ -523,6 +523,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-updater"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "aether-usage-runtime"
 version = "0.1.0"
 dependencies = [

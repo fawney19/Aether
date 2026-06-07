@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+# Internal updater sidecar for Docker Compose deployments.
+
+ARG RUST_VERSION=1.95.0
+
+FROM rust:${RUST_VERSION}-alpine AS builder
+
+WORKDIR /build
+RUN apk add --no-cache musl-dev
+COPY . .
+RUN --mount=type=cache,id=aether-updater-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=aether-updater-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=aether-updater-target,target=/build/target,sharing=locked \
+    cargo build --release --locked -p aether-updater && \
+    cp target/release/aether-updater /tmp/aether-updater
+
+FROM docker:27-cli
+
+RUN apk add --no-cache bash
+
+COPY --from=builder /tmp/aether-updater /usr/local/bin/aether-updater
+
+ENV AETHER_UPDATER_BIND=0.0.0.0:8099 \
+    AETHER_UPDATER_SCRIPT=/aether-deploy/update.sh \
+    AETHER_UPDATER_WORKDIR=/aether-deploy
+
+EXPOSE 8099
+ENTRYPOINT ["/usr/local/bin/aether-updater"]

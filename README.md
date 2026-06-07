@@ -57,7 +57,9 @@ docker compose -f docker-compose.single-node.yml pull && docker compose -f docke
 
 ### 一键更新
 
-Docker Compose 部署后，可在部署目录直接执行：
+Docker Compose 部署后，可在管理后台右上角“版本信息”或 `/admin/system` 的“系统更新”区域执行 Web 自动更新。Compose 会启动一个内网 `aether-updater` sidecar，它只执行部署目录里的固定 `update.sh`，并通过 `AETHER_UPDATER_TOKEN` 与 app 鉴权。生产环境请在 `.env` 中把 `AETHER_UPDATER_TOKEN` 改成随机长字符串；如果不是从部署目录交互式执行 compose，请设置 `AETHER_DEPLOY_DIR` 为部署目录绝对路径。
+
+也可以在部署目录直接执行：
 
 ```bash
 ./update.sh
@@ -71,9 +73,9 @@ Docker Compose 部署后，可在部署目录直接执行：
 
 仓库自带的 Docker Compose 默认把应用日志输出到容器 `stdout/stderr`，直接用 `docker compose logs -f app` 查看，并由 Docker 轮转日志，避免正式发布镜像切换到非 root 用户后再被宿主机挂载日志目录的权限问题拖垮启动。如果你确实需要文件日志，需要在 compose 里把 `AETHER_LOG_DESTINATION` 改成 `file|both`，并额外挂载一个容器用户可写的目录到 `/opt/aether/logs`。
 
-管理后台右上角“版本信息”会检测新版本。Docker Compose 部署只提示版本，实际更新继续执行 `./update.sh`；systemd / launchd / 二进制部署才使用后台自更新，流程是下载对应平台的 GitHub Release 包、强制校验 `SHA256SUMS`、解压到 `/opt/aether/releases/<version>`，再切换 `/opt/aether/current` 并退出进程，交给 systemd / launchd 拉起新版本。
+管理后台右上角“版本信息”会检测新版本。Docker Compose single-node 部署通过 updater sidecar 拉取镜像并重建 `app` 容器；多节点部署不要从单个后台节点执行更新，应使用外部滚动发布。systemd / launchd / 二进制部署继续使用后台自更新，流程是下载对应平台的 GitHub Release 包、强制校验 `SHA256SUMS`、解压到 `/opt/aether/releases/<version>`，再切换 `/opt/aether/current` 并退出进程，交给 systemd / launchd 拉起新版本。
 
-源码或本地构建版本不会启用后台在线更新，请继续使用源码更新流程。Docker Compose 用户如果希望“容器重建后也保持镜像层面的新版本”，仍建议定期运行 `./update.sh` 拉取并重建 app 镜像。服务器访问 GitHub 需要代理时，可设置 `AETHER_UPDATE_PROXY_URL`，也兼容 `UPDATE_PROXY_URL`、`HTTPS_PROXY`、`ALL_PROXY`、`HTTP_PROXY` 以及 `NO_PROXY`。共享出口触发 GitHub API 限流时，可设置只读 `AETHER_UPDATE_GITHUB_TOKEN`，也兼容 `GITHUB_TOKEN` / `GH_TOKEN`。下载总超时默认 600 秒，连续无响应/无数据默认 30 秒，可通过 `AETHER_UPDATE_DOWNLOAD_TIMEOUT_SECS` 和 `AETHER_UPDATE_DOWNLOAD_IDLE_TIMEOUT_SECS` 调整。
+源码或本地构建版本不会启用后台在线更新，请继续使用源码更新流程。服务器访问 GitHub 需要代理时，可设置 `AETHER_UPDATE_PROXY_URL`，也兼容 `UPDATE_PROXY_URL`、`HTTPS_PROXY`、`ALL_PROXY`、`HTTP_PROXY` 以及 `NO_PROXY`。共享出口触发 GitHub API 限流时，可设置只读 `AETHER_UPDATE_GITHUB_TOKEN`，也兼容 `GITHUB_TOKEN` / `GH_TOKEN`。下载总超时默认 600 秒，连续无响应/无数据默认 30 秒，可通过 `AETHER_UPDATE_DOWNLOAD_TIMEOUT_SECS` 和 `AETHER_UPDATE_DOWNLOAD_IDLE_TIMEOUT_SECS` 调整。
 
 标准 Docker Compose 使用 Docker named volumes 存放 Postgres/Redis/MySQL 数据；Single Node 使用部署目录下的 `./data` 存放 SQLite 数据。
 
