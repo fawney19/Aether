@@ -6968,6 +6968,16 @@ ORDER BY request_count DESC, group_key ASC
             } else {
                 ""
             };
+        let provider_id_filter = query
+            .provider_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let provider_name_filter = query
+            .provider_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         let sql = format!(
             r#"
 WITH filtered_usage AS (
@@ -7013,6 +7023,8 @@ WITH filtered_usage AS (
     AND "usage".status NOT IN ('pending', 'streaming')
     {provider_extra_where}
     {filtered_extra_where}
+    AND ($4::text IS NULL OR "usage".provider_id = $4)
+    AND ($5::text IS NULL OR "usage".provider_name = $5)
 ),
 normalized_usage AS (
   SELECT
@@ -7129,6 +7141,8 @@ LIMIT $3
                     query.limit
                 ))
             })?)
+            .bind(provider_id_filter)
+            .bind(provider_name_filter)
             .fetch(&self.pool);
 
         let mut items = Vec::new();
@@ -7172,6 +7186,8 @@ LIMIT $3
                     created_from_unix_secs: dashboard_utc_to_unix_secs(raw_start),
                     created_until_unix_secs: dashboard_utc_to_unix_secs(raw_end),
                     group_by: query.group_by,
+                    provider_id: query.provider_id.clone(),
+                    provider_name: query.provider_name.clone(),
                     limit: raw_merge_limit,
                     exclude_reserved_provider_labels: query.exclude_reserved_provider_labels,
                 })
@@ -7194,6 +7210,8 @@ LIMIT $3
                     created_from_unix_secs: dashboard_utc_to_unix_secs(raw_start),
                     created_until_unix_secs: dashboard_utc_to_unix_secs(raw_end),
                     group_by: query.group_by,
+                    provider_id: query.provider_id.clone(),
+                    provider_name: query.provider_name.clone(),
                     limit: raw_merge_limit,
                     exclude_reserved_provider_labels: query.exclude_reserved_provider_labels,
                 })

@@ -1536,6 +1536,18 @@ FROM "usage"
             push_sqlite_usage_where(&mut builder, &mut has_where);
             builder.push(SQLITE_PROVIDER_IDENTITY_IS_NOT_RESERVED);
         }
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "provider_id",
+            query.provider_id.as_deref(),
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "provider_name",
+            query.provider_name.as_deref(),
+        );
         if matches!(query.group_by, UsageAuditAggregationGroupBy::User) {
             push_sqlite_usage_where(&mut builder, &mut has_where);
             builder.push("user_id IS NOT NULL AND TRIM(user_id) <> ''");
