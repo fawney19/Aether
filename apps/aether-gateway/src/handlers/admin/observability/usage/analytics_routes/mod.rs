@@ -1,4 +1,5 @@
 mod aggregation;
+mod attribution;
 mod cache_affinity_hit_analysis;
 mod cache_affinity_interval_timeline;
 mod cache_affinity_ttl_analysis;
@@ -31,6 +32,17 @@ pub(super) async fn maybe_build_local_admin_usage_analytics_response(
             )
             .await
             .map(Some);
+        }
+        Some("attribution")
+            if request_context.request_method == http::Method::GET
+                && matches!(
+                    request_context.request_path.as_str(),
+                    "/api/admin/usage/attribution" | "/api/admin/usage/attribution/"
+                ) =>
+        {
+            return attribution::build_admin_usage_attribution_response(state, request_context)
+                .await
+                .map(Some);
         }
         Some("heatmap")
             if request_context.request_method == http::Method::GET

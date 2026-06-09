@@ -753,6 +753,135 @@ async fn gateway_handles_admin_usage_aggregation_stats_for_legacy_provider_name_
 }
 
 #[tokio::test]
+async fn gateway_handles_admin_usage_attribution_locally_with_metric_shares() {
+    let (upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/attribution").await;
+
+    let mut usage_1 = sample_usage_row(
+        "usage-1",
+        "req-1",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "completed",
+        120,
+        30,
+        0.3,
+        0.6,
+        DAY_1_UNIX_SECS,
+    );
+    usage_1.provider_id = Some("provider-openai".to_string());
+    usage_1.total_tokens = usage_1.input_tokens;
+
+    let mut usage_2 = sample_usage_row(
+        "usage-2",
+        "req-2",
+        Some("user-2"),
+        Some("key-2"),
+        Some("secondary"),
+        "OpenAI",
+        "gpt-5",
+        "completed",
+        40,
+        10,
+        0.1,
+        0.3,
+        DAY_1_UNIX_SECS,
+    );
+    usage_2.provider_id = Some("provider-openai".to_string());
+    usage_2.total_tokens = usage_2.input_tokens;
+
+    let mut usage_3 = sample_usage_row(
+        "usage-3",
+        "req-3",
+        Some("user-3"),
+        Some("key-3"),
+        Some("tertiary"),
+        "OpenAI",
+        "gpt-5",
+        "completed",
+        80,
+        20,
+        0.2,
+        0.1,
+        DAY_1_UNIX_SECS,
+    );
+    usage_3.provider_id = Some("provider-openai".to_string());
+    usage_3.total_tokens = usage_3.input_tokens;
+
+    let mut other_provider_usage = sample_usage_row(
+        "usage-other",
+        "req-other",
+        Some("user-4"),
+        Some("key-4"),
+        Some("other"),
+        "Anthropic",
+        "claude-3-7",
+        "completed",
+        200,
+        50,
+        1.0,
+        1.0,
+        DAY_1_UNIX_SECS,
+    );
+    other_provider_usage.provider_id = Some("provider-anthropic".to_string());
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        usage_1,
+        usage_2,
+        usage_3,
+        other_provider_usage,
+    ]));
+    let user_repository = Arc::new(InMemoryUserReadRepository::seed(vec![
+        sample_user_summary("user-1", "alice"),
+        sample_user_summary("user-2", "bob"),
+        sample_user_summary("user-3", "carol"),
+        sample_user_summary("user-4", "dave"),
+    ]));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_usage_reader_for_tests(usage_repository)
+                    .with_user_reader(user_repository),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/attribution?provider_id=provider-openai&metric=actual_cost&limit=2&start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["provider"]["id"], "provider-openai");
+    assert_eq!(payload["group_by"], "user");
+    assert_eq!(payload["metric"], "actual_cost");
+    assert_eq!(payload["total"], 1.0);
+    let items = payload["items"].as_array().expect("items array");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["id"], "user-1");
+    assert_eq!(items[0]["name"], "alice");
+    assert_eq!(items[0]["actual_cost"], 0.6);
+    assert_eq!(items[0]["share"], 0.6);
+    assert_eq!(items[1]["id"], "user-2");
+    assert_eq!(items[1]["share"], 0.3);
+    assert_eq!(payload["others"]["requests"], 1);
+    assert_eq!(payload["others"]["actual_cost"], 0.1);
+    assert_eq!(payload["others"]["share"], 0.1);
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_returns_service_unavailable_for_admin_usage_replay_without_provider_catalog_reader(
 ) {
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![]));
