@@ -242,7 +242,7 @@ pub(super) async fn build_admin_usage_attribution_response(
             group_by: UsageAuditAggregationGroupBy::User,
             provider_id: provider_id.clone(),
             provider_name: provider_name.clone(),
-            limit: 10_000,
+            limit: 0,
             exclude_reserved_provider_labels: false,
         })
         .await?;

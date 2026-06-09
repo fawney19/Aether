@@ -521,7 +521,9 @@ fn finalize_usage_audit_aggregation_rows(
             .cmp(&left.request_count)
             .then_with(|| left.group_key.cmp(&right.group_key))
     });
-    items.truncate(limit);
+    if limit > 0 {
+        items.truncate(limit);
+    }
     items
 }
 
@@ -6978,6 +6980,9 @@ ORDER BY request_count DESC, group_key ASC
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        let provider_name_requires_legacy =
+            provider_id_filter.is_none() && provider_name_filter.is_some();
+        let limit_sql = if query.limit > 0 { "LIMIT $3" } else { "" };
         let sql = format!(
             r#"
 WITH filtered_usage AS (
@@ -7024,7 +7029,17 @@ WITH filtered_usage AS (
     {provider_extra_where}
     {filtered_extra_where}
     AND ($4::text IS NULL OR "usage".provider_id = $4)
-    AND ($5::text IS NULL OR "usage".provider_name = $5)
+    AND (
+      $5::text IS NULL
+      OR (
+        "usage".provider_name = $5
+        AND (
+          $6::boolean = FALSE
+          OR "usage".provider_id IS NULL
+          OR TRIM("usage".provider_id) = ''
+        )
+      )
+    )
 ),
 normalized_usage AS (
   SELECT
@@ -7115,7 +7130,7 @@ SELECT
   success_count
 FROM aggregated_usage
 ORDER BY request_count DESC, group_key ASC
-LIMIT $3
+{limit_sql}
 "#,
             provider_extra_where = provider_extra_where,
             filtered_extra_where = fragments.filtered_extra_where,
@@ -7130,19 +7145,26 @@ LIMIT $3
             aggregate_secondary_name_expr = fragments.aggregate_secondary_name_expr,
             avg_response_time_expr = fragments.avg_response_time_expr,
             success_count_expr = fragments.success_count_expr,
+            limit_sql = limit_sql,
         );
 
-        let mut rows = sqlx::query(&sql)
-            .bind(query.created_from_unix_secs as f64)
-            .bind(query.created_until_unix_secs as f64)
-            .bind(i64::try_from(query.limit).map_err(|_| {
+        let limit_bind = if query.limit > 0 {
+            i64::try_from(query.limit).map_err(|_| {
                 DataLayerError::InvalidInput(format!(
                     "invalid usage aggregation limit: {}",
                     query.limit
                 ))
-            })?)
+            })?
+        } else {
+            0
+        };
+        let mut rows = sqlx::query(&sql)
+            .bind(query.created_from_unix_secs as f64)
+            .bind(query.created_until_unix_secs as f64)
+            .bind(limit_bind)
             .bind(provider_id_filter)
             .bind(provider_name_filter)
+            .bind(provider_name_requires_legacy)
             .fetch(&self.pool);
 
         let mut items = Vec::new();
@@ -7179,7 +7201,11 @@ LIMIT $3
         };
 
         let mut grouped = BTreeMap::<String, StoredUsageAuditAggregation>::new();
-        let raw_merge_limit = query.limit.max(10_000);
+        let raw_merge_limit = if query.limit == 0 {
+            0
+        } else {
+            query.limit.max(10_000)
+        };
         if let Some((raw_start, raw_end)) = split.raw_leading {
             let raw = self
                 .aggregate_usage_audits_raw(&UsageAuditAggregationQuery {

@@ -1466,7 +1466,7 @@ FROM "usage"
         &self,
         query: &UsageAuditAggregationQuery,
     ) -> Result<Vec<StoredUsageAuditAggregation>, DataLayerError> {
-        if query.created_from_unix_secs >= query.created_until_unix_secs || query.limit == 0 {
+        if query.created_from_unix_secs >= query.created_until_unix_secs {
             return Ok(Vec::new());
         }
 
@@ -1548,15 +1548,27 @@ FROM "usage"
             "provider_name",
             query.provider_name.as_deref(),
         );
+        if query.provider_id.is_none()
+            && query
+                .provider_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some()
+        {
+            push_sqlite_usage_where(&mut builder, &mut has_where);
+            builder.push("(provider_id IS NULL OR TRIM(provider_id) = '')");
+        }
         if matches!(query.group_by, UsageAuditAggregationGroupBy::User) {
             push_sqlite_usage_where(&mut builder, &mut has_where);
             builder.push("user_id IS NOT NULL AND TRIM(user_id) <> ''");
         }
         builder
             .push(" GROUP BY group_key")
-            .push(" ORDER BY request_count DESC, group_key ASC")
-            .push(" LIMIT ")
-            .push_bind(query.limit as i64);
+            .push(" ORDER BY request_count DESC, group_key ASC");
+        if query.limit > 0 {
+            builder.push(" LIMIT ").push_bind(query.limit as i64);
+        }
 
         let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
         rows.iter()

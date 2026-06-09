@@ -830,6 +830,16 @@ fn usage_matches_aggregation_provider_filter(
         if item.provider_name != provider_name {
             return false;
         }
+        if query.provider_id.is_none()
+            && item
+                .provider_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some()
+        {
+            return false;
+        }
     }
     true
 }
@@ -1342,7 +1352,9 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                 .cmp(&left.request_count)
                 .then_with(|| left.group_key.cmp(&right.group_key))
         });
-        items.truncate(query.limit);
+        if query.limit > 0 {
+            items.truncate(query.limit);
+        }
         Ok(items)
     }
 
