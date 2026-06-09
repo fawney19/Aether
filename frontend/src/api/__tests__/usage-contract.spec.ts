@@ -153,4 +153,38 @@ describe('usageApi contract alignment', () => {
       timeout: 120000,
     })
   })
+
+  it('loads provider attribution through the admin usage attribution endpoint', async () => {
+    getMock.mockResolvedValueOnce({
+      data: {
+        provider: { id: 'provider-openai', name: null },
+        group_by: 'user',
+        metric: 'actual_cost',
+        total: 1.2,
+        items: [{ id: 'user-1', name: 'alice', actual_cost: 1.2, share: 1 }],
+        others: null,
+      },
+    })
+
+    const result = await usageApi.getUsageAttribution({
+      provider_id: 'provider-openai',
+      group_by: 'user',
+      metric: 'actual_cost',
+      preset: 'last30days',
+      limit: 8,
+    })
+
+    expect(getMock).toHaveBeenCalledWith('/api/admin/usage/attribution', {
+      params: {
+        provider_id: 'provider-openai',
+        group_by: 'user',
+        metric: 'actual_cost',
+        preset: 'last30days',
+        limit: 8,
+      },
+      timeout: 120000,
+    })
+    expect(result.total).toBe(1.2)
+    expect(result.items[0].name).toBe('alice')
+  })
 })

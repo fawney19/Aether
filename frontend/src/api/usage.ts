@@ -92,6 +92,34 @@ export interface UsageByProvider {
   cache_hit_rate?: number
 }
 
+export type UsageAttributionMetric = 'actual_cost' | 'total_cost' | 'tokens' | 'requests'
+export type UsageAttributionGroupBy = 'user' | 'api_key'
+
+export interface UsageAttributionItem {
+  id: string
+  user_id?: string
+  name: string
+  email?: string | null
+  username?: string | null
+  requests: number
+  total_tokens: number
+  total_cost: number
+  actual_cost: number
+  share: number
+}
+
+export interface UsageAttributionResponse {
+  provider: {
+    id?: string | null
+    name?: string | null
+  }
+  group_by: UsageAttributionGroupBy
+  metric: UsageAttributionMetric
+  total: number
+  items: UsageAttributionItem[]
+  others: UsageAttributionItem | null
+}
+
 export interface UsageByApiFormat {
   api_format: string
   request_count: number
@@ -432,6 +460,41 @@ export const usageApi = {
     options?: UsageRequestOptions
   ): Promise<UsageByProvider[]> {
     return this.getUsageAggregation<UsageByProvider[]>('provider', filters, options)
+  },
+
+  async getUsageAttribution(
+    params: Pick<UsageFilters, 'start_date' | 'end_date' | 'preset' | 'timezone' | 'tz_offset_minutes'> & {
+      provider_id?: string | null
+      provider_name?: string | null
+      group_by?: UsageAttributionGroupBy
+      metric?: UsageAttributionMetric
+      limit?: number
+    },
+    options?: UsageRequestOptions
+  ): Promise<UsageAttributionResponse> {
+    if (!params.provider_id && !params.provider_name) {
+      throw new Error('getUsageAttribution requires provider_id or provider_name')
+    }
+    const requestParams = compactParams({
+      ...params,
+      provider_id: params.provider_id,
+      provider_name: params.provider_name,
+      group_by: params.group_by ?? 'user',
+      metric: params.metric ?? 'actual_cost',
+      limit: params.limit ?? 10,
+    })
+    const cacheKey = `usage-attribution-${JSON.stringify(requestParams)}${options?.skipCache ? ':fresh' : ''}`
+    return cachedRequest(
+      cacheKey,
+      async () => {
+        const response = await apiClient.get<UsageAttributionResponse>('/api/admin/usage/attribution', {
+          params: requestParams,
+          timeout: USAGE_ANALYTICS_REQUEST_TIMEOUT_MS,
+        })
+        return response.data
+      },
+      options?.skipCache ? 0 : USAGE_ANALYTICS_CACHE_TTL_MS
+    )
   },
 
   async getUsageByApiFormat(
