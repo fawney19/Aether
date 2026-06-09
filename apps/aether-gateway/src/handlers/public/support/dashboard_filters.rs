@@ -814,6 +814,8 @@ async fn dashboard_load_user_counts(
             created_from_unix_secs,
             created_until_unix_secs,
             group_by: UsageAuditAggregationGroupBy::User,
+            provider_id: None,
+            provider_name: None,
             limit: 10_000,
             exclude_reserved_provider_labels: false,
         })
