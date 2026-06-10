@@ -166,7 +166,45 @@
             </div>
           </div>
 
-          <div class="space-y-2">
+          <div
+            v-if="showAttributionDonut"
+            class="grid gap-4 lg:grid-cols-[minmax(0,220px)_1fr] lg:items-center"
+          >
+            <div class="h-[220px] min-w-0">
+              <DoughnutChart
+                :data="providerAttributionDonutData"
+                :options="providerAttributionDonutOptions"
+              />
+            </div>
+            <div class="space-y-2">
+              <div
+                v-for="(item, index) in providerAttributionDisplayItems"
+                :key="item.id"
+                class="flex items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-xs"
+              >
+                <div class="flex min-w-0 items-center gap-2">
+                  <span
+                    class="h-2.5 w-2.5 shrink-0 rounded-full"
+                    :style="{ backgroundColor: ATTRIBUTION_DONUT_COLORS[index % ATTRIBUTION_DONUT_COLORS.length] }"
+                  />
+                  <span class="truncate font-medium">{{ item.name }}</span>
+                </div>
+                <div class="shrink-0 text-right">
+                  <div class="font-medium">
+                    {{ formatAttributionMetricValue(item) }}
+                  </div>
+                  <div class="text-[11px] text-muted-foreground">
+                    {{ formatShare(item.share) }}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div
+            v-else
+            class="space-y-2"
+          >
             <div
               v-for="item in providerAttributionDisplayItems"
               :key="item.id"
@@ -198,9 +236,11 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import type { ChartData, ChartOptions } from 'chart.js'
 import Card from '@/components/ui/card.vue'
 import { Pagination } from '@/components/ui'
 import { TimeRangePicker } from '@/components/common'
+import DoughnutChart from '@/components/charts/DoughnutChart.vue'
 import { CostForecastChart, LeaderboardControls, LeaderboardTable, QuotaProgressCard } from '@/components/stats'
 import { UsageProviderTable } from '@/features/usage/components'
 import { adminApi, type CostForecastResponse, type CostSavingsResponse, type LeaderboardItem, type QuotaUsageProvider } from '@/api/admin'
@@ -227,6 +267,18 @@ const apiKeyLeaderboardPage = ref(1)
 const apiKeyLeaderboardPageSize = ref(10)
 const apiKeyLeaderboardTotal = ref(0)
 const apiKeyLeaderboardPageSizeOptions = [10, 20, 50, 100]
+const ATTRIBUTION_DONUT_THRESHOLD = 6
+const ATTRIBUTION_DONUT_COLORS = [
+  'rgba(59, 130, 246, 0.82)',
+  'rgba(239, 68, 68, 0.82)',
+  'rgba(16, 185, 129, 0.82)',
+  'rgba(245, 158, 11, 0.82)',
+  'rgba(139, 92, 246, 0.82)',
+  'rgba(6, 182, 212, 0.82)',
+  'rgba(132, 204, 22, 0.82)',
+  'rgba(249, 115, 22, 0.82)',
+  'rgba(148, 163, 184, 0.82)'
+]
 
 const forecastLoading = ref(false)
 const quotaLoading = ref(false)
@@ -256,6 +308,39 @@ const providerAttributionDisplayItems = computed<UsageAttributionItem[]>(() => {
   }
   return items
 })
+const showAttributionDonut = computed(() => {
+  const items = providerAttributionDisplayItems.value
+  return items.length > 0 && items.length <= ATTRIBUTION_DONUT_THRESHOLD
+})
+const providerAttributionDonutData = computed<ChartData<'doughnut'>>(() => ({
+  labels: providerAttributionDisplayItems.value.map(item => item.name),
+  datasets: [{
+    data: providerAttributionDisplayItems.value.map(item => attributionMetricValue(item)),
+    backgroundColor: providerAttributionDisplayItems.value.map((_, index) => ATTRIBUTION_DONUT_COLORS[index % ATTRIBUTION_DONUT_COLORS.length]),
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.12)'
+  }]
+}))
+const providerAttributionDonutOptions = computed<ChartOptions<'doughnut'>>(() => ({
+  responsive: true,
+  maintainAspectRatio: false,
+  cutout: '64%',
+  plugins: {
+    legend: {
+      display: false
+    },
+    tooltip: {
+      callbacks: {
+        label: (context) => {
+          const value = typeof context.raw === 'number' ? context.raw : 0
+          const total = (context.dataset.data as number[]).reduce((sum, current) => sum + current, 0)
+          const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : '0.0'
+          return `${context.label}: ${formatAttributionMetric(value)} (${percentage}%)`
+        }
+      }
+    }
+  }
+}))
 const attributionMetricLabel = computed(() => {
   switch (attributionMetric.value) {
     case 'actual_cost': return '实际成本'
@@ -292,6 +377,20 @@ function formatAttributionMetric(value: number) {
     return formatTokens(value)
   }
   return Math.round(value).toLocaleString('zh-CN')
+}
+
+function attributionMetricValue(item: UsageAttributionItem) {
+  switch (attributionMetric.value) {
+    case 'actual_cost': return item.actual_cost
+    case 'total_cost': return item.total_cost
+    case 'tokens': return item.total_tokens
+    case 'requests': return item.requests
+    default: return 0
+  }
+}
+
+function formatAttributionMetricValue(item: UsageAttributionItem) {
+  return formatAttributionMetric(attributionMetricValue(item))
 }
 
 async function loadForecast() {
