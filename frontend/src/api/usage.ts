@@ -92,6 +92,34 @@ export interface UsageByProvider {
   cache_hit_rate?: number
 }
 
+export type UsageAttributionMetric = 'actual_cost' | 'total_cost' | 'tokens' | 'requests'
+export type UsageAttributionGroupBy = 'user'
+
+export interface UsageAttributionItem {
+  id: string
+  user_id?: string
+  name: string
+  email?: string | null
+  username?: string | null
+  requests: number
+  total_tokens: number
+  total_cost: number
+  actual_cost: number
+  share: number
+}
+
+export interface UsageAttributionResponse {
+  provider: {
+    id?: string | null
+    name?: string | null
+  }
+  group_by: UsageAttributionGroupBy
+  metric: UsageAttributionMetric
+  total: number
+  items: UsageAttributionItem[]
+  others: UsageAttributionItem | null
+}
+
 export interface UsageByApiFormat {
   api_format: string
   request_count: number
@@ -137,6 +165,49 @@ type UsageListResponse = {
   total?: unknown
   limit?: unknown
   offset?: unknown
+}
+
+type AdminUsageRecordsResponse = {
+  records: Array<Record<string, unknown>>
+  total: number
+  limit: number
+  offset: number
+}
+
+type ActiveUsageRequestsResponse = {
+  requests: Array<{
+    id: string
+    status: 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
+    input_tokens: number
+    effective_input_tokens?: number | null
+    output_tokens: number
+    cache_creation_input_tokens?: number | null
+    cache_creation_ephemeral_5m_input_tokens?: number | null
+    cache_creation_ephemeral_1h_input_tokens?: number | null
+    cache_read_input_tokens?: number | null
+    cost: number
+    actual_cost?: number | null
+    rate_multiplier?: number | null
+    response_time_ms: number | null
+    first_byte_time_ms: number | null
+    status_code?: number | null
+    error_message?: string | null
+    provider?: string | null
+    api_key_name?: string | null
+    provider_key_name?: string | null
+    api_format?: string | null
+    endpoint_api_format?: string | null
+    is_stream?: boolean | null
+    upstream_is_stream?: boolean | null
+    client_requested_stream?: boolean | null
+    client_is_stream?: boolean | null
+    has_format_conversion?: boolean | null
+    has_fallback?: boolean | null
+    target_model?: string | null
+    reasoning_effort?: string | null
+    service_tier?: string | null
+    image_progress?: ImageProgress | null
+  }>
 }
 
 function assertPositiveInteger(value: number, field: string): number {
@@ -434,6 +505,41 @@ export const usageApi = {
     return this.getUsageAggregation<UsageByProvider[]>('provider', filters, options)
   },
 
+  async getUsageAttribution(
+    params: Pick<UsageFilters, 'start_date' | 'end_date' | 'preset' | 'timezone' | 'tz_offset_minutes'> & {
+      provider_id?: string | null
+      provider_name?: string | null
+      group_by?: UsageAttributionGroupBy
+      metric?: UsageAttributionMetric
+      limit?: number
+    },
+    options?: UsageRequestOptions
+  ): Promise<UsageAttributionResponse> {
+    if (!params.provider_id && !params.provider_name) {
+      throw new Error('getUsageAttribution requires provider_id or provider_name')
+    }
+    const requestParams = compactParams({
+      ...params,
+      provider_id: params.provider_id,
+      provider_name: params.provider_name,
+      group_by: params.group_by ?? 'user',
+      metric: params.metric ?? 'actual_cost',
+      limit: params.limit ?? 10,
+    })
+    const cacheKey = `usage-attribution-${JSON.stringify(requestParams)}${options?.skipCache ? ':fresh' : ''}`
+    return cachedRequest(
+      cacheKey,
+      async () => {
+        const response = await apiClient.get<UsageAttributionResponse>('/api/admin/usage/attribution', {
+          params: requestParams,
+          timeout: USAGE_ANALYTICS_REQUEST_TIMEOUT_MS,
+        })
+        return response.data
+      },
+      options?.skipCache ? 0 : USAGE_ANALYTICS_CACHE_TTL_MS
+    )
+  },
+
   async getUsageByApiFormat(
     filters?: UsageFilters & { limit?: number },
     options?: UsageRequestOptions
@@ -475,15 +581,10 @@ export const usageApi = {
     hide_unknown?: boolean
     limit?: number
     offset?: number
-  }): Promise<{
-    records: Array<Record<string, unknown>>
-    total: number
-    limit: number
-    offset: number
-  }> {
+  }): Promise<AdminUsageRecordsResponse> {
     const key = buildCacheKey('usage:records', params as Record<string, unknown> | undefined)
-    return dedupedRequest(key, async () => {
-      const response = await apiClient.get('/api/admin/usage/records', { params })
+    return dedupedRequest<AdminUsageRecordsResponse>(key, async () => {
+      const response = await apiClient.get<AdminUsageRecordsResponse>('/api/admin/usage/records', { params })
       return response.data
     })
   },
@@ -495,41 +596,7 @@ export const usageApi = {
   async getActiveRequests(
     ids?: string[],
     timeRange?: Pick<UsageFilters, 'start_date' | 'end_date' | 'preset' | 'timezone' | 'tz_offset_minutes'>
-  ): Promise<{
-    requests: Array<{
-      id: string
-      status: 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
-      input_tokens: number
-      effective_input_tokens?: number | null
-      output_tokens: number
-      cache_creation_input_tokens?: number | null
-      cache_creation_ephemeral_5m_input_tokens?: number | null
-      cache_creation_ephemeral_1h_input_tokens?: number | null
-      cache_read_input_tokens?: number | null
-      cost: number
-      actual_cost?: number | null
-      rate_multiplier?: number | null
-      response_time_ms: number | null
-      first_byte_time_ms: number | null
-      status_code?: number | null
-      error_message?: string | null
-      provider?: string | null
-      api_key_name?: string | null
-      provider_key_name?: string | null
-      api_format?: string | null
-      endpoint_api_format?: string | null
-      is_stream?: boolean | null
-      upstream_is_stream?: boolean | null
-      client_requested_stream?: boolean | null
-      client_is_stream?: boolean | null
-      has_format_conversion?: boolean | null
-      has_fallback?: boolean | null
-      target_model?: string | null
-      reasoning_effort?: string | null
-      service_tier?: string | null
-      image_progress?: ImageProgress | null
-    }>
-  }> {
+  ): Promise<ActiveUsageRequestsResponse> {
     const params: Record<string, string | number> = {}
     if (ids?.length) {
       params.ids = ids.join(',')
@@ -549,7 +616,7 @@ export const usageApi = {
     if (typeof timeRange?.tz_offset_minutes === 'number') {
       params.tz_offset_minutes = timeRange.tz_offset_minutes
     }
-    const response = await apiClient.get('/api/admin/usage/active', { params })
+    const response = await apiClient.get<ActiveUsageRequestsResponse>('/api/admin/usage/active', { params })
     return response.data
   },
 

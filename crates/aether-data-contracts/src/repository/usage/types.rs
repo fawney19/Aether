@@ -775,6 +775,8 @@ pub struct UsageAuditAggregationQuery {
     pub created_from_unix_secs: u64,
     pub created_until_unix_secs: u64,
     pub group_by: UsageAuditAggregationGroupBy,
+    pub provider_id: Option<String>,
+    pub provider_name: Option<String>,
     pub limit: usize,
     pub exclude_reserved_provider_labels: bool,
 }

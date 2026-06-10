@@ -817,6 +817,33 @@ fn usage_matches_leaderboard_query(
     true
 }
 
+fn usage_matches_aggregation_provider_filter(
+    item: &StoredRequestUsageAudit,
+    query: &UsageAuditAggregationQuery,
+) -> bool {
+    if let Some(provider_id) = query.provider_id.as_deref() {
+        if item.provider_id.as_deref() != Some(provider_id) {
+            return false;
+        }
+    }
+    if let Some(provider_name) = query.provider_name.as_deref() {
+        if item.provider_name != provider_name {
+            return false;
+        }
+        if query.provider_id.is_none()
+            && item
+                .provider_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some()
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn sort_usage_items(items: &mut [StoredRequestUsageAudit], newest_first: bool) {
     items.sort_by(|left, right| {
         let created_order = if newest_first {
@@ -1205,6 +1232,7 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                 || matches!(item.status.as_str(), "pending" | "streaming")
                 || (query.exclude_reserved_provider_labels
                     && usage_provider_aggregation_identity(item).is_none())
+                || !usage_matches_aggregation_provider_filter(item, query)
             {
                 continue;
             }
@@ -1324,7 +1352,9 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                 .cmp(&left.request_count)
                 .then_with(|| left.group_key.cmp(&right.group_key))
         });
-        items.truncate(query.limit);
+        if query.limit > 0 {
+            items.truncate(query.limit);
+        }
         Ok(items)
     }
 
@@ -3229,6 +3259,8 @@ mod tests {
                 created_from_unix_secs: 0,
                 created_until_unix_secs: 1_000,
                 group_by: UsageAuditAggregationGroupBy::Provider,
+                provider_id: None,
+                provider_name: None,
                 limit: 10,
                 exclude_reserved_provider_labels: false,
             })
@@ -3290,6 +3322,8 @@ mod tests {
                 created_from_unix_secs: 0,
                 created_until_unix_secs: 1_000,
                 group_by: UsageAuditAggregationGroupBy::Model,
+                provider_id: None,
+                provider_name: None,
                 limit: 10,
                 exclude_reserved_provider_labels: true,
             })
@@ -3304,6 +3338,8 @@ mod tests {
                 created_from_unix_secs: 0,
                 created_until_unix_secs: 1_000,
                 group_by: UsageAuditAggregationGroupBy::ApiFormat,
+                provider_id: None,
+                provider_name: None,
                 limit: 10,
                 exclude_reserved_provider_labels: true,
             })

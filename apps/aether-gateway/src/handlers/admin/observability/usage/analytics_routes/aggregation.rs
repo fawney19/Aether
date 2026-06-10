@@ -185,6 +185,8 @@ pub(super) async fn build_admin_usage_aggregation_stats_response(
             created_from_unix_secs,
             created_until_unix_secs,
             group_by: group_by_query,
+            provider_id: None,
+            provider_name: None,
             limit,
             exclude_reserved_provider_labels,
         })

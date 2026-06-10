@@ -340,6 +340,19 @@ pub(super) fn classify_admin_observability_family_route(
     } else if method == http::Method::GET
         && matches!(
             normalized_path,
+            "/api/admin/usage/attribution" | "/api/admin/usage/attribution/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "usage_manage",
+            "attribution",
+            "admin:usage",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
             "/api/admin/usage/stats" | "/api/admin/usage/stats/"
         )
     {
