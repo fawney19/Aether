@@ -147,7 +147,7 @@
           暂无可归因的提供商数据
         </div>
         <div
-          v-else-if="providerAttributionItems.length === 0"
+          v-else-if="providerAttributionVisibleItems.length === 0"
           class="py-8 text-center text-xs text-muted-foreground"
         >
           当前时间范围内暂无用户贡献数据
@@ -178,7 +178,7 @@
             </div>
             <div class="space-y-2">
               <div
-                v-for="(item, index) in providerAttributionDisplayItems"
+                v-for="(item, index) in providerAttributionVisibleItems"
                 :key="item.id"
                 class="flex items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-xs"
               >
@@ -206,7 +206,7 @@
             class="space-y-2"
           >
             <div
-              v-for="item in providerAttributionDisplayItems"
+              v-for="item in providerAttributionVisibleItems"
               :key="item.id"
               class="space-y-1"
             >
@@ -267,7 +267,7 @@ const apiKeyLeaderboardPage = ref(1)
 const apiKeyLeaderboardPageSize = ref(10)
 const apiKeyLeaderboardTotal = ref(0)
 const apiKeyLeaderboardPageSizeOptions = [10, 20, 50, 100]
-const ATTRIBUTION_DONUT_THRESHOLD = 6
+const ATTRIBUTION_DONUT_THRESHOLD = 8
 const ATTRIBUTION_DONUT_COLORS = [
   'rgba(59, 130, 246, 0.82)',
   'rgba(239, 68, 68, 0.82)',
@@ -308,15 +308,18 @@ const providerAttributionDisplayItems = computed<UsageAttributionItem[]>(() => {
   }
   return items
 })
+const providerAttributionVisibleItems = computed<UsageAttributionItem[]>(() =>
+  providerAttributionDisplayItems.value.filter(item => attributionMetricValue(item) > 0)
+)
 const showAttributionDonut = computed(() => {
-  const items = providerAttributionDisplayItems.value
-  return items.length > 0 && items.length <= ATTRIBUTION_DONUT_THRESHOLD
+  const items = providerAttributionVisibleItems.value
+  return items.length > 0 && items.length < ATTRIBUTION_DONUT_THRESHOLD
 })
 const providerAttributionDonutData = computed<ChartData<'doughnut'>>(() => ({
-  labels: providerAttributionDisplayItems.value.map(item => item.name),
+  labels: providerAttributionVisibleItems.value.map(item => item.name),
   datasets: [{
-    data: providerAttributionDisplayItems.value.map(item => attributionMetricValue(item)),
-    backgroundColor: providerAttributionDisplayItems.value.map((_, index) => ATTRIBUTION_DONUT_COLORS[index % ATTRIBUTION_DONUT_COLORS.length]),
+    data: providerAttributionVisibleItems.value.map(item => attributionMetricValue(item)),
+    backgroundColor: providerAttributionVisibleItems.value.map((_, index) => ATTRIBUTION_DONUT_COLORS[index % ATTRIBUTION_DONUT_COLORS.length]),
     borderWidth: 2,
     borderColor: 'rgba(255, 255, 255, 0.12)'
   }]
@@ -457,7 +460,7 @@ async function loadProviderAttribution() {
       provider_name: provider.providerIdentitySource === 'legacy_name' || !provider.providerId ? provider.provider : undefined,
       group_by: 'user',
       metric: attributionMetric.value,
-      limit: 8,
+      limit: ATTRIBUTION_DONUT_THRESHOLD,
     })
     if (requestId !== providerAttributionRequestId) return
     providerAttribution.value = response
