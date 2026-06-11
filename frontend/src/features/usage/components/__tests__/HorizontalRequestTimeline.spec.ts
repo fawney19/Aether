@@ -644,6 +644,42 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.querySelector('.error-block .error-json')).toBeNull()
   })
 
+  it('preserves upstream body messages when upstream error codes are unknown snake_case values', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-unknown-upstream-code',
+        provider_id: 'anyrouter',
+        provider_name: 'anyrouter',
+        key_id: 'key-anyrouter',
+        key_name: 'anyrouter key',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 400,
+        error_message: 'execution runtime internal error',
+        extra_data: {
+          upstream_response: {
+            status_code: 400,
+            body: {
+              error: {
+                code: 'invalid_responses_request',
+                message: 'invalid codex request (request id: 20260610175106369998440o1JVMfnL)',
+              },
+            },
+          },
+        },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+    const errorBlockText = root.querySelector('.error-block')?.textContent ?? ''
+
+    expect(errorBlockText).toContain('invalid codex request (request id: 20260610175106369998440o1JVMfnL)')
+    expect(errorBlockText).toContain('HTTP 400')
+    expect(errorBlockText).not.toContain('内部执行错误')
+    expect(errorBlockText).not.toContain('execution runtime internal error')
+  })
+
   it('localizes internal error types and keeps repeated provider context out of the error block', async () => {
     const trace = buildTrace([
       buildCandidate({
@@ -672,6 +708,48 @@ describe('HorizontalRequestTimeline', () => {
     expect(errorBlockText).not.toContain('Key')
     expect(errorBlockText).not.toContain('aether 公益')
     expect(errorBlockText).not.toContain('公益 Key')
+  })
+
+  it('prefers client response body messages over generic internal trace fields', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-client-response-error',
+        provider_id: 'provider-client-response',
+        provider_name: 'Provider Client Response',
+        key_id: 'key-client-response',
+        key_name: 'Client Response Key',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 503,
+        error_type: 'internal',
+        extra_data: {
+          error_flow: {
+            source: 'execution_runtime',
+            type: 'internal',
+            message: 'execution runtime internal error',
+          },
+          client_response: {
+            status_code: 503,
+            body: {
+              error: {
+                type: 'server_error',
+                code: 'server_error',
+                message: 'Our servers are currently overloaded. Please try again later.',
+              },
+            },
+          },
+        },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+    const errorBlockText = root.querySelector('.error-block')?.textContent ?? ''
+
+    expect(errorBlockText).toContain('Our servers are currently overloaded. Please try again later.')
+    expect(errorBlockText).toContain('HTTP 503')
+    expect(errorBlockText).not.toContain('内部执行错误')
+    expect(errorBlockText).not.toContain('execution runtime internal error')
   })
 
   it('keeps the failure message when upstream response only records an empty body state', async () => {

@@ -1494,41 +1494,64 @@ const currentAttemptRequestError = computed<{
 
   const extra = extractObject(attempt.extra_data)
   const upstreamResponse = extractObject(extra?.upstream_response)
+  const clientResponse = extractObject(extra?.client_response)
   const errorFlow = extractObject(extra?.error_flow)
   const upstreamBody = upstreamResponse?.body
-  const statusCode = readNumberField(upstreamResponse ?? {}, 'status_code')
-    ?? readNumberField(upstreamResponse ?? {}, 'statusCode')
+  const clientBody = clientResponse?.body
+  const clientErrorMessage = readNestedString(clientBody, 'error', 'message')
+    ?? readNestedString(clientBody, 'message')
+    ?? readNestedString(clientBody, 'detail')
+  const upstreamErrorMessage = readNestedString(upstreamBody, 'error', 'message')
+    ?? readNestedString(upstreamBody, 'message')
+    ?? readNestedString(upstreamBody, 'detail')
+  const preferClientResponse = Boolean(clientErrorMessage)
+  const primaryResponse = preferClientResponse ? clientResponse : upstreamResponse
+  const secondaryResponse = preferClientResponse ? upstreamResponse : clientResponse
+  const statusCode = readNumberField(primaryResponse ?? {}, 'status_code')
+    ?? readNumberField(primaryResponse ?? {}, 'statusCode')
+    ?? readNumberField(secondaryResponse ?? {}, 'status_code')
+    ?? readNumberField(secondaryResponse ?? {}, 'statusCode')
     ?? readNumberField(errorFlow ?? {}, 'status_code')
     ?? readNumberField(errorFlow ?? {}, 'statusCode')
     ?? attempt.status_code
   const flowMessage = errorFlow
     ? readStringField(errorFlow, 'message')
     : ''
-  const upstreamErrorMessage = readNestedString(upstreamBody, 'error', 'message')
-    ?? readNestedString(upstreamBody, 'message')
-    ?? readNestedString(upstreamBody, 'detail')
-  const upstreamErrorType = readNestedString(upstreamBody, 'error', 'type')
+  const upstreamErrorType = readNestedString(clientBody, 'error', 'type')
+    ?? readNestedString(clientBody, 'type')
+    ?? readNestedString(upstreamBody, 'error', 'type')
     ?? readNestedString(upstreamBody, 'type')
     ?? readStringField(errorFlow ?? {}, 'type')
     ?? (typeof attempt.error_type === 'string' && attempt.error_type.trim() ? attempt.error_type.trim() : undefined)
-  const upstreamErrorCode = readNestedValue(upstreamBody, 'error', 'code')
+  const upstreamErrorCode = readNestedValue(clientBody, 'error', 'code')
+    ?? readNestedValue(clientBody, 'code')
+    ?? readNestedValue(upstreamBody, 'error', 'code')
     ?? readNestedValue(upstreamBody, 'code')
     ?? readNestedValue(errorFlow, 'code')
   const upstreamErrorCodeLabel = formatFailureCodeLabel(upstreamErrorCode)
-  const upstreamErrorParam = readNestedString(upstreamBody, 'error', 'param')
+  const upstreamErrorParam = readNestedString(clientBody, 'error', 'param')
+    ?? readNestedString(clientBody, 'param')
+    ?? readNestedString(upstreamBody, 'error', 'param')
     ?? readNestedString(upstreamBody, 'param')
     ?? readStringField(errorFlow ?? {}, 'param')
   const fallbackMessage = typeof attempt.error_message === 'string' && attempt.error_message.trim()
     ? attempt.error_message.trim()
     : ''
-  const message = resolveFailureReason({
-    message: flowMessage || upstreamErrorMessage || fallbackMessage,
-    type: upstreamErrorType,
-    code: upstreamErrorCode,
-    statusCode,
-  })
-    || ''
-  const upstreamResponseDisplay = normalizeUpstreamResponseDisplay(extra?.upstream_response)
+  const message = clientErrorMessage
+    ? resolveFailureReason({
+      message: clientErrorMessage,
+      type: upstreamErrorType,
+      statusCode,
+    }) || clientErrorMessage
+    : resolveFailureReason({
+      message: upstreamErrorMessage || flowMessage || fallbackMessage,
+      type: upstreamErrorType,
+      code: upstreamErrorCode,
+      statusCode,
+    }) || ''
+  const upstreamResponseDisplay = preferClientResponse
+    ? normalizeUpstreamResponseDisplay(extra?.client_response) ?? normalizeUpstreamResponseDisplay(extra?.upstream_response)
+    : normalizeUpstreamResponseDisplay(extra?.upstream_response) ?? normalizeUpstreamResponseDisplay(extra?.client_response)
   const fields = buildCurrentAttemptErrorFields(
     errorFlow,
     upstreamErrorType,

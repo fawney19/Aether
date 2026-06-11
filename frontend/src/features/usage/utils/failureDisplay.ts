@@ -94,7 +94,7 @@ export function formatFailureCodeLabel(value: unknown): string | null {
   const normalized = nonEmptyString(value)
   if (!normalized) return null
   const key = normalized.toLowerCase()
-  return FAILURE_CODE_LABELS[key] ?? FAILURE_TYPE_LABELS[key] ?? inferInternalFailureTypeLabel(normalized)
+  return FAILURE_CODE_LABELS[key] ?? FAILURE_TYPE_LABELS[key] ?? null
 }
 
 export function resolveFailureReason(input: {

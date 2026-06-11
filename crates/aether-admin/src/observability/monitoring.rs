@@ -541,6 +541,16 @@ fn build_admin_monitoring_trace_candidate_extra_data(
             ) {
                 merge_admin_monitoring_trace_response(extra_object, "upstream_response", response);
             }
+            if let Some(response) = admin_monitoring_trace_response_data(
+                "client_response",
+                admin_monitoring_usage_client_response_status_code(usage),
+                usage.client_response_headers.as_ref(),
+                usage.client_response_body.as_ref(),
+                usage.client_response_body_ref.as_deref(),
+                usage.client_response_body_state,
+            ) {
+                merge_admin_monitoring_trace_response(extra_object, "client_response", response);
+            }
         }
 
         if let Some(proxy_value) = extra_object.get_mut("proxy") {
@@ -567,6 +577,23 @@ fn build_admin_monitoring_trace_candidate_extra_data(
         Some(object) => Value::Object(object),
         None => Value::Null,
     }
+}
+
+fn admin_monitoring_usage_client_response_status_code(
+    usage: &StoredRequestUsageAudit,
+) -> Option<u16> {
+    usage
+        .request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("client_response_status_code"))
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
+        })
+        .and_then(|value| u16::try_from(value).ok())
+        .or(usage.status_code)
 }
 
 fn admin_monitoring_trace_response_data(

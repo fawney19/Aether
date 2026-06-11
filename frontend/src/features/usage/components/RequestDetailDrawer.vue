@@ -159,47 +159,6 @@
               v-else-if="detail"
               class="space-y-4"
             >
-              <!-- 执行失败原因：优先展示本地调度/运行时失败摘要 -->
-              <Card
-                v-if="failureNotice"
-                class="border-red-200 bg-red-50/80 shadow-sm dark:border-red-900/60 dark:bg-red-950/30"
-              >
-                <div class="p-3 sm:p-4 flex gap-3">
-                  <div class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600 dark:bg-red-900/50 dark:text-red-300">
-                    <AlertTriangle class="h-4 w-4" />
-                  </div>
-                  <div class="min-w-0 flex-1 space-y-2">
-                    <div class="flex flex-wrap items-center gap-2">
-                      <h4 class="text-sm font-semibold text-red-950 dark:text-red-100">
-                        {{ failureNotice.title }}
-                      </h4>
-                      <Badge
-                        v-if="failureNotice.isSchedulingFailure"
-                        variant="outline"
-                        class="border-red-300 bg-white/60 text-[10px] text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200"
-                      >
-                        调度阶段
-                      </Badge>
-                    </div>
-                    <p class="text-sm leading-6 text-red-900 dark:text-red-100">
-                      {{ failureNotice.message }}
-                    </p>
-                    <div
-                      v-if="failureNotice.meta.length > 0"
-                      class="flex flex-wrap gap-1.5"
-                    >
-                      <span
-                        v-for="item in failureNotice.meta"
-                        :key="item"
-                        class="rounded-full border border-red-200 bg-white/70 px-2 py-0.5 text-[11px] font-mono text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200"
-                      >
-                        {{ item }}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </Card>
-
               <!-- 费用与性能概览 -->
               <Card>
                 <div class="p-3 sm:p-4">
@@ -584,7 +543,13 @@
               </Card>
 
               <!-- 请求链路追踪卡片 -->
-              <div>
+              <div class="space-y-2">
+                <div
+                  v-if="shouldShowFailureTimelineHint"
+                  class="rounded-lg border border-red-200 bg-red-50/50 px-3 py-2 text-xs leading-5 text-red-700 dark:border-red-900/60 dark:bg-red-950/20 dark:text-red-200"
+                >
+                  请求已失败，具体原因请查看下方链路追踪中选中的失败节点；点击红色节点可切换候选或重试的错误详情。
+                </div>
                 <HorizontalRequestTimeline
                   v-if="showTimeline && traceTimelineRequestId"
                   ref="timelineRef"
@@ -839,8 +804,8 @@ import Separator from '@/components/ui/separator.vue'
 import Skeleton from '@/components/ui/skeleton.vue'
 import Tabs from '@/components/ui/tabs.vue'
 import TabsContent from '@/components/ui/tabs-content.vue'
-import { AlertTriangle, Check, Columns2, RefreshCw, X, Monitor, Server, MessageSquareText, Code2, Terminal, Play } from 'lucide-vue-next'
-import { dashboardApi, type RequestDetail, type RequestErrorDomain } from '@/api/dashboard'
+import { Check, Columns2, RefreshCw, X, Monitor, Server, MessageSquareText, Code2, Terminal, Play } from 'lucide-vue-next'
+import { dashboardApi, type RequestDetail } from '@/api/dashboard'
 import type { ImageProgress, RequestTrace } from '@/api/requestTrace'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { formatCompactNumber, formatShortRequestId, formatTokens } from '@/utils/format'
@@ -858,7 +823,6 @@ import {
   resolveDisplayRequestStatus,
   resolveUsageStreamLabelSegments,
 } from '../utils/status'
-import { resolveRequestFailureNotice } from '../utils/errorNotice'
 
 // 子组件
 import RequestHeadersContent from './RequestDetailDrawer/RequestHeadersContent.vue'
@@ -942,40 +906,9 @@ type PricingTierLike = {
 
 type JsonRecord = Record<string, unknown>
 
-type NormalizedErrorDomain = {
-  source?: string | null
-  status_code?: number | null
-  type?: string | null
-  message: string
-  code?: string | number | null
-  category?: string | null
-}
-
 function asRecord(value: unknown): JsonRecord | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   return value as JsonRecord
-}
-
-function normalizeErrorDomain(domain: RequestErrorDomain | null | undefined): NormalizedErrorDomain | null {
-  if (!domain || typeof domain !== 'object') return null
-  const message = typeof domain.message === 'string' ? domain.message.trim() : ''
-  if (!message) return null
-  return {
-    source: domain.source ?? null,
-    status_code: domain.status_code ?? null,
-    type: domain.type ?? null,
-    message,
-    code: domain.code ?? null,
-    category: domain.category ?? null,
-  }
-}
-
-function formatErrorDomainMeta(domain: NormalizedErrorDomain): string {
-  const parts: string[] = []
-  if (domain.status_code != null) parts.push(`HTTP ${domain.status_code}`)
-  if (domain.type) parts.push(domain.type)
-  if (domain.source) parts.push(`source=${domain.source}`)
-  return parts.join(' · ')
 }
 
 function mapTraceFinalStatusToRequestStatus(
@@ -1239,7 +1172,10 @@ const metadataPanelData = computed<Record<string, unknown> | null>(() => {
   return Object.keys(merged).length > 0 ? merged : null
 })
 
-const failureNotice = computed(() => resolveRequestFailureNotice(detail.value))
+const shouldShowFailureTimelineHint = computed(() => {
+  if (!detail.value || !traceTimelineRequestId.value || !timelineHasTrace.value) return false
+  return resolveRequestStateStatusFromDetail(detail.value) === 'failed'
+})
 
 const settlementInfo = computed<JsonRecord | null>(() =>
   asRecord(detail.value?.settlement ?? null),
