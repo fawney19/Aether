@@ -137,7 +137,7 @@ pub fn to_raw(canonical: &CanonicalRequest) -> Value {
     let mut messages = Vec::new();
     for instruction in &canonical.instructions {
         let role = match instruction.role {
-            CanonicalRole::Developer => "developer",
+            CanonicalRole::Developer => "system",
             _ => "system",
         };
         if !instruction.text.trim().is_empty() {
