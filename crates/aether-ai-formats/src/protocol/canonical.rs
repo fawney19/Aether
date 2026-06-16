@@ -5295,7 +5295,7 @@ mod tests {
         let rebuilt = canonical_to_openai_chat_request(&canonical);
         assert_eq!(rebuilt["model"], "gpt-5");
         assert_eq!(rebuilt["messages"][0]["role"], "system");
-        assert_eq!(rebuilt["messages"][1]["role"], "system");
+        assert_eq!(rebuilt["messages"][1]["role"], "developer");
         assert_eq!(
             rebuilt["messages"][2]["content"][1]["image_url"]["url"],
             "data:image/png;base64,iVBORw0KGgo="
