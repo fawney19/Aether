@@ -719,6 +719,8 @@ mod tests {
             provider_request_body: Some(json!({"model":"gpt-5","metadata":{}})),
             provider_request_body_base64: None,
             content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            request_gzip: None,
             proxy: None,
             transport_profile: None,
             timeouts: None,

@@ -112,7 +112,6 @@ async fn proxy_pii_redaction_local_openai_chat_runtime_masks_headers_and_restore
                 Some(json!({
                     "chat_pii_redaction": {
                         "enabled": true,
-                        "inject_model_instruction": true,
                     }
                 })),
             )]),
@@ -363,13 +362,7 @@ async fn proxy_pii_redaction_local_openai_chat_runtime_masks_headers_and_restore
     let provider_body_text = serde_json::to_string(&seen.body).expect("body should serialize");
     assert!(!provider_body_text.contains("alice@example.com"));
     assert!(provider_body_text.contains("<AETHER:EMAIL:"));
-    assert_eq!(seen.body["messages"][0]["role"], "assistant");
-    let notice = seen.body["messages"][0]["content"]
-        .as_str()
-        .expect("notice should be text");
-    assert!(notice.contains("not a user request"));
-    assert!(notice.contains("do not answer"));
-    assert_eq!(seen.body["messages"][1]["role"], "user");
+    assert_eq!(seen.body["messages"][0]["role"], "user");
 
     let stored_candidates = request_candidate_repository
         .list_by_request_id("trace-proxy-pii-redaction-sync")

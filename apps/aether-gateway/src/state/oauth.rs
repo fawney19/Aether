@@ -171,7 +171,10 @@ fn oauth_invalid_reason_is_account_block(reason: Option<&str>) -> bool {
     snapshot.blocked
         && !matches!(
             snapshot.code.trim().to_ascii_lowercase().as_str(),
-            "oauth_token_invalid" | "oauth_expired" | "oauth_refresh_failed"
+            "oauth_token_invalid"
+                | "oauth_token_expired"
+                | "oauth_expired"
+                | "oauth_refresh_failed"
         )
 }
 
@@ -356,14 +359,16 @@ fn build_oauth_status_snapshot_value(key: &StoredProviderCatalogKey) -> Value {
     let invalid_reason = trimmed_reason(key.oauth_invalid_reason.as_deref());
 
     if let Some(reason) = tagged_reason(invalid_reason.as_deref(), OAUTH_EXPIRED_PREFIX) {
+        let (code, label) =
+            aether_admin::provider::status::oauth_token_snapshot_status_parts(reason.as_str());
         return json!({
-            "code": "invalid",
-            "label": "已失效",
+            "code": code,
+            "label": label,
             "reason": reason,
             "expires_at": expires_at_unix_secs,
             "invalid_at": invalid_at_unix_secs,
             "source": "oauth_invalid",
-            "requires_reauth": true,
+            "requires_reauth": code == "invalid",
             "expiring_soon": false,
         });
     }
@@ -1291,6 +1296,7 @@ impl AppState {
                 let deleted_key_ids = [key_id.to_string()];
                 self.cleanup_deleted_provider_catalog_refs(
                     &transport.provider.id,
+                    false,
                     &[],
                     &deleted_key_ids,
                 )

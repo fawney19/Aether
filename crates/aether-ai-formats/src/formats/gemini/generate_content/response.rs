@@ -55,6 +55,18 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
         {
             stop_reason = Some(CanonicalStopReason::ToolUse);
         }
+        let mut extensions = gemini_extensions(
+            candidate_object,
+            &["index", "content", "finishReason", "finish_reason"],
+        );
+        if let Some(raw_finish_reason) = candidate_object
+            .get("finishReason")
+            .or_else(|| candidate_object.get("finish_reason"))
+            .cloned()
+        {
+            canonical_extension_object_mut(&mut extensions, "gemini")
+                .insert("raw_finish_reason".to_string(), raw_finish_reason);
+        }
         outputs.push(CanonicalResponseOutput {
             index: candidate_object
                 .get("index")
@@ -64,10 +76,7 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
             role: CanonicalRole::Assistant,
             content,
             stop_reason,
-            extensions: gemini_extensions(
-                candidate_object,
-                &["index", "content", "finishReason", "finish_reason"],
-            ),
+            extensions,
         });
     }
     outputs.retain(gemini_response_output_has_visible_content);
@@ -177,7 +186,13 @@ fn canonical_to_gemini_response(
         });
         if let Some(candidate_object) = candidate.as_object_mut() {
             if let Some(gemini) = output.extensions.get("gemini").and_then(Value::as_object) {
+                if let Some(raw_finish_reason) = gemini.get("raw_finish_reason").cloned() {
+                    candidate_object.insert("finishReason".to_string(), raw_finish_reason);
+                }
                 for (key, value) in gemini {
+                    if key == "raw_finish_reason" {
+                        continue;
+                    }
                     candidate_object.entry(key.clone()).or_insert(value.clone());
                 }
             }

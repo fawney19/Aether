@@ -4,7 +4,9 @@ use std::sync::{
     Arc, LazyLock,
 };
 
-use aether_admin::provider::pool as admin_provider_pool_pure;
+use aether_admin::provider::{
+    pool as admin_provider_pool_pure, status as admin_provider_status_pure,
+};
 use aether_data_contracts::repository::candidate_selection::{
     StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
     StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
@@ -1217,9 +1219,15 @@ fn pool_key_requires_reauth_for_scheduling(
         .map(str::trim)
         .unwrap_or_default();
     if !invalid_reason.is_empty() {
-        if pool_oauth_reason_has_tag(invalid_reason, "[OAUTH_EXPIRED]")
-            || pool_oauth_reason_has_tag(invalid_reason, "[ACCOUNT_BLOCK]")
-        {
+        let account_state = admin_provider_status_pure::resolve_pool_account_state(
+            None,
+            key.upstream_metadata.as_ref(),
+            Some(invalid_reason),
+        );
+        if account_state.blocked && !account_state.recoverable {
+            return true;
+        }
+        if pool_oauth_reason_has_tag(invalid_reason, "[ACCOUNT_BLOCK]") {
             return true;
         }
         if pool_oauth_reason_has_tag(invalid_reason, "[REQUEST_FAILED]") {
@@ -1229,6 +1237,9 @@ fn pool_key_requires_reauth_for_scheduling(
             return key
                 .expires_at_unix_secs
                 .is_none_or(|expires_at| expires_at == 0 || expires_at <= now_unix_secs);
+        }
+        if pool_oauth_reason_has_tag(invalid_reason, "[OAUTH_EXPIRED]") {
+            return false;
         }
         return true;
     }
@@ -3265,8 +3276,7 @@ mod tests {
 
         let mut key_a_invalid = sample_codex_pool_key("provider-a", "key-a-invalid");
         key_a_invalid.oauth_invalid_at_unix_secs = Some(1_710_000_000);
-        key_a_invalid.oauth_invalid_reason =
-            Some("[OAUTH_EXPIRED] Codex Token 无效或已过期 (401)".to_string());
+        key_a_invalid.oauth_invalid_reason = Some("[OAUTH_EXPIRED] token invalidated".to_string());
         let exhausted_status_snapshot = json!({
             "quota": {
                 "provider_type": "codex",
@@ -3370,8 +3380,7 @@ mod tests {
 
         let mut key_a_invalid = sample_codex_pool_key("provider-a", "key-a-invalid");
         key_a_invalid.oauth_invalid_at_unix_secs = Some(1_710_000_000);
-        key_a_invalid.oauth_invalid_reason =
-            Some("[OAUTH_EXPIRED] Codex Token 无效或已过期 (401)".to_string());
+        key_a_invalid.oauth_invalid_reason = Some("[OAUTH_EXPIRED] token invalidated".to_string());
         key_a_invalid.status_snapshot = Some(json!({
             "quota": {
                 "provider_type": "codex",
@@ -3463,12 +3472,19 @@ mod tests {
         key.oauth_invalid_reason = Some("[REQUEST_FAILED] 账号状态检查失败".to_string());
         key.oauth_invalid_at_unix_secs = Some(100);
         assert!(!pool_key_requires_reauth_for_scheduling(&key, 300));
+
+        key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] session expired".to_string());
+        assert!(!pool_key_requires_reauth_for_scheduling(&key, 300));
     }
 
     #[test]
     fn pool_key_reauth_scheduling_blocks_invalid_oauth_markers_without_affecting_non_oauth_keys() {
         let mut key = sample_codex_pool_key("provider-a", "key-invalid");
         key.oauth_invalid_reason = Some("[ACCOUNT_BLOCK] account has been deactivated".to_string());
+        assert!(pool_key_requires_reauth_for_scheduling(&key, 100));
+
+        key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] token invalidated".to_string());
+        key.oauth_invalid_at_unix_secs = None;
         assert!(pool_key_requires_reauth_for_scheduling(&key, 100));
 
         key.oauth_invalid_reason = Some("Kiro Token 无效或已过期".to_string());

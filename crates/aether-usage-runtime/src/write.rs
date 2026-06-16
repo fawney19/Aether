@@ -720,8 +720,11 @@ pub fn build_terminal_usage_context_seed(
         },
         body_states: request_capture.body_states,
         request_metadata: merge_usage_request_metadata_owned(
-            build_usage_request_metadata_seed(plan, context),
-            build_plan_body_capture_metadata(plan.body.body_bytes_b64.as_deref()),
+            merge_usage_request_metadata_owned(
+                build_usage_request_metadata_seed(plan, context),
+                build_plan_body_capture_metadata(plan.body.body_bytes_b64.as_deref()),
+            ),
+            build_runtime_body_size_request_metadata(plan, context),
         ),
     }
 }
@@ -1561,6 +1564,7 @@ fn build_usage_event_data_seed_with_detail(
         .and_then(infer_endpoint_kind)
         .map(ToOwned::to_owned);
     let request_metadata = build_runtime_request_metadata_seed_from_parts(
+        plan,
         context,
         request_capture.request_body.is_some(),
         request_capture.request_body_ref.as_deref(),
@@ -1859,6 +1863,7 @@ fn build_runtime_request_metadata_seed(
         context_has_inline_body(context, "provider_request_body")
             || plan_has_inline_json_body_for_usage(plan);
     let mut metadata = build_runtime_request_metadata_seed_from_parts(
+        plan,
         context,
         request_has_inline_body,
         request_body_ref.as_deref(),
@@ -1889,6 +1894,7 @@ fn build_runtime_request_metadata_seed(
 }
 
 fn build_runtime_request_metadata_seed_from_parts(
+    plan: &ExecutionPlan,
     context: Option<&Map<String, Value>>,
     request_has_inline_body: bool,
     request_body_ref: Option<&str>,
@@ -1943,8 +1949,126 @@ fn build_runtime_request_metadata_seed_from_parts(
         &mut metadata,
         provider_request_body_base64,
     );
+    if let Some(body_size) = build_runtime_body_size_metadata(plan, context) {
+        metadata.insert("body_size".to_string(), body_size);
+    }
 
     (!metadata.is_empty()).then_some(Value::Object(metadata))
+}
+
+fn build_runtime_body_size_metadata(
+    plan: &ExecutionPlan,
+    context: Option<&Map<String, Value>>,
+) -> Option<Value> {
+    let client_body_bytes =
+        context_value_ref(context, "original_request_body").and_then(captured_body_size_bytes);
+    let provider_body_bytes = plan_body_size_bytes(plan);
+    if client_body_bytes.is_none() && provider_body_bytes.is_none() {
+        return None;
+    }
+
+    let mut metadata = Map::new();
+    if let Some(bytes) = client_body_bytes {
+        metadata.insert(
+            "client_request_body".to_string(),
+            Value::String(format_data_size(bytes)),
+        );
+    }
+    if let Some(bytes) = provider_body_bytes {
+        metadata.insert(
+            "provider_request_body".to_string(),
+            Value::String(format_data_size(bytes)),
+        );
+    }
+    if let (Some(client_bytes), Some(provider_bytes)) = (client_body_bytes, provider_body_bytes) {
+        if let Some(ratio) = format_size_ratio(provider_bytes, client_bytes) {
+            metadata.insert("provider_over_client".to_string(), Value::String(ratio));
+        }
+    }
+    metadata.insert(
+        "basis".to_string(),
+        Value::String("serialized gateway request bodies after normalization".to_string()),
+    );
+
+    Some(Value::Object(metadata))
+}
+
+fn build_runtime_body_size_request_metadata(
+    plan: &ExecutionPlan,
+    context: Option<&Map<String, Value>>,
+) -> Option<Value> {
+    let body_size = build_runtime_body_size_metadata(plan, context)?;
+    let mut metadata = Map::new();
+    metadata.insert("body_size".to_string(), body_size);
+    Some(Value::Object(metadata))
+}
+
+fn captured_body_size_bytes(value: &Value) -> Option<u64> {
+    if value.is_null() {
+        return None;
+    }
+    if let Some(body_base64) = value
+        .as_object()
+        .and_then(|object| object.get("body_bytes_b64"))
+        .and_then(Value::as_str)
+    {
+        return decoded_base64_len_hint(body_base64);
+    }
+    json_serialized_len(value)
+}
+
+fn plan_body_size_bytes(plan: &ExecutionPlan) -> Option<u64> {
+    if let Some(body_base64) = plan.body.body_bytes_b64.as_deref() {
+        return decoded_base64_len_hint(body_base64);
+    }
+    plan.body.json_body.as_ref().and_then(json_serialized_len)
+}
+
+fn json_serialized_len(value: &Value) -> Option<u64> {
+    serde_json::to_vec(value)
+        .ok()
+        .and_then(|bytes| u64::try_from(bytes.len()).ok())
+}
+
+fn format_data_size(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+
+    let bytes = bytes as f64;
+    let (value, unit) = if bytes >= GIB {
+        (bytes / GIB, "GB")
+    } else if bytes >= MIB {
+        (bytes / MIB, "MB")
+    } else {
+        (bytes / KIB, "KB")
+    };
+    format!("{} {}", format_compact_decimal(value), unit)
+}
+
+fn format_size_ratio(numerator: u64, denominator: u64) -> Option<String> {
+    if denominator == 0 {
+        return None;
+    }
+    Some(format!(
+        "{}x",
+        format_compact_decimal(numerator as f64 / denominator as f64)
+    ))
+}
+
+fn format_compact_decimal(value: f64) -> String {
+    let digits = if value >= 100.0 {
+        0
+    } else if value >= 10.0 {
+        1
+    } else {
+        2
+    };
+    let formatted = format!("{value:.digits$}");
+    formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 fn capture_usage_storage_value(value: Value) -> Value {
@@ -3354,7 +3478,25 @@ mod tests {
             record.local_execution_runtime_miss_reason.as_deref(),
             Some("all_candidates_skipped")
         );
-        assert_eq!(record.request_metadata, None);
+        let metadata = record
+            .request_metadata
+            .as_ref()
+            .and_then(Value::as_object)
+            .expect("pending usage should only keep lightweight request metadata");
+        assert_eq!(metadata.len(), 1);
+        let body_size = metadata
+            .get("body_size")
+            .and_then(Value::as_object)
+            .expect("pending usage should keep request body size metadata");
+        assert_eq!(
+            body_size.get("basis"),
+            Some(&json!(
+                "serialized gateway request bodies after normalization"
+            ))
+        );
+        assert!(body_size.get("client_request_body").is_some());
+        assert!(body_size.get("provider_request_body").is_some());
+        assert!(body_size.get("provider_over_client").is_some());
     }
 
     #[test]
@@ -3392,14 +3534,27 @@ mod tests {
         )
         .expect("pending usage should build");
 
+        let metadata = record
+            .request_metadata
+            .as_ref()
+            .and_then(Value::as_object)
+            .expect("pending usage should keep request metadata");
+        assert_eq!(metadata.get("api_key_is_standalone"), Some(&json!(true)));
+        assert_eq!(metadata.get("client_ip"), Some(&json!("203.0.113.8")));
+        assert_eq!(metadata.get("user_agent"), Some(&json!("Claude-Code/1.0")));
+        let body_size = metadata
+            .get("body_size")
+            .and_then(Value::as_object)
+            .expect("pending usage should keep request body size metadata");
         assert_eq!(
-            record.request_metadata,
-            Some(json!({
-                "api_key_is_standalone": true,
-                "client_ip": "203.0.113.8",
-                "user_agent": "Claude-Code/1.0"
-            }))
+            body_size.get("basis"),
+            Some(&json!(
+                "serialized gateway request bodies after normalization"
+            ))
         );
+        assert!(body_size.get("provider_request_body").is_some());
+        assert!(body_size.get("client_request_body").is_none());
+        assert!(body_size.get("provider_over_client").is_none());
     }
 
     #[test]
@@ -5381,6 +5536,95 @@ mod tests {
     }
 
     #[test]
+    fn sync_terminal_usage_records_human_readable_request_body_sizes_in_metadata() {
+        let client_body_bytes = vec![b'c'; 1024];
+        let provider_body_bytes = vec![b'p'; 4096];
+        let client_body_base64 =
+            base64::engine::general_purpose::STANDARD.encode(client_body_bytes);
+        let provider_body_base64 =
+            base64::engine::general_purpose::STANDARD.encode(provider_body_bytes);
+        let plan = ExecutionPlan {
+            request_id: "req-sync-body-size-1".to_string(),
+            candidate_id: Some("cand-sync-body-size-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody {
+                json_body: None,
+                body_bytes_b64: Some(provider_body_base64),
+                body_ref: None,
+            },
+            stream: false,
+            client_api_format: "openai:chat".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let payload = GatewaySyncReportRequest {
+            trace_id: "trace-sync-body-size-1".to_string(),
+            report_kind: "openai_chat_sync_success".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:chat",
+                "provider_api_format": "openai:responses",
+                "needs_conversion": true,
+                "original_request_body": {
+                    "body_bytes_b64": client_body_base64
+                }
+            })),
+            status_code: 200,
+            headers: BTreeMap::new(),
+            body_json: Some(json!({"id": "resp_123"})),
+            client_body_json: None,
+            body_base64: None,
+            telemetry: None,
+        };
+
+        let context_seed =
+            build_terminal_usage_context_seed(&plan, payload.report_context.as_ref());
+        assert_request_body_size_metadata(
+            context_seed.request_metadata.as_ref(),
+            "context seed should include body size metadata",
+        );
+
+        let payload_seed = build_sync_terminal_usage_payload_seed(&payload);
+        let seed_event = build_terminal_usage_event_from_seed(build_sync_terminal_usage_seed(
+            context_seed,
+            payload_seed,
+        ))
+        .expect("seed usage event should build");
+        assert_request_body_size_metadata(
+            seed_event.data.request_metadata.as_ref(),
+            "seed event should include body size metadata",
+        );
+
+        let wrapper_event =
+            build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("wrapper usage event should build");
+        assert_request_body_size_metadata(
+            wrapper_event.data.request_metadata.as_ref(),
+            "wrapper event should include body size metadata",
+        );
+    }
+
+    fn assert_request_body_size_metadata(metadata: Option<&Value>, message: &str) {
+        let body_size = metadata
+            .and_then(|metadata| metadata.get("body_size"))
+            .unwrap_or_else(|| panic!("{message}: {metadata:?}"));
+
+        assert_eq!(body_size.get("client_request_body"), Some(&json!("1 KB")));
+        assert_eq!(body_size.get("provider_request_body"), Some(&json!("4 KB")));
+        assert_eq!(body_size.get("provider_over_client"), Some(&json!("4x")));
+    }
+
+    #[test]
     fn stream_terminal_usage_records_base64_response_sizes_in_metadata() {
         let provider_bytes =
             b"{\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}";
@@ -5590,6 +5834,121 @@ mod tests {
                 "model": "gpt-5.4",
                 "input": [{"role": "user", "content": "provider-side compiled body"}],
             }))
+        );
+        let body_size = event
+            .data
+            .request_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("body_size"))
+            .and_then(Value::as_object)
+            .expect("provider body size metadata should exist");
+        assert!(body_size.get("provider_request_body").is_some());
+        assert!(body_size.get("client_request_body").is_none());
+        assert!(body_size.get("provider_over_client").is_none());
+    }
+
+    #[test]
+    fn openai_image_sync_terminal_usage_captures_request_and_response_bodies() {
+        let plan = ExecutionPlan {
+            request_id: "req-openai-image-sync-body-1".to_string(),
+            candidate_id: Some("cand-openai-image-sync-body-1".to_string()),
+            provider_name: Some("Upstream Aether".to_string()),
+            provider_id: "provider-aether-1".to_string(),
+            endpoint_id: "endpoint-aether-1".to_string(),
+            key_id: "key-aether-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://upstream-aether.example/v1/images/generations".to_string(),
+            headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "gpt-image-2-upstream",
+                "prompt": "Draw a red kite",
+                "size": "1024x1024",
+                "n": 1,
+                "response_format": "b64_json"
+            })),
+            stream: false,
+            client_api_format: "openai:image".to_string(),
+            provider_api_format: "openai:image".to_string(),
+            model_name: Some("gpt-image-2".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let payload = GatewaySyncReportRequest {
+            trace_id: "trace-openai-image-sync-body-1".to_string(),
+            report_kind: "openai_image_sync_finalize".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:image",
+                "provider_api_format": "openai:image",
+                "needs_conversion": true,
+                "original_request_body": {
+                    "model": "gpt-image-2",
+                    "prompt": "Draw a red kite",
+                    "size": "1024x1024",
+                    "response_format": "b64_json"
+                },
+                "provider_request_body": {
+                    "model": "gpt-image-2-upstream",
+                    "prompt": "Draw a red kite",
+                    "size": "1024x1024",
+                    "n": 1,
+                    "response_format": "b64_json"
+                }
+            })),
+            status_code: 200,
+            headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+            body_json: Some(json!({
+                "created": 1776839946,
+                "data": [{
+                    "b64_json": "aGVsbG8=",
+                    "revised_prompt": "red kite"
+                }],
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 22,
+                    "total_tokens": 33
+                }
+            })),
+            client_body_json: None,
+            body_base64: None,
+            telemetry: None,
+        };
+
+        let event =
+            build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        assert_eq!(
+            event.data.request_body,
+            payload
+                .report_context
+                .as_ref()
+                .and_then(|value| value.get("original_request_body"))
+                .cloned()
+        );
+        assert_eq!(
+            event.data.provider_request_body,
+            payload
+                .report_context
+                .as_ref()
+                .and_then(|value| value.get("provider_request_body"))
+                .cloned()
+        );
+        assert_eq!(event.data.response_body, payload.body_json);
+        assert!(event.data.client_response_body.is_none());
+        assert_eq!(
+            event.data.request_body_state,
+            Some(UsageBodyCaptureState::Inline)
+        );
+        assert_eq!(
+            event.data.provider_request_body_state,
+            Some(UsageBodyCaptureState::Inline)
+        );
+        assert_eq!(
+            event.data.response_body_state,
+            Some(UsageBodyCaptureState::Inline)
         );
     }
 

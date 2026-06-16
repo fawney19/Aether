@@ -27,6 +27,8 @@ export interface UsageRecord {
   cost?: number
   response_time?: number
   created_at: string
+  updated_at?: string | null
+  response_time_updated_at?: string | null
   has_fallback?: boolean // 🆕 是否发生了 fallback
   client_family?: string | null
   client_ip?: string | null
@@ -472,7 +474,10 @@ export const usageApi = {
     provider?: string
     api_format?: string  // API 格式筛选（如 openai:chat, claude:messages）
     status?: string // 'stream' | 'standard' | 'error'
+    client_family?: string
     hide_unknown?: boolean
+    include_total?: boolean
+    total_only?: boolean
     limit?: number
     offset?: number
   }): Promise<{
@@ -480,11 +485,44 @@ export const usageApi = {
     total: number
     limit: number
     offset: number
+    total_is_estimated?: boolean
   }> {
     const key = buildCacheKey('usage:records', params as Record<string, unknown> | undefined)
     return dedupedRequest(key, async () => {
       const response = await apiClient.get('/api/admin/usage/records', { params })
       return response.data
+    })
+  },
+
+  async getAllUsageRecordTotal(params?: {
+    start_date?: string
+    end_date?: string
+    preset?: string
+    timezone?: string
+    tz_offset_minutes?: number
+    search?: string
+    user_id?: string
+    username?: string
+    model?: string
+    provider?: string
+    api_format?: string
+    status?: string
+    client_family?: string
+    hide_unknown?: boolean
+  }): Promise<number> {
+    const requestParams = compactParams({
+      ...params,
+      include_total: true,
+      total_only: true,
+      limit: 1,
+      offset: 0,
+    })
+    const key = buildCacheKey('usage:records:total', requestParams)
+    return dedupedRequest(key, async () => {
+      const response = await apiClient.get<UsageListResponse>('/api/admin/usage/records', {
+        params: requestParams,
+      })
+      return assertNumber(response.data.total, 'total')
     })
   },
 
@@ -511,6 +549,8 @@ export const usageApi = {
       rate_multiplier?: number | null
       response_time_ms: number | null
       first_byte_time_ms: number | null
+      updated_at?: string | null
+      response_time_updated_at?: string | null
       status_code?: number | null
       error_message?: string | null
       provider?: string | null

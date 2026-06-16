@@ -89,6 +89,7 @@
         @update:filter-model="filterModel = $event"
         @reset-filters="resetFilters"
         @open-priority-dialog="openPriorityDialog"
+        @batch-process="openProviderBatchDialog"
         @add-provider="openAddProviderDialog"
         @refresh="loadProviders"
       />
@@ -191,7 +192,7 @@
                   />
                 </template>
               </SortableTableHead>
-              <TableHead class="w-[18%] min-w-[120px] text-center">
+              <TableHead class="w-[18%] min-w-[160px] text-center">
                 操作
               </TableHead>
             </TableRow>
@@ -277,6 +278,12 @@
     @provider-updated="handleProviderUpdated"
   />
 
+  <ProviderBatchActionDialog
+    v-model="providerBatchDialogOpen"
+    :providers="displayedProviders"
+    @changed="handleProviderBatchChanged"
+  />
+
   <PriorityManagementDialog
     v-model="priorityDialogOpen"
     @saved="handlePrioritySaved"
@@ -313,6 +320,7 @@ import SortableTableHead from '@/components/ui/sortable-table-head.vue'
 import TableFilterMenu from '@/components/ui/table-filter-menu.vue'
 import Pagination from '@/components/ui/pagination.vue'
 import { ProviderFormDialog, PriorityManagementDialog, ProviderAuthDialog } from '@/features/providers/components'
+import ProviderBatchActionDialog from '@/features/providers/components/ProviderBatchActionDialog.vue'
 import ProviderDetailDrawer from '@/features/providers/components/ProviderDetailDrawer.vue'
 import ProviderTableHeader from '@/features/providers/components/ProviderTableHeader.vue'
 import ProviderTableRow from '@/features/providers/components/ProviderTableRow.vue'
@@ -355,6 +363,7 @@ const loading = ref(false)
 const providers = ref<ProviderWithEndpointsSummary[]>([])
 let providersRequestId = 0
 const providerDialogOpen = ref(false)
+const providerBatchDialogOpen = ref(false)
 const providerToEdit = ref<ProviderWithEndpointsSummary | null>(null)
 const priorityDialogOpen = ref(false)
 const priorityMode = ref<'provider' | 'global_key'>('provider')
@@ -669,6 +678,14 @@ function openAddProviderDialog() {
 // 打开优先级管理对话框
 function openPriorityDialog() {
   priorityDialogOpen.value = true
+}
+
+function openProviderBatchDialog() {
+  providerBatchDialogOpen.value = true
+}
+
+async function handleProviderBatchChanged() {
+  await loadProviders()
 }
 
 // 打开提供商详情抽屉

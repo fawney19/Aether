@@ -63,6 +63,8 @@ fn missing_exact_provider_request_payload(decision_kind: &str) -> AiExecutionDec
         provider_request_body: None,
         provider_request_body_base64: None,
         content_type: Some("application/json".to_string()),
+        content_encoding: None,
+        request_gzip: None,
         proxy: None,
         transport_profile: None,
         timeouts: None,

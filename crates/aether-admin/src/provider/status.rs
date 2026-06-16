@@ -26,6 +26,10 @@ const ACCOUNT_BLOCK_REASON_KEYWORDS: &[&str] = &[
     "账户访问被禁止",
     "访问受限",
     "账户访问受限",
+    "oauth_token_invalid",
+    "oauth_token_expired",
+    "token_invalidated",
+    "session expired",
     "authentication token has been invalidated",
     "token has been invalidated",
     "codex token 无效或已过期",
@@ -43,6 +47,7 @@ const AUTO_REMOVABLE_ACCOUNT_STATE_CODES: &[&str] = &[
     "account_quarantined",
     "workspace_deactivated",
     "account_forbidden",
+    "oauth_token_invalid",
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -122,8 +127,79 @@ fn looks_like_account_verification(reason: &str) -> bool {
     .any(|keyword| lowered.contains(keyword))
 }
 
+pub fn oauth_token_reason_is_expired(reason: &str) -> bool {
+    let lowered = reason.trim().to_ascii_lowercase();
+    !lowered.is_empty()
+        && [
+            "oauth_token_expired",
+            "session has expired",
+            "session expired",
+            "access token expired",
+            "expired access token",
+            "token expired",
+            "token has expired",
+            "security token included in the request is expired",
+            "已过期",
+            "过期",
+        ]
+        .iter()
+        .any(|keyword| lowered.contains(keyword))
+}
+
+pub fn oauth_token_reason_is_hard_invalid(reason: &str) -> bool {
+    let lowered = reason.trim().to_ascii_lowercase();
+    if lowered.is_empty() {
+        return false;
+    }
+
+    if [
+        "oauth_token_invalid",
+        "token_invalidated",
+        "authentication token has been invalidated",
+        "token has been invalidated",
+        "token invalidated",
+        "invalidated",
+        "revoked",
+        "已撤销",
+        "被撤销",
+        "撤销",
+        "已作废",
+        "作废",
+        "已失效",
+        "token 失效",
+        "令牌失效",
+    ]
+    .iter()
+    .any(|keyword| lowered.contains(keyword))
+    {
+        return true;
+    }
+
+    (lowered.contains("token 无效") || lowered.contains("令牌无效"))
+        && !oauth_token_reason_is_expired(reason)
+}
+
+pub fn oauth_token_account_status_parts(reason: &str) -> (&'static str, &'static str) {
+    if oauth_token_reason_is_hard_invalid(reason) {
+        ("oauth_token_invalid", "Token 失效")
+    } else {
+        ("oauth_token_expired", "Token 过期")
+    }
+}
+
+pub fn oauth_token_snapshot_status_parts(reason: &str) -> (&'static str, &'static str) {
+    if oauth_token_reason_is_hard_invalid(reason) {
+        ("invalid", "已失效")
+    } else {
+        ("expired", "已过期")
+    }
+}
+
 fn classify_block_reason(reason: &str) -> (&'static str, &'static str) {
     let lowered = reason.to_ascii_lowercase();
+    if oauth_token_reason_is_hard_invalid(reason) || oauth_token_reason_is_expired(reason) {
+        return oauth_token_account_status_parts(reason);
+    }
     if [
         "authentication token has been invalidated",
         "token has been invalidated",
@@ -352,17 +428,18 @@ fn resolve_from_oauth_invalid_reason(reason: Option<&str>) -> Option<PoolAccount
     }
     if let Some(cleaned) = tagged_reason(&text, "OAUTH_EXPIRED") {
         let reason = if cleaned.is_empty() {
-            "OAuth Token 已过期且无法续期".to_string()
+            "OAuth Token 已过期".to_string()
         } else {
             cleaned
         };
+        let (code, label) = oauth_token_account_status_parts(&reason);
         return Some(PoolAccountState {
             blocked: true,
-            code: Some("oauth_token_invalid".to_string()),
-            label: Some("Token 失效".to_string()),
+            code: Some(code.to_string()),
+            label: Some(label.to_string()),
             reason: Some(reason),
             source: Some("oauth_invalid".to_string()),
-            recoverable: false,
+            recoverable: code == "oauth_token_expired",
         });
     }
     if let Some(cleaned) = tagged_reason(&text, "REQUEST_FAILED") {
@@ -456,17 +533,18 @@ pub fn resolve_account_status_snapshot(
 
     if let Some(cleaned) = tagged_reason(&text, "OAUTH_EXPIRED") {
         let reason = if cleaned.is_empty() {
-            "OAuth Token 已过期且无法续期".to_string()
+            "OAuth Token 已过期".to_string()
         } else {
             cleaned
         };
+        let (code, label) = oauth_token_account_status_parts(&reason);
         return AccountStatusSnapshot {
-            code: "oauth_token_invalid".to_string(),
-            label: Some("Token 失效".to_string()),
+            code: code.to_string(),
+            label: Some(label.to_string()),
             reason: Some(reason),
             blocked: true,
             source: Some("oauth_invalid".to_string()),
-            recoverable: false,
+            recoverable: code == "oauth_token_expired",
         };
     }
 
@@ -631,11 +709,11 @@ mod tests {
     }
 
     #[test]
-    fn account_snapshot_marks_oauth_expired_as_token_invalid() {
+    fn account_snapshot_marks_oauth_invalidated_as_token_invalid() {
         let snapshot = resolve_account_status_snapshot(
             Some("codex"),
             None,
-            Some("[OAUTH_EXPIRED] Codex Token 无效或已过期 (401)"),
+            Some("[OAUTH_EXPIRED] Your authentication token has been invalidated. Please try signing in again."),
         );
 
         assert_eq!(snapshot.code, "oauth_token_invalid");
@@ -645,7 +723,21 @@ mod tests {
     }
 
     #[test]
-    fn oauth_expired_state_is_not_auto_removed() {
+    fn account_snapshot_marks_oauth_expired_as_token_expired() {
+        let snapshot = resolve_account_status_snapshot(
+            Some("codex"),
+            None,
+            Some("[OAUTH_EXPIRED] session expired"),
+        );
+
+        assert_eq!(snapshot.code, "oauth_token_expired");
+        assert_eq!(snapshot.label.as_deref(), Some("Token 过期"));
+        assert!(snapshot.blocked);
+        assert!(snapshot.recoverable);
+    }
+
+    #[test]
+    fn oauth_invalidated_state_is_auto_removed() {
         let state = resolve_pool_account_state(
             Some("codex"),
             None,
@@ -654,6 +746,19 @@ mod tests {
 
         assert!(state.blocked);
         assert_eq!(state.code.as_deref(), Some("oauth_token_invalid"));
+        assert!(should_auto_remove_account_state(&state));
+    }
+
+    #[test]
+    fn oauth_expired_state_is_not_auto_removed() {
+        let state = resolve_pool_account_state(
+            Some("codex"),
+            None,
+            Some("[OAUTH_EXPIRED] session expired"),
+        );
+
+        assert!(state.blocked);
+        assert_eq!(state.code.as_deref(), Some("oauth_token_expired"));
         assert!(!should_auto_remove_account_state(&state));
     }
 

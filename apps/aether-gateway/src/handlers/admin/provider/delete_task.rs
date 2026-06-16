@@ -94,7 +94,7 @@ pub(crate) async fn run_admin_provider_delete_task(
         .map(|item| item.id.clone())
         .collect::<Vec<_>>();
     let key_ids = keys.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
-    app.cleanup_deleted_provider_catalog_refs(&provider.id, &endpoint_ids, &key_ids)
+    app.cleanup_deleted_provider_catalog_refs(&provider.id, true, &endpoint_ids, &key_ids)
         .await?;
 
     task.stage = "deleting_models".to_string();

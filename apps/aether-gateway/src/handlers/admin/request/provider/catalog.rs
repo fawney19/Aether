@@ -220,11 +220,17 @@ impl<'a> AdminAppState<'a> {
     pub(crate) async fn cleanup_deleted_provider_catalog_refs(
         &self,
         provider_id: &str,
+        provider_deleted: bool,
         endpoint_ids: &[String],
         key_ids: &[String],
     ) -> Result<(), GatewayError> {
         self.app
-            .cleanup_deleted_provider_catalog_refs(provider_id, endpoint_ids, key_ids)
+            .cleanup_deleted_provider_catalog_refs(
+                provider_id,
+                provider_deleted,
+                endpoint_ids,
+                key_ids,
+            )
             .await
     }
 }

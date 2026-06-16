@@ -738,6 +738,34 @@ fn strip_codex_hosted_tool_choice_name_for_backend(
     }
 }
 
+fn wrap_codex_responses_string_input_for_backend(
+    body_object: &mut serde_json::Map<String, Value>,
+    provider_api_format: &str,
+) {
+    if !aether_ai_formats::is_openai_responses_family_format(provider_api_format) {
+        return;
+    }
+    let Some(text) = body_object
+        .get("input")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+
+    body_object.insert(
+        "input".to_string(),
+        json!([{
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": text,
+            }],
+        }]),
+    );
+}
+
 pub fn apply_codex_openai_responses_special_body_edits(
     provider_request_body: &mut Value,
     provider_type: &str,
@@ -760,6 +788,7 @@ pub fn apply_codex_openai_responses_special_body_edits(
         return;
     };
 
+    wrap_codex_responses_string_input_for_backend(body_object, provider_api_format);
     for field in CODEX_OPENAI_RESPONSES_UNSUPPORTED_BODY_FIELDS {
         if !body_rules_handle_path(body_rules, field) {
             body_object.remove(*field);
@@ -983,6 +1012,34 @@ mod tests {
             ])
         );
         assert_eq!(provider_request_body["parallel_tool_calls"], json!(false));
+    }
+
+    #[test]
+    fn codex_responses_body_edits_wrap_string_input_for_backend() {
+        let mut provider_request_body = json!({
+            "input": "hello",
+            "model": "gpt-5.4"
+        });
+
+        apply_codex_openai_responses_special_body_edits(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            None,
+            None,
+        );
+
+        assert_eq!(
+            provider_request_body["input"],
+            json!([{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "hello"
+                }]
+            }])
+        );
     }
 
     #[test]

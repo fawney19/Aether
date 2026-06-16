@@ -111,6 +111,38 @@ impl LocalExecutionRuntimeMissContext {
         }
         Some(summaries.join(" | "))
     }
+
+    pub(crate) fn all_provider_request_body_build_failures_detail(&self) -> Option<String> {
+        if self.candidate_contexts.is_empty()
+            || !self.candidate_contexts.iter().all(|candidate| {
+                candidate.candidate.status == RequestCandidateStatus::Skipped
+                    && candidate
+                        .candidate
+                        .skip_reason
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|value| value == "provider_request_body_build_failed")
+            })
+        {
+            return None;
+        }
+
+        let diagnostic = self
+            .candidate_contexts
+            .iter()
+            .find_map(runtime_miss_candidate_failure_diagnostic)?;
+        let mut detail = format!("上游请求体转换失败：{}", diagnostic.message);
+        if diagnostic.path != "$" {
+            detail.push_str(&format!("；字段路径：{}", diagnostic.path));
+        }
+        detail.push_str("（原因代码: provider_request_body_build_failed）");
+        Some(detail)
+    }
+}
+
+struct RuntimeMissFailureDiagnostic {
+    path: String,
+    message: String,
 }
 
 pub(crate) async fn build_local_execution_exhaustion(
@@ -835,6 +867,41 @@ fn candidate_extra_data_string(candidate: &StoredRequestCandidate, key: &str) ->
         .map(ToOwned::to_owned)
 }
 
+fn runtime_miss_candidate_failure_diagnostic(
+    candidate: &RuntimeMissCandidateContext,
+) -> Option<RuntimeMissFailureDiagnostic> {
+    let extra_data = candidate.candidate.extra_data.as_ref()?.as_object()?;
+    let diagnostic = extra_data
+        .get("failure_diagnostic")
+        .and_then(Value::as_object)
+        .filter(|diagnostic| diagnostic.get("safe_to_show") != Some(&Value::Bool(false)))
+        .or_else(|| {
+            extra_data
+                .get("request_conversion_error")
+                .and_then(Value::as_object)
+        })
+        .or_else(|| {
+            extra_data
+                .get("request_body_build_error")
+                .and_then(Value::as_object)
+        })?;
+    let message = diagnostic
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let path = diagnostic
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("$");
+    Some(RuntimeMissFailureDiagnostic {
+        path: path.to_string(),
+        message: message.to_string(),
+    })
+}
+
 fn build_runtime_miss_candidate_endpoint_url(
     candidate: &StoredRequestCandidate,
     endpoint: &StoredProviderCatalogEndpoint,
@@ -1036,7 +1103,8 @@ mod tests {
     use super::{
         apply_runtime_miss_usage_routing, beautify_local_execution_client_error_message,
         request_candidate_represents_provider_execution,
-        select_last_runtime_miss_executed_candidate, RuntimeMissCandidateContext,
+        select_last_runtime_miss_executed_candidate, LocalExecutionRuntimeMissContext,
+        RuntimeMissCandidateContext,
     };
     use crate::constants::EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS;
     use crate::state::LocalExecutionRuntimeMissDiagnostic;
@@ -1160,5 +1228,69 @@ mod tests {
         }];
 
         assert!(select_last_runtime_miss_executed_candidate(&contexts).is_none());
+    }
+
+    #[test]
+    fn runtime_miss_context_surfaces_request_conversion_field_diagnostic() {
+        let skipped_candidate = StoredRequestCandidate::new(
+            "cand-skipped".to_string(),
+            "req-1".to_string(),
+            Some("user-1".to_string()),
+            Some("api-key-1".to_string()),
+            Some("alice".to_string()),
+            Some("default".to_string()),
+            0,
+            0,
+            Some("provider-1".to_string()),
+            Some("endpoint-1".to_string()),
+            Some("provider-key-1".to_string()),
+            RequestCandidateStatus::Skipped,
+            Some("provider_request_body_build_failed".to_string()),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(json!({
+                "failure_diagnostic": {
+                    "kind": "request_conversion",
+                    "path": "$.n",
+                    "message": "openai:chat 字段 n 不能无损转换到 openai:responses：OpenAI Responses request has no canonical equivalent for this Chat field",
+                    "safe_to_show": true
+                },
+                "request_conversion_error": {
+                    "path": "$.n",
+                    "message": "compat"
+                }
+            })),
+            None,
+            100,
+            None,
+            None,
+        )
+        .expect("candidate should build");
+
+        let context = LocalExecutionRuntimeMissContext {
+            candidate_contexts: vec![RuntimeMissCandidateContext {
+                candidate: skipped_candidate,
+                provider_name: Some("openai".to_string()),
+                key_name: Some("prod".to_string()),
+                client_api_format: Some("openai:chat".to_string()),
+                provider_api_format: Some("openai:responses".to_string()),
+                global_model_name: Some("gpt-5".to_string()),
+                selected_provider_model_name: Some("gpt-5-upstream".to_string()),
+                endpoint_url: Some("https://api.openai.example/v1/responses".to_string()),
+            }],
+            ..LocalExecutionRuntimeMissContext::default()
+        };
+
+        let detail = context
+            .all_provider_request_body_build_failures_detail()
+            .expect("detail should include conversion diagnostic");
+
+        assert!(detail.contains("字段 n"));
+        assert!(detail.contains("字段路径：$.n"));
+        assert!(detail.contains("provider_request_body_build_failed"));
     }
 }

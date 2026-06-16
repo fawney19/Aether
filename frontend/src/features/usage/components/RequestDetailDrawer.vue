@@ -734,6 +734,24 @@
                         >
                           <Skeleton class="h-32 w-full" />
                         </div>
+                        <div
+                          v-else-if="requestBodyLoadErrorVisible"
+                          class="m-4 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive"
+                        >
+                          <div class="flex items-start gap-2">
+                            <AlertTriangle class="mt-0.5 h-4 w-4 flex-shrink-0" />
+                            <span>{{ bodyLoadErrorMessage }}</span>
+                          </div>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            class="mt-3 h-8 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            @click="retryBodyContentLoad"
+                          >
+                            <RefreshCw class="mr-1.5 h-3.5 w-3.5" />
+                            重试
+                          </Button>
+                        </div>
                         <ConversationView
                           v-else-if="contentViewMode === 'conversation'"
                           :render-result="requestRenderResult"
@@ -782,6 +800,24 @@
                           class="p-4"
                         >
                           <Skeleton class="h-32 w-full" />
+                        </div>
+                        <div
+                          v-else-if="responseBodyLoadErrorVisible"
+                          class="m-4 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive"
+                        >
+                          <div class="flex items-start gap-2">
+                            <AlertTriangle class="mt-0.5 h-4 w-4 flex-shrink-0" />
+                            <span>{{ bodyLoadErrorMessage }}</span>
+                          </div>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            class="mt-3 h-8 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                            @click="retryBodyContentLoad"
+                          >
+                            <RefreshCw class="mr-1.5 h-3.5 w-3.5" />
+                            重试
+                          </Button>
                         </div>
                         <ConversationView
                           v-else-if="contentViewMode === 'conversation'"
@@ -843,7 +879,12 @@ import { AlertTriangle, Check, Columns2, RefreshCw, X, Monitor, Server, MessageS
 import { dashboardApi, type RequestDetail, type RequestErrorDomain } from '@/api/dashboard'
 import type { ImageProgress, RequestTrace } from '@/api/requestTrace'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
-import { formatCompactNumber, formatShortRequestId, formatTokens } from '@/utils/format'
+import {
+  formatByteSize,
+  formatCompactNumber,
+  formatShortRequestId,
+  formatTokens,
+} from '@/utils/format'
 import { log } from '@/utils/logger'
 import { getEffectiveInputTokens } from '../token-normalization'
 import {
@@ -942,6 +983,8 @@ type PricingTierLike = {
 
 type JsonRecord = Record<string, unknown>
 
+const METADATA_BYTE_FIELD_PATTERN = /(^bytes$|_bytes$|bytes$)/i
+
 type NormalizedErrorDomain = {
   source?: string | null
   status_code?: number | null
@@ -954,6 +997,29 @@ type NormalizedErrorDomain = {
 function asRecord(value: unknown): JsonRecord | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   return value as JsonRecord
+}
+
+function shouldFormatMetadataByteField(key: string, value: unknown): value is number {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && METADATA_BYTE_FIELD_PATTERN.test(key)
+}
+
+function formatMetadataDisplayValue(value: unknown, key = ''): unknown {
+  if (shouldFormatMetadataByteField(key, value)) {
+    return formatByteSize(value)
+  }
+  if (Array.isArray(value)) {
+    return value.map(item => formatMetadataDisplayValue(item))
+  }
+  if (value && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .reduce<Record<string, unknown>>((formatted, [childKey, childValue]) => {
+        formatted[childKey] = formatMetadataDisplayValue(childValue, childKey)
+        return formatted
+      }, {})
+  }
+  return value
 }
 
 function normalizeErrorDomain(domain: RequestErrorDomain | null | undefined): NormalizedErrorDomain | null {
@@ -1130,6 +1196,7 @@ const curlCopying = ref(false)
 const curlCopied = ref(false)
 const replayDialogOpen = ref(false)
 const bodyLoading = ref(false)
+const bodyLoadError = ref<string | null>(null)
 const bodiesLoadedForRequestId = ref<string | null>(null)
 const showTimeline = ref(false)
 const AUTO_REFRESH_INTERVAL_MS = 1000
@@ -1236,7 +1303,9 @@ const metadataPanelData = computed<Record<string, unknown> | null>(() => {
     merged.settlement = detail.value.settlement
   }
 
-  return Object.keys(merged).length > 0 ? merged : null
+  return Object.keys(merged).length > 0
+    ? formatMetadataDisplayValue(merged) as Record<string, unknown>
+    : null
 })
 
 const failureNotice = computed(() => resolveRequestFailureNotice(detail.value))
@@ -1286,6 +1355,36 @@ const isRequestBodyLoading = computed(() => {
 
 const isResponseBodyLoading = computed(() => {
   return bodyLoading.value && activeTab.value === 'response-body' && !currentResponseBody.value
+})
+
+const requestBodyLoadFailed = computed(() => {
+  const errors = detail.value?.body_load_errors
+  return Boolean(errors?.request_body || errors?.provider_request_body)
+})
+
+const responseBodyLoadFailed = computed(() => {
+  const errors = detail.value?.body_load_errors
+  return Boolean(errors?.response_body || errors?.client_response_body)
+})
+
+const bodyLoadErrorMessage = computed(() => {
+  return bodyLoadError.value || '正文内容加载失败，请重试'
+})
+
+const requestBodyLoadErrorVisible = computed(() => {
+  return Boolean(
+    (bodyLoadError.value || requestBodyLoadFailed.value) &&
+    activeTab.value === 'request-body' &&
+    !currentRequestBody.value
+  )
+})
+
+const responseBodyLoadErrorVisible = computed(() => {
+  return Boolean(
+    (bodyLoadError.value || responseBodyLoadFailed.value) &&
+    activeTab.value === 'response-body' &&
+    !currentResponseBody.value
+  )
 })
 
 function clearTimelineMountTimer() {
@@ -1918,6 +2017,15 @@ function hasContent(data: unknown): boolean {
   return true
 }
 
+function hasBodyLoadErrors(errors: RequestDetail['body_load_errors'] | null | undefined): boolean {
+  return Boolean(
+    errors?.request_body ||
+    errors?.provider_request_body ||
+    errors?.response_body ||
+    errors?.client_response_body
+  )
+}
+
 function toFiniteNumber(value: unknown): number | null {
   const num = Number(value)
   return Number.isFinite(num) ? num : null
@@ -2118,6 +2226,7 @@ watch(() => props.isOpen, async (isOpen) => {
     showTimeline.value = false
     clearTimelineMountTimer()
     bodyLoading.value = false
+    bodyLoadError.value = null
     bodiesLoadedForRequestId.value = null
   }
 })
@@ -2131,6 +2240,7 @@ async function ensureBodyContentLoaded() {
 
   const requestId = ++bodyLoadRequestId
   bodyLoading.value = true
+  bodyLoadError.value = null
   try {
     const response = await dashboardApi.getRequestDetail(props.requestId, { includeBodies: true })
     if (requestId !== bodyLoadRequestId || !detail.value) return
@@ -2144,6 +2254,7 @@ async function ensureBodyContentLoaded() {
       has_provider_request_body: response.has_provider_request_body,
       has_response_body: response.has_response_body,
       has_client_response_body: response.has_client_response_body,
+      body_load_errors: response.body_load_errors,
       request_error: response.request_error,
       upstream_error: response.upstream_error,
       client_error: response.client_error,
@@ -2152,15 +2263,23 @@ async function ensureBodyContentLoaded() {
       error_flow: response.error_flow,
       scheduling_failure: response.scheduling_failure,
     }
-    bodiesLoadedForRequestId.value = cacheKey
+    if (!hasBodyLoadErrors(response.body_load_errors)) {
+      bodiesLoadedForRequestId.value = cacheKey
+    }
   } catch (err) {
     if (requestId !== bodyLoadRequestId) return
     log.error('Failed to load request bodies:', err)
+    bodyLoadError.value = '正文内容加载失败，请重试'
   } finally {
     if (requestId === bodyLoadRequestId) {
       bodyLoading.value = false
     }
   }
+}
+
+function retryBodyContentLoad() {
+  bodyLoadError.value = null
+  void ensureBodyContentLoaded()
 }
 
 async function loadDetail(id: string, silent = false) {
@@ -2178,6 +2297,7 @@ async function loadDetail(id: string, silent = false) {
     clearTimelineMountTimer()
     ++bodyLoadRequestId
     bodyLoading.value = false
+    bodyLoadError.value = null
   }
   error.value = null
   try {

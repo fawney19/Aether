@@ -13,6 +13,10 @@ pub(super) fn codex_looks_like_token_invalidated(message: Option<&str>) -> bool 
     admin_provider_quota_pure::codex_looks_like_token_invalidated(message)
 }
 
+pub(super) fn codex_looks_like_token_expired(message: Option<&str>) -> bool {
+    admin_provider_quota_pure::codex_looks_like_token_expired(message)
+}
+
 pub(super) fn codex_looks_like_workspace_deactivated(message: Option<&str>) -> bool {
     admin_provider_quota_pure::codex_looks_like_workspace_deactivated(message)
 }

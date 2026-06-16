@@ -1520,6 +1520,45 @@ const REBUILD_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_STATS_SQL: &str =
     include_str!("queries/rebuild_provider_api_key_codex_window_usage_stats_sql.sql");
 
 const LIST_USAGE_AUDITS_PREFIX: &str = include_str!("queries/list_usage_audits_prefix.sql");
+fn push_postgres_usage_where(builder: &mut QueryBuilder<'_, Postgres>, has_where: &mut bool) {
+    builder.push(if *has_where { " AND " } else { " WHERE " });
+    *has_where = true;
+}
+
+fn push_postgres_usage_client_family_filter(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    has_where: &mut bool,
+    client_family: Option<&str>,
+) {
+    let Some(client_family) = client_family
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+
+    push_postgres_usage_where(builder, has_where);
+    builder
+        .push("LOWER(COALESCE(NULLIF(BTRIM(\"usage\".request_metadata->'client_session_affinity'->>'client_family'), ''), NULLIF(BTRIM(\"usage\".request_metadata->>'client_family'), ''))) = ")
+        .push_bind(client_family.to_ascii_lowercase());
+}
+
+fn push_postgres_usage_exclude_unknown_filter(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    has_where: &mut bool,
+    exclude_unknown_model_or_provider: bool,
+) {
+    if !exclude_unknown_model_or_provider {
+        return;
+    }
+
+    push_postgres_usage_where(builder, has_where);
+    builder.push(
+        "(lower(BTRIM(COALESCE(\"usage\".model, ''))) NOT IN ('unknown', 'unknow') \
+AND lower(BTRIM(COALESCE(\"usage\".provider_name, ''))) NOT IN ('unknown', 'unknow'))",
+    );
+}
+
 const USAGE_PROVIDER_IDENTITY_FILTER_SQL: &str = r#" AND (
       (
         BTRIM(COALESCE("usage".provider_id, '')) <> ''
@@ -2370,6 +2409,21 @@ ORDER BY request_count DESC, "usage".provider_name ASC
         }
     }
 
+    pub async fn find_by_request_id_shallow(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
+        let sql = shallow_usage_body_projection_sql(FIND_BY_REQUEST_ID_SQL);
+        let row = sqlx::query(&sql)
+            .bind(request_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_postgres_err()?;
+        row.as_ref()
+            .map(|row| map_usage_row(row, false))
+            .transpose()
+    }
+
     pub async fn find_by_id(
         &self,
         id: &str,
@@ -2529,6 +2583,7 @@ ORDER BY request_count DESC, "usage".provider_name ASC
         }
         if let Some(user_id) = query.user_id.as_deref() {
             builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
             builder
                 .push("\"usage\".user_id = ")
                 .push_bind(user_id.to_string());
@@ -2554,6 +2609,16 @@ ORDER BY request_count DESC, "usage".provider_name ASC
                 .push("\"usage\".api_format = ")
                 .push_bind(api_format.to_string());
         }
+        push_postgres_usage_client_family_filter(
+            &mut builder,
+            &mut has_where,
+            query.client_family.as_deref(),
+        );
+        push_postgres_usage_exclude_unknown_filter(
+            &mut builder,
+            &mut has_where,
+            query.exclude_unknown_model_or_provider,
+        );
         if let Some(statuses) = query.statuses.as_deref() {
             if !statuses.is_empty() {
                 builder.push(if has_where { " AND " } else { " WHERE " });
@@ -2625,6 +2690,7 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
         }
         if let Some(user_id) = query.user_id.as_deref() {
             builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
             builder
                 .push("\"usage\".user_id = ")
                 .push_bind(user_id.to_string());
@@ -2650,6 +2716,16 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
                 .push("\"usage\".api_format = ")
                 .push_bind(api_format.to_string());
         }
+        push_postgres_usage_client_family_filter(
+            &mut builder,
+            &mut has_where,
+            query.client_family.as_deref(),
+        );
+        push_postgres_usage_exclude_unknown_filter(
+            &mut builder,
+            &mut has_where,
+            query.exclude_unknown_model_or_provider,
+        );
         if let Some(statuses) = query.statuses.as_deref() {
             if !statuses.is_empty() {
                 builder.push(if has_where { " AND " } else { " WHERE " });
@@ -2828,6 +2904,16 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
                 .push("\"usage\".api_format = ")
                 .push_bind(api_format.to_string());
         }
+        push_postgres_usage_client_family_filter(
+            &mut builder,
+            &mut has_where,
+            query.client_family.as_deref(),
+        );
+        push_postgres_usage_exclude_unknown_filter(
+            &mut builder,
+            &mut has_where,
+            query.exclude_unknown_model_or_provider,
+        );
         if let Some(statuses) = query.statuses.as_deref() {
             if !statuses.is_empty() {
                 builder.push(if has_where { " AND " } else { " WHERE " });
@@ -2914,6 +3000,16 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
                 .push("\"usage\".api_format = ")
                 .push_bind(api_format.to_string());
         }
+        push_postgres_usage_client_family_filter(
+            &mut builder,
+            &mut has_where,
+            query.client_family.as_deref(),
+        );
+        push_postgres_usage_exclude_unknown_filter(
+            &mut builder,
+            &mut has_where,
+            query.exclude_unknown_model_or_provider,
+        );
         if let Some(statuses) = query.statuses.as_deref() {
             if !statuses.is_empty() {
                 builder.push(if has_where { " AND " } else { " WHERE " });
@@ -8035,6 +8131,12 @@ ORDER BY "usage".user_id ASC
                         .bind(&request_metadata_json)
                         .bind(usage.finalized_at_unix_secs.map(|value| value as f64))
                         .bind(usage.created_at_unix_ms.map(|value| value as f64))
+                        .bind(i64::try_from(usage.updated_at_unix_secs).map_err(|_| {
+                            DataLayerError::InvalidInput(format!(
+                                "usage.updated_at_unix_secs out of range: {}",
+                                usage.updated_at_unix_secs
+                            ))
+                        })?)
                         .bind(request_body_storage.has_detached_blob())
                         .bind(provider_request_body_storage.has_detached_blob())
                         .bind(response_body_storage.has_detached_blob())
@@ -8783,6 +8885,13 @@ impl UsageReadRepository for SqlxUsageReadRepository {
         request_id: &str,
     ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
         Self::find_by_request_id(self, request_id).await
+    }
+
+    async fn find_by_request_id_shallow(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
+        Self::find_by_request_id_shallow(self, request_id).await
     }
 
     async fn resolve_body_ref(&self, body_ref: &str) -> Result<Option<Value>, DataLayerError> {
@@ -10073,6 +10182,43 @@ fn map_usage_row(
         &settlement_pricing_snapshot,
     );
     Ok(usage)
+}
+
+fn shallow_usage_body_projection_sql(sql: &str) -> String {
+    let replacements = [
+        ("\"usage\".request_body,", "NULL::json AS request_body,"),
+        (
+            "\"usage\".request_body_compressed,",
+            "CASE WHEN \"usage\".request_body_compressed IS NULL THEN NULL ELSE ''::bytea END AS request_body_compressed,",
+        ),
+        (
+            "\"usage\".provider_request_body,",
+            "NULL::json AS provider_request_body,",
+        ),
+        (
+            "\"usage\".provider_request_body_compressed,",
+            "CASE WHEN \"usage\".provider_request_body_compressed IS NULL THEN NULL ELSE ''::bytea END AS provider_request_body_compressed,",
+        ),
+        ("\"usage\".response_body,", "NULL::json AS response_body,"),
+        (
+            "\"usage\".response_body_compressed,",
+            "CASE WHEN \"usage\".response_body_compressed IS NULL THEN NULL ELSE ''::bytea END AS response_body_compressed,",
+        ),
+        (
+            "\"usage\".client_response_body,",
+            "NULL::json AS client_response_body,",
+        ),
+        (
+            "\"usage\".client_response_body_compressed,",
+            "CASE WHEN \"usage\".client_response_body_compressed IS NULL THEN NULL ELSE ''::bytea END AS client_response_body_compressed,",
+        ),
+    ];
+
+    replacements
+        .into_iter()
+        .fold(sql.to_string(), |current, (from, to)| {
+            current.replace(from, to)
+        })
 }
 
 fn to_i32(value: u64) -> Result<i32, DataLayerError> {

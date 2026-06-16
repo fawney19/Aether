@@ -112,7 +112,6 @@ fn auth_repository_with_redaction_feature_settings() -> Arc<InMemoryAuthApiKeySn
             Some(json!({
                 "chat_pii_redaction": {
                     "enabled": true,
-                    "inject_model_instruction": true,
                 }
             })),
         )]),

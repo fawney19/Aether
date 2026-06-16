@@ -948,10 +948,29 @@ pub fn codex_build_invalid_state(
 
 pub fn codex_looks_like_token_invalidated(message: Option<&str>) -> bool {
     let lowered = message.unwrap_or_default().trim().to_ascii_lowercase();
-    lowered.contains("token invalid")
+    lowered.contains("token_invalidated")
+        || lowered.contains("authentication token has been invalidated")
+        || lowered.contains("token has been invalidated")
         || lowered.contains("token invalidated")
-        || lowered.contains("session has expired")
+        || lowered.contains("invalidated")
+        || lowered.contains("revoked")
+        || lowered.contains("已撤销")
+        || lowered.contains("被撤销")
+        || lowered.contains("撤销")
+        || lowered.contains("作废")
+}
+
+pub fn codex_looks_like_token_expired(message: Option<&str>) -> bool {
+    let lowered = message.unwrap_or_default().trim().to_ascii_lowercase();
+    lowered.contains("session has expired")
         || lowered.contains("session expired")
+        || lowered.contains("access token expired")
+        || lowered.contains("expired access token")
+        || lowered.contains("token has expired")
+        || lowered.contains("token expired")
+        || lowered.contains("security token included in the request is expired")
+        || lowered.contains("已过期")
+        || lowered.contains("过期")
 }
 
 fn codex_looks_like_account_deactivated(message: Option<&str>) -> bool {
@@ -980,7 +999,15 @@ pub fn codex_structured_invalid_reason(status_code: u16, upstream_message: Optio
     }
     if codex_looks_like_token_invalidated(Some(message)) {
         let detail = if message.is_empty() {
-            "Codex Token 无效或已过期"
+            "Codex Token 已失效"
+        } else {
+            message
+        };
+        return format!("{OAUTH_EXPIRED_PREFIX}{detail}");
+    }
+    if codex_looks_like_token_expired(Some(message)) {
+        let detail = if message.is_empty() {
+            "Codex Token 已过期"
         } else {
             message
         };
@@ -988,7 +1015,7 @@ pub fn codex_structured_invalid_reason(status_code: u16, upstream_message: Optio
     }
     if status_code == 401 {
         let detail = if message.is_empty() {
-            "Codex Token 无效或已过期 (401)"
+            "Codex Token 已过期 (401)"
         } else {
             message
         };
@@ -1021,6 +1048,7 @@ pub fn codex_runtime_invalid_reason(
         401 => Some(codex_structured_invalid_reason(401, upstream_message)),
         402 => Some(codex_structured_invalid_reason(402, upstream_message)),
         403 if codex_looks_like_token_invalidated(upstream_message)
+            || codex_looks_like_token_expired(upstream_message)
             || codex_looks_like_account_deactivated(upstream_message) =>
         {
             Some(codex_structured_invalid_reason(403, upstream_message))
@@ -1848,9 +1876,16 @@ mod tests {
     }
 
     #[test]
-    fn auto_remove_structured_reason_keeps_oauth_expired_token_invalid() {
-        assert!(!should_auto_remove_structured_reason(Some(
+    fn auto_remove_structured_reason_removes_oauth_token_invalidated() {
+        assert!(should_auto_remove_structured_reason(Some(
             "[OAUTH_EXPIRED] token invalidated"
+        )));
+    }
+
+    #[test]
+    fn auto_remove_structured_reason_keeps_oauth_token_expired() {
+        assert!(!should_auto_remove_structured_reason(Some(
+            "[OAUTH_EXPIRED] session expired"
         )));
     }
 
@@ -1945,7 +1980,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_token_invalid_is_not_auto_remove_proof_by_itself() {
+    fn oauth_token_invalid_is_auto_remove_proof_by_itself() {
         let mut key = StoredProviderCatalogKey::new(
             "key-1".to_string(),
             "provider-1".to_string(),
@@ -1958,7 +1993,7 @@ mod tests {
         key.expires_at_unix_secs = Some(1_000);
         key.oauth_invalid_reason = Some("oauth_token_invalid".to_string());
 
-        assert!(!super::should_auto_remove_oauth_invalid_key(
+        assert!(super::should_auto_remove_oauth_invalid_key(
             &key,
             Some("oauth_token_invalid"),
             false,

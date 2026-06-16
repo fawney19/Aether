@@ -1703,6 +1703,52 @@ async fn gateway_submits_admin_provider_delete_task_locally_with_trusted_admin_p
     upstream_handle.abort();
 }
 
+#[test]
+fn provider_delete_task_reservation_reuses_active_provider_task() {
+    let state = AppState::new().expect("gateway should build");
+    let first = crate::LocalProviderDeleteTaskState {
+        task_id: "task-first".to_string(),
+        provider_id: "provider-openai".to_string(),
+        status: "pending".to_string(),
+        stage: "queued".to_string(),
+        total_keys: 0,
+        deleted_keys: 0,
+        total_endpoints: 0,
+        deleted_endpoints: 0,
+        message: "delete task submitted".to_string(),
+    };
+    let second = crate::LocalProviderDeleteTaskState {
+        task_id: "task-second".to_string(),
+        provider_id: "provider-openai".to_string(),
+        status: "pending".to_string(),
+        stage: "queued".to_string(),
+        total_keys: 0,
+        deleted_keys: 0,
+        total_endpoints: 0,
+        deleted_endpoints: 0,
+        message: "delete task submitted".to_string(),
+    };
+
+    assert_eq!(
+        state.reserve_provider_delete_task(first.clone()).task_id,
+        "task-first"
+    );
+    assert_eq!(
+        state.reserve_provider_delete_task(second.clone()).task_id,
+        "task-first"
+    );
+
+    state.put_provider_delete_task(crate::LocalProviderDeleteTaskState {
+        status: "completed".to_string(),
+        stage: "completed".to_string(),
+        ..first
+    });
+    assert_eq!(
+        state.reserve_provider_delete_task(second).task_id,
+        "task-second"
+    );
+}
+
 #[tokio::test]
 async fn local_admin_provider_delete_task_status_attaches_audit_only_for_terminal_states() {
     let mut completed_state = AppState::new().expect("gateway should build");

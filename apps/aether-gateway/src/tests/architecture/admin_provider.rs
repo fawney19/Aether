@@ -118,6 +118,48 @@ fn admin_provider_oauth_complete_dispatch_remains_thin() {
 }
 
 #[test]
+fn postgres_provider_cleanup_preserves_usage_history() {
+    let postgres_provider_catalog =
+        read_workspace_file("crates/aether-data/src/repository/provider_catalog/postgres.rs");
+
+    for forbidden in [
+        "UPDATE usage SET provider_id = NULL",
+        "UPDATE usage SET provider_endpoint_id = NULL",
+        "UPDATE usage SET provider_api_key_id = NULL",
+    ] {
+        assert!(
+            !postgres_provider_catalog.contains(forbidden),
+            "provider cleanup must not rewrite usage history with {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn provider_cleanup_keeps_common_backends_in_sync() {
+    for path in [
+        "crates/aether-data/src/repository/provider_catalog/postgres.rs",
+        "crates/aether-data/src/repository/provider_catalog/mysql.rs",
+        "crates/aether-data/src/repository/provider_catalog/sqlite.rs",
+    ] {
+        let source = read_workspace_file(path);
+        for required in [
+            "UPDATE user_preferences SET default_provider_id = NULL WHERE default_provider_id =",
+            "UPDATE video_tasks SET provider_id = NULL WHERE provider_id =",
+            "DELETE FROM request_candidates WHERE provider_id =",
+            "UPDATE video_tasks SET endpoint_id = NULL WHERE endpoint_id =",
+            "DELETE FROM request_candidates WHERE endpoint_id =",
+            "DELETE FROM gemini_file_mappings WHERE key_id =",
+            "UPDATE video_tasks SET key_id = NULL WHERE key_id =",
+        ] {
+            assert!(
+                source.contains(required),
+                "{path} should keep provider cleanup behavior in sync with {required}"
+            );
+        }
+    }
+}
+
+#[test]
 fn admin_provider_oauth_complete_helpers_are_split() {
     let complete_mod = read_workspace_file(
         "apps/aether-gateway/src/handlers/admin/provider/oauth/dispatch/complete/mod.rs",

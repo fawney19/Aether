@@ -234,6 +234,12 @@ export interface RequestDetail {
   has_provider_request_body?: boolean
   has_response_body?: boolean
   has_client_response_body?: boolean
+  body_load_errors?: {
+    request_body?: boolean
+    provider_request_body?: boolean
+    response_body?: boolean
+    client_response_body?: boolean
+  } | null
   metadata?: Record<string, unknown>
   routing?: Record<string, unknown>
   body_capture?: Record<string, unknown>

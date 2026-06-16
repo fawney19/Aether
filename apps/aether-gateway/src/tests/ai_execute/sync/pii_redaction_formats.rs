@@ -498,8 +498,7 @@ fn auth_repository(case: &RedactionFormatCase) -> Arc<InMemoryAuthApiKeySnapshot
             key_hash,
             Some(json!({
                 "chat_pii_redaction": {
-                    "enabled": true,
-                    "inject_model_instruction": true
+                    "enabled": true
                 }
             })),
         )]),

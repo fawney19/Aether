@@ -2,6 +2,51 @@ use serde_json::{Map, Value};
 
 use crate::formats::shared::model_directives::ReasoningEffort;
 
+macro_rules! define_openai_reasoning_effort {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum $name {
+            None,
+            Minimal,
+            Low,
+            Medium,
+            High,
+            XHigh,
+        }
+
+        impl $name {
+            pub fn parse(value: &str) -> Option<Self> {
+                match value.trim().to_ascii_lowercase().as_str() {
+                    "none" => Some(Self::None),
+                    "minimal" => Some(Self::Minimal),
+                    "low" => Some(Self::Low),
+                    "medium" => Some(Self::Medium),
+                    "high" => Some(Self::High),
+                    "xhigh" => Some(Self::XHigh),
+                    _ => None,
+                }
+            }
+
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    Self::None => "none",
+                    Self::Minimal => "minimal",
+                    Self::Low => "low",
+                    Self::Medium => "medium",
+                    Self::High => "high",
+                    Self::XHigh => "xhigh",
+                }
+            }
+        }
+    };
+}
+
+define_openai_reasoning_effort!(OpenAiChatReasoningEffort);
+define_openai_reasoning_effort!(OpenAiResponsesReasoningEffort);
+
+#[deprecated(note = "use OpenAiChatReasoningEffort or OpenAiResponsesReasoningEffort")]
+pub type OpenAiReasoningEffort = OpenAiChatReasoningEffort;
+
 pub fn parse_openai_stop_sequences(stop: Option<&Value>) -> Option<Vec<Value>> {
     match stop {
         Some(Value::String(value)) if !value.trim().is_empty() => {

@@ -25,27 +25,8 @@ pub(crate) struct LocalFailoverRegexRule {
 pub(crate) async fn resolve_local_failover_policy(
     state: &AppState,
     plan: &ExecutionPlan,
-    report_context: Option<&serde_json::Value>,
+    _report_context: Option<&serde_json::Value>,
 ) -> LocalFailoverPolicy {
-    if let Some(policy) = local_failover_policy_from_report_context(report_context) {
-        debug!(
-            event_name = "local_failover_policy_loaded",
-            log_type = "debug",
-            request_id = %plan.request_id,
-            provider_id = %plan.provider_id,
-            endpoint_id = %plan.endpoint_id,
-            key_id = %plan.key_id,
-            source = "report_context",
-            max_retries = ?policy.max_retries,
-            stop_status_code_count = policy.stop_status_codes.len(),
-            continue_status_code_count = policy.continue_status_codes.len(),
-            success_failover_pattern_count = policy.success_failover_patterns.len(),
-            error_stop_pattern_count = policy.error_stop_patterns.len(),
-            "gateway loaded local failover policy from report context"
-        );
-        return policy;
-    }
-
     let transport = match state
         .read_provider_transport_snapshot(&plan.provider_id, &plan.endpoint_id, &plan.key_id)
         .await
@@ -201,31 +182,39 @@ fn parse_regex_rules(
     rules: &serde_json::Map<String, serde_json::Value>,
     key: &str,
 ) -> Vec<LocalFailoverRegexRule> {
+    let allow_status_only = key == "error_stop_patterns";
     rules
         .get(key)
         .and_then(Value::as_array)
         .into_iter()
         .flat_map(|items| items.iter())
-        .filter_map(parse_regex_rule)
+        .filter_map(|value| parse_regex_rule(value, allow_status_only))
         .collect()
 }
 
-fn parse_regex_rule(value: &serde_json::Value) -> Option<LocalFailoverRegexRule> {
+fn parse_regex_rule(
+    value: &serde_json::Value,
+    allow_status_only: bool,
+) -> Option<LocalFailoverRegexRule> {
     let object = value.as_object()?;
     let pattern = object
         .get("pattern")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())?;
+        .unwrap_or_default();
+    let status_codes: BTreeSet<u16> = object
+        .get("status_codes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|values| values.iter())
+        .filter_map(|value| parse_u64_value(value).and_then(|value| u16::try_from(value).ok()))
+        .collect();
+    if pattern.is_empty() && (!allow_status_only || status_codes.is_empty()) {
+        return None;
+    }
     Some(LocalFailoverRegexRule {
         pattern: pattern.to_string(),
-        status_codes: object
-            .get("status_codes")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flat_map(|values| values.iter())
-            .filter_map(|value| parse_u64_value(value).and_then(|value| u16::try_from(value).ok()))
-            .collect(),
+        status_codes,
     })
 }
 

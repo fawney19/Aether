@@ -310,10 +310,60 @@ WHERE id = ?
     pub async fn cleanup_deleted_provider_refs(
         &self,
         provider_id: &str,
-        _endpoint_ids: &[String],
-        _key_ids: &[String],
+        provider_deleted: bool,
+        endpoint_ids: &[String],
+        key_ids: &[String],
     ) -> Result<(), DataLayerError> {
         validate_non_empty(provider_id, "provider catalog provider_id")?;
+        let mut tx = self.pool.begin().await.map_sql_err()?;
+
+        if provider_deleted {
+            sqlx::query(
+                "UPDATE user_preferences SET default_provider_id = NULL WHERE default_provider_id = ?",
+            )
+            .bind(provider_id)
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+            sqlx::query("UPDATE video_tasks SET provider_id = NULL WHERE provider_id = ?")
+                .bind(provider_id)
+                .execute(&mut *tx)
+                .await
+                .map_sql_err()?;
+            sqlx::query("DELETE FROM request_candidates WHERE provider_id = ?")
+                .bind(provider_id)
+                .execute(&mut *tx)
+                .await
+                .map_sql_err()?;
+        }
+
+        for endpoint_id in endpoint_ids {
+            sqlx::query("UPDATE video_tasks SET endpoint_id = NULL WHERE endpoint_id = ?")
+                .bind(endpoint_id)
+                .execute(&mut *tx)
+                .await
+                .map_sql_err()?;
+            sqlx::query("DELETE FROM request_candidates WHERE endpoint_id = ?")
+                .bind(endpoint_id)
+                .execute(&mut *tx)
+                .await
+                .map_sql_err()?;
+        }
+
+        for key_id in key_ids {
+            sqlx::query("DELETE FROM gemini_file_mappings WHERE key_id = ?")
+                .bind(key_id)
+                .execute(&mut *tx)
+                .await
+                .map_sql_err()?;
+            sqlx::query("UPDATE video_tasks SET key_id = NULL WHERE key_id = ?")
+                .bind(key_id)
+                .execute(&mut *tx)
+                .await
+                .map_sql_err()?;
+        }
+
+        tx.commit().await.map_sql_err()?;
         Ok(())
     }
 
@@ -990,10 +1040,18 @@ impl ProviderCatalogWriteRepository for MysqlProviderCatalogReadRepository {
     async fn cleanup_deleted_provider_refs(
         &self,
         provider_id: &str,
+        provider_deleted: bool,
         endpoint_ids: &[String],
         key_ids: &[String],
     ) -> Result<(), DataLayerError> {
-        Self::cleanup_deleted_provider_refs(self, provider_id, endpoint_ids, key_ids).await
+        Self::cleanup_deleted_provider_refs(
+            self,
+            provider_id,
+            provider_deleted,
+            endpoint_ids,
+            key_ids,
+        )
+        .await
     }
 
     async fn create_endpoint(

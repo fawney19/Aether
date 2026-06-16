@@ -56,6 +56,16 @@ fn unix_secs_to_rfc3339(unix_secs: u64) -> Option<String> {
     Some(timestamp.to_rfc3339())
 }
 
+fn admin_usage_response_time_updated_at(item: &StoredRequestUsageAudit) -> Option<String> {
+    item.response_time_ms?;
+    if matches!(item.status.as_str(), "pending" | "streaming")
+        && item.updated_at_unix_secs <= item.created_at_unix_ms
+    {
+        return None;
+    }
+    unix_secs_to_rfc3339(item.updated_at_unix_secs)
+}
+
 pub fn admin_usage_parse_limit(query: Option<&str>) -> Result<usize, String> {
     match query_param_value(query, "limit") {
         None => Ok(100),
@@ -1196,6 +1206,8 @@ fn admin_usage_active_request_json(
         "actual_cost": round_to(item.actual_total_cost_usd, 6),
         "response_time_ms": item.response_time_ms,
         "first_byte_time_ms": item.first_byte_time_ms,
+        "updated_at": unix_secs_to_rfc3339(item.updated_at_unix_secs),
+        "response_time_updated_at": admin_usage_response_time_updated_at(item),
         "status_code": item.status_code,
         "error_message": item.error_message,
         "provider": item.provider_name,
@@ -2259,6 +2271,7 @@ pub fn build_admin_usage_active_requests_response(
     auth_api_key_reader_available: bool,
     provider_key_names: &BTreeMap<String, String>,
     image_progress_by_request_id: &BTreeMap<String, Value>,
+    state_overrides_by_request_id: &BTreeMap<String, Value>,
 ) -> Response<Body> {
     let payload: Vec<_> = items
         .iter()
@@ -2266,12 +2279,23 @@ pub fn build_admin_usage_active_requests_response(
             let provider_key_name = admin_usage_provider_key_name(item, provider_key_names);
             let api_key_name =
                 admin_usage_api_key_name(item, api_key_names, auth_api_key_reader_available);
-            admin_usage_active_request_json(
+            let mut payload = admin_usage_active_request_json(
                 item,
                 api_key_name,
                 provider_key_name,
                 image_progress_by_request_id.get(&item.request_id),
-            )
+            );
+            if let (Some(payload), Some(overrides)) = (
+                payload.as_object_mut(),
+                state_overrides_by_request_id
+                    .get(&item.request_id)
+                    .and_then(Value::as_object),
+            ) {
+                for (key, value) in overrides {
+                    payload.insert(key.clone(), value.clone());
+                }
+            }
+            payload
         })
         .collect();
 

@@ -5,6 +5,10 @@ use crate::formats::context::FormatContext;
 use crate::formats::openai::embedding::request::mapped_embedding_model;
 use crate::protocol::canonical::{namespace_extension_object, CanonicalRequest};
 
+pub fn from(body: &Value, _ctx: &FormatContext) -> Option<CanonicalRequest> {
+    crate::formats::openai::embedding::request::from_namespace(body, "doubao")
+}
+
 pub fn to(request: &CanonicalRequest, ctx: &FormatContext) -> Option<Value> {
     let embedding = request.embedding.as_ref()?;
     let items = embedding.input.as_string_items()?;

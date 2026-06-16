@@ -29,7 +29,6 @@ impl<'a> ProviderRequestRedaction<'a> {
 #[derive(Clone, Copy, Debug, Default)]
 struct ChatPiiRedactionFeatureSettings {
     enabled: Option<bool>,
-    inject_model_instruction: Option<bool>,
 }
 
 impl ChatPiiRedactionFeatureSettings {
@@ -44,20 +43,10 @@ impl ChatPiiRedactionFeatureSettings {
         if let Some(enabled) = settings.get("enabled").and_then(Value::as_bool) {
             self.enabled = Some(enabled);
         }
-        if let Some(inject_model_instruction) = settings
-            .get("inject_model_instruction")
-            .and_then(Value::as_bool)
-        {
-            self.inject_model_instruction = Some(inject_model_instruction);
-        }
     }
 
     fn effective_enabled(self) -> bool {
         self.enabled.unwrap_or(false)
-    }
-
-    fn effective_inject_model_instruction(self) -> bool {
-        self.inject_model_instruction.unwrap_or(true)
     }
 }
 
@@ -122,7 +111,7 @@ pub(crate) async fn resolve_provider_chat_pii_redaction<'a>(
         &body_bytes,
         format,
         build_redaction_session_config(hmac_key, &runtime_config, now_unix_secs),
-        MaskChatRequestOptions::runtime(feature_settings.effective_inject_model_instruction()),
+        MaskChatRequestOptions::runtime(),
         Some(&cache),
     )
     .await
@@ -188,5 +177,24 @@ fn redaction_mask_error_to_gateway_error(error: RedactionMaskError) -> GatewayEr
             status: limit.client_status(),
             message: limit.safe_message().to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::ChatPiiRedactionFeatureSettings;
+
+    #[test]
+    fn chat_pii_redaction_feature_settings_only_control_enablement() {
+        let mut settings = ChatPiiRedactionFeatureSettings::default();
+        settings.merge_from_value(Some(&json!({
+            "chat_pii_redaction": {
+                "enabled": true
+            }
+        })));
+
+        assert!(settings.effective_enabled());
     }
 }

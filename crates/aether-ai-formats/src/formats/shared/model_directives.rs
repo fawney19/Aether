@@ -14,6 +14,8 @@ pub enum ModelOverride {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningEffort {
+    None,
+    Minimal,
     Low,
     Medium,
     High,
@@ -24,6 +26,8 @@ pub enum ReasoningEffort {
 impl ReasoningEffort {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "minimal" => Some(Self::Minimal),
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
@@ -35,6 +39,8 @@ impl ReasoningEffort {
 
     pub fn as_openai_chat_value(self) -> &'static str {
         match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
@@ -44,6 +50,8 @@ impl ReasoningEffort {
 
     pub fn as_openai_responses_value(self) -> &'static str {
         match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
@@ -53,6 +61,7 @@ impl ReasoningEffort {
 
     pub fn as_claude_output_value(self) -> &'static str {
         match self {
+            Self::None | Self::Minimal => "low",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
@@ -63,7 +72,7 @@ impl ReasoningEffort {
 
     pub fn as_gemini_level_value(self) -> &'static str {
         match self {
-            Self::Low => "low",
+            Self::None | Self::Minimal | Self::Low => "low",
             Self::Medium => "medium",
             Self::High | Self::XHigh | Self::Max => "high",
         }
@@ -71,6 +80,8 @@ impl ReasoningEffort {
 
     pub fn thinking_budget_tokens(self) -> u64 {
         match self {
+            Self::None => 0,
+            Self::Minimal => 512,
             Self::Low => 1280,
             Self::Medium => 2048,
             Self::High => 4096,

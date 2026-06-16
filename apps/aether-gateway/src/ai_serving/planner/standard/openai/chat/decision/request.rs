@@ -25,6 +25,7 @@ use crate::ai_serving::planner::standard::{
     apply_deepseek_tool_call_thinking_compat, build_cross_format_openai_chat_request_body,
     build_cross_format_openai_chat_upstream_url, build_local_openai_chat_request_body,
     build_local_openai_chat_upstream_url, request_body_build_failure_extra_data,
+    request_conversion_failure_extra_data,
 };
 use crate::ai_serving::transport::auth::resolve_local_openai_bearer_auth;
 use crate::ai_serving::transport::kiro::{
@@ -601,10 +602,14 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             candidate_index,
             candidate_id,
             "provider_request_body_build_failed",
-            request_body_build_failure_extra_data(
+            request_conversion_failure_extra_data(
                 body_json,
                 "openai:chat",
                 provider_api_format.as_str(),
+                Some(prepared_candidate.mapped_model.as_str()),
+                Some(parts.uri.path()),
+                upstream_is_stream,
+                "openai_chat_request_conversion",
             ),
         )
         .await;
@@ -1051,6 +1056,7 @@ async fn resolve_openai_chat_to_openai_image_payload_parts(
             headers: &parts.headers,
             auth_header: &prepared_candidate.auth_header,
             auth_value: &prepared_candidate.auth_value,
+            accept: "text/event-stream",
             header_rules: transport.endpoint.header_rules.as_ref(),
             provider_request_body: &provider_request_body,
             original_request_body: body_json,

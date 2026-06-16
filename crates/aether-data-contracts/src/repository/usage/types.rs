@@ -730,6 +730,8 @@ pub struct UsageAuditListQuery {
     pub provider_name: Option<String>,
     pub model: Option<String>,
     pub api_format: Option<String>,
+    pub client_family: Option<String>,
+    pub exclude_unknown_model_or_provider: bool,
     pub statuses: Option<Vec<String>>,
     pub is_stream: Option<bool>,
     pub error_only: bool,
@@ -746,6 +748,8 @@ pub struct UsageAuditKeywordSearchQuery {
     pub provider_name: Option<String>,
     pub model: Option<String>,
     pub api_format: Option<String>,
+    pub client_family: Option<String>,
+    pub exclude_unknown_model_or_provider: bool,
     pub statuses: Option<Vec<String>>,
     pub is_stream: Option<bool>,
     pub error_only: bool,
@@ -1444,6 +1448,13 @@ pub trait UsageReadRepository: Send + Sync {
         &self,
         request_id: &str,
     ) -> Result<Option<StoredRequestUsageAudit>, crate::DataLayerError>;
+
+    async fn find_by_request_id_shallow(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<StoredRequestUsageAudit>, crate::DataLayerError> {
+        self.find_by_request_id(request_id).await
+    }
 
     async fn resolve_body_ref(
         &self,

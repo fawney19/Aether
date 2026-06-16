@@ -6,7 +6,10 @@ pub mod formats;
 pub mod protocol;
 pub mod provider_compat;
 
-pub use formats::context::{FormatContext, FormatError};
+pub use formats::context::{
+    ConversionFieldRecord, ConversionFieldStatus, ConversionReport, Converted, FormatContext,
+    FormatError,
+};
 pub use formats::id::{
     api_format_alias_matches, api_format_storage_aliases, api_format_uses_body_stream_field,
     is_openai_responses_compact_format, is_openai_responses_family_format,
@@ -19,7 +22,11 @@ pub use formats::matrix::{
     sync_cli_response_conversion_kind, RequestConversionKind, SyncChatResponseConversionKind,
     SyncCliResponseConversionKind,
 };
-pub use formats::registry::{build_stream_transcoder, convert_request, convert_response};
+pub use formats::registry::{
+    build_stream_transcoder, convert_request, convert_request_pure,
+    convert_request_pure_with_context, convert_response, convert_response_pure, emit_request_pure,
+    emit_response_pure, parse_request_pure, parse_response_pure,
+};
 pub use formats::shared::model_directives::{
     apply_model_directive_mapping_patch, apply_model_directive_overrides_from_model,
     apply_model_directive_overrides_from_request, claude_model_uses_adaptive_effort,

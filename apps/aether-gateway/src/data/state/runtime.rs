@@ -1124,6 +1124,16 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn find_request_usage_by_request_id_shallow(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
+        match &self.usage_reader {
+            Some(repository) => repository.find_by_request_id_shallow(request_id).await,
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn find_request_usage_by_id(
         &self,
         usage_id: &str,
@@ -1956,6 +1966,14 @@ impl GatewayDataState {
         request_id: &str,
     ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
         self.find_request_usage_by_request_id(request_id).await
+    }
+
+    pub(crate) async fn read_request_usage_audit_shallow(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
+        self.find_request_usage_by_request_id_shallow(request_id)
+            .await
     }
 
     pub(crate) async fn read_request_audit_bundle(

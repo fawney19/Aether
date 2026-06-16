@@ -89,7 +89,7 @@ async fn resolve_admin_monitoring_trace(
     {
         let usage = app
             .data
-            .read_request_usage_audit(request_id)
+            .read_request_usage_audit_shallow(request_id)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         return Ok(Some(ResolvedAdminMonitoringTrace { trace, usage }));
@@ -98,7 +98,7 @@ async fn resolve_admin_monitoring_trace(
     let mut usage_candidates = Vec::new();
     if let Some(usage) = app
         .data
-        .read_request_usage_audit(request_id)
+        .read_request_usage_audit_shallow(request_id)
         .await
         .map_err(|err| GatewayError::Internal(err.to_string()))?
     {

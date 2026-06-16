@@ -260,7 +260,7 @@ impl<'a> AdminAppState<'a> {
                 affected += 1;
             }
         }
-        self.cleanup_deleted_provider_catalog_refs(&provider.id, &[], &deleted_key_ids)
+        self.cleanup_deleted_provider_catalog_refs(&provider.id, false, &[], &deleted_key_ids)
             .await?;
 
         Ok(affected)
@@ -295,7 +295,7 @@ impl<'a> AdminAppState<'a> {
         let deleted = self.delete_provider_catalog_key(&key.id).await?;
         if deleted {
             let deleted_key_ids = [key.id.clone()];
-            self.cleanup_deleted_provider_catalog_refs(&provider.id, &[], &deleted_key_ids)
+            self.cleanup_deleted_provider_catalog_refs(&provider.id, false, &[], &deleted_key_ids)
                 .await?;
         }
         Ok(deleted)
@@ -356,7 +356,7 @@ impl<'a> AdminAppState<'a> {
                     affected = affected.saturating_add(1);
                 }
             }
-            self.cleanup_deleted_provider_catalog_refs(&provider.id, &[], &deleted_key_ids)
+            self.cleanup_deleted_provider_catalog_refs(&provider.id, false, &[], &deleted_key_ids)
                 .await?;
 
             return Ok(Json(

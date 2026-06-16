@@ -56,7 +56,8 @@ INSERT INTO "usage" (
   client_response_body_compressed,
   request_metadata,
   finalized_at,
-  created_at
+  created_at,
+  updated_at_unix_secs
 ) VALUES (
   $1,
   $2,
@@ -144,7 +145,11 @@ INSERT INTO "usage" (
     WHEN $54 IS NULL THEN NULL
     ELSE TO_TIMESTAMP($54::double precision)
   END,
-  COALESCE(TO_TIMESTAMP($55::double precision), NOW())
+  COALESCE(TO_TIMESTAMP($55::double precision), NOW()),
+  COALESCE(
+    NULLIF($56::bigint, 0),
+    CAST(EXTRACT(EPOCH FROM COALESCE(TO_TIMESTAMP($55::double precision), NOW())) AS BIGINT)
+  )
 )
 ON CONFLICT (request_id)
 DO UPDATE SET
@@ -218,42 +223,49 @@ DO UPDATE SET
   billing_status = CASE WHEN "usage".billing_status = 'pending' THEN EXCLUDED.billing_status ELSE "usage".billing_status END,
   request_headers = NULL,
   request_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.request_body_compressed IS NOT NULL OR $56 THEN NULL
+    WHEN EXCLUDED.request_body_compressed IS NOT NULL OR $57 THEN NULL
     ELSE COALESCE(EXCLUDED.request_body, "usage".request_body)
   END ELSE "usage".request_body END,
   request_body_compressed = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.request_body IS NOT NULL OR $56 THEN NULL
+    WHEN EXCLUDED.request_body IS NOT NULL OR $57 THEN NULL
     ELSE COALESCE(EXCLUDED.request_body_compressed, "usage".request_body_compressed)
   END ELSE "usage".request_body_compressed END,
   provider_request_headers = NULL,
   provider_request_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.provider_request_body_compressed IS NOT NULL OR $57 THEN NULL
+    WHEN EXCLUDED.provider_request_body_compressed IS NOT NULL OR $58 THEN NULL
     ELSE COALESCE(EXCLUDED.provider_request_body, "usage".provider_request_body)
   END ELSE "usage".provider_request_body END,
   provider_request_body_compressed = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.provider_request_body IS NOT NULL OR $57 THEN NULL
+    WHEN EXCLUDED.provider_request_body IS NOT NULL OR $58 THEN NULL
     ELSE COALESCE(EXCLUDED.provider_request_body_compressed, "usage".provider_request_body_compressed)
   END ELSE "usage".provider_request_body_compressed END,
   response_headers = NULL,
   response_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.response_body_compressed IS NOT NULL OR $58 THEN NULL
+    WHEN EXCLUDED.response_body_compressed IS NOT NULL OR $59 THEN NULL
     ELSE COALESCE(EXCLUDED.response_body, "usage".response_body)
   END ELSE "usage".response_body END,
   response_body_compressed = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.response_body IS NOT NULL OR $58 THEN NULL
+    WHEN EXCLUDED.response_body IS NOT NULL OR $59 THEN NULL
     ELSE COALESCE(EXCLUDED.response_body_compressed, "usage".response_body_compressed)
   END ELSE "usage".response_body_compressed END,
   client_response_headers = NULL,
   client_response_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.client_response_body_compressed IS NOT NULL OR $59 THEN NULL
+    WHEN EXCLUDED.client_response_body_compressed IS NOT NULL OR $60 THEN NULL
     ELSE COALESCE(EXCLUDED.client_response_body, "usage".client_response_body)
   END ELSE "usage".client_response_body END,
   client_response_body_compressed = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.client_response_body IS NOT NULL OR $59 THEN NULL
+    WHEN EXCLUDED.client_response_body IS NOT NULL OR $60 THEN NULL
     ELSE COALESCE(EXCLUDED.client_response_body_compressed, "usage".client_response_body_compressed)
   END ELSE "usage".client_response_body_compressed END,
   request_metadata = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.request_metadata, "usage".request_metadata) ELSE "usage".request_metadata END,
-  finalized_at = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.finalized_at, "usage".finalized_at) ELSE "usage".finalized_at END
+  finalized_at = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.finalized_at, "usage".finalized_at) ELSE "usage".finalized_at END,
+  updated_at_unix_secs = CASE WHEN "usage".billing_status = 'pending' THEN
+    GREATEST(
+      COALESCE(NULLIF("usage".updated_at_unix_secs, 0), 0),
+      COALESCE(NULLIF(EXCLUDED.updated_at_unix_secs, 0), 0),
+      CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT)
+    )
+  ELSE "usage".updated_at_unix_secs END
 RETURNING
   id,
   request_id,
@@ -352,5 +364,9 @@ RETURNING
   NULL::varchar AS settlement_billing_rule_id,
   NULL::varchar AS settlement_billing_rule_version,
   CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_ms,
-  CAST(EXTRACT(EPOCH FROM COALESCE(finalized_at, created_at)) AS BIGINT) AS updated_at_unix_secs,
+  GREATEST(
+    COALESCE(NULLIF(updated_at_unix_secs, 0), 0),
+    COALESCE(CAST(EXTRACT(EPOCH FROM finalized_at) AS BIGINT), 0),
+    CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT)
+  ) AS updated_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM finalized_at) AS BIGINT) AS finalized_at_unix_secs

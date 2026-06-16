@@ -1797,13 +1797,21 @@ pub(crate) async fn proxy_request(
             .all_candidates_skipped_for_reason(AUTH_API_KEY_CONCURRENCY_LIMIT_SKIP_REASON)
             || local_execution_runtime_miss_context
                 .all_candidates_skipped_for_reason(LEGACY_API_KEY_CONCURRENCY_LIMIT_SKIP_REASON);
-        let local_execution_runtime_miss_detail = local_execution_runtime_miss_detail(
-            control_decision,
-            local_execution_runtime_miss_diagnostic.as_ref(),
-            auth_api_key_concurrency_limited,
-            stream_request,
-        )
-        .unwrap_or_else(|| "当前 AI 请求无法在本地执行：没有匹配到可用的执行路径".to_string());
+        let local_execution_runtime_miss_detail = (!auth_api_key_concurrency_limited)
+            .then(|| {
+                local_execution_runtime_miss_context
+                    .all_provider_request_body_build_failures_detail()
+            })
+            .flatten()
+            .or_else(|| {
+                local_execution_runtime_miss_detail(
+                    control_decision,
+                    local_execution_runtime_miss_diagnostic.as_ref(),
+                    auth_api_key_concurrency_limited,
+                    stream_request,
+                )
+            })
+            .unwrap_or_else(|| "当前 AI 请求无法在本地执行：没有匹配到可用的执行路径".to_string());
         let local_execution_failure_path = if auth_api_key_concurrency_limited {
             EXECUTION_PATH_LOCAL_API_KEY_CONCURRENCY_LIMITED
         } else {

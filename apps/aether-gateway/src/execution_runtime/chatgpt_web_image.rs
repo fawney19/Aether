@@ -187,6 +187,7 @@ async fn execute_chatgpt_web_image(
         request_id = %plan.request_id,
         candidate_id = ?plan.candidate_id,
         base_url = %base_url,
+        operation = %request.operation,
         image_count = request.images.len(),
         size = %request.size,
         ratio = %request.ratio,
@@ -311,6 +312,7 @@ async fn execute_chatgpt_web_image(
 
 #[derive(Debug, Clone)]
 struct ChatGptWebImageRequest {
+    operation: String,
     model: String,
     web_model: String,
     prompt: String,
@@ -342,6 +344,7 @@ impl ChatGptWebImageRequest {
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
         Ok(Self {
+            operation: chatgpt_web_image_operation(body.get("operation")),
             model: text("model").unwrap_or_else(|| "gpt-image-2".to_string()),
             web_model: text("web_model").unwrap_or_else(|| "gpt-5-5-thinking".to_string()),
             prompt: text("prompt").unwrap_or_else(|| "Generate a high quality image.".to_string()),
@@ -2434,10 +2437,23 @@ fn json_u64(value: Option<&Value>) -> Option<u64> {
     })
 }
 
+fn chatgpt_web_image_operation(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .filter(|value| matches!(value.as_str(), "generate" | "edit"))
+        .unwrap_or_else(|| "generate".to_string())
+}
+
 fn build_failed_sse(request: &ChatGptWebImageRequest, failure: &Value) -> String {
     let failed = if failure.get("type").and_then(Value::as_str) == Some("response.failed") {
         failure.clone()
     } else {
+        let operation = match request.operation.as_str() {
+            "edit" => "edit",
+            _ => "generation",
+        };
         json!({
             "type": "response.failed",
             "response": {
@@ -2445,7 +2461,7 @@ fn build_failed_sse(request: &ChatGptWebImageRequest, failure: &Value) -> String
                 "model": request.model,
                 "error": failure.get("error").cloned().unwrap_or_else(|| json!({
                     "code": "chatgpt_web_image_failed",
-                    "message": "ChatGPT-Web image generation failed"
+                    "message": format!("ChatGPT-Web image {operation} failed")
                 }))
             }
         })
@@ -2641,7 +2657,7 @@ fn chatgpt_web_image_request_context(plan: &ExecutionPlan) -> Option<Value> {
     let mut image_request = Map::new();
     image_request.insert(
         "operation".to_string(),
-        Value::String("generate".to_string()),
+        Value::String(chatgpt_web_image_operation(body.get("operation"))),
     );
     for key in [
         "model",
@@ -3223,6 +3239,7 @@ mod tests {
     #[test]
     fn chatgpt_web_success_sse_includes_estimated_image_usage() {
         let request = ChatGptWebImageRequest {
+            operation: "generate".to_string(),
             model: "gpt-image-2".to_string(),
             web_model: "gpt-5-5-thinking".to_string(),
             prompt: "draw a test image".to_string(),
@@ -3276,6 +3293,7 @@ mod tests {
     #[test]
     fn chatgpt_web_success_sse_uses_image_dimensions_not_output_text() {
         let request = ChatGptWebImageRequest {
+            operation: "generate".to_string(),
             model: "gpt-image-2".to_string(),
             web_model: "gpt-5-5-thinking".to_string(),
             prompt: "draw a test image".to_string(),
@@ -3332,6 +3350,32 @@ mod tests {
                 .and_then(Value::as_str),
             Some("chatgpt_web_image_default")
         );
+    }
+
+    #[test]
+    fn chatgpt_web_image_request_context_preserves_edit_operation() {
+        let plan = sample_plan(
+            CHATGPT_WEB_DEFAULT_BASE_URL,
+            json!({
+                "operation": "edit",
+                "model": "gpt-image-2",
+                "web_model": "gpt-5-5-thinking",
+                "prompt": "adjust this image",
+                "size": "512x512",
+                "ratio": "1:1",
+                "images": ["data:image/png;base64,aW1hZ2U="],
+                "count": 1,
+                "output_format": "png"
+            }),
+            true,
+        );
+
+        let context = chatgpt_web_stream_observer_context(&plan, None);
+
+        assert_eq!(context["image_request"]["operation"], json!("edit"));
+        assert_eq!(context["image_request"]["model"], json!("gpt-image-2"));
+        assert_eq!(context["image_request"]["size"], json!("512x512"));
+        assert_eq!(context["provider_api_format"], json!("openai:image"));
     }
 
     #[test]

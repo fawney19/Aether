@@ -87,6 +87,23 @@ impl RequestCandidateReadRepository for SqliteRequestCandidateRepository {
         rows.iter().map(map_candidate_row).collect()
     }
 
+    async fn list_attempted_by_request_id(
+        &self,
+        request_id: &str,
+    ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
+        let rows = sqlx::query(&format!(
+            "{CANDIDATE_COLUMNS} WHERE request_id = ? \
+             AND (status IN ('streaming', 'success', 'failed', 'cancelled') \
+             OR (status = 'pending' AND started_at IS NOT NULL)) \
+             ORDER BY candidate_index ASC, retry_index ASC, created_at ASC"
+        ))
+        .bind(request_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_sql_err()?;
+        rows.iter().map(map_candidate_row).collect()
+    }
+
     async fn list_recent(
         &self,
         limit: usize,

@@ -225,6 +225,25 @@ fn accumulate_api_key_usage_contribution(
     };
 }
 
+fn usage_audit_client_family(item: &StoredRequestUsageAudit) -> Option<&str> {
+    item.client_family
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| usage_request_metadata_client_family(item.request_metadata.as_ref()))
+}
+
+fn usage_admin_unknown_label(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "unknown" | "unknow"
+    )
+}
+
+fn usage_has_admin_unknown_model_or_provider(item: &StoredRequestUsageAudit) -> bool {
+    usage_admin_unknown_label(&item.model) || usage_admin_unknown_label(&item.provider_name)
+}
+
 fn usage_matches_list_query(item: &StoredRequestUsageAudit, query: &UsageAuditListQuery) -> bool {
     // The field is historically named `created_at_unix_ms`, but usage audit rows
     // across gateway handlers, SQL repositories and tests are stored as epoch seconds.
@@ -257,6 +276,21 @@ fn usage_matches_list_query(item: &StoredRequestUsageAudit, query: &UsageAuditLi
         if item.api_format.as_deref() != Some(api_format) {
             return false;
         }
+    }
+    if let Some(client_family) = query
+        .client_family
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !usage_audit_client_family(item)
+            .is_some_and(|value| value.eq_ignore_ascii_case(client_family))
+        {
+            return false;
+        }
+    }
+    if query.exclude_unknown_model_or_provider && usage_has_admin_unknown_model_or_provider(item) {
+        return false;
     }
     if let Some(statuses) = query.statuses.as_ref() {
         if !statuses.iter().any(|status| status == &item.status) {
@@ -317,6 +351,21 @@ fn usage_matches_keyword_search_query(
         if item.api_format.as_deref() != Some(api_format) {
             return false;
         }
+    }
+    if let Some(client_family) = query
+        .client_family
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !usage_audit_client_family(item)
+            .is_some_and(|value| value.eq_ignore_ascii_case(client_family))
+        {
+            return false;
+        }
+    }
+    if query.exclude_unknown_model_or_provider && usage_has_admin_unknown_model_or_provider(item) {
+        return false;
     }
     if let Some(statuses) = query.statuses.as_ref() {
         if !statuses.iter().any(|status| status == &item.status) {

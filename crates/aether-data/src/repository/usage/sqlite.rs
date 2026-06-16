@@ -455,6 +455,21 @@ fn push_sqlite_usage_list_filters(
             .push("api_format = ")
             .push_bind(api_format.to_string());
     }
+    if let Some(client_family) = query.client_family.as_deref().map(str::trim) {
+        if !client_family.is_empty() {
+            push_sqlite_usage_where(builder, has_where);
+            builder
+                .push("LOWER(COALESCE(NULLIF(TRIM(CAST(json_extract(request_metadata, '$.client_session_affinity.client_family') AS TEXT)), ''), NULLIF(TRIM(CAST(json_extract(request_metadata, '$.client_family') AS TEXT)), ''))) = ")
+                .push_bind(client_family.to_ascii_lowercase());
+        }
+    }
+    if query.exclude_unknown_model_or_provider {
+        push_sqlite_usage_where(builder, has_where);
+        builder.push(
+            "(LOWER(TRIM(COALESCE(model, ''))) NOT IN ('unknown', 'unknow') \
+AND LOWER(TRIM(COALESCE(provider_name, ''))) NOT IN ('unknown', 'unknow'))",
+        );
+    }
     if let Some(statuses) = query.statuses.as_deref() {
         if !statuses.is_empty() {
             push_sqlite_usage_where(builder, has_where);
@@ -496,6 +511,8 @@ fn push_sqlite_usage_keyword_filters(
             provider_name: query.provider_name.clone(),
             model: query.model.clone(),
             api_format: query.api_format.clone(),
+            client_family: query.client_family.clone(),
+            exclude_unknown_model_or_provider: query.exclude_unknown_model_or_provider,
             statuses: query.statuses.clone(),
             is_stream: query.is_stream,
             error_only: query.error_only,

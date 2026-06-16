@@ -651,6 +651,7 @@ pub trait ProviderCatalogWriteRepository: Send + Sync {
     async fn cleanup_deleted_provider_refs(
         &self,
         provider_id: &str,
+        provider_deleted: bool,
         endpoint_ids: &[String],
         key_ids: &[String],
     ) -> Result<(), crate::DataLayerError>;

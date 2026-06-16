@@ -21,7 +21,10 @@ fn oauth_invalid_reason_is_account_level_block(reason: Option<&str>) -> bool {
     snapshot.blocked
         && !matches!(
             snapshot.code.trim().to_ascii_lowercase().as_str(),
-            "oauth_token_invalid" | "oauth_expired" | "oauth_refresh_failed"
+            "oauth_token_invalid"
+                | "oauth_token_expired"
+                | "oauth_expired"
+                | "oauth_refresh_failed"
         )
 }
 

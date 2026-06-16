@@ -265,14 +265,16 @@ fn build_provider_key_oauth_status_snapshot(key: &StoredProviderCatalogKey) -> V
     if let Some(reason) =
         tagged_oauth_invalid_reason(invalid_reason.as_deref(), OAUTH_EXPIRED_PREFIX)
     {
+        let (code, label) =
+            admin_provider_status_pure::oauth_token_snapshot_status_parts(reason.as_str());
         return json!({
-            "code": "invalid",
-            "label": "已失效",
+            "code": code,
+            "label": label,
             "reason": reason,
             "expires_at": expires_at_unix_secs,
             "invalid_at": invalid_at_unix_secs,
             "source": "oauth_invalid",
-            "requires_reauth": true,
+            "requires_reauth": code == "invalid",
             "expiring_soon": false,
         });
     }

@@ -6,6 +6,7 @@ use crate::auth::{
     build_claude_passthrough_headers, build_complete_passthrough_headers_with_auth,
     build_openai_passthrough_headers, build_passthrough_headers, ensure_upstream_auth_header,
 };
+use crate::headers::force_identity_accept_encoding;
 use crate::rules::{
     apply_local_body_rules, apply_local_body_rules_with_request_headers,
     apply_local_header_rules_with_request_headers,
@@ -146,6 +147,10 @@ pub fn build_standard_plan_fallback_headers(
         }
     }
 
+    if input.upstream_is_stream {
+        force_identity_accept_encoding(&mut headers);
+    }
+
     headers
 }
 
@@ -272,6 +277,7 @@ pub fn build_standard_provider_request_headers(
         headers
             .entry("accept".to_string())
             .or_insert_with(|| "text/event-stream".to_string());
+        force_identity_accept_encoding(&mut headers);
     }
 
     Some(StandardProviderRequestHeaders {
@@ -360,6 +366,10 @@ mod tests {
     fn builds_same_format_headers_with_complete_passthrough_and_stream_accept() {
         let mut request_headers = HeaderMap::new();
         request_headers.insert("x-client", "demo".parse().expect("header"));
+        request_headers.insert(
+            http::header::ACCEPT_ENCODING,
+            "gzip, br".parse().expect("header"),
+        );
         let transport = sample_transport("openai:chat");
         let resolved =
             build_standard_provider_request_headers(StandardProviderRequestHeadersInput {
@@ -387,7 +397,41 @@ mod tests {
             resolved.headers.get("accept"),
             Some(&"text/event-stream".to_string())
         );
+        assert_eq!(
+            resolved.headers.get("accept-encoding"),
+            Some(&"identity".to_string())
+        );
         assert_eq!(resolved.headers.get("x-client"), Some(&"demo".to_string()));
+    }
+
+    #[test]
+    fn builds_sync_headers_preserving_supported_accept_encoding() {
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(
+            http::header::ACCEPT_ENCODING,
+            "gzip, br".parse().expect("header"),
+        );
+        let transport = sample_transport("openai:chat");
+        let resolved =
+            build_standard_provider_request_headers(StandardProviderRequestHeadersInput {
+                transport: &transport,
+                provider_api_format: "openai:chat",
+                same_format: true,
+                headers: &request_headers,
+                auth_header: "authorization",
+                auth_value: "Bearer secret",
+                extra_headers: &BTreeMap::new(),
+                header_rules: None,
+                provider_request_body: &json!({"model":"gpt-5"}),
+                original_request_body: &json!({"model":"gpt-5"}),
+                upstream_is_stream: false,
+            })
+            .expect("headers should build");
+
+        assert_eq!(
+            resolved.headers.get("accept-encoding"),
+            Some(&"gzip".to_string())
+        );
     }
 
     #[test]
@@ -473,6 +517,10 @@ mod tests {
     fn stream_fallback_headers_treat_wildcard_accept_as_absent() {
         let mut request_headers = HeaderMap::new();
         request_headers.insert(http::header::ACCEPT, "*/*".parse().expect("header"));
+        request_headers.insert(
+            http::header::ACCEPT_ENCODING,
+            "gzip, br".parse().expect("header"),
+        );
 
         let headers = build_standard_plan_fallback_headers(StandardPlanFallbackHeadersInput {
             request_headers: &request_headers,
@@ -491,6 +539,10 @@ mod tests {
         assert_eq!(
             headers.get("accept"),
             Some(&"text/event-stream".to_string())
+        );
+        assert_eq!(
+            headers.get("accept-encoding"),
+            Some(&"identity".to_string())
         );
     }
 

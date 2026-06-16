@@ -2,7 +2,9 @@ use serde_json::Value;
 
 use aether_ai_formats::api::{
     is_claude_messages_shaped_body_on_openai_chat_endpoint, is_openai_responses_family_format,
+    normalize_api_format_alias,
 };
+use aether_ai_formats::{convert_request_pure_with_context, FormatContext, FormatError};
 
 use crate::{CandidateFailureDiagnostic, CandidateFailureDiagnosticKind};
 
@@ -24,6 +26,31 @@ pub fn request_body_build_failure_extra_data(
     )
 }
 
+pub fn request_conversion_failure_extra_data(
+    body_json: &Value,
+    client_api_format: &str,
+    provider_api_format: &str,
+    mapped_model: Option<&str>,
+    request_path: Option<&str>,
+    upstream_is_stream: bool,
+    source: impl Into<String>,
+) -> Option<Value> {
+    let diagnostic = diagnose_request_conversion_failure(
+        body_json,
+        client_api_format,
+        provider_api_format,
+        mapped_model,
+        request_path,
+        upstream_is_stream,
+    )?;
+    Some(
+        diagnostic
+            .formats(client_api_format, provider_api_format)
+            .source(source)
+            .to_extra_data(),
+    )
+}
+
 pub fn same_format_provider_request_body_failure_extra_data(
     body_json: &Value,
     provider_api_format: &str,
@@ -41,6 +68,67 @@ pub fn same_format_provider_request_body_failure_extra_data(
 }
 
 type RequestBodyBuildDiagnostic = CandidateFailureDiagnostic;
+type RequestConversionDiagnostic = CandidateFailureDiagnostic;
+
+fn diagnose_request_conversion_failure(
+    body_json: &Value,
+    client_api_format: &str,
+    provider_api_format: &str,
+    mapped_model: Option<&str>,
+    request_path: Option<&str>,
+    upstream_is_stream: bool,
+) -> Option<RequestConversionDiagnostic> {
+    let mut context = FormatContext::default().with_upstream_stream(upstream_is_stream);
+    if let Some(mapped_model) = mapped_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        context = context.with_mapped_model(mapped_model);
+    }
+    if let Some(request_path) = request_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        context = context.with_request_path(request_path);
+    }
+
+    let source_format =
+        compatible_source_format_for_diagnostic(body_json, client_api_format, provider_api_format);
+    match convert_request_pure_with_context(
+        source_format.as_str(),
+        provider_api_format,
+        body_json,
+        &context,
+    ) {
+        Ok(_) => {
+            diagnose_request_body_build_failure(body_json, client_api_format, provider_api_format)
+                .filter(CandidateFailureDiagnostic::has_specific_path)
+                .or_else(|| Some(fallback_request_conversion_diagnostic()))
+        }
+        Err(error) => {
+            let format_diagnostic =
+                diagnostic_from_format_error(&error, client_api_format, provider_api_format);
+            if format_diagnostic.has_specific_path() {
+                Some(format_diagnostic)
+            } else {
+                diagnose_request_body_build_failure(
+                    body_json,
+                    client_api_format,
+                    provider_api_format,
+                )
+                .filter(CandidateFailureDiagnostic::has_specific_path)
+                .or(Some(format_diagnostic))
+            }
+        }
+    }
+}
+
+fn fallback_request_conversion_diagnostic() -> RequestConversionDiagnostic {
+    diagnostic(
+        "$",
+        "请求体转换本身已通过；失败可能发生在 Body 规则应用或后续上游请求体语义校验",
+    )
+}
 
 fn diagnose_request_body_build_failure(
     body_json: &Value,
@@ -72,6 +160,123 @@ fn diagnose_request_body_build_failure(
         "$",
         "请求体转换失败；当前转换器未返回更细的字段路径",
     ))
+}
+
+fn compatible_source_format_for_diagnostic(
+    body_json: &Value,
+    client_api_format: &str,
+    provider_api_format: &str,
+) -> String {
+    let client_api_format = normalize_api_format_alias(client_api_format);
+    let provider_api_format = normalize_api_format_alias(provider_api_format);
+    if client_api_format == "openai:chat"
+        && provider_api_format == "claude:messages"
+        && is_claude_messages_shaped_body_on_openai_chat_endpoint(body_json)
+    {
+        return "claude:messages".to_string();
+    }
+    client_api_format
+}
+
+fn diagnostic_from_format_error(
+    error: &FormatError,
+    client_api_format: &str,
+    provider_api_format: &str,
+) -> RequestConversionDiagnostic {
+    CandidateFailureDiagnostic::new(
+        CandidateFailureDiagnosticKind::RequestConversion,
+        format_error_path(error),
+        format_error_message(error, client_api_format, provider_api_format),
+    )
+}
+
+fn format_error_path(error: &FormatError) -> String {
+    match error {
+        FormatError::UnsupportedField { field, .. }
+        | FormatError::UnauditedField { field, .. }
+        | FormatError::InvalidEnumValue { field, .. }
+        | FormatError::LossyConversionBlocked { field, .. }
+        | FormatError::InvalidTargetField { field, .. } => field_to_json_path(field),
+        FormatError::UnsupportedFormat(_)
+        | FormatError::RequestParseFailed { .. }
+        | FormatError::RequestEmitFailed { .. }
+        | FormatError::ResponseParseFailed { .. }
+        | FormatError::ResponseEmitFailed { .. } => "$".to_string(),
+    }
+}
+
+fn field_to_json_path(field: &str) -> String {
+    let field = field.trim();
+    if field.is_empty() || field == "$" {
+        return "$".to_string();
+    }
+    if field.starts_with('$') {
+        return field.to_string();
+    }
+    format!("$.{}", field)
+        .replace("[].", "[*].")
+        .replace("[]", "[*]")
+}
+
+fn format_error_message(
+    error: &FormatError,
+    client_api_format: &str,
+    provider_api_format: &str,
+) -> String {
+    match error {
+        FormatError::UnsupportedFormat(format) => {
+            format!("不支持的 API 格式 {format}，无法执行 {client_api_format} → {provider_api_format} 转换")
+        }
+        FormatError::RequestParseFailed { format } => {
+            format!("无法按 {format} 解析请求体；请检查请求体结构和字段类型是否符合该格式")
+        }
+        FormatError::RequestEmitFailed { format } => {
+            format!("无法生成 {format} 上游请求体；请检查源请求是否缺少目标格式必需字段或包含不可映射结构")
+        }
+        FormatError::ResponseParseFailed { format } => {
+            format!("无法按 {format} 解析响应体")
+        }
+        FormatError::ResponseEmitFailed { format } => {
+            format!("无法生成 {format} 响应体")
+        }
+        FormatError::UnsupportedField {
+            format,
+            field,
+            reason,
+        } => {
+            format!("{format} 字段 {field} 不支持跨格式转换：{reason}")
+        }
+        FormatError::UnauditedField {
+            source_format,
+            target_format,
+            field,
+            reason,
+        } => {
+            format!("{source_format} 字段 {field} 尚未审计，不能转换到 {target_format}：{reason}")
+        }
+        FormatError::InvalidEnumValue {
+            format,
+            field,
+            value,
+        } => {
+            format!("{format} 字段 {field} 的枚举值 {value:?} 无效，无法转换")
+        }
+        FormatError::LossyConversionBlocked {
+            source_format,
+            target_format,
+            field,
+            reason,
+        } => {
+            format!("{source_format} 字段 {field} 不能无损转换到 {target_format}：{reason}")
+        }
+        FormatError::InvalidTargetField {
+            format,
+            field,
+            reason,
+        } => {
+            format!("目标格式 {format} 字段 {field} 无效：{reason}")
+        }
+    }
 }
 
 fn is_openai_responses_client_format(client_api_format: &str) -> bool {
@@ -593,7 +798,7 @@ fn request_body_build_source(client_api_format: &str, provider_api_format: &str)
 mod tests {
     use serde_json::json;
 
-    use super::request_body_build_failure_extra_data;
+    use super::{request_body_build_failure_extra_data, request_conversion_failure_extra_data};
 
     #[test]
     fn openai_chat_to_claude_recognizes_compatible_claude_native_tool_shape() {
@@ -712,6 +917,37 @@ mod tests {
             diagnostic["request_body_build_error"]["path"],
             "$.tool_choice.name"
         );
+    }
+
+    #[test]
+    fn request_conversion_reports_lossy_incompatible_field_path() {
+        let body = json!({
+            "model": "gpt-5.4",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "n": 2
+        });
+
+        let diagnostic = request_conversion_failure_extra_data(
+            &body,
+            "openai:chat",
+            "openai:responses",
+            Some("gpt-5.4"),
+            Some("/v1/chat/completions"),
+            false,
+            "test_conversion",
+        )
+        .expect("diagnostic");
+
+        assert_eq!(
+            diagnostic["failure_diagnostic"]["kind"],
+            "request_conversion"
+        );
+        assert_eq!(diagnostic["failure_diagnostic"]["path"], "$.n");
+        assert_eq!(diagnostic["request_conversion_error"]["path"], "$.n");
+        assert!(diagnostic["failure_diagnostic"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("字段 n"));
     }
 
     #[test]

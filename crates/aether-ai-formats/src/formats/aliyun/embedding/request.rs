@@ -1,10 +1,57 @@
 use serde_json::{Map, Value};
 
 use crate::formats::context::FormatContext;
-use crate::formats::openai::embedding::request::mapped_embedding_model;
+use crate::formats::openai::embedding::request::{mapped_embedding_model, namespace_extensions};
 use crate::protocol::canonical::{
     CanonicalEmbeddingContent, CanonicalEmbeddingInput, CanonicalRequest,
 };
+
+pub fn from(body: &Value, _ctx: &FormatContext) -> Option<CanonicalRequest> {
+    from_raw(body)
+}
+
+pub fn from_raw(body_json: &Value) -> Option<CanonicalRequest> {
+    let request = body_json.as_object()?;
+    let model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let contents = request
+        .get("input")
+        .and_then(Value::as_object)
+        .and_then(|input| input.get("contents"))
+        .and_then(Value::as_array)?;
+    let input = contents_to_embedding_input(contents)?;
+    let mut parameters = request
+        .get("parameters")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let dimensions = parameters
+        .remove("dimension")
+        .or_else(|| request.get("dimensions").cloned())
+        .and_then(|value| value.as_u64());
+    let parameters = (!parameters.is_empty()).then_some(parameters);
+    Some(CanonicalRequest {
+        model,
+        embedding: Some(crate::protocol::canonical::CanonicalEmbeddingRequest {
+            input,
+            encoding_format: None,
+            dimensions,
+            task: None,
+            user: None,
+            parameters,
+            extensions: namespace_extensions(
+                "aliyun",
+                request,
+                &["model", "input", "parameters", "dimensions"],
+            ),
+        }),
+        ..CanonicalRequest::default()
+    })
+}
 
 pub fn to(request: &CanonicalRequest, ctx: &FormatContext) -> Option<Value> {
     let embedding = request.embedding.as_ref()?;
@@ -40,6 +87,67 @@ pub fn to(request: &CanonicalRequest, ctx: &FormatContext) -> Option<Value> {
     }
 
     Some(Value::Object(output))
+}
+
+fn contents_to_embedding_input(contents: &[Value]) -> Option<CanonicalEmbeddingInput> {
+    if contents.is_empty() {
+        return None;
+    }
+    let parsed = contents
+        .iter()
+        .map(embedding_content_from_value)
+        .collect::<Option<Vec<_>>>()?;
+    if parsed.iter().all(|content| {
+        content.image.is_none() && content.video.is_none() && content.multi_images.is_none()
+    }) {
+        return Some(CanonicalEmbeddingInput::StringArray(
+            parsed
+                .into_iter()
+                .map(|content| content.text)
+                .collect::<Option<Vec<_>>>()?,
+        ));
+    }
+    Some(CanonicalEmbeddingInput::Multimodal(parsed))
+}
+
+fn embedding_content_from_value(value: &Value) -> Option<CanonicalEmbeddingContent> {
+    let object = value.as_object()?;
+    let content = CanonicalEmbeddingContent {
+        text: object
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        image: object
+            .get("image")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        video: object
+            .get("video")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        multi_images: match object.get("multi_images").and_then(Value::as_array) {
+            Some(values) => Some(
+                values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(ToOwned::to_owned)
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            None => None,
+        },
+    };
+    (!content.is_empty()).then_some(content)
 }
 
 fn embedding_input_to_contents(input: &CanonicalEmbeddingInput) -> Option<Vec<Value>> {

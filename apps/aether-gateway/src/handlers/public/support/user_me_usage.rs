@@ -4,11 +4,14 @@ use aether_ai_serving::UPSTREAM_IS_STREAM_KEY;
 use aether_billing::{
     normalize_input_tokens_for_billing, normalize_total_input_context_for_cache_hit_rate,
 };
-use aether_data_contracts::repository::usage::{
-    StoredRequestUsageAudit, StoredUsageBreakdownSummaryRow, StoredUsageDailySummary,
-    UsageAuditKeywordSearchQuery, UsageAuditListQuery, UsageBreakdownGroupBy,
-    UsageBreakdownSummaryQuery, UsageCacheAffinityIntervalGroupBy, UsageCacheAffinityIntervalQuery,
-    UsageDashboardSummaryQuery,
+use aether_data_contracts::repository::{
+    candidates::{RequestCandidateStatus, StoredRequestCandidate},
+    usage::{
+        StoredRequestUsageAudit, StoredUsageBreakdownSummaryRow, StoredUsageDailySummary,
+        UsageAuditKeywordSearchQuery, UsageAuditListQuery, UsageBreakdownGroupBy,
+        UsageBreakdownSummaryQuery, UsageCacheAffinityIntervalGroupBy,
+        UsageCacheAffinityIntervalQuery, UsageDashboardSummaryQuery,
+    },
 };
 use axum::{
     body::Body,
@@ -17,7 +20,7 @@ use axum::{
     Json,
 };
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::GatewayError;
 
@@ -531,6 +534,8 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
         "rate_multiplier": item.settlement_rate_multiplier(),
         "response_time_ms": item.response_time_ms,
         "first_byte_time_ms": item.first_byte_time_ms,
+        "updated_at": unix_secs_to_rfc3339(item.updated_at_unix_secs),
+        "response_time_updated_at": users_me_usage_response_time_updated_at(item),
         "status_code": item.status_code,
         "error_message": item.error_message,
         "api_format": item.api_format,
@@ -571,6 +576,118 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
         payload["service_tier"] = json!(service_tier);
     }
     payload
+}
+
+fn users_me_usage_response_time_updated_at(item: &StoredRequestUsageAudit) -> Option<String> {
+    item.response_time_ms?;
+    if matches!(item.status.as_str(), "pending" | "streaming")
+        && item.updated_at_unix_secs <= item.created_at_unix_ms
+    {
+        return None;
+    }
+    unix_secs_to_rfc3339(item.updated_at_unix_secs)
+}
+
+fn unix_millis_to_rfc3339(unix_ms: u64) -> Option<String> {
+    let secs = i64::try_from(unix_ms / 1_000).ok()?;
+    let nanos = u32::try_from(unix_ms % 1_000)
+        .ok()?
+        .saturating_mul(1_000_000);
+    chrono::DateTime::<Utc>::from_timestamp(secs, nanos).map(|timestamp| timestamp.to_rfc3339())
+}
+
+fn users_me_usage_current_candidate(
+    candidates: &[StoredRequestCandidate],
+) -> Option<&StoredRequestCandidate> {
+    candidates
+        .iter()
+        .filter(|candidate| {
+            !matches!(
+                candidate.status,
+                RequestCandidateStatus::Available
+                    | RequestCandidateStatus::Unused
+                    | RequestCandidateStatus::Skipped
+            )
+        })
+        .max_by_key(|candidate| {
+            (
+                candidate.candidate_index,
+                candidate.retry_index,
+                candidate
+                    .started_at_unix_ms
+                    .or(candidate.finished_at_unix_ms)
+                    .unwrap_or(candidate.created_at_unix_ms),
+            )
+        })
+}
+
+fn users_me_usage_terminal_candidate_state_override(
+    candidates: &[StoredRequestCandidate],
+) -> Option<Value> {
+    let candidate = users_me_usage_current_candidate(candidates)?;
+
+    let status = match candidate.status {
+        RequestCandidateStatus::Success => "completed",
+        RequestCandidateStatus::Failed => "failed",
+        RequestCandidateStatus::Cancelled => "cancelled",
+        _ => return None,
+    };
+    let latency_ms = candidate.latency_ms.or_else(|| {
+        Some(
+            candidate
+                .finished_at_unix_ms?
+                .saturating_sub(candidate.started_at_unix_ms?),
+        )
+    });
+    let mut payload = json!({ "status": status });
+    if let Some(latency_ms) = latency_ms {
+        payload["response_time_ms"] = json!(latency_ms);
+        if let Some(response_time_updated_at) = candidate
+            .finished_at_unix_ms
+            .or_else(|| {
+                candidate
+                    .started_at_unix_ms
+                    .map(|started_at| started_at.saturating_add(latency_ms))
+            })
+            .and_then(unix_millis_to_rfc3339)
+        {
+            payload["response_time_updated_at"] = json!(response_time_updated_at);
+        }
+    }
+    if let Some(status_code) = candidate.status_code {
+        payload["status_code"] = json!(status_code);
+    }
+    if let Some(error_message) = candidate.error_message.as_ref() {
+        payload["error_message"] = json!(error_message);
+    }
+    Some(payload)
+}
+
+async fn resolve_users_me_usage_active_state_overrides_by_request_id(
+    state: &AppState,
+    items: &[StoredRequestUsageAudit],
+) -> Result<BTreeMap<String, Value>, GatewayError> {
+    if !state.has_request_candidate_data_reader() || items.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let active_request_ids = items
+        .iter()
+        .filter(|item| matches!(item.status.as_str(), "pending" | "streaming"))
+        .map(|item| item.request_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut overrides = BTreeMap::new();
+    for request_id in active_request_ids {
+        let candidates = state
+            .read_request_candidates_by_request_id(&request_id)
+            .await?;
+        if let Some(override_payload) =
+            users_me_usage_terminal_candidate_state_override(&candidates)
+        {
+            overrides.insert(request_id, override_payload);
+        }
+    }
+    Ok(overrides)
 }
 
 fn users_me_usage_is_failed(item: &StoredRequestUsageAudit) -> bool {
@@ -925,6 +1042,8 @@ pub(super) async fn handle_users_me_usage_get(
                 provider_name: None,
                 model: None,
                 api_format: None,
+                client_family: None,
+                exclude_unknown_model_or_provider: false,
                 statuses: None,
                 is_stream: None,
                 error_only: false,
@@ -978,6 +1097,8 @@ pub(super) async fn handle_users_me_usage_get(
                     provider_name: None,
                     model: None,
                     api_format: None,
+                    client_family: None,
+                    exclude_unknown_model_or_provider: false,
                     statuses: None,
                     is_stream: None,
                     error_only: false,
@@ -1004,6 +1125,8 @@ pub(super) async fn handle_users_me_usage_get(
                     provider_name: None,
                     model: None,
                     api_format: None,
+                    client_family: None,
+                    exclude_unknown_model_or_provider: false,
                     statuses: None,
                     is_stream: None,
                     error_only: false,
@@ -1140,6 +1263,8 @@ pub(super) async fn handle_users_me_usage_active_get(
                 provider_name: None,
                 model: None,
                 api_format: None,
+                client_family: None,
+                exclude_unknown_model_or_provider: false,
                 statuses: Some(vec!["pending".to_string(), "streaming".to_string()]),
                 is_stream: None,
                 error_only: false,
@@ -1168,11 +1293,35 @@ pub(super) async fn handle_users_me_usage_active_get(
             .filter(|item| !users_me_usage_is_failed(item))
             .collect::<Vec<_>>()
     };
+    let active_state_overrides =
+        match resolve_users_me_usage_active_state_overrides_by_request_id(state, &items).await {
+            Ok(value) => value,
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("user active usage candidate lookup failed: {err:?}"),
+                    false,
+                );
+            }
+        };
 
     Json(json!({
         "requests": items
             .iter()
-            .map(build_users_me_usage_active_payload)
+            .map(|item| {
+                let mut payload = build_users_me_usage_active_payload(item);
+                if let (Some(payload), Some(overrides)) = (
+                    payload.as_object_mut(),
+                    active_state_overrides
+                        .get(&item.request_id)
+                        .and_then(Value::as_object),
+                ) {
+                    for (key, value) in overrides {
+                        payload.insert(key.clone(), value.clone());
+                    }
+                }
+                payload
+            })
             .collect::<Vec<_>>(),
     }))
     .into_response()
@@ -1364,13 +1513,16 @@ async fn build_usage_heatmap_summaries(
 mod tests {
     use std::collections::BTreeMap;
 
-    use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
+    use aether_data_contracts::repository::{
+        candidates::{RequestCandidateStatus, StoredRequestCandidate},
+        usage::StoredRequestUsageAudit,
+    };
     use serde_json::json;
 
     use super::{
         build_users_me_usage_active_payload, build_users_me_usage_record_payload,
         users_me_usage_client_is_stream, users_me_usage_is_failed,
-        users_me_usage_upstream_is_stream,
+        users_me_usage_terminal_candidate_state_override, users_me_usage_upstream_is_stream,
     };
 
     fn sample_usage(status: &str) -> StoredRequestUsageAudit {
@@ -1415,6 +1567,41 @@ mod tests {
         .expect("usage should build")
     }
 
+    fn sample_candidate(
+        status: RequestCandidateStatus,
+        status_code: Option<i32>,
+        latency_ms: Option<i32>,
+        error_message: Option<&str>,
+    ) -> StoredRequestCandidate {
+        StoredRequestCandidate::new(
+            "candidate-1".to_string(),
+            "req-1".to_string(),
+            Some("user-1".to_string()),
+            Some("api-key-1".to_string()),
+            Some("alice".to_string()),
+            Some("default".to_string()),
+            0,
+            0,
+            Some("provider-1".to_string()),
+            Some("endpoint-1".to_string()),
+            Some("provider-key-1".to_string()),
+            status,
+            None,
+            false,
+            status_code,
+            None,
+            error_message.map(str::to_string),
+            latency_ms,
+            None,
+            None,
+            None,
+            1_000,
+            Some(1_000),
+            Some(10_210),
+        )
+        .expect("candidate should build")
+    }
+
     #[test]
     fn user_usage_record_payload_rehydrates_cache_creation_total_from_classified_fields() {
         let item = StoredRequestUsageAudit {
@@ -1445,6 +1632,45 @@ mod tests {
         assert_eq!(payload["cache_creation_input_tokens"], 10);
         assert_eq!(payload["cache_creation_ephemeral_5m_input_tokens"], 4);
         assert_eq!(payload["cache_creation_ephemeral_1h_input_tokens"], 6);
+    }
+
+    #[test]
+    fn user_usage_active_override_uses_terminal_candidate_latency() {
+        let candidate = sample_candidate(
+            RequestCandidateStatus::Success,
+            Some(200),
+            Some(9_210),
+            None,
+        );
+
+        let payload =
+            users_me_usage_terminal_candidate_state_override(&[candidate]).expect("override");
+
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["response_time_ms"], 9_210);
+        assert_eq!(payload["status_code"], 200);
+        assert_eq!(
+            payload["response_time_updated_at"],
+            "1970-01-01T00:00:10.210+00:00"
+        );
+    }
+
+    #[test]
+    fn user_usage_active_override_ignores_terminal_candidate_when_newer_attempt_is_live() {
+        let failed = sample_candidate(
+            RequestCandidateStatus::Failed,
+            Some(503),
+            Some(1_000),
+            Some("first attempt failed"),
+        );
+        let mut streaming = sample_candidate(RequestCandidateStatus::Streaming, None, None, None);
+        streaming.candidate_index = 1;
+        streaming.started_at_unix_ms = Some(10_500);
+        streaming.finished_at_unix_ms = None;
+
+        let payload = users_me_usage_terminal_candidate_state_override(&[failed, streaming]);
+
+        assert!(payload.is_none());
     }
 
     #[test]

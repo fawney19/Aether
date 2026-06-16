@@ -522,6 +522,15 @@ async function pollActiveRequests() {
         record.rate_multiplier = update.rate_multiplier ?? undefined
         record.response_time_ms = update.response_time_ms ?? undefined
         record.first_byte_time_ms = update.first_byte_time_ms ?? undefined
+        if ('updated_at' in update) {
+          record.updated_at = typeof update.updated_at === 'string' ? update.updated_at : null
+        }
+        if ('response_time_updated_at' in update) {
+          record.response_time_updated_at =
+            typeof update.response_time_updated_at === 'string'
+              ? update.response_time_updated_at
+              : null
+        }
         record.status_code = update.status_code ?? undefined
         record.error_message = update.error_message ?? undefined
         if (typeof update.upstream_is_stream === 'boolean') {

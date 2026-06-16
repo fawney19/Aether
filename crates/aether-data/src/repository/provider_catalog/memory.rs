@@ -652,6 +652,7 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
     async fn cleanup_deleted_provider_refs(
         &self,
         _provider_id: &str,
+        _provider_deleted: bool,
         _endpoint_ids: &[String],
         _key_ids: &[String],
     ) -> Result<(), DataLayerError> {

@@ -298,13 +298,8 @@ impl GeminiProviderState {
                 candidate_object.get("finishReason").and_then(Value::as_str)
             {
                 let has_tool_calls = !self.tool_calls.is_empty();
-                let mut finish_reason = normalize_openai_finish_reason(match finish_reason {
-                    "STOP" => Some("stop"),
-                    "MAX_TOKENS" => Some("length"),
-                    "SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII"
-                    | "OTHER" => Some("content_filter"),
-                    other => Some(other),
-                });
+                let mut finish_reason =
+                    normalize_openai_finish_reason(map_gemini_stream_finish_reason(finish_reason));
                 if has_tool_calls && finish_reason.as_deref().is_none_or(|value| value == "stop") {
                     finish_reason = Some("tool_calls".to_string());
                 }
@@ -340,6 +335,23 @@ impl GeminiProviderState {
                 usage: None,
             },
         }])
+    }
+}
+
+fn map_gemini_stream_finish_reason(value: &str) -> Option<&str> {
+    match value {
+        "STOP" => Some("stop"),
+        "MAX_TOKENS" => Some("length"),
+        "SAFETY"
+        | "RECITATION"
+        | "LANGUAGE"
+        | "BLOCKLIST"
+        | "PROHIBITED_CONTENT"
+        | "SPII"
+        | "IMAGE_SAFETY"
+        | "IMAGE_PROHIBITED_CONTENT"
+        | "IMAGE_RECITATION" => Some("content_filter"),
+        other => Some(other),
     }
 }
 

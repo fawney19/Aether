@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::headers::{
-    should_skip_upstream_complete_passthrough_header, should_skip_upstream_passthrough_header,
+    normalize_upstream_accept_encoding, should_skip_upstream_complete_passthrough_header,
+    should_skip_upstream_passthrough_header,
 };
 use super::snapshot::GatewayProviderTransportSnapshot;
 
@@ -21,20 +22,18 @@ fn collect_passthrough_headers(
         if should_skip_upstream_passthrough_header(&key) {
             continue;
         }
-        let value = value.trim();
-        if value.is_empty() {
+        let Some(value) = normalize_passthrough_header_value(&key, value) else {
             continue;
-        }
-        out.insert(key, value.to_string());
+        };
+        out.insert(key, value);
     }
 
     for (key, value) in extra_headers {
         let normalized_key = key.to_ascii_lowercase();
-        let value = value.trim();
-        if value.is_empty() {
+        let Some(value) = normalize_passthrough_header_value(&normalized_key, value) else {
             continue;
-        }
-        out.insert(normalized_key, value.to_string());
+        };
+        out.insert(normalized_key, value);
     }
 
     out
@@ -53,23 +52,34 @@ fn collect_complete_passthrough_headers(
         if should_skip_upstream_complete_passthrough_header(&key) {
             continue;
         }
-        let value = value.trim();
-        if value.is_empty() {
+        let Some(value) = normalize_passthrough_header_value(&key, value) else {
             continue;
-        }
-        out.insert(key, value.to_string());
+        };
+        out.insert(key, value);
     }
 
     for (key, value) in extra_headers {
         let normalized_key = key.to_ascii_lowercase();
-        let value = value.trim();
-        if value.is_empty() {
+        let Some(value) = normalize_passthrough_header_value(&normalized_key, value) else {
             continue;
-        }
-        out.insert(normalized_key, value.to_string());
+        };
+        out.insert(normalized_key, value);
     }
 
     out
+}
+
+fn normalize_passthrough_header_value(key: &str, value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if key.eq_ignore_ascii_case("accept-encoding") {
+        return normalize_upstream_accept_encoding(value);
+    }
+
+    Some(value.to_string())
 }
 
 pub fn build_passthrough_headers(
@@ -312,7 +322,8 @@ fn bearer_auth_value(secret: &str) -> String {
 mod tests {
     use super::{
         build_claude_passthrough_headers, build_complete_passthrough_headers_with_auth,
-        resolve_local_openai_bearer_auth, resolve_local_standard_auth,
+        build_openai_passthrough_headers, resolve_local_openai_bearer_auth,
+        resolve_local_standard_auth,
     };
     use crate::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
@@ -414,6 +425,28 @@ mod tests {
         assert_eq!(
             built.get("x-api-key").map(String::as_str),
             Some("sk-upstream-claude")
+        );
+    }
+
+    #[test]
+    fn passthrough_headers_preserve_supported_response_compression() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::ACCEPT_ENCODING,
+            http::HeaderValue::from_static("gzip, br"),
+        );
+
+        let built = build_openai_passthrough_headers(
+            &headers,
+            "authorization",
+            "Bearer upstream",
+            &BTreeMap::new(),
+            Some("application/json"),
+        );
+
+        assert_eq!(
+            built.get("accept-encoding").map(String::as_str),
+            Some("gzip")
         );
     }
 

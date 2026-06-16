@@ -19,6 +19,16 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn list_attempted_request_candidates_by_request_id(
+        &self,
+        request_id: &str,
+    ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
+        match &self.request_candidate_reader {
+            Some(repository) => repository.list_attempted_by_request_id(request_id).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub(crate) async fn list_request_candidates_by_provider_id(
         &self,
         provider_id: &str,
@@ -416,18 +426,24 @@ impl GatewayDataState {
     pub(crate) async fn cleanup_deleted_provider_catalog_refs(
         &self,
         provider_id: &str,
+        provider_deleted: bool,
         endpoint_ids: &[String],
         key_ids: &[String],
     ) -> Result<(), DataLayerError> {
         let cleaned = match &self.provider_catalog_writer {
             Some(repository) => {
                 repository
-                    .cleanup_deleted_provider_refs(provider_id, endpoint_ids, key_ids)
+                    .cleanup_deleted_provider_refs(
+                        provider_id,
+                        provider_deleted,
+                        endpoint_ids,
+                        key_ids,
+                    )
                     .await
             }
             None => Ok(()),
         };
-        if !endpoint_ids.is_empty() || !key_ids.is_empty() {
+        if provider_deleted || !endpoint_ids.is_empty() || !key_ids.is_empty() {
             self.clear_provider_catalog_cache();
         }
         cleaned

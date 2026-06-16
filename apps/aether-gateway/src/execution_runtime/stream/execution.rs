@@ -3921,9 +3921,13 @@ mod tests {
         StreamFrame, StreamFramePayload, StreamFrameType,
     };
     use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data::repository::usage::InMemoryUsageReadRepository;
     use aether_data_contracts::repository::candidates::{
         RequestCandidateReadRepository, RequestCandidateStatus,
+    };
+    use aether_data_contracts::repository::provider_catalog::{
+        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
     use aether_data_contracts::repository::usage::UsageReadRepository;
     use aether_usage_runtime::UsageRuntimeConfig;
@@ -3953,6 +3957,77 @@ mod tests {
     use crate::control::GatewayControlDecision;
     use crate::tunnel::{tunnel_protocol, TunnelProxyConn};
     use crate::AppState;
+
+    fn provider_catalog_stop_429_for_plan(
+        plan: &ExecutionPlan,
+    ) -> InMemoryProviderCatalogReadRepository {
+        let provider_type = plan.provider_name.as_deref().unwrap_or("custom");
+        let provider = StoredProviderCatalogProvider::new(
+            plan.provider_id.clone(),
+            plan.provider_id.clone(),
+            Some("https://provider.example".to_string()),
+            provider_type.to_string(),
+        )
+        .expect("provider should build")
+        .with_transport_fields(
+            true,
+            false,
+            false,
+            None,
+            Some(3),
+            None,
+            None,
+            None,
+            Some(json!({
+                "failover_rules": {
+                    "stop_status_codes": [429]
+                }
+            })),
+        );
+        let endpoint = StoredProviderCatalogEndpoint::new(
+            plan.endpoint_id.clone(),
+            plan.provider_id.clone(),
+            plan.provider_api_format.clone(),
+            None,
+            None,
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://provider.example".to_string(),
+            None,
+            None,
+            Some(2),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build");
+        let key = StoredProviderCatalogKey::new(
+            plan.key_id.clone(),
+            plan.provider_id.clone(),
+            plan.key_id.clone(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(json!([plan.provider_api_format.clone()])),
+            "plain-upstream-key".to_string(),
+            None,
+            None,
+            Some(json!({ "openai:chat": 1 })),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build");
+
+        InMemoryProviderCatalogReadRepository::seed(vec![provider], vec![endpoint], vec![key])
+    }
 
     fn test_decision() -> GatewayControlDecision {
         GatewayControlDecision::synthetic(
@@ -5458,6 +5533,14 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         };
+        let state = state.with_data_state_for_tests(
+            crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                Arc::clone(&request_candidate_repository),
+                Arc::clone(&usage_repository),
+            )
+            .with_provider_catalog_reader(Arc::new(provider_catalog_stop_429_for_plan(&plan)))
+            .with_encryption_key_for_tests("development-key"),
+        );
         let trailer_error = connect_json_frame(
             2,
             br#"{"error":{"code":"resource_exhausted","message":"an internal error occurred"}}"#,
@@ -5493,10 +5576,7 @@ mod tests {
                 "client_api_format": "claude:messages",
                 "needs_conversion": true,
                 "has_envelope": true,
-                "envelope_name": "windsurf:GetChatMessage",
-                "local_failover_policy": {
-                    "stop_status_codes": [429]
-                }
+                "envelope_name": "windsurf:GetChatMessage"
             })),
             crate::clock::current_unix_ms(),
             Instant::now(),
@@ -5594,6 +5674,14 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         };
+        let state = state.with_data_state_for_tests(
+            crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                Arc::clone(&request_candidate_repository),
+                Arc::clone(&usage_repository),
+            )
+            .with_provider_catalog_reader(Arc::new(provider_catalog_stop_429_for_plan(&plan)))
+            .with_encryption_key_for_tests("development-key"),
+        );
         let connect_error = connect_json_frame(
             2,
             br#"{"error":{"code":"resource_exhausted","message":"quota exhausted"}}"#,
@@ -5628,10 +5716,7 @@ mod tests {
                 "client_api_format": "claude:messages",
                 "needs_conversion": true,
                 "has_envelope": true,
-                "envelope_name": "windsurf:GetChatMessage",
-                "local_failover_policy": {
-                    "stop_status_codes": [429]
-                }
+                "envelope_name": "windsurf:GetChatMessage"
             })),
             crate::clock::current_unix_ms(),
             Instant::now(),

@@ -2506,7 +2506,7 @@ fn ai_serving_same_format_provider_root_request_separates_body_and_url_policy() 
         "apps/aether-gateway/src/ai_serving/planner/passthrough/provider/family/request.rs",
     );
     for pattern in [
-        "super::super::request::build_same_format_provider_request_body(",
+        "super::super::request::build_same_format_provider_request_body_with_compatibility_report(",
         "super::super::request::build_same_format_upstream_url(",
     ] {
         assert!(

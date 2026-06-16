@@ -5,7 +5,8 @@ use serde_json::{json, Value};
 use crate::{
     formats::context::FormatContext,
     protocol::canonical::{
-        canonical_blocks_to_claude, canonical_stop_reason_to_claude, canonical_usage_to_claude,
+        canonical_blocks_to_claude, canonical_extension_object_mut,
+        canonical_stop_reason_to_claude, canonical_usage_to_claude,
         claude_content_to_canonical_blocks, claude_extensions, claude_stop_reason_to_canonical,
         claude_usage_to_canonical, namespace_extension_object, CanonicalResponse,
         CanonicalResponseOutput, CanonicalRole,
@@ -28,6 +29,27 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
     let content = claude_content_to_canonical_blocks(body.get("content"))?;
     let stop_reason =
         claude_stop_reason_to_canonical(body.get("stop_reason").and_then(Value::as_str));
+    let mut extensions = claude_extensions(
+        body,
+        &[
+            "id",
+            "type",
+            "role",
+            "model",
+            "content",
+            "stop_reason",
+            "stop_sequence",
+            "usage",
+        ],
+    );
+    if let Some(raw_stop_reason) = body.get("stop_reason").cloned() {
+        canonical_extension_object_mut(&mut extensions, "claude")
+            .insert("raw_stop_reason".to_string(), raw_stop_reason);
+    }
+    if let Some(raw_stop_sequence) = body.get("stop_sequence").cloned() {
+        canonical_extension_object_mut(&mut extensions, "claude")
+            .insert("raw_stop_sequence".to_string(), raw_stop_sequence);
+    }
     Some(CanonicalResponse {
         id: body
             .get("id")
@@ -49,19 +71,7 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
         content,
         stop_reason,
         usage: claude_usage_to_canonical(body.get("usage")),
-        extensions: claude_extensions(
-            body,
-            &[
-                "id",
-                "type",
-                "role",
-                "model",
-                "content",
-                "stop_reason",
-                "stop_sequence",
-                "usage",
-            ],
-        ),
+        extensions,
     })
 }
 
@@ -86,12 +96,23 @@ pub fn to_raw(canonical: &CanonicalResponse) -> Value {
             "output_tokens": 0,
         })),
     });
+    if let Some(claude) = canonical
+        .extensions
+        .get("claude")
+        .and_then(Value::as_object)
+    {
+        if let Some(raw_stop_reason) = claude.get("raw_stop_reason").cloned() {
+            response["stop_reason"] = raw_stop_reason;
+        }
+        if let Some(raw_stop_sequence) = claude.get("raw_stop_sequence").cloned() {
+            response["stop_sequence"] = raw_stop_sequence;
+        }
+    }
     if let Some(object) = response.as_object_mut() {
-        object.extend(namespace_extension_object(
-            &canonical.extensions,
-            "claude",
-            object,
-        ));
+        let mut extra = namespace_extension_object(&canonical.extensions, "claude", object);
+        extra.remove("raw_stop_reason");
+        extra.remove("raw_stop_sequence");
+        object.extend(extra);
     }
     response
 }

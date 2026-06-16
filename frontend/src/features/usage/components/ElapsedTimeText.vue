@@ -7,11 +7,13 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 
 const props = withDefaults(defineProps<{
   createdAt?: string | null
+  responseTimeUpdatedAt?: string | null
   status?: string | null
   responseTimeMs?: number | null
   precision?: number
 }>(), {
   createdAt: null,
+  responseTimeUpdatedAt: null,
   status: null,
   responseTimeMs: null,
   precision: 2,
@@ -28,6 +30,10 @@ function parseCreatedAtMs(value: string | null | undefined): number {
   // 后端有时返回无时区时间，按 UTC 解析，和列表时间显示逻辑保持一致
   const normalized = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`
   return new Date(normalized).getTime()
+}
+
+function finiteNonNegativeMs(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
 }
 
 function stopRaf() {
@@ -61,8 +67,16 @@ onUnmounted(() => {
 
 const displayText = computed(() => {
   if (!isActive.value) {
-    if (props.responseTimeMs == null) return '-'
-    return `${(props.responseTimeMs / 1000).toFixed(precision.value)}s`
+    const responseTimeMs = finiteNonNegativeMs(props.responseTimeMs)
+    if (responseTimeMs == null) return '-'
+    return `${(responseTimeMs / 1000).toFixed(precision.value)}s`
+  }
+
+  const responseTimeMs = finiteNonNegativeMs(props.responseTimeMs)
+  const updatedAtMs = parseCreatedAtMs(props.responseTimeUpdatedAt)
+  if (responseTimeMs != null && !Number.isNaN(updatedAtMs)) {
+    const elapsedSinceUpdateMs = Math.max(0, now.value - updatedAtMs)
+    return `${((responseTimeMs + elapsedSinceUpdateMs) / 1000).toFixed(precision.value)}s`
   }
 
   if (!props.createdAt) return '-'

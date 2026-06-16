@@ -107,8 +107,8 @@ pub use decision_payload::{
 };
 pub use dto::{
     augment_sync_report_context, generic_decision_missing_exact_provider_request,
-    AiExecutionDecision, AiExecutionPlanPayload, AiStreamAttempt, AiSyncAttempt, ConversionMode,
-    ExecutionStrategy,
+    AiExecutionDecision, AiExecutionPlanPayload, AiRequestGzipPolicy, AiStreamAttempt,
+    AiSyncAttempt, ConversionMode, ExecutionStrategy,
 };
 pub use execution_path::{
     run_ai_stream_execution_path, run_ai_sync_execution_path, AiPlanFallbackReason,
@@ -126,7 +126,8 @@ pub use report_context::{
     AiExecutionReportContextParts, AiRequestOrigin,
 };
 pub use request_body_diagnostics::{
-    request_body_build_failure_extra_data, same_format_provider_request_body_failure_extra_data,
+    request_body_build_failure_extra_data, request_conversion_failure_extra_data,
+    same_format_provider_request_body_failure_extra_data,
 };
 pub use runtime_miss::{
     apply_ai_runtime_candidate_evaluation_progress,

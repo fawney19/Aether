@@ -352,7 +352,8 @@ fn normalize_chat_pii_redaction_feature_settings(
 fn normalize_chat_pii_redaction_feature_object(
     feature: &mut Map<String, Value>,
 ) -> Result<(), String> {
-    for key in ["enabled", "inject_model_instruction"] {
+    feature.remove("inject_model_instruction");
+    for key in ["enabled"] {
         if let Some(value) = feature.get(key) {
             if !value.is_boolean() {
                 return Err(format!("chat_pii_redaction.{key} 必须是布尔值"));
@@ -450,7 +451,7 @@ mod tests {
     fn user_self_feature_update_preserves_notification_push_permission() {
         let normalized = normalize_user_self_feature_settings_update(
             Some(json!({
-                "chat_pii_redaction": {"enabled": true, "inject_model_instruction": false},
+                "chat_pii_redaction": {"enabled": true},
                 "notification_push_service": {"enabled": false}
             })),
             Some(json!({

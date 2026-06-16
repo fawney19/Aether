@@ -156,14 +156,11 @@ SELECT
   usage_settlement_snapshots.billing_rule_id AS settlement_billing_rule_id,
   usage_settlement_snapshots.billing_rule_version AS settlement_billing_rule_version,
   CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT) AS created_at_unix_ms,
-  CAST(
-    EXTRACT(
-      EPOCH FROM COALESCE(
-        usage_settlement_snapshots.finalized_at,
-        "usage".finalized_at,
-        "usage".created_at
-      )
-    ) AS BIGINT
+  GREATEST(
+    COALESCE(NULLIF("usage".updated_at_unix_secs, 0), 0),
+    COALESCE(CAST(EXTRACT(EPOCH FROM usage_settlement_snapshots.finalized_at) AS BIGINT), 0),
+    COALESCE(CAST(EXTRACT(EPOCH FROM "usage".finalized_at) AS BIGINT), 0),
+    CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT)
   ) AS updated_at_unix_secs,
   CAST(
     EXTRACT(

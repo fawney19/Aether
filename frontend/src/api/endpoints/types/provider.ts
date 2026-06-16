@@ -774,8 +774,17 @@ export interface FailoverRuleItem {
 }
 
 export interface FailoverRulesConfig {
-  success_failover_patterns: FailoverRuleItem[]
-  error_stop_patterns: FailoverRuleItem[]
+  max_retries?: number
+  stop_status_codes?: number[]
+  stop_on_status_codes?: number[]
+  early_stop_status_codes?: number[]
+  non_retryable_status_codes?: number[]
+  continue_on_status_codes?: number[]
+  retryable_status_codes?: number[]
+  retry_on_status_codes?: number[]
+  continue_status_codes?: number[]
+  success_failover_patterns?: FailoverRuleItem[]
+  error_stop_patterns?: FailoverRuleItem[]
 }
 
 export interface ProviderWithEndpointsSummary {

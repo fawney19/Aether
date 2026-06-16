@@ -570,6 +570,176 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).not.toContain('该错误被标记为敏感上游错误')
   })
 
+  it('keeps local sync diagnostics visible when upstream response body capture is disabled', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-local-sync-diagnostic',
+        provider_id: 'provider-local-sync',
+        provider_name: 'Provider Local Sync',
+        key_id: 'key-local-sync',
+        key_name: 'Local Sync Key',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 500,
+        error_type: 'local_sync_attempt_aborted',
+        error_message: 'Local sync attempt failed before terminal finalization: Internal("Unsupported provider stream event cannot be converted losslessly: field $.type = \\"response.future.delta\\"; fields: payload, response, type")',
+        extra_data: {
+          upstream_response: {
+            status_code: 500,
+            headers: { 'content-type': 'application/json' },
+            body_state: 'disabled',
+          },
+        },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    expect(root.textContent).toContain('错误信息')
+    expect(root.textContent).toContain('HTTP 500')
+    expect(root.textContent).toContain('流式格式转换失败')
+    expect(root.textContent).toContain('上游返回了当前不支持的 stream event')
+    expect(root.textContent).toContain('字段 $.type = "response.future.delta"')
+    const errorJsonText = root.querySelector('.error-block .error-json')?.textContent ?? ''
+    expect(errorJsonText).toContain('"body_state":"disabled"')
+    expect(errorJsonText).toContain('"diagnostic"')
+    expect(errorJsonText).toContain('"breakpoint":"$.type"')
+    expect(errorJsonText).toContain('"analysis_hint"')
+    expect(errorJsonText).toContain('"raw"')
+  })
+
+  it('formats request conversion diagnostics with field paths on skipped trace nodes', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-request-conversion',
+        provider_id: 'provider-request-conversion',
+        provider_name: 'Provider Request Conversion',
+        key_id: 'key-request-conversion',
+        key_name: 'Request Conversion Key',
+        candidate_index: 0,
+        status: 'skipped',
+        skip_reason: 'provider_request_body_build_failed',
+        extra_data: {
+          failure_diagnostic: {
+            kind: 'request_conversion',
+            path: '$.n',
+            message: 'lossy conversion blocked from openai:chat to openai:responses at n: multiple completions cannot be represented losslessly',
+            safe_to_show: true,
+          },
+        },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    expect(root.textContent).toContain('跳过原因')
+    expect(root.textContent).toContain('上游请求体转换失败')
+    expect(root.textContent).toContain('$.n')
+    expect(root.textContent).toContain('格式转换失败')
+    expect(root.textContent).toContain('OpenAI Chat → OpenAI Responses')
+    expect(root.textContent).toContain('字段 $.n 会丢失信息')
+    expect(root.querySelector('.diagnostic-json-panel')).toBeNull()
+  })
+
+  it('formats unsupported stream finish reasons with the failing field', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-finish-reason',
+        provider_id: 'provider-finish-reason',
+        provider_name: 'Provider Finish Reason',
+        key_id: 'key-finish-reason',
+        key_name: 'Finish Reason Key',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 500,
+        error_message: 'Internal("Unsupported provider stream finish reason cannot be converted losslessly: field $.finish_reason = \\"future_reason\\"")',
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    expect(root.textContent).toContain('流式格式转换失败')
+    expect(root.textContent).toContain('finish reason')
+    expect(root.textContent).toContain('字段 $.finish_reason = "future_reason"')
+    const errorJsonText = root.querySelector('.error-block .error-json')?.textContent ?? ''
+    expect(errorJsonText).toContain('"diagnostic"')
+    expect(errorJsonText).toContain('"breakpoint":"$.finish_reason"')
+  })
+
+  it('uses conversion messages from error_flow as the diagnostic breakpoint source', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-error-flow-conversion',
+        provider_id: 'provider-error-flow-conversion',
+        provider_name: 'Provider Error Flow Conversion',
+        key_id: 'key-error-flow-conversion',
+        key_name: 'Error Flow Conversion Key',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 500,
+        error_message: 'execution runtime stream returned non-success status 500',
+        extra_data: {
+          upstream_response: {
+            status_code: 500,
+            body_state: 'disabled',
+          },
+          error_flow: {
+            status_code: 500,
+            message: 'lossy conversion blocked from openai:chat to openai:responses at n: multiple completions cannot be represented losslessly',
+          },
+        },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    expect(root.textContent).toContain('格式转换失败')
+    expect(root.textContent).toContain('OpenAI Chat → OpenAI Responses')
+    expect(root.textContent).toContain('字段 $.n 会丢失信息')
+    expect(root.textContent).not.toContain('上游返回非成功状态 500')
+    const errorJsonText = root.querySelector('.error-block .error-json')?.textContent ?? ''
+    expect(errorJsonText).toContain('"body_state":"disabled"')
+    expect(errorJsonText).toContain('"breakpoint":"$.n"')
+    expect(errorJsonText).toContain('断点在请求/响应格式转换器')
+  })
+
+  it('shows failed diagnostic messages even when the only response panel data is diagnostic metadata', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-diagnostic-only',
+        provider_id: 'provider-diagnostic-only',
+        provider_name: 'Provider Diagnostic Only',
+        key_id: 'key-diagnostic-only',
+        key_name: 'Diagnostic Only Key',
+        candidate_index: 0,
+        status: 'failed',
+        error_type: 'request_conversion_failed',
+        extra_data: {
+          failure_diagnostic: {
+            kind: 'request_conversion',
+            path: '$.temperature',
+            message: 'unsupported field temperature in openai:responses: temperature cannot be represented',
+            safe_to_show: true,
+          },
+        },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    expect(root.textContent).toContain('错误信息')
+    expect(root.textContent).toContain('格式转换失败')
+    expect(root.textContent).toContain('OpenAI Responses 不支持字段 $.temperature')
+    const errorJsonText = root.querySelector('.error-block .error-json')?.textContent ?? ''
+    expect(errorJsonText).toContain('"diagnostic"')
+    expect(errorJsonText).toContain('"breakpoint":"$.temperature"')
+  })
+
   it('keeps the failure message when upstream response only records an empty body state', async () => {
     const trace = buildTrace([
       buildCandidate({

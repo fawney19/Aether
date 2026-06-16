@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  classifyAccountBlockLabel,
   cleanAccountBlockReason,
   isAccountLevelBlockReason,
   isRefreshFailedReason,
@@ -29,5 +30,10 @@ describe('accountBlock helpers', () => {
         '[REFRESH_FAILED] Token 续期失败 (401): token has been invalidated',
       ),
     ).toBe(false)
+  })
+
+  it('labels invalidated and expired oauth markers separately', () => {
+    expect(classifyAccountBlockLabel('[OAUTH_EXPIRED] token invalidated')).toBe('Token 失效')
+    expect(classifyAccountBlockLabel('[OAUTH_EXPIRED] session expired')).toBe('Token 过期')
   })
 })

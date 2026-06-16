@@ -2064,7 +2064,7 @@ async fn keeps_codex_candidate_selectable_when_oauth_token_is_expired() {
             let mut key = sample_key("key-codex", "provider-codex", Some(10));
             key.auth_type = "oauth".to_string();
             key.oauth_invalid_at_unix_secs = Some(1_710_000_000);
-            key.oauth_invalid_reason = Some("Codex Token 无效或已过期".to_string());
+            key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] session expired".to_string());
             key
         }],
     ));

@@ -3,6 +3,7 @@ import { ref } from 'vue'
 
 const {
   getAllUsageRecordsMock,
+  getAllUsageRecordTotalMock,
   getUsageStatsMock,
   getUsageByModelMock,
   getUsageByProviderMock,
@@ -10,6 +11,7 @@ const {
   meGetUsageMock,
 } = vi.hoisted(() => ({
   getAllUsageRecordsMock: vi.fn(),
+  getAllUsageRecordTotalMock: vi.fn(),
   getUsageStatsMock: vi.fn(),
   getUsageByModelMock: vi.fn(),
   getUsageByProviderMock: vi.fn(),
@@ -20,6 +22,7 @@ const {
 vi.mock('@/api/usage', () => ({
   usageApi: {
     getAllUsageRecords: getAllUsageRecordsMock,
+    getAllUsageRecordTotal: getAllUsageRecordTotalMock,
     getUsageStats: getUsageStatsMock,
     getUsageByModel: getUsageByModelMock,
     getUsageByProvider: getUsageByProviderMock,
@@ -72,6 +75,7 @@ describe('useUsageData', () => {
       limit: 20,
       offset: 0,
     })
+    getAllUsageRecordTotalMock.mockResolvedValue(1)
     getUsageStatsMock.mockRejectedValue({
       response: { status: 500 },
       message: 'stats failed',
@@ -141,6 +145,35 @@ describe('useUsageData', () => {
       error_message: 'error code: 524',
       response_time_ms: 125_000,
     })
+  })
+
+  it('refreshes exact admin record totals after an estimated first page', async () => {
+    const isAdminPage = ref(true)
+    const { loadRecords, totalRecords } = useUsageData({ isAdminPage })
+    const dateRange = { preset: 'last7days', tz_offset_minutes: 0 }
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord()],
+      total: 21,
+      total_is_estimated: true,
+      limit: 20,
+      offset: 0,
+    })
+    getAllUsageRecordTotalMock.mockResolvedValueOnce(122101)
+
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+
+    expect(getAllUsageRecordsMock).toHaveBeenCalledWith(expect.objectContaining({
+      include_total: false,
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(getAllUsageRecordTotalMock).toHaveBeenCalledWith(expect.objectContaining({
+      preset: 'last7days',
+      tz_offset_minutes: 0,
+    }))
+    expect(totalRecords.value).toBe(122101)
   })
 
   it('continues loading admin breakdowns when the summary request fails', async () => {

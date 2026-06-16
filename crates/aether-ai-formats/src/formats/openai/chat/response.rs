@@ -70,6 +70,13 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
         }
         let stop_reason =
             openai_finish_reason_to_canonical(choice.get("finish_reason").and_then(Value::as_str));
+        let mut extensions = BTreeMap::new();
+        if let Some(raw_finish_reason) = choice.get("finish_reason").cloned() {
+            extensions.insert(
+                "openai".to_string(),
+                json!({ "raw_finish_reason": raw_finish_reason }),
+            );
+        }
         outputs.push(CanonicalResponseOutput {
             index: choice
                 .get("index")
@@ -79,7 +86,7 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
             role: CanonicalRole::Assistant,
             content,
             stop_reason,
-            extensions: BTreeMap::new(),
+            extensions,
         });
     }
     let first_output = outputs.first()?;
@@ -123,10 +130,21 @@ pub fn to_raw(canonical: &CanonicalResponse) -> Value {
         .iter()
         .enumerate()
         .map(|(fallback_index, output)| {
+            let finish_reason = output
+                .extensions
+                .get("openai")
+                .and_then(Value::as_object)
+                .and_then(|openai| openai.get("raw_finish_reason"))
+                .cloned()
+                .unwrap_or_else(|| {
+                    Value::String(
+                        canonical_stop_reason_to_openai(output.stop_reason.as_ref()).to_string(),
+                    )
+                });
             json!({
                 "index": output.index,
                 "message": canonical_blocks_to_openai_chat_message(&output.content),
-                "finish_reason": canonical_stop_reason_to_openai(output.stop_reason.as_ref()),
+                "finish_reason": finish_reason,
             })
             .as_object()
             .map(|choice| {

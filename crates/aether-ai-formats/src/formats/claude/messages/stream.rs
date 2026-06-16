@@ -322,8 +322,7 @@ impl ClaudeProviderState {
                 let finish_reason = map_claude_stop_reason(
                     delta.get("stop_reason").and_then(Value::as_str),
                     delta.get("stop_reason").and_then(Value::as_str) == Some("tool_use"),
-                )
-                .map(ToOwned::to_owned);
+                );
                 let (id, model) = self.identity(report_context);
                 out.push(CanonicalStreamFrame {
                     id,

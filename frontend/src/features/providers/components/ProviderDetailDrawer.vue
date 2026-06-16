@@ -1627,11 +1627,23 @@ const antigravityQuotaDialogKey = ref<EndpointAPIKey | null>(null)
 
 // 故障转移规则
 const failoverRulesDialogOpen = ref(false)
+const FAILOVER_RULE_ARRAY_KEYS = [
+  'success_failover_patterns',
+  'error_stop_patterns',
+  'stop_status_codes',
+  'stop_on_status_codes',
+  'early_stop_status_codes',
+  'non_retryable_status_codes',
+  'continue_on_status_codes',
+  'retryable_status_codes',
+  'retry_on_status_codes',
+  'continue_status_codes',
+] as const
 const hasFailoverRules = computed(() => {
   const rules = provider.value?.failover_rules
   if (!rules) return false
-  return (rules.success_failover_patterns?.length || 0) > 0
-    || (rules.error_stop_patterns?.length || 0) > 0
+  return FAILOVER_RULE_ARRAY_KEYS.some(key => (rules[key]?.length || 0) > 0)
+    || typeof rules.max_retries === 'number'
 })
 
 // Provider 级别代理配置状态

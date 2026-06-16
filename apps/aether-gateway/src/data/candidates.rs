@@ -11,9 +11,15 @@ pub(crate) async fn read_request_candidate_trace(
     request_id: &str,
     attempted_only: bool,
 ) -> Result<Option<RequestCandidateTrace>, DataLayerError> {
-    let all_candidates = state
-        .list_request_candidates_by_request_id(request_id)
-        .await?;
+    let all_candidates = if attempted_only {
+        state
+            .list_attempted_request_candidates_by_request_id(request_id)
+            .await?
+    } else {
+        state
+            .list_request_candidates_by_request_id(request_id)
+            .await?
+    };
     Ok(RequestCandidateTrace::from_candidates(
         request_id,
         all_candidates,

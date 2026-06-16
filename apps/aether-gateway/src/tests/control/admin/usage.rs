@@ -1172,7 +1172,7 @@ async fn gateway_handles_admin_usage_active_ids_for_terminal_updates() {
 
 #[tokio::test]
 async fn gateway_handles_admin_usage_records_locally_with_trusted_admin_principal() {
-    let (upstream_url, upstream_hits, upstream_handle) =
+    let (_upstream_url, upstream_hits, upstream_handle) =
         start_usage_upstream("/api/admin/usage/records").await;
 
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
@@ -1330,6 +1330,100 @@ async fn gateway_filters_admin_usage_records_with_unknown_model_or_provider() {
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["total"], 1);
     assert_eq!(payload["records"][0]["id"], "usage-visible");
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_supports_fast_admin_usage_record_totals() {
+    let (upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/records").await;
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        sample_usage_row(
+            "usage-a",
+            "req-a",
+            Some("user-1"),
+            Some("key-1"),
+            Some("primary"),
+            "OpenAI",
+            "gpt-5",
+            "completed",
+            120,
+            30,
+            0.3,
+            0.36,
+            DAY_2_UNIX_SECS,
+        ),
+        sample_usage_row(
+            "usage-b",
+            "req-b",
+            Some("user-1"),
+            Some("key-1"),
+            Some("primary"),
+            "OpenAI",
+            "gpt-5-mini",
+            "completed",
+            80,
+            20,
+            0.2,
+            0.24,
+            DAY_2_UNIX_SECS - 1,
+        ),
+        sample_usage_row(
+            "usage-c",
+            "req-c",
+            Some("user-1"),
+            Some("key-1"),
+            Some("primary"),
+            "Anthropic",
+            "claude-sonnet",
+            "completed",
+            60,
+            10,
+            0.1,
+            0.12,
+            DAY_1_UNIX_SECS,
+        ),
+    ]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_usage_reader_for_tests(
+                usage_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let fast_response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/records?start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0&include_total=false&limit=2&offset=0"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(fast_response.status(), StatusCode::OK);
+    let fast_payload: serde_json::Value =
+        fast_response.json().await.expect("json body should parse");
+    assert_eq!(fast_payload["records"].as_array().unwrap().len(), 2);
+    assert_eq!(fast_payload["total"], 3);
+    assert_eq!(fast_payload["total_is_estimated"], true);
+
+    let total_response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/records?start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0&total_only=true&limit=2&offset=0"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(total_response.status(), StatusCode::OK);
+    let total_payload: serde_json::Value =
+        total_response.json().await.expect("json body should parse");
+    assert_eq!(total_payload["records"].as_array().unwrap().len(), 0);
+    assert_eq!(total_payload["total"], 3);
+    assert_eq!(total_payload["total_is_estimated"], false);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

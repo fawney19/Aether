@@ -5,7 +5,8 @@ use crate::ai_serving::planner::report_context::{
 };
 use crate::ai_serving::planner::spec_metadata::local_video_create_spec_metadata;
 use crate::ai_serving::planner::{
-    build_ai_execution_decision_response, AiExecutionDecisionResponseParts,
+    build_ai_execution_decision_response, resolve_transport_request_gzip_policy,
+    AiExecutionDecisionResponseParts,
 };
 use crate::ai_serving::transport::{
     resolve_transport_execution_timeouts, resolve_transport_profile,
@@ -103,6 +104,7 @@ pub(super) async fn maybe_build_local_video_create_decision_payload_for_candidat
         provider_request_body,
         upstream_url,
     } = resolved;
+    let request_gzip = resolve_transport_request_gzip_policy(&transport);
 
     let mut decision = build_ai_execution_decision_response(AiExecutionDecisionResponseParts {
         decision_is_stream: false,
@@ -135,6 +137,8 @@ pub(super) async fn maybe_build_local_video_create_decision_payload_for_candidat
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
+        content_encoding: None,
+        request_gzip,
         proxy,
         transport_profile,
         timeouts: resolve_transport_execution_timeouts(&transport),

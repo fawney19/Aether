@@ -11,6 +11,12 @@ pub(crate) struct LocalProviderDeleteTaskState {
     pub message: String,
 }
 
+impl LocalProviderDeleteTaskState {
+    pub(crate) fn is_active(&self) -> bool {
+        matches!(self.status.as_str(), "pending" | "running")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LocalMutationOutcome<T> {
     Applied(T),

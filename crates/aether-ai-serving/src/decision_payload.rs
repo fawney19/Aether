@@ -10,7 +10,7 @@ use aether_contracts::{
 };
 use serde_json::{json, Map, Value};
 
-use crate::{AiExecutionDecision, ConversionMode, ExecutionStrategy};
+use crate::{AiExecutionDecision, AiRequestGzipPolicy, ConversionMode, ExecutionStrategy};
 
 pub struct AiExecutionDecisionResponseParts {
     pub decision_is_stream: bool,
@@ -37,6 +37,8 @@ pub struct AiExecutionDecisionResponseParts {
     pub provider_request_body: Option<serde_json::Value>,
     pub provider_request_body_base64: Option<String>,
     pub content_type: Option<String>,
+    pub content_encoding: Option<String>,
+    pub request_gzip: Option<AiRequestGzipPolicy>,
     pub proxy: Option<ProxySnapshot>,
     pub transport_profile: Option<ResolvedTransportProfile>,
     pub timeouts: Option<ExecutionTimeouts>,
@@ -83,6 +85,8 @@ pub fn build_ai_execution_decision_response(
         provider_request_body: parts.provider_request_body,
         provider_request_body_base64: parts.provider_request_body_base64,
         content_type: parts.content_type,
+        content_encoding: parts.content_encoding,
+        request_gzip: parts.request_gzip,
         proxy: parts.proxy,
         transport_profile: parts.transport_profile,
         timeouts: parts.timeouts,
@@ -222,6 +226,8 @@ mod tests {
             provider_request_body: Some(json!({"model": "gpt-5"})),
             provider_request_body_base64: None,
             content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            request_gzip: None,
             proxy: None,
             transport_profile: None,
             timeouts: None,

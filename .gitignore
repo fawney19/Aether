@@ -2,6 +2,7 @@
 # Edit at https://www.toptal.com/developers/gitignore?templates=python
 
 *.rsa
+*_rsa
 
 # AI Assistant Configuration
 .codex/

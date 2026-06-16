@@ -68,6 +68,11 @@ impl CandidateFailureDiagnostic {
         self
     }
 
+    pub fn has_specific_path(&self) -> bool {
+        let path = self.path.trim();
+        !path.is_empty() && path != "$"
+    }
+
     pub fn to_extra_data(&self) -> Value {
         let diagnostic = self.to_value();
         let mut extra_data = json!({
@@ -75,17 +80,31 @@ impl CandidateFailureDiagnostic {
         });
 
         // Compatibility for current usage UI and already persisted trace readers.
-        if self.kind == CandidateFailureDiagnosticKind::RequestBodyBuild {
-            if let Some(object) = extra_data.as_object_mut() {
-                object.insert(
-                    "request_body_build_error".to_string(),
-                    json!({
-                        "path": self.path,
-                        "message": self.message,
-                        "client_api_format": self.client_api_format,
-                        "provider_api_format": self.provider_api_format,
-                    }),
-                );
+        if let Some(object) = extra_data.as_object_mut() {
+            match self.kind {
+                CandidateFailureDiagnosticKind::RequestBodyBuild => {
+                    object.insert(
+                        "request_body_build_error".to_string(),
+                        json!({
+                            "path": self.path,
+                            "message": self.message,
+                            "client_api_format": self.client_api_format,
+                            "provider_api_format": self.provider_api_format,
+                        }),
+                    );
+                }
+                CandidateFailureDiagnosticKind::RequestConversion => {
+                    object.insert(
+                        "request_conversion_error".to_string(),
+                        json!({
+                            "path": self.path,
+                            "message": self.message,
+                            "client_api_format": self.client_api_format,
+                            "provider_api_format": self.provider_api_format,
+                        }),
+                    );
+                }
+                _ => {}
             }
         }
 

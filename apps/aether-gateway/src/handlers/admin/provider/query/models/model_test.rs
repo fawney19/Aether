@@ -2183,6 +2183,11 @@ async fn provider_query_execute_openai_image_test_candidate(
                 headers: &parts.headers,
                 auth_header: &auth_header,
                 auth_value: &auth_value,
+                accept: if is_codex || is_chatgpt_web {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                },
                 header_rules: transport.endpoint.header_rules.as_ref(),
                 provider_request_body: &provider_request_body,
                 original_request_body: &request_body,

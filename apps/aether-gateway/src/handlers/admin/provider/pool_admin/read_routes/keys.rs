@@ -304,6 +304,7 @@ fn admin_pool_trimmed_string(value: Option<&Value>) -> Option<String> {
 fn admin_pool_account_code_status_filter(code: &str) -> Option<&'static str> {
     match code.trim().to_ascii_lowercase().as_str() {
         "oauth_token_invalid" => Some("invalid"),
+        "oauth_token_expired" => Some("expired"),
         "account_banned" | "account_suspended" => Some("account_banned"),
         "account_disabled" => Some("account_disabled"),
         "workspace_deactivated" => Some("workspace_deactivated"),

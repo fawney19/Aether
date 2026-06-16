@@ -1578,6 +1578,47 @@ mod tests {
     }
 
     #[test]
+    fn build_image_api_provider_edit_request_body_keeps_images_edit_shape() {
+        let parts = request_parts("/v1/images/edits", Some("application/json"));
+        let request = normalize_openai_image_request(
+            &parts,
+            &json!({
+                "model": "gpt-image-2",
+                "prompt": "replace the background",
+                "image": "data:image/png;base64,aW1hZ2U=",
+                "mask": "data:image/png;base64,bWFzaw==",
+                "input_fidelity": "high",
+                "output_format": "png",
+                "response_format": "url",
+                "user": "user-123"
+            }),
+            None,
+        )
+        .expect("edit request should normalize");
+
+        let provider_request_body =
+            build_openai_image_api_provider_request_body(&request, Some("mapped-edit-model"));
+
+        assert_eq!(provider_request_body["model"], "mapped-edit-model");
+        assert_eq!(provider_request_body["prompt"], "replace the background");
+        assert_eq!(provider_request_body["input_fidelity"], "high");
+        assert_eq!(provider_request_body["output_format"], "png");
+        assert_eq!(provider_request_body["response_format"], "url");
+        assert_eq!(provider_request_body["user"], "user-123");
+        assert_eq!(
+            provider_request_body["image"]["image_url"],
+            "data:image/png;base64,aW1hZ2U="
+        );
+        assert_eq!(
+            provider_request_body["mask"]["image_url"],
+            "data:image/png;base64,bWFzaw=="
+        );
+        assert!(provider_request_body.get("input").is_none());
+        assert!(provider_request_body.get("tools").is_none());
+        assert!(provider_request_body.get("action").is_none());
+    }
+
+    #[test]
     fn chatgpt_web_accepts_1k_tier_and_1024_size() {
         let parts = request_parts("/v1/images/generations", Some("application/json"));
         let by_tier = build_chatgpt_web_image_request_body(
@@ -1628,6 +1669,40 @@ mod tests {
         assert_eq!(body["quality"], "high");
         assert_eq!(body["partial_images"], 2);
         assert_eq!(body["output_format"], "png");
+    }
+
+    #[test]
+    fn chatgpt_web_accepts_openai_image_edit_requests() {
+        let parts = request_parts("/v1/images/edits", Some("application/json"));
+        let body = build_chatgpt_web_image_request_body(
+            &parts,
+            &json!({
+                "model": "gpt-image-2",
+                "prompt": "make the sky brighter",
+                "image": {
+                    "b64_json": "aW1hZ2U=",
+                    "mime_type": "image/png"
+                },
+                "size": "1024x1024",
+                "quality": "high",
+                "response_format": "b64_json",
+                "output_format": "png",
+                "user": "user-123"
+            }),
+            None,
+        )
+        .expect("ChatGPT-Web edit request should pass");
+
+        assert_eq!(body["operation"], "edit");
+        assert_eq!(body["model"], "gpt-image-2");
+        assert_eq!(body["prompt"], "make the sky brighter");
+        assert_eq!(body["size"], "1024x1024");
+        assert_eq!(body["quality"], "high");
+        assert_eq!(body["response_format"], "b64_json");
+        assert_eq!(body["output_format"], "png");
+        assert_eq!(body["user"], "user-123");
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["images"], json!(["data:image/png;base64,aW1hZ2U="]));
     }
 
     #[test]

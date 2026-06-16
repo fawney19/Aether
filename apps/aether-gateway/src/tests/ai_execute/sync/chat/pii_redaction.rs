@@ -230,14 +230,10 @@ fn redaction_test_rules() -> serde_json::Value {
     ])
 }
 
-fn chat_pii_redaction_feature_settings(
-    enabled: bool,
-    inject_model_instruction: bool,
-) -> serde_json::Value {
+fn chat_pii_redaction_feature_settings(enabled: bool) -> serde_json::Value {
     json!({
         "chat_pii_redaction": {
             "enabled": enabled,
-            "inject_model_instruction": inject_model_instruction,
         }
     })
 }
@@ -245,7 +241,6 @@ fn chat_pii_redaction_feature_settings(
 fn auth_repository_with_redaction_feature_settings(
     test_id: &str,
     feature_enabled: bool,
-    inject_model_instruction: bool,
 ) -> Arc<InMemoryAuthApiKeySnapshotRepository> {
     let snapshot = auth_snapshot(&format!("api-key-{test_id}"), &format!("user-{test_id}"));
     let key_hash = hash_api_key(&format!("sk-client-{test_id}"));
@@ -257,10 +252,7 @@ fn auth_repository_with_redaction_feature_settings(
         .with_export_records(vec![auth_export_record(
             &snapshot,
             key_hash,
-            Some(chat_pii_redaction_feature_settings(
-                feature_enabled,
-                inject_model_instruction,
-            )),
+            Some(chat_pii_redaction_feature_settings(feature_enabled)),
         )]),
     )
 }
@@ -372,8 +364,7 @@ async fn run_sync_redaction_case_with_system_config(
         }),
     );
     let (provider_url, provider_handle) = start_server(provider_app).await;
-    let auth_repository =
-        auth_repository_with_redaction_feature_settings(test_id, feature_enabled, true);
+    let auth_repository = auth_repository_with_redaction_feature_settings(test_id, feature_enabled);
     let candidate_selection_repository =
         Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
             candidate_row(test_id),
@@ -522,14 +513,9 @@ async fn ai_execute_sync_pii_redaction_round_trip_impl() {
     assert!(provider_body_text.contains("<AETHER:ACCESS_TOKEN:"));
     assert!(provider_body_text.contains("<AETHER:SECRET_KEY:"));
     assert_eq!(seen.body["messages"][0]["role"], "system");
-    assert_eq!(seen.body["messages"][1]["role"], "assistant");
-    let notice = seen.body["messages"][1]["content"]
-        .as_str()
-        .expect("notice should be text");
-    assert!(notice.contains("not a user request"));
-    assert_eq!(seen.body["messages"][2]["role"], "user");
-    assert_eq!(seen.body["messages"][3]["role"], "assistant");
-    assert_eq!(seen.body["messages"][4]["role"], "tool");
+    assert_eq!(seen.body["messages"][1]["role"], "user");
+    assert_eq!(seen.body["messages"][2]["role"], "assistant");
+    assert_eq!(seen.body["messages"][3]["role"], "tool");
 
     let response_content = response_json["choices"][0]["message"]["content"]
         .as_str()
@@ -702,7 +688,7 @@ async fn ai_execute_pii_redaction_restores_executed_candidate_session_after_late
     );
     let (provider_url, provider_handle) = start_server(provider_app).await;
     let auth_repository =
-        auth_repository_with_redaction_feature_settings("redaction-candidate-session", true, true);
+        auth_repository_with_redaction_feature_settings("redaction-candidate-session", true);
     let mut later_candidate = candidate_row("redaction-candidate-session");
     later_candidate.provider_id = "provider-redaction-candidate-session-later".to_string();
     later_candidate.endpoint_id = "endpoint-redaction-candidate-session-later".to_string();
@@ -817,7 +803,7 @@ async fn pii_redaction_performance_limits_do_not_forward_unredacted_body_upstrea
     );
     let (provider_url, provider_handle) = start_server(provider_app).await;
     let auth_repository =
-        auth_repository_with_redaction_feature_settings("pii-redaction-limit", true, true);
+        auth_repository_with_redaction_feature_settings("pii-redaction-limit", true);
     let candidate_selection_repository =
         Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
             candidate_row("pii-redaction-limit"),
@@ -893,7 +879,7 @@ async fn ai_execute_pii_redaction_missing_encryption_key_fails_closed_before_pro
     );
     let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
     let test_id = "ai-execute-pii-redaction-missing-encryption-key";
-    let auth_repository = auth_repository_with_redaction_feature_settings(test_id, true, true);
+    let auth_repository = auth_repository_with_redaction_feature_settings(test_id, true);
     let candidate_selection_repository =
         Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
             candidate_row(test_id),

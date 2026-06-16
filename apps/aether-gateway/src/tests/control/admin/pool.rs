@@ -3526,6 +3526,15 @@ async fn gateway_cleans_up_admin_pool_banned_keys_locally_with_trusted_admin_pri
     );
     banned_key.name = "banned".to_string();
     banned_key.oauth_invalid_reason = Some("account_banned".to_string());
+    let mut oauth_invalidated_key = sample_key(
+        "key-openai-oauth-invalidated",
+        "provider-openai",
+        "openai:chat",
+        "sk-oauth-invalidated",
+    );
+    oauth_invalidated_key.name = "oauth-invalidated".to_string();
+    oauth_invalidated_key.oauth_invalid_reason =
+        Some("[OAUTH_EXPIRED] token invalidated".to_string());
     let mut oauth_expired_key = sample_key(
         "key-openai-oauth-expired",
         "provider-openai",
@@ -3533,7 +3542,7 @@ async fn gateway_cleans_up_admin_pool_banned_keys_locally_with_trusted_admin_pri
         "sk-oauth-expired",
     );
     oauth_expired_key.name = "oauth-expired".to_string();
-    oauth_expired_key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] token invalidated".to_string());
+    oauth_expired_key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] session expired".to_string());
     let mut healthy_key = sample_key(
         "key-openai-healthy",
         "provider-openai",
@@ -3545,7 +3554,12 @@ async fn gateway_cleans_up_admin_pool_banned_keys_locally_with_trusted_admin_pri
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
         Vec::new(),
-        vec![banned_key, oauth_expired_key, healthy_key],
+        vec![
+            banned_key,
+            oauth_invalidated_key,
+            oauth_expired_key,
+            healthy_key,
+        ],
     ));
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
@@ -3575,8 +3589,8 @@ async fn gateway_cleans_up_admin_pool_banned_keys_locally_with_trusted_admin_pri
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["affected"], 1);
-    assert_eq!(payload["message"], "已清理 1 个异常账号");
+    assert_eq!(payload["affected"], 2);
+    assert_eq!(payload["message"], "已清理 2 个异常账号");
 
     let remaining_keys = provider_catalog_repository
         .list_keys_by_provider_ids(&["provider-openai".to_string()])
@@ -3586,6 +3600,9 @@ async fn gateway_cleans_up_admin_pool_banned_keys_locally_with_trusted_admin_pri
     assert!(remaining_keys
         .iter()
         .any(|key| key.id == "key-openai-oauth-expired"));
+    assert!(!remaining_keys
+        .iter()
+        .any(|key| key.id == "key-openai-oauth-invalidated"));
     assert!(remaining_keys
         .iter()
         .any(|key| key.id == "key-openai-healthy"));

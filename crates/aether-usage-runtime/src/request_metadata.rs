@@ -123,6 +123,7 @@ fn copy_allowed_metadata_fields(source: &Map<String, Value>, target: &mut Map<St
     copy_number(source, target, "provider_request_body_base64_bytes");
     copy_number(source, target, "provider_response_body_base64_bytes");
     copy_number(source, target, "client_response_body_base64_bytes");
+    copy_non_null_value(source, target, "body_size");
     copy_number(source, target, "client_response_status_code");
     copy_non_null_value(source, target, "billing_snapshot");
     copy_non_empty_string(source, target, "billing_snapshot_schema_version");
@@ -165,6 +166,7 @@ fn move_allowed_metadata_fields(mut source: Map<String, Value>, target: &mut Map
     remove_number(&mut source, target, "provider_request_body_base64_bytes");
     remove_number(&mut source, target, "provider_response_body_base64_bytes");
     remove_number(&mut source, target, "client_response_body_base64_bytes");
+    remove_non_null_value(&mut source, target, "body_size");
     remove_number(&mut source, target, "client_response_status_code");
     remove_non_null_value(&mut source, target, "billing_snapshot");
     remove_non_empty_string(&mut source, target, "billing_snapshot_schema_version");
@@ -491,6 +493,11 @@ mod tests {
             "provider_request_body_base64_bytes": 512,
             "provider_response_body_base64_bytes": 1024,
             "client_response_body_base64_bytes": 2048,
+            "body_size": {
+                "client_request_body": "1 KB",
+                "provider_request_body": "4 KB",
+                "provider_over_client": "4x"
+            },
             "billing_snapshot": {"status": "complete"},
             "billing_snapshot_schema_version": "2.0",
             "billing_snapshot_status": "complete",
@@ -524,6 +531,11 @@ mod tests {
                 "provider_request_body_base64_bytes": 512,
                 "provider_response_body_base64_bytes": 1024,
                 "client_response_body_base64_bytes": 2048,
+                "body_size": {
+                    "client_request_body": "1 KB",
+                    "provider_request_body": "4 KB",
+                    "provider_over_client": "4x"
+                },
                 "billing_snapshot": {"status": "complete"},
                 "billing_snapshot_schema_version": "2.0",
                 "billing_snapshot_status": "complete",

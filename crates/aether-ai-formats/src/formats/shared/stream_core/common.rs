@@ -19,6 +19,93 @@ pub fn decode_json_data_line(line: &[u8]) -> Option<Value> {
     serde_json::from_str(data_line).ok()
 }
 
+pub fn unsupported_stream_event_message(payload: &Value) -> String {
+    const BASE_MESSAGE: &str = "Unsupported provider stream event cannot be converted losslessly";
+    match unsupported_stream_event_diagnostic(payload) {
+        Some(diagnostic) if !diagnostic.is_empty() => format!("{BASE_MESSAGE}: {diagnostic}"),
+        _ => BASE_MESSAGE.to_string(),
+    }
+}
+
+fn unsupported_stream_event_diagnostic(payload: &Value) -> Option<String> {
+    let mut details = Vec::new();
+    if let Some((path, value)) = unsupported_stream_event_primary_field(payload) {
+        details.push(format!("field {path} = {value}"));
+    } else if let Some(path) = unsupported_stream_event_single_field(payload) {
+        details.push(format!("field {path} is unsupported"));
+    }
+
+    if let Some(fields) = unsupported_stream_event_field_list(payload) {
+        details.push(format!("fields: {fields}"));
+    }
+
+    if details.is_empty() {
+        None
+    } else {
+        Some(details.join("; "))
+    }
+}
+
+fn unsupported_stream_event_primary_field(payload: &Value) -> Option<(&'static str, String)> {
+    const STRING_FIELD_PATHS: &[(&str, &str)] = &[
+        ("$.item.type", "/item/type"),
+        ("$.content_block.type", "/content_block/type"),
+        ("$.delta.type", "/delta/type"),
+        ("$.part.type", "/part/type"),
+        ("$.payload.type", "/payload/type"),
+        ("$.type", "/type"),
+        ("$.event", "/event"),
+    ];
+
+    STRING_FIELD_PATHS
+        .iter()
+        .find_map(|(display_path, pointer)| {
+            payload
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| (*display_path, json!(value.trim()).to_string()))
+        })
+}
+
+fn unsupported_stream_event_single_field(payload: &Value) -> Option<String> {
+    let object = payload.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    object.keys().next().map(|key| json_path_key(key))
+}
+
+fn unsupported_stream_event_field_list(payload: &Value) -> Option<String> {
+    let object = payload.as_object()?;
+    if object.is_empty() {
+        return None;
+    }
+    let fields = object
+        .keys()
+        .take(8)
+        .map(|key| key.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if object.len() > 8 {
+        Some(format!("{fields}, ..."))
+    } else {
+        Some(fields)
+    }
+}
+
+fn json_path_key(key: &str) -> String {
+    if !key.is_empty()
+        && key.chars().enumerate().all(|(index, ch)| {
+            ch == '_' || ch.is_ascii_alphabetic() || (index > 0 && ch.is_ascii_digit())
+        })
+    {
+        format!("$.{key}")
+    } else {
+        format!("$[{}]", json!(key))
+    }
+}
+
 pub fn resolve_identity(
     response_id: Option<&str>,
     model: Option<&str>,
@@ -110,26 +197,27 @@ pub fn canonical_usage_from_openai_usage(value: Option<&Value>) -> Option<Canoni
 }
 
 pub fn openai_stream_payload_is_terminal_error(payload: &Value) -> bool {
+    let response = payload.get("response").and_then(Value::as_object);
+    if payload.get("error").is_some_and(|error| !error.is_null())
+        || response
+            .and_then(|response| response.get("error"))
+            .is_some_and(|error| !error.is_null())
+    {
+        return true;
+    }
+
     let event_type = payload
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if payload.get("error").is_some() {
-        return true;
-    }
-    if matches!(
-        event_type,
-        "error" | "response.failed" | "response.incomplete"
-    ) {
+    if matches!(event_type, "error" | "response.failed") {
         return true;
     }
 
-    payload
-        .get("response")
-        .and_then(Value::as_object)
+    response
         .and_then(|response| response.get("status"))
         .and_then(Value::as_str)
-        .is_some_and(|status| matches!(status, "failed" | "incomplete"))
+        .is_some_and(|status| status == "failed")
 }
 
 pub fn openai_stream_terminal_error_body(payload: &Value) -> Option<Value> {
@@ -697,5 +785,40 @@ fn inclusive_total_tokens_from_usage(usage: &CanonicalUsage, input_tokens: u64) 
         usage.total_tokens
     } else {
         input_tokens.saturating_add(usage.output_tokens)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        openai_stream_payload_is_terminal_error, openai_stream_terminal_error_body,
+        openai_stream_terminal_error_message,
+    };
+
+    #[test]
+    fn completed_openai_responses_payload_with_null_error_is_not_terminal_error() {
+        let payload = json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_123",
+                "object": "response",
+                "status": "completed",
+                "error": null,
+                "incomplete_details": null,
+                "output": [],
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "total_tokens": 3
+                }
+            },
+            "error": null
+        });
+
+        assert!(!openai_stream_payload_is_terminal_error(&payload));
+        assert!(openai_stream_terminal_error_body(&payload).is_none());
+        assert!(openai_stream_terminal_error_message(&payload).is_none());
     }
 }

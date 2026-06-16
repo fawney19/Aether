@@ -229,6 +229,26 @@ impl SqlxRequestCandidateReadRepository {
         collect_query_rows(builder.build().fetch(&self.pool), map_request_candidate_row).await
     }
 
+    pub async fn list_attempted_by_request_id(
+        &self,
+        request_id: &str,
+    ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
+        let mut builder = QueryBuilder::<Postgres>::new(candidate_columns());
+        let mut where_clause = WhereClause::new();
+        push_eq(
+            &mut builder,
+            &mut where_clause,
+            "request_id",
+            request_id.to_string(),
+        );
+        builder.push(
+            " AND (status IN ('streaming', 'success', 'failed', 'cancelled') \
+             OR (status = 'pending' AND started_at IS NOT NULL)) \
+             ORDER BY candidate_index ASC, retry_index ASC, created_at ASC",
+        );
+        collect_query_rows(builder.build().fetch(&self.pool), map_request_candidate_row).await
+    }
+
     pub async fn list_recent(
         &self,
         limit: usize,
@@ -511,6 +531,13 @@ impl RequestCandidateReadRepository for SqlxRequestCandidateReadRepository {
         request_id: &str,
     ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
         Self::list_by_request_id(self, request_id).await
+    }
+
+    async fn list_attempted_by_request_id(
+        &self,
+        request_id: &str,
+    ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
+        Self::list_attempted_by_request_id(self, request_id).await
     }
 
     async fn list_recent(

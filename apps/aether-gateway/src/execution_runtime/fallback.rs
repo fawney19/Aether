@@ -1007,6 +1007,100 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn provider_failover_rules_can_stop_rate_limit_status() {
+        let result = ExecutionResult {
+            request_id: "req-1".to_string(),
+            candidate_id: None,
+            status_code: 429,
+            headers: Default::default(),
+            body: None,
+            telemetry: None,
+            error: None,
+        };
+        let local_report_context = serde_json::json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
+        let state = build_state_with_provider_config(Some(serde_json::json!({
+            "failover_rules": {
+                "stop_on_status_codes": [429]
+            }
+        })));
+        let plan = sample_plan();
+
+        assert!(
+            should_stop_local_candidate_failover_sync(
+                &state,
+                &plan,
+                "openai_chat_sync",
+                Some(&local_report_context),
+                &result,
+                Some("{\"error\":{\"message\":\"rate limited\"}}"),
+            )
+            .await
+        );
+        assert!(
+            !should_retry_next_local_candidate_sync(
+                &state,
+                &plan,
+                "openai_chat_sync",
+                Some(&local_report_context),
+                &result,
+                Some("{\"error\":{\"message\":\"rate limited\"}}"),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn status_only_error_stop_rule_can_stop_rate_limit_status() {
+        let result = ExecutionResult {
+            request_id: "req-1".to_string(),
+            candidate_id: None,
+            status_code: 429,
+            headers: Default::default(),
+            body: None,
+            telemetry: None,
+            error: None,
+        };
+        let local_report_context = serde_json::json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
+        let state = build_state_with_provider_config(Some(serde_json::json!({
+            "failover_rules": {
+                "error_stop_patterns": [
+                    {"status_codes": [429]}
+                ]
+            }
+        })));
+        let plan = sample_plan();
+
+        assert!(
+            should_stop_local_candidate_failover_sync(
+                &state,
+                &plan,
+                "openai_chat_sync",
+                Some(&local_report_context),
+                &result,
+                None,
+            )
+            .await
+        );
+        assert!(
+            !should_retry_next_local_candidate_sync(
+                &state,
+                &plan,
+                "openai_chat_sync",
+                Some(&local_report_context),
+                &result,
+                None,
+            )
+            .await
+        );
+    }
+
     #[test]
     fn resolve_local_failover_policy_reads_regex_rules() {
         let state = build_state_with_provider_config(Some(serde_json::json!({
@@ -1035,6 +1129,32 @@ mod tests {
             vec![LocalFailoverRegexRule {
                 pattern: "content_policy_violation".to_string(),
                 status_codes: [400, 403].into_iter().collect(),
+            }]
+        );
+    }
+
+    #[test]
+    fn resolve_local_failover_policy_reads_status_only_error_stop_rules() {
+        let state = build_state_with_provider_config(Some(serde_json::json!({
+            "failover_rules": {
+                "success_failover_patterns": [
+                    {"status_codes": [200]}
+                ],
+                "error_stop_patterns": [
+                    {"status_codes": [429]}
+                ]
+            }
+        })));
+        let plan = sample_plan();
+        let runtime = tokio::runtime::Runtime::new().expect("runtime should build");
+
+        let policy = runtime.block_on(resolve_local_failover_policy(&state, &plan, None));
+        assert!(policy.success_failover_patterns.is_empty());
+        assert_eq!(
+            policy.error_stop_patterns,
+            vec![LocalFailoverRegexRule {
+                pattern: String::new(),
+                status_codes: [429].into_iter().collect(),
             }]
         );
     }
@@ -1125,11 +1245,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chatgpt_web_report_context_stops_local_sync_failover_on_transport_errors() {
+    async fn report_context_failover_policy_does_not_override_provider_config() {
         let result = ExecutionResult {
             request_id: "req-1".to_string(),
             candidate_id: None,
-            status_code: 503,
+            status_code: 429,
             headers: Default::default(),
             body: None,
             telemetry: None,
@@ -1150,7 +1270,7 @@ mod tests {
         let plan = sample_plan();
 
         assert!(
-            should_stop_local_candidate_failover_sync(
+            should_retry_next_local_candidate_sync(
                 &state,
                 &plan,
                 "openai_image_sync",
@@ -1161,7 +1281,7 @@ mod tests {
             .await
         );
         assert!(
-            !should_retry_next_local_candidate_sync(
+            !should_stop_local_candidate_failover_sync(
                 &state,
                 &plan,
                 "openai_image_sync",

@@ -5,13 +5,12 @@ use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
 use crate::GatewayError;
 use aether_admin::observability::usage::{
-    admin_usage_bad_request_response, admin_usage_client_family,
-    admin_usage_data_unavailable_response, admin_usage_has_fallback, admin_usage_is_failed,
-    admin_usage_matches_search, admin_usage_matches_username, admin_usage_parse_ids,
-    admin_usage_parse_limit, admin_usage_parse_offset, admin_usage_provider_key_name,
-    admin_usage_record_json, build_admin_usage_active_requests_response,
-    build_admin_usage_records_response, build_admin_usage_summary_stats_response_from_summary,
-    ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
+    admin_usage_bad_request_response, admin_usage_data_unavailable_response,
+    admin_usage_has_fallback, admin_usage_is_failed, admin_usage_matches_search,
+    admin_usage_matches_username, admin_usage_parse_ids, admin_usage_parse_limit,
+    admin_usage_parse_offset, admin_usage_provider_key_name, admin_usage_record_json,
+    build_admin_usage_active_requests_response, build_admin_usage_records_response,
+    build_admin_usage_summary_stats_response_from_summary, ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
 };
 use aether_data::repository::users::StoredUserSummary;
 use aether_data_contracts::repository::{
@@ -195,29 +194,51 @@ async fn resolve_admin_usage_attempt_flags_by_usage_id(
         .collect())
 }
 
-async fn resolve_admin_usage_image_progress_by_request_id(
+#[derive(Default)]
+struct AdminUsageActiveCandidateState {
+    image_progress_by_request_id: BTreeMap<String, serde_json::Value>,
+    state_overrides_by_request_id: BTreeMap<String, serde_json::Value>,
+}
+
+async fn resolve_admin_usage_active_candidate_state(
     state: &AdminAppState<'_>,
     items: &[StoredRequestUsageAudit],
-) -> Result<BTreeMap<String, serde_json::Value>, GatewayError> {
+) -> Result<AdminUsageActiveCandidateState, GatewayError> {
     if !state.has_request_candidate_data_reader() || items.is_empty() {
-        return Ok(BTreeMap::new());
+        return Ok(AdminUsageActiveCandidateState::default());
     }
 
     let request_ids = items
         .iter()
         .map(|item| item.request_id.clone())
         .collect::<BTreeSet<_>>();
-    let mut progress_by_request_id = BTreeMap::new();
+    let active_usage_by_request_id = items
+        .iter()
+        .filter(|item| matches!(item.status.as_str(), "pending" | "streaming"))
+        .map(|item| (item.request_id.clone(), item))
+        .collect::<BTreeMap<_, _>>();
+    let mut candidate_state = AdminUsageActiveCandidateState::default();
     for request_id in request_ids {
         let candidates = state
             .app()
             .read_request_candidates_by_request_id(&request_id)
             .await?;
         if let Some(progress) = latest_admin_usage_image_progress(&candidates) {
-            progress_by_request_id.insert(request_id, progress);
+            candidate_state
+                .image_progress_by_request_id
+                .insert(request_id.clone(), progress);
+        }
+        if active_usage_by_request_id.contains_key(&request_id) {
+            if let Some(override_payload) =
+                admin_usage_terminal_candidate_state_override(&candidates)
+            {
+                candidate_state
+                    .state_overrides_by_request_id
+                    .insert(request_id, override_payload);
+            }
         }
     }
-    Ok(progress_by_request_id)
+    Ok(candidate_state)
 }
 
 fn latest_admin_usage_image_progress(
@@ -246,6 +267,82 @@ fn latest_admin_usage_image_progress(
         .map(|(_, _, _, progress)| progress)
 }
 
+fn admin_usage_current_candidate(
+    candidates: &[StoredRequestCandidate],
+) -> Option<&StoredRequestCandidate> {
+    candidates
+        .iter()
+        .filter(|candidate| {
+            !matches!(
+                candidate.status,
+                RequestCandidateStatus::Available
+                    | RequestCandidateStatus::Unused
+                    | RequestCandidateStatus::Skipped
+            )
+        })
+        .max_by_key(|candidate| {
+            (
+                candidate.candidate_index,
+                candidate.retry_index,
+                candidate
+                    .started_at_unix_ms
+                    .or(candidate.finished_at_unix_ms)
+                    .unwrap_or(candidate.created_at_unix_ms),
+            )
+        })
+}
+
+fn admin_usage_unix_millis_to_rfc3339(unix_ms: u64) -> Option<String> {
+    let secs = i64::try_from(unix_ms / 1_000).ok()?;
+    let nanos = u32::try_from(unix_ms % 1_000)
+        .ok()?
+        .saturating_mul(1_000_000);
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos)
+        .map(|timestamp| timestamp.to_rfc3339())
+}
+
+fn admin_usage_terminal_candidate_state_override(
+    candidates: &[StoredRequestCandidate],
+) -> Option<serde_json::Value> {
+    let candidate = admin_usage_current_candidate(candidates)?;
+
+    let status = match candidate.status {
+        RequestCandidateStatus::Success => "completed",
+        RequestCandidateStatus::Failed => "failed",
+        RequestCandidateStatus::Cancelled => "cancelled",
+        _ => return None,
+    };
+    let latency_ms = candidate.latency_ms.or_else(|| {
+        Some(
+            candidate
+                .finished_at_unix_ms?
+                .saturating_sub(candidate.started_at_unix_ms?),
+        )
+    });
+    let mut payload = json!({ "status": status });
+    if let Some(latency_ms) = latency_ms {
+        payload["response_time_ms"] = json!(latency_ms);
+        if let Some(response_time_updated_at) = candidate
+            .finished_at_unix_ms
+            .or_else(|| {
+                candidate
+                    .started_at_unix_ms
+                    .map(|started_at| started_at.saturating_add(latency_ms))
+            })
+            .and_then(admin_usage_unix_millis_to_rfc3339)
+        {
+            payload["response_time_updated_at"] = json!(response_time_updated_at);
+        }
+    }
+    if let Some(status_code) = candidate.status_code {
+        payload["status_code"] = json!(status_code);
+    }
+    if let Some(error_message) = candidate.error_message.as_ref() {
+        payload["error_message"] = json!(error_message);
+    }
+    Some(payload)
+}
+
 fn admin_usage_matches_attempt_status(
     item: &StoredRequestUsageAudit,
     status: &str,
@@ -264,19 +361,6 @@ fn admin_usage_matches_attempt_status(
     }
 }
 
-fn admin_usage_matches_client_family(
-    item: &StoredRequestUsageAudit,
-    client_family: Option<&str>,
-) -> bool {
-    let Some(client_family) = client_family
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return true;
-    };
-    admin_usage_client_family(item).is_some_and(|value| value.eq_ignore_ascii_case(client_family))
-}
-
 fn admin_usage_bool_query_param(query: Option<&str>, name: &str) -> bool {
     query_param_value(query, name)
         .as_deref()
@@ -290,15 +374,24 @@ fn admin_usage_bool_query_param(query: Option<&str>, name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn admin_usage_is_unknown_label(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "unknown" | "unknow"
-    )
+fn admin_usage_include_total_query_param(query: Option<&str>) -> bool {
+    query_param_value(query, "include_total")
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            !(value == "0"
+                || value.eq_ignore_ascii_case("false")
+                || value.eq_ignore_ascii_case("no")
+                || value.eq_ignore_ascii_case("off"))
+        })
+        .unwrap_or(true)
 }
 
-fn admin_usage_has_unknown_model_or_provider(item: &StoredRequestUsageAudit) -> bool {
-    admin_usage_is_unknown_label(&item.model) || admin_usage_is_unknown_label(&item.provider_name)
+fn admin_usage_fast_page_total(offset: usize, limit: usize, record_count: usize) -> usize {
+    offset
+        .saturating_add(record_count)
+        .saturating_add(usize::from(limit > 0 && record_count == limit))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -314,6 +407,7 @@ fn build_admin_usage_records_response_with_attempt_flags(
     total: usize,
     limit: usize,
     offset: usize,
+    total_is_estimated: bool,
 ) -> Response<Body> {
     let records: Vec<_> = items
         .iter()
@@ -343,6 +437,7 @@ fn build_admin_usage_records_response_with_attempt_flags(
         "total": total,
         "limit": limit,
         "offset": offset,
+        "total_is_estimated": total_is_estimated,
     }))
     .into_response()
 }
@@ -485,6 +580,8 @@ fn build_admin_usage_keyword_search_query(
         provider_name: base_query.provider_name.clone(),
         model: base_query.model.clone(),
         api_format: base_query.api_format.clone(),
+        client_family: base_query.client_family.clone(),
+        exclude_unknown_model_or_provider: base_query.exclude_unknown_model_or_provider,
         statuses: base_query.statuses.clone(),
         is_stream: base_query.is_stream,
         error_only: base_query.error_only,
@@ -582,6 +679,7 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                         state.has_auth_api_key_data_reader(),
                         &BTreeMap::new(),
                         &BTreeMap::new(),
+                        &BTreeMap::new(),
                     )));
                 };
                 state
@@ -605,15 +703,16 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
             };
             let api_key_names = admin_usage_api_key_names(state, &items).await?;
             let provider_key_names = admin_usage_provider_key_names(state, &items).await?;
-            let image_progress_by_request_id =
-                resolve_admin_usage_image_progress_by_request_id(state, &items).await?;
+            let active_candidate_state =
+                resolve_admin_usage_active_candidate_state(state, &items).await?;
 
             return Ok(Some(build_admin_usage_active_requests_response(
                 &items,
                 &api_key_names,
                 state.has_auth_api_key_data_reader(),
                 &provider_key_names,
-                &image_progress_by_request_id,
+                &active_candidate_state.image_progress_by_request_id,
+                &active_candidate_state.state_overrides_by_request_id,
             )));
         }
         Some("records")
@@ -641,6 +740,8 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
             let client_family_filter = query_param_value(query, "client_family");
             let hide_unknown_records = admin_usage_bool_query_param(query, "hide_unknown")
                 || admin_usage_bool_query_param(query, "hide_unknown_records");
+            let include_total = admin_usage_include_total_query_param(query);
+            let total_only = admin_usage_bool_query_param(query, "total_only");
             let limit = match admin_usage_parse_limit(query) {
                 Ok(value) => value,
                 Err(detail) => return Ok(Some(admin_usage_bad_request_response(detail))),
@@ -664,13 +765,6 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                     offset,
                 )));
             };
-            let base_query = build_admin_usage_records_query(
-                created_from_unix_secs,
-                created_until_unix_secs,
-                query,
-                None,
-                None,
-            );
             let active_search = search.as_deref().filter(|value| !value.trim().is_empty());
             let active_username_filter = username_filter
                 .as_deref()
@@ -678,10 +772,16 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
             let active_client_family_filter = client_family_filter
                 .as_deref()
                 .filter(|value| !value.trim().is_empty());
-            let (usage, total) = if hide_unknown_records
-                || attempt_status_filter.is_some()
-                || active_client_family_filter.is_some()
-            {
+            let mut base_query = build_admin_usage_records_query(
+                created_from_unix_secs,
+                created_until_unix_secs,
+                query,
+                None,
+                None,
+            );
+            base_query.client_family = active_client_family_filter.map(str::to_owned);
+            base_query.exclude_unknown_model_or_provider = hide_unknown_records;
+            let (usage, total, total_is_estimated) = if attempt_status_filter.is_some() {
                 let mut usage = state.list_usage_audits(&base_query).await?;
                 let user_ids: Vec<String> = usage
                     .iter()
@@ -718,18 +818,20 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                             &attempt_flags_by_usage_id,
                             request_candidate_reader_available,
                         )
-                    }) && admin_usage_matches_client_family(item, active_client_family_filter)
-                        && (!hide_unknown_records
-                            || !admin_usage_has_unknown_model_or_provider(item))
+                    })
                 });
                 sort_usage_newest_first(&mut usage);
                 let total = usage.len();
-                let records = usage
-                    .into_iter()
-                    .skip(offset)
-                    .take(limit)
-                    .collect::<Vec<_>>();
-                (records, total)
+                let records = if total_only {
+                    Vec::new()
+                } else {
+                    usage
+                        .into_iter()
+                        .skip(offset)
+                        .take(limit)
+                        .collect::<Vec<_>>()
+                };
+                (records, total, false)
             } else if active_search.is_some() || active_username_filter.is_some() {
                 let keywords = active_search
                     .map(parse_admin_usage_search_keywords)
@@ -749,30 +851,53 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                     None,
                     None,
                 );
-                let total = usize::try_from(
-                    state
-                        .count_usage_audits_by_keyword_search(&keyword_query)
-                        .await?,
-                )
-                .unwrap_or(usize::MAX);
-                let paged_query = UsageAuditKeywordSearchQuery {
-                    limit: Some(limit),
-                    offset: Some(offset),
-                    ..keyword_query
-                };
-                (
-                    state
-                        .list_usage_audits_by_keyword_search(&paged_query)
-                        .await?,
-                    total,
-                )
-            } else {
-                let total = usize::try_from(state.count_usage_audits(&base_query).await?)
+                if total_only {
+                    let total = usize::try_from(
+                        state
+                            .count_usage_audits_by_keyword_search(&keyword_query)
+                            .await?,
+                    )
                     .unwrap_or(usize::MAX);
-                let mut paged_query = base_query.clone();
-                paged_query.limit = Some(limit);
-                paged_query.offset = Some(offset);
-                (state.list_usage_audits(&paged_query).await?, total)
+                    (Vec::new(), total, false)
+                } else {
+                    let paged_query = UsageAuditKeywordSearchQuery {
+                        limit: Some(limit),
+                        offset: Some(offset),
+                        ..keyword_query.clone()
+                    };
+                    let records = state
+                        .list_usage_audits_by_keyword_search(&paged_query)
+                        .await?;
+                    let total = if include_total {
+                        usize::try_from(
+                            state
+                                .count_usage_audits_by_keyword_search(&keyword_query)
+                                .await?,
+                        )
+                        .unwrap_or(usize::MAX)
+                    } else {
+                        admin_usage_fast_page_total(offset, limit, records.len())
+                    };
+                    (records, total, !include_total)
+                }
+            } else {
+                if total_only {
+                    let total = usize::try_from(state.count_usage_audits(&base_query).await?)
+                        .unwrap_or(usize::MAX);
+                    (Vec::new(), total, false)
+                } else {
+                    let mut paged_query = base_query.clone();
+                    paged_query.limit = Some(limit);
+                    paged_query.offset = Some(offset);
+                    let records = state.list_usage_audits(&paged_query).await?;
+                    let total = if include_total {
+                        usize::try_from(state.count_usage_audits(&base_query).await?)
+                            .unwrap_or(usize::MAX)
+                    } else {
+                        admin_usage_fast_page_total(offset, limit, records.len())
+                    };
+                    (records, total, !include_total)
+                }
             };
 
             let user_ids: Vec<String> = usage
@@ -800,10 +925,96 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                 total,
                 limit,
                 offset,
+                total_is_estimated,
             )));
         }
         _ => {}
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use aether_data_contracts::repository::candidates::{
+        RequestCandidateStatus, StoredRequestCandidate,
+    };
+
+    use super::admin_usage_terminal_candidate_state_override;
+
+    fn sample_candidate(
+        candidate_index: i32,
+        status: RequestCandidateStatus,
+        status_code: Option<i32>,
+        latency_ms: Option<i32>,
+        error_message: Option<&str>,
+    ) -> StoredRequestCandidate {
+        StoredRequestCandidate::new(
+            format!("candidate-{candidate_index}"),
+            "req-1".to_string(),
+            Some("user-1".to_string()),
+            Some("api-key-1".to_string()),
+            Some("alice".to_string()),
+            Some("default".to_string()),
+            candidate_index,
+            0,
+            Some("provider-1".to_string()),
+            Some("endpoint-1".to_string()),
+            Some("provider-key-1".to_string()),
+            status,
+            None,
+            false,
+            status_code,
+            None,
+            error_message.map(str::to_string),
+            latency_ms,
+            None,
+            None,
+            None,
+            1_000,
+            Some(1_000),
+            Some(10_210),
+        )
+        .expect("candidate should build")
+    }
+
+    #[test]
+    fn admin_usage_active_override_uses_current_terminal_candidate_latency() {
+        let candidate = sample_candidate(
+            0,
+            RequestCandidateStatus::Success,
+            Some(200),
+            Some(9_210),
+            None,
+        );
+
+        let payload =
+            admin_usage_terminal_candidate_state_override(&[candidate]).expect("override");
+
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["response_time_ms"], 9_210);
+        assert_eq!(
+            payload["response_time_updated_at"],
+            "1970-01-01T00:00:10.210+00:00"
+        );
+    }
+
+    #[test]
+    fn admin_usage_active_override_ignores_terminal_candidate_when_newer_attempt_is_live() {
+        let failed = sample_candidate(
+            0,
+            RequestCandidateStatus::Failed,
+            Some(503),
+            Some(1_000),
+            Some("first attempt failed"),
+        );
+        let mut streaming =
+            sample_candidate(1, RequestCandidateStatus::Streaming, None, None, None);
+        streaming.started_at_unix_ms = Some(10_500);
+        streaming.finished_at_unix_ms = None;
+
+        let payload = admin_usage_terminal_candidate_state_override(&[failed, streaming]);
+
+        assert!(payload.is_none());
+    }
 }

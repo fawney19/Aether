@@ -61,11 +61,8 @@ pub(crate) fn classify_local_failover(
     }
 
     if input.status_code >= 400
-        && input.response_text.is_some_and(|text| {
-            policy
-                .error_stop_patterns
-                .iter()
-                .any(|rule| local_failover_regex_rule_matches(rule, text, input.status_code))
+        && policy.error_stop_patterns.iter().any(|rule| {
+            local_failover_regex_rule_matches(rule, input.response_text, input.status_code)
         })
     {
         return LocalFailoverClassification::StopErrorPattern;
@@ -76,7 +73,7 @@ pub(crate) fn classify_local_failover(
             policy
                 .success_failover_patterns
                 .iter()
-                .any(|rule| local_failover_regex_rule_matches(rule, text, input.status_code))
+                .any(|rule| local_failover_regex_rule_matches(rule, Some(text), input.status_code))
         })
     {
         return LocalFailoverClassification::RetrySuccessPattern;
@@ -190,14 +187,23 @@ fn first_non_empty_json_text(
 
 fn local_failover_regex_rule_matches(
     rule: &LocalFailoverRegexRule,
-    response_text: &str,
+    response_text: Option<&str>,
     status_code: u16,
 ) -> bool {
     if !rule.status_codes.is_empty() && !rule.status_codes.contains(&status_code) {
         return false;
     }
 
-    Regex::new(&rule.pattern)
+    let pattern = rule.pattern.trim();
+    if pattern.is_empty() {
+        return !rule.status_codes.is_empty();
+    }
+
+    let Some(response_text) = response_text else {
+        return false;
+    };
+
+    Regex::new(pattern)
         .ok()
         .is_some_and(|regex| regex.is_match(response_text))
 }
@@ -257,6 +263,50 @@ mod tests {
                 LocalFailoverInput::new(400, Some("{\"error\":\"content_policy_violation\"}"))
             ),
             LocalFailoverClassification::StopErrorPattern
+        );
+    }
+
+    #[test]
+    fn classifier_detects_error_stop_pattern_without_status_codes_on_any_error_status() {
+        let policy = LocalFailoverPolicy {
+            error_stop_patterns: vec![LocalFailoverRegexRule {
+                pattern: "content_policy_violation".to_string(),
+                status_codes: BTreeSet::new(),
+            }],
+            ..LocalFailoverPolicy::default()
+        };
+
+        for status_code in [400, 429, 503] {
+            assert_eq!(
+                classify_local_failover(
+                    &policy,
+                    LocalFailoverInput::new(
+                        status_code,
+                        Some("{\"error\":\"content_policy_violation\"}")
+                    )
+                ),
+                LocalFailoverClassification::StopErrorPattern
+            );
+        }
+    }
+
+    #[test]
+    fn classifier_detects_status_only_error_stop_rule_without_response_text() {
+        let policy = LocalFailoverPolicy {
+            error_stop_patterns: vec![LocalFailoverRegexRule {
+                pattern: String::new(),
+                status_codes: [429].into_iter().collect(),
+            }],
+            ..LocalFailoverPolicy::default()
+        };
+
+        assert_eq!(
+            classify_local_failover(&policy, LocalFailoverInput::new(429, None)),
+            LocalFailoverClassification::StopErrorPattern
+        );
+        assert_eq!(
+            classify_local_failover(&policy, LocalFailoverInput::new(503, None)),
+            LocalFailoverClassification::RetryUpstreamFailure
         );
     }
 

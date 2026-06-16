@@ -112,14 +112,16 @@ pub use rules::{
 };
 pub use same_format_provider::{
     build_same_format_provider_headers, build_same_format_provider_request_body,
+    build_same_format_provider_request_body_with_compatibility_report,
     build_same_format_provider_upstream_url, classify_same_format_provider_request_behavior,
     resolve_same_format_provider_direct_auth, same_format_provider_transport_supported,
     same_format_provider_transport_unsupported_reason,
     same_format_provider_transport_unsupported_reason_for_trace,
-    should_try_same_format_provider_oauth_auth, SameFormatProviderFamily,
+    should_try_same_format_provider_oauth_auth, SameFormatProviderCompatibilityEdit,
+    SameFormatProviderCompatibilityEditAction, SameFormatProviderFamily,
     SameFormatProviderHeadersInput, SameFormatProviderRequestBehavior,
     SameFormatProviderRequestBehaviorParams, SameFormatProviderRequestBodyInput,
-    SameFormatProviderUpstreamUrlParams,
+    SameFormatProviderRequestBodyOutput, SameFormatProviderUpstreamUrlParams,
 };
 pub use snapshot::{
     read_provider_transport_snapshot, GatewayProviderTransportSnapshot,

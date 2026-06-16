@@ -376,9 +376,6 @@ fn oauth_invalid_reason_blocks_scheduling(
     now_unix_secs: u64,
 ) -> bool {
     let trimmed_reason = invalid_reason.trim();
-    if oauth_invalid_reason_has_tag(trimmed_reason, "[OAUTH_EXPIRED]") {
-        return true;
-    }
 
     let account_state = admin_provider_status_pure::resolve_pool_account_state(
         Some(provider_type),
@@ -433,6 +430,7 @@ fn oauth_account_state_code_is_hard_block(code: &str) -> bool {
             | "account_forbidden"
             | "account_blocked"
             | "account_verification"
+            | "oauth_token_invalid"
     )
 }
 

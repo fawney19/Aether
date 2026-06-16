@@ -994,6 +994,7 @@ WHERE id = $1
     pub async fn cleanup_deleted_provider_refs(
         &self,
         provider_id: &str,
+        provider_deleted: bool,
         endpoint_ids: &[String],
         key_ids: &[String],
     ) -> Result<(), DataLayerError> {
@@ -1005,37 +1006,27 @@ WHERE id = $1
 
         let mut tx = self.pool.begin().await.map_postgres_err()?;
 
-        sqlx::query(
-            "UPDATE user_preferences SET default_provider_id = NULL WHERE default_provider_id = $1",
-        )
-        .bind(provider_id)
-        .execute(&mut *tx)
-        .await
-        .map_postgres_err()?;
-        sqlx::query("UPDATE usage SET provider_id = NULL WHERE provider_id = $1")
+        if provider_deleted {
+            sqlx::query(
+                "UPDATE user_preferences SET default_provider_id = NULL WHERE default_provider_id = $1",
+            )
             .bind(provider_id)
             .execute(&mut *tx)
             .await
             .map_postgres_err()?;
-        sqlx::query("UPDATE video_tasks SET provider_id = NULL WHERE provider_id = $1")
-            .bind(provider_id)
-            .execute(&mut *tx)
-            .await
-            .map_postgres_err()?;
-        sqlx::query("DELETE FROM request_candidates WHERE provider_id = $1")
-            .bind(provider_id)
-            .execute(&mut *tx)
-            .await
-            .map_postgres_err()?;
+            sqlx::query("UPDATE video_tasks SET provider_id = NULL WHERE provider_id = $1")
+                .bind(provider_id)
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+            sqlx::query("DELETE FROM request_candidates WHERE provider_id = $1")
+                .bind(provider_id)
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+        }
 
         for endpoint_id in endpoint_ids {
-            sqlx::query(
-                "UPDATE usage SET provider_endpoint_id = NULL WHERE provider_endpoint_id = $1",
-            )
-            .bind(endpoint_id)
-            .execute(&mut *tx)
-            .await
-            .map_postgres_err()?;
             sqlx::query("UPDATE video_tasks SET endpoint_id = NULL WHERE endpoint_id = $1")
                 .bind(endpoint_id)
                 .execute(&mut *tx)
@@ -1054,13 +1045,6 @@ WHERE id = $1
                 .execute(&mut *tx)
                 .await
                 .map_postgres_err()?;
-            sqlx::query(
-                "UPDATE usage SET provider_api_key_id = NULL WHERE provider_api_key_id = $1",
-            )
-            .bind(key_id)
-            .execute(&mut *tx)
-            .await
-            .map_postgres_err()?;
             sqlx::query("UPDATE video_tasks SET key_id = NULL WHERE key_id = $1")
                 .bind(key_id)
                 .execute(&mut *tx)
@@ -1068,16 +1052,18 @@ WHERE id = $1
                 .map_postgres_err()?;
         }
 
-        sqlx::query("DELETE FROM api_key_provider_mappings WHERE provider_id = $1")
-            .bind(provider_id)
-            .execute(&mut *tx)
-            .await
-            .map_postgres_err()?;
-        sqlx::query("DELETE FROM provider_usage_tracking WHERE provider_id = $1")
-            .bind(provider_id)
-            .execute(&mut *tx)
-            .await
-            .map_postgres_err()?;
+        if provider_deleted {
+            sqlx::query("DELETE FROM api_key_provider_mappings WHERE provider_id = $1")
+                .bind(provider_id)
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+            sqlx::query("DELETE FROM provider_usage_tracking WHERE provider_id = $1")
+                .bind(provider_id)
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+        }
 
         tx.commit().await.map_err(postgres_error)?;
         Ok(())
@@ -1995,10 +1981,18 @@ impl ProviderCatalogWriteRepository for SqlxProviderCatalogReadRepository {
     async fn cleanup_deleted_provider_refs(
         &self,
         provider_id: &str,
+        provider_deleted: bool,
         endpoint_ids: &[String],
         key_ids: &[String],
     ) -> Result<(), DataLayerError> {
-        Self::cleanup_deleted_provider_refs(self, provider_id, endpoint_ids, key_ids).await
+        Self::cleanup_deleted_provider_refs(
+            self,
+            provider_id,
+            provider_deleted,
+            endpoint_ids,
+            key_ids,
+        )
+        .await
     }
 
     async fn create_endpoint(

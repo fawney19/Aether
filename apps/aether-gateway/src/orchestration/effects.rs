@@ -2031,7 +2031,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oauth_invalidation_marks_codex_key_invalid() {
+    async fn oauth_invalidation_marks_codex_key_expired() {
         let state = codex_state();
         let plan = sample_codex_plan();
 
@@ -2069,7 +2069,7 @@ mod tests {
                 .and_then(|value| value.get("oauth"))
                 .and_then(|value| value.get("code"))
                 .and_then(Value::as_str),
-            Some("invalid")
+            Some("expired")
         );
     }
 

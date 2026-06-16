@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::antigravity::is_antigravity_provider_transport;
@@ -73,6 +74,29 @@ pub struct SameFormatProviderRequestBodyInput<'a> {
     pub kiro_auth_config: Option<&'a KiroAuthConfig>,
     pub is_claude_code: bool,
     pub enable_model_directives: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SameFormatProviderRequestBodyOutput {
+    pub body: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compatibility_edits: Vec<SameFormatProviderCompatibilityEdit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SameFormatProviderCompatibilityEdit {
+    pub field: String,
+    pub action: SameFormatProviderCompatibilityEditAction,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SameFormatProviderCompatibilityEditAction {
+    RuntimeRewrite,
+    ProviderCompatibilityRewrite,
+    ProviderEnvelope,
+    OperatorRule,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -159,14 +183,40 @@ pub fn classify_same_format_provider_request_behavior(
 pub fn build_same_format_provider_request_body(
     input: SameFormatProviderRequestBodyInput<'_>,
 ) -> Option<Value> {
+    build_same_format_provider_request_body_inner(input, None)
+}
+
+pub fn build_same_format_provider_request_body_with_compatibility_report(
+    input: SameFormatProviderRequestBodyInput<'_>,
+) -> Option<SameFormatProviderRequestBodyOutput> {
+    let mut compatibility_edits = Vec::new();
+    let body =
+        build_same_format_provider_request_body_inner(input, Some(&mut compatibility_edits))?;
+    Some(SameFormatProviderRequestBodyOutput {
+        body,
+        compatibility_edits,
+    })
+}
+
+fn build_same_format_provider_request_body_inner(
+    input: SameFormatProviderRequestBodyInput<'_>,
+    mut compatibility_edits: Option<&mut Vec<SameFormatProviderCompatibilityEdit>>,
+) -> Option<Value> {
     if let Some(kiro_auth_config) = input.kiro_auth_config {
-        return build_kiro_provider_request_body(
+        let body = build_kiro_provider_request_body(
             input.body_json,
             input.mapped_model,
             kiro_auth_config,
             input.body_rules,
             input.request_headers,
+        )?;
+        record_compatibility_edit(
+            &mut compatibility_edits,
+            "$",
+            SameFormatProviderCompatibilityEditAction::ProviderEnvelope,
+            "wrapped same-format request in Kiro provider envelope",
         );
+        return Some(body);
     }
 
     if embedding_multimodal_input_requires_aliyun_provider(
@@ -188,41 +238,82 @@ pub fn build_same_format_provider_request_body(
                 .map(|(key, value)| (key.clone(), value.clone())),
         )
     } else {
-        aether_ai_formats::convert_request(
+        aether_ai_formats::convert_request_pure(
             input.client_api_format,
             input.provider_api_format,
             input.body_json,
-            &aether_ai_formats::FormatContext::default().with_mapped_model(input.mapped_model),
         )
         .ok()?
+        .value
         .as_object()?
         .clone()
     };
     match input.family {
         SameFormatProviderFamily::Standard => {
+            let previous_model = provider_request_body.get("model").cloned();
             provider_request_body.insert(
                 "model".to_string(),
                 Value::String(input.mapped_model.to_string()),
             );
+            if previous_model != Some(Value::String(input.mapped_model.to_string())) {
+                record_compatibility_edit(
+                    &mut compatibility_edits,
+                    "model",
+                    SameFormatProviderCompatibilityEditAction::RuntimeRewrite,
+                    "rewrote request model to mapped upstream model",
+                );
+            }
         }
         SameFormatProviderFamily::Gemini => {
-            provider_request_body.remove("model");
+            if provider_request_body.remove("model").is_some() {
+                record_compatibility_edit(
+                    &mut compatibility_edits,
+                    "model",
+                    SameFormatProviderCompatibilityEditAction::RuntimeRewrite,
+                    "removed top-level model because Gemini model is carried by the upstream URL",
+                );
+            }
         }
     }
     let mut provider_request_body = Value::Object(provider_request_body);
     if input.is_claude_code {
+        let before = compatibility_edits
+            .is_some()
+            .then(|| provider_request_body.clone());
         crate::claude_code::sanitize_claude_code_request_body(&mut provider_request_body);
+        if before.is_some_and(|before| before != provider_request_body) {
+            record_compatibility_edit(
+                &mut compatibility_edits,
+                "body",
+                SameFormatProviderCompatibilityEditAction::ProviderCompatibilityRewrite,
+                "sanitized Claude Code request body for provider compatibility",
+            );
+        }
     }
     if input.enable_model_directives {
         if let Some(source_model) = input.source_model {
+            let before = compatibility_edits
+                .is_some()
+                .then(|| provider_request_body.clone());
             aether_ai_formats::apply_model_directive_overrides_from_model(
                 &mut provider_request_body,
                 input.provider_api_format,
                 input.mapped_model,
                 source_model,
             );
+            if before.is_some_and(|before| before != provider_request_body) {
+                record_compatibility_edit(
+                    &mut compatibility_edits,
+                    "model_directives",
+                    SameFormatProviderCompatibilityEditAction::RuntimeRewrite,
+                    "applied model directive request body overrides",
+                );
+            }
         }
     }
+    let before_body_rules = compatibility_edits
+        .is_some()
+        .then(|| provider_request_body.clone());
     if !apply_local_body_rules_with_request_headers(
         &mut provider_request_body,
         input.body_rules,
@@ -231,26 +322,71 @@ pub fn build_same_format_provider_request_body(
     ) {
         return None;
     }
+    if before_body_rules.is_some_and(|before| before != provider_request_body) {
+        record_compatibility_edit(
+            &mut compatibility_edits,
+            "body_rules",
+            SameFormatProviderCompatibilityEditAction::OperatorRule,
+            "applied configured provider body rules",
+        );
+    }
     if matches!(input.family, SameFormatProviderFamily::Gemini)
         && aether_ai_formats::api_format_alias_matches(
             input.provider_api_format,
             "gemini:generate_content",
         )
     {
-        strip_gemini_function_response_ids(&mut provider_request_body);
+        let stripped = strip_gemini_function_response_ids(&mut provider_request_body);
+        if stripped > 0 {
+            record_compatibility_edit(
+                &mut compatibility_edits,
+                "contents[].parts[].functionResponse.id",
+                SameFormatProviderCompatibilityEditAction::ProviderCompatibilityRewrite,
+                format!(
+                    "stripped {stripped} Gemini functionResponse id field(s) rejected by upstreams"
+                ),
+            );
+        }
     }
     let require_body_stream_field = input.force_body_stream_field
         || input
             .body_json
             .as_object()
             .is_some_and(|object| object.contains_key("stream"));
+    let previous_stream = provider_request_body.get("stream").cloned();
     aether_ai_formats::enforce_request_body_stream_field(
         &mut provider_request_body,
         input.provider_api_format,
         input.upstream_is_stream,
         require_body_stream_field,
     );
+    if previous_stream != provider_request_body.get("stream").cloned() {
+        record_compatibility_edit(
+            &mut compatibility_edits,
+            "stream",
+            SameFormatProviderCompatibilityEditAction::RuntimeRewrite,
+            format!(
+                "enforced provider stream policy with upstream_is_stream={}",
+                input.upstream_is_stream
+            ),
+        );
+    }
     Some(provider_request_body)
+}
+
+fn record_compatibility_edit(
+    edits: &mut Option<&mut Vec<SameFormatProviderCompatibilityEdit>>,
+    field: impl Into<String>,
+    action: SameFormatProviderCompatibilityEditAction,
+    detail: impl Into<String>,
+) {
+    if let Some(edits) = edits.as_mut() {
+        edits.push(SameFormatProviderCompatibilityEdit {
+            field: field.into(),
+            action,
+            detail: detail.into(),
+        });
+    }
 }
 
 fn embedding_multimodal_input_requires_aliyun_provider(
@@ -278,25 +414,31 @@ fn embedding_content_is_multimodal(value: &Value) -> bool {
     })
 }
 
-fn strip_gemini_function_response_ids(value: &mut Value) {
+fn strip_gemini_function_response_ids(value: &mut Value) -> usize {
     match value {
         Value::Object(object) => {
+            let mut stripped = 0;
             for key in ["functionResponse", "function_response"] {
                 if let Some(function_response) = object.get_mut(key).and_then(Value::as_object_mut)
                 {
-                    function_response.remove("id");
+                    if function_response.remove("id").is_some() {
+                        stripped += 1;
+                    }
                 }
             }
             for child in object.values_mut() {
-                strip_gemini_function_response_ids(child);
+                stripped += strip_gemini_function_response_ids(child);
             }
+            stripped
         }
         Value::Array(items) => {
+            let mut stripped = 0;
             for item in items {
-                strip_gemini_function_response_ids(item);
+                stripped += strip_gemini_function_response_ids(item);
             }
+            stripped
         }
-        _ => {}
+        _ => 0,
     }
 }
 
@@ -883,6 +1025,61 @@ mod tests {
     }
 
     #[test]
+    fn same_format_standard_body_preserves_fields_that_cross_format_would_block() {
+        let body = build_same_format_provider_request_body(SameFormatProviderRequestBodyInput {
+            body_json: &json!({
+                "model": "client-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "n": 2,
+                "reasoning_effort": "max",
+                "unknown_vendor_field": {"keep": true}
+            }),
+            mapped_model: "client-model",
+            client_api_format: "openai:chat",
+            provider_api_format: "/v1/chat/completions",
+            source_model: Some("client-model"),
+            family: SameFormatProviderFamily::Standard,
+            body_rules: None,
+            request_headers: None,
+            upstream_is_stream: false,
+            force_body_stream_field: false,
+            kiro_auth_config: None,
+            is_claude_code: false,
+            enable_model_directives: false,
+        })
+        .expect("same-format body should bypass canonical conversion");
+
+        assert_eq!(body["n"], 2);
+        assert_eq!(body["reasoning_effort"], "max");
+        assert_eq!(body["unknown_vendor_field"]["keep"], true);
+    }
+
+    #[test]
+    fn cross_format_standard_body_fails_closed_for_lossy_chat_fields() {
+        let body = build_same_format_provider_request_body(SameFormatProviderRequestBodyInput {
+            body_json: &json!({
+                "model": "client-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "n": 2
+            }),
+            mapped_model: "upstream-model",
+            client_api_format: "openai:chat",
+            provider_api_format: "openai:responses",
+            source_model: Some("client-model"),
+            family: SameFormatProviderFamily::Standard,
+            body_rules: None,
+            request_headers: None,
+            upstream_is_stream: false,
+            force_body_stream_field: false,
+            kiro_auth_config: None,
+            is_claude_code: false,
+            enable_model_directives: false,
+        });
+
+        assert!(body.is_none());
+    }
+
+    #[test]
     fn same_format_embedding_body_rejects_multimodal_for_openai_like_provider() {
         let body = build_same_format_provider_request_body(SameFormatProviderRequestBodyInput {
             body_json: &json!({
@@ -1071,6 +1268,77 @@ mod tests {
         let function_response = &body["contents"][0]["parts"][1]["function_response"];
         assert!(function_response.get("id").is_none());
         assert_eq!(function_response["name"], "lookup_snake");
+    }
+
+    #[test]
+    fn same_format_body_report_records_provider_compatibility_edits() {
+        let output = build_same_format_provider_request_body_with_compatibility_report(
+            SameFormatProviderRequestBodyInput {
+                body_json: &json!({
+                    "model": "client-model",
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [
+                                {
+                                    "functionResponse": {
+                                        "id": "call_123",
+                                        "name": "lookup",
+                                        "response": {"ok": true}
+                                    }
+                                },
+                                {
+                                    "function_response": {
+                                        "id": "call_456",
+                                        "name": "lookup_snake",
+                                        "response": {"ok": true}
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "stream": true
+                }),
+                mapped_model: "gemini-upstream",
+                client_api_format: "gemini:generate_content",
+                provider_api_format: "gemini:generate_content",
+                source_model: Some("client-model"),
+                family: SameFormatProviderFamily::Gemini,
+                body_rules: None,
+                request_headers: None,
+                upstream_is_stream: false,
+                force_body_stream_field: false,
+                kiro_auth_config: None,
+                is_claude_code: false,
+                enable_model_directives: false,
+            },
+        )
+        .expect("same-format body should build");
+
+        assert!(output.body.get("model").is_none());
+        assert!(output.body.get("stream").is_none());
+        assert!(output
+            .body
+            .pointer("/contents/0/parts/0/functionResponse/id")
+            .is_none());
+        assert!(output
+            .body
+            .pointer("/contents/0/parts/1/function_response/id")
+            .is_none());
+        assert!(output.compatibility_edits.iter().any(|edit| {
+            edit.field == "model"
+                && edit.action == SameFormatProviderCompatibilityEditAction::RuntimeRewrite
+        }));
+        assert!(output.compatibility_edits.iter().any(|edit| {
+            edit.field == "stream"
+                && edit.action == SameFormatProviderCompatibilityEditAction::RuntimeRewrite
+        }));
+        assert!(output.compatibility_edits.iter().any(|edit| {
+            edit.field == "contents[].parts[].functionResponse.id"
+                && edit.action
+                    == SameFormatProviderCompatibilityEditAction::ProviderCompatibilityRewrite
+                && edit.detail.contains("2")
+        }));
     }
 
     #[test]

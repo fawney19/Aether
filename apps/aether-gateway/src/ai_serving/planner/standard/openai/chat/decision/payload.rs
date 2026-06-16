@@ -6,7 +6,8 @@ use crate::ai_serving::planner::report_context::{
     insert_provider_stream_event_api_format, LocalExecutionReportContextParts,
 };
 use crate::ai_serving::planner::{
-    build_ai_execution_decision_response, AiExecutionDecisionResponseParts,
+    build_ai_execution_decision_response, resolve_transport_request_gzip_policy,
+    AiExecutionDecisionResponseParts,
 };
 use crate::ai_serving::transport::{
     resolve_transport_execution_timeouts, resolve_transport_profile,
@@ -104,15 +105,6 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
             .eq_ignore_ascii_case("chatgpt_web")
     {
         extra_fields.insert("chatgpt_web_image".to_string(), serde_json::json!(true));
-        extra_fields.insert(
-            "local_failover_policy".to_string(),
-            serde_json::json!({
-                "stop_status_codes": [400, 401, 403, 429, 500, 502, 503, 504],
-                "error_stop_patterns": [
-                    { "pattern": ".*" }
-                ]
-            }),
-        );
     }
     let super::request::LocalOpenAiChatCandidatePayloadParts {
         client_api_format,
@@ -192,6 +184,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         ),
         &transport,
     );
+    let request_gzip = resolve_transport_request_gzip_policy(&transport);
 
     let mut decision = build_ai_execution_decision_response(AiExecutionDecisionResponseParts {
         decision_is_stream,
@@ -218,6 +211,8 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         provider_request_body: Some(provider_request_body),
         provider_request_body_base64: None,
         content_type: Some("application/json".to_string()),
+        content_encoding: None,
+        request_gzip,
         proxy,
         transport_profile,
         timeouts,

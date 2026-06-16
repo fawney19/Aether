@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use super::{
     apply_codex_openai_responses_special_body_edits, apply_codex_openai_responses_special_headers,
 };
+use crate::ai_serving::planner::standard::build_local_openai_responses_request_body;
 use http::{HeaderMap, HeaderValue};
 use serde_json::json;
 
@@ -34,6 +35,40 @@ fn applies_codex_defaults_when_body_rules_do_not_handle_fields() {
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     assert_eq!(body["parallel_tool_calls"], true);
     assert!(body.get("reasoning").is_none());
+}
+
+#[test]
+fn local_openai_responses_codex_body_wraps_string_input_for_backend() {
+    let body = json!({
+        "model": "gpt-5",
+        "input": "hello"
+    });
+
+    let provider_request_body = build_local_openai_responses_request_body(
+        &body,
+        "gpt-5-upstream",
+        false,
+        false,
+        "codex",
+        "openai:responses",
+        None,
+        Some("key-123"),
+        &HeaderMap::new(),
+        false,
+    )
+    .expect("codex local openai responses body should build");
+
+    assert_eq!(
+        provider_request_body["input"],
+        json!([{
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": "hello"
+            }]
+        }])
+    );
 }
 
 #[test]

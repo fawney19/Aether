@@ -213,6 +213,11 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
             headers: effective_headers,
             auth_header: &auth_header,
             auth_value: &auth_value,
+            accept: if is_codex || is_chatgpt_web {
+                "text/event-stream"
+            } else {
+                "application/json"
+            },
             header_rules: transport.endpoint.header_rules.as_ref(),
             provider_request_body: &provider_request_body,
             original_request_body: body_json,

@@ -564,11 +564,17 @@ impl AppState {
     pub(crate) async fn cleanup_deleted_provider_catalog_refs(
         &self,
         provider_id: &str,
+        provider_deleted: bool,
         endpoint_ids: &[String],
         key_ids: &[String],
     ) -> Result<(), GatewayError> {
         self.data
-            .cleanup_deleted_provider_catalog_refs(provider_id, endpoint_ids, key_ids)
+            .cleanup_deleted_provider_catalog_refs(
+                provider_id,
+                provider_deleted,
+                endpoint_ids,
+                key_ids,
+            )
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         for key_id in key_ids {
@@ -768,6 +774,25 @@ impl AppState {
             .lock()
             .expect("provider delete tasks cache should lock");
         tasks.insert(task.task_id.clone(), task);
+    }
+
+    pub(crate) fn reserve_provider_delete_task(
+        &self,
+        task: LocalProviderDeleteTaskState,
+    ) -> LocalProviderDeleteTaskState {
+        let mut tasks = self
+            .provider_delete_tasks
+            .lock()
+            .expect("provider delete tasks cache should lock");
+        if let Some(existing) = tasks
+            .values()
+            .find(|existing| existing.provider_id == task.provider_id && existing.is_active())
+            .cloned()
+        {
+            return existing;
+        }
+        tasks.insert(task.task_id.clone(), task.clone());
+        task
     }
 
     pub(crate) fn get_provider_delete_task(

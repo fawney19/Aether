@@ -5403,7 +5403,7 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
         assert!(stored_key.oauth_invalid_at_unix_secs.is_some());
         assert_eq!(
             stored_key.oauth_invalid_reason.as_deref(),
-            Some("[OAUTH_EXPIRED] Codex Token 无效或已过期 (401)")
+            Some("[OAUTH_EXPIRED] Codex Token 已过期 (401)")
         );
     } else if account_state_recheck_attempted
         && payload["account_state_recheck_error"] == "wham/usage API 返回状态码 403"
@@ -5449,7 +5449,40 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
         oauth_snapshot.get("expires_at"),
         auth_config.get("expires_at")
     );
-    if stored_key.oauth_invalid_reason.is_some() {
+    if stored_key
+        .oauth_invalid_reason
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with("[OAUTH_EXPIRED]"))
+    {
+        assert_eq!(
+            oauth_snapshot
+                .get("code")
+                .and_then(serde_json::Value::as_str),
+            Some("expired")
+        );
+        assert_eq!(
+            oauth_snapshot
+                .get("label")
+                .and_then(serde_json::Value::as_str),
+            Some("已过期")
+        );
+        assert_eq!(
+            oauth_snapshot.get("reason"),
+            Some(&json!("Codex Token 已过期 (401)"))
+        );
+        assert_eq!(
+            oauth_snapshot
+                .get("requires_reauth")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            oauth_snapshot
+                .get("expiring_soon")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+    } else if stored_key.oauth_invalid_reason.is_some() {
         assert_eq!(
             oauth_snapshot
                 .get("code")
@@ -5463,8 +5496,11 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
             Some("已失效")
         );
         assert_eq!(
-            oauth_snapshot.get("reason"),
-            Some(&json!("Codex Token 无效或已过期 (401)"))
+            oauth_snapshot
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|reason| !reason.trim().is_empty()),
+            true
         );
         assert_eq!(
             oauth_snapshot

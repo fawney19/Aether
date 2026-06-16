@@ -1,4 +1,5 @@
 export { default as ProviderFormDialog } from './ProviderFormDialog.vue'
+export { default as ProviderBatchActionDialog } from './ProviderBatchActionDialog.vue'
 export { default as EndpointFormDialog } from './EndpointFormDialog.vue'
 export { default as KeyFormDialog } from './KeyFormDialog.vue'
 export { default as KeyAllowedModelsDialog } from './KeyAllowedModelsDialog.vue'

@@ -17,7 +17,8 @@ use crate::ai_serving::planner::report_context::{
 use crate::ai_serving::planner::spec_metadata::local_same_format_provider_spec_metadata;
 use crate::ai_serving::planner::CandidateFailureDiagnostic;
 use crate::ai_serving::planner::{
-    build_ai_execution_decision_response, AiExecutionDecisionResponseParts,
+    build_ai_execution_decision_response, resolve_transport_request_gzip_policy,
+    AiExecutionDecisionResponseParts,
 };
 use crate::ai_serving::transport::{
     resolve_transport_execution_timeouts, resolve_transport_profile,
@@ -107,6 +108,11 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
             json!(crate::ai_serving::transport::GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME),
         );
     }
+    if !resolved.compatibility_edits.is_empty() {
+        if let Ok(value) = serde_json::to_value(&resolved.compatibility_edits) {
+            extra_fields.insert("request_body_compatibility_edits".to_string(), value);
+        }
+    }
     let provider_api_format = resolved.provider_api_format.clone();
     let effective_headers = input.effective_headers(&parts.headers);
     let report_context = append_local_failover_policy_to_value(
@@ -175,8 +181,10 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
         provider_request_headers,
         provider_request_body,
         transport_profile: _,
+        compatibility_edits: _,
         request_redacted: _,
     } = resolved;
+    let request_gzip = resolve_transport_request_gzip_policy(&transport);
 
     let mut decision = build_ai_execution_decision_response(AiExecutionDecisionResponseParts {
         decision_is_stream: spec_metadata.require_streaming,
@@ -203,6 +211,8 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
         provider_request_body: Some(provider_request_body),
         provider_request_body_base64: None,
         content_type: Some("application/json".to_string()),
+        content_encoding: None,
+        request_gzip,
         proxy,
         transport_profile,
         timeouts: resolve_transport_execution_timeouts(&transport),

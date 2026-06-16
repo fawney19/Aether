@@ -15,7 +15,7 @@ use crate::formats::shared::error_body::{
 use crate::formats::shared::sse::encode_json_sse;
 use crate::formats::shared::stream_core::common::{
     decode_json_data_line, openai_stream_terminal_error_body, openai_stream_terminal_error_message,
-    CanonicalStreamEvent, CanonicalStreamFrame, CanonicalUsage,
+    unsupported_stream_event_message, CanonicalStreamEvent, CanonicalStreamFrame, CanonicalUsage,
 };
 use crate::formats::shared::AiSurfaceFinalizeError;
 
@@ -84,6 +84,22 @@ impl StreamingStandardFormatMatrix {
         };
         let mut out = Vec::new();
         for frame in frames {
+            if let CanonicalStreamEvent::Finish {
+                finish_reason: Some(ref finish_reason),
+                ..
+            } = frame.event
+            {
+                if !canonical_stream_finish_reason_is_supported(finish_reason) {
+                    self.terminated = true;
+                    out.extend(client.emit_unsupported_finish_reason(finish_reason)?);
+                    break;
+                }
+            }
+            if let CanonicalStreamEvent::UnknownEvent(payload) = &frame.event {
+                self.terminated = true;
+                out.extend(client.emit_unknown_event(payload)?);
+                break;
+            }
             out.extend(client.emit(frame)?);
         }
         Ok(out)
@@ -386,6 +402,52 @@ impl ClientStreamEmitter {
             }
         }
     }
+
+    fn emit_unknown_event(&mut self, payload: &Value) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        let Some(error_body) = build_core_error_body_for_client_format(
+            self.api_format(),
+            &unsupported_stream_event_message(payload),
+            Some("unsupported_stream_event"),
+            LocalCoreSyncErrorKind::ServerError,
+        ) else {
+            return Ok(Vec::new());
+        };
+        self.emit_error(error_body)
+    }
+
+    fn emit_unsupported_finish_reason(
+        &mut self,
+        finish_reason: &str,
+    ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        let Some(error_body) = build_core_error_body_for_client_format(
+            self.api_format(),
+            &format!(
+                "Unsupported provider stream finish reason cannot be converted losslessly: field $.finish_reason = {}",
+                serde_json::json!(finish_reason)
+            ),
+            Some("unsupported_finish_reason"),
+            LocalCoreSyncErrorKind::ServerError,
+        ) else {
+            return Ok(Vec::new());
+        };
+        self.emit_error(error_body)
+    }
+
+    fn api_format(&self) -> &'static str {
+        match self {
+            ClientStreamEmitter::OpenAIChat(_) => "openai:chat",
+            ClientStreamEmitter::OpenAIResponses(_) => "openai:responses",
+            ClientStreamEmitter::Claude(_) => "claude:messages",
+            ClientStreamEmitter::Gemini(_) => "gemini:generate_content",
+        }
+    }
+}
+
+fn canonical_stream_finish_reason_is_supported(finish_reason: &str) -> bool {
+    matches!(
+        finish_reason.trim(),
+        "stop" | "length" | "tool_calls" | "function_call" | "content_filter"
+    )
 }
 
 fn build_client_error_body_for_line(report_context: &Value, line: &[u8]) -> Option<Value> {
@@ -654,6 +716,107 @@ mod tests {
     }
 
     #[test]
+    fn ignores_openai_responses_keepalive_events_for_chat_clients() {
+        let report_context = report_context("openai:responses", "openai:chat");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let mut output = Vec::new();
+
+        let keepalive = matrix
+            .transform_line(
+                &report_context,
+                data_line(json!({
+                    "type": "keepalive",
+                    "sequence_number": 1,
+                })),
+            )
+            .expect("keepalive should be ignored");
+        assert!(keepalive.is_empty());
+
+        for line in [
+            data_line(json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp_keepalive_123",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "pong",
+            })),
+            data_line(json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_keepalive_123",
+                    "object": "response",
+                    "model": "gpt-5.4",
+                    "status": "completed",
+                    "output": [],
+                },
+            })),
+        ] {
+            output.extend(
+                matrix
+                    .transform_line(&report_context, line)
+                    .expect("keepalive and text should convert"),
+            );
+        }
+
+        let sse = String::from_utf8(output).expect("sse should be utf8");
+        assert!(!sse.contains("Unsupported provider stream event"), "{sse}");
+        assert!(!sse.contains("unsupported_stream_event"), "{sse}");
+        assert!(sse.contains("pong"), "{sse}");
+        assert!(sse.contains("chat.completion.chunk"), "{sse}");
+    }
+
+    #[test]
+    fn ignores_openai_responses_keepalive_events_for_responses_clients() {
+        let mut report_context = report_context("openai:chat", "openai:responses");
+        report_context["provider_stream_event_api_format"] = json!("openai:responses");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let mut output = Vec::new();
+
+        let keepalive = matrix
+            .transform_line(
+                &report_context,
+                data_line(json!({
+                    "type": "keepalive",
+                    "sequence_number": 1,
+                })),
+            )
+            .expect("keepalive should be ignored");
+        assert!(keepalive.is_empty());
+
+        for line in [
+            data_line(json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp_keepalive_456",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": "pong",
+            })),
+            data_line(json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_keepalive_456",
+                    "object": "response",
+                    "model": "gpt-5.4",
+                    "status": "completed",
+                    "output": [],
+                },
+            })),
+        ] {
+            output.extend(
+                matrix
+                    .transform_line(&report_context, line)
+                    .expect("keepalive and text should convert"),
+            );
+        }
+
+        let sse = String::from_utf8(output).expect("sse should be utf8");
+        assert!(!sse.contains("Unsupported provider stream event"), "{sse}");
+        assert!(!sse.contains("unsupported_stream_event"), "{sse}");
+        assert!(sse.contains("pong"), "{sse}");
+        assert!(sse.contains("event: response.output_text.delta"), "{sse}");
+    }
+
+    #[test]
     fn transforms_provider_errors_to_claude_error_events() {
         let cases = [
             (
@@ -851,6 +1014,485 @@ mod tests {
     }
 
     #[test]
+    fn transforms_unknown_provider_stream_events_to_visible_client_errors() {
+        let cases = [
+            (
+                "openai:chat",
+                "data: {\"error\":",
+                "\"code\":\"unsupported_stream_event\"",
+            ),
+            (
+                "openai:responses",
+                "event: response.failed\n",
+                "\"code\":\"unsupported_stream_event\"",
+            ),
+            (
+                "claude:messages",
+                "event: error\n",
+                "\"code\":\"unsupported_stream_event\"",
+            ),
+            (
+                "gemini:generate_content",
+                "data: {\"error\":",
+                "\"status\":\"INTERNAL\"",
+            ),
+        ];
+
+        for (client_api_format, prefix, marker) in cases {
+            let mut report_context = report_context("openai:responses", client_api_format);
+            report_context["provider_stream_event_api_format"] = json!("openai:responses");
+            let mut matrix = StreamingStandardFormatMatrix::default();
+            let output = matrix
+                .transform_line(
+                    &report_context,
+                    data_line(json!({
+                        "type": "response.future.delta",
+                        "response": {
+                            "id": "resp_unknown_123",
+                            "model": "gpt-5.4",
+                        },
+                        "payload": {
+                            "kept": true,
+                        },
+                    })),
+                )
+                .expect("unknown provider event should fail closed visibly");
+            let sse = String::from_utf8(output).expect("sse should be utf8");
+
+            assert!(sse.contains(prefix), "{client_api_format}: {sse}");
+            assert!(
+                sse.contains("Unsupported provider stream event cannot be converted losslessly"),
+                "{client_api_format}: {sse}"
+            );
+            assert!(
+                sse.contains("field $.type = \\\"response.future.delta\\\""),
+                "{sse}"
+            );
+            assert!(sse.contains(marker), "{client_api_format}: {sse}");
+            assert!(matrix
+                .finish(&report_context)
+                .expect("finish should succeed")
+                .is_empty());
+            assert!(matrix
+                .transform_line(
+                    &report_context,
+                    data_line(json!({
+                        "type": "response.output_text.delta",
+                        "response_id": "resp_unknown_123",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "delta": "after",
+                    })),
+                )
+                .expect("terminated matrix should ignore later lines")
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn transforms_openai_responses_known_sidecar_events_without_unsupported_errors() {
+        let report_context = report_context("openai:responses", "claude:messages");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let mut output = Vec::new();
+
+        for line in [
+            data_line(json!({
+                "type": "response.created",
+                "response": {
+                    "id": "resp_sidecar_123",
+                    "model": "gpt-5.4",
+                    "status": "in_progress",
+                    "output": [],
+                },
+            })),
+            data_line(json!({
+                "type": "response.output_item.added",
+                "response_id": "resp_sidecar_123",
+                "output_index": 0,
+                "item": {
+                    "type": "web_search_call",
+                    "id": "ws_123",
+                    "status": "in_progress",
+                    "action": {"type": "search", "query": "aether format conversion"},
+                },
+            })),
+            data_line(json!({
+                "type": "response.web_search_call.searching",
+                "item_id": "ws_123",
+                "output_index": 0,
+            })),
+            data_line(json!({
+                "type": "response.output_text.annotation.added",
+                "response_id": "resp_sidecar_123",
+                "output_index": 1,
+                "content_index": 0,
+                "annotation_index": 0,
+                "annotation": {"type": "url_citation", "url": "https://example.invalid"},
+            })),
+            data_line(json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp_sidecar_123",
+                "output_index": 1,
+                "content_index": 0,
+                "delta": "sidecar ok",
+            })),
+            data_line(json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_sidecar_123",
+                    "object": "response",
+                    "model": "gpt-5.4",
+                    "status": "completed",
+                    "output": [],
+                    "usage": {
+                        "input_tokens": 1,
+                        "output_tokens": 2,
+                        "total_tokens": 3,
+                    },
+                },
+            })),
+        ] {
+            output.extend(
+                matrix
+                    .transform_line(&report_context, line)
+                    .expect("known responses sidecar event should convert or be ignored"),
+            );
+        }
+
+        let sse = String::from_utf8(output).expect("sse should be utf8");
+        assert!(!sse.contains("unsupported_stream_event"), "{sse}");
+        assert!(!sse.contains("Unsupported provider stream event"), "{sse}");
+        assert!(sse.contains("sidecar ok"), "{sse}");
+        assert!(sse.contains("event: message_stop"), "{sse}");
+    }
+
+    #[test]
+    fn transforms_openai_responses_incomplete_max_tokens_as_normal_finish() {
+        let report_context = report_context("openai:responses", "claude:messages");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let output = matrix
+            .transform_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.incomplete",
+                    "response": {
+                        "id": "resp_incomplete_123",
+                        "object": "response",
+                        "model": "gpt-5.4",
+                        "status": "incomplete",
+                        "incomplete_details": {
+                            "reason": "max_output_tokens",
+                        },
+                        "output": [{
+                            "type": "message",
+                            "id": "msg_incomplete_123",
+                            "role": "assistant",
+                            "status": "incomplete",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "partial answer",
+                            }],
+                        }],
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 20,
+                            "total_tokens": 30,
+                        },
+                    },
+                })),
+            )
+            .expect("incomplete max token response should convert as length finish");
+
+        let sse = String::from_utf8(output).expect("sse should be utf8");
+        assert!(!sse.contains("Response incomplete"), "{sse}");
+        assert!(!sse.contains("unsupported_stream_event"), "{sse}");
+        assert!(sse.contains("partial answer"), "{sse}");
+        assert!(sse.contains("\"stop_reason\":\"max_tokens\""), "{sse}");
+        assert!(matrix
+            .finish(&report_context)
+            .expect("finish should be terminated")
+            .is_empty());
+    }
+
+    #[test]
+    fn transforms_openai_responses_local_shell_call_to_claude_tool_use() {
+        let report_context = report_context("openai:responses", "claude:messages");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let mut output = Vec::new();
+
+        for line in [
+            data_line(json!({
+                "type": "response.output_item.done",
+                "response_id": "resp_shell_123",
+                "output_index": 0,
+                "item": {
+                    "type": "local_shell_call",
+                    "id": "lsc_123",
+                    "call_id": "call_shell_123",
+                    "status": "completed",
+                    "action": {
+                        "type": "exec",
+                        "command": ["pwd"],
+                        "env": {},
+                    },
+                },
+            })),
+            data_line(json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_shell_123",
+                    "object": "response",
+                    "model": "gpt-5.4",
+                    "status": "completed",
+                    "output": [],
+                },
+            })),
+        ] {
+            output.extend(
+                matrix
+                    .transform_line(&report_context, line)
+                    .expect("local shell call should convert to a generic tool use"),
+            );
+        }
+
+        let sse = String::from_utf8(output).expect("sse should be utf8");
+        assert!(!sse.contains("unsupported_stream_event"), "{sse}");
+        assert!(sse.contains("\"type\":\"tool_use\""), "{sse}");
+        assert!(sse.contains("\"name\":\"local_shell\""), "{sse}");
+        assert!(sse.contains("\\\"command\\\":[\\\"pwd\\\"]"), "{sse}");
+        assert!(sse.contains("\"stop_reason\":\"tool_use\""), "{sse}");
+    }
+
+    #[test]
+    fn transforms_unknown_stream_finish_reasons_to_visible_client_errors() {
+        let cases = [
+            (
+                "openai:chat",
+                "data: {\"error\":",
+                "\"code\":\"unsupported_finish_reason\"",
+            ),
+            (
+                "openai:responses",
+                "event: response.failed\n",
+                "\"code\":\"unsupported_finish_reason\"",
+            ),
+            (
+                "claude:messages",
+                "event: error\n",
+                "\"code\":\"unsupported_finish_reason\"",
+            ),
+            (
+                "gemini:generate_content",
+                "data: {\"error\":",
+                "\"status\":\"INTERNAL\"",
+            ),
+        ];
+
+        for (client_api_format, prefix, marker) in cases {
+            let report_context = report_context("openai:chat", client_api_format);
+            let mut matrix = StreamingStandardFormatMatrix::default();
+            let output = matrix
+                .transform_line(
+                    &report_context,
+                    data_line(json!({
+                        "id": "chatcmpl_unknown_finish",
+                        "object": "chat.completion.chunk",
+                        "model": "gpt-5.4",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "future_reason"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 2,
+                            "total_tokens": 3
+                        }
+                    })),
+                )
+                .expect("unknown finish reason should fail closed visibly");
+            let sse = String::from_utf8(output).expect("sse should be utf8");
+
+            assert!(sse.contains(prefix), "{client_api_format}: {sse}");
+            assert!(
+                sse.contains("Unsupported provider stream finish reason"),
+                "{client_api_format}: {sse}"
+            );
+            assert!(
+                sse.contains("field $.finish_reason = \\\"future_reason\\\""),
+                "{client_api_format}: {sse}"
+            );
+            assert!(sse.contains("future_reason"), "{client_api_format}: {sse}");
+            assert!(sse.contains(marker), "{client_api_format}: {sse}");
+            assert!(matrix
+                .finish(&report_context)
+                .expect("finish should succeed")
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn transforms_unmappable_gemini_stream_finish_reasons_to_visible_client_errors() {
+        let cases = [
+            (
+                "openai:chat",
+                "data: {\"error\":",
+                "\"code\":\"unsupported_finish_reason\"",
+            ),
+            (
+                "openai:responses",
+                "event: response.failed\n",
+                "\"code\":\"unsupported_finish_reason\"",
+            ),
+            (
+                "claude:messages",
+                "event: error\n",
+                "\"code\":\"unsupported_finish_reason\"",
+            ),
+            (
+                "gemini:generate_content",
+                "data: {\"error\":",
+                "\"status\":\"INTERNAL\"",
+            ),
+        ];
+
+        for (client_api_format, prefix, marker) in cases {
+            let report_context = report_context("gemini:generate_content", client_api_format);
+            let mut matrix = StreamingStandardFormatMatrix::default();
+            let output = matrix
+                .transform_line(
+                    &report_context,
+                    data_line(json!({
+                        "responseId": "gemini_unmappable_finish",
+                        "modelVersion": "gemini-2.5-pro",
+                        "candidates": [{
+                            "index": 0,
+                            "content": {
+                                "role": "model",
+                                "parts": [{"text": "partial"}]
+                            },
+                            "finishReason": "OTHER"
+                        }],
+                        "usageMetadata": {
+                            "promptTokenCount": 1,
+                            "candidatesTokenCount": 2,
+                            "totalTokenCount": 3
+                        }
+                    })),
+                )
+                .expect("unmappable Gemini finish reason should fail closed visibly");
+            let sse = String::from_utf8(output).expect("sse should be utf8");
+
+            assert!(sse.contains(prefix), "{client_api_format}: {sse}");
+            assert!(
+                sse.contains("Unsupported provider stream finish reason"),
+                "{client_api_format}: {sse}"
+            );
+            assert!(
+                sse.contains("field $.finish_reason = \\\"OTHER\\\""),
+                "{client_api_format}: {sse}"
+            );
+            assert!(sse.contains("OTHER"), "{client_api_format}: {sse}");
+            assert!(sse.contains(marker), "{client_api_format}: {sse}");
+            assert!(matrix
+                .finish(&report_context)
+                .expect("finish should succeed")
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn transforms_unknown_claude_stream_stop_reasons_to_visible_client_errors() {
+        let cases = [
+            (
+                "openai:chat",
+                "data: {\"error\":",
+                "\"code\":\"unsupported_finish_reason\"",
+            ),
+            (
+                "openai:responses",
+                "event: response.failed\n",
+                "\"code\":\"unsupported_finish_reason\"",
+            ),
+            (
+                "claude:messages",
+                "event: error\n",
+                "\"code\":\"unsupported_finish_reason\"",
+            ),
+            (
+                "gemini:generate_content",
+                "data: {\"error\":",
+                "\"status\":\"INTERNAL\"",
+            ),
+        ];
+
+        for (client_api_format, prefix, marker) in cases {
+            let report_context = report_context("claude:messages", client_api_format);
+            let mut matrix = StreamingStandardFormatMatrix::default();
+            let output = matrix
+                .transform_line(
+                    &report_context,
+                    data_line(json!({
+                        "type": "message_delta",
+                        "delta": {
+                            "stop_reason": "future_reason"
+                        },
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 2
+                        }
+                    })),
+                )
+                .expect("unknown Claude stop reason should fail closed visibly");
+            let sse = String::from_utf8(output).expect("sse should be utf8");
+
+            assert!(sse.contains(prefix), "{client_api_format}: {sse}");
+            assert!(
+                sse.contains("Unsupported provider stream finish reason"),
+                "{client_api_format}: {sse}"
+            );
+            assert!(sse.contains("future_reason"), "{client_api_format}: {sse}");
+            assert!(sse.contains(marker), "{client_api_format}: {sse}");
+            assert!(matrix
+                .finish(&report_context)
+                .expect("finish should succeed")
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn openai_responses_client_emits_incomplete_for_length_finish_reason() {
+        let report_context = report_context("openai:chat", "openai:responses");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let output = matrix
+            .transform_line(
+                &report_context,
+                data_line(json!({
+                    "id": "chatcmpl_length_finish",
+                    "object": "chat.completion.chunk",
+                    "model": "gpt-5.4",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "length"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 2,
+                        "total_tokens": 3
+                    }
+                })),
+            )
+            .expect("length finish reason should map to response.incomplete");
+        let sse = String::from_utf8(output).expect("sse should be utf8");
+
+        assert!(sse.contains("event: response.incomplete\n"));
+        assert!(sse.contains("\"status\":\"incomplete\""));
+        assert!(sse.contains("\"incomplete_details\":{\"reason\":\"max_output_tokens\"}"));
+        assert!(!sse.contains("event: response.completed\n"));
+    }
+
+    #[test]
     fn rewrites_gemini_inline_image_streams_to_claude_image_blocks() {
         let report_context = report_context("gemini:generate_content", "claude:messages");
         let mut matrix = StreamingStandardFormatMatrix::default();
@@ -972,6 +1614,8 @@ mod tests {
                         "object": "response",
                         "model": "gpt-5.5",
                         "status": "completed",
+                        "error": null,
+                        "incomplete_details": null,
                         "output": [],
                         "usage": {
                             "input_tokens": 26,
@@ -994,6 +1638,8 @@ mod tests {
             .latest_summary()
             .cloned()
             .expect("summary should exist");
+        assert!(summary.observed_finish);
+        assert_eq!(summary.parser_error, None);
         let usage = summary
             .standardized_usage
             .expect("standardized usage should exist");
@@ -1096,6 +1742,45 @@ mod tests {
         assert_eq!(summary.finish_reason.as_deref(), Some("error"));
         assert_eq!(summary.parser_error.as_deref(), Some("policy failure"));
         assert_eq!(summary.unknown_event_count, 1);
+    }
+
+    #[test]
+    fn terminal_observer_marks_openai_responses_incomplete_as_length_finish() {
+        let mut report_context = report_context("openai:chat", "openai:responses");
+        report_context["provider_stream_event_api_format"] = json!("openai:responses");
+        let mut observer = StreamingStandardTerminalObserver::default();
+
+        observer
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.incomplete",
+                    "response": {
+                        "id": "resp_incomplete_123",
+                        "model": "gpt-5.4",
+                        "status": "incomplete",
+                        "incomplete_details": {
+                            "reason": "max_output_tokens",
+                        },
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 20,
+                            "total_tokens": 30,
+                        },
+                    },
+                })),
+            )
+            .expect("incomplete event should be observed as terminal finish");
+
+        let summary = observer
+            .latest_summary()
+            .cloned()
+            .expect("summary should exist");
+        assert!(summary.observed_finish);
+        assert_eq!(summary.finish_reason.as_deref(), Some("length"));
+        assert_eq!(summary.parser_error, None);
+        assert_eq!(summary.unknown_event_count, 0);
     }
 
     #[test]

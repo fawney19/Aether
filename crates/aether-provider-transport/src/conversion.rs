@@ -593,6 +593,52 @@ mod tests {
     }
 
     #[test]
+    fn cross_format_pair_requires_provider_or_endpoint_enablement() {
+        let disabled = transport_snapshot("custom", "openai:responses", "bearer", false, None);
+        assert!(!request_conversion_enabled_for_transport(
+            &disabled,
+            "claude:messages",
+            "openai:responses",
+        ));
+        assert_eq!(
+            candidate_transport_pair_skip_reason(&disabled, "claude:messages"),
+            Some("format_conversion_disabled")
+        );
+
+        let provider_enabled =
+            transport_snapshot("custom", "openai:responses", "bearer", true, None);
+        assert!(request_conversion_enabled_for_transport(
+            &provider_enabled,
+            "claude:messages",
+            "openai:responses",
+        ));
+        assert_eq!(
+            candidate_transport_pair_skip_reason(&provider_enabled, "claude:messages"),
+            None
+        );
+
+        let endpoint_enabled = transport_snapshot(
+            "custom",
+            "openai:responses",
+            "bearer",
+            false,
+            Some(json!({
+                "enabled": true,
+                "accept_formats": ["claude:messages"],
+            })),
+        );
+        assert!(request_conversion_enabled_for_transport(
+            &endpoint_enabled,
+            "claude:messages",
+            "openai:responses",
+        ));
+        assert_eq!(
+            candidate_transport_pair_skip_reason(&endpoint_enabled, "claude:messages"),
+            None
+        );
+    }
+
+    #[test]
     fn vertex_gemini_transport_supports_cross_format_conversion_with_query_auth() {
         let transport = transport_snapshot(
             "vertex_ai",

@@ -114,18 +114,8 @@ SELECT
       OR NULLIF(BTRIM("usage".request_metadata->>'user_agent'), '') IS NOT NULL
       OR NULLIF(BTRIM("usage".request_metadata->>'request_path'), '') IS NOT NULL
       OR NULLIF(BTRIM("usage".request_metadata->>'request_path_and_query'), '') IS NOT NULL
-      OR CASE
-        WHEN jsonb_typeof("usage".provider_request_body::jsonb) = 'object' THEN COALESCE(
-          NULLIF(BTRIM("usage".provider_request_body->>'reasoning_effort'), ''),
-          NULLIF(BTRIM("usage".provider_request_body->'reasoning'->>'effort'), ''),
-          NULLIF(BTRIM("usage".provider_request_body->'output_config'->>'effort'), '')
-        )
-        ELSE NULLIF(BTRIM("usage".request_metadata->>'provider_reasoning_effort'), '')
-      END IS NOT NULL
-      OR CASE
-        WHEN jsonb_typeof("usage".provider_request_body::jsonb) = 'object' THEN NULLIF(BTRIM("usage".provider_request_body->>'service_tier'), '')
-        ELSE NULLIF(BTRIM("usage".request_metadata->>'provider_service_tier'), '')
-      END IS NOT NULL
+      OR NULLIF(BTRIM("usage".request_metadata->>'provider_reasoning_effort'), '') IS NOT NULL
+      OR NULLIF(BTRIM("usage".request_metadata->>'provider_service_tier'), '') IS NOT NULL
       OR ("usage".request_metadata->>'client_requested_stream') IN ('true', 'false')
       OR ("usage".request_metadata->>'upstream_is_stream') IN ('true', 'false')
       THEN jsonb_strip_nulls(jsonb_build_object(
@@ -138,19 +128,9 @@ SELECT
         'request_path_and_query',
         NULLIF(BTRIM("usage".request_metadata->>'request_path_and_query'), ''),
         'provider_reasoning_effort',
-        CASE
-          WHEN jsonb_typeof("usage".provider_request_body::jsonb) = 'object' THEN COALESCE(
-            NULLIF(BTRIM("usage".provider_request_body->>'reasoning_effort'), ''),
-            NULLIF(BTRIM("usage".provider_request_body->'reasoning'->>'effort'), ''),
-            NULLIF(BTRIM("usage".provider_request_body->'output_config'->>'effort'), '')
-          )
-          ELSE NULLIF(BTRIM("usage".request_metadata->>'provider_reasoning_effort'), '')
-        END,
+        NULLIF(BTRIM("usage".request_metadata->>'provider_reasoning_effort'), ''),
         'provider_service_tier',
-        CASE
-          WHEN jsonb_typeof("usage".provider_request_body::jsonb) = 'object' THEN NULLIF(BTRIM("usage".provider_request_body->>'service_tier'), '')
-          ELSE NULLIF(BTRIM("usage".request_metadata->>'provider_service_tier'), '')
-        END,
+        NULLIF(BTRIM("usage".request_metadata->>'provider_service_tier'), ''),
         'client_requested_stream',
         CASE
           WHEN ("usage".request_metadata->>'client_requested_stream') IN ('true', 'false')
@@ -238,14 +218,11 @@ SELECT
   usage_settlement_snapshots.billing_rule_id AS settlement_billing_rule_id,
   usage_settlement_snapshots.billing_rule_version AS settlement_billing_rule_version,
   CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT) AS created_at_unix_ms,
-  CAST(
-    EXTRACT(
-      EPOCH FROM COALESCE(
-        usage_settlement_snapshots.finalized_at,
-        "usage".finalized_at,
-        "usage".created_at
-      )
-    ) AS BIGINT
+  GREATEST(
+    COALESCE(NULLIF("usage".updated_at_unix_secs, 0), 0),
+    COALESCE(CAST(EXTRACT(EPOCH FROM usage_settlement_snapshots.finalized_at) AS BIGINT), 0),
+    COALESCE(CAST(EXTRACT(EPOCH FROM "usage".finalized_at) AS BIGINT), 0),
+    CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT)
   ) AS updated_at_unix_secs,
   CAST(
     EXTRACT(

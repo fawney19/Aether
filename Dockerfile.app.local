@@ -23,10 +23,11 @@ RUN npm run build
 FROM ${RUST_BASE_IMAGE} AS gateway-base
 WORKDIR /build
 
-# 本地镜像优先缩短构建时间，保留 release 语义，但改用更快的 thin LTO。
+# 生产级 release 构建：保留 thin LTO，同时用 lld 缩短最终链接阶段。
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
     CARGO_PROFILE_RELEASE_LTO=thin \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+    RUSTFLAGS="-C linker=clang -C link-arg=-fuse-ld=lld"
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -34,10 +35,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
+    clang \
     cmake \
     git \
     libclang-dev \
     libssl-dev \
+    lld \
     pkg-config \
     perl
 
@@ -67,7 +70,8 @@ COPY crates/ ./crates/
 RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=aether-cargo-target-local,target=/build/target,sharing=locked \
-    cargo build --release --locked -p aether-gateway && \
+    set -eux; \
+    cargo build --release --locked -p aether-gateway --bin aether-gateway; \
     cp target/release/aether-gateway /tmp/aether-gateway
 
 # ==================== 最小运行时打包 ====================

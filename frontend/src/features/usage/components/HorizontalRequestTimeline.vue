@@ -1401,9 +1401,8 @@ const currentAttemptFailureDiagnostic = computed<{
   const attempt = currentAttempt.value
   if (!attempt) return null
   const extra = extractObject(attempt.extra_data)
-  const failureDiagnostic = extractObject(extra?.failure_diagnostic)
-  const safeToShow = failureDiagnostic?.safe_to_show !== false
-  const error = failureDiagnostic && safeToShow
+  const failureDiagnostic = extractVisibleFailureDiagnostic(extra)
+  const error = failureDiagnostic
     ? failureDiagnostic
     : extractObject(extra?.request_body_build_error)
   const path = typeof error?.path === 'string' && error.path.trim()
@@ -1415,17 +1414,203 @@ const currentAttemptFailureDiagnostic = computed<{
   if (!path && !message) return null
   return {
     path: path || '$',
-    message: message || '请求体转换失败',
+    message: formatAttemptErrorMessage(message) || message || '请求体转换失败',
   }
 })
+
+const isGenericExecutionRuntimeStatusMessage = (message: string): boolean =>
+  /execution runtime (stream )?returned non-success status \d+/i.test(message)
+
+const isLocalSyncFinalizeDiagnostic = (message: string): boolean =>
+  /local sync attempt failed before terminal finalization/i.test(message)
+  || /unsupported provider stream (event|finish reason)/i.test(message)
+
+const isActionableDiagnosticMessage = (message: string): boolean =>
+  isLocalSyncFinalizeDiagnostic(message) || isConversionDiagnosticMessage(message)
+
+const extractVisibleFailureDiagnostic = (
+  extra: Record<string, unknown> | null | undefined,
+): Record<string, unknown> | null => {
+  const failureDiagnostic = extractObject(extra?.failure_diagnostic)
+  if (!failureDiagnostic || failureDiagnostic.safe_to_show === false) return null
+  return failureDiagnostic
+}
+
+const extractVisibleDiagnosticObjects = (
+  extra: Record<string, unknown> | null | undefined,
+): Array<Record<string, unknown>> => [
+  extractVisibleFailureDiagnostic(extra),
+  extractObject(extra?.request_conversion_error),
+  extractObject(extra?.request_body_build_error),
+].filter((value): value is Record<string, unknown> => Boolean(value))
+
+const extractVisibleDiagnosticMessage = (
+  extra: Record<string, unknown> | null | undefined,
+): string => {
+  for (const diagnostic of extractVisibleDiagnosticObjects(extra)) {
+    const message = readStringField(diagnostic, 'message')
+    if (message) return message
+  }
+  return ''
+}
+
+const chooseAttemptRawErrorMessage = (
+  flowMessage: string,
+  fallbackMessage: string,
+  diagnosticMessage: string,
+): string => {
+  const flow = flowMessage.trim()
+  const fallback = fallbackMessage.trim()
+  const diagnostic = diagnosticMessage.trim()
+
+  if (flow && fallback && !isActionableDiagnosticMessage(flow) && isActionableDiagnosticMessage(fallback)) {
+    return fallback
+  }
+  if (flow && diagnostic && isGenericExecutionRuntimeStatusMessage(flow) && isActionableDiagnosticMessage(diagnostic)) {
+    return diagnostic
+  }
+  if (fallback && diagnostic && isGenericExecutionRuntimeStatusMessage(fallback) && isActionableDiagnosticMessage(diagnostic)) {
+    return diagnostic
+  }
+
+  return flow || fallback || diagnostic
+}
+
+const decodeRustDebugString = (value: string): string => {
+  try {
+    return JSON.parse(`"${value}"`)
+  } catch {
+    return value.replace(/\\"/g, '"')
+  }
+}
+
+const normalizeDiagnosticFieldPath = (field: string): string => {
+  const trimmed = field.trim()
+  if (!trimmed || trimmed === '$') return '$'
+  if (trimmed.startsWith('$')) return trimmed
+  if (trimmed.startsWith('[')) return `$${trimmed}`
+  return `$.${trimmed}`
+}
+
+const formatConversionPair = (source: string, target: string): string =>
+  `${formatApiFormat(source.trim())} → ${formatApiFormat(target.trim())}`
+
+const extractFieldDetail = (message: string): string => {
+  const fieldMatch = message.match(/field\s+([^;=]+?)\s*=\s*(\"(?:\\.|[^"\\])*\"|[^;]+)/i)
+  const unsupportedFieldMatch = message.match(/field\s+([^;]+?)\s+is unsupported/i)
+  if (fieldMatch?.[1]) {
+    return `字段 ${normalizeDiagnosticFieldPath(fieldMatch[1])} = ${fieldMatch[2].trim()}`
+  }
+  if (unsupportedFieldMatch?.[1]) {
+    return `字段 ${normalizeDiagnosticFieldPath(unsupportedFieldMatch[1])} 不支持`
+  }
+  return ''
+}
+
+const formatUnsupportedStreamEventMessage = (message: string): string => {
+  const detail = extractFieldDetail(message)
+  const fieldDetail = detail ? `（${detail}）` : ''
+  return `流式格式转换失败：上游返回了当前不支持的 stream event${fieldDetail}，无法无损转换到客户端请求格式`
+}
+
+const formatUnsupportedFinishReasonMessage = (message: string): string => {
+  const fieldDetail = extractFieldDetail(message)
+  const legacyMatch = message.match(/unsupported provider stream finish reason\s+(.+?)\s+cannot be converted losslessly/i)
+  const detail = fieldDetail || (legacyMatch?.[1]
+    ? `字段 $.finish_reason = ${legacyMatch[1].trim()}`
+    : '')
+  return `流式格式转换失败：上游返回了当前不支持的 finish reason${detail ? `（${detail}）` : ''}，无法无损转换到客户端请求格式`
+}
+
+const formatKnownConversionErrorMessage = (message: string): string => {
+  const lossy = message.match(/^lossy conversion blocked from\s+(\S+)\s+to\s+(\S+)\s+at\s+([^:]+):\s*(.+)$/i)
+  if (lossy) {
+    return `格式转换失败：${formatConversionPair(lossy[1], lossy[2])} 在字段 ${normalizeDiagnosticFieldPath(lossy[3])} 会丢失信息：${lossy[4].trim()}`
+  }
+
+  const unaudited = message.match(/^unaudited field\s+(.+?)\s+in\s+(.+?)\s+cannot be converted to\s+([^:]+):\s*(.+)$/i)
+  if (unaudited) {
+    return `格式转换失败：${formatConversionPair(unaudited[2], unaudited[3])} 的字段 ${normalizeDiagnosticFieldPath(unaudited[1])} 尚未审计，不能安全转换：${unaudited[4].trim()}`
+  }
+
+  const unsupportedField = message.match(/^unsupported field\s+(.+?)\s+in\s+([^:]+(?::[^:]+)?):\s*(.+)$/i)
+  if (unsupportedField) {
+    return `格式转换失败：${formatApiFormat(unsupportedField[2])} 不支持字段 ${normalizeDiagnosticFieldPath(unsupportedField[1])}：${unsupportedField[3].trim()}`
+  }
+
+  const invalidEnum = message.match(/^invalid enum value\s+(.+?)\s+for\s+(.+)\.([^.\s]+)$/i)
+  if (invalidEnum) {
+    return `格式转换失败：${formatApiFormat(invalidEnum[2])} 字段 ${normalizeDiagnosticFieldPath(invalidEnum[3])} 的枚举值 ${invalidEnum[1].trim()} 无效`
+  }
+
+  const invalidTarget = message.match(/^invalid target field\s+(.+?)\s+for\s+(.+?):\s*(.+)$/i)
+  if (invalidTarget) {
+    return `格式转换失败：目标格式 ${formatApiFormat(invalidTarget[2])} 字段 ${normalizeDiagnosticFieldPath(invalidTarget[1])} 无效：${invalidTarget[3].trim()}`
+  }
+
+  const unsupportedFormat = message.match(/^unsupported AI format:\s*(.+)$/i)
+  if (unsupportedFormat) {
+    return `格式转换失败：不支持的 API 格式 ${unsupportedFormat[1].trim()}`
+  }
+
+  const parseEmit = message.match(/^failed to\s+(parse|emit)\s+(.+?)\s+(request|response)$/i)
+  if (parseEmit) {
+    const action = parseEmit[1].toLowerCase() === 'parse' ? '解析' : '生成'
+    const subject = parseEmit[3].toLowerCase() === 'request' ? '请求体' : '响应体'
+    return `格式转换失败：无法${action} ${formatApiFormat(parseEmit[2])} ${subject}`
+  }
+
+  return ''
+}
+
+const isConversionDiagnosticMessage = (message: string): boolean => {
+  const normalized = message.trim()
+  if (!normalized) return false
+  return /conversion|converted|convertible|cannot be converted|lossy conversion|unsupported field|unaudited field|invalid enum value|invalid target field|unsupported ai format|failed to (parse|emit) .+ (request|response)|unsupported provider stream (event|finish reason)|转换|无损|字段 .*不支持/i
+    .test(normalized)
+}
 
 const formatAttemptErrorMessage = (message: string, statusCode?: number): string => {
   const normalized = message.trim()
   if (!normalized) return ''
-  if (/execution runtime (stream )?returned non-success status \d+/i.test(normalized)) {
+  const directInternal = normalized.match(/^Internal\("((?:\\.|[^"\\])*)"\)$/i)
+  if (directInternal?.[1]) {
+    return formatAttemptErrorMessage(decodeRustDebugString(directInternal[1]), statusCode)
+  }
+  const localSyncInternal = normalized.match(/local sync attempt failed before terminal finalization:\s*Internal\("((?:\\.|[^"\\])*)"\)/i)
+  if (localSyncInternal?.[1]) {
+    return formatAttemptErrorMessage(decodeRustDebugString(localSyncInternal[1]), statusCode)
+  }
+  if (/unsupported provider stream event cannot be converted losslessly/i.test(normalized)) {
+    return formatUnsupportedStreamEventMessage(normalized)
+  }
+  if (/unsupported provider stream finish reason/i.test(normalized)) {
+    return formatUnsupportedFinishReasonMessage(normalized)
+  }
+  const conversionMessage = formatKnownConversionErrorMessage(normalized)
+  if (conversionMessage) {
+    return conversionMessage
+  }
+  if (isGenericExecutionRuntimeStatusMessage(normalized)) {
     return statusCode != null ? `上游返回非成功状态 ${statusCode}` : '上游返回非成功状态'
   }
   return normalized
+}
+
+const shouldShowAttemptMessageWithUpstreamResponse = (
+  rawMessage: string,
+  upstreamResponse: Record<string, unknown> | null,
+): boolean => {
+  if (!upstreamResponse) return true
+  const normalized = rawMessage.trim()
+  if (!normalized) return false
+  if (isLocalSyncFinalizeDiagnostic(normalized)) return true
+  if (isConversionDiagnosticMessage(normalized)) return true
+  if (isGenericExecutionRuntimeStatusMessage(normalized)) return false
+
+  const hasBody = hasRenderableValue(upstreamResponse.body)
+  const bodyState = (readStringField(upstreamResponse, 'body_state') ?? '').toLowerCase()
+  return !hasBody && bodyState === 'disabled'
 }
 
 const currentAttemptRequestError = computed<{
@@ -1453,16 +1638,176 @@ const currentAttemptRequestError = computed<{
   const fallbackType = typeof attempt.error_type === 'string' && attempt.error_type.trim()
     ? attempt.error_type.trim()
     : ''
-  const message = formatAttemptErrorMessage(flowMessage || fallbackMessage, statusCode) || fallbackType
+  const diagnosticMessage = extractVisibleDiagnosticMessage(extra)
+  const rawMessage = chooseAttemptRawErrorMessage(flowMessage || '', fallbackMessage, diagnosticMessage)
+  const message = formatAttemptErrorMessage(rawMessage, statusCode) || fallbackType
   const upstreamResponseDisplay = normalizeUpstreamResponseDisplay(extra?.upstream_response)
-  if (!message && statusCode == null && !upstreamResponseDisplay) return null
+  const visibleDiagnosticObjects = extractVisibleDiagnosticObjects(extra)
+  const shouldAttachDiagnostic = Boolean(
+    visibleDiagnosticObjects.length
+      || isLocalSyncFinalizeDiagnostic(rawMessage)
+      || isConversionDiagnosticMessage(rawMessage),
+  )
+  const diagnostic = shouldAttachDiagnostic
+    ? buildAttemptDiagnosticPayload(
+        attempt,
+        message || fallbackType || rawMessage || '未知失败',
+        statusCode,
+        upstreamResponseDisplay,
+        rawMessage,
+      )
+    : null
+  const upstreamResponseWithDiagnostic = diagnostic
+    ? { ...(upstreamResponseDisplay ?? {}), diagnostic }
+    : upstreamResponseDisplay
+  if (!message && statusCode == null && !upstreamResponseWithDiagnostic) return null
+  const showMessage = shouldShowAttemptMessageWithUpstreamResponse(
+    rawMessage || fallbackType,
+    upstreamResponseDisplay,
+  )
 
   return {
-    message: upstreamResponseDisplay ? '' : (message || '未知错误'),
+    message: showMessage ? (message || '未知错误') : '',
     statusCode,
-    upstreamResponse: upstreamResponseDisplay,
+    upstreamResponse: upstreamResponseWithDiagnostic,
   }
 })
+
+const diagnosticPathFromObject = (value: unknown): string => {
+  const object = extractObject(value)
+  if (!object) return ''
+  return readStringField(object, 'path')
+    || readStringField(object, 'field_path')
+    || readStringField(object, 'fieldPath')
+    || readStringField(object, 'field')
+    || ''
+}
+
+const diagnosticFieldPathFromMessage = (message: string): string => {
+  const normalized = message.trim()
+  if (!normalized) return ''
+  const fieldMatch = normalized.match(/field\s+([^;=]+?)\s*(?:=|is unsupported|不支持)/i)
+  if (fieldMatch?.[1]) return normalizeDiagnosticFieldPath(fieldMatch[1])
+  const lossyMatch = normalized.match(/lossy conversion blocked from\s+\S+\s+to\s+\S+\s+at\s+([^:]+):/i)
+  if (lossyMatch?.[1]) return normalizeDiagnosticFieldPath(lossyMatch[1])
+  const invalidTargetMatch = normalized.match(/invalid target field\s+(.+?)\s+for\s+/i)
+  if (invalidTargetMatch?.[1]) return normalizeDiagnosticFieldPath(invalidTargetMatch[1])
+  const unsupportedFieldMatch = normalized.match(/unsupported field\s+(.+?)\s+in\s+/i)
+  if (unsupportedFieldMatch?.[1]) return normalizeDiagnosticFieldPath(unsupportedFieldMatch[1])
+  const invalidEnumMatch = normalized.match(/invalid enum value\s+.+?\s+for\s+.+\.([^.\s]+)$/i)
+  if (invalidEnumMatch?.[1]) return normalizeDiagnosticFieldPath(invalidEnumMatch[1])
+  return ''
+}
+
+function resolveAttemptDiagnosticBreakpoint(attempt: CandidateRecord, rawMessageOverride = ''): string {
+  const extra = extractObject(attempt.extra_data)
+  const failureDiagnostic = extractVisibleFailureDiagnostic(extra)
+  const requestConversionError = extractObject(extra?.request_conversion_error)
+  const requestBodyBuildError = extractObject(extra?.request_body_build_error)
+  const errorFlow = extractObject(extra?.error_flow)
+  const rawMessage = [
+    rawMessageOverride,
+    readStringField(errorFlow ?? {}, 'message') ?? '',
+    readStringField(failureDiagnostic ?? {}, 'message') ?? '',
+    readStringField(requestConversionError ?? {}, 'message') ?? '',
+    readStringField(requestBodyBuildError ?? {}, 'message') ?? '',
+    typeof attempt.error_message === 'string' ? attempt.error_message : '',
+  ].find(item => item.trim()) ?? ''
+
+  return diagnosticPathFromObject(failureDiagnostic)
+    || diagnosticPathFromObject(requestConversionError)
+    || diagnosticPathFromObject(requestBodyBuildError)
+    || diagnosticFieldPathFromMessage(rawMessage)
+    || '$'
+}
+
+function buildAttemptDiagnosticPayload(
+  attempt: CandidateRecord,
+  summaryInput: string,
+  statusCode: number | undefined,
+  upstreamResponseDisplay: Record<string, unknown> | null,
+  rawMessageForBreakpoint = '',
+): Record<string, unknown> | null {
+  const extra = extractObject(attempt.extra_data)
+  const rawFailureDiagnostic = extractVisibleFailureDiagnostic(extra)
+  const rawRequestConversionError = extractObject(extra?.request_conversion_error)
+  const rawRequestBodyBuildError = extractObject(extra?.request_body_build_error)
+  const hasDiagnostic = Boolean(
+    summaryInput
+      || rawFailureDiagnostic
+      || rawRequestConversionError
+      || rawRequestBodyBuildError
+      || attempt.error_message
+      || attempt.error_type
+      || attempt.skip_reason
+      || upstreamResponseDisplay,
+  )
+  if (!hasDiagnostic) return null
+
+  const summary = summaryInput
+    || readStringField(rawFailureDiagnostic ?? {}, 'message')
+    || readStringField(rawRequestConversionError ?? {}, 'message')
+    || readStringField(rawRequestBodyBuildError ?? {}, 'message')
+    || (typeof attempt.error_message === 'string' ? formatAttemptErrorMessage(attempt.error_message, attempt.status_code) : '')
+    || attempt.error_type
+    || currentAttemptSkipReasonDisplay.value
+    || '未知失败'
+  const breakpoint = resolveAttemptDiagnosticBreakpoint(attempt, rawMessageForBreakpoint)
+  const providerFormat = readStringField(extra ?? {}, 'provider_api_format')
+  const clientFormat = readStringField(extra ?? {}, 'client_api_format')
+    || (typeof props.requestApiFormat === 'string' ? props.requestApiFormat : '')
+  const conversionDisplay = clientFormat || providerFormat
+    ? `${clientFormat ? formatApiFormat(clientFormat) : '未知请求格式'} → ${providerFormat ? formatApiFormat(providerFormat) : '未知上游格式'}`
+    : currentAttemptFormatDisplay.value
+  const analysisHint = (() => {
+    const raw = `${summary}\n${rawMessageForBreakpoint}\n${attempt.error_message ?? ''}`.toLowerCase()
+    if (raw.includes('unsupported provider stream event')) {
+      return '断点在上游流式事件解析/转换矩阵：先按 breakpoint 对应字段确认 event type，再决定是补 canonical mapping 还是加入 known noop。'
+    }
+    if (raw.includes('finish reason')) {
+      return '断点在 finish_reason 映射：确认该结束原因是否可等价映射；不能无损映射时保持失败闭合。'
+    }
+    if (raw.includes('lossy conversion') || raw.includes('无损') || raw.includes('丢失信息') || raw.includes('request_conversion')) {
+      return '断点在请求/响应格式转换器：检查 breakpoint 字段是否能被目标格式表达，不能表达就需要拒绝、降级或新增显式映射策略。'
+    }
+    return '先从 breakpoint 字段开始回放；若 breakpoint 为 $，优先查看 raw.failure_diagnostic / raw.error_message 和 upstream_response。'
+  })()
+
+  const payload = {
+    summary,
+    breakpoint,
+    analysis_hint: analysisHint,
+    request: {
+      request_id: trace.value?.request_id ?? attempt.request_id,
+      path: currentAttemptRequestPathDisplay.value || null,
+      format_conversion: conversionDisplay || null,
+      client_api_format: clientFormat || null,
+      provider_api_format: providerFormat || null,
+      needs_conversion: extra?.needs_conversion ?? null,
+      conversion_mode: readStringField(extra ?? {}, 'conversion_mode') ?? null,
+    },
+    node: {
+      candidate_id: attempt.id,
+      candidate_index: attempt.candidate_index,
+      retry_index: attempt.retry_index,
+      provider: attempt.provider_name || attempt.provider_id || null,
+      key: currentAttemptKeyDisplay.value || null,
+      status: attempt.status,
+      status_code: statusCode ?? attempt.status_code ?? null,
+      skip_reason: attempt.skip_reason ?? null,
+      error_type: attempt.error_type ?? null,
+      error_message: attempt.error_message ?? null,
+    },
+    raw: {
+      failure_diagnostic: rawFailureDiagnostic,
+      request_conversion_error: rawRequestConversionError,
+      request_body_build_error: rawRequestBodyBuildError,
+      error_flow: extractObject(extra?.error_flow),
+      upstream_response: upstreamResponseDisplay ?? normalizeUpstreamResponseDisplay(extra?.upstream_response),
+    },
+  }
+  return payload
+}
 
 const currentAttemptExtraDataDisplay = computed<Record<string, unknown> | null>(() => {
   const extra = extractObject(currentAttempt.value?.extra_data)
@@ -1727,7 +2072,7 @@ const loadTrace = async (silent = false) => {
     error.value = null
 
     try {
-      internalTrace.value = await requestTraceApi.getRequestTrace(props.requestId)
+      internalTrace.value = await requestTraceApi.getRequestTrace(props.requestId, { attemptedOnly: true })
     } catch (err: unknown) {
       if (isAxiosError(err) && err.response?.status === 404) {
         internalTrace.value = null
@@ -2765,6 +3110,7 @@ function getDisplayStatus(attempt: CandidateRecord | null | undefined): string {
 /* 跳过原因 */
 .skip-reason {
   margin-top: 1rem;
+  padding: 0.75rem;
   background: hsl(var(--muted) / 0.5);
   border-radius: 8px;
   display: flex;

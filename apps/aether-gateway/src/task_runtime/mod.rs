@@ -46,6 +46,7 @@ pub(crate) const TASK_KEY_STATS_HOURLY_AGG: &str = "maintenance.stats.hourly.agg
 pub(crate) const TASK_KEY_USAGE_SYNC_REPORT: &str = "usage.sync.report";
 pub(crate) const TASK_KEY_PROVIDER_OAUTH_ACCOUNT_REFRESH: &str = "provider.oauth.account.refresh";
 pub(crate) const TASK_KEY_PROVIDER_BALANCE_REFRESH: &str = "provider.ops.balance.refresh";
+const PROVIDER_DELETE_LOCK_TTL_SECS: u64 = 60 * 60 * 6;
 
 const RETRY_ONCE: RetryPolicy = RetryPolicy { max_attempts: 1 };
 
@@ -501,17 +502,23 @@ pub(crate) async fn submit_provider_delete_task(
     };
 
     let task_id = Uuid::new_v4().simple().to_string()[..16].to_string();
-    state.put_provider_delete_task(crate::LocalProviderDeleteTaskState {
-        task_id: task_id.clone(),
-        provider_id: provider.id.clone(),
-        status: "pending".to_string(),
-        stage: "queued".to_string(),
-        total_keys: 0,
-        deleted_keys: 0,
-        total_endpoints: 0,
-        deleted_endpoints: 0,
-        message: "delete task submitted".to_string(),
-    });
+    let reserved =
+        state
+            .as_ref()
+            .reserve_provider_delete_task(crate::LocalProviderDeleteTaskState {
+                task_id: task_id.clone(),
+                provider_id: provider.id.clone(),
+                status: "pending".to_string(),
+                stage: "queued".to_string(),
+                total_keys: 0,
+                deleted_keys: 0,
+                total_endpoints: 0,
+                deleted_endpoints: 0,
+                message: "delete task submitted".to_string(),
+            });
+    if reserved.task_id != task_id {
+        return Ok(Some(reserved.task_id));
+    }
 
     let app = state.cloned_app();
     let provider_id = provider.id.clone();
@@ -555,7 +562,7 @@ pub(crate) async fn submit_provider_delete_task(
 
     spawn_named("task-runtime-provider-delete", async move {
         let lock_key = format!("task_runtime:lock:{TASK_KEY_PROVIDER_DELETE}:{provider_id}");
-        let lock_ttl = std::time::Duration::from_secs(60 * 15);
+        let lock_ttl = std::time::Duration::from_secs(PROVIDER_DELETE_LOCK_TTL_SECS);
         let lock = app
             .runtime_state
             .lock_try_acquire(&lock_key, app.tunnel.local_instance_id(), lock_ttl)
@@ -563,6 +570,17 @@ pub(crate) async fn submit_provider_delete_task(
             .ok()
             .flatten();
         if lock.is_none() {
+            app.put_provider_delete_task(crate::LocalProviderDeleteTaskState {
+                task_id: run_id.clone(),
+                provider_id: provider_id.clone(),
+                status: "failed".to_string(),
+                stage: "skipped".to_string(),
+                total_keys: 0,
+                deleted_keys: 0,
+                total_endpoints: 0,
+                deleted_endpoints: 0,
+                message: "provider delete skipped: another node is running this task".to_string(),
+            });
             let _ = update_run_status(
                 &app,
                 &run_id,

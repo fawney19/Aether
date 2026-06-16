@@ -366,13 +366,19 @@ export function useUsageData(options: UseUsageDataOptions) {
           params.hide_unknown = true
         }
 
-        const response = await usageApi.getAllUsageRecords(params)
+        const response = await usageApi.getAllUsageRecords({
+          ...params,
+          include_total: false,
+        })
         if (requestId !== loadRecordsRequestId) {
           return
         }
         const nextRecords = (response.records || []) as UsageRecord[]
         currentRecords.value = mergeRecordStatus(currentRecords.value, nextRecords)
         totalRecords.value = response.total || 0
+        if (response.total_is_estimated === true) {
+          void refreshAdminRecordTotal(params, requestId)
+        }
       } else {
         // 用户页面：使用用户 API
         const userData = await meApi.getUsage(params)
@@ -394,6 +400,20 @@ export function useUsageData(options: UseUsageDataOptions) {
       if (requestId === loadRecordsRequestId) {
         isLoadingRecords.value = false
       }
+    }
+  }
+
+  async function refreshAdminRecordTotal(
+    params: Record<string, unknown>,
+    requestId: number
+  ): Promise<void> {
+    try {
+      const total = await usageApi.getAllUsageRecordTotal(params)
+      if (requestId === loadRecordsRequestId) {
+        totalRecords.value = total
+      }
+    } catch (error) {
+      log.warn('加载使用记录总数失败:', error)
     }
   }
 
@@ -513,6 +533,8 @@ export function useUsageData(options: UseUsageDataOptions) {
           actual_cost: existing.actual_cost ?? record.actual_cost,
           response_time_ms: mergePositiveDurationMs(existing.response_time_ms, record.response_time_ms),
           first_byte_time_ms: mergePositiveDurationMs(existing.first_byte_time_ms, record.first_byte_time_ms),
+          updated_at: existing.updated_at ?? record.updated_at,
+          response_time_updated_at: existing.response_time_updated_at ?? record.response_time_updated_at,
           status_code: existing.status_code ?? record.status_code,
           error_message: existing.error_message ?? record.error_message,
           image_progress: existing.image_progress ?? record.image_progress,

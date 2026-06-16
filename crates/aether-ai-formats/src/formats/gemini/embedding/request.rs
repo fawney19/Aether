@@ -1,8 +1,137 @@
 use serde_json::{json, Map, Value};
 
 use crate::formats::context::FormatContext;
-use crate::formats::openai::embedding::request::mapped_embedding_model;
-use crate::protocol::canonical::{CanonicalEmbeddingRequest, CanonicalRequest};
+use crate::formats::openai::embedding::request::{mapped_embedding_model, namespace_extensions};
+use crate::protocol::canonical::{
+    CanonicalEmbeddingInput, CanonicalEmbeddingRequest, CanonicalRequest,
+};
+
+pub fn from(body: &Value, _ctx: &FormatContext) -> Option<CanonicalRequest> {
+    from_raw(body)
+}
+
+pub fn from_raw(body_json: &Value) -> Option<CanonicalRequest> {
+    let request = body_json.as_object()?;
+    if let Some(requests) = request.get("requests").and_then(Value::as_array) {
+        return from_batch_requests(request, requests);
+    }
+
+    let item = parse_gemini_embedding_request_object(request)?;
+    Some(CanonicalRequest {
+        model: item.model,
+        embedding: Some(CanonicalEmbeddingRequest {
+            input: CanonicalEmbeddingInput::String(item.text),
+            encoding_format: None,
+            dimensions: item.dimensions,
+            task: item.task,
+            user: None,
+            parameters: None,
+            extensions: namespace_extensions(
+                "gemini",
+                request,
+                &[
+                    "model",
+                    "content",
+                    "outputDimensionality",
+                    "output_dimensionality",
+                    "taskType",
+                    "task_type",
+                ],
+            ),
+        }),
+        ..CanonicalRequest::default()
+    })
+}
+
+fn from_batch_requests(
+    request: &Map<String, Value>,
+    requests: &[Value],
+) -> Option<CanonicalRequest> {
+    if requests.is_empty() {
+        return None;
+    }
+    let items = requests
+        .iter()
+        .map(|request| parse_gemini_embedding_request_object(request.as_object()?))
+        .collect::<Option<Vec<_>>>()?;
+    let first = items.first()?;
+    if items.iter().any(|item| {
+        item.model != first.model || item.dimensions != first.dimensions || item.task != first.task
+    }) {
+        return None;
+    }
+    let model = first.model.clone();
+    let dimensions = first.dimensions;
+    let task = first.task.clone();
+    Some(CanonicalRequest {
+        model,
+        embedding: Some(CanonicalEmbeddingRequest {
+            input: CanonicalEmbeddingInput::StringArray(
+                items.into_iter().map(|item| item.text).collect(),
+            ),
+            encoding_format: None,
+            dimensions,
+            task,
+            user: None,
+            parameters: None,
+            extensions: namespace_extensions("gemini", request, &["requests"]),
+        }),
+        ..CanonicalRequest::default()
+    })
+}
+
+struct ParsedGeminiEmbeddingRequest {
+    model: String,
+    text: String,
+    dimensions: Option<u64>,
+    task: Option<String>,
+}
+
+fn parse_gemini_embedding_request_object(
+    request: &Map<String, Value>,
+) -> Option<ParsedGeminiEmbeddingRequest> {
+    let model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let parts = request
+        .get("content")
+        .and_then(Value::as_object)
+        .and_then(|content| content.get("parts"))
+        .and_then(Value::as_array)?;
+    let text = parts
+        .iter()
+        .map(|part| {
+            part.as_object()?
+                .get("text")?
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .collect::<Option<Vec<_>>>()?
+        .join("\n");
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(ParsedGeminiEmbeddingRequest {
+        model,
+        text,
+        dimensions: request
+            .get("outputDimensionality")
+            .or_else(|| request.get("output_dimensionality"))
+            .and_then(Value::as_u64),
+        task: request
+            .get("taskType")
+            .or_else(|| request.get("task_type"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+    })
+}
 
 pub fn to(request: &CanonicalRequest, ctx: &FormatContext) -> Option<Value> {
     let embedding = request.embedding.as_ref()?;

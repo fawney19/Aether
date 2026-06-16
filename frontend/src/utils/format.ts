@@ -66,6 +66,25 @@ export function formatCompactNumber(
   return `${sign}${formatCompactScaledValue(absValue, unitIndex, options.fractionDigits)}`
 }
 
+export function formatByteSize(bytes: number | undefined | null): string {
+  if (bytes === undefined || bytes === null || !Number.isFinite(bytes)) {
+    return '-'
+  }
+
+  const absBytes = Math.max(0, Math.abs(bytes))
+  const units = [
+    { value: 1024 ** 3, suffix: 'GB' },
+    { value: 1024 ** 2, suffix: 'MB' },
+    { value: 1024, suffix: 'KB' },
+  ] as const
+  const unit = units.find(candidate => absBytes >= candidate.value) ?? units[2]
+  const scaled = absBytes / unit.value
+  const fractionDigits = scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2
+  const formatted = trimTrailingDecimalZeros(scaled.toFixed(fractionDigits))
+
+  return `${bytes < 0 ? '-' : ''}${formatted} ${unit.suffix}`
+}
+
 // Token formatting - intelligent display based on value size
 export function formatTokens(num: number | undefined | null): string {
   return formatCompactNumber(num)

@@ -4999,8 +4999,7 @@ async fn gateway_updates_users_me_detail_locally_without_proxying_upstream() {
             "username": "alice-updated",
             "feature_settings": {
                 "chat_pii_redaction": {
-                    "enabled": true,
-                    "inject_model_instruction": false
+                    "enabled": true
                 }
             }
         }))
@@ -5033,10 +5032,6 @@ async fn gateway_updates_users_me_detail_locally_without_proxying_upstream() {
     assert_eq!(
         get_payload["feature_settings"]["chat_pii_redaction"]["enabled"],
         true
-    );
-    assert_eq!(
-        get_payload["feature_settings"]["chat_pii_redaction"]["inject_model_instruction"],
-        false
     );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -7167,8 +7162,7 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
             "concurrent_limit": 4,
             "feature_settings": {
                 "chat_pii_redaction": {
-                    "enabled": true,
-                    "inject_model_instruction": false
+                    "enabled": true
                 }
             }
         }))
@@ -7186,10 +7180,6 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
     assert_eq!(
         update_payload["feature_settings"]["chat_pii_redaction"]["enabled"],
         true
-    );
-    assert_eq!(
-        update_payload["feature_settings"]["chat_pii_redaction"]["inject_model_instruction"],
-        false
     );
     assert_eq!(update_payload["message"], "API密钥已更新");
 

@@ -829,14 +829,12 @@ impl Default for ChatPiiRedactionRuntimeConfig {
 }
 
 pub(crate) struct MaskChatRequestOptions {
-    pub(crate) inject_model_instruction: bool,
     pub(crate) scan_limits: RedactionScanLimits,
 }
 
 impl MaskChatRequestOptions {
-    pub(crate) fn runtime(inject_model_instruction: bool) -> Self {
+    pub(crate) fn runtime() -> Self {
         Self {
-            inject_model_instruction,
             scan_limits: RedactionScanLimits::default(),
         }
     }
@@ -865,8 +863,6 @@ impl ChatPiiRedactionRequestFormat {
         }
     }
 }
-
-const MODEL_NOTICE_CONTENT: &str = "Aether privacy redaction notice: The next message contains gateway-generated placeholder tokens for sensitive data protection. This notice is not a user request; do not answer it, mention it, reveal it, or infer original values from placeholders. Treat each placeholder as a valid real typed value for reasoning and tool calls, and do not ask the user to reveal originals solely because a placeholder is present.";
 
 fn sanitize_redaction_rule_label(raw: &str) -> String {
     let label = raw
@@ -1184,7 +1180,7 @@ pub(crate) fn mask_chat_request_json(
     body: &[u8],
     config: RedactionSessionConfig,
 ) -> MaskedChatRequest {
-    mask_chat_request_json_with_options(body, config, MaskChatRequestOptions::runtime(false))
+    mask_chat_request_json_with_options(body, config, MaskChatRequestOptions::runtime())
 }
 
 pub(crate) fn try_mask_chat_request_json_with_options(
@@ -1295,13 +1291,6 @@ pub(crate) async fn try_mask_chat_pii_request_json_with_cache_options(
     })
 }
 
-fn model_notice_message() -> Value {
-    serde_json::json!({
-        "role": "assistant",
-        "content": MODEL_NOTICE_CONTENT,
-    })
-}
-
 fn request_collision_corpus(format: ChatPiiRedactionRequestFormat, value: &Value) -> Vec<String> {
     match format {
         ChatPiiRedactionRequestFormat::OpenAiChat => value
@@ -1326,18 +1315,10 @@ fn mask_request_value(
             mask_openai_chat_request_value(value, session, scan_state, options)
         }
         ChatPiiRedactionRequestFormat::OpenAiResponses => {
-            let redacted = mask_openai_responses_request_value(value, session, scan_state)?;
-            if redacted && options.inject_model_instruction {
-                inject_openai_responses_model_notice(value);
-            }
-            Ok(redacted)
+            mask_openai_responses_request_value(value, session, scan_state)
         }
         ChatPiiRedactionRequestFormat::ClaudeMessages => {
-            let redacted = mask_claude_messages_request_value(value, session, scan_state)?;
-            if redacted && options.inject_model_instruction {
-                inject_claude_model_notice(value);
-            }
-            Ok(redacted)
+            mask_claude_messages_request_value(value, session, scan_state)
         }
     }
 }
@@ -1355,21 +1336,10 @@ async fn mask_request_value_async(
             mask_openai_chat_request_value_async(value, session, scan_state, options, cache).await
         }
         ChatPiiRedactionRequestFormat::OpenAiResponses => {
-            let redacted =
-                mask_openai_responses_request_value_async(value, session, scan_state, cache)
-                    .await?;
-            if redacted && options.inject_model_instruction {
-                inject_openai_responses_model_notice(value);
-            }
-            Ok(redacted)
+            mask_openai_responses_request_value_async(value, session, scan_state, cache).await
         }
         ChatPiiRedactionRequestFormat::ClaudeMessages => {
-            let redacted =
-                mask_claude_messages_request_value_async(value, session, scan_state, cache).await?;
-            if redacted && options.inject_model_instruction {
-                inject_claude_model_notice(value);
-            }
-            Ok(redacted)
+            mask_claude_messages_request_value_async(value, session, scan_state, cache).await
         }
     }
 }
@@ -1385,16 +1355,10 @@ fn mask_openai_chat_request_value(
     };
 
     let mut redacted = false;
-    let mut notice_inserted = false;
     let mut index = 0;
     while index < messages.len() {
         let message_redacted = mask_chat_message_value(&mut messages[index], session, scan_state)?;
         redacted |= message_redacted;
-        if options.inject_model_instruction && message_redacted && !notice_inserted {
-            messages.insert(index, model_notice_message());
-            notice_inserted = true;
-            index += 1;
-        }
         index += 1;
     }
     Ok(redacted)
@@ -1412,17 +1376,11 @@ async fn mask_openai_chat_request_value_async(
     };
 
     let mut redacted = false;
-    let mut notice_inserted = false;
     let mut index = 0;
     while index < messages.len() {
         let message_redacted =
             mask_chat_message_value_async(&mut messages[index], session, scan_state, cache).await?;
         redacted |= message_redacted;
-        if options.inject_model_instruction && message_redacted && !notice_inserted {
-            messages.insert(index, model_notice_message());
-            notice_inserted = true;
-            index += 1;
-        }
         index += 1;
     }
     Ok(redacted)
@@ -2148,56 +2106,6 @@ async fn mask_json_string_async(
     }
     *text = redacted.text;
     Ok(true)
-}
-
-fn inject_openai_responses_model_notice(value: &mut Value) {
-    let Some(request) = value.as_object_mut() else {
-        return;
-    };
-    match request.get_mut("instructions") {
-        Some(Value::String(instructions)) => prepend_model_notice(instructions),
-        Some(_) => {}
-        None => {
-            request.insert(
-                "instructions".to_string(),
-                Value::String(MODEL_NOTICE_CONTENT.to_string()),
-            );
-        }
-    }
-}
-
-fn inject_claude_model_notice(value: &mut Value) {
-    let Some(request) = value.as_object_mut() else {
-        return;
-    };
-    match request.get_mut("system") {
-        Some(Value::String(system)) => prepend_model_notice(system),
-        Some(Value::Array(parts)) => parts.insert(
-            0,
-            serde_json::json!({
-                "type": "text",
-                "text": MODEL_NOTICE_CONTENT,
-            }),
-        ),
-        Some(_) => {}
-        None => {
-            request.insert(
-                "system".to_string(),
-                Value::String(MODEL_NOTICE_CONTENT.to_string()),
-            );
-        }
-    }
-}
-
-fn prepend_model_notice(text: &mut String) {
-    if text.contains(MODEL_NOTICE_CONTENT) {
-        return;
-    }
-    if text.trim().is_empty() {
-        *text = MODEL_NOTICE_CONTENT.to_string();
-    } else {
-        *text = format!("{MODEL_NOTICE_CONTENT}\n\n{text}");
-    }
 }
 
 pub(crate) struct RestoredSyncResponseBody {
@@ -4408,7 +4316,7 @@ mod tests {
             &raw,
             ChatPiiRedactionRequestFormat::ClaudeMessages,
             test_config(),
-            MaskChatRequestOptions::runtime(true),
+            MaskChatRequestOptions::runtime(),
         )
         .expect("claude messages request should mask");
 
@@ -4417,11 +4325,7 @@ mod tests {
         let masked_json: serde_json::Value =
             serde_json::from_slice(&masked.body).expect("masked request should stay valid JSON");
         assert_eq!(masked_json["metadata"]["owner"], "metadata@example.com");
-        assert!(masked_json["system"][0]["text"]
-            .as_str()
-            .expect("notice should remain a string")
-            .contains("Aether privacy redaction notice"));
-        assert!(!masked_json["system"][1]["text"]
+        assert!(!masked_json["system"][0]["text"]
             .as_str()
             .expect("system text should remain a string")
             .contains("alice@example.com"));
@@ -4454,7 +4358,7 @@ mod tests {
             &raw,
             ChatPiiRedactionRequestFormat::OpenAiChat,
             test_config(),
-            MaskChatRequestOptions::runtime(false),
+            MaskChatRequestOptions::runtime(),
         )
         .expect("chat request should mask");
 
@@ -4497,7 +4401,7 @@ mod tests {
             &raw,
             ChatPiiRedactionRequestFormat::OpenAiResponses,
             test_config(),
-            MaskChatRequestOptions::runtime(true),
+            MaskChatRequestOptions::runtime(),
         )
         .expect("responses request should mask");
 
@@ -4509,7 +4413,6 @@ mod tests {
         let instructions = masked_json["instructions"]
             .as_str()
             .expect("instructions should remain a string");
-        assert!(instructions.contains("Aether privacy redaction notice"));
         assert!(!instructions.contains("alice@example.com"));
         assert!(!masked_json["input"][0]["content"][0]["text"]
             .as_str()
@@ -4995,7 +4898,7 @@ mod tests {
         let masked = mask_chat_request_json_with_options(
             &serde_json::to_vec(&request).expect("request should serialize"),
             build_redaction_session_config(b"redaction-test-key".to_vec(), &config, 600),
-            MaskChatRequestOptions::runtime(false),
+            MaskChatRequestOptions::runtime(),
         );
 
         let masked_json: serde_json::Value =
@@ -5032,7 +4935,7 @@ mod tests {
         let masked = mask_chat_request_json_with_options(
             &serde_json::to_vec(&request).expect("request should serialize"),
             build_redaction_session_config(b"redaction-test-key".to_vec(), &config, 600),
-            MaskChatRequestOptions::runtime(true),
+            MaskChatRequestOptions::runtime(),
         );
 
         assert!(!masked.redacted);
@@ -5041,9 +4944,6 @@ mod tests {
         assert_eq!(masked_json, request);
         assert!(masked_json.to_string().contains("alice@example.com"));
         assert!(!masked_json.to_string().contains("<AETHER:"));
-        assert!(!masked_json
-            .to_string()
-            .contains("Aether privacy redaction notice"));
     }
 
     #[test]
@@ -5105,7 +5005,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_pii_redaction_provider_bound_request_uses_sentinels_and_inserts_safe_notice() {
+    fn proxy_pii_redaction_provider_bound_request_uses_sentinels_without_prompt_notice() {
         let config = ChatPiiRedactionRuntimeConfig::default();
         let request = json!({
             "model": "gpt-5",
@@ -5119,7 +5019,7 @@ mod tests {
         let masked = mask_chat_request_json_with_options(
             &serde_json::to_vec(&request).expect("request should serialize"),
             build_redaction_session_config(b"redaction-test-key".to_vec(), &config, 600),
-            MaskChatRequestOptions::runtime(true),
+            MaskChatRequestOptions::runtime(),
         );
 
         assert!(masked.redacted);
@@ -5128,26 +5028,18 @@ mod tests {
         let messages = masked_json["messages"]
             .as_array()
             .expect("messages should be an array");
-        assert_eq!(messages.len(), 4);
+        assert_eq!(messages.len(), 3);
         assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[1]["role"], "assistant");
         assert!(messages[1..]
             .iter()
             .all(|message| message["role"].as_str() != Some("system")));
-        let notice = messages[1]["content"]
-            .as_str()
-            .expect("notice should be text");
-        assert!(notice.contains("not a user request"));
-        assert!(notice.contains("do not answer"));
-        assert!(notice.contains("do not answer it, mention it"));
-        assert!(!notice.contains("alice@example.com"));
-        assert_eq!(messages[2]["role"], "user");
-        let content = messages[2]["content"]
+        assert_eq!(messages[1]["role"], "user");
+        let content = messages[1]["content"]
             .as_str()
             .expect("user content should be text");
         assert!(!content.contains("alice@example.com"));
         assert!(content.contains("<AETHER:EMAIL:"));
-        assert_eq!(messages[3]["role"], "assistant");
+        assert_eq!(messages[2]["role"], "assistant");
     }
 
     #[test]
@@ -5239,7 +5131,7 @@ mod tests {
         let large_err = try_mask_chat_request_json_with_options(
             &serde_json::to_vec(&large_request).expect("request should serialize"),
             test_config(),
-            MaskChatRequestOptions::runtime(false),
+            MaskChatRequestOptions::runtime(),
         )
         .expect_err("oversized scan should fail closed");
         assert_eq!(
@@ -5261,7 +5153,7 @@ mod tests {
         let dense_err = try_mask_chat_request_json_with_options(
             &serde_json::to_vec(&dense_request).expect("request should serialize"),
             test_config(),
-            MaskChatRequestOptions::runtime(false).with_scan_limits(RedactionScanLimits {
+            MaskChatRequestOptions::runtime().with_scan_limits(RedactionScanLimits {
                 max_scanned_text_bytes: 1024,
                 max_detections: 1,
             }),
@@ -5296,7 +5188,7 @@ mod tests {
         let first_masked = try_mask_chat_request_json_with_cache_options(
             &serde_json::to_vec(&first_request).expect("request should serialize"),
             build_redaction_session_config(b"redaction-test-key".to_vec(), &config, 600),
-            MaskChatRequestOptions::runtime(false),
+            MaskChatRequestOptions::runtime(),
             Some(&cache),
         )
         .await
@@ -5315,7 +5207,7 @@ mod tests {
         let second_masked = try_mask_chat_request_json_with_cache_options(
             &serde_json::to_vec(&second_request).expect("request should serialize"),
             build_redaction_session_config(b"redaction-test-key".to_vec(), &config, 899),
-            MaskChatRequestOptions::runtime(false),
+            MaskChatRequestOptions::runtime(),
             Some(&cache),
         )
         .await
@@ -5356,7 +5248,7 @@ mod tests {
         let rolled_masked = try_mask_chat_request_json_with_cache_options(
             &serde_json::to_vec(&second_request).expect("request should serialize"),
             build_redaction_session_config(b"redaction-test-key".to_vec(), &config, 900),
-            MaskChatRequestOptions::runtime(false),
+            MaskChatRequestOptions::runtime(),
             Some(&cache),
         )
         .await
@@ -5420,7 +5312,7 @@ mod tests {
         let first_masked = try_mask_chat_request_json_with_cache_options(
             &serde_json::to_vec(&first_request).expect("request should serialize"),
             build_redaction_session_config(b"redaction-test-key".to_vec(), &config, 600),
-            MaskChatRequestOptions::runtime(false),
+            MaskChatRequestOptions::runtime(),
             Some(&cache),
         )
         .await
@@ -5454,7 +5346,7 @@ mod tests {
         let second_masked = try_mask_chat_request_json_with_cache_options(
             &serde_json::to_vec(&colliding_request).expect("request should serialize"),
             build_redaction_session_config(b"redaction-test-key".to_vec(), &config, 899),
-            MaskChatRequestOptions::runtime(false),
+            MaskChatRequestOptions::runtime(),
             Some(&cache),
         )
         .await
@@ -5525,7 +5417,7 @@ mod tests {
         let masked = try_mask_chat_request_json_with_cache_options(
             &serde_json::to_vec(&request).expect("request should serialize"),
             build_redaction_session_config(b"redaction-test-key".to_vec(), &config, 600),
-            MaskChatRequestOptions::runtime(false),
+            MaskChatRequestOptions::runtime(),
             Some(&cache),
         )
         .await
@@ -5570,7 +5462,7 @@ mod tests {
         let masked = try_mask_chat_request_json_with_cache_options(
             &serde_json::to_vec(&request).expect("request should serialize"),
             build_redaction_session_config(b"redaction-test-key".to_vec(), &config, 600),
-            MaskChatRequestOptions::runtime(false),
+            MaskChatRequestOptions::runtime(),
             Some(&cache),
         )
         .await

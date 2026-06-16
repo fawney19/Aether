@@ -44,6 +44,14 @@ impl ConversionMode {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AiRequestGzipPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_bytes: Option<usize>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AiExecutionPlanPayload {
     pub action: String,
@@ -114,6 +122,10 @@ pub struct AiExecutionDecision {
     pub provider_request_body_base64: Option<String>,
     #[serde(default)]
     pub content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_encoding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_gzip: Option<AiRequestGzipPolicy>,
     #[serde(default)]
     pub proxy: Option<ProxySnapshot>,
     #[serde(default)]
@@ -216,6 +228,8 @@ mod tests {
             provider_request_body: None,
             provider_request_body_base64: None,
             content_type: None,
+            content_encoding: None,
+            request_gzip: None,
             proxy: None,
             transport_profile: None,
             timeouts: None,

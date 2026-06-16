@@ -442,6 +442,18 @@ pub trait RequestCandidateReadRepository: Send + Sync {
         request_id: &str,
     ) -> Result<Vec<StoredRequestCandidate>, crate::DataLayerError>;
 
+    async fn list_attempted_by_request_id(
+        &self,
+        request_id: &str,
+    ) -> Result<Vec<StoredRequestCandidate>, crate::DataLayerError> {
+        Ok(self
+            .list_by_request_id(request_id)
+            .await?
+            .into_iter()
+            .filter(|candidate| candidate.status.is_attempted(candidate.started_at_unix_ms))
+            .collect())
+    }
+
     async fn list_recent(
         &self,
         limit: usize,

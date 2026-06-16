@@ -14,6 +14,7 @@ pub struct ProviderOpenAiImageHeadersInput<'a> {
     pub headers: &'a http::HeaderMap,
     pub auth_header: &'a str,
     pub auth_value: &'a str,
+    pub accept: &'a str,
     pub header_rules: Option<&'a Value>,
     pub provider_request_body: &'a Value,
     pub original_request_body: &'a Value,
@@ -80,7 +81,7 @@ pub fn build_openai_image_headers(
         &BTreeMap::new(),
     );
     provider_request_headers.insert("content-type".to_string(), "application/json".to_string());
-    provider_request_headers.insert("accept".to_string(), "text/event-stream".to_string());
+    provider_request_headers.insert("accept".to_string(), input.accept.to_string());
     if !apply_local_header_rules_with_request_headers(
         &mut provider_request_headers,
         input.header_rules,
@@ -190,6 +191,17 @@ mod tests {
     }
 
     #[test]
+    fn standard_openai_image_url_preserves_edit_surface() {
+        let mut transport = sample_transport();
+        transport.provider.provider_type = "openai".to_string();
+
+        let url =
+            build_openai_image_upstream_url(&transport, Some("/v1/images/edits"), Some("trace=1"));
+
+        assert_eq!(url, "https://api.openai.com/v1/images/edits?trace=1");
+    }
+
+    #[test]
     fn chatgpt_web_is_supported_by_dedicated_openai_image_transport_policy() {
         let mut transport = sample_transport();
         transport.provider.provider_type = "chatgpt_web".to_string();
@@ -245,6 +257,7 @@ mod tests {
             headers: &HeaderMap::new(),
             auth_header: "authorization",
             auth_value: "Bearer secret",
+            accept: "text/event-stream",
             header_rules: Some(&json!([
                 {"action":"set","key":"x-image-route","value":"codex"}
             ])),
@@ -266,5 +279,46 @@ mod tests {
             Some(&"text/event-stream".to_string())
         );
         assert_eq!(headers.get("x-image-route"), Some(&"codex".to_string()));
+    }
+
+    #[test]
+    fn standard_openai_compatible_image_headers_can_request_json() {
+        let headers = build_openai_image_headers(ProviderOpenAiImageHeadersInput {
+            headers: &HeaderMap::new(),
+            auth_header: "authorization",
+            auth_value: "Bearer secret",
+            accept: "application/json",
+            header_rules: None,
+            provider_request_body: &json!({
+                "model": "upstream-image-model",
+                "prompt": "draw a city",
+            }),
+            original_request_body: &json!({"prompt":"draw a city"}),
+        })
+        .expect("headers should build");
+
+        assert_eq!(headers.get("accept"), Some(&"application/json".to_string()));
+        assert_eq!(
+            headers.get("content-type"),
+            Some(&"application/json".to_string())
+        );
+    }
+
+    #[test]
+    fn standard_openai_compatible_image_url_supports_aether_api_root() {
+        let mut transport = sample_transport();
+        transport.provider.provider_type = "custom".to_string();
+        transport.endpoint.base_url = "https://upstream-aether.example/v1".to_string();
+
+        let url = build_openai_image_upstream_url(
+            &transport,
+            Some("/v1/images/generations"),
+            Some("trace=1"),
+        );
+
+        assert_eq!(
+            url,
+            "https://upstream-aether.example/v1/images/generations?trace=1"
+        );
     }
 }

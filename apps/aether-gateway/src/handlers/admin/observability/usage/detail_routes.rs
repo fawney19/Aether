@@ -14,16 +14,75 @@ use aether_admin::observability::usage::{
     admin_usage_bad_request_response, admin_usage_data_unavailable_response,
     admin_usage_provider_key_name, ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
 };
-use aether_data_contracts::repository::usage::UsageBodyField;
+use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageBodyField};
 use axum::{
     body::Body,
     http,
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use tokio::try_join;
+
+struct AdminUsageDetailBodyValue {
+    value: Option<Value>,
+    load_failed: bool,
+}
+
+async fn resolve_admin_usage_detail_request_body(
+    state: &AdminAppState<'_>,
+    item: &StoredRequestUsageAudit,
+) -> AdminUsageDetailBodyValue {
+    match admin_usage_resolve_request_capture_body_for_item(state, item, None).await {
+        Ok(body) => AdminUsageDetailBodyValue {
+            value: body,
+            load_failed: false,
+        },
+        Err(err) => {
+            tracing::warn!(
+                error = ?err,
+                usage_id = %item.id,
+                request_id = %item.request_id,
+                field = UsageBodyField::RequestBody.as_storage_field(),
+                "failed to resolve admin usage detail body"
+            );
+            let value = admin_usage_resolve_request_capture_body(item, None);
+            AdminUsageDetailBodyValue {
+                load_failed: value.is_none(),
+                value,
+            }
+        }
+    }
+}
+
+async fn resolve_admin_usage_detail_body_value(
+    state: &AdminAppState<'_>,
+    item: &StoredRequestUsageAudit,
+    field: UsageBodyField,
+) -> AdminUsageDetailBodyValue {
+    let inline_body = item.body_value(field);
+    match admin_usage_resolve_body_value(state, item, inline_body, field).await {
+        Ok(body) => AdminUsageDetailBodyValue {
+            value: body,
+            load_failed: false,
+        },
+        Err(err) => {
+            tracing::warn!(
+                error = ?err,
+                usage_id = %item.id,
+                request_id = %item.request_id,
+                field = field.as_storage_field(),
+                "failed to resolve admin usage detail body"
+            );
+            let value = inline_body.cloned();
+            AdminUsageDetailBodyValue {
+                load_failed: value.is_none(),
+                value,
+            }
+        }
+    }
+}
 
 pub(super) async fn maybe_build_local_admin_usage_detail_response(
     state: &AdminAppState<'_>,
@@ -174,32 +233,40 @@ pub(super) async fn maybe_build_local_admin_usage_detail_response(
             let provider_key_name = admin_usage_provider_key_name(&item, &provider_key_names);
 
             let mut detail_item = item.clone();
+            let mut body_load_errors = serde_json::Map::new();
             let request_body = if include_bodies {
-                let (request_body, provider_request_body, response_body, client_response_body) = try_join!(
-                    admin_usage_resolve_request_capture_body_for_item(state, &item, None),
-                    admin_usage_resolve_body_value(
+                let (request_body, provider_request_body, response_body, client_response_body) = tokio::join!(
+                    resolve_admin_usage_detail_request_body(state, &item),
+                    resolve_admin_usage_detail_body_value(
                         state,
                         &item,
-                        item.provider_request_body.as_ref(),
                         UsageBodyField::ProviderRequestBody,
                     ),
-                    admin_usage_resolve_body_value(
+                    resolve_admin_usage_detail_body_value(
                         state,
                         &item,
-                        item.response_body.as_ref(),
                         UsageBodyField::ResponseBody,
                     ),
-                    admin_usage_resolve_body_value(
+                    resolve_admin_usage_detail_body_value(
                         state,
                         &item,
-                        item.client_response_body.as_ref(),
                         UsageBodyField::ClientResponseBody,
                     ),
-                )?;
-                detail_item.provider_request_body = provider_request_body;
-                detail_item.response_body = response_body;
-                detail_item.client_response_body = client_response_body;
-                request_body
+                );
+                for (field, resolved) in [
+                    (UsageBodyField::RequestBody, &request_body),
+                    (UsageBodyField::ProviderRequestBody, &provider_request_body),
+                    (UsageBodyField::ResponseBody, &response_body),
+                    (UsageBodyField::ClientResponseBody, &client_response_body),
+                ] {
+                    if resolved.load_failed {
+                        body_load_errors.insert(field.as_storage_field().to_string(), json!(true));
+                    }
+                }
+                detail_item.provider_request_body = provider_request_body.value;
+                detail_item.response_body = response_body.value;
+                detail_item.client_response_body = client_response_body.value;
+                request_body.value
             } else {
                 None
             };
@@ -207,7 +274,7 @@ pub(super) async fn maybe_build_local_admin_usage_detail_response(
                 // request_body 已通过 request capture 解析；其余 detached body 在上方并行加载。
             }
             let default_headers = admin_usage_curl_headers();
-            let payload = build_admin_usage_detail_payload(
+            let mut payload = build_admin_usage_detail_payload(
                 &detail_item,
                 &users_by_id,
                 &api_key_names,
@@ -218,6 +285,11 @@ pub(super) async fn maybe_build_local_admin_usage_detail_response(
                 request_body,
                 &default_headers,
             );
+            payload["body_load_errors"] = if include_bodies && !body_load_errors.is_empty() {
+                Value::Object(body_load_errors)
+            } else {
+                Value::Null
+            };
 
             return Ok(Some(attach_admin_audit_response(
                 Json(payload).into_response(),

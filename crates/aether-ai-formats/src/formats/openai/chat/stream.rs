@@ -683,6 +683,136 @@ impl OpenAIResponsesProviderState {
         self.emit_ready_tool_call(report_context, out, index);
     }
 
+    fn emit_custom_tool_call_item(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        item: &Map<String, Value>,
+        output_index: Option<usize>,
+    ) {
+        if item.get("type").and_then(Value::as_str) != Some("custom_tool_call") {
+            return;
+        }
+        let name = item
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("custom_tool")
+            .to_string();
+        let arguments = tool_arguments_from_maybe_json_string(
+            item.get("input").or_else(|| item.get("arguments")),
+            "input",
+        );
+        self.emit_generic_tool_call_item(report_context, out, item, output_index, name, arguments);
+    }
+
+    fn emit_shell_tool_call_item(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        item: &Map<String, Value>,
+        output_index: Option<usize>,
+    ) {
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+        let name = match item_type {
+            "local_shell_call" => "local_shell",
+            "shell_call" => "shell",
+            _ => return,
+        };
+        let arguments = tool_arguments_from_named_fields(
+            item,
+            &[
+                "action",
+                "environment",
+                "status",
+                "created_by",
+                "max_output_length",
+            ],
+        );
+        self.emit_generic_tool_call_item(
+            report_context,
+            out,
+            item,
+            output_index,
+            name.to_string(),
+            arguments,
+        );
+    }
+
+    fn emit_apply_patch_tool_call_item(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        item: &Map<String, Value>,
+        output_index: Option<usize>,
+    ) {
+        if item.get("type").and_then(Value::as_str) != Some("apply_patch_call") {
+            return;
+        }
+        let arguments = tool_arguments_from_named_fields(item, &["operation", "status"]);
+        self.emit_generic_tool_call_item(
+            report_context,
+            out,
+            item,
+            output_index,
+            "apply_patch".to_string(),
+            arguments,
+        );
+    }
+
+    fn emit_computer_tool_call_item(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        item: &Map<String, Value>,
+        output_index: Option<usize>,
+    ) {
+        if item.get("type").and_then(Value::as_str) != Some("computer_call") {
+            return;
+        }
+        let arguments = tool_arguments_from_named_fields(
+            item,
+            &["action", "actions", "pending_safety_checks", "status"],
+        );
+        self.emit_generic_tool_call_item(
+            report_context,
+            out,
+            item,
+            output_index,
+            "computer".to_string(),
+            arguments,
+        );
+    }
+
+    fn emit_generic_tool_call_item(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        item: &Map<String, Value>,
+        output_index: Option<usize>,
+        name: String,
+        arguments: String,
+    ) {
+        self.ensure_started(report_context, out);
+        let key = item
+            .get("call_id")
+            .or_else(|| item.get("id"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let index = self.tool_index_for_key(key, output_index);
+        let state = self.tool_calls.entry(index).or_default();
+        state.call_id = item
+            .get("call_id")
+            .or_else(|| item.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or(state.call_id.as_str())
+            .to_string();
+        state.name = name;
+        Self::merge_tool_call_arguments(state, &arguments);
+        self.emit_ready_tool_call(report_context, out, index);
+    }
+
     fn emit_missing_tool_result(
         &mut self,
         report_context: &Value,
@@ -753,6 +883,54 @@ impl OpenAIResponsesProviderState {
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
             .map(ToOwned::to_owned);
+        self.emit_missing_tool_result(report_context, out, index, tool_use_id, name, &content);
+    }
+
+    fn emit_generic_tool_result_item(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        item: &Map<String, Value>,
+        output_index: Option<usize>,
+    ) {
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+        let is_supported_result = matches!(
+            item_type,
+            "custom_tool_call_output"
+                | "local_shell_call_output"
+                | "shell_call_output"
+                | "apply_patch_call_output"
+                | "computer_call_output"
+        );
+        if !is_supported_result {
+            return;
+        }
+        let tool_use_id = item
+            .get("call_id")
+            .or_else(|| item.get("tool_call_id"))
+            .or_else(|| item.get("id"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("call_auto_0")
+            .to_string();
+        let index =
+            self.tool_index_for_key(Some(format!("{item_type}:{tool_use_id}")), output_index);
+        let content = openai_tool_result_content_from_value(
+            item.get("output")
+                .or_else(|| item.get("content"))
+                .or_else(|| item.get("delta")),
+        );
+        let name = match item_type {
+            "local_shell_call_output" => Some("local_shell".to_string()),
+            "shell_call_output" => Some("shell".to_string()),
+            "apply_patch_call_output" => Some("apply_patch".to_string()),
+            "computer_call_output" => Some("computer".to_string()),
+            _ => item
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned),
+        };
         self.emit_missing_tool_result(report_context, out, index, tool_use_id, name, &content);
     }
 
@@ -868,6 +1046,79 @@ impl OpenAIResponsesProviderState {
                 item: Value::Object(item.clone()),
             },
         });
+    }
+
+    fn emit_output_item(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        item: &Map<String, Value>,
+        output_index: Option<usize>,
+        final_item: bool,
+    ) {
+        match item.get("type").and_then(Value::as_str).unwrap_or_default() {
+            "function_call" => self.emit_tool_call_item(report_context, out, item, output_index),
+            "function_call_output" => {
+                self.emit_tool_result_item(report_context, out, item, output_index);
+            }
+            "custom_tool_call" => {
+                self.emit_custom_tool_call_item(report_context, out, item, output_index);
+            }
+            "local_shell_call" | "shell_call" => {
+                self.emit_shell_tool_call_item(report_context, out, item, output_index);
+            }
+            "apply_patch_call" => {
+                self.emit_apply_patch_tool_call_item(report_context, out, item, output_index);
+            }
+            "computer_call" => {
+                self.emit_computer_tool_call_item(report_context, out, item, output_index);
+            }
+            "custom_tool_call_output"
+            | "local_shell_call_output"
+            | "shell_call_output"
+            | "apply_patch_call_output"
+            | "computer_call_output" => {
+                self.emit_generic_tool_result_item(report_context, out, item, output_index);
+            }
+            "message" => self.emit_message_item(report_context, out, item, output_index),
+            "reasoning" if final_item => self.emit_reasoning_item(report_context, out, item),
+            "reasoning" => self.ensure_started(report_context, out),
+            "image_generation_call" => {
+                self.emit_image_generation_item(
+                    report_context,
+                    out,
+                    item,
+                    output_index,
+                    final_item,
+                );
+            }
+            "web_search_call" | "file_search_call" | "code_interpreter_call" | "mcp_call" => {
+                if !final_item {
+                    self.ensure_started(report_context, out);
+                }
+            }
+            _ => out.push(self.unknown_frame(report_context, Value::Object(item.clone()))),
+        }
+    }
+
+    fn emit_response_output_items(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        response: &Map<String, Value>,
+    ) {
+        for (output_index, raw_item) in response
+            .get("output")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let Some(item) = raw_item.as_object() else {
+                continue;
+            };
+            self.emit_output_item(report_context, out, item, Some(output_index), true);
+        }
     }
 
     pub fn push_line(
@@ -988,6 +1239,27 @@ impl OpenAIResponsesProviderState {
                     self.emit_missing_text(report_context, &mut out, key, refusal);
                 }
             }
+            "response.audio.transcript.delta" => {
+                let piece = value
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !piece.is_empty() {
+                    let key = Self::text_part_key_from_event(&value);
+                    self.emit_text_delta(report_context, &mut out, key, piece);
+                }
+            }
+            "response.audio.transcript.done" => {
+                let transcript = value
+                    .get("transcript")
+                    .and_then(Value::as_str)
+                    .or_else(|| value.get("text").and_then(Value::as_str))
+                    .unwrap_or_default();
+                if !transcript.is_empty() {
+                    let key = Self::text_part_key_from_event(&value);
+                    self.emit_missing_text(report_context, &mut out, key, transcript);
+                }
+            }
             "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
                 let piece = value
                     .get("delta")
@@ -1054,32 +1326,70 @@ impl OpenAIResponsesProviderState {
                     .get("output_index")
                     .and_then(Value::as_u64)
                     .map(|value| value as usize);
-                match item.get("type").and_then(Value::as_str).unwrap_or_default() {
-                    "function_call" => {
-                        self.emit_tool_call_item(report_context, &mut out, item, output_index);
-                    }
-                    "function_call_output" => {
-                        self.emit_tool_result_item(report_context, &mut out, item, output_index);
-                    }
-                    "message" => {
-                        self.emit_message_item(report_context, &mut out, item, output_index);
-                    }
-                    "reasoning" => {
-                        self.ensure_started(report_context, &mut out);
-                    }
-                    "image_generation_call" => {
-                        self.emit_image_generation_item(
-                            report_context,
-                            &mut out,
-                            item,
-                            output_index,
-                            false,
-                        );
-                    }
-                    _ => {
-                        out.push(self.unknown_frame(report_context, Value::Object(item.clone())));
-                    }
+                self.emit_output_item(report_context, &mut out, item, output_index, false);
+            }
+            "response.custom_tool_call_input.delta" => {
+                let delta = value
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if delta.is_empty() {
+                    return Ok(out);
                 }
+                self.ensure_started(report_context, &mut out);
+                let key = value
+                    .get("item_id")
+                    .or_else(|| value.get("call_id"))
+                    .or_else(|| value.get("id"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                let output_index = value
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize);
+                let index = self.tool_index_for_key(key, output_index);
+                let state = self.tool_calls.entry(index).or_default();
+                if state.name.is_empty() {
+                    state.name = value
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("custom_tool")
+                        .to_string();
+                }
+                state.arguments.push_str(delta);
+                self.emit_ready_tool_call(report_context, &mut out, index);
+            }
+            "response.custom_tool_call_input.done" => {
+                let input = value
+                    .get("input")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                self.ensure_started(report_context, &mut out);
+                let key = value
+                    .get("item_id")
+                    .or_else(|| value.get("call_id"))
+                    .or_else(|| value.get("id"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+                let output_index = value
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize);
+                let index = self.tool_index_for_key(key, output_index);
+                let state = self.tool_calls.entry(index).or_default();
+                if state.name.is_empty() {
+                    state.name = value
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("custom_tool")
+                        .to_string();
+                }
+                let arguments = tool_arguments_from_maybe_json_string(
+                    Some(&Value::String(input.to_string())),
+                    "input",
+                );
+                Self::merge_tool_call_arguments(state, &arguments);
+                self.emit_ready_tool_call(report_context, &mut out, index);
             }
             "response.function_call_arguments.delta" => {
                 let delta = value
@@ -1226,32 +1536,29 @@ impl OpenAIResponsesProviderState {
                     .get("output_index")
                     .and_then(Value::as_u64)
                     .map(|value| value as usize);
-                match item.get("type").and_then(Value::as_str).unwrap_or_default() {
-                    "function_call" => {
-                        self.emit_tool_call_item(report_context, &mut out, item, output_index);
-                    }
-                    "function_call_output" => {
-                        self.emit_tool_result_item(report_context, &mut out, item, output_index);
-                    }
-                    "message" => {
-                        self.emit_message_item(report_context, &mut out, item, output_index);
-                    }
-                    "reasoning" => {
-                        self.emit_reasoning_item(report_context, &mut out, item);
-                    }
-                    "image_generation_call" => {
-                        self.emit_image_generation_item(
-                            report_context,
-                            &mut out,
-                            item,
-                            output_index,
-                            true,
-                        );
-                    }
-                    _ => {
-                        out.push(self.unknown_frame(report_context, Value::Object(item.clone())));
-                    }
-                }
+                self.emit_output_item(report_context, &mut out, item, output_index, true);
+            }
+            "response.incomplete" => {
+                let Some(response) = value.get("response").and_then(Value::as_object) else {
+                    return Ok(out);
+                };
+                self.ensure_started(report_context, &mut out);
+                let (id, model) = self.identity(report_context);
+                self.emit_response_output_items(report_context, &mut out, response);
+
+                out.push(CanonicalStreamFrame {
+                    id,
+                    model,
+                    event: CanonicalStreamEvent::Finish {
+                        finish_reason: Some(openai_responses_incomplete_finish_reason(&value)),
+                        usage: canonical_usage_from_openai_usage(response.get("usage")),
+                    },
+                });
+                self.finished = true;
+            }
+            "keepalive" => {}
+            event_type if openai_responses_stream_event_is_known_noop(event_type) => {
+                self.ensure_started(report_context, &mut out);
             }
             event_type if openai_stream_payload_is_terminal_error(&value) => {
                 self.finished = true;
@@ -1276,61 +1583,7 @@ impl OpenAIResponsesProviderState {
                 };
                 self.ensure_started(report_context, &mut out);
                 let (id, model) = self.identity(report_context);
-
-                for (output_index, raw_item) in response
-                    .get("output")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .enumerate()
-                {
-                    let Some(item) = raw_item.as_object() else {
-                        continue;
-                    };
-                    match item.get("type").and_then(Value::as_str).unwrap_or_default() {
-                        "message" => {
-                            self.emit_message_item(
-                                report_context,
-                                &mut out,
-                                item,
-                                Some(output_index),
-                            );
-                        }
-                        "function_call" => {
-                            self.emit_tool_call_item(
-                                report_context,
-                                &mut out,
-                                item,
-                                Some(output_index),
-                            );
-                        }
-                        "function_call_output" => {
-                            self.emit_tool_result_item(
-                                report_context,
-                                &mut out,
-                                item,
-                                Some(output_index),
-                            );
-                        }
-                        "reasoning" => {
-                            self.emit_reasoning_item(report_context, &mut out, item);
-                        }
-                        "image_generation_call" => {
-                            self.emit_image_generation_item(
-                                report_context,
-                                &mut out,
-                                item,
-                                Some(output_index),
-                                true,
-                            );
-                        }
-                        _ => {
-                            out.push(
-                                self.unknown_frame(report_context, Value::Object(item.clone())),
-                            );
-                        }
-                    }
-                }
+                self.emit_response_output_items(report_context, &mut out, response);
 
                 let finish_reason = if self.tool_calls.is_empty() {
                     Some("stop".to_string())
@@ -2265,7 +2518,12 @@ impl OpenAIResponsesClientEmitter {
         Ok(out)
     }
 
-    fn completed_response(&self, usage: CanonicalUsage) -> Value {
+    fn terminal_response(
+        &self,
+        usage: CanonicalUsage,
+        status: &str,
+        incomplete_reason: Option<&str>,
+    ) -> Value {
         let mut ordered_output = Vec::new();
         let summary = if self.reasoning_summary_parts.is_empty() {
             if self.reasoning.trim().is_empty() {
@@ -2387,7 +2645,7 @@ impl OpenAIResponsesClientEmitter {
         let mut response = json!({
             "id": self.response_id(),
             "object": "response",
-            "status": "completed",
+            "status": status,
             "model": self.model(),
             "output": ordered_output
                 .into_iter()
@@ -2395,6 +2653,9 @@ impl OpenAIResponsesClientEmitter {
                 .collect::<Vec<_>>(),
             "usage": openai_responses_usage_from_usage(&usage),
         });
+        if let Some(reason) = incomplete_reason {
+            response["incomplete_details"] = json!({ "reason": reason });
+        }
         if let Some(response_object) = response.as_object_mut() {
             if let Some(created_at) = self.created_at {
                 response_object.insert("created_at".to_string(), Value::from(created_at));
@@ -2402,6 +2663,14 @@ impl OpenAIResponsesClientEmitter {
             ensure_modern_openai_responses_response_fields(response_object);
         }
         response
+    }
+
+    fn completed_response(&self, usage: CanonicalUsage) -> Value {
+        self.terminal_response(usage, "completed", None)
+    }
+
+    fn incomplete_response(&self, usage: CanonicalUsage, reason: &str) -> Value {
+        self.terminal_response(usage, "incomplete", Some(reason))
     }
 
     pub fn emit(&mut self, frame: CanonicalStreamFrame) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
@@ -2674,7 +2943,10 @@ impl OpenAIResponsesClientEmitter {
                 self.encode_response_event(event.as_str(), payload)
             }
             CanonicalStreamEvent::UnknownEvent(_) => Ok(Vec::new()),
-            CanonicalStreamEvent::Finish { usage, .. } => {
+            CanonicalStreamEvent::Finish {
+                finish_reason,
+                usage,
+            } => {
                 if self.finished {
                     return Ok(Vec::new());
                 }
@@ -2684,11 +2956,22 @@ impl OpenAIResponsesClientEmitter {
                 out.extend(self.finish_tool_items()?);
                 out.extend(self.finish_tool_result_items()?);
                 let usage = usage.unwrap_or_default();
+                let (event_type, response) = match finish_reason.as_deref() {
+                    Some("length") => (
+                        "response.incomplete",
+                        self.incomplete_response(usage, "max_output_tokens"),
+                    ),
+                    Some("content_filter") => (
+                        "response.incomplete",
+                        self.incomplete_response(usage, "content_filter"),
+                    ),
+                    _ => ("response.completed", self.completed_response(usage)),
+                };
                 out.extend(self.encode_response_event(
-                    "response.completed",
+                    event_type,
                     json!({
-                        "type": "response.completed",
-                        "response": self.completed_response(usage),
+                        "type": event_type,
+                        "response": response,
                     }),
                 )?);
                 self.finished = true;
@@ -2759,6 +3042,95 @@ fn openai_tool_result_content_from_value(value: Option<&Value>) -> String {
         Some(Value::Null) | None => String::new(),
         Some(value) => value.to_string(),
     }
+}
+
+fn tool_arguments_from_maybe_json_string(value: Option<&Value>, fallback_key: &str) -> String {
+    match value {
+        Some(Value::String(text)) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return String::new();
+            }
+            match serde_json::from_str::<Value>(trimmed) {
+                Ok(Value::Object(_)) => trimmed.to_string(),
+                Ok(parsed) => single_field_tool_arguments(fallback_key, parsed),
+                Err(_) => single_field_tool_arguments(fallback_key, Value::String(text.clone())),
+            }
+        }
+        Some(value @ Value::Object(_)) => value.to_string(),
+        Some(Value::Null) | None => String::new(),
+        Some(value) => single_field_tool_arguments(fallback_key, value.clone()),
+    }
+}
+
+fn single_field_tool_arguments(key: &str, value: Value) -> String {
+    let mut arguments = Map::new();
+    arguments.insert(key.to_string(), value);
+    Value::Object(arguments).to_string()
+}
+
+fn tool_arguments_from_named_fields(item: &Map<String, Value>, field_names: &[&str]) -> String {
+    let mut arguments = Map::new();
+    for field_name in field_names {
+        if let Some(value) = item.get(*field_name) {
+            arguments.insert((*field_name).to_string(), value.clone());
+        }
+    }
+    if arguments.is_empty() {
+        String::new()
+    } else {
+        Value::Object(arguments).to_string()
+    }
+}
+
+fn openai_responses_stream_event_is_known_noop(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "response.queued"
+            | "response.output_text.annotation.added"
+            | "response.audio.delta"
+            | "response.audio.done"
+            | "response.code_interpreter_call.in_progress"
+            | "response.code_interpreter_call.interpreting"
+            | "response.code_interpreter_call.completed"
+            | "response.code_interpreter_call_code.delta"
+            | "response.code_interpreter_call_code.done"
+            | "response.file_search_call.in_progress"
+            | "response.file_search_call.searching"
+            | "response.file_search_call.completed"
+            | "response.image_generation_call.in_progress"
+            | "response.image_generation_call.generating"
+            | "response.image_generation_call.partial_image"
+            | "response.image_generation_call.completed"
+            | "response.mcp_call.in_progress"
+            | "response.mcp_call.completed"
+            | "response.mcp_call.failed"
+            | "response.mcp_call_arguments.delta"
+            | "response.mcp_call_arguments.done"
+            | "response.mcp_list_tools.in_progress"
+            | "response.mcp_list_tools.completed"
+            | "response.mcp_list_tools.failed"
+            | "response.web_search_call.in_progress"
+            | "response.web_search_call.searching"
+            | "response.web_search_call.completed"
+    )
+}
+
+fn openai_responses_incomplete_finish_reason(payload: &Value) -> String {
+    let reason = payload
+        .get("response")
+        .and_then(Value::as_object)
+        .and_then(|response| response.get("incomplete_details"))
+        .and_then(Value::as_object)
+        .and_then(|details| details.get("reason"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match reason {
+        "content_filter" => "content_filter",
+        "tool_calls" | "function_call" => "tool_calls",
+        _ => "length",
+    }
+    .to_string()
 }
 
 #[cfg(test)]

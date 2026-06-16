@@ -3,7 +3,7 @@ mod parse;
 mod plan;
 
 use self::invalid::{
-    codex_build_invalid_state, codex_looks_like_token_invalidated,
+    codex_build_invalid_state, codex_looks_like_token_expired, codex_looks_like_token_invalidated,
     codex_looks_like_workspace_deactivated, codex_soft_request_failure_reason,
     codex_structured_invalid_reason,
 };
@@ -275,6 +275,7 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
                 }
                 403 => {
                     let candidate_reason = if codex_looks_like_token_invalidated(err_msg.as_deref())
+                        || codex_looks_like_token_expired(err_msg.as_deref())
                     {
                         codex_structured_invalid_reason(403, err_msg.as_deref())
                     } else {

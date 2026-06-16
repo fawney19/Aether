@@ -4,7 +4,9 @@ use aether_ai_formats::api::ExecutionRuntimeAuthContext;
 use aether_contracts::{ExecutionPlan, RequestBody};
 use url::Url;
 
-use crate::dto::AiExecutionDecision;
+use crate::dto::{AiExecutionDecision, AiRequestGzipPolicy};
+
+const DEFAULT_REQUEST_GZIP_MIN_JSON_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiDecisionPlanCore {
@@ -112,6 +114,10 @@ pub fn build_ai_execution_plan_from_decision(
     payload: &mut AiExecutionDecision,
     parts: AiExecutionPlanFromDecisionParts,
 ) -> ExecutionPlan {
+    let explicit_content_encoding = take_ai_non_empty_string(&mut payload.content_encoding);
+    let request_gzip = payload.request_gzip.take();
+    let content_encoding = explicit_content_encoding
+        .or_else(|| infer_ai_execution_plan_content_encoding(&parts, request_gzip.as_ref()));
     ExecutionPlan {
         request_id: parts.core.request_id,
         candidate_id: payload.candidate_id.take(),
@@ -123,7 +129,7 @@ pub fn build_ai_execution_plan_from_decision(
         url: parts.url,
         headers: parts.headers,
         content_type: parts.content_type,
-        content_encoding: None,
+        content_encoding,
         body: parts.body,
         stream: parts.stream,
         client_api_format: parts.core.client_api_format,
@@ -133,6 +139,52 @@ pub fn build_ai_execution_plan_from_decision(
         transport_profile: payload.transport_profile.take(),
         timeouts: payload.timeouts.take(),
     }
+}
+
+fn infer_ai_execution_plan_content_encoding(
+    parts: &AiExecutionPlanFromDecisionParts,
+    request_gzip: Option<&AiRequestGzipPolicy>,
+) -> Option<String> {
+    if let Some(should_gzip) = should_gzip_explicit_json_request(parts, request_gzip) {
+        return should_gzip.then(|| "gzip".to_string());
+    }
+
+    None
+}
+
+fn should_gzip_explicit_json_request(
+    parts: &AiExecutionPlanFromDecisionParts,
+    request_gzip: Option<&AiRequestGzipPolicy>,
+) -> Option<bool> {
+    let request_gzip = request_gzip?;
+    let enabled = request_gzip
+        .enabled
+        .unwrap_or(request_gzip.min_bytes.is_some());
+    if !enabled {
+        return Some(false);
+    }
+    Some(json_request_body_len_at_least(
+        parts,
+        request_gzip
+            .min_bytes
+            .unwrap_or(DEFAULT_REQUEST_GZIP_MIN_JSON_BYTES),
+    ))
+}
+
+fn json_request_body_len_at_least(
+    parts: &AiExecutionPlanFromDecisionParts,
+    min_bytes: usize,
+) -> bool {
+    if parts.body.body_bytes_b64.is_some() || parts.body.body_ref.is_some() {
+        return false;
+    }
+    let Some(json_body) = parts.body.json_body.as_ref() else {
+        return false;
+    };
+
+    serde_json::to_vec(json_body)
+        .map(|body| body.len() >= min_bytes)
+        .unwrap_or(false)
 }
 
 pub fn build_ai_execution_decision_from_plan(
@@ -149,7 +201,7 @@ pub fn build_ai_execution_decision_from_plan(
         url,
         headers,
         content_type,
-        content_encoding: _content_encoding,
+        content_encoding,
         body,
         stream,
         client_api_format,
@@ -208,6 +260,8 @@ pub fn build_ai_execution_decision_from_plan(
         provider_request_body: json_body,
         provider_request_body_base64: body_bytes_b64,
         content_type,
+        content_encoding,
+        request_gzip: None,
         proxy,
         transport_profile,
         timeouts,
@@ -399,6 +453,171 @@ mod tests {
     }
 
     #[test]
+    fn build_ai_execution_plan_without_request_gzip_policy_leaves_json_uncompressed() {
+        let large_codex_url = test_plan_for_url_and_body(
+            "https://chatgpt.com/backend-api/codex/responses",
+            RequestBody::from_json(json!({
+                "model": "gpt-5.5",
+                "input": "x".repeat(DEFAULT_REQUEST_GZIP_MIN_JSON_BYTES),
+            })),
+        );
+        let large_openai = test_plan_for_url_and_body(
+            "https://api.openai.com/v1/responses",
+            RequestBody::from_json(json!({
+                "model": "gpt-5.5",
+                "input": "x".repeat(DEFAULT_REQUEST_GZIP_MIN_JSON_BYTES),
+            })),
+        );
+
+        assert_eq!(large_codex_url.content_encoding, None);
+        assert_eq!(large_openai.content_encoding, None);
+    }
+
+    #[test]
+    fn build_ai_execution_plan_does_not_gzip_raw_body_even_when_explicit() {
+        let mut payload = test_decision();
+        payload.request_gzip = Some(AiRequestGzipPolicy {
+            enabled: Some(true),
+            min_bytes: Some(0),
+        });
+        let core =
+            take_ai_decision_plan_core(&mut payload).expect("core fields should be available");
+
+        let plan = build_ai_execution_plan_from_decision(
+            &mut payload,
+            AiExecutionPlanFromDecisionParts {
+                core,
+                method: "POST".to_string(),
+                url: "https://api.example.com/v1/chat/completions".to_string(),
+                headers: BTreeMap::new(),
+                content_type: Some("application/json".to_string()),
+                body: RequestBody {
+                    json_body: None,
+                    body_bytes_b64: Some("dGVzdA==".to_string()),
+                    body_ref: None,
+                },
+                stream: false,
+            },
+        );
+
+        assert_eq!(plan.content_encoding, None);
+    }
+
+    #[test]
+    fn build_ai_execution_plan_preserves_explicit_content_encoding_for_raw_body() {
+        let mut payload = test_decision();
+        payload.content_encoding = Some("gzip".to_string());
+        payload.request_gzip = Some(AiRequestGzipPolicy {
+            enabled: Some(false),
+            min_bytes: None,
+        });
+        let core =
+            take_ai_decision_plan_core(&mut payload).expect("core fields should be available");
+
+        let plan = build_ai_execution_plan_from_decision(
+            &mut payload,
+            AiExecutionPlanFromDecisionParts {
+                core,
+                method: "POST".to_string(),
+                url: "https://api.example.com/v1/chat/completions".to_string(),
+                headers: BTreeMap::new(),
+                content_type: Some("application/octet-stream".to_string()),
+                body: RequestBody {
+                    json_body: None,
+                    body_bytes_b64: Some("dGVzdA==".to_string()),
+                    body_ref: None,
+                },
+                stream: false,
+            },
+        );
+
+        assert_eq!(plan.content_encoding.as_deref(), Some("gzip"));
+    }
+
+    #[test]
+    fn build_ai_execution_plan_gzips_explicit_json_request_for_non_codex() {
+        let mut payload = test_decision();
+        payload.request_gzip = Some(AiRequestGzipPolicy {
+            enabled: Some(true),
+            min_bytes: Some(1),
+        });
+        let core =
+            take_ai_decision_plan_core(&mut payload).expect("core fields should be available");
+
+        let plan = build_ai_execution_plan_from_decision(
+            &mut payload,
+            AiExecutionPlanFromDecisionParts {
+                core,
+                method: "POST".to_string(),
+                url: "https://api.example.com/v1/chat/completions".to_string(),
+                headers: BTreeMap::new(),
+                content_type: Some("application/json".to_string()),
+                body: RequestBody::from_json(json!({"model": "gpt-test"})),
+                stream: false,
+            },
+        );
+
+        assert_eq!(plan.content_encoding.as_deref(), Some("gzip"));
+    }
+
+    #[test]
+    fn build_ai_execution_plan_respects_explicit_request_gzip_threshold() {
+        let mut payload = test_decision();
+        payload.request_gzip = Some(AiRequestGzipPolicy {
+            enabled: Some(true),
+            min_bytes: Some(1024),
+        });
+        let core =
+            take_ai_decision_plan_core(&mut payload).expect("core fields should be available");
+
+        let plan = build_ai_execution_plan_from_decision(
+            &mut payload,
+            AiExecutionPlanFromDecisionParts {
+                core,
+                method: "POST".to_string(),
+                url: "https://api.example.com/v1/chat/completions".to_string(),
+                headers: BTreeMap::new(),
+                content_type: Some("application/json".to_string()),
+                body: RequestBody::from_json(json!({"model": "gpt-test"})),
+                stream: false,
+            },
+        );
+
+        assert_eq!(plan.content_encoding, None);
+    }
+
+    #[test]
+    fn build_ai_execution_plan_explicit_request_gzip_false_disables_gzip() {
+        let mut payload = test_decision();
+        payload.provider_api_format = Some("openai:responses".to_string());
+        payload.client_api_format = Some("openai:responses".to_string());
+        payload.request_gzip = Some(AiRequestGzipPolicy {
+            enabled: Some(false),
+            min_bytes: None,
+        });
+        let core =
+            take_ai_decision_plan_core(&mut payload).expect("core fields should be available");
+
+        let plan = build_ai_execution_plan_from_decision(
+            &mut payload,
+            AiExecutionPlanFromDecisionParts {
+                core,
+                method: "POST".to_string(),
+                url: "https://chatgpt.com/backend-api/codex/responses".to_string(),
+                headers: BTreeMap::new(),
+                content_type: Some("application/json".to_string()),
+                body: RequestBody::from_json(json!({
+                    "model": "gpt-5.5",
+                    "input": "x".repeat(DEFAULT_REQUEST_GZIP_MIN_JSON_BYTES),
+                })),
+                stream: true,
+            },
+        );
+
+        assert_eq!(plan.content_encoding, None);
+    }
+
+    #[test]
     fn infer_ai_upstream_base_url_preserves_codex_base_path() {
         assert_eq!(
             infer_ai_upstream_base_url("https://tiger.bookapi.cc/codex/responses").as_deref(),
@@ -482,6 +701,88 @@ mod tests {
         assert_eq!(decision.report_kind.as_deref(), Some("report"));
     }
 
+    #[test]
+    fn plan_decision_round_trip_preserves_raw_body_content_encoding() {
+        let original = ExecutionPlan {
+            request_id: "plan-request".to_string(),
+            candidate_id: Some("candidate-1".to_string()),
+            provider_name: Some("provider".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://api.example.com/v1/upload".to_string(),
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "application/octet-stream".to_string(),
+            )]),
+            content_type: Some("application/octet-stream".to_string()),
+            content_encoding: Some("gzip".to_string()),
+            body: RequestBody {
+                json_body: None,
+                body_bytes_b64: Some("dGVzdA==".to_string()),
+                body_ref: None,
+            },
+            stream: false,
+            client_api_format: "openai:chat".to_string(),
+            provider_api_format: "openai:chat".to_string(),
+            model_name: Some("gpt-test".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+
+        let mut decision =
+            build_ai_execution_decision_from_plan(AiExecutionDecisionFromPlanParts {
+                action: "execution_runtime.sync_decision".to_string(),
+                decision_kind: Some("raw_upload_sync".to_string()),
+                request_id: None,
+                upstream_base_url: Some("https://api.example.com".to_string()),
+                include_auth_pair: false,
+                plan: original,
+                report_kind: None,
+                report_context: None,
+                auth_context: None,
+            });
+
+        assert_eq!(decision.content_encoding.as_deref(), Some("gzip"));
+        assert!(decision.request_gzip.is_none());
+
+        let core =
+            take_ai_decision_plan_core(&mut decision).expect("core fields should be available");
+        let method = take_ai_non_empty_string(&mut decision.provider_request_method)
+            .expect("method should round-trip");
+        let url =
+            take_ai_non_empty_string(&mut decision.upstream_url).expect("url should round-trip");
+        let headers = std::mem::take(&mut decision.provider_request_headers);
+        let content_type = decision.content_type.take();
+        let body = resolve_ai_passthrough_sync_request_body(
+            decision.provider_request_body.take(),
+            decision.provider_request_body_base64.take(),
+        );
+        let stream = decision.upstream_is_stream;
+
+        let round_tripped = build_ai_execution_plan_from_decision(
+            &mut decision,
+            AiExecutionPlanFromDecisionParts {
+                core,
+                method,
+                url,
+                headers,
+                content_type,
+                body,
+                stream,
+            },
+        );
+
+        assert_eq!(round_tripped.content_encoding.as_deref(), Some("gzip"));
+        assert_eq!(
+            round_tripped.body.body_bytes_b64.as_deref(),
+            Some("dGVzdA==")
+        );
+        assert!(round_tripped.body.json_body.is_none());
+    }
+
     fn test_decision() -> AiExecutionDecision {
         AiExecutionDecision {
             action: "sync".to_string(),
@@ -511,6 +812,8 @@ mod tests {
             provider_request_body: None,
             provider_request_body_base64: None,
             content_type: None,
+            content_encoding: None,
+            request_gzip: None,
             proxy: None,
             transport_profile: None,
             timeouts: None,
@@ -519,5 +822,36 @@ mod tests {
             report_context: None,
             auth_context: None,
         }
+    }
+
+    fn test_plan_for_url_and_body(url: &str, body: RequestBody) -> ExecutionPlan {
+        test_plan_for_url_body_and_format(url, body, "openai:responses")
+    }
+
+    fn test_plan_for_url_body_and_format(
+        url: &str,
+        body: RequestBody,
+        provider_api_format: &str,
+    ) -> ExecutionPlan {
+        let mut payload = test_decision();
+        payload.provider_api_format = Some(provider_api_format.to_string());
+        payload.client_api_format = Some(provider_api_format.to_string());
+        let core =
+            take_ai_decision_plan_core(&mut payload).expect("core fields should be available");
+        build_ai_execution_plan_from_decision(
+            &mut payload,
+            AiExecutionPlanFromDecisionParts {
+                core,
+                method: "POST".to_string(),
+                url: url.to_string(),
+                headers: BTreeMap::from([(
+                    "content-type".to_string(),
+                    "application/json".to_string(),
+                )]),
+                content_type: Some("application/json".to_string()),
+                body,
+                stream: true,
+            },
+        )
     }
 }
