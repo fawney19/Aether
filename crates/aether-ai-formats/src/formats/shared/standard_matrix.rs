@@ -1370,12 +1370,10 @@ mod tests {
             "text": {
                 "format": {
                     "type": "json_schema",
-                    "json_schema": {
-                        "name": "answer_schema",
-                        "schema": {
-                            "type": "object",
-                            "properties": {"answer": {"type": "string"}}
-                        }
+                    "name": "answer_schema",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"answer": {"type": "string"}}
                     }
                 }
             }

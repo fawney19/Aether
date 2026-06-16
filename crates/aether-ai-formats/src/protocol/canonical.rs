@@ -4183,14 +4183,45 @@ pub(crate) fn openai_response_format_to_canonical(
     value: Option<&Value>,
 ) -> Option<CanonicalResponseFormat> {
     let object = value?.as_object()?;
+    let format_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("text")
+        .to_string();
+    // Chat format uses nested json_schema wrapper;
+    // Responses format uses flat structure (schema/name/strict at top level).
+    let json_schema = object.get("json_schema").cloned().or_else(|| {
+        if format_type != "json_schema" {
+            return None;
+        }
+        let has_schema = object.contains_key("schema");
+        let has_name = object.contains_key("name");
+        if !has_schema && !has_name {
+            return None;
+        }
+        let mut wrapper = serde_json::Map::new();
+        if let Some(name) = object.get("name") {
+            wrapper.insert("name".to_string(), name.clone());
+        }
+        if let Some(schema) = object.get("schema") {
+            wrapper.insert("schema".to_string(), schema.clone());
+        }
+        if let Some(strict) = object.get("strict") {
+            wrapper.insert("strict".to_string(), strict.clone());
+        }
+        Some(Value::Object(wrapper))
+    });
+    let mut excluded = vec!["type", "json_schema"];
+    if json_schema.is_some() && object.get("json_schema").is_none() {
+        // Flat format: also exclude fields that were promoted into json_schema
+        excluded.push("schema");
+        excluded.push("name");
+        excluded.push("strict");
+    }
     Some(CanonicalResponseFormat {
-        format_type: object
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("text")
-            .to_string(),
-        json_schema: object.get("json_schema").cloned(),
-        extensions: openai_extensions(object, &["type", "json_schema"]),
+        format_type,
+        json_schema,
+        extensions: openai_extensions(object, &excluded),
     })
 }
 
@@ -4199,6 +4230,26 @@ pub(crate) fn canonical_response_format_to_openai(value: &CanonicalResponseForma
     output.insert("type".to_string(), Value::String(value.format_type.clone()));
     if let Some(json_schema) = &value.json_schema {
         output.insert("json_schema".to_string(), json_schema.clone());
+    }
+    Value::Object(output)
+}
+
+pub(crate) fn canonical_response_format_to_openai_responses(
+    value: &CanonicalResponseFormat,
+) -> Value {
+    let mut output = Map::new();
+    output.insert("type".to_string(), Value::String(value.format_type.clone()));
+    if let Some(json_schema) = &value.json_schema {
+        // Responses format uses flat structure: promote json_schema fields to top level
+        if let Some(schema_obj) = json_schema.as_object() {
+            for (key, val) in schema_obj {
+                if key != "type" {
+                    output.insert(key.clone(), val.clone());
+                }
+            }
+        } else {
+            output.insert("json_schema".to_string(), json_schema.clone());
+        }
     }
     Value::Object(output)
 }
@@ -4850,9 +4901,11 @@ mod tests {
         from_gemini_to_canonical_request, from_gemini_to_canonical_response,
         from_openai_chat_to_canonical_request, from_openai_chat_to_canonical_response,
         from_openai_responses_to_canonical_request, from_openai_responses_to_canonical_response,
+        openai_response_format_to_canonical, canonical_response_format_to_openai_responses,
         CanonicalContentBlock, CanonicalEmbedding, CanonicalEmbeddingInput,
-        CanonicalEmbeddingRequest, CanonicalRole, CanonicalUsage,
+        CanonicalEmbeddingRequest, CanonicalResponseFormat, CanonicalRole, CanonicalUsage,
     };
+    use std::collections::BTreeMap;
     use serde_json::{json, Value};
 
     #[test]
@@ -5370,7 +5423,8 @@ mod tests {
             "text": {
                 "format": {
                     "type": "json_schema",
-                    "json_schema": {"name": "answer", "schema": {"type": "object"}}
+                    "name": "answer",
+                    "schema": {"type": "object"}
                 },
                 "verbosity": "low"
             },
@@ -5411,7 +5465,7 @@ mod tests {
         let rebuilt = canonical_to_openai_responses_request(&canonical, "gpt-5-upstream", false)
             .expect("openai responses request");
         assert_eq!(rebuilt["model"], "gpt-5-upstream");
-        assert_eq!(rebuilt["text"]["format"]["json_schema"]["name"], "answer");
+        assert_eq!(rebuilt["text"]["format"]["name"], "answer");
         assert_eq!(rebuilt["text"]["verbosity"], "low");
         assert_eq!(rebuilt["tool_choice"]["name"], "lookup");
     }
@@ -6058,5 +6112,42 @@ mod tests {
         assert_eq!(rebuilt["choices"][0]["message"]["content"], "first");
         assert_eq!(rebuilt["choices"][1]["message"]["content"], "second");
         assert_eq!(rebuilt["choices"][1]["finish_reason"], "length");
+    }
+
+    #[test]
+    fn openai_responses_flat_json_schema_converts_to_canonical() {
+        let format = json!({
+            "type": "json_schema",
+            "strict": true,
+            "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+            "name": "codex_output_schema"
+        });
+        let canonical = openai_response_format_to_canonical(Some(&format));
+        assert!(canonical.is_some());
+        let canonical = canonical.unwrap();
+        assert_eq!(canonical.format_type, "json_schema");
+        let json_schema = canonical.json_schema.expect("json_schema should be present");
+        assert_eq!(json_schema["name"], "codex_output_schema");
+        assert_eq!(json_schema["schema"]["type"], "object");
+        assert_eq!(json_schema["strict"], true);
+    }
+
+    #[test]
+    fn canonical_json_schema_flattens_for_responses_output() {
+        let canonical = CanonicalResponseFormat {
+            format_type: "json_schema".to_string(),
+            json_schema: Some(json!({
+                "name": "codex_output_schema",
+                "schema": {"type": "object"},
+                "strict": true
+            })),
+            extensions: BTreeMap::new(),
+        };
+        let output = canonical_response_format_to_openai_responses(&canonical);
+        assert_eq!(output["type"], "json_schema");
+        assert_eq!(output["name"], "codex_output_schema");
+        assert_eq!(output["schema"]["type"], "object");
+        assert_eq!(output["strict"], true);
+        assert!(output.get("json_schema").is_none());
     }
 }

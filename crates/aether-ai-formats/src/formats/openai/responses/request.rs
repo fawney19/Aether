@@ -4,7 +4,7 @@ use crate::{
     formats::context::FormatContext,
     formats::openai::shared::map_thinking_budget_to_openai_reasoning_effort,
     protocol::canonical::{
-        canonical_response_format_to_openai, canonicalize_tool_arguments, media_data_or_url,
+        canonical_response_format_to_openai, canonical_response_format_to_openai_responses, canonicalize_tool_arguments, media_data_or_url,
         namespace_extension_object, openai_content_text, openai_extensions,
         openai_response_format_to_canonical, openai_responses_extension,
         openai_responses_generation_config, openai_responses_input_to_canonical_messages,
@@ -428,7 +428,7 @@ fn canonical_text_config_to_responses(canonical: &CanonicalRequest) -> Option<Va
     if let Some(response_format) = &canonical.response_format {
         text.insert(
             "format".to_string(),
-            canonical_response_format_to_openai(response_format),
+            canonical_response_format_to_openai_responses(response_format),
         );
     }
     if let Some(verbosity) = canonical
