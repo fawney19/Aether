@@ -37,7 +37,8 @@ SELECT
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
-  api_keys.ip_rules AS api_key_ip_rules
+  api_keys.ip_rules AS api_key_ip_rules,
+  api_keys.feature_settings AS api_key_feature_settings
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 WHERE api_keys.key_hash = $1
@@ -68,7 +69,8 @@ SELECT
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
-  api_keys.ip_rules AS api_key_ip_rules
+  api_keys.ip_rules AS api_key_ip_rules,
+  api_keys.feature_settings AS api_key_feature_settings
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 WHERE api_keys.id = $1
@@ -99,7 +101,8 @@ SELECT
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
-  api_keys.ip_rules AS api_key_ip_rules
+  api_keys.ip_rules AS api_key_ip_rules,
+  api_keys.feature_settings AS api_key_feature_settings
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 WHERE api_keys.id = $1 AND users.id = $2
@@ -130,7 +133,8 @@ SELECT
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
-  api_keys.ip_rules AS api_key_ip_rules
+  api_keys.ip_rules AS api_key_ip_rules,
+  api_keys.feature_settings AS api_key_feature_settings
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 WHERE api_keys.id = ANY($1::TEXT[])
@@ -1601,7 +1605,8 @@ fn map_auth_api_key_snapshot_row(
         row_get(row, "api_key_allowed_api_formats")?,
         row_get(row, "api_key_allowed_models")?,
     )?
-    .with_api_key_ip_rules(row_get(row, "api_key_ip_rules")?)?;
+    .with_api_key_ip_rules(row_get(row, "api_key_ip_rules")?)?
+    .with_api_key_feature_settings(row_get(row, "api_key_feature_settings")?);
     Ok(snapshot.with_user_rate_limit(row_get(row, "user_rate_limit")?))
 }
 

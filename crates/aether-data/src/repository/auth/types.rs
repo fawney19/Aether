@@ -25,6 +25,7 @@ pub struct StoredAuthApiKeySnapshot {
     pub api_key_allowed_api_formats: Option<Vec<String>>,
     pub api_key_allowed_models: Option<Vec<String>>,
     pub api_key_ip_rules: Option<Vec<String>>,
+    pub api_key_feature_settings: Option<serde_json::Value>,
 }
 
 impl StoredAuthApiKeySnapshot {
@@ -99,7 +100,16 @@ impl StoredAuthApiKeySnapshot {
                 "api_keys.allowed_models",
             )?,
             api_key_ip_rules: None,
+            api_key_feature_settings: None,
         })
+    }
+
+    pub fn with_api_key_feature_settings(
+        mut self,
+        api_key_feature_settings: Option<serde_json::Value>,
+    ) -> Self {
+        self.api_key_feature_settings = normalize_optional_json(api_key_feature_settings);
+        self
     }
 
     pub fn with_api_key_ip_rules(
@@ -159,6 +169,7 @@ pub struct ResolvedAuthApiKeySnapshot {
     pub api_key_allowed_api_formats: Option<Vec<String>>,
     pub api_key_allowed_models: Option<Vec<String>>,
     pub api_key_ip_rules: Option<Vec<String>>,
+    pub api_key_feature_settings: Option<serde_json::Value>,
     pub currently_usable: bool,
 }
 
@@ -189,6 +200,7 @@ impl ResolvedAuthApiKeySnapshot {
             api_key_allowed_api_formats: snapshot.api_key_allowed_api_formats,
             api_key_allowed_models: snapshot.api_key_allowed_models,
             api_key_ip_rules: snapshot.api_key_ip_rules,
+            api_key_feature_settings: snapshot.api_key_feature_settings,
             currently_usable,
         };
         resolved.constrain_non_standalone_api_key_policy_to_user_policy();

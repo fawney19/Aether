@@ -1738,6 +1738,7 @@ mod tests {
             api_key_allowed_api_formats: None,
             api_key_allowed_models: None,
             api_key_ip_rules: None,
+            api_key_feature_settings: None,
             currently_usable: true,
         }
     }
@@ -1761,6 +1762,7 @@ mod tests {
             routing_policy: None,
             routing_trace_seed: None,
             routing_context: None,
+            codex_adapter_route: None,
         }
     }
 

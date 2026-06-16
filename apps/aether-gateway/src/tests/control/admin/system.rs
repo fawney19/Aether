@@ -8,6 +8,7 @@ use aether_data::repository::auth::{
 use aether_data::repository::auth_modules::{
     InMemoryAuthModuleReadRepository, StoredOAuthProviderModuleConfig,
 };
+use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
 use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
 use aether_data::repository::global_models::InMemoryGlobalModelReadRepository;
 use aether_data::repository::oauth_providers::InMemoryOAuthProviderRepository;
@@ -17,6 +18,7 @@ use aether_data::repository::users::{
     InMemoryUserReadRepository, StoredUserAuthRecord, UpsertUserGroupRecord, UserReadRepository,
 };
 use aether_data::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
+use aether_data_contracts::repository::candidate_selection::StoredMinimalCandidateSelectionRow;
 use aether_data_contracts::repository::global_models::StoredPublicGlobalModel;
 use axum::body::Body;
 use axum::routing::{any, delete, get, post, put};
@@ -37,6 +39,48 @@ use crate::constants::{
 use crate::data::GatewayDataState;
 
 static SYSTEM_UPDATE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+const ADMIN_GLOBAL_MODELS_DATA_UNAVAILABLE_DETAIL: &str = "Admin global model data unavailable";
+
+fn sample_codex_adapter_candidate_row(
+    global_model_name: &str,
+    provider_id: &str,
+    endpoint_id: &str,
+    endpoint_api_format: &str,
+    key_id: &str,
+    model_id: &str,
+) -> StoredMinimalCandidateSelectionRow {
+    StoredMinimalCandidateSelectionRow {
+        provider_id: provider_id.to_string(),
+        provider_name: provider_id.to_string(),
+        provider_type: "custom".to_string(),
+        provider_priority: 10,
+        provider_is_active: true,
+        endpoint_id: endpoint_id.to_string(),
+        endpoint_api_format: endpoint_api_format.to_string(),
+        endpoint_api_family: Some("openai".to_string()),
+        endpoint_kind: Some("chat".to_string()),
+        endpoint_is_active: true,
+        key_id: key_id.to_string(),
+        key_name: "default".to_string(),
+        key_auth_type: "api_key".to_string(),
+        key_is_active: true,
+        key_api_formats: Some(vec![endpoint_api_format.to_string()]),
+        key_allowed_models: None,
+        key_capabilities: None,
+        key_internal_priority: 0,
+        key_global_priority_by_format: Some(json!({ endpoint_api_format: 1 })),
+        model_id: model_id.to_string(),
+        global_model_id: format!("global-{global_model_name}"),
+        global_model_name: global_model_name.to_string(),
+        global_model_mappings: None,
+        global_model_supports_streaming: Some(true),
+        model_provider_model_name: format!("{global_model_name}-upstream"),
+        model_provider_model_mappings: None,
+        model_supports_streaming: Some(true),
+        model_is_active: true,
+        model_is_available: true,
+    }
+}
 
 #[tokio::test]
 async fn gateway_handles_admin_system_version_locally_with_trusted_admin_principal() {
@@ -1968,6 +2012,266 @@ async fn gateway_sets_admin_system_config_locally_with_trusted_admin_principal()
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_rejects_incompatible_codex_adapter_candidates_on_system_config_save() {
+    let _guard = SYSTEM_UPDATE_TEST_MUTEX.lock().await;
+
+    let candidate_repository = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(
+        Vec::<StoredMinimalCandidateSelectionRow>::new(),
+    ));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ));
+    let data_state =
+        GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+            provider_catalog_repository,
+            candidate_repository,
+        )
+        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data_state),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .put(format!(
+            "{gateway_url}/api/admin/system/configs/module.codex_adapter.routes"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "value": [{
+                "codex_model": "gpt-5.5",
+                "enabled": true,
+                "scheduling_mode": "priority",
+                "candidates": [{
+                    "global_model": "glm-incompatible",
+                    "enabled": true,
+                    "priority": 0,
+                    "weight": 100
+                }]
+            }]
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert!(payload["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("glm-incompatible")));
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_reports_codex_adapter_global_model_compatibility() {
+    let _guard = SYSTEM_UPDATE_TEST_MUTEX.lock().await;
+
+    let candidate_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_codex_adapter_candidate_row(
+                "glm-compatible",
+                "provider-responses",
+                "endpoint-responses",
+                "openai:responses",
+                "key-responses",
+                "model-responses",
+            ),
+            sample_codex_adapter_candidate_row(
+                "glm-conversion-disabled",
+                "provider-chat",
+                "endpoint-chat",
+                "openai:chat",
+                "key-chat",
+                "model-chat",
+            ),
+        ]));
+
+    let provider_responses = sample_provider("provider-responses", "Responses", 1);
+    let mut provider_chat = sample_provider("provider-chat", "Chat", 2);
+    provider_chat.enable_format_conversion = false;
+    let endpoint_responses = sample_endpoint(
+        "endpoint-responses",
+        "provider-responses",
+        "openai:responses",
+        "https://responses.example.com",
+    );
+    let endpoint_chat = sample_endpoint(
+        "endpoint-chat",
+        "provider-chat",
+        "openai:chat",
+        "https://chat.example.com",
+    );
+    let key_responses = sample_key(
+        "key-responses",
+        "provider-responses",
+        "openai:responses",
+        "sk-responses",
+    );
+    let key_chat = sample_key("key-chat", "provider-chat", "openai:chat", "sk-chat");
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider_responses, provider_chat],
+        vec![endpoint_responses, endpoint_chat],
+        vec![key_responses, key_chat],
+    ));
+
+    let data_state =
+        GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+            provider_catalog_repository,
+            candidate_repository,
+        )
+        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data_state),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/models/global/codex-adapter-compatibility"
+        ))
+        .query(&[
+            ("global_model", "glm-compatible"),
+            ("global_model", "glm-conversion-disabled"),
+        ])
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    let items = payload["items"]
+        .as_array()
+        .expect("items should be an array");
+    let compatible = items
+        .iter()
+        .find(|item| item["global_model"] == json!("glm-compatible"))
+        .expect("compatible item should exist");
+    assert_eq!(compatible["compatible"], json!(true));
+
+    let blocked = items
+        .iter()
+        .find(|item| item["global_model"] == json!("glm-conversion-disabled"))
+        .expect("blocked item should exist");
+    assert_eq!(blocked["compatible"], json!(false));
+    assert!(blocked["reasons"].as_array().is_some_and(|reasons| reasons
+        .iter()
+        .any(|value| value == "format_conversion_disabled")));
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_degrades_codex_adapter_global_model_compatibility_without_minimal_candidate_selection_reader(
+) {
+    let _guard = SYSTEM_UPDATE_TEST_MUTEX.lock().await;
+
+    let provider_responses = sample_provider("provider-responses", "Responses", 1);
+    let endpoint_responses = sample_endpoint(
+        "endpoint-responses",
+        "provider-responses",
+        "openai:responses",
+        "https://responses.example.com",
+    );
+    let key_responses = sample_key(
+        "key-responses",
+        "provider-responses",
+        "openai:responses",
+        "sk-responses",
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider_responses],
+        vec![endpoint_responses],
+        vec![key_responses],
+    ));
+
+    let data_state =
+        GatewayDataState::with_provider_catalog_reader_for_tests(provider_catalog_repository)
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data_state),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/models/global/codex-adapter-compatibility"
+        ))
+        .query(&[("global_model", "glm-compatible")])
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["detail"], "Admin global model data unavailable");
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_returns_codex_adapter_compatibility_data_unavailable_without_minimal_candidate_selection(
+) {
+    let _guard = SYSTEM_UPDATE_TEST_MUTEX.lock().await;
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ));
+    let data_state =
+        GatewayDataState::with_provider_catalog_repository_for_tests(provider_catalog_repository)
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data_state),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/models/global/codex-adapter-compatibility"
+        ))
+        .query(&[("global_model", "glm-compatible")])
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(
+        payload["detail"],
+        json!(ADMIN_GLOBAL_MODELS_DATA_UNAVAILABLE_DETAIL)
+    );
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]

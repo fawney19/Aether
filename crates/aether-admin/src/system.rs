@@ -1,3 +1,7 @@
+use crate::codex_adapter::{
+    normalize_codex_adapter_routes_config_value, CODEX_ADAPTER_ENABLED_CONFIG_KEY,
+    CODEX_ADAPTER_ROUTES_CONFIG_KEY,
+};
 use aether_data::repository::{
     auth_modules::{StoredLdapModuleConfig, StoredOAuthProviderModuleConfig},
     proxy_nodes::{
@@ -1815,6 +1819,8 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "module.bark_push.device_key" => Some(serde_json::Value::Null),
         "module.bark_push.server_url" => Some(json!(DEFAULT_BARK_API_BASE)),
         "module.bark_push.template" => Some(json!("")),
+        CODEX_ADAPTER_ENABLED_CONFIG_KEY => Some(json!(false)),
+        CODEX_ADAPTER_ROUTES_CONFIG_KEY => Some(json!([])),
         "module.chat_pii_redaction.enabled" => Some(json!(false)),
         "module.chat_pii_redaction.rules" => Some(chat_pii_redaction_default_rules()),
         "module.chat_pii_redaction.cache_ttl_seconds" => Some(json!(300)),
@@ -2198,7 +2204,8 @@ pub fn parse_admin_system_config_update(
         "module.important_notification.enabled"
         | "module.important_notification.email_enabled"
         | "module.server_chan_push.enabled"
-        | "module.bark_push.enabled" => match value.as_bool() {
+        | "module.bark_push.enabled"
+        | CODEX_ADAPTER_ENABLED_CONFIG_KEY => match value.as_bool() {
             Some(enabled) => value = json!(enabled),
             None if value.is_null() => {
                 value = admin_system_config_default_value(&normalized_key).unwrap_or(json!(false));
@@ -2285,6 +2292,14 @@ pub fn parse_admin_system_config_update(
                     ));
                 }
             };
+        }
+        CODEX_ADAPTER_ROUTES_CONFIG_KEY => {
+            value = normalize_codex_adapter_routes_config_value(value).map_err(|_| {
+                (
+                    http::StatusCode::BAD_REQUEST,
+                    json!({ "detail": "请求数据验证失败" }),
+                )
+            })?;
         }
         "module.chat_pii_redaction.enabled" => match value.as_bool() {
             Some(enabled) => value = json!(enabled),
@@ -3513,6 +3528,101 @@ mod tests {
         )
         .expect_err("server url without scheme should fail");
         assert_eq!(err.0, http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn codex_adapter_system_config_defaults_are_registered() {
+        assert_eq!(
+            admin_system_config_default_value(CODEX_ADAPTER_ENABLED_CONFIG_KEY),
+            Some(json!(false))
+        );
+        assert_eq!(
+            admin_system_config_default_value(CODEX_ADAPTER_ROUTES_CONFIG_KEY),
+            Some(json!([]))
+        );
+    }
+
+    #[test]
+    fn codex_adapter_enabled_config_is_boolean_and_defaults_null_to_false() {
+        let update = parse_admin_system_config_update(
+            CODEX_ADAPTER_ENABLED_CONFIG_KEY,
+            r#"{ "value": true }"#.as_bytes(),
+        )
+        .expect("enabled config should parse");
+
+        assert_eq!(update.normalized_key, CODEX_ADAPTER_ENABLED_CONFIG_KEY);
+        assert_eq!(update.value, json!(true));
+
+        let defaulted = parse_admin_system_config_update(
+            CODEX_ADAPTER_ENABLED_CONFIG_KEY,
+            r#"{ "value": null }"#.as_bytes(),
+        )
+        .expect("null enabled config should default");
+
+        assert_eq!(defaulted.value, json!(false));
+    }
+
+    #[test]
+    fn codex_adapter_routes_config_is_normalized_through_system_update() {
+        let update = parse_admin_system_config_update(
+            CODEX_ADAPTER_ROUTES_CONFIG_KEY,
+            r#"{
+                "value": [
+                    {
+                        "codex_model": " gpt-5.5 ",
+                        "scheduling_mode": "priority",
+                        "candidates": [
+                            { "global_model": " glm-4.6 ", "priority": 0, "weight": 70 },
+                            { "global_model": "deepseek-v3.2", "enabled": false, "priority": 1, "weight": 30 }
+                        ]
+                    }
+                ]
+            }"#
+            .as_bytes(),
+        )
+        .expect("routes config should parse");
+
+        assert_eq!(update.normalized_key, CODEX_ADAPTER_ROUTES_CONFIG_KEY);
+        assert_eq!(update.value[0]["codex_model"], json!("gpt-5.5"));
+        assert_eq!(update.value[0]["enabled"], json!(true));
+        assert_eq!(
+            update.value[0]["candidates"][0]["global_model"],
+            json!("glm-4.6")
+        );
+        assert_eq!(update.value[0]["candidates"][0]["enabled"], json!(true));
+        assert_eq!(update.value[0]["candidates"][1]["enabled"], json!(false));
+    }
+
+    #[test]
+    fn codex_adapter_routes_config_defaults_null_and_rejects_invalid_routes() {
+        let defaulted = parse_admin_system_config_update(
+            CODEX_ADAPTER_ROUTES_CONFIG_KEY,
+            r#"{ "value": null }"#.as_bytes(),
+        )
+        .expect("null routes should default");
+
+        assert_eq!(defaulted.value, json!([]));
+
+        let err = parse_admin_system_config_update(
+            CODEX_ADAPTER_ROUTES_CONFIG_KEY,
+            r#"{
+                "value": [
+                    {
+                        "codex_model": "gpt-5.5",
+                        "enabled": true,
+                        "scheduling_mode": "invalid",
+                        "candidates": [
+                            { "global_model": "glm-4.6", "priority": 0, "weight": 70 }
+                        ]
+                    }
+                ]
+            }"#
+            .as_bytes(),
+        )
+        .expect_err("invalid routes should fail");
+
+        assert_eq!(err.0, http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.1, json!({ "detail": "请求数据验证失败" }));
     }
 
     #[test]

@@ -12,6 +12,7 @@ use super::super::cache::{
     AuthApiKeyLastUsedCache, AuthContextCache, DashboardResponseCache, DirectPlanBypassCache,
     SchedulerAffinityCache, SystemConfigCache,
 };
+use super::super::codex_adapter::config::CodexAdapterRuntimeConfigCache;
 use super::super::data::GatewayDataState;
 use super::super::fallback_metrics;
 use super::super::rate_limit::FrontdoorUserRpmLimiter;
@@ -123,6 +124,7 @@ pub struct AppState {
     pub(crate) scheduler_affinity_epoch: Arc<AtomicU64>,
     pub(crate) dashboard_response_cache: Arc<DashboardResponseCache>,
     pub(crate) system_config_cache: Arc<SystemConfigCache>,
+    pub(crate) codex_adapter_config_cache: Arc<CodexAdapterRuntimeConfigCache>,
     pub(crate) fallback_metrics: Arc<fallback_metrics::GatewayFallbackMetrics>,
     pub(crate) frontdoor_cors: Option<Arc<FrontdoorCorsConfig>>,
     pub(crate) frontdoor_user_rpm: Arc<FrontdoorUserRpmLimiter>,

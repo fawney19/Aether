@@ -11,6 +11,7 @@ pub(crate) fn admin_global_model_id_from_path(request_path: &str) -> Option<Stri
     if normalized.is_empty()
         || normalized.contains('/')
         || normalized == "batch-delete"
+        || normalized == "codex-adapter-compatibility"
         || normalized.ends_with("/providers")
         || normalized.ends_with("/assign-to-providers")
         || normalized.ends_with("/routing")

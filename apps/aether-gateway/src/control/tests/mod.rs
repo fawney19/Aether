@@ -77,6 +77,7 @@ mod admin_api_keys;
 mod admin_billing;
 mod admin_core;
 mod admin_endpoints;
+mod admin_global_models;
 mod admin_monitoring;
 mod admin_oauth;
 mod admin_payments;

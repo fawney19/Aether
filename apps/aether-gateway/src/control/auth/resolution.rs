@@ -23,6 +23,7 @@ use super::principal::derive_principal_candidate;
 use super::types::{
     GatewayCredentialCarrier, GatewayPrincipalCandidate, GatewayTrustedAuthHeaders,
 };
+use crate::codex_adapter::feature_settings::codex_adapter_feature_enabled;
 use crate::headers::header_value_str;
 
 const AUTH_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(60);
@@ -74,6 +75,8 @@ pub(crate) struct GatewayControlAuthContext {
     pub(crate) api_key_rate_limit: Option<i32>,
     #[serde(skip)]
     pub(crate) api_key_is_standalone: bool,
+    #[serde(skip)]
+    pub(crate) api_key_codex_adapter_enabled: bool,
     #[serde(skip)]
     pub(crate) admin_bypass_limits: bool,
     #[serde(skip)]
@@ -240,6 +243,9 @@ fn log_local_auth_rejection(trace_id: &str, decision: &GatewayControlDecision) {
         }
         GatewayLocalAuthRejection::ModelNotAllowed { model } => {
             ("model_not_allowed", model.clone())
+        }
+        GatewayLocalAuthRejection::CodexAdapter { reason } => {
+            ("codex_adapter", reason.code().to_string())
         }
         GatewayLocalAuthRejection::IpNotAllowed { remote_ip } => {
             ("ip_not_allowed", remote_ip.clone())
@@ -615,6 +621,7 @@ pub(super) async fn resolve_data_backed_auth_context(
                     user_rate_limit: None,
                     api_key_rate_limit: None,
                     api_key_is_standalone: false,
+                    api_key_codex_adapter_enabled: false,
                     admin_bypass_limits: false,
                     local_rejection: Some(GatewayLocalAuthRejection::InvalidApiKey),
                     allowed_models: None,
@@ -720,6 +727,7 @@ async fn resolve_antigravity_bearer_bridge_auth_context(
             user_rate_limit: None,
             api_key_rate_limit: None,
             api_key_is_standalone: false,
+            api_key_codex_adapter_enabled: false,
             admin_bypass_limits: false,
             local_rejection: Some(GatewayLocalAuthRejection::InvalidApiKey),
             allowed_models: None,
@@ -776,6 +784,7 @@ async fn resolve_trusted_auth_context(
             user_rate_limit: None,
             api_key_rate_limit: None,
             api_key_is_standalone: false,
+            api_key_codex_adapter_enabled: false,
             admin_bypass_limits: false,
             local_rejection: Some(GatewayLocalAuthRejection::InvalidApiKey),
             allowed_models: None,
@@ -873,6 +882,9 @@ async fn build_data_backed_auth_context(
         user_rate_limit: snapshot.user_rate_limit,
         api_key_rate_limit: snapshot.api_key_rate_limit,
         api_key_is_standalone: snapshot.api_key_is_standalone,
+        api_key_codex_adapter_enabled: codex_adapter_feature_enabled(
+            snapshot.api_key_feature_settings.as_ref(),
+        ) && !snapshot.api_key_is_standalone,
         admin_bypass_limits: snapshot.user_role.eq_ignore_ascii_case("admin")
             && !snapshot.api_key_is_standalone,
         local_rejection,
@@ -1181,6 +1193,60 @@ mod tests {
         .expect("auth context should exist");
         assert_eq!(second.api_key_id, "key-1");
         assert_eq!(repository.touch_count("key-1"), 1);
+    }
+
+    #[tokio::test]
+    async fn data_backed_auth_context_marks_codex_adapter_enabled_for_user_api_key_only() {
+        let user_api_key = "sk-test-codex-user";
+        let standalone_api_key = "sk-test-codex-standalone";
+        let codex_settings = serde_json::json!({ "codex_adapter": { "enabled": true } });
+        let user_snapshot = sample_snapshot("key-codex-user", "user-codex")
+            .with_api_key_feature_settings(Some(codex_settings.clone()));
+        let mut standalone_snapshot =
+            sample_snapshot("key-codex-standalone", "user-codex-standalone")
+                .with_api_key_feature_settings(Some(codex_settings));
+        standalone_snapshot.api_key_is_standalone = true;
+        let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![
+            (Some(hash_api_key(user_api_key)), user_snapshot),
+            (Some(hash_api_key(standalone_api_key)), standalone_snapshot),
+        ]));
+        let data = GatewayDataState::with_auth_api_key_repository_for_tests(repository);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data);
+
+        let mut user_headers = HeaderMap::new();
+        user_headers.insert(
+            http::header::AUTHORIZATION,
+            format!("Bearer {user_api_key}").parse().unwrap(),
+        );
+        let user_auth = resolve_data_backed_auth_context(
+            &state,
+            &user_headers,
+            &uri("/v1/responses"),
+            Some("openai:responses"),
+        )
+        .await
+        .expect("resolution should succeed")
+        .expect("auth context should exist");
+
+        let mut standalone_headers = HeaderMap::new();
+        standalone_headers.insert(
+            http::header::AUTHORIZATION,
+            format!("Bearer {standalone_api_key}").parse().unwrap(),
+        );
+        let standalone_auth = resolve_data_backed_auth_context(
+            &state,
+            &standalone_headers,
+            &uri("/v1/responses"),
+            Some("openai:responses"),
+        )
+        .await
+        .expect("resolution should succeed")
+        .expect("auth context should exist");
+
+        assert!(user_auth.api_key_codex_adapter_enabled);
+        assert!(!standalone_auth.api_key_codex_adapter_enabled);
     }
 
     #[tokio::test]

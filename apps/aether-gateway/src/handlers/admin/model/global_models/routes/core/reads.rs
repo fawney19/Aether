@@ -18,6 +18,10 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use url::form_urlencoded;
+
+const CODEX_ADAPTER_COMPATIBILITY_PATH: &str =
+    "/api/admin/models/global/codex-adapter-compatibility";
 
 pub(super) async fn maybe_build_local_admin_global_models_read_response(
     state: &AdminAppState<'_>,
@@ -26,6 +30,15 @@ pub(super) async fn maybe_build_local_admin_global_models_read_response(
     let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
+
+    if decision.route_family.as_deref() == Some("global_models_manage")
+        && request_context.method() == http::Method::GET
+        && request_context.path() == CODEX_ADAPTER_COMPATIBILITY_PATH
+    {
+        return Ok(Some(
+            build_codex_adapter_compatibility_response(state, request_context).await?,
+        ));
+    }
 
     if decision.route_family.as_deref() == Some("global_models_manage")
         && decision.route_kind.as_deref() == Some("routing_preview")
@@ -124,6 +137,42 @@ async fn build_get_global_model_response(
             None => global_model_not_found_response(&global_model_id),
         },
     )
+}
+
+async fn build_codex_adapter_compatibility_response(
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
+) -> Result<Response<Body>, GatewayError> {
+    if !state.has_provider_catalog_data_reader()
+        || !state.app().has_minimal_candidate_selection_reader()
+    {
+        return Ok(build_admin_global_models_data_unavailable_response());
+    }
+
+    let global_models = request_context
+        .query_string()
+        .map(|query| {
+            form_urlencoded::parse(query.as_bytes())
+                .filter_map(|(key, value)| (key == "global_model").then_some(value.into_owned()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let items =
+        crate::codex_adapter::compatibility::read_codex_adapter_global_model_compatibilities(
+            state.app(),
+            &global_models,
+        )
+        .await?;
+
+    Ok(Json(json!({
+        "items": items.into_iter().map(|item| json!({
+            "global_model": item.global_model,
+            "compatible": item.compatible,
+            "reasons": item.reasons,
+            "summary": item.summary,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response())
 }
 
 async fn build_global_model_providers_response(

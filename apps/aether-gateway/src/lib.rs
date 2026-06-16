@@ -35,6 +35,7 @@ mod bark_push;
 mod cache;
 mod client_session_affinity;
 mod clock;
+mod codex_adapter;
 mod constants;
 mod control;
 mod data;
