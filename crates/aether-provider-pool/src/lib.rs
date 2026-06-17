@@ -25,7 +25,8 @@ pub use providers::{
     grok_supported_quota_windows_for_tier, normalize_chatgpt_web_image_quota_limit,
     AntigravityProviderPoolAdapter, ChatGptWebProviderPoolAdapter, CodexProviderPoolAdapter,
     DefaultProviderPoolAdapter, GeminiCliProviderPoolAdapter, GrokProviderPoolAdapter,
-    KiroPoolQuotaAuthInput, KiroProviderPoolAdapter, UnsupportedQuotaProviderPoolAdapter,
+    KiloFreeProviderPoolAdapter, KiroPoolQuotaAuthInput, KiroProviderPoolAdapter,
+    OpenCodeFreeProviderPoolAdapter, UnsupportedQuotaProviderPoolAdapter,
     ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH, CHATGPT_WEB_CONVERSATION_INIT_PATH,
     CHATGPT_WEB_DEFAULT_BASE_URL, CODEX_WHAM_USAGE_URL, GEMINI_CLI_RETRIEVE_USER_QUOTA_PATH,
     GEMINI_CLI_USER_AGENT, KIRO_USAGE_LIMITS_PATH, KIRO_USAGE_SDK_VERSION,
@@ -73,7 +74,9 @@ mod tests {
                 "codex",
                 "gemini_cli",
                 "grok",
+                "kilo_free",
                 "kiro",
+                "opencode_free",
                 "vertex_ai",
                 "windsurf"
             ]

@@ -72,6 +72,12 @@
                   <SelectItem value="antigravity">
                     Antigravity
                   </SelectItem>
+                  <SelectItem value="opencode_free">
+                    OpenCode Free
+                  </SelectItem>
+                  <SelectItem value="kilo_free">
+                    Kilo Free
+                  </SelectItem>
                 </template>
                 <!-- 编辑模式：显示所有类型（兼容已有数据） -->
                 <template v-else>
@@ -104,6 +110,12 @@
                   </SelectItem>
                   <SelectItem value="antigravity">
                     Antigravity
+                  </SelectItem>
+                  <SelectItem value="opencode_free">
+                    OpenCode Free
+                  </SelectItem>
+                  <SelectItem value="kilo_free">
+                    Kilo Free
                   </SelectItem>
                 </template>
               </SelectContent>

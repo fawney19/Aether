@@ -596,4 +596,36 @@ mod tests {
             Some(("x-goog-api-key".to_string(), "sk-gemini".to_string(),))
         );
     }
+
+    #[test]
+    fn standard_auth_uses_format_override_for_openai_embedding() {
+        let mut transport = sample_transport();
+        transport.endpoint.api_format = "openai:embedding".to_string();
+        transport.key.auth_type = "api_key".to_string();
+        transport.key.auth_type_by_format = Some(serde_json::json!({
+            "openai:embedding": "bearer"
+        }));
+        transport.key.decrypted_api_key = "ms-test-key".to_string();
+
+        assert_eq!(
+            resolve_local_standard_auth(&transport),
+            Some((
+                "authorization".to_string(),
+                "Bearer ms-test-key".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn standard_auth_defaults_to_x_api_key_for_openai_embedding_without_override() {
+        let mut transport = sample_transport();
+        transport.endpoint.api_format = "openai:embedding".to_string();
+        transport.key.auth_type = "api_key".to_string();
+        transport.key.decrypted_api_key = "ms-test-key".to_string();
+
+        assert_eq!(
+            resolve_local_standard_auth(&transport),
+            Some(("x-api-key".to_string(), "ms-test-key".to_string(),))
+        );
+    }
 }

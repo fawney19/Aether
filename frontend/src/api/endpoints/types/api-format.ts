@@ -273,7 +273,12 @@ export function sortApiFormats(formats: string[]): string[] {
   })
 }
 
-// openai family 格式只支持 bearer（Authorization header），不允许覆盖认证方式
+// openai:embedding / openai:rerank 等非 chat 格式允许覆盖认证方式（bearer / api_key），
+// openai chat / responses 等格式仍然固定使用 bearer（Authorization header）。
 export function formatSupportsAuthOverride(format: string): boolean {
-  return parseApiFormat(normalizeApiFormatAlias(format)).family !== 'openai'
+  const { family, kind } = parseApiFormat(normalizeApiFormatAlias(format))
+  if (family === 'openai') {
+    return kind === 'embedding' || kind === 'rerank'
+  }
+  return true
 }
