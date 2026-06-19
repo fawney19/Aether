@@ -1581,6 +1581,20 @@ mod tests {
         transport
     }
 
+    fn sample_kilo_free_transport() -> GatewayProviderTransportSnapshot {
+        let mut transport = sample_custom_aiplatform_transport();
+        transport.provider.provider_type = "kilo_free".to_string();
+        transport.provider.name = "Kilo Free".to_string();
+        transport.endpoint.api_format = "openai:chat".to_string();
+        transport.endpoint.api_family = Some("openai".to_string());
+        transport.endpoint.endpoint_kind = Some("chat".to_string());
+        transport.endpoint.base_url = "https://api.kilo.ai/api/gateway".to_string();
+        transport.endpoint.custom_path = None;
+        transport.key.api_formats = Some(vec!["openai:chat".to_string()]);
+        transport.key.decrypted_api_key = "kilo-secret".to_string();
+        transport
+    }
+
     fn sample_openai_transport(
         endpoint_id: &str,
         api_format: &str,
@@ -1639,6 +1653,15 @@ mod tests {
 
         assert_eq!(strategy.provider_id(), "windsurf");
         assert_eq!(strategy.kind(), ModelFetchStrategyKind::Windsurf);
+    }
+
+    #[test]
+    fn strategy_selection_uses_standard_transport_for_kilo_free() {
+        let strategy = select_model_fetch_strategy(&[sample_kilo_free_transport()])
+            .expect("strategy should select");
+
+        assert_eq!(strategy.provider_id(), "kilo_free");
+        assert_eq!(strategy.kind(), ModelFetchStrategyKind::StandardTransport);
     }
 
     #[tokio::test]

@@ -298,13 +298,14 @@ async fn gateway_handles_admin_provider_oauth_supported_types_locally_with_trust
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     let items = payload.as_array().expect("items should be array");
-    assert_eq!(items.len(), 6);
+    assert_eq!(items.len(), 7);
     assert_eq!(items[0]["provider_type"], "claude_code");
     assert_eq!(items[1]["provider_type"], "codex");
     assert_eq!(items[2]["provider_type"], "chatgpt_web");
     assert_eq!(items[3]["provider_type"], "gemini_cli");
     assert_eq!(items[4]["provider_type"], "antigravity");
     assert_eq!(items[5]["provider_type"], "windsurf");
+    assert_eq!(items[6]["provider_type"], "kilo_free");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

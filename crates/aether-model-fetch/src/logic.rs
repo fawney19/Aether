@@ -74,6 +74,8 @@ pub fn build_models_fetch_url(
     let provider_type = provider_type.trim().to_ascii_lowercase();
     let url = if provider_type == "codex" && api_format.starts_with("openai:") {
         build_codex_models_url(base_url)
+    } else if provider_type == "opencode_free" && api_format.starts_with("openai:") {
+        build_opencode_free_models_url(base_url)
     } else if api_format.starts_with("openai:") {
         build_v1_models_url(base_url)
     } else if api_format.starts_with("claude:") {
@@ -610,6 +612,27 @@ fn build_v1_models_url(base_url: &str) -> Option<String> {
     build_openai_compatible_models_url(base_url)
 }
 
+fn build_opencode_free_models_url(base_url: &str) -> Option<String> {
+    let (trimmed_base_url, base_query) = split_url_query(base_url);
+    let trimmed_base_url = trimmed_base_url.trim_end_matches('/');
+    if trimmed_base_url.is_empty() {
+        return None;
+    }
+
+    let mut url = if trimmed_base_url.ends_with("/v1/models") {
+        trimmed_base_url.to_string()
+    } else if trimmed_base_url.ends_with("/v1") {
+        format!("{trimmed_base_url}/models")
+    } else {
+        format!("{trimmed_base_url}/v1/models")
+    };
+    if let Some(query) = base_query.filter(|value| !value.trim().is_empty()) {
+        url.push('?');
+        url.push_str(query);
+    }
+    Some(url)
+}
+
 fn build_claude_models_url(base_url: &str) -> Option<String> {
     if let Some(url) = build_deepseek_anthropic_models_url(base_url) {
         return Some(url);
@@ -1090,6 +1113,32 @@ mod tests {
     }
 
     #[test]
+    fn build_models_fetch_url_uses_opencode_free_v1_models_endpoint() {
+        assert_eq!(
+            build_models_fetch_url("opencode_free", "openai:chat", "https://opencode.ai/zen"),
+            Some((
+                "https://opencode.ai/zen/v1/models".to_string(),
+                "openai:chat".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn build_models_fetch_url_keeps_kilo_free_default_models_endpoint() {
+        assert_eq!(
+            build_models_fetch_url(
+                "kilo_free",
+                "openai:chat",
+                "https://api.kilo.ai/api/gateway"
+            ),
+            Some((
+                "https://api.kilo.ai/api/gateway/models".to_string(),
+                "openai:chat".to_string()
+            ))
+        );
+    }
+
+    #[test]
     fn build_models_fetch_url_uses_deepseek_openai_models_for_anthropic_base() {
         assert_eq!(
             build_models_fetch_url(
@@ -1231,6 +1280,14 @@ mod tests {
         assert!(merged["antigravity"]["quota_by_model"]
             .get("stale-model")
             .is_none());
+    }
+
+    #[test]
+    fn preset_models_for_provider_returns_none_for_free_providers() {
+        assert!(preset_models_for_provider("opencode_free").is_none());
+        assert!(preset_models_for_provider("kilo_free").is_none());
+        assert!(preset_models_for_provider("OPENCODE_FREE").is_none());
+        assert!(preset_models_for_provider(" Kilo_Free ").is_none());
     }
 
     #[test]

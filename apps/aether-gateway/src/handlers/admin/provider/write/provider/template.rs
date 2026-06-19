@@ -8,10 +8,12 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use aether_provider_transport::provider_types::{
-    fixed_provider_template, FixedProviderEndpointTemplate, FixedProviderTemplate,
+    fixed_provider_template, FixedProviderEndpointTemplate, FixedProviderKeyTemplate,
+    FixedProviderTemplate,
 };
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use uuid::Uuid;
 
 const FIXED_PROVIDER_TEMPLATE_METADATA_KEY: &str = "_aether_fixed_provider_template";
 const OVERRIDE_BODY_RULES: &str = "body_rules";
@@ -29,6 +31,13 @@ struct FixedProviderEndpointMetadata {
     retired: bool,
     overrides: BTreeSet<String>,
     config_keys: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FixedProviderKeyMetadata {
+    provider_type: String,
+    item_key: String,
+    version: u32,
 }
 
 pub(crate) async fn reconcile_admin_fixed_provider_template_endpoints(
@@ -117,13 +126,71 @@ pub(crate) async fn reconcile_admin_fixed_provider_template_keys(
     state: &AdminAppState<'_>,
     provider: &StoredProviderCatalogProvider,
 ) -> Result<(), GatewayError> {
-    let Some(_) = state.fixed_provider_template(&provider.provider_type) else {
+    let Some(template) = state.fixed_provider_template(&provider.provider_type) else {
         return Ok(());
     };
 
     let existing_keys = state
         .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
         .await?;
+    let mut matched_default_key_ids = BTreeSet::new();
+
+    for key_template in template.keys {
+        let existing_key = existing_keys
+            .iter()
+            .find(|key| key_matches_fixed_provider_template(key, key_template));
+        match existing_key {
+            Some(existing_key) => {
+                matched_default_key_ids.insert(existing_key.id.clone());
+                let mut updated_key = reconcile_fixed_provider_default_key(
+                    state,
+                    provider,
+                    existing_key,
+                    template,
+                    key_template,
+                )
+                .map_err(GatewayError::Internal)?;
+                upsert_fixed_provider_key_metadata(
+                    &mut updated_key,
+                    &managed_fixed_provider_key_metadata(template, key_template),
+                );
+                if updated_key != *existing_key {
+                    let Some(_) = state.update_provider_catalog_key(&updated_key).await? else {
+                        return Err(GatewayError::Internal(
+                            "provider catalog key writer unavailable".to_string(),
+                        ));
+                    };
+                }
+            }
+            None => {
+                let mut created =
+                    build_admin_fixed_provider_key_record(state, provider, template, key_template)
+                        .map_err(GatewayError::Internal)?;
+                upsert_fixed_provider_key_metadata(
+                    &mut created,
+                    &managed_fixed_provider_key_metadata(template, key_template),
+                );
+                let Some(_) = state.create_provider_catalog_key(&created).await? else {
+                    return Err(GatewayError::Internal(
+                        "provider catalog key writer unavailable".to_string(),
+                    ));
+                };
+            }
+        }
+    }
+
+    for existing_key in existing_keys.iter().filter(|key| {
+        fixed_provider_key_metadata(key).is_some()
+            && !matched_default_key_ids.contains(&key.id)
+            && template.keys.iter().any(|template_key| {
+                fixed_provider_key_metadata(key)
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.item_key == template_key.item_key)
+            })
+    }) {
+        let _ = state.delete_provider_catalog_key(&existing_key.id).await?;
+    }
+
     for existing_key in existing_keys {
         let Some(updated_key) = reconcile_fixed_provider_key(provider, &existing_key) else {
             continue;
@@ -493,6 +560,201 @@ fn current_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn build_admin_fixed_provider_key_record(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    template: &FixedProviderTemplate,
+    key_template: &FixedProviderKeyTemplate,
+) -> Result<StoredProviderCatalogKey, String> {
+    let mut key = StoredProviderCatalogKey::new(
+        Uuid::new_v4().to_string(),
+        provider.id.clone(),
+        key_template.name.to_string(),
+        key_template.auth_type.to_string(),
+        None,
+        true,
+    )
+    .map_err(|err| err.to_string())?
+    .with_transport_fields(
+        Some(fixed_provider_key_api_formats(key_template)),
+        key_template
+            .api_key
+            .and_then(|api_key| state.encrypt_catalog_secret_with_fallbacks(api_key)),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .map_err(|err| err.to_string())?;
+    key.auto_fetch_models = key_template.auto_fetch_models;
+    key.request_count = Some(0);
+    key.success_count = Some(0);
+    key.error_count = Some(0);
+    key.total_response_time_ms = Some(0);
+    key.health_by_format = Some(json!({}));
+    key.circuit_breaker_by_format = Some(json!({}));
+    let now_unix_secs = current_unix_secs();
+    key.created_at_unix_ms = Some(now_unix_secs);
+    key.updated_at_unix_secs = Some(now_unix_secs);
+    upsert_fixed_provider_key_metadata(
+        &mut key,
+        &managed_fixed_provider_key_metadata(template, key_template),
+    );
+    Ok(key)
+}
+
+fn reconcile_fixed_provider_default_key(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    existing_key: &StoredProviderCatalogKey,
+    template: &FixedProviderTemplate,
+    key_template: &FixedProviderKeyTemplate,
+) -> Result<StoredProviderCatalogKey, String> {
+    let mut updated = existing_key.clone();
+    updated.provider_id = provider.id.clone();
+    updated.name = key_template.name.to_string();
+    updated.auth_type = key_template.auth_type.to_string();
+    updated.api_formats = Some(fixed_provider_key_api_formats(key_template));
+    updated.auth_type_by_format = None;
+    updated.encrypted_auth_config = None;
+    updated.auto_fetch_models = key_template.auto_fetch_models;
+    if let Some(api_key) = key_template.api_key {
+        if let Some(encrypted_api_key) = state.encrypt_catalog_secret_with_fallbacks(api_key) {
+            updated.encrypted_api_key = Some(encrypted_api_key);
+        }
+    } else {
+        updated.encrypted_api_key = None;
+    }
+    if updated.health_by_format.is_none() {
+        updated.health_by_format = Some(json!({}));
+    }
+    if updated.circuit_breaker_by_format.is_none() {
+        updated.circuit_breaker_by_format = Some(json!({}));
+    }
+    upsert_fixed_provider_key_metadata(
+        &mut updated,
+        &managed_fixed_provider_key_metadata(template, key_template),
+    );
+    if updated != *existing_key {
+        updated.updated_at_unix_secs = Some(current_unix_secs());
+    }
+    Ok(updated)
+}
+
+fn key_matches_fixed_provider_template(
+    key: &StoredProviderCatalogKey,
+    key_template: &FixedProviderKeyTemplate,
+) -> bool {
+    if let Some(metadata) = fixed_provider_key_metadata(key) {
+        if metadata.item_key == key_template.item_key {
+            return true;
+        }
+    }
+
+    key.name.trim().eq_ignore_ascii_case(key_template.name)
+        && key
+            .auth_type
+            .trim()
+            .eq_ignore_ascii_case(key_template.auth_type)
+        && fixed_provider_key_api_format_values_match(key.api_formats.as_ref(), key_template)
+}
+
+fn fixed_provider_key_api_formats(key_template: &FixedProviderKeyTemplate) -> Value {
+    json!(key_template.api_formats.to_vec())
+}
+
+fn fixed_provider_key_api_format_values_match(
+    actual: Option<&Value>,
+    key_template: &FixedProviderKeyTemplate,
+) -> bool {
+    let Some(actual) = actual.and_then(Value::as_array) else {
+        return false;
+    };
+    let actual = actual
+        .iter()
+        .filter_map(Value::as_str)
+        .map(normalize_api_format_alias)
+        .collect::<Vec<_>>();
+    let expected = key_template
+        .api_formats
+        .iter()
+        .map(|value| normalize_api_format_alias(value))
+        .collect::<Vec<_>>();
+    actual == expected
+}
+
+fn fixed_provider_key_metadata(key: &StoredProviderCatalogKey) -> Option<FixedProviderKeyMetadata> {
+    let metadata = key
+        .upstream_metadata
+        .as_ref()?
+        .as_object()?
+        .get(FIXED_PROVIDER_TEMPLATE_METADATA_KEY)?
+        .as_object()?;
+    let provider_type = metadata
+        .get("provider_type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let item_key = metadata
+        .get("item_key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if !metadata
+        .get("managed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    Some(FixedProviderKeyMetadata {
+        provider_type: provider_type.to_string(),
+        item_key: item_key.to_string(),
+        version: metadata
+            .get("version")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(0),
+    })
+}
+
+fn managed_fixed_provider_key_metadata(
+    template: &FixedProviderTemplate,
+    key_template: &FixedProviderKeyTemplate,
+) -> FixedProviderKeyMetadata {
+    FixedProviderKeyMetadata {
+        provider_type: template.provider_type.to_string(),
+        item_key: key_template.item_key.to_string(),
+        version: template.version,
+    }
+}
+
+fn upsert_fixed_provider_key_metadata(
+    key: &mut StoredProviderCatalogKey,
+    metadata: &FixedProviderKeyMetadata,
+) {
+    let mut upstream_metadata = key
+        .upstream_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    upstream_metadata.insert(
+        FIXED_PROVIDER_TEMPLATE_METADATA_KEY.to_string(),
+        json!({
+            "managed": true,
+            "provider_type": metadata.provider_type,
+            "item_key": metadata.item_key,
+            "version": metadata.version,
+        }),
+    );
+    key.upstream_metadata = Some(Value::Object(upstream_metadata));
+}
+
 fn reconcile_fixed_provider_key(
     provider: &StoredProviderCatalogProvider,
     existing_key: &StoredProviderCatalogKey,
@@ -533,4 +795,84 @@ fn sync_override_if_changed<T>(
         return;
     }
     sync_override(overrides, key, actual, desired);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_provider_transport::provider_types::fixed_provider_template;
+
+    fn sample_key(provider_id: &str) -> StoredProviderCatalogKey {
+        StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            provider_id.to_string(),
+            "Default".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("sample key")
+        .with_transport_fields(
+            Some(json!(["openai:chat"])),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("sample key transport fields")
+    }
+
+    #[test]
+    fn default_free_provider_key_matching_is_idempotent_by_metadata() {
+        let template = fixed_provider_template("opencode_free").expect("opencode_free template");
+        let key_template = &template.keys[0];
+        let mut key = sample_key("provider-1");
+
+        upsert_fixed_provider_key_metadata(
+            &mut key,
+            &managed_fixed_provider_key_metadata(template, key_template),
+        );
+
+        assert!(key_matches_fixed_provider_template(&key, key_template));
+        assert_eq!(
+            fixed_provider_key_metadata(&key).unwrap().item_key,
+            "default"
+        );
+    }
+
+    #[test]
+    fn default_free_provider_key_matching_accepts_existing_exact_default() {
+        let template = fixed_provider_template("kilo_free").expect("kilo_free template");
+        let key_template = &template.keys[0];
+        let key = sample_key("provider-1");
+
+        assert!(key_matches_fixed_provider_template(&key, key_template));
+    }
+
+    #[test]
+    fn fixed_provider_key_metadata_preserves_existing_upstream_metadata() {
+        let template = fixed_provider_template("opencode_free").expect("opencode_free template");
+        let key_template = &template.keys[0];
+        let mut key = sample_key("provider-1");
+        key.upstream_metadata = Some(json!({ "models": { "etag": "abc" } }));
+
+        upsert_fixed_provider_key_metadata(
+            &mut key,
+            &managed_fixed_provider_key_metadata(template, key_template),
+        );
+
+        assert_eq!(
+            key.upstream_metadata.as_ref().unwrap()["models"]["etag"],
+            "abc"
+        );
+        assert_eq!(
+            key.upstream_metadata.as_ref().unwrap()[FIXED_PROVIDER_TEMPLATE_METADATA_KEY]
+                ["item_key"],
+            "default"
+        );
+    }
 }
