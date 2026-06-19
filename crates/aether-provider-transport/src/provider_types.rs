@@ -43,6 +43,16 @@ pub struct FixedProviderEndpointTemplate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedProviderKeyTemplate {
+    pub item_key: &'static str,
+    pub name: &'static str,
+    pub auth_type: &'static str,
+    pub api_formats: &'static [&'static str],
+    pub api_key: Option<&'static str>,
+    pub auto_fetch_models: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderApiFormatInheritance {
     None,
     OAuth,
@@ -159,10 +169,13 @@ pub struct FixedProviderTemplate {
     pub version: u32,
     pub base_url: &'static str,
     pub endpoints: &'static [FixedProviderEndpointTemplate],
+    pub keys: &'static [FixedProviderKeyTemplate],
     pub runtime_policy: ProviderRuntimePolicy,
 }
 
 const EMPTY_ENDPOINT_CONFIG_DEFAULTS: &[FixedProviderEndpointConfigDefault] = &[];
+const EMPTY_FIXED_PROVIDER_KEY_TEMPLATES: &[FixedProviderKeyTemplate] = &[];
+const OPENAI_CHAT_API_FORMATS: &[&str] = &["openai:chat"];
 const FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS: &[FixedProviderEndpointConfigDefault] =
     &[FixedProviderEndpointConfigDefault {
         key: "upstream_stream_policy",
@@ -276,6 +289,30 @@ const WINDSURF_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     ..STANDARD_RUNTIME_POLICY
 };
 
+const OPENCODE_FREE_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    fixed_provider: true,
+    api_format_inheritance: ProviderApiFormatInheritance::None,
+    enable_format_conversion_by_default: false,
+    oauth_is_bearer_like: false,
+    supports_model_fetch: true,
+    supports_local_openai_chat_transport: true,
+    supports_local_same_format_transport: true,
+    local_embedding_support: ProviderLocalEmbeddingSupport::None,
+    allow_auth_channel_mismatch_by_default: false,
+};
+
+const KILO_FREE_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    fixed_provider: true,
+    api_format_inheritance: ProviderApiFormatInheritance::OAuthOrBearer,
+    enable_format_conversion_by_default: false,
+    oauth_is_bearer_like: true,
+    supports_model_fetch: true,
+    supports_local_openai_chat_transport: true,
+    supports_local_same_format_transport: true,
+    local_embedding_support: ProviderLocalEmbeddingSupport::None,
+    allow_auth_channel_mismatch_by_default: false,
+};
+
 const CLAUDE_CODE_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
     provider_type: "claude_code",
     version: 1,
@@ -286,6 +323,7 @@ const CLAUDE_CODE_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProvider
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
+    keys: EMPTY_FIXED_PROVIDER_KEY_TEMPLATES,
     runtime_policy: CLAUDE_CODE_RUNTIME_POLICY,
 };
 
@@ -313,6 +351,7 @@ const CODEX_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTempla
             config_defaults: FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS,
         },
     ],
+    keys: EMPTY_FIXED_PROVIDER_KEY_TEMPLATES,
     runtime_policy: CODEX_RUNTIME_POLICY,
 };
 
@@ -326,6 +365,7 @@ const CHATGPT_WEB_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProvider
         custom_path: None,
         config_defaults: FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS,
     }],
+    keys: EMPTY_FIXED_PROVIDER_KEY_TEMPLATES,
     runtime_policy: CHATGPT_WEB_RUNTIME_POLICY,
 };
 
@@ -339,6 +379,7 @@ const KIRO_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplat
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
+    keys: EMPTY_FIXED_PROVIDER_KEY_TEMPLATES,
     runtime_policy: crate::kiro::RUNTIME_POLICY,
 };
 
@@ -352,6 +393,7 @@ const GEMINI_CLI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderT
         custom_path: Some("/v1internal:{action}"),
         config_defaults: AUTO_STREAM_ENDPOINT_CONFIG_DEFAULTS,
     }],
+    keys: EMPTY_FIXED_PROVIDER_KEY_TEMPLATES,
     runtime_policy: GEMINI_CLI_RUNTIME_POLICY,
 };
 
@@ -379,6 +421,7 @@ const VERTEX_AI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTe
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
     ],
+    keys: EMPTY_FIXED_PROVIDER_KEY_TEMPLATES,
     runtime_policy: VERTEX_AI_RUNTIME_POLICY,
 };
 
@@ -392,6 +435,7 @@ const ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProvider
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
+    keys: EMPTY_FIXED_PROVIDER_KEY_TEMPLATES,
     runtime_policy: ANTIGRAVITY_RUNTIME_POLICY,
 };
 
@@ -425,6 +469,7 @@ const GROK_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplat
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
     ],
+    keys: EMPTY_FIXED_PROVIDER_KEY_TEMPLATES,
     runtime_policy: GROK_RUNTIME_POLICY,
 };
 
@@ -438,7 +483,50 @@ const WINDSURF_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTem
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
+    keys: EMPTY_FIXED_PROVIDER_KEY_TEMPLATES,
     runtime_policy: WINDSURF_RUNTIME_POLICY,
+};
+
+const OPENCODE_FREE_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
+    provider_type: "opencode_free",
+    version: 1,
+    base_url: "https://opencode.ai/zen",
+    endpoints: &[FixedProviderEndpointTemplate {
+        item_key: "openai:chat",
+        api_format: "openai:chat",
+        custom_path: Some("/v1"),
+        config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+    }],
+    keys: &[FixedProviderKeyTemplate {
+        item_key: "default",
+        name: "Default",
+        auth_type: "api_key",
+        api_formats: OPENAI_CHAT_API_FORMATS,
+        api_key: None,
+        auto_fetch_models: true,
+    }],
+    runtime_policy: OPENCODE_FREE_RUNTIME_POLICY,
+};
+
+const KILO_FREE_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
+    provider_type: "kilo_free",
+    version: 1,
+    base_url: "https://api.kilo.ai/api/gateway",
+    endpoints: &[FixedProviderEndpointTemplate {
+        item_key: "openai:chat",
+        api_format: "openai:chat",
+        custom_path: None,
+        config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+    }],
+    keys: &[FixedProviderKeyTemplate {
+        item_key: "default",
+        name: "Default",
+        auth_type: "api_key",
+        api_formats: OPENAI_CHAT_API_FORMATS,
+        api_key: Some("free"),
+        auto_fetch_models: true,
+    }],
+    runtime_policy: KILO_FREE_RUNTIME_POLICY,
 };
 
 pub fn provider_type_is_fixed(provider_type: &str) -> bool {
@@ -493,6 +581,8 @@ pub fn fixed_provider_template(provider_type: &str) -> Option<&'static FixedProv
         "vertex_ai" => Some(&VERTEX_AI_FIXED_PROVIDER_TEMPLATE),
         "antigravity" => Some(&ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE),
         "windsurf" => Some(&WINDSURF_FIXED_PROVIDER_TEMPLATE),
+        "opencode_free" => Some(&OPENCODE_FREE_FIXED_PROVIDER_TEMPLATE),
+        "kilo_free" => Some(&KILO_FREE_FIXED_PROVIDER_TEMPLATE),
         _ => None,
     }
 }
@@ -614,6 +704,17 @@ pub fn provider_type_admin_oauth_template(provider_type: &str) -> Option<Provide
             redirect_uri: "show-auth-token",
             use_pkce: false,
         }),
+        "kilo_free" => Some(ProviderOAuthTemplate {
+            provider_type: "kilo_free",
+            display_name: "KiloFree",
+            authorize_url: "https://kilo.ai/oauth/authorize",
+            token_url: "https://api.kilo.ai/oauth/token",
+            client_id: "kilo-free",
+            client_secret: "",
+            scopes: &[],
+            redirect_uri: "http://localhost:8085/oauth2callback",
+            use_pkce: false,
+        }),
         _ => None,
     }
 }
@@ -625,6 +726,7 @@ pub const ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES: &[&str] = &[
     "gemini_cli",
     "antigravity",
     "windsurf",
+    "kilo_free",
 ];
 
 #[cfg(test)]
@@ -789,6 +891,91 @@ mod tests {
         );
         assert_eq!(template.redirect_uri, "show-auth-token");
         assert!(ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES.contains(&"windsurf"));
+    }
+
+    #[test]
+    fn opencode_free_fixed_provider_template_exposes_openai_chat_with_v1_path() {
+        let template =
+            fixed_provider_template("opencode_free").expect("opencode_free template should exist");
+        assert_eq!(template.provider_type, "opencode_free");
+        assert_eq!(template.base_url, "https://opencode.ai/zen");
+        assert_eq!(template.version, 1);
+        assert_eq!(
+            template
+                .endpoints
+                .iter()
+                .map(|item| item.api_format)
+                .collect::<Vec<_>>(),
+            vec!["openai:chat"]
+        );
+        let endpoint =
+            fixed_provider_endpoint_template_by_api_format("opencode_free", "openai:chat")
+                .expect("opencode_free chat endpoint should exist");
+        assert_eq!(endpoint.custom_path, Some("/v1"));
+        assert_eq!(template.keys.len(), 1);
+        assert_eq!(template.keys[0].item_key, "default");
+        assert_eq!(template.keys[0].name, "Default");
+        assert_eq!(template.keys[0].auth_type, "api_key");
+        assert_eq!(template.keys[0].api_formats, &["openai:chat"]);
+        assert_eq!(template.keys[0].api_key, None);
+        assert!(template.keys[0].auto_fetch_models);
+
+        let policy = provider_runtime_policy("opencode_free");
+        assert!(policy.fixed_provider);
+        assert!(!policy.oauth_is_bearer_like);
+        assert!(policy.supports_model_fetch);
+        assert!(policy.supports_local_openai_chat_transport);
+        assert!(policy.supports_local_same_format_transport);
+    }
+
+    #[test]
+    fn kilo_free_fixed_provider_template_exposes_openai_chat_without_custom_path() {
+        let template =
+            fixed_provider_template("kilo_free").expect("kilo_free template should exist");
+        assert_eq!(template.provider_type, "kilo_free");
+        assert_eq!(template.base_url, "https://api.kilo.ai/api/gateway");
+        assert_eq!(template.version, 1);
+        assert_eq!(
+            template
+                .endpoints
+                .iter()
+                .map(|item| item.api_format)
+                .collect::<Vec<_>>(),
+            vec!["openai:chat"]
+        );
+        let endpoint = fixed_provider_endpoint_template_by_api_format("kilo_free", "openai:chat")
+            .expect("kilo_free chat endpoint should exist");
+        assert_eq!(endpoint.custom_path, None);
+        assert_eq!(template.keys.len(), 1);
+        assert_eq!(template.keys[0].item_key, "default");
+        assert_eq!(template.keys[0].name, "Default");
+        assert_eq!(template.keys[0].auth_type, "api_key");
+        assert_eq!(template.keys[0].api_formats, &["openai:chat"]);
+        assert_eq!(template.keys[0].api_key, Some("free"));
+        assert!(template.keys[0].auto_fetch_models);
+
+        let policy = provider_runtime_policy("kilo_free");
+        assert!(policy.fixed_provider);
+        assert!(policy.oauth_is_bearer_like);
+        assert!(policy.supports_model_fetch);
+        assert!(policy.supports_local_openai_chat_transport);
+        assert!(policy.key_inherits_api_formats("bearer", None));
+    }
+
+    #[test]
+    fn kilo_free_admin_oauth_template_is_advertised() {
+        let template =
+            provider_type_admin_oauth_template("kilo_free").expect("kilo_free oauth template");
+
+        assert_eq!(template.provider_type, "kilo_free");
+        assert_eq!(template.display_name, "KiloFree");
+        assert!(ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES.contains(&"kilo_free"));
+    }
+
+    #[test]
+    fn opencode_free_has_no_admin_oauth_template() {
+        assert!(provider_type_admin_oauth_template("opencode_free").is_none());
+        assert!(!ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES.contains(&"opencode_free"));
     }
 
     #[test]

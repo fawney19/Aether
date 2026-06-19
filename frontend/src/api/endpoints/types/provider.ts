@@ -668,7 +668,7 @@ export interface ProviderStatusMonitorResponse {
   providers: ProviderStatusMonitor[]
 }
 
-export type ProviderType = 'custom' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro' | 'grok' | 'windsurf' | 'vertex_ai'
+export type ProviderType = 'custom' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro' | 'grok' | 'windsurf' | 'vertex_ai' | 'opencode_free' | 'kilo_free'
 
 export interface ClaudeCodeAdvancedConfig {
   // 会话数量控制：null/undefined 表示不限制
@@ -774,17 +774,8 @@ export interface FailoverRuleItem {
 }
 
 export interface FailoverRulesConfig {
-  max_retries?: number
-  stop_status_codes?: number[]
-  stop_on_status_codes?: number[]
-  early_stop_status_codes?: number[]
-  non_retryable_status_codes?: number[]
-  continue_on_status_codes?: number[]
-  retryable_status_codes?: number[]
-  retry_on_status_codes?: number[]
-  continue_status_codes?: number[]
-  success_failover_patterns?: FailoverRuleItem[]
-  error_stop_patterns?: FailoverRuleItem[]
+  success_failover_patterns: FailoverRuleItem[]
+  error_stop_patterns: FailoverRuleItem[]
 }
 
 export interface ProviderWithEndpointsSummary {
