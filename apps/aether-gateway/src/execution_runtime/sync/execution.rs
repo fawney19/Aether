@@ -44,12 +44,15 @@ use crate::execution_runtime::grok::maybe_execute_grok_sync;
 use crate::execution_runtime::kiro_cache::{
     build_kiro_prompt_cache_profile, compute_kiro_prompt_cache_usage,
     estimate_kiro_prompt_input_tokens, kiro_simulated_cache_enabled_from_provider_config,
-    kiro_simulated_cache_enabled_from_report_context, KiroPromptCacheUsage,
-    KIRO_SIMULATED_CACHE_ENABLED_CONTEXT_FIELD,
+    kiro_simulated_cache_enabled_from_report_context, simulated_cache_config_from_provider_config,
+    KiroPromptCacheUsage, KIRO_SIMULATED_CACHE_ENABLED_CONTEXT_FIELD,
+    SIMULATED_CACHE_ENABLED_CONTEXT_FIELD, SIMULATED_CACHE_MAX_PERCENT_CONTEXT_FIELD,
+    SIMULATED_CACHE_MIN_PERCENT_CONTEXT_FIELD,
 };
 use crate::execution_runtime::oauth_retry::refresh_oauth_plan_auth_for_retry;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::post_sync_plan_to_remote_execution_runtime;
+use crate::execution_runtime::simulated_cache::maybe_apply_simulated_cache_to_response_body;
 use crate::execution_runtime::submission::{
     resolve_local_sync_error_status_code, submit_local_core_error_or_sync_finalize,
 };
@@ -399,47 +402,69 @@ async fn seed_kiro_sync_simulated_cache_enabled(
     plan: &ExecutionPlan,
     report_context: &mut Option<Value>,
 ) {
-    if !plan
-        .provider_name
-        .as_deref()
-        .is_some_and(|provider_name| provider_name.eq_ignore_ascii_case("Kiro"))
-    {
-        return;
-    }
-
-    let enabled = match state
+    let (config, legacy_kiro_enabled) = match state
         .read_provider_catalog_providers_by_ids(std::slice::from_ref(&plan.provider_id))
         .await
     {
-        Ok(providers) => providers
-            .iter()
-            .find(|provider| provider.id == plan.provider_id)
-            .filter(|provider| provider.provider_type.eq_ignore_ascii_case("kiro"))
-            .is_some_and(|provider| {
-                kiro_simulated_cache_enabled_from_provider_config(provider.config.as_ref())
-            }),
+        Ok(providers) => {
+            let provider = providers
+                .iter()
+                .find(|provider| provider.id == plan.provider_id);
+            let config = provider.and_then(|provider| {
+                simulated_cache_config_from_provider_config(provider.config.as_ref())
+            });
+            let legacy_kiro_enabled = provider
+                .filter(|provider| provider.provider_type.eq_ignore_ascii_case("kiro"))
+                .is_some_and(|provider| {
+                    config.is_none()
+                        && kiro_simulated_cache_enabled_from_provider_config(
+                            provider.config.as_ref(),
+                        )
+                });
+            (config, legacy_kiro_enabled)
+        }
         Err(err) => {
             warn!(
-                event_name = "kiro_simulated_cache_config_read_failed",
+                event_name = "simulated_cache_config_read_failed",
                 log_type = "event",
                 request_id = %plan.request_id,
                 provider_id = %plan.provider_id,
                 error = ?err,
-                "failed to read Kiro simulated cache provider config; defaulting disabled"
+                "failed to read simulated cache provider config; defaulting disabled"
             );
-            false
+            (None, false)
         }
     };
 
     let Some(context) = report_context.as_mut().and_then(Value::as_object_mut) else {
         return;
     };
-    if enabled {
+    if let Some(config) = config {
+        context.insert(
+            SIMULATED_CACHE_ENABLED_CONTEXT_FIELD.to_string(),
+            Value::Bool(true),
+        );
+        context.insert(
+            SIMULATED_CACHE_MIN_PERCENT_CONTEXT_FIELD.to_string(),
+            Value::from(config.min_percent),
+        );
+        context.insert(
+            SIMULATED_CACHE_MAX_PERCENT_CONTEXT_FIELD.to_string(),
+            Value::from(config.max_percent),
+        );
+        context.remove(KIRO_SIMULATED_CACHE_ENABLED_CONTEXT_FIELD);
+    } else if legacy_kiro_enabled {
+        context.remove(SIMULATED_CACHE_ENABLED_CONTEXT_FIELD);
+        context.remove(SIMULATED_CACHE_MIN_PERCENT_CONTEXT_FIELD);
+        context.remove(SIMULATED_CACHE_MAX_PERCENT_CONTEXT_FIELD);
         context.insert(
             KIRO_SIMULATED_CACHE_ENABLED_CONTEXT_FIELD.to_string(),
             Value::Bool(true),
         );
     } else {
+        context.remove(SIMULATED_CACHE_ENABLED_CONTEXT_FIELD);
+        context.remove(SIMULATED_CACHE_MIN_PERCENT_CONTEXT_FIELD);
+        context.remove(SIMULATED_CACHE_MAX_PERCENT_CONTEXT_FIELD);
         context.remove(KIRO_SIMULATED_CACHE_ENABLED_CONTEXT_FIELD);
     }
 }
@@ -2129,7 +2154,32 @@ async fn execute_execution_runtime_sync_impl(
         }
         seed_kiro_sync_report_context_prompt_cache_usage(state, &plan, &mut report_context).await;
     }
+    let mut body_bytes = body_bytes;
+    let mut body_base64 = body_base64;
+    let mut body_json = body_json;
+    let mut response_body_rewritten = false;
+    if (200..300).contains(&status_code) {
+        if let Some(body_json) = body_json.as_mut() {
+            if maybe_apply_simulated_cache_to_response_body(
+                body_json,
+                &mut report_context,
+                plan.client_api_format.as_str(),
+            ) {
+                body_bytes = serde_json::to_vec(body_json)
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                body_base64 = None;
+                response_body_rewritten = true;
+            }
+        }
+    }
     let mut client_headers = headers.clone();
+    if response_body_rewritten {
+        client_headers.remove("content-encoding");
+        client_headers.insert("content-length".to_string(), body_bytes.len().to_string());
+        client_headers
+            .entry("content-type".to_string())
+            .or_insert_with(|| "application/json".to_string());
+    }
     apply_endpoint_response_header_rules(state, &plan, &mut client_headers, body_json.as_ref())
         .await?;
     let explicit_finalize = should_finalize_sync_response(report_kind.as_deref());

@@ -241,6 +241,7 @@ async fn gateway_handles_admin_provider_summary_locally_with_trusted_admin_princ
                 "pool_advanced": {"enabled": true},
                 "failover_rules": {"strategy": "ordered"},
                 "chat_pii_redaction": {"enabled": true},
+                "simulated_cache": {"enabled": true, "min_percent": 90, "max_percent": 100},
                 "kiro": {"simulated_cache_enabled": true},
                 "provider_ops": {"architecture_id": "anyrouter"}
             })),
@@ -355,6 +356,9 @@ async fn gateway_handles_admin_provider_summary_locally_with_trusted_admin_princ
     assert_eq!(payload["ops_architecture_id"], "anyrouter");
     assert_eq!(payload["chat_pii_redaction"], json!({"enabled": true}));
     assert_eq!(payload["kiro_simulated_cache_enabled"], true);
+    assert_eq!(payload["simulated_cache_enabled"], true);
+    assert_eq!(payload["simulated_cache_min_percent"], 90.0);
+    assert_eq!(payload["simulated_cache_max_percent"], 100.0);
     assert_eq!(payload["created_at"], "2024-03-21T05:46:40Z");
     assert_eq!(payload["updated_at"], "2024-03-21T05:48:20Z");
     assert_eq!(
@@ -870,6 +874,57 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
     assert_eq!(payload["ops_configured"], true);
     assert_eq!(payload["ops_architecture_id"], "cubence");
 
+    let simulated_cache_enable_response = reqwest::Client::new()
+        .patch(format!("{gateway_url}/api/admin/providers/provider-openai"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "config": {
+                "simulated_cache": {
+                    "enabled": true,
+                    "min_percent": 90,
+                    "max_percent": 100
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    let simulated_cache_enable_status = simulated_cache_enable_response.status();
+    let simulated_cache_enable_body = simulated_cache_enable_response
+        .text()
+        .await
+        .expect("body should read");
+    assert_eq!(
+        simulated_cache_enable_status,
+        StatusCode::OK,
+        "body={simulated_cache_enable_body}"
+    );
+    let simulated_cache_enable_payload: serde_json::Value =
+        serde_json::from_str(&simulated_cache_enable_body).expect("json body should parse");
+    assert_eq!(
+        simulated_cache_enable_payload["simulated_cache_enabled"],
+        true
+    );
+    assert_eq!(
+        simulated_cache_enable_payload["simulated_cache_min_percent"],
+        90.0
+    );
+    assert_eq!(
+        simulated_cache_enable_payload["simulated_cache_max_percent"],
+        100.0
+    );
+    assert_eq!(
+        simulated_cache_enable_payload["chat_pii_redaction"],
+        json!({"enabled": true})
+    );
+    assert_eq!(
+        simulated_cache_enable_payload["failover_rules"],
+        json!({"strategy": "ordered"})
+    );
+
     let disable_response = reqwest::Client::new()
         .patch(format!("{gateway_url}/api/admin/providers/provider-openai"))
         .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
@@ -878,7 +933,8 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!({
             "config": {
-                "chat_pii_redaction": {"enabled": false}
+                "chat_pii_redaction": {"enabled": false},
+                "simulated_cache": null
             }
         }))
         .send()
@@ -899,6 +955,7 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
         json!({"strategy": "ordered"})
     );
     assert_eq!(disable_payload["ops_architecture_id"], "cubence");
+    assert_eq!(disable_payload["simulated_cache_enabled"], false);
 
     let invalid_response = reqwest::Client::new()
         .patch(format!("{gateway_url}/api/admin/providers/provider-openai"))
@@ -947,6 +1004,14 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
             .and_then(|value| value.get("failover_rules"))
             .cloned(),
         Some(json!({"strategy": "ordered"}))
+    );
+    assert_eq!(
+        updated_provider
+            .config
+            .as_ref()
+            .and_then(|value| value.get("simulated_cache"))
+            .cloned(),
+        None
     );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 

@@ -1202,6 +1202,7 @@ fn admin_usage_active_request_json(
         "cache_creation_ephemeral_5m_input_tokens": item.cache_creation_ephemeral_5m_input_tokens,
         "cache_creation_ephemeral_1h_input_tokens": item.cache_creation_ephemeral_1h_input_tokens,
         "cache_read_input_tokens": item.cache_read_input_tokens,
+        "simulated_cache_enabled": admin_usage_simulated_cache_enabled(item),
         "cost": round_to(item.total_cost_usd, 6),
         "actual_cost": round_to(item.actual_total_cost_usd, 6),
         "response_time_ms": item.response_time_ms,
@@ -1294,6 +1295,7 @@ pub fn admin_usage_record_json(
         "cache_creation_ephemeral_5m_input_tokens": item.cache_creation_ephemeral_5m_input_tokens,
         "cache_creation_ephemeral_1h_input_tokens": item.cache_creation_ephemeral_1h_input_tokens,
         "cache_read_input_tokens": item.cache_read_input_tokens,
+        "simulated_cache_enabled": admin_usage_simulated_cache_enabled(item),
         "total_tokens": admin_usage_total_tokens(item),
         "cost": round_to(item.total_cost_usd, 6),
         "actual_cost": round_to(item.actual_total_cost_usd, 6),
@@ -1380,6 +1382,17 @@ pub fn admin_usage_cache_creation_tokens(item: &StoredRequestUsageAudit) -> u64 
     }
 }
 
+fn admin_usage_simulated_cache_enabled(item: &StoredRequestUsageAudit) -> bool {
+    item.request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("dimensions"))
+        .and_then(Value::as_object)
+        .and_then(|dimensions| dimensions.get("simulated_cache_enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 pub fn admin_usage_total_input_context(item: &StoredRequestUsageAudit) -> u64 {
     let api_format = item
         .endpoint_api_format
@@ -1389,6 +1402,9 @@ pub fn admin_usage_total_input_context(item: &StoredRequestUsageAudit) -> u64 {
     let cache_creation_tokens =
         i64::try_from(admin_usage_cache_creation_tokens(item)).unwrap_or(i64::MAX);
     let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
+    if admin_usage_simulated_cache_enabled(item) {
+        return input_tokens.max(0).saturating_add(cache_read_tokens.max(0)) as u64;
+    }
     normalize_total_input_context_for_cache_hit_rate(
         api_format,
         input_tokens,
@@ -1404,6 +1420,9 @@ pub fn admin_usage_effective_input_tokens(item: &StoredRequestUsageAudit) -> u64
         .or(item.api_format.as_deref());
     let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
     let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
+    if admin_usage_simulated_cache_enabled(item) {
+        return input_tokens.max(0) as u64;
+    }
     normalize_input_tokens_for_billing(api_format, input_tokens, cache_read_tokens) as u64
 }
 
@@ -3429,6 +3448,36 @@ mod tests {
         assert_eq!(payload["cache_creation_ephemeral_5m_input_tokens"], 12);
         assert_eq!(payload["cache_creation_ephemeral_1h_input_tokens"], 8);
         assert_eq!(payload["total_tokens"], 50);
+    }
+
+    #[test]
+    fn admin_usage_record_keeps_simulated_cache_input_as_effective_input() {
+        let item = StoredRequestUsageAudit {
+            input_tokens: 2103,
+            cache_read_input_tokens: 21439,
+            request_metadata: Some(json!({
+                "dimensions": {
+                    "simulated_cache_enabled": true,
+                    "simulated_cache_hit_percent": 91.07,
+                    "simulated_cache_min_percent": 90,
+                    "simulated_cache_max_percent": 95
+                }
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        let payload = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            Some("primary"),
+        );
+
+        assert_eq!(payload["effective_input_tokens"], 2103);
+        assert_eq!(payload["cache_read_input_tokens"], 21439);
+        assert_eq!(payload["simulated_cache_enabled"], true);
     }
 
     #[test]

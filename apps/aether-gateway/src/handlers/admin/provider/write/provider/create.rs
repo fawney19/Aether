@@ -5,6 +5,7 @@ use crate::handlers::admin::provider::shared::support::{
 use crate::handlers::admin::provider::write::normalize::normalize_chat_pii_redaction_config;
 use crate::handlers::admin::provider::write::normalize::normalize_pool_advanced_config;
 use crate::handlers::admin::provider::write::normalize::normalize_provider_type_input;
+use crate::handlers::admin::provider::write::normalize::normalize_simulated_cache_config;
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::normalize_json_object;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider;
@@ -139,6 +140,12 @@ pub(crate) async fn build_admin_create_provider_record(
         let value = normalize_chat_pii_redaction_config(config_map.remove("chat_pii_redaction"))?;
         if let Some(value) = value {
             config_map.insert("chat_pii_redaction".to_string(), value);
+        }
+    }
+    if config_map.contains_key("simulated_cache") {
+        let value = normalize_simulated_cache_config(config_map.remove("simulated_cache"))?;
+        if let Some(value) = value {
+            config_map.insert("simulated_cache".to_string(), value);
         }
     }
     let config = (!config_map.is_empty()).then_some(serde_json::Value::Object(config_map));

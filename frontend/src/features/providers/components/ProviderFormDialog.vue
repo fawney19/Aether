@@ -281,20 +281,50 @@
           />
         </div>
 
-        <div
-          v-if="form.provider_type === 'kiro'"
-          class="flex items-center justify-between p-3 border rounded-lg bg-muted/50"
-        >
-          <div class="space-y-0.5">
-            <span class="text-sm font-medium">模拟缓存模式</span>
-            <p class="text-xs text-muted-foreground leading-relaxed">
-              启用后仅对 Kiro 请求模拟 prompt cache 读写计量。
-            </p>
+        <div class="space-y-3 p-3 border rounded-lg bg-muted/50">
+          <div class="flex items-center justify-between gap-4">
+            <div class="space-y-0.5">
+              <span class="text-sm font-medium">模拟缓存</span>
+              <p class="text-xs text-muted-foreground leading-relaxed">
+                按请求输入 token 的随机百分比强制覆盖缓存命中统计。
+              </p>
+            </div>
+            <Switch
+              :model-value="form.simulated_cache_enabled"
+              @update:model-value="(v: boolean) => form.simulated_cache_enabled = v"
+            />
           </div>
-          <Switch
-            :model-value="form.kiro_simulated_cache_enabled"
-            @update:model-value="(v: boolean) => form.kiro_simulated_cache_enabled = v"
-          />
+          <div
+            v-if="form.simulated_cache_enabled"
+            class="grid grid-cols-2 gap-3"
+          >
+            <div class="space-y-1.5">
+              <Label for="simulated_cache_min_percent">最小命中百分比</Label>
+              <Input
+                id="simulated_cache_min_percent"
+                :model-value="form.simulated_cache_min_percent ?? ''"
+                type="number"
+                min="0"
+                max="100"
+                step="0.01"
+                placeholder="90"
+                @update:model-value="(v) => form.simulated_cache_min_percent = parseNumberInput(v, { allowFloat: true, min: 0, max: 100 }) ?? 90"
+              />
+            </div>
+            <div class="space-y-1.5">
+              <Label for="simulated_cache_max_percent">最大命中百分比</Label>
+              <Input
+                id="simulated_cache_max_percent"
+                :model-value="form.simulated_cache_max_percent ?? ''"
+                type="number"
+                min="0"
+                max="100"
+                step="0.01"
+                placeholder="100"
+                @update:model-value="(v) => form.simulated_cache_max_percent = parseNumberInput(v, { allowFloat: true, min: 0, max: 100 }) ?? 100"
+              />
+            </div>
+          </div>
         </div>
 
         <div class="flex items-center justify-between gap-4 p-3 border rounded-lg bg-muted/50">
@@ -406,8 +436,9 @@ const form = ref({
   request_timeout: undefined as number | undefined,
   // 号池模式
   pool_mode_enabled: false,
-  // Kiro 专属配置
-  kiro_simulated_cache_enabled: false,
+  simulated_cache_enabled: false,
+  simulated_cache_min_percent: 90 as number | undefined,
+  simulated_cache_max_percent: 100 as number | undefined,
 })
 
 // 重置表单
@@ -434,8 +465,9 @@ function resetForm() {
     request_timeout: undefined,
     // 号池模式
     pool_mode_enabled: false,
-    // Kiro 专属配置
-    kiro_simulated_cache_enabled: false,
+    simulated_cache_enabled: false,
+    simulated_cache_min_percent: 90,
+    simulated_cache_max_percent: 100,
   }
 }
 
@@ -466,8 +498,9 @@ function loadProviderData() {
     request_timeout: props.provider.request_timeout ?? undefined,
     // 号池模式
     pool_mode_enabled: poolAdvanced !== null,
-    // Kiro 专属配置
-    kiro_simulated_cache_enabled: props.provider.kiro_simulated_cache_enabled ?? false,
+    simulated_cache_enabled: props.provider.simulated_cache_enabled ?? props.provider.kiro_simulated_cache_enabled ?? false,
+    simulated_cache_min_percent: props.provider.simulated_cache_min_percent ?? 90,
+    simulated_cache_max_percent: props.provider.simulated_cache_max_percent ?? 100,
   }
 }
 
@@ -485,9 +518,6 @@ const { isEditMode, handleDialogUpdate, handleCancel } = useFormDialog({
 watch(() => form.value.provider_type, () => {
   if (!isEditMode.value) {
     form.value.pool_mode_enabled = false
-  }
-  if (form.value.provider_type !== 'kiro') {
-    form.value.kiro_simulated_cache_enabled = false
   }
 })
 
@@ -514,6 +544,14 @@ const handleSubmit = async () => {
     showError('过期时间必须是合法时间', '验证失败')
     return
   }
+  if (form.value.simulated_cache_enabled) {
+    const minPercent = form.value.simulated_cache_min_percent ?? 90
+    const maxPercent = form.value.simulated_cache_max_percent ?? 100
+    if (minPercent < 0 || minPercent > 100 || maxPercent < 0 || maxPercent > 100 || minPercent > maxPercent) {
+      showError('模拟缓存百分比必须在 0-100 之间，且最小值不能大于最大值', '验证失败')
+      return
+    }
+  }
 
   loading.value = true
   try {
@@ -538,15 +576,22 @@ const handleSubmit = async () => {
       pool_advanced: form.value.pool_mode_enabled
         ? (currentPoolAdvanced ?? {})
         : null,
-      ...(form.value.provider_type === 'kiro'
-        ? {
-            config: {
+      config: {
+        simulated_cache: form.value.simulated_cache_enabled
+          ? {
+              enabled: true,
+              min_percent: form.value.simulated_cache_min_percent ?? 90,
+              max_percent: form.value.simulated_cache_max_percent ?? 100,
+            }
+          : null,
+        ...(form.value.provider_type === 'kiro'
+          ? {
               kiro: {
-                simulated_cache_enabled: form.value.kiro_simulated_cache_enabled,
+                simulated_cache_enabled: false,
               },
-            },
-          }
-        : {}),
+            }
+          : {}),
+      },
     }
 
     if (isEditMode.value && props.provider) {

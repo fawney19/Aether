@@ -7,6 +7,7 @@ type UsageTokenLike = {
   cache_read_input_tokens?: number | null
   api_format?: string | null
   endpoint_api_format?: string | null
+  simulated_cache_enabled?: boolean | null
 }
 
 function toNonNegativeNumber(value: number | null | undefined): number {
@@ -42,7 +43,7 @@ export function getEffectiveInputTokens(usage: UsageTokenLike): number {
 
   const inputTokens = toNonNegativeNumber(usage.input_tokens)
   const cacheReadTokens = toNonNegativeNumber(usage.cache_read_input_tokens)
-  if (inputTokens === 0 || cacheReadTokens === 0) {
+  if (inputTokens === 0 || cacheReadTokens === 0 || usage.simulated_cache_enabled === true) {
     return inputTokens
   }
 

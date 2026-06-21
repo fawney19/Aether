@@ -108,6 +108,7 @@ export interface UsageRecord {
   cache_creation_ephemeral_5m_input_tokens?: number
   cache_creation_ephemeral_1h_input_tokens?: number
   cache_read_input_tokens?: number
+  simulated_cache_enabled?: boolean
   total_tokens: number
   cost: number
   actual_cost?: number

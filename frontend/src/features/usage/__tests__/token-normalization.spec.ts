@@ -41,6 +41,16 @@ describe('usage token normalization', () => {
     })).toBe(80)
   })
 
+  it('does not subtract simulated cache reads from already-split input tokens', () => {
+    expect(getEffectiveInputTokens({
+      input_tokens: 2103,
+      effective_input_tokens: 0,
+      cache_read_input_tokens: 21439,
+      api_format: 'openai:chat',
+      simulated_cache_enabled: true,
+    })).toBe(2103)
+  })
+
   it('does not subtract cache read tokens for Claude usage', () => {
     expect(getEffectiveInputTokens({
       input_tokens: 4941,

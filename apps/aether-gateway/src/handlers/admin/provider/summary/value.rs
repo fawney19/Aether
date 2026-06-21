@@ -8,7 +8,7 @@ use aether_data_contracts::repository::candidates::{
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 fn json_truthy(value: &serde_json::Value) -> bool {
@@ -26,6 +26,34 @@ fn endpoint_timestamp_or_now(value: Option<u64>, now_unix_secs: u64) -> serde_js
     unix_secs_to_rfc3339(value.unwrap_or(now_unix_secs))
         .map(serde_json::Value::String)
         .unwrap_or(serde_json::Value::Null)
+}
+
+fn json_number_as_f64(value: Option<&Value>) -> Option<f64> {
+    value.and_then(|value| match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    })
+}
+
+fn simulated_cache_summary(config: Option<&serde_json::Map<String, Value>>) -> (bool, f64, f64) {
+    let simulated_cache = config
+        .and_then(|cfg| cfg.get("simulated_cache"))
+        .and_then(Value::as_object);
+    let enabled = simulated_cache
+        .and_then(|cfg| cfg.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let min_percent = simulated_cache
+        .and_then(|cfg| json_number_as_f64(cfg.get("min_percent")))
+        .unwrap_or(90.0)
+        .clamp(0.0, 100.0);
+    let max_percent = simulated_cache
+        .and_then(|cfg| json_number_as_f64(cfg.get("max_percent")))
+        .unwrap_or(100.0)
+        .clamp(0.0, 100.0);
+
+    (enabled, min_percent, max_percent)
 }
 
 pub(crate) fn build_admin_provider_summary_value(
@@ -133,12 +161,15 @@ pub(crate) fn build_admin_provider_summary_value(
         .and_then(|cfg| cfg.get("architecture_id"))
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned);
-    let kiro_simulated_cache_enabled = config
-        .and_then(|cfg| cfg.get("kiro"))
-        .and_then(serde_json::Value::as_object)
-        .and_then(|cfg| cfg.get("simulated_cache_enabled"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    let (simulated_cache_enabled, simulated_cache_min_percent, simulated_cache_max_percent) =
+        simulated_cache_summary(config);
+    let kiro_simulated_cache_enabled = simulated_cache_enabled
+        || config
+            .and_then(|cfg| cfg.get("kiro"))
+            .and_then(serde_json::Value::as_object)
+            .and_then(|cfg| cfg.get("simulated_cache_enabled"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
     let ops_quota_alert_enabled = provider_ops_config
         .and_then(serde_json::Value::as_object)
         .and_then(|cfg| cfg.get("quota_alert"))
@@ -167,47 +198,137 @@ pub(crate) fn build_admin_provider_summary_value(
         .or(provider.quota_expires_at_unix_secs)
         .and_then(unix_secs_to_rfc3339);
 
-    json!({
-        "id": provider.id.clone(),
-        "name": provider.name.clone(),
-        "provider_type": provider.provider_type.clone(),
-        "description": provider.description.clone(),
-        "website": provider.website.clone(),
-        "provider_priority": provider.provider_priority,
-        "keep_priority_on_conversion": provider.keep_priority_on_conversion,
-        "enable_format_conversion": provider.enable_format_conversion,
-        "is_active": provider.is_active,
-        "billing_type": billing_type,
-        "monthly_quota_usd": monthly_quota_usd,
-        "monthly_used_usd": monthly_used_usd,
-        "quota_reset_day": quota_reset_day,
-        "quota_last_reset_at": quota_last_reset_at,
-        "quota_expires_at": quota_expires_at,
-        "max_retries": provider.max_retries,
-        "proxy": provider.proxy.clone(),
-        "stream_first_byte_timeout": provider.stream_first_byte_timeout_secs,
-        "request_timeout": provider.request_timeout_secs,
-        "claude_code_advanced": config.and_then(|cfg| cfg.get("claude_code_advanced")).cloned(),
-        "pool_advanced": config.and_then(|cfg| cfg.get("pool_advanced")).cloned(),
-        "failover_rules": config.and_then(|cfg| cfg.get("failover_rules")).cloned(),
-        "chat_pii_redaction": config.and_then(|cfg| cfg.get("chat_pii_redaction")).cloned(),
-        "total_endpoints": total_endpoints,
-        "active_endpoints": active_endpoints,
-        "total_keys": total_keys,
-        "active_keys": active_keys,
-        "total_models": total_models,
-        "active_models": active_models,
-        "global_model_ids": active_global_model_ids,
-        "avg_health_score": avg_health_score,
-        "unhealthy_endpoints": unhealthy_endpoints,
-        "api_formats": api_formats,
-        "endpoint_health_details": endpoint_health_details,
-        "ops_configured": ops_configured,
-        "ops_architecture_id": ops_architecture_id,
-        "kiro_simulated_cache_enabled": kiro_simulated_cache_enabled,
-        "codex_cyber_flag_passthrough_enabled": codex_cyber_flag_passthrough_enabled(&provider.provider_type, provider.config.as_ref()),
-        "ops_quota_alert_enabled": ops_quota_alert_enabled,
-        "created_at": endpoint_timestamp_or_now(provider.created_at_unix_ms, now_unix_secs),
-        "updated_at": endpoint_timestamp_or_now(provider.updated_at_unix_secs, now_unix_secs),
-    })
+    let mut value = serde_json::Map::new();
+    value.insert("id".to_string(), json!(provider.id.clone()));
+    value.insert("name".to_string(), json!(provider.name.clone()));
+    value.insert(
+        "provider_type".to_string(),
+        json!(provider.provider_type.clone()),
+    );
+    value.insert(
+        "description".to_string(),
+        json!(provider.description.clone()),
+    );
+    value.insert("website".to_string(), json!(provider.website.clone()));
+    value.insert(
+        "provider_priority".to_string(),
+        json!(provider.provider_priority),
+    );
+    value.insert(
+        "keep_priority_on_conversion".to_string(),
+        json!(provider.keep_priority_on_conversion),
+    );
+    value.insert(
+        "enable_format_conversion".to_string(),
+        json!(provider.enable_format_conversion),
+    );
+    value.insert("is_active".to_string(), json!(provider.is_active));
+    value.insert("billing_type".to_string(), json!(billing_type));
+    value.insert("monthly_quota_usd".to_string(), json!(monthly_quota_usd));
+    value.insert("monthly_used_usd".to_string(), json!(monthly_used_usd));
+    value.insert("quota_reset_day".to_string(), json!(quota_reset_day));
+    value.insert(
+        "quota_last_reset_at".to_string(),
+        json!(quota_last_reset_at),
+    );
+    value.insert("quota_expires_at".to_string(), json!(quota_expires_at));
+    value.insert("max_retries".to_string(), json!(provider.max_retries));
+    value.insert("proxy".to_string(), json!(provider.proxy.clone()));
+    value.insert(
+        "stream_first_byte_timeout".to_string(),
+        json!(provider.stream_first_byte_timeout_secs),
+    );
+    value.insert(
+        "request_timeout".to_string(),
+        json!(provider.request_timeout_secs),
+    );
+    value.insert(
+        "claude_code_advanced".to_string(),
+        config
+            .and_then(|cfg| cfg.get("claude_code_advanced"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    value.insert(
+        "pool_advanced".to_string(),
+        config
+            .and_then(|cfg| cfg.get("pool_advanced"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    value.insert(
+        "failover_rules".to_string(),
+        config
+            .and_then(|cfg| cfg.get("failover_rules"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    value.insert(
+        "chat_pii_redaction".to_string(),
+        config
+            .and_then(|cfg| cfg.get("chat_pii_redaction"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    value.insert("total_endpoints".to_string(), json!(total_endpoints));
+    value.insert("active_endpoints".to_string(), json!(active_endpoints));
+    value.insert("total_keys".to_string(), json!(total_keys));
+    value.insert("active_keys".to_string(), json!(active_keys));
+    value.insert("total_models".to_string(), json!(total_models));
+    value.insert("active_models".to_string(), json!(active_models));
+    value.insert(
+        "global_model_ids".to_string(),
+        json!(active_global_model_ids),
+    );
+    value.insert("avg_health_score".to_string(), json!(avg_health_score));
+    value.insert(
+        "unhealthy_endpoints".to_string(),
+        json!(unhealthy_endpoints),
+    );
+    value.insert("api_formats".to_string(), json!(api_formats));
+    value.insert(
+        "endpoint_health_details".to_string(),
+        json!(endpoint_health_details),
+    );
+    value.insert("ops_configured".to_string(), json!(ops_configured));
+    value.insert(
+        "ops_architecture_id".to_string(),
+        json!(ops_architecture_id),
+    );
+    value.insert(
+        "kiro_simulated_cache_enabled".to_string(),
+        json!(kiro_simulated_cache_enabled),
+    );
+    value.insert(
+        "simulated_cache_enabled".to_string(),
+        json!(simulated_cache_enabled),
+    );
+    value.insert(
+        "simulated_cache_min_percent".to_string(),
+        json!(simulated_cache_min_percent),
+    );
+    value.insert(
+        "simulated_cache_max_percent".to_string(),
+        json!(simulated_cache_max_percent),
+    );
+    value.insert(
+        "codex_cyber_flag_passthrough_enabled".to_string(),
+        json!(codex_cyber_flag_passthrough_enabled(
+            &provider.provider_type,
+            provider.config.as_ref()
+        )),
+    );
+    value.insert(
+        "ops_quota_alert_enabled".to_string(),
+        json!(ops_quota_alert_enabled),
+    );
+    value.insert(
+        "created_at".to_string(),
+        endpoint_timestamp_or_now(provider.created_at_unix_ms, now_unix_secs),
+    );
+    value.insert(
+        "updated_at".to_string(),
+        endpoint_timestamp_or_now(provider.updated_at_unix_secs, now_unix_secs),
+    );
+    Value::Object(value)
 }

@@ -118,6 +118,7 @@ SELECT
       OR NULLIF(BTRIM("usage".request_metadata->>'provider_service_tier'), '') IS NOT NULL
       OR ("usage".request_metadata->>'client_requested_stream') IN ('true', 'false')
       OR ("usage".request_metadata->>'upstream_is_stream') IN ('true', 'false')
+      OR ("usage".request_metadata->'dimensions'->>'simulated_cache_enabled') IN ('true', 'false')
       THEN jsonb_strip_nulls(jsonb_build_object(
         'client_ip',
         NULLIF(BTRIM("usage".request_metadata->>'client_ip'), ''),
@@ -141,6 +142,36 @@ SELECT
         CASE
           WHEN ("usage".request_metadata->>'upstream_is_stream') IN ('true', 'false')
             THEN ("usage".request_metadata->>'upstream_is_stream')::boolean
+          ELSE NULL
+        END,
+        'dimensions',
+        CASE
+          WHEN ("usage".request_metadata->'dimensions'->>'simulated_cache_enabled') IN ('true', 'false')
+          THEN jsonb_strip_nulls(jsonb_build_object(
+            'simulated_cache_enabled',
+            ("usage".request_metadata->'dimensions'->>'simulated_cache_enabled')::boolean,
+            'simulated_cache_hit_percent',
+            CASE
+              WHEN ("usage".request_metadata->'dimensions'->>'simulated_cache_hit_percent')
+                   ~ '^-?[0-9]+(\.[0-9]+)?$'
+              THEN ("usage".request_metadata->'dimensions'->>'simulated_cache_hit_percent')::double precision
+              ELSE NULL
+            END,
+            'simulated_cache_min_percent',
+            CASE
+              WHEN ("usage".request_metadata->'dimensions'->>'simulated_cache_min_percent')
+                   ~ '^-?[0-9]+(\.[0-9]+)?$'
+              THEN ("usage".request_metadata->'dimensions'->>'simulated_cache_min_percent')::double precision
+              ELSE NULL
+            END,
+            'simulated_cache_max_percent',
+            CASE
+              WHEN ("usage".request_metadata->'dimensions'->>'simulated_cache_max_percent')
+                   ~ '^-?[0-9]+(\.[0-9]+)?$'
+              THEN ("usage".request_metadata->'dimensions'->>'simulated_cache_max_percent')::double precision
+              ELSE NULL
+            END
+          ))
           ELSE NULL
         END
       ))::json

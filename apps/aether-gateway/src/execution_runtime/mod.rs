@@ -15,6 +15,7 @@ mod oauth_retry;
 pub(crate) mod remote_compat;
 mod response_header_rules;
 mod server;
+mod simulated_cache;
 pub(crate) mod stream;
 mod stream_pump;
 pub(crate) mod submission;

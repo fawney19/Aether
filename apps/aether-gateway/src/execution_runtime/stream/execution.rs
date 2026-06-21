@@ -67,13 +67,18 @@ use crate::execution_runtime::kiro_cache::{
     billed_input_tokens as kiro_billed_input_tokens, build_kiro_prompt_cache_profile,
     compute_kiro_prompt_cache_usage, estimate_kiro_prompt_input_tokens,
     kiro_simulated_cache_enabled_from_provider_config,
-    kiro_simulated_cache_enabled_from_report_context, KiroPromptCacheUsage,
-    KIRO_SIMULATED_CACHE_ENABLED_CONTEXT_FIELD,
+    kiro_simulated_cache_enabled_from_report_context, simulated_cache_config_from_provider_config,
+    KiroPromptCacheUsage, KIRO_SIMULATED_CACHE_ENABLED_CONTEXT_FIELD,
+    SIMULATED_CACHE_ENABLED_CONTEXT_FIELD, SIMULATED_CACHE_MAX_PERCENT_CONTEXT_FIELD,
+    SIMULATED_CACHE_MIN_PERCENT_CONTEXT_FIELD,
 };
 use crate::execution_runtime::kiro_web_search::maybe_execute_kiro_web_search_stream;
 use crate::execution_runtime::oauth_retry::refresh_oauth_plan_auth_for_retry;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::post_stream_plan_to_remote_execution_runtime;
+use crate::execution_runtime::simulated_cache::{
+    maybe_apply_simulated_cache_to_response_body, maybe_apply_simulated_cache_to_stream_chunk,
+};
 use crate::execution_runtime::submission::{
     resolve_core_error_background_report_kind, resolve_local_sync_error_status_code,
     strip_utf8_bom_and_ws, submit_local_core_error_or_sync_finalize,
@@ -357,47 +362,69 @@ async fn seed_kiro_simulated_cache_enabled(
     plan: &ExecutionPlan,
     report_context: &mut Option<Value>,
 ) {
-    if !plan
-        .provider_name
-        .as_deref()
-        .is_some_and(|provider_name| provider_name.eq_ignore_ascii_case("Kiro"))
-    {
-        return;
-    }
-
-    let enabled = match state
+    let (config, legacy_kiro_enabled) = match state
         .read_provider_catalog_providers_by_ids(std::slice::from_ref(&plan.provider_id))
         .await
     {
-        Ok(providers) => providers
-            .iter()
-            .find(|provider| provider.id == plan.provider_id)
-            .filter(|provider| provider.provider_type.eq_ignore_ascii_case("kiro"))
-            .is_some_and(|provider| {
-                kiro_simulated_cache_enabled_from_provider_config(provider.config.as_ref())
-            }),
+        Ok(providers) => {
+            let provider = providers
+                .iter()
+                .find(|provider| provider.id == plan.provider_id);
+            let config = provider.and_then(|provider| {
+                simulated_cache_config_from_provider_config(provider.config.as_ref())
+            });
+            let legacy_kiro_enabled = provider
+                .filter(|provider| provider.provider_type.eq_ignore_ascii_case("kiro"))
+                .is_some_and(|provider| {
+                    config.is_none()
+                        && kiro_simulated_cache_enabled_from_provider_config(
+                            provider.config.as_ref(),
+                        )
+                });
+            (config, legacy_kiro_enabled)
+        }
         Err(err) => {
             warn!(
-                event_name = "kiro_simulated_cache_config_read_failed",
+                event_name = "simulated_cache_config_read_failed",
                 log_type = "event",
                 request_id = %plan.request_id,
                 provider_id = %plan.provider_id,
                 error = ?err,
-                "failed to read Kiro simulated cache provider config; defaulting disabled"
+                "failed to read simulated cache provider config; defaulting disabled"
             );
-            false
+            (None, false)
         }
     };
 
     let Some(context) = report_context.as_mut().and_then(Value::as_object_mut) else {
         return;
     };
-    if enabled {
+    if let Some(config) = config {
+        context.insert(
+            SIMULATED_CACHE_ENABLED_CONTEXT_FIELD.to_string(),
+            Value::Bool(true),
+        );
+        context.insert(
+            SIMULATED_CACHE_MIN_PERCENT_CONTEXT_FIELD.to_string(),
+            Value::from(config.min_percent),
+        );
+        context.insert(
+            SIMULATED_CACHE_MAX_PERCENT_CONTEXT_FIELD.to_string(),
+            Value::from(config.max_percent),
+        );
+        context.remove(KIRO_SIMULATED_CACHE_ENABLED_CONTEXT_FIELD);
+    } else if legacy_kiro_enabled {
+        context.remove(SIMULATED_CACHE_ENABLED_CONTEXT_FIELD);
+        context.remove(SIMULATED_CACHE_MIN_PERCENT_CONTEXT_FIELD);
+        context.remove(SIMULATED_CACHE_MAX_PERCENT_CONTEXT_FIELD);
         context.insert(
             KIRO_SIMULATED_CACHE_ENABLED_CONTEXT_FIELD.to_string(),
             Value::Bool(true),
         );
     } else {
+        context.remove(SIMULATED_CACHE_ENABLED_CONTEXT_FIELD);
+        context.remove(SIMULATED_CACHE_MIN_PERCENT_CONTEXT_FIELD);
+        context.remove(SIMULATED_CACHE_MAX_PERCENT_CONTEXT_FIELD);
         context.remove(KIRO_SIMULATED_CACHE_ENABLED_CONTEXT_FIELD);
     }
 }
@@ -2364,10 +2391,12 @@ async fn execute_stream_from_frame_stream(
     let normalized_stream_report_context =
         normalize_provider_private_report_context(report_context.as_ref());
     let upstream_headers = headers.clone();
+    let normalizer_report_context = report_context.clone();
+    let rewriter_report_context = normalized_stream_report_context.clone();
     let mut private_stream_normalizer =
-        maybe_build_provider_private_stream_normalizer(report_context.as_ref());
+        maybe_build_provider_private_stream_normalizer(normalizer_report_context.as_ref());
     let mut local_stream_rewriter =
-        maybe_build_stream_response_rewriter(normalized_stream_report_context.as_ref());
+        maybe_build_stream_response_rewriter(rewriter_report_context.as_ref());
     if private_stream_normalizer.is_some() || local_stream_rewriter.is_some() {
         headers.remove("content-encoding");
         headers.remove("content-length");
@@ -2601,9 +2630,14 @@ async fn execute_stream_from_frame_stream(
                     if !response_headers_indicate_sse(&upstream_headers)
                         && (200..300).contains(&status_code)
                     {
-                        if let Some(body_json) =
+                        if let Some(mut body_json) =
                             parse_prefetched_sync_json_body(&prefetched_inspection_body)
                         {
+                            maybe_apply_simulated_cache_to_response_body(
+                                &mut body_json,
+                                &mut report_context,
+                                plan.client_api_format.as_str(),
+                            );
                             match maybe_bridge_standard_sync_json_to_stream(
                                 &body_json,
                                 plan.provider_api_format.as_str(),
@@ -2716,6 +2750,11 @@ async fn execute_stream_from_frame_stream(
                     } else {
                         normalized_chunk
                     };
+                    let rewritten_chunk = maybe_apply_simulated_cache_to_stream_chunk(
+                        rewritten_chunk,
+                        &mut report_context,
+                        plan.client_api_format.as_str(),
+                    );
                     if !rewritten_chunk.is_empty() {
                         prefetched_body.extend_from_slice(&rewritten_chunk);
                         prefetched_chunks.push(Bytes::from(rewritten_chunk));
@@ -2813,7 +2852,7 @@ async fn execute_stream_from_frame_stream(
     let trace_id_owned = trace_id.to_string();
     let headers_for_report = headers.clone();
     let report_kind_owned = report_kind;
-    let report_context_owned = report_context;
+    let mut report_context_owned = report_context;
     let normalized_stream_report_context_owned = normalized_stream_report_context;
     let lifecycle_seed_for_report = lifecycle_seed;
     let provider_prefetched_body_for_report = provider_prefetched_body;
@@ -2875,15 +2914,17 @@ async fn execute_stream_from_frame_stream(
         let mut buffered_body = Vec::new();
         let mut provider_body_truncated = false;
         let mut client_body_truncated = false;
+        let normalizer_report_context = report_context_owned.clone();
+        let rewriter_report_context = normalized_stream_report_context_owned.clone();
         let mut private_stream_normalizer = if sync_json_stream_bridge_active_for_report {
             None
         } else {
-            maybe_build_provider_private_stream_normalizer(report_context_owned.as_ref())
+            maybe_build_provider_private_stream_normalizer(normalizer_report_context.as_ref())
         };
         let mut local_stream_rewriter = if sync_json_stream_bridge_active_for_report {
             None
         } else {
-            maybe_build_stream_response_rewriter(normalized_stream_report_context_owned.as_ref())
+            maybe_build_stream_response_rewriter(rewriter_report_context.as_ref())
         };
         let stream_usage_report_context =
             normalized_stream_report_context_owned.clone().or_else(|| {
@@ -3252,6 +3293,11 @@ async fn execute_stream_from_frame_stream(
                         } else {
                             normalized_chunk
                         };
+                        let rewritten_chunk = maybe_apply_simulated_cache_to_stream_chunk(
+                            rewritten_chunk,
+                            &mut report_context_owned,
+                            plan_for_report.client_api_format.as_str(),
+                        );
 
                         if rewritten_chunk.is_empty() {
                             if let Some(error_body_json) = provider_private_error_body_json {

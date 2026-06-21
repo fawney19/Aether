@@ -20,6 +20,15 @@ const TOKENS_PER_TOOL: u64 = 150;
 const TOKENS_PER_MESSAGE: u64 = 4;
 const INLINE_IMAGE_DATA_TOKEN_PLACEHOLDER: &str = "[inline-image-data]";
 pub(crate) const KIRO_SIMULATED_CACHE_ENABLED_CONTEXT_FIELD: &str = "kiro_simulated_cache_enabled";
+pub(crate) const SIMULATED_CACHE_ENABLED_CONTEXT_FIELD: &str = "simulated_cache_enabled";
+pub(crate) const SIMULATED_CACHE_MIN_PERCENT_CONTEXT_FIELD: &str = "simulated_cache_min_percent";
+pub(crate) const SIMULATED_CACHE_MAX_PERCENT_CONTEXT_FIELD: &str = "simulated_cache_max_percent";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SimulatedCacheConfig {
+    pub(crate) min_percent: f64,
+    pub(crate) max_percent: f64,
+}
 
 static KIRO_PROMPT_CACHE_TRACKER: OnceLock<KiroPromptCacheTracker> = OnceLock::new();
 
@@ -411,6 +420,10 @@ fn build_lookback_match_candidates(
 }
 
 pub(crate) fn kiro_simulated_cache_enabled_from_provider_config(config: Option<&Value>) -> bool {
+    if simulated_cache_config_from_provider_config(config).is_some() {
+        return true;
+    }
+
     config
         .and_then(Value::as_object)
         .and_then(|config| config.get("kiro"))
@@ -420,9 +433,74 @@ pub(crate) fn kiro_simulated_cache_enabled_from_provider_config(config: Option<&
         .unwrap_or(false)
 }
 
+pub(crate) fn simulated_cache_config_from_provider_config(
+    config: Option<&Value>,
+) -> Option<SimulatedCacheConfig> {
+    let object = config.and_then(Value::as_object)?;
+    let simulated_cache = object.get("simulated_cache").and_then(Value::as_object)?;
+    if !simulated_cache
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let min_percent = json_number_as_f64(simulated_cache.get("min_percent")).unwrap_or(90.0);
+    let max_percent = json_number_as_f64(simulated_cache.get("max_percent")).unwrap_or(100.0);
+    normalize_simulated_cache_config(min_percent, max_percent)
+}
+
+pub(crate) fn simulated_cache_config_from_report_context(
+    report_context: Option<&Value>,
+) -> Option<SimulatedCacheConfig> {
+    let context = report_context.and_then(Value::as_object)?;
+    if !context
+        .get(SIMULATED_CACHE_ENABLED_CONTEXT_FIELD)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let min_percent =
+        json_number_as_f64(context.get(SIMULATED_CACHE_MIN_PERCENT_CONTEXT_FIELD)).unwrap_or(90.0);
+    let max_percent =
+        json_number_as_f64(context.get(SIMULATED_CACHE_MAX_PERCENT_CONTEXT_FIELD)).unwrap_or(100.0);
+    normalize_simulated_cache_config(min_percent, max_percent)
+}
+
+fn normalize_simulated_cache_config(
+    min_percent: f64,
+    max_percent: f64,
+) -> Option<SimulatedCacheConfig> {
+    if !min_percent.is_finite() || !max_percent.is_finite() {
+        return None;
+    }
+    let min_percent = min_percent.clamp(0.0, 100.0);
+    let max_percent = max_percent.clamp(0.0, 100.0);
+    if min_percent > max_percent {
+        return None;
+    }
+    Some(SimulatedCacheConfig {
+        min_percent,
+        max_percent,
+    })
+}
+
+fn json_number_as_f64(value: Option<&Value>) -> Option<f64> {
+    value.and_then(|value| match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    })
+}
+
 pub(crate) fn kiro_simulated_cache_enabled_from_report_context(
     report_context: Option<&Value>,
 ) -> bool {
+    if simulated_cache_config_from_report_context(report_context).is_some() {
+        return true;
+    }
+
     report_context
         .and_then(Value::as_object)
         .and_then(|context| context.get(KIRO_SIMULATED_CACHE_ENABLED_CONTEXT_FIELD))
@@ -1546,6 +1624,36 @@ mod tests {
     }
 
     #[test]
+    fn simulated_cache_config_reads_generic_provider_config() {
+        let config = simulated_cache_config_from_provider_config(Some(&serde_json::json!({
+            "simulated_cache": {
+                "enabled": true,
+                "min_percent": 90,
+                "max_percent": 100
+            }
+        })))
+        .expect("generic simulated cache config should parse");
+
+        assert_eq!(config.min_percent, 90.0);
+        assert_eq!(config.max_percent, 100.0);
+        assert!(kiro_simulated_cache_enabled_from_provider_config(Some(
+            &serde_json::json!({
+                "simulated_cache": {"enabled": true, "min_percent": 90, "max_percent": 100}
+            })
+        )));
+    }
+
+    #[test]
+    fn simulated_cache_config_rejects_invalid_range() {
+        assert!(
+            simulated_cache_config_from_provider_config(Some(&serde_json::json!({
+                "simulated_cache": {"enabled": true, "min_percent": 100, "max_percent": 90}
+            })))
+            .is_none()
+        );
+    }
+
+    #[test]
     fn kiro_simulated_cache_enabled_reads_report_context_flag() {
         assert!(!kiro_simulated_cache_enabled_from_report_context(None));
         assert!(!kiro_simulated_cache_enabled_from_report_context(Some(
@@ -1553,6 +1661,13 @@ mod tests {
         )));
         assert!(kiro_simulated_cache_enabled_from_report_context(Some(
             &serde_json::json!({"kiro_simulated_cache_enabled": true})
+        )));
+        assert!(kiro_simulated_cache_enabled_from_report_context(Some(
+            &serde_json::json!({
+                "simulated_cache_enabled": true,
+                "simulated_cache_min_percent": 90,
+                "simulated_cache_max_percent": 100
+            })
         )));
     }
 }

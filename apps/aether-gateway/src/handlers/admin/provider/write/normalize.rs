@@ -159,6 +159,63 @@ pub(crate) fn normalize_chat_pii_redaction_config(
     }
 }
 
+pub(crate) fn normalize_simulated_cache_config(
+    value: Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Object(mut map) => {
+            let enabled = map
+                .remove("enabled")
+                .and_then(|value| value.as_bool())
+                .ok_or_else(|| "simulated_cache.enabled must be a boolean".to_string())?;
+            let min_percent =
+                simulated_cache_percent(map.remove("min_percent"), 90.0, "min_percent")?;
+            let max_percent =
+                simulated_cache_percent(map.remove("max_percent"), 100.0, "max_percent")?;
+            if min_percent > max_percent {
+                return Err(
+                    "simulated_cache.min_percent must not be greater than max_percent".to_string(),
+                );
+            }
+            Ok(Some(serde_json::json!({
+                "enabled": enabled,
+                "min_percent": min_percent,
+                "max_percent": max_percent
+            })))
+        }
+        _ => Err("simulated_cache must be a JSON object".to_string()),
+    }
+}
+
+fn simulated_cache_percent(
+    value: Option<serde_json::Value>,
+    default_value: f64,
+    field_name: &str,
+) -> Result<f64, String> {
+    let percent = match value {
+        Some(serde_json::Value::Number(number)) => number
+            .as_f64()
+            .ok_or_else(|| format!("simulated_cache.{field_name} must be a number"))?,
+        Some(serde_json::Value::String(text)) => text
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("simulated_cache.{field_name} must be a number"))?,
+        Some(_) => return Err(format!("simulated_cache.{field_name} must be a number")),
+        None => default_value,
+    };
+    if percent.is_finite() && (0.0..=100.0).contains(&percent) {
+        Ok(percent)
+    } else {
+        Err(format!(
+            "simulated_cache.{field_name} must be between 0 and 100"
+        ))
+    }
+}
+
 pub(crate) fn validate_vertex_api_formats(
     provider_type: &str,
     auth_type: &str,
@@ -212,7 +269,8 @@ mod tests {
         normalize_allow_auth_channel_mismatch_formats, normalize_api_format_json_object_keys,
         normalize_api_format_list, normalize_auth_type, normalize_auth_type_by_format,
         normalize_chat_pii_redaction_config, normalize_pool_advanced_config,
-        normalize_provider_type_input, validate_vertex_api_formats,
+        normalize_provider_type_input, normalize_simulated_cache_config,
+        validate_vertex_api_formats,
     };
     use serde_json::json;
 
@@ -254,6 +312,41 @@ mod tests {
             normalize_chat_pii_redaction_config(Some(json!({ "enabled": "yes" }))).unwrap_err(),
             "chat_pii_redaction.enabled 必须是布尔值"
         );
+    }
+
+    #[test]
+    fn normalize_simulated_cache_requires_valid_percent_range() {
+        assert_eq!(
+            normalize_simulated_cache_config(Some(json!({
+                "enabled": true,
+                "min_percent": 90,
+                "max_percent": 95
+            })))
+            .expect("simulated cache should normalize"),
+            Some(json!({
+                "enabled": true,
+                "min_percent": 90.0,
+                "max_percent": 95.0
+            }))
+        );
+        assert!(normalize_simulated_cache_config(Some(json!({
+            "enabled": true,
+            "min_percent": -1,
+            "max_percent": 95
+        })))
+        .is_err());
+        assert!(normalize_simulated_cache_config(Some(json!({
+            "enabled": true,
+            "min_percent": 95,
+            "max_percent": 90
+        })))
+        .is_err());
+        assert!(normalize_simulated_cache_config(Some(json!({
+            "enabled": "yes",
+            "min_percent": 90,
+            "max_percent": 95
+        })))
+        .is_err());
     }
 
     #[test]

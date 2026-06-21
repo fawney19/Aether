@@ -279,6 +279,8 @@ END
 
 const SQLITE_USAGE_EFFECTIVE_INPUT_TOKENS_EXPR: &str = r#"
 CASE
+  WHEN CAST(json_extract(request_metadata, '$.dimensions.simulated_cache_enabled') AS TEXT) IN ('true', '1')
+  THEN MAX(COALESCE(input_tokens, 0), 0)
   WHEN (
     LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'openai'
     OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'openai:%'
@@ -296,6 +298,8 @@ END
 
 const SQLITE_USAGE_TOTAL_INPUT_CONTEXT_EXPR: &str = r#"
 CASE
+  WHEN CAST(json_extract(request_metadata, '$.dimensions.simulated_cache_enabled') AS TEXT) IN ('true', '1')
+  THEN MAX(COALESCE(input_tokens, 0), 0) + MAX(COALESCE(cache_read_input_tokens, 0), 0)
   WHEN (
     LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'openai'
     OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'openai:%'
@@ -331,6 +335,8 @@ END
 const SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR: &str = r#"
 (
   CASE
+    WHEN CAST(json_extract(request_metadata, '$.dimensions.simulated_cache_enabled') AS TEXT) IN ('true', '1')
+    THEN MAX(COALESCE(input_tokens, 0), 0)
     WHEN (
       LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'openai'
       OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'openai:%'

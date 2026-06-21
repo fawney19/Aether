@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
 use aether_contracts::{ExecutionPlan, ExecutionTelemetry};
@@ -24,6 +26,8 @@ use crate::{
     STREAM_MISSING_TERMINAL_EVENT_MESSAGE, STREAM_TERMINAL_ERROR_CATEGORY,
     STREAM_TERMINAL_ERROR_MESSAGE,
 };
+
+static SIMULATED_CACHE_RANDOM_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UsageLifecycleState {
@@ -668,6 +672,35 @@ fn build_terminal_usage_event_from_seed_impl(
     };
     let request_metadata =
         attach_provider_request_body_metadata(request_metadata, provider_request.as_ref());
+    let usage_context = TerminalUsageContextSeed {
+        client_contract: client_contract.clone(),
+        provider_contract: provider_contract.clone(),
+        request_id: request_id.clone(),
+        user_id: user_id.clone(),
+        api_key_id: api_key_id.clone(),
+        username: username.clone(),
+        api_key_name: api_key_name.clone(),
+        provider_name: provider_name.clone(),
+        model: model.clone(),
+        target_model: target_model.clone(),
+        model_id: model_id.clone(),
+        global_model_id: global_model_id.clone(),
+        provider_id: provider_id.clone(),
+        provider_endpoint_id: provider_endpoint_id.clone(),
+        provider_api_key_id: provider_api_key_id.clone(),
+        request_type: request_type.clone(),
+        has_format_conversion,
+        is_stream,
+        request_headers: None,
+        request_body: None,
+        provider_request_headers: None,
+        provider_request: None,
+        body_refs: UsageBodyRefsSeed::default(),
+        body_states: UsageBodyStatesSeed::default(),
+        routing: UsageRoutingSeed::default(),
+        request_metadata: request_metadata.clone(),
+    };
+    let standardized_usage = apply_simulated_cache_to_usage(standardized_usage, &usage_context);
 
     let mut data = UsageEventData {
         user_id,
@@ -731,7 +764,6 @@ fn build_terminal_usage_event_from_seed_impl(
     if let Some(usage) = standardized_usage.as_ref() {
         apply_standardized_usage_seed(usage, &mut data);
     }
-
     if data.total_tokens.is_none() {
         if let Some(tokens) = data
             .response_body
@@ -1046,6 +1078,147 @@ fn merge_standardized_usage_with_context_cache(
         usage.cache_read_tokens = context_usage.cache_read_tokens;
     }
     Some(usage)
+}
+
+fn apply_simulated_cache_to_usage(
+    usage: Option<StandardizedUsage>,
+    context_seed: &TerminalUsageContextSeed,
+) -> Option<StandardizedUsage> {
+    let Some(config) = simulated_cache_config_from_metadata(context_seed.request_metadata.as_ref())
+    else {
+        return usage;
+    };
+
+    let mut usage = usage.unwrap_or_else(StandardizedUsage::new);
+    let total_input_tokens =
+        usage_total_input_tokens(&usage, context_seed.provider_contract.as_str());
+    if total_input_tokens == 0 {
+        return usage.has_token_signal().then_some(usage);
+    }
+
+    let hit_percent =
+        simulated_cache_hit_percent_from_metadata(context_seed.request_metadata.as_ref())
+            .unwrap_or_else(|| {
+                random_simulated_cache_percent(config.min_percent, config.max_percent)
+            });
+    let cache_read_tokens = ((total_input_tokens as f64) * hit_percent / 100.0).round() as u64;
+    let cache_read_tokens = cache_read_tokens.min(total_input_tokens);
+    let billed_input_tokens = total_input_tokens.saturating_sub(cache_read_tokens);
+
+    usage.input_tokens = billed_input_tokens as i64;
+    usage.cache_creation_tokens = 0;
+    usage.cache_creation_ephemeral_5m_tokens = 0;
+    usage.cache_creation_ephemeral_1h_tokens = 0;
+    usage.cache_read_tokens = cache_read_tokens as i64;
+    usage
+        .dimensions
+        .insert("simulated_cache_enabled".to_string(), json!(true));
+    usage.dimensions.insert(
+        "simulated_cache_hit_percent".to_string(),
+        json!((hit_percent * 100.0).round() / 100.0),
+    );
+    Some(usage)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SimulatedCacheRuntimeConfig {
+    min_percent: f64,
+    max_percent: f64,
+}
+
+fn simulated_cache_config_from_metadata(
+    metadata: Option<&Value>,
+) -> Option<SimulatedCacheRuntimeConfig> {
+    let object = metadata.and_then(Value::as_object)?;
+    let dimensions = object
+        .get("dimensions")
+        .and_then(Value::as_object)
+        .unwrap_or(object);
+    if !dimensions
+        .get("simulated_cache_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let min_percent = json_f64(dimensions.get("simulated_cache_min_percent")).unwrap_or(90.0);
+    let max_percent = json_f64(dimensions.get("simulated_cache_max_percent")).unwrap_or(100.0);
+    if !min_percent.is_finite() || !max_percent.is_finite() {
+        return None;
+    }
+    let min_percent = min_percent.clamp(0.0, 100.0);
+    let max_percent = max_percent.clamp(0.0, 100.0);
+    (min_percent <= max_percent).then_some(SimulatedCacheRuntimeConfig {
+        min_percent,
+        max_percent,
+    })
+}
+
+fn simulated_cache_hit_percent_from_metadata(metadata: Option<&Value>) -> Option<f64> {
+    let object = metadata.and_then(Value::as_object)?;
+    let dimensions = object
+        .get("dimensions")
+        .and_then(Value::as_object)
+        .unwrap_or(object);
+    json_f64(dimensions.get("simulated_cache_hit_percent"))
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(0.0, 100.0))
+}
+
+fn json_f64(value: Option<&Value>) -> Option<f64> {
+    value.and_then(|value| match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    })
+}
+
+fn usage_total_input_tokens(usage: &StandardizedUsage, api_format: &str) -> u64 {
+    let input_tokens = usage.input_tokens.max(0) as u64;
+    let api_family = api_format
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(api_family.as_str(), "openai" | "gemini" | "google") {
+        return input_tokens;
+    }
+
+    let cache_creation_tokens = usage
+        .cache_creation_tokens
+        .max(0)
+        .saturating_add(usage.cache_creation_ephemeral_5m_tokens.max(0))
+        .saturating_add(usage.cache_creation_ephemeral_1h_tokens.max(0))
+        as u64;
+    let cache_read_tokens = usage.cache_read_tokens.max(0) as u64;
+    input_tokens
+        .saturating_add(cache_creation_tokens)
+        .saturating_add(cache_read_tokens)
+}
+
+fn random_simulated_cache_percent(min_percent: f64, max_percent: f64) -> f64 {
+    if (max_percent - min_percent).abs() <= f64::EPSILON {
+        return min_percent;
+    }
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    let counter = SIMULATED_CACHE_RANDOM_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let seed = splitmix64(nanos ^ counter.rotate_left(17));
+    let unit = seed as f64 / u64::MAX as f64;
+    min_percent + (max_percent - min_percent) * unit
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9E3779B97F4A7C15);
+    let mut mixed = value;
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D049BB133111EB);
+    mixed ^ (mixed >> 31)
 }
 
 pub fn build_stream_terminal_usage_seed(
@@ -3342,9 +3515,10 @@ mod tests {
         build_terminal_usage_event_from_seed, build_usage_event_data_seed, decode_body_for_storage,
         extract_token_counts_from_json, extract_token_counts_from_value, headers_to_json,
         mask_header_value, mask_sensitive_body_fields, mask_sensitive_headers_in_json_value,
-        parse_sse_body_for_storage, resolve_error_message, trim_owned_non_empty_string,
-        LifecycleUsageSeed, TerminalUsageSeed, UsageBodyRefsSeed, UsageBodyStatesSeed,
-        UsageRoutingSeed, UsageTerminalState, MAX_USAGE_CAPTURE_BYTES, MAX_USAGE_CAPTURE_DEPTH,
+        parse_sse_body_for_storage, random_simulated_cache_percent, resolve_error_message,
+        trim_owned_non_empty_string, LifecycleUsageSeed, TerminalUsageSeed, UsageBodyRefsSeed,
+        UsageBodyStatesSeed, UsageRoutingSeed, UsageTerminalState, MAX_USAGE_CAPTURE_BYTES,
+        MAX_USAGE_CAPTURE_DEPTH,
     };
     use crate::{
         build_upsert_usage_record_from_event, GatewayStreamReportRequest, GatewaySyncReportRequest,
@@ -6222,6 +6396,113 @@ mod tests {
         assert_eq!(event.data.cache_creation_input_tokens, Some(1200));
         assert_eq!(event.data.cache_read_input_tokens, Some(300));
         assert_eq!(event.data.total_tokens, Some(300));
+    }
+
+    #[test]
+    fn sync_terminal_usage_applies_generic_simulated_cache_override() {
+        let plan = ExecutionPlan {
+            request_id: "req-sync-generic-cache-context-1".to_string(),
+            candidate_id: Some("cand-sync-generic-cache-context-1".to_string()),
+            provider_name: Some("Custom".to_string()),
+            provider_id: "provider-custom-1".to_string(),
+            endpoint_id: "endpoint-custom-1".to_string(),
+            key_id: "key-custom-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://custom.example/v1/chat/completions".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "custom-model"})),
+            stream: false,
+            client_api_format: "openai:chat".to_string(),
+            provider_api_format: "openai:chat".to_string(),
+            model_name: Some("custom-model".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let payload = GatewaySyncReportRequest {
+            trace_id: "trace-sync-generic-cache-context-1".to_string(),
+            report_kind: "openai_chat_sync_success".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:chat",
+                "provider_api_format": "openai:chat",
+                "provider_name": "Custom",
+                "model": "custom-model",
+                "simulated_cache_enabled": true,
+                "simulated_cache_min_percent": 90,
+                "simulated_cache_max_percent": 95
+            })),
+            status_code: 200,
+            headers: BTreeMap::new(),
+            body_json: Some(json!({
+                "id": "chatcmpl-generic-cache-1",
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 7,
+                    "total_tokens": 127,
+                    "prompt_tokens_details": {
+                        "cached_tokens": 20
+                    }
+                }
+            })),
+            client_body_json: None,
+            body_base64: None,
+            telemetry: None,
+        };
+
+        let event =
+            build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        let input_tokens = event
+            .data
+            .input_tokens
+            .expect("simulated cache below 100% should leave uncached input tokens");
+        assert_eq!(event.data.output_tokens, Some(7));
+        assert_eq!(event.data.cache_creation_input_tokens, None);
+        let cache_read_tokens = event
+            .data
+            .cache_read_input_tokens
+            .expect("simulated cache should write cache read tokens");
+        assert!((5..=10).contains(&input_tokens));
+        assert!((90..=95).contains(&cache_read_tokens));
+        assert_eq!(input_tokens + cache_read_tokens, 100);
+        assert_eq!(event.data.total_tokens, Some(127));
+        let dimensions = event
+            .data
+            .request_metadata
+            .as_ref()
+            .and_then(Value::as_object)
+            .and_then(|metadata| metadata.get("dimensions"))
+            .and_then(Value::as_object)
+            .expect("dimensions should exist");
+        assert_eq!(
+            dimensions.get("simulated_cache_enabled"),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            dimensions
+                .get("simulated_cache_min_percent")
+                .and_then(Value::as_f64)
+                .unwrap_or_default(),
+            90.0
+        );
+        assert_eq!(
+            dimensions
+                .get("simulated_cache_max_percent")
+                .and_then(Value::as_f64)
+                .unwrap_or_default(),
+            95.0
+        );
+    }
+
+    #[test]
+    fn random_simulated_cache_percent_stays_in_range() {
+        let percent = random_simulated_cache_percent(90.0, 95.0);
+
+        assert!((90.0..=95.0).contains(&percent));
+        assert_eq!(random_simulated_cache_percent(92.0, 92.0), 92.0);
     }
 
     #[test]

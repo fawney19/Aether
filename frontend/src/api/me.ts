@@ -81,6 +81,7 @@ export interface UsageRecordDetail {
   cache_creation_ephemeral_5m_input_tokens?: number
   cache_creation_ephemeral_1h_input_tokens?: number
   cache_read_input_tokens?: number
+  simulated_cache_enabled?: boolean
   status_code: number
   error_message?: string
   input_price_per_1m: number

@@ -21,8 +21,39 @@ pub(crate) fn build_usage_request_metadata_seed(
     let mut metadata = Map::new();
     if let Some(context) = context {
         copy_allowed_metadata_fields(context, &mut metadata);
+        copy_simulated_cache_dimensions(context, &mut metadata);
     }
     (!metadata.is_empty()).then_some(Value::Object(metadata))
+}
+
+fn copy_simulated_cache_dimensions(source: &Map<String, Value>, target: &mut Map<String, Value>) {
+    let Some(Value::Bool(enabled)) = source.get("simulated_cache_enabled") else {
+        return;
+    };
+    let mut dimensions = match target.remove("dimensions") {
+        Some(Value::Object(object)) => object,
+        _ => Map::new(),
+    };
+    dimensions.insert("simulated_cache_enabled".to_string(), Value::Bool(*enabled));
+    if let Some(value) = source
+        .get("simulated_cache_min_percent")
+        .filter(|value| value.is_number())
+    {
+        dimensions.insert("simulated_cache_min_percent".to_string(), value.clone());
+    }
+    if let Some(value) = source
+        .get("simulated_cache_max_percent")
+        .filter(|value| value.is_number())
+    {
+        dimensions.insert("simulated_cache_max_percent".to_string(), value.clone());
+    }
+    if let Some(value) = source
+        .get("simulated_cache_hit_percent")
+        .filter(|value| value.is_number())
+    {
+        dimensions.insert("simulated_cache_hit_percent".to_string(), value.clone());
+    }
+    target.insert("dimensions".to_string(), Value::Object(dimensions));
 }
 
 pub(crate) fn merge_usage_request_metadata(

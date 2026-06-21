@@ -110,6 +110,17 @@ fn users_me_usage_cache_creation_tokens(item: &StoredRequestUsageAudit) -> u64 {
     }
 }
 
+fn users_me_usage_simulated_cache_enabled(item: &StoredRequestUsageAudit) -> bool {
+    item.request_metadata
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|metadata| metadata.get("dimensions"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|dimensions| dimensions.get("simulated_cache_enabled"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn users_me_usage_total_input_context(item: &StoredRequestUsageAudit) -> u64 {
     let api_format = item
         .endpoint_api_format
@@ -119,6 +130,9 @@ fn users_me_usage_total_input_context(item: &StoredRequestUsageAudit) -> u64 {
     let cache_creation_tokens =
         i64::try_from(users_me_usage_cache_creation_tokens(item)).unwrap_or(i64::MAX);
     let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
+    if users_me_usage_simulated_cache_enabled(item) {
+        return input_tokens.max(0).saturating_add(cache_read_tokens.max(0)) as u64;
+    }
     normalize_total_input_context_for_cache_hit_rate(
         api_format,
         input_tokens,
@@ -134,6 +148,9 @@ fn users_me_usage_effective_input_tokens(item: &StoredRequestUsageAudit) -> u64 
         .or(item.api_format.as_deref());
     let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
     let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
+    if users_me_usage_simulated_cache_enabled(item) {
+        return input_tokens.max(0) as u64;
+    }
     normalize_input_tokens_for_billing(api_format, input_tokens, cache_read_tokens) as u64
 }
 
@@ -486,6 +503,7 @@ fn build_users_me_usage_record_payload(
         "cache_creation_ephemeral_5m_input_tokens": item.cache_creation_ephemeral_5m_input_tokens,
         "cache_creation_ephemeral_1h_input_tokens": item.cache_creation_ephemeral_1h_input_tokens,
         "cache_read_input_tokens": item.cache_read_input_tokens,
+        "simulated_cache_enabled": users_me_usage_simulated_cache_enabled(item),
         "status_code": item.status_code,
         "error_message": item.error_message,
         "input_price_per_1m": input_price_per_1m,
@@ -529,6 +547,7 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
         "cache_creation_ephemeral_5m_input_tokens": item.cache_creation_ephemeral_5m_input_tokens,
         "cache_creation_ephemeral_1h_input_tokens": item.cache_creation_ephemeral_1h_input_tokens,
         "cache_read_input_tokens": item.cache_read_input_tokens,
+        "simulated_cache_enabled": users_me_usage_simulated_cache_enabled(item),
         "cost": round_to(item.total_cost_usd, 6),
         "actual_cost": round_to(item.actual_total_cost_usd, 6),
         "rate_multiplier": item.settlement_rate_multiplier(),
@@ -1709,6 +1728,27 @@ mod tests {
         assert_eq!(payload["effective_input_tokens"], 4941);
         assert_eq!(payload["cache_creation_input_tokens"], 687);
         assert_eq!(payload["cache_read_input_tokens"], 52873);
+    }
+
+    #[test]
+    fn user_usage_record_keeps_simulated_cache_input_as_effective_input() {
+        let mut item = sample_usage("completed");
+        item.input_tokens = 2103;
+        item.cache_read_input_tokens = 21439;
+        item.request_metadata = Some(json!({
+            "dimensions": {
+                "simulated_cache_enabled": true,
+                "simulated_cache_hit_percent": 91.07,
+                "simulated_cache_min_percent": 90,
+                "simulated_cache_max_percent": 95
+            }
+        }));
+
+        let payload = build_users_me_usage_record_payload(&item, false, &BTreeMap::new(), false);
+
+        assert_eq!(payload["effective_input_tokens"], 2103);
+        assert_eq!(payload["cache_read_input_tokens"], 21439);
+        assert_eq!(payload["simulated_cache_enabled"], true);
     }
 
     #[test]

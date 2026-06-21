@@ -613,6 +613,22 @@ fn usage_sql_provider_performance_reads_upstream_stream_from_billing_facts() {
 }
 
 #[test]
+fn usage_sql_raw_analytics_preserve_simulated_cache_effective_input() {
+    let source = include_str!("mod.rs");
+
+    assert!(source.contains("usage_raw.request_metadata->'dimensions'->>'simulated_cache_enabled'"));
+    assert!(source.contains("WHEN simulated_cache_enabled THEN input_tokens"));
+    assert!(source.contains("WHEN simulated_cache_enabled THEN input_tokens + cache_read_tokens"));
+}
+
+#[test]
+fn usage_sqlite_simulated_cache_boolean_accepts_json_true() {
+    let source = include_str!("../sqlite.rs");
+
+    assert!(source.contains("json_extract(request_metadata, '$.dimensions.simulated_cache_enabled') AS TEXT) IN ('true', '1')"));
+}
+
+#[test]
 fn usage_billing_facts_projects_upstream_stream_mode() {
     let migration = include_str!(
         "../../../../migrations/postgres/20260505130000_project_upstream_stream_in_usage_billing_facts.sql"
@@ -1725,6 +1741,91 @@ fn usage_settlement_pricing_snapshot_from_usage_extracts_typed_billing_fields() 
             ..UsageSettlementPricingSnapshot::default()
         }
     );
+}
+
+#[test]
+fn usage_settlement_pricing_snapshot_preserves_simulated_cache_input() {
+    let snapshot = usage_settlement_pricing_snapshot_from_usage(
+        &UpsertUsageRecord {
+            request_id: "req-simulated-cache".to_string(),
+            user_id: None,
+            api_key_id: None,
+            username: None,
+            api_key_name: None,
+            provider_name: "openai".to_string(),
+            model: "gpt-5".to_string(),
+            target_model: None,
+            provider_id: Some("provider-1".to_string()),
+            provider_endpoint_id: Some("endpoint-1".to_string()),
+            provider_api_key_id: Some("provider-key-1".to_string()),
+            request_type: Some("chat".to_string()),
+            api_format: Some("openai:chat".to_string()),
+            api_family: Some("openai".to_string()),
+            endpoint_kind: Some("chat".to_string()),
+            endpoint_api_format: Some("openai:chat".to_string()),
+            provider_api_family: Some("openai".to_string()),
+            provider_endpoint_kind: Some("chat".to_string()),
+            has_format_conversion: Some(false),
+            is_stream: Some(false),
+            input_tokens: Some(10),
+            output_tokens: Some(2),
+            total_tokens: Some(102),
+            cache_creation_input_tokens: Some(0),
+            cache_creation_ephemeral_5m_input_tokens: None,
+            cache_creation_ephemeral_1h_input_tokens: None,
+            cache_read_input_tokens: Some(90),
+            cache_creation_cost_usd: None,
+            cache_read_cost_usd: None,
+            output_price_per_1m: None,
+            total_cost_usd: None,
+            actual_total_cost_usd: None,
+            status_code: Some(200),
+            error_message: None,
+            error_category: None,
+            response_time_ms: Some(100),
+            first_byte_time_ms: None,
+            status: "completed".to_string(),
+            billing_status: "pending".to_string(),
+            request_headers: None,
+            request_body: None,
+            request_body_ref: None,
+            provider_request_headers: None,
+            provider_request_body: None,
+            provider_request_body_ref: None,
+            response_headers: None,
+            response_body: None,
+            response_body_ref: None,
+            client_response_headers: None,
+            client_response_body: None,
+            client_response_body_ref: None,
+            request_body_state: None,
+            provider_request_body_state: None,
+            response_body_state: None,
+            client_response_body_state: None,
+            candidate_id: None,
+            candidate_index: None,
+            key_name: None,
+            planner_kind: None,
+            route_family: None,
+            route_kind: None,
+            execution_path: None,
+            local_execution_runtime_miss_reason: None,
+            request_metadata: None,
+            finalized_at_unix_secs: None,
+            created_at_unix_ms: Some(100),
+            updated_at_unix_secs: 100,
+        },
+        Some(&json!({
+            "dimensions": {
+                "simulated_cache_enabled": true,
+                "simulated_cache_hit_percent": 90.0
+            }
+        })),
+    )
+    .expect("snapshot should build");
+
+    assert_eq!(snapshot.billing_effective_input_tokens, Some(10));
+    assert_eq!(snapshot.billing_total_input_context, Some(100));
 }
 
 #[test]

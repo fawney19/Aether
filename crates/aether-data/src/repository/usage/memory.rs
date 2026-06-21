@@ -950,9 +950,13 @@ fn normalize_usage_input_tokens(
     api_format: Option<&str>,
     input_tokens: i64,
     cache_read_tokens: i64,
+    simulated_cache_enabled: bool,
 ) -> i64 {
     if input_tokens <= 0 {
         return input_tokens.max(0);
+    }
+    if simulated_cache_enabled {
+        return input_tokens;
     }
     if cache_read_tokens <= 0 {
         return input_tokens;
@@ -971,10 +975,15 @@ fn normalize_usage_total_input_context(
     input_tokens: i64,
     cache_creation_tokens: i64,
     cache_read_tokens: i64,
+    simulated_cache_enabled: bool,
 ) -> i64 {
     let normalized_input_tokens = input_tokens.max(0);
     let normalized_cache_creation_tokens = cache_creation_tokens.max(0);
     let normalized_cache_read_tokens = cache_read_tokens.max(0);
+
+    if simulated_cache_enabled {
+        return normalized_input_tokens.saturating_add(normalized_cache_read_tokens);
+    }
 
     let fresh_input_tokens = match usage_api_family(api_format) {
         UsageApiFamily::Claude => {
@@ -984,6 +993,7 @@ fn normalize_usage_total_input_context(
             api_format,
             normalized_input_tokens,
             normalized_cache_read_tokens,
+            false,
         ),
         UsageApiFamily::Unknown => {
             if normalized_cache_creation_tokens > 0 {
@@ -1011,6 +1021,7 @@ fn usage_total_input_context(item: &StoredRequestUsageAudit) -> u64 {
         input_tokens,
         cache_creation_tokens,
         cache_read_tokens,
+        usage_simulated_cache_enabled(item),
     ) as u64
 }
 
@@ -1021,7 +1032,23 @@ fn usage_effective_input_tokens(item: &StoredRequestUsageAudit) -> u64 {
         .or(item.api_format.as_deref());
     let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
     let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
-    normalize_usage_input_tokens(api_format, input_tokens, cache_read_tokens) as u64
+    normalize_usage_input_tokens(
+        api_format,
+        input_tokens,
+        cache_read_tokens,
+        usage_simulated_cache_enabled(item),
+    ) as u64
+}
+
+fn usage_simulated_cache_enabled(item: &StoredRequestUsageAudit) -> bool {
+    item.request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("dimensions"))
+        .and_then(Value::as_object)
+        .and_then(|dimensions| dimensions.get("simulated_cache_enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn usage_total_tokens(item: &StoredRequestUsageAudit) -> u64 {

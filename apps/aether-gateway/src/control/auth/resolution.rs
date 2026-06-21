@@ -552,7 +552,16 @@ pub(crate) async fn refresh_execution_runtime_auth_context(
     auth_context: GatewayControlAuthContext,
     auth_endpoint_signature: Option<&str>,
 ) -> Result<GatewayControlAuthContext, GatewayError> {
-    if auth_context.local_rejection.is_some() || !auth_context.access_allowed {
+    let should_refresh_wallet_rejection = matches!(
+        auth_context.local_rejection,
+        Some(
+            GatewayLocalAuthRejection::BalanceDenied { .. }
+                | GatewayLocalAuthRejection::WalletUnavailable
+        )
+    );
+    if !should_refresh_wallet_rejection
+        && (auth_context.local_rejection.is_some() || !auth_context.access_allowed)
+    {
         return Ok(auth_context);
     }
     let Some(auth_endpoint_signature) = auth_endpoint_signature
@@ -1494,6 +1503,103 @@ mod tests {
             "cached auth context should revalidate wallet state before execution"
         );
         assert!(!second.access_allowed);
+    }
+
+    #[tokio::test]
+    async fn execution_runtime_auth_context_revalidates_cached_unlimited_wallet_state() {
+        let api_key = "sk-test-runtime-wallet-unlimited";
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some(hash_api_key(api_key)),
+            sample_snapshot(
+                "key-runtime-wallet-unlimited",
+                "user-runtime-wallet-unlimited",
+            ),
+        )]));
+        let wallet_repository = Arc::new(InMemoryWalletRepository::seed(vec![
+            StoredWalletSnapshot::new(
+                "wallet-runtime-unlimited".to_string(),
+                Some("user-runtime-wallet-unlimited".to_string()),
+                None,
+                0.0,
+                0.0,
+                "finite".to_string(),
+                "USD".to_string(),
+                "active".to_string(),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                100,
+            )
+            .expect("wallet should build"),
+        ]));
+        let data = GatewayDataState::with_auth_and_wallet_for_tests(
+            auth_repository,
+            Arc::clone(&wallet_repository),
+        );
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data);
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/chat/completions",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", api_key.parse().unwrap());
+
+        let first = resolve_execution_runtime_auth_context(
+            &state,
+            &decision,
+            &headers,
+            &uri("/v1/chat/completions"),
+            "trace-runtime-wallet-unlimited",
+        )
+        .await
+        .expect("resolution should succeed")
+        .expect("auth context should exist");
+        assert_eq!(
+            first.local_rejection,
+            Some(GatewayLocalAuthRejection::BalanceDenied {
+                remaining: Some(0.0),
+            })
+        );
+        assert!(!first.access_allowed);
+
+        wallet_repository
+            .update_auth_user_wallet_snapshot(
+                "user-runtime-wallet-unlimited",
+                0.0,
+                0.0,
+                "unlimited",
+                "USD",
+                "active",
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                Some(101),
+            )
+            .await
+            .expect("wallet update should succeed")
+            .expect("wallet should exist");
+
+        let second = resolve_execution_runtime_auth_context(
+            &state,
+            &decision,
+            &headers,
+            &uri("/v1/chat/completions"),
+            "trace-runtime-wallet-unlimited",
+        )
+        .await
+        .expect("resolution should succeed")
+        .expect("auth context should exist");
+
+        assert_eq!(second.local_rejection, None);
+        assert!(second.access_allowed);
+        assert_eq!(second.balance_remaining, None);
     }
 
     #[tokio::test]
