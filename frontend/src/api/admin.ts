@@ -463,12 +463,16 @@ export interface CheckUpdateResponse {
 
 export interface SystemUpdateCapabilityResponse {
   supported: boolean
+  can_execute_update?: boolean
+  execution_mode?: 'self' | 'docker' | 'manual' | string
   build_type: string
   update_strategy?: 'self' | 'docker' | 'manual' | string
   strategy?: 'self' | 'docker' | 'manual' | string
   deployment_topology?: 'single-node' | 'multi-node' | string
   topology?: 'single-node' | 'multi-node' | string
   enabled: boolean
+  docker_web_update_supported?: boolean
+  docker_update_status?: string
   rollback_available: boolean
   task_status: string
   task_error: string | null
@@ -484,10 +488,13 @@ export interface UpdateTaskStatusResponse {
   phase: string
   error: string | null
   output: string | null
+  output_tail?: string[]
   progress_label?: string | null
   downloaded_bytes?: number | null
   total_bytes?: number | null
   progress_percent?: number | null
+  docker_status?: string | null
+  docker_exit_code?: number | null
 }
 
 export interface UpdateHistoryEntry {

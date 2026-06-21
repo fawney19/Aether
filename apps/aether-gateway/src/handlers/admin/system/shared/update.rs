@@ -1,7 +1,10 @@
-use crate::handlers::admin::system::shared::update_client::build_update_http_client;
+use crate::handlers::admin::system::shared::update_client::{
+    build_direct_update_http_client, build_update_http_client,
+};
 use crate::GatewayError;
 use axum::http;
 use futures_util::StreamExt;
+use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::Component;
@@ -116,6 +119,8 @@ const DEFAULT_UPDATE_DOWNLOAD_IDLE_TIMEOUT_SECS: u64 = 30;
 const SOURCE_BUILD_UPDATE_BLOCKER: &str = "当前为源码构建，请使用 git pull 后重新编译。";
 const DOCKER_UPDATE_BLOCKER: &str =
     "Docker 部署请使用镜像更新：进入 docker-compose.yml 所在目录执行 ./update.sh。";
+const DOCKER_UPDATER_NOT_CONFIGURED_BLOCKER: &str =
+    "Docker Web 更新未配置，请设置 AETHER_DOCKER_UPDATER_URL 和 AETHER_UPDATER_TOKEN，或在 compose 目录执行 ./update.sh。";
 const MANUAL_UPDATE_BLOCKER: &str =
     "当前部署策略不支持在线自更新，请手动下载 Release 或使用安装脚本更新。";
 const MULTI_NODE_UPDATE_BLOCKER: &str =
@@ -350,6 +355,17 @@ pub(crate) fn self_update_supported() -> bool {
     )
 }
 
+pub(crate) fn docker_web_update_supported() -> bool {
+    current_update_strategy() == UpdateStrategy::Docker
+        && current_deployment_topology() == DeploymentTopology::SingleNode
+        && docker_updater_url().is_some()
+        && docker_updater_token().is_some()
+}
+
+pub(crate) fn web_update_supported() -> bool {
+    self_update_supported() || docker_web_update_supported()
+}
+
 pub(crate) fn current_self_update_blocker() -> &'static str {
     if !is_release_build() {
         return SOURCE_BUILD_UPDATE_BLOCKER;
@@ -363,6 +379,18 @@ pub(crate) fn current_self_update_blocker() -> &'static str {
         UpdateStrategy::Docker => DOCKER_UPDATE_BLOCKER,
         UpdateStrategy::Manual => MANUAL_UPDATE_BLOCKER,
     }
+}
+
+pub(crate) fn current_web_update_blocker() -> &'static str {
+    if self_update_supported() || docker_web_update_supported() {
+        return "一键更新可用";
+    }
+    if current_update_strategy() == UpdateStrategy::Docker
+        && current_deployment_topology() == DeploymentTopology::SingleNode
+    {
+        return DOCKER_UPDATER_NOT_CONFIGURED_BLOCKER;
+    }
+    current_self_update_blocker()
 }
 
 fn update_logs_dir() -> PathBuf {
@@ -380,12 +408,43 @@ fn docker_update_command() -> String {
         .unwrap_or_else(|| "./update.sh".to_string())
 }
 
+fn docker_updater_url() -> Option<String> {
+    std::env::var("AETHER_DOCKER_UPDATER_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn docker_updater_token() -> Option<String> {
+    std::env::var("AETHER_UPDATER_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn docker_update_status_label(
+    update_strategy: UpdateStrategy,
+    deployment_topology: DeploymentTopology,
+) -> &'static str {
+    if update_strategy != UpdateStrategy::Docker {
+        "not_docker"
+    } else if deployment_topology != DeploymentTopology::SingleNode {
+        "unsupported_topology"
+    } else if docker_web_update_supported() {
+        "configured"
+    } else {
+        "not_configured"
+    }
+}
+
 pub(crate) fn build_admin_system_update_capability_payload() -> serde_json::Value {
     let build_type = current_build_type();
     let update_strategy = current_update_strategy();
     let deployment_topology = current_deployment_topology();
     let supported =
         self_update_supported_for(is_release_build(), update_strategy, deployment_topology);
+    let docker_supported = docker_web_update_supported();
+    let can_execute_update = supported || docker_supported;
     let rollback_available = supported && find_rollback_target().is_some();
     let task_status = read_update_task_status();
     let base_dir = aether_base_dir();
@@ -397,7 +456,11 @@ pub(crate) fn build_admin_system_update_capability_payload() -> serde_json::Valu
     let data_dir = base_dir.join("data");
     json!({
         "supported": supported,
-        "enabled": supported,
+        "enabled": can_execute_update,
+        "can_execute_update": can_execute_update,
+        "execution_mode": if supported { "self" } else if docker_supported { "docker" } else { "manual" },
+        "docker_web_update_supported": docker_supported,
+        "docker_update_status": docker_update_status_label(update_strategy, deployment_topology),
         "rollback_available": rollback_available,
         "task_status": task_status.phase,
         "task_error": task_status.error,
@@ -411,11 +474,136 @@ pub(crate) fn build_admin_system_update_capability_payload() -> serde_json::Valu
         "data_dir": data_dir,
         "logs_dir": update_logs_dir(),
         "docker_update_command": docker_command,
-        "message": if supported {
+        "message": if can_execute_update {
             "一键更新可用"
         } else {
-            current_self_update_blocker()
+            current_web_update_blocker()
         },
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct DockerUpdaterRunResponse {
+    started: Option<bool>,
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DockerUpdaterStatus {
+    status: String,
+    error: Option<String>,
+    output_tail: Option<Vec<String>>,
+    exit_code: Option<i32>,
+}
+
+pub(crate) async fn read_admin_docker_update_status() -> serde_json::Value {
+    match fetch_docker_updater_status().await {
+        Ok(status) => docker_status_payload(status),
+        Err(err) => json!({
+            "phase": "failed",
+            "error": err,
+            "output": serde_json::Value::Null,
+            "progress_label": serde_json::Value::Null,
+            "downloaded_bytes": serde_json::Value::Null,
+            "total_bytes": serde_json::Value::Null,
+            "progress_percent": serde_json::Value::Null,
+            "docker_status": "unavailable",
+        }),
+    }
+}
+
+pub(crate) async fn start_admin_docker_update_task(
+) -> Result<Result<serde_json::Value, (http::StatusCode, serde_json::Value)>, GatewayError> {
+    if !docker_web_update_supported() {
+        return Ok(Err((
+            http::StatusCode::PRECONDITION_REQUIRED,
+            json!({ "detail": current_web_update_blocker() }),
+        )));
+    }
+
+    let url = docker_updater_url().expect("checked by docker_web_update_supported");
+    let token = docker_updater_token().expect("checked by docker_web_update_supported");
+    let client =
+        build_direct_update_http_client(std::time::Duration::from_secs(10), "Docker updater")?;
+    let response = client
+        .post(format!("{url}/run"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|err| GatewayError::Internal(format!("Docker updater 请求失败: {err}")))?;
+
+    if response.status() == reqwest::StatusCode::CONFLICT {
+        return Ok(Err(update_already_running_response()));
+    }
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(Err((
+            http::StatusCode::UNAUTHORIZED,
+            json!({ "detail": "Docker updater token 无效" }),
+        )));
+    }
+    let response = response.error_for_status().map_err(|err| {
+        GatewayError::Internal(format!("Docker updater 返回错误: {err}"))
+    })?;
+    let payload = response
+        .json::<DockerUpdaterRunResponse>()
+        .await
+        .map_err(|err| GatewayError::Internal(format!("Docker updater 响应无效: {err}")))?;
+
+    Ok(Ok(json!({
+        "message": "Docker 更新已启动，服务会在镜像拉取和容器重建期间短暂不可用",
+        "started": payload.started.unwrap_or(true),
+        "status": payload.status.unwrap_or_else(|| "running".to_string()),
+        "need_restart": true,
+    })))
+}
+
+async fn fetch_docker_updater_status() -> Result<DockerUpdaterStatus, String> {
+    if !docker_web_update_supported() {
+        return Err(current_web_update_blocker().to_string());
+    }
+    let url = docker_updater_url().ok_or_else(|| DOCKER_UPDATER_NOT_CONFIGURED_BLOCKER.to_string())?;
+    let token =
+        docker_updater_token().ok_or_else(|| DOCKER_UPDATER_NOT_CONFIGURED_BLOCKER.to_string())?;
+    let client = build_direct_update_http_client(std::time::Duration::from_secs(5), "Docker updater")
+        .map_err(|err| err.to_string())?;
+    let response = client
+        .get(format!("{url}/status"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|err| format!("Docker updater 请求失败: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("Docker updater 返回错误: {err}"))?;
+    response
+        .json::<DockerUpdaterStatus>()
+        .await
+        .map_err(|err| format!("Docker updater 响应无效: {err}"))
+}
+
+fn docker_status_payload(status: DockerUpdaterStatus) -> serde_json::Value {
+    let output_tail = status.output_tail.unwrap_or_default();
+    let output = if output_tail.is_empty() {
+        None
+    } else {
+        Some(output_tail.join("\n"))
+    };
+    let phase = match status.status.as_str() {
+        "running" => "running",
+        "succeeded" => "prepared",
+        "failed" => "failed",
+        _ => "idle",
+    };
+    json!({
+        "phase": phase,
+        "error": status.error,
+        "output": output,
+        "output_tail": output_tail,
+        "progress_label": if phase == "running" { Some("正在执行 Docker 更新脚本") } else { None },
+        "downloaded_bytes": serde_json::Value::Null,
+        "total_bytes": serde_json::Value::Null,
+        "progress_percent": serde_json::Value::Null,
+        "docker_status": status.status,
+        "docker_exit_code": status.exit_code,
     })
 }
 
@@ -1020,6 +1208,36 @@ fn self_update_rejection_response() -> (http::StatusCode, serde_json::Value) {
 mod tests {
     use super::*;
     use flate2::Compression;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvSnapshot {
+        key: &'static str,
+        value: Option<String>,
+    }
+
+    impl EnvSnapshot {
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                value: std::env::var(key).ok(),
+            }
+        }
+    }
+
+    impl Drop for EnvSnapshot {
+        fn drop(&mut self) {
+            if let Some(value) = &self.value {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     fn temp_test_dir(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -1039,6 +1257,55 @@ mod tests {
             .expect("binary should be written");
         std::fs::write(root.join("frontend/index.html"), b"<html></html>")
             .expect("frontend index should be written");
+    }
+
+    #[test]
+    fn docker_web_update_support_requires_updater_configuration() {
+        let _guard = env_test_lock().lock().expect("env lock");
+        let _strategy = EnvSnapshot::capture("AETHER_UPDATE_STRATEGY");
+        let _topology = EnvSnapshot::capture("AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY");
+        let _url = EnvSnapshot::capture("AETHER_DOCKER_UPDATER_URL");
+        let _token = EnvSnapshot::capture("AETHER_UPDATER_TOKEN");
+
+        std::env::set_var("AETHER_UPDATE_STRATEGY", "docker");
+        std::env::set_var("AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY", "single-node");
+        std::env::remove_var("AETHER_DOCKER_UPDATER_URL");
+        std::env::remove_var("AETHER_UPDATER_TOKEN");
+
+        assert!(!docker_web_update_supported());
+        assert_eq!(current_web_update_blocker(), DOCKER_UPDATER_NOT_CONFIGURED_BLOCKER);
+    }
+
+    #[test]
+    fn docker_web_update_supports_configured_single_node() {
+        let _guard = env_test_lock().lock().expect("env lock");
+        let _strategy = EnvSnapshot::capture("AETHER_UPDATE_STRATEGY");
+        let _topology = EnvSnapshot::capture("AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY");
+        let _url = EnvSnapshot::capture("AETHER_DOCKER_UPDATER_URL");
+        let _token = EnvSnapshot::capture("AETHER_UPDATER_TOKEN");
+
+        std::env::set_var("AETHER_UPDATE_STRATEGY", "docker");
+        std::env::set_var("AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY", "single-node");
+        std::env::set_var("AETHER_DOCKER_UPDATER_URL", "http://updater:8099");
+        std::env::set_var("AETHER_UPDATER_TOKEN", "secret");
+
+        assert!(docker_web_update_supported());
+        assert!(web_update_supported());
+        assert_eq!(current_web_update_blocker(), "一键更新可用");
+    }
+
+    #[test]
+    fn docker_status_payload_maps_updater_status() {
+        let payload = docker_status_payload(DockerUpdaterStatus {
+            status: "running".to_string(),
+            error: None,
+            output_tail: Some(vec![">>> Pulling".to_string(), "done".to_string()]),
+            exit_code: None,
+        });
+
+        assert_eq!(payload["phase"], "running");
+        assert_eq!(payload["docker_status"], "running");
+        assert_eq!(payload["output"], ">>> Pulling\ndone");
     }
 
     #[test]

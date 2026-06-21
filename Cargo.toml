@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/aether-tunnel",
+    "apps/aether-updater",
     "crates/aether-ai-formats",
     "crates/aether-admin",
     "crates/aether-ai-serving",
