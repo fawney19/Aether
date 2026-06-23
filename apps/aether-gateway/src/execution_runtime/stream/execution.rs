@@ -6635,6 +6635,10 @@ mod tests {
                 Arc::clone(&request_candidate_repository),
                 Arc::clone(&usage_repository),
             )
+            .with_system_config_values_for_tests([(
+                "request_record_level".to_string(),
+                json!("full"),
+            )])
             .with_provider_catalog_reader(Arc::new(provider_catalog_stop_429_for_plan(&plan)))
             .with_encryption_key_for_tests("development-key"),
         );
@@ -6728,14 +6732,18 @@ mod tests {
     async fn execute_stream_from_frame_stream_decodes_non_success_windsurf_connect_error_body() {
         let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
         let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let data_state =
+            crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                Arc::clone(&request_candidate_repository),
+                Arc::clone(&usage_repository),
+            )
+            .with_system_config_values_for_tests([(
+                "request_record_level".to_string(),
+                json!("full"),
+            )]);
         let state = AppState::new()
             .expect("app state should build")
-            .with_data_state_for_tests(
-                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
-                    Arc::clone(&request_candidate_repository),
-                    Arc::clone(&usage_repository),
-                ),
-            )
+            .with_data_state_for_tests(data_state)
             .with_usage_runtime_for_tests(UsageRuntimeConfig {
                 enabled: true,
                 ..UsageRuntimeConfig::default()
@@ -6773,6 +6781,10 @@ mod tests {
                 Arc::clone(&request_candidate_repository),
                 Arc::clone(&usage_repository),
             )
+            .with_system_config_values_for_tests([(
+                "request_record_level".to_string(),
+                json!("full"),
+            )])
             .with_provider_catalog_reader(Arc::new(provider_catalog_stop_429_for_plan(&plan)))
             .with_encryption_key_for_tests("development-key"),
         );
@@ -7773,14 +7785,18 @@ mod tests {
 
         let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
         let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let data_state =
+            crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                Arc::clone(&request_candidate_repository),
+                Arc::clone(&usage_repository),
+            )
+            .with_system_config_values_for_tests([(
+                "request_record_level".to_string(),
+                json!("full"),
+            )]);
         let state = AppState::new()
             .expect("app state should build")
-            .with_data_state_for_tests(
-                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
-                    Arc::clone(&request_candidate_repository),
-                    Arc::clone(&usage_repository),
-                ),
-            )
+            .with_data_state_for_tests(data_state)
             .with_usage_runtime_for_tests(UsageRuntimeConfig {
                 enabled: true,
                 ..UsageRuntimeConfig::default()

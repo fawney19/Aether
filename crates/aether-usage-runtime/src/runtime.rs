@@ -28,8 +28,8 @@ pub trait UsageBillingEventEnricher: Send + Sync {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UsageRequestRecordLevel {
-    Basic,
     #[default]
+    Basic,
     Full,
 }
 
@@ -46,7 +46,7 @@ pub struct UsageBodyCapturePolicy {
 impl Default for UsageBodyCapturePolicy {
     fn default() -> Self {
         Self {
-            record_level: UsageRequestRecordLevel::Full,
+            record_level: UsageRequestRecordLevel::Basic,
             max_request_body_bytes: Some(DEFAULT_USAGE_REQUEST_BODY_CAPTURE_LIMIT_BYTES),
             max_response_body_bytes: Some(DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES),
         }
@@ -1029,10 +1029,7 @@ mod tests {
     use serde_json::json;
     use tokio::time::{sleep, Duration};
 
-    use super::{
-        UsageBillingEventEnricher, UsageBodyCapturePolicy, UsageRequestRecordLevel,
-        UsageRuntimeAccess,
-    };
+    use super::{UsageBillingEventEnricher, UsageBodyCapturePolicy, UsageRuntimeAccess};
     use crate::worker::ManualProxyNodeCounter;
     use crate::{
         apply_usage_body_capture_policy_to_event, build_lifecycle_usage_seed, UsageEvent,
@@ -1890,7 +1887,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_request_record_level_strips_body_capture_but_preserves_derived_fields() {
+    fn default_body_capture_policy_strips_body_capture_but_preserves_derived_fields() {
         let mut event = UsageEvent::new(
             UsageEventType::Failed,
             "req-basic-1",
@@ -1915,13 +1912,7 @@ mod tests {
             },
         );
 
-        apply_usage_body_capture_policy_to_event(
-            UsageBodyCapturePolicy {
-                record_level: UsageRequestRecordLevel::Basic,
-                ..UsageBodyCapturePolicy::default()
-            },
-            &mut event,
-        );
+        apply_usage_body_capture_policy_to_event(UsageBodyCapturePolicy::default(), &mut event);
 
         assert_eq!(event.data.total_tokens, Some(42));
         assert_eq!(event.data.error_message.as_deref(), Some("upstream failed"));

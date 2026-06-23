@@ -335,7 +335,11 @@ async fn gateway_truncates_deep_request_echo_for_local_openai_chat_sync_usage_im
                     Arc::clone(&request_candidate_repository),
                     Arc::clone(&usage_repository),
                     DEVELOPMENT_ENCRYPTION_KEY,
-                ),
+                )
+                .with_system_config_values_for_tests([(
+                    "request_record_level".to_string(),
+                    json!("full"),
+                )]),
             )
             .with_usage_runtime_for_tests(UsageRuntimeConfig {
                 enabled: true,
@@ -498,10 +502,10 @@ async fn gateway_applies_system_max_request_body_size_to_local_openai_chat_sync_
                 Arc::clone(&usage_repository),
                 DEVELOPMENT_ENCRYPTION_KEY,
             )
-            .with_system_config_values_for_tests([(
-                "max_request_body_size".to_string(),
-                json!(128),
-            )]),
+            .with_system_config_values_for_tests([
+                ("request_record_level".to_string(), json!("full")),
+                ("max_request_body_size".to_string(), json!(128)),
+            ]),
         )
         .with_usage_runtime_for_tests(UsageRuntimeConfig {
             enabled: true,
@@ -784,7 +788,11 @@ async fn gateway_records_failed_usage_when_all_local_openai_chat_candidates_exha
                 Arc::clone(&request_candidate_repository),
                 Arc::clone(&usage_repository),
                 DEVELOPMENT_ENCRYPTION_KEY,
-            ),
+            )
+            .with_system_config_values_for_tests([(
+                "request_record_level".to_string(),
+                json!("full"),
+            )]),
         )
         .with_usage_runtime_for_tests(UsageRuntimeConfig {
             enabled: true,
@@ -917,7 +925,11 @@ async fn gateway_records_failed_usage_when_sync_runtime_transport_is_unavailable
                 Arc::clone(&request_candidate_repository),
                 Arc::clone(&usage_repository),
                 DEVELOPMENT_ENCRYPTION_KEY,
-            ),
+            )
+            .with_system_config_values_for_tests([(
+                "request_record_level".to_string(),
+                json!("full"),
+            )]),
         )
         .with_usage_runtime_for_tests(UsageRuntimeConfig {
             enabled: true,
@@ -1092,7 +1104,11 @@ async fn gateway_records_failed_usage_for_claude_runtime_miss_without_execution_
             Arc::clone(&request_candidate_repository),
             Arc::clone(&usage_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
-        ),
+        )
+        .with_system_config_values_for_tests([(
+            "request_record_level".to_string(),
+            json!("full"),
+        )]),
     )
     .with_usage_runtime_for_tests(UsageRuntimeConfig {
         enabled: true,
@@ -1303,7 +1319,11 @@ async fn gateway_handles_local_openai_chat_stream_report_with_local_reporting_wh
             Arc::clone(&request_candidate_repository),
             Arc::clone(&usage_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
-        ),
+        )
+        .with_system_config_values_for_tests([(
+            "request_record_level".to_string(),
+            json!("full"),
+        )]),
     )
     .with_usage_runtime_for_tests(UsageRuntimeConfig {
         enabled: true,
@@ -1482,10 +1502,10 @@ async fn gateway_preserves_stream_usage_when_max_response_body_size_truncates_ca
                 Arc::clone(&usage_repository),
                 DEVELOPMENT_ENCRYPTION_KEY,
             )
-            .with_system_config_values_for_tests([(
-                "max_response_body_size".to_string(),
-                json!(128),
-            )]),
+            .with_system_config_values_for_tests([
+                ("request_record_level".to_string(), json!("full")),
+                ("max_response_body_size".to_string(), json!(128)),
+            ]),
         )
         .with_usage_runtime_for_tests(UsageRuntimeConfig {
             enabled: true,
@@ -1736,7 +1756,11 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
             Arc::clone(&request_candidate_repository),
             Arc::clone(&usage_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
-        ),
+        )
+        .with_system_config_values_for_tests([(
+            "request_record_level".to_string(),
+            json!("full"),
+        )]),
     )
     .with_usage_runtime_for_tests(UsageRuntimeConfig {
         enabled: true,
@@ -2038,7 +2062,11 @@ fn gateway_keeps_failed_usage_request_capture_lightweight_for_large_local_claude
                         Arc::clone(&request_candidate_repository),
                         Arc::clone(&usage_repository),
                         DEVELOPMENT_ENCRYPTION_KEY,
-                    ),
+                    )
+                    .with_system_config_values_for_tests([(
+                        "request_record_level".to_string(),
+                        json!("full"),
+                    )]),
                 )
                 .with_usage_runtime_for_tests(UsageRuntimeConfig {
                     enabled: true,

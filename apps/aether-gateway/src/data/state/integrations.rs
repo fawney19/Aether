@@ -38,7 +38,7 @@ const MAX_RESPONSE_BODY_SIZE_KEY: &str = "max_response_body_size";
 
 fn usage_request_record_level_from_value(value: Option<&Value>) -> UsageRequestRecordLevel {
     let Some(value) = value.and_then(Value::as_str).map(str::trim) else {
-        return UsageRequestRecordLevel::Full;
+        return UsageRequestRecordLevel::Basic;
     };
 
     if value.eq_ignore_ascii_case("basic")
@@ -426,14 +426,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_runtime_access_defaults_missing_request_record_level_to_full() {
+    async fn usage_runtime_access_defaults_missing_request_record_level_to_basic() {
         let state = GatewayDataState::disabled();
 
         let level = UsageRuntimeAccess::request_record_level(&state)
             .await
             .expect("missing request record level should fall back");
 
-        assert_eq!(level, UsageRequestRecordLevel::Full);
+        assert_eq!(level, UsageRequestRecordLevel::Basic);
     }
 
     #[tokio::test]
@@ -447,7 +447,7 @@ mod tests {
             .await
             .expect("body capture policy should read");
 
-        assert_eq!(policy.record_level, UsageRequestRecordLevel::Full);
+        assert_eq!(policy.record_level, UsageRequestRecordLevel::Basic);
         assert_eq!(policy.max_request_body_bytes, Some(1234));
         assert_eq!(policy.max_response_body_bytes, Some(5678));
     }
