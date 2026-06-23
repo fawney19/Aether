@@ -183,6 +183,12 @@
                   >
                     {{ formatConcurrentLimitSimple(apiKey.concurrent_limit) }}
                   </Badge>
+                  <Badge
+                    variant="secondary"
+                    class="h-5 px-2 py-0 text-[10px] font-medium"
+                  >
+                    {{ formatBillingMultiplier(apiKey.billing_multiplier) }}
+                  </Badge>
                 </div>
               </TableCell>
 
@@ -292,6 +298,12 @@
                   class="text-[10px] px-1.5 py-0"
                 >
                   {{ formatConcurrentLimitSimple(apiKey.concurrent_limit) }}
+                </Badge>
+                <Badge
+                  variant="secondary"
+                  class="text-[10px] px-1.5 py-0"
+                >
+                  {{ formatBillingMultiplier(apiKey.billing_multiplier) }}
                 </Badge>
               </div>
               <div class="flex items-center gap-0.5 flex-shrink-0">
@@ -1606,6 +1618,11 @@ function formatConcurrentLimitSimple(concurrentLimit?: number | null): string {
     return '不限并发'
   }
   return `${concurrentLimit} 并发`
+}
+
+function formatBillingMultiplier(multiplier?: number | null): string {
+  const value = typeof multiplier === 'number' && Number.isFinite(multiplier) ? multiplier : 1
+  return `${value.toLocaleString(undefined, { maximumFractionDigits: 4 })}x`
 }
 
 function formatIpRules(ipRules?: string[] | null): string {

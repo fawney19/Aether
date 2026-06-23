@@ -1125,6 +1125,12 @@
                     >
                       {{ formatConcurrentLimitSimple(apiKey.concurrent_limit) }}
                     </Badge>
+                    <Badge
+                      variant="secondary"
+                      class="text-xs"
+                    >
+                      {{ formatBillingMultiplier(apiKey.billing_multiplier) }}
+                    </Badge>
                   </div>
                   <div class="flex items-center gap-1 mt-0.5">
                     <code class="text-xs font-mono text-muted-foreground">
@@ -1301,6 +1307,22 @@
           <p class="text-xs text-muted-foreground">
             {{ editingUserApiKey ? '留空表示保持当前值，填 0 表示不限并发' : '留空表示不限并发，填 0 也表示不限并发' }}
           </p>
+        </div>
+        <div class="space-y-2">
+          <Label
+            for="admin-user-key-billing-multiplier"
+            class="text-sm font-medium"
+          >计费倍率</Label>
+          <Input
+            id="admin-user-key-billing-multiplier"
+            :model-value="userApiKeyForm.billing_multiplier"
+            type="number"
+            min="0"
+            max="1000"
+            step="0.01"
+            class="h-10"
+            @update:model-value="(v) => userApiKeyForm.billing_multiplier = parseNumberInput(v, { allowFloat: true, min: 0, max: 1000 }) ?? 1"
+          />
         </div>
         <div class="space-y-2">
           <Label
@@ -1632,6 +1654,7 @@ const userApiKeyForm = ref({
   name: '',
   rate_limit: undefined as number | undefined,
   concurrent_limit: undefined as number | undefined,
+  billing_multiplier: 1,
   ip_rules_text: '',
   chat_pii_redaction_enabled: false,
   chat_pii_redaction_placeholder_notice: true,
@@ -1947,6 +1970,11 @@ function formatConcurrentLimitSimple(concurrentLimit?: number | null): string {
   return `${concurrentLimit} 并发`
 }
 
+function formatBillingMultiplier(multiplier?: number | null): string {
+  const value = typeof multiplier === 'number' && Number.isFinite(multiplier) ? multiplier : 1
+  return `${value.toLocaleString(undefined, { maximumFractionDigits: 4 })}x`
+}
+
 function formatIpRules(ipRules?: string[] | null): string {
   return ipRules && ipRules.length > 0 ? ipRules.join(', ') : '不限制'
 }
@@ -2172,6 +2200,7 @@ function openCreateUserApiKeyDialog() {
     name: `Key-${new Date().toISOString().split('T')[0]}`,
     rate_limit: undefined,
     concurrent_limit: undefined,
+    billing_multiplier: 1,
     ip_rules_text: '',
     chat_pii_redaction_enabled: redactionFeature.enabled,
     chat_pii_redaction_placeholder_notice: redactionFeature.inject_model_instruction,
@@ -2187,6 +2216,7 @@ function openEditUserApiKeyDialog(apiKey: ApiKey) {
     name: apiKey.name || '',
     rate_limit: apiKey.rate_limit ?? undefined,
     concurrent_limit: apiKey.concurrent_limit ?? undefined,
+    billing_multiplier: apiKey.billing_multiplier ?? 1,
     ip_rules_text: apiKey.ip_rules?.join(', ') ?? '',
     chat_pii_redaction_enabled: redactionFeature.enabled,
     chat_pii_redaction_placeholder_notice: redactionFeature.inject_model_instruction,
@@ -2201,6 +2231,7 @@ function closeUserApiKeyFormDialog() {
     name: '',
     rate_limit: undefined,
     concurrent_limit: undefined,
+    billing_multiplier: 1,
     ip_rules_text: '',
     chat_pii_redaction_enabled: false,
     chat_pii_redaction_placeholder_notice: true,
@@ -2222,6 +2253,7 @@ async function submitUserApiKeyForm() {
         name: userApiKeyForm.value.name,
         rate_limit: userApiKeyForm.value.rate_limit ?? 0,
         concurrent_limit: userApiKeyForm.value.concurrent_limit,
+        billing_multiplier: userApiKeyForm.value.billing_multiplier,
         ip_rules: ipRules,
         feature_settings: mergeChatPiiRedactionFeatureSettings(editingUserApiKey.value.feature_settings, {
           enabled: userApiKeyForm.value.chat_pii_redaction_enabled,
@@ -2234,6 +2266,7 @@ async function submitUserApiKeyForm() {
         name: userApiKeyForm.value.name,
         rate_limit: userApiKeyForm.value.rate_limit ?? 0,
         concurrent_limit: userApiKeyForm.value.concurrent_limit,
+        billing_multiplier: userApiKeyForm.value.billing_multiplier,
         ip_rules: ipRules,
         feature_settings: mergeChatPiiRedactionFeatureSettings(null, {
           enabled: userApiKeyForm.value.chat_pii_redaction_enabled,

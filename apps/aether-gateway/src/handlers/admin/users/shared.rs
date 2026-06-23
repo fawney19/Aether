@@ -27,6 +27,8 @@ pub(super) struct AdminCreateUserApiKeyRequest {
     #[serde(default)]
     pub(super) concurrent_limit: Option<i32>,
     #[serde(default)]
+    pub(super) billing_multiplier: Option<f64>,
+    #[serde(default)]
     pub(super) expire_days: Option<i32>,
     #[serde(default)]
     pub(super) expires_at: Option<String>,
@@ -51,6 +53,8 @@ pub(super) struct AdminUpdateUserApiKeyRequest {
     #[serde(default)]
     pub(super) concurrent_limit: Option<i32>,
     #[serde(default)]
+    pub(super) billing_multiplier: Option<f64>,
+    #[serde(default)]
     pub(super) feature_settings: Option<Option<Value>>,
     #[serde(
         default,
@@ -59,6 +63,9 @@ pub(super) struct AdminUpdateUserApiKeyRequest {
     )]
     pub(super) ip_rules: Option<Option<Vec<String>>>,
 }
+
+pub(super) type AdminUpdateUserApiKeyPatch =
+    AdminTypedObjectPatch<AdminUpdateUserApiKeyRequest>;
 
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct AdminToggleUserApiKeyLockRequest {

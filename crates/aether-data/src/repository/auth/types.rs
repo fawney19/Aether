@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub const DEFAULT_API_KEY_BILLING_MULTIPLIER: f64 = 1.0;
+pub const MAX_API_KEY_BILLING_MULTIPLIER: f64 = 1000.0;
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredAuthApiKeySnapshot {
     pub user_id: String,
     pub username: String,
@@ -25,6 +28,7 @@ pub struct StoredAuthApiKeySnapshot {
     pub api_key_allowed_api_formats: Option<Vec<String>>,
     pub api_key_allowed_models: Option<Vec<String>>,
     pub api_key_ip_rules: Option<Vec<String>>,
+    pub api_key_billing_multiplier: f64,
 }
 
 impl StoredAuthApiKeySnapshot {
@@ -99,6 +103,7 @@ impl StoredAuthApiKeySnapshot {
                 "api_keys.allowed_models",
             )?,
             api_key_ip_rules: None,
+            api_key_billing_multiplier: DEFAULT_API_KEY_BILLING_MULTIPLIER,
         })
     }
 
@@ -107,6 +112,15 @@ impl StoredAuthApiKeySnapshot {
         api_key_ip_rules: Option<serde_json::Value>,
     ) -> Result<Self, crate::DataLayerError> {
         self.api_key_ip_rules = parse_string_list(api_key_ip_rules, "api_keys.ip_rules")?;
+        Ok(self)
+    }
+
+    pub fn with_api_key_billing_multiplier(
+        mut self,
+        billing_multiplier: Option<f64>,
+    ) -> Result<Self, crate::DataLayerError> {
+        self.api_key_billing_multiplier =
+            normalize_api_key_billing_multiplier(billing_multiplier)?;
         Ok(self)
     }
 
@@ -134,7 +148,7 @@ impl StoredAuthApiKeySnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedAuthApiKeySnapshot {
     pub user_id: String,
     pub username: String,
@@ -159,6 +173,7 @@ pub struct ResolvedAuthApiKeySnapshot {
     pub api_key_allowed_api_formats: Option<Vec<String>>,
     pub api_key_allowed_models: Option<Vec<String>>,
     pub api_key_ip_rules: Option<Vec<String>>,
+    pub api_key_billing_multiplier: f64,
     pub currently_usable: bool,
 }
 
@@ -189,6 +204,7 @@ impl ResolvedAuthApiKeySnapshot {
             api_key_allowed_api_formats: snapshot.api_key_allowed_api_formats,
             api_key_allowed_models: snapshot.api_key_allowed_models,
             api_key_ip_rules: snapshot.api_key_ip_rules,
+            api_key_billing_multiplier: snapshot.api_key_billing_multiplier,
             currently_usable,
         };
         resolved.constrain_non_standalone_api_key_policy_to_user_policy();
@@ -355,6 +371,7 @@ pub struct StoredAuthApiKeyExportRecord {
     pub total_requests: u64,
     pub total_tokens: u64,
     pub total_cost_usd: f64,
+    pub billing_multiplier: f64,
     pub last_used_at_unix_secs: Option<u64>,
     pub created_at_unix_secs: Option<u64>,
     pub updated_at_unix_secs: Option<u64>,
@@ -429,11 +446,20 @@ impl StoredAuthApiKeyExportRecord {
             total_requests: parse_u64_i64(total_requests, "api_keys.total_requests")?,
             total_tokens: parse_u64_i64(total_tokens, "api_keys.total_tokens")?,
             total_cost_usd,
+            billing_multiplier: DEFAULT_API_KEY_BILLING_MULTIPLIER,
             last_used_at_unix_secs: None,
             created_at_unix_secs: None,
             updated_at_unix_secs: None,
             is_standalone,
         })
+    }
+
+    pub fn with_billing_multiplier(
+        mut self,
+        billing_multiplier: Option<f64>,
+    ) -> Result<Self, crate::DataLayerError> {
+        self.billing_multiplier = normalize_api_key_billing_multiplier(billing_multiplier)?;
+        Ok(self)
     }
 
     pub fn with_activity_timestamps(
@@ -501,9 +527,10 @@ pub struct CreateUserApiKeyRecord {
     pub total_requests: u64,
     pub total_tokens: u64,
     pub total_cost_usd: f64,
+    pub billing_multiplier: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UpdateUserApiKeyBasicRecord {
     pub user_id: String,
     pub api_key_id: String,
@@ -511,6 +538,8 @@ pub struct UpdateUserApiKeyBasicRecord {
     pub rate_limit: Option<i32>,
     pub concurrent_limit: Option<i32>,
     pub ip_rules: Option<Option<Vec<String>>>,
+    pub billing_multiplier_present: bool,
+    pub billing_multiplier: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -533,9 +562,10 @@ pub struct CreateStandaloneApiKeyRecord {
     pub total_requests: u64,
     pub total_tokens: u64,
     pub total_cost_usd: f64,
+    pub billing_multiplier: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UpdateStandaloneApiKeyBasicRecord {
     pub api_key_id: String,
     pub name: Option<String>,
@@ -551,6 +581,8 @@ pub struct UpdateStandaloneApiKeyBasicRecord {
     pub expires_at_unix_secs: Option<u64>,
     pub auto_delete_on_expiry_present: bool,
     pub auto_delete_on_expiry: bool,
+    pub billing_multiplier_present: bool,
+    pub billing_multiplier: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -797,6 +829,20 @@ fn normalize_optional_json(value: Option<serde_json::Value>) -> Option<serde_jso
         Some(serde_json::Value::Null) | None => None,
         Some(value) => Some(value),
     }
+}
+
+pub fn normalize_api_key_billing_multiplier(
+    value: Option<f64>,
+) -> Result<f64, crate::DataLayerError> {
+    let value = value.unwrap_or(DEFAULT_API_KEY_BILLING_MULTIPLIER);
+    if !value.is_finite()
+        || !(0.0..=MAX_API_KEY_BILLING_MULTIPLIER).contains(&value)
+    {
+        return Err(crate::DataLayerError::UnexpectedValue(format!(
+            "api_keys.billing_multiplier must be between 0 and {MAX_API_KEY_BILLING_MULTIPLIER}"
+        )));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]

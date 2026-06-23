@@ -166,6 +166,7 @@ fn build_users_me_api_key_list_payload(
         "created_at": format_users_me_optional_unix_secs_iso8601(record.created_at_unix_secs),
         "total_requests": record.total_requests,
         "total_cost_usd": record.total_cost_usd,
+        "billing_multiplier": record.billing_multiplier,
         "rate_limit": record.rate_limit,
         "concurrent_limit": record.concurrent_limit,
         "allowed_providers": record.allowed_providers,
@@ -190,6 +191,7 @@ fn build_users_me_api_key_detail_payload(
         "ip_rules": record.ip_rules,
         "force_capabilities": record.force_capabilities,
         "feature_settings": record.feature_settings,
+        "billing_multiplier": record.billing_multiplier,
         "rate_limit": record.rate_limit,
         "concurrent_limit": record.concurrent_limit,
         "last_used_at": format_users_me_optional_unix_secs_iso8601(record.last_used_at_unix_secs),
@@ -591,6 +593,7 @@ pub(super) async fn handle_users_me_api_key_create(
         total_requests: 0,
         total_tokens: 0,
         total_cost_usd: 0.0,
+        billing_multiplier: aether_data::repository::auth::DEFAULT_API_KEY_BILLING_MULTIPLIER,
     };
     let Some(created) = (match state.create_user_api_key(record).await {
         Ok(value) => value,
@@ -636,6 +639,7 @@ pub(super) async fn handle_users_me_api_key_create(
         "is_locked": false,
         "rate_limit": created.rate_limit,
         "concurrent_limit": created.concurrent_limit,
+        "billing_multiplier": created.billing_multiplier,
         "ip_rules": created.ip_rules,
         "feature_settings": created.feature_settings,
         "last_used_at": format_users_me_optional_unix_secs_iso8601(created.last_used_at_unix_secs),
@@ -736,6 +740,8 @@ pub(super) async fn handle_users_me_api_key_update(
             rate_limit,
             concurrent_limit,
             ip_rules,
+            billing_multiplier_present: false,
+            billing_multiplier: None,
         })
         .await
     {

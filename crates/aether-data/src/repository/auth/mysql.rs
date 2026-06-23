@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use sqlx::{mysql::MySqlRow, MySql, QueryBuilder, Row};
 
 use super::types::{
-    AuthApiKeyExportSummary, AuthApiKeyLookupKey, AuthApiKeyReadRepository,
-    AuthApiKeyWriteRepository, CreateStandaloneApiKeyRecord, CreateUserApiKeyRecord,
+    normalize_api_key_billing_multiplier, AuthApiKeyExportSummary, AuthApiKeyLookupKey,
+    AuthApiKeyReadRepository, AuthApiKeyWriteRepository, CreateStandaloneApiKeyRecord,
+    CreateUserApiKeyRecord,
     StandaloneApiKeyExportListQuery, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
     UpdateStandaloneApiKeyBasicRecord, UpdateUserApiKeyBasicRecord,
 };
@@ -35,7 +36,8 @@ SELECT
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
-  api_keys.ip_rules AS api_key_ip_rules
+  api_keys.ip_rules AS api_key_ip_rules,
+  COALESCE(api_keys.billing_multiplier, 1.0) AS api_key_billing_multiplier
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 "#;
@@ -61,6 +63,7 @@ SELECT
   api_keys.total_requests,
   COALESCE(api_keys.total_tokens, 0) AS total_tokens,
   COALESCE(api_keys.total_cost_usd, 0) AS total_cost_usd,
+  COALESCE(api_keys.billing_multiplier, 1.0) AS billing_multiplier,
   api_keys.last_used_at AS last_used_at_unix_secs,
   api_keys.created_at AS created_at_unix_secs,
   api_keys.updated_at AS updated_at_unix_secs,
@@ -116,10 +119,10 @@ INSERT INTO api_keys (
   id, user_id, key_hash, key_encrypted, name, allowed_providers,
   allowed_api_formats, allowed_models, ip_rules, rate_limit, concurrent_limit,
   force_capabilities, feature_settings, is_active, expires_at, auto_delete_on_expiry,
-  total_requests, total_tokens, total_cost_usd, is_standalone,
+  total_requests, total_tokens, total_cost_usd, billing_multiplier, is_standalone,
   created_at, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#,
         )
         .bind(&record.api_key_id)
@@ -161,6 +164,9 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         )?)
         .bind(i64_from_u64(record.total_tokens, "api_keys.total_tokens")?)
         .bind(record.total_cost_usd)
+        .bind(normalize_api_key_billing_multiplier(Some(
+            record.billing_multiplier,
+        ))?)
         .bind(record.is_standalone)
         .bind(now as i64)
         .bind(now as i64)
@@ -191,6 +197,7 @@ struct CreateApiKeyInsertRecord {
     total_requests: u64,
     total_tokens: u64,
     total_cost_usd: f64,
+    billing_multiplier: f64,
     is_standalone: bool,
 }
 
@@ -434,6 +441,7 @@ WHERE id = ?
             total_requests: record.total_requests,
             total_tokens: record.total_tokens,
             total_cost_usd: record.total_cost_usd,
+            billing_multiplier: record.billing_multiplier,
             is_standalone: false,
         })
         .await
@@ -462,6 +470,7 @@ WHERE id = ?
             total_requests: record.total_requests,
             total_tokens: record.total_tokens,
             total_cost_usd: record.total_cost_usd,
+            billing_multiplier: record.billing_multiplier,
             is_standalone: true,
         })
         .await
@@ -479,6 +488,7 @@ SET name = COALESCE(?, name),
     rate_limit = COALESCE(?, rate_limit),
     concurrent_limit = COALESCE(?, concurrent_limit),
     ip_rules = CASE WHEN ? THEN ? ELSE ip_rules END,
+    billing_multiplier = CASE WHEN ? THEN ? ELSE billing_multiplier END,
     updated_at = ?
 WHERE id = ?
   AND user_id = ?
@@ -492,6 +502,10 @@ WHERE id = ?
         .bind(json_string_from_nested_string_list(
             &record.ip_rules,
             "api_keys.ip_rules",
+        )?)
+        .bind(record.billing_multiplier_present)
+        .bind(normalize_api_key_billing_multiplier(
+            record.billing_multiplier,
         )?)
         .bind(now)
         .bind(&record.api_key_id)
@@ -519,6 +533,7 @@ SET name = COALESCE(?, name),
     ip_rules = CASE WHEN ? THEN ? ELSE ip_rules END,
     expires_at = CASE WHEN ? THEN ? ELSE expires_at END,
     auto_delete_on_expiry = CASE WHEN ? THEN ? ELSE auto_delete_on_expiry END,
+    billing_multiplier = CASE WHEN ? THEN ? ELSE billing_multiplier END,
     updated_at = ?
 WHERE id = ?
   AND is_standalone = 1
@@ -556,6 +571,10 @@ WHERE id = ?
         )?)
         .bind(record.auto_delete_on_expiry_present)
         .bind(record.auto_delete_on_expiry)
+        .bind(record.billing_multiplier_present)
+        .bind(normalize_api_key_billing_multiplier(
+            record.billing_multiplier,
+        )?)
         .bind(now)
         .bind(&record.api_key_id)
         .execute(&self.pool)
@@ -975,7 +994,10 @@ fn map_auth_api_key_snapshot_row(
     .with_api_key_ip_rules(optional_json_from_string(
         row.try_get("api_key_ip_rules").map_sql_err()?,
         "api_keys.ip_rules",
-    )?)?;
+    )?)?
+    .with_api_key_billing_multiplier(Some(
+        row.try_get("api_key_billing_multiplier").map_sql_err()?,
+    ))?;
     Ok(snapshot.with_user_rate_limit(row.try_get("user_rate_limit").map_sql_err()?))
 }
 
@@ -1023,6 +1045,9 @@ fn map_auth_api_key_export_row(
             row.try_get("ip_rules").map_sql_err()?,
             "api_keys.ip_rules",
         )?)
+    })
+    .and_then(|record| {
+        record.with_billing_multiplier(Some(row.try_get("billing_multiplier").map_sql_err()?))
     })
     .map(|record| record.with_feature_settings(feature_settings))
     .and_then(|record| {

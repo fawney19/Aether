@@ -270,6 +270,23 @@
 
           <div class="space-y-2">
             <Label
+              for="form-billing-multiplier"
+              class="text-sm font-medium"
+            >计费倍率</Label>
+            <Input
+              id="form-billing-multiplier"
+              :model-value="form.billing_multiplier"
+              type="number"
+              min="0"
+              max="1000"
+              step="0.01"
+              class="h-10"
+              @update:model-value="(v) => form.billing_multiplier = parseNumberInput(v, { allowFloat: true, min: 0, max: 1000 }) ?? 1"
+            />
+          </div>
+
+          <div class="space-y-2">
+            <Label
               for="form-concurrent-limit"
               class="text-sm font-medium"
             >并发限制</Label>
@@ -356,6 +373,7 @@ export interface StandaloneKeyFormData {
   expires_at?: string  // ISO 日期字符串，如 "2025-12-31"，undefined = 永不过期
   rate_limit?: number | null
   concurrent_limit?: number | null
+  billing_multiplier?: number
   auto_delete_on_expiry: boolean
   allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
@@ -375,6 +393,7 @@ interface StandaloneKeyFormState {
   rate_limit?: number
   concurrent_limit_inherited: boolean
   concurrent_limit?: number
+  billing_multiplier: number
   auto_delete_on_expiry: boolean
   provider_unrestricted: boolean
   api_format_unrestricted: boolean
@@ -435,6 +454,7 @@ const form = ref<StandaloneKeyFormState>({
   rate_limit: undefined,
   concurrent_limit_inherited: true,
   concurrent_limit: undefined,
+  billing_multiplier: 1,
   auto_delete_on_expiry: false,
   provider_unrestricted: true,
   api_format_unrestricted: true,
@@ -484,6 +504,7 @@ function resetForm() {
     rate_limit: undefined,
     concurrent_limit_inherited: true,
     concurrent_limit: undefined,
+    billing_multiplier: 1,
     auto_delete_on_expiry: false,
     provider_unrestricted: true,
     api_format_unrestricted: true,
@@ -511,6 +532,7 @@ function loadKeyData() {
     rate_limit: props.apiKey.rate_limit ?? undefined,
     concurrent_limit_inherited: props.apiKey.concurrent_limit == null,
     concurrent_limit: props.apiKey.concurrent_limit ?? undefined,
+    billing_multiplier: props.apiKey.billing_multiplier ?? 1,
     auto_delete_on_expiry: props.apiKey.auto_delete_on_expiry,
     provider_unrestricted: props.apiKey.allowed_providers == null,
     api_format_unrestricted: props.apiKey.allowed_api_formats == null,
@@ -565,6 +587,7 @@ function handleSubmit() {
     expires_at: form.value.expires_at,
     rate_limit: form.value.rate_limit_inherited ? null : (form.value.rate_limit ?? 0),
     concurrent_limit: form.value.concurrent_limit_inherited ? null : (form.value.concurrent_limit ?? 0),
+    billing_multiplier: form.value.billing_multiplier ?? 1,
     auto_delete_on_expiry: form.value.auto_delete_on_expiry,
     allowed_providers: form.value.provider_unrestricted ? null : [...form.value.allowed_providers],
     allowed_api_formats: form.value.api_format_unrestricted ? null : [...form.value.allowed_api_formats],

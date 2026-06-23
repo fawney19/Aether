@@ -180,6 +180,7 @@ export interface UserApiKeyExport {
   total_requests?: number
   total_tokens?: number
   total_cost_usd?: number
+  billing_multiplier?: number
 }
 
 // 独立余额 Key 导出结构（与 UserApiKeyExport 相同，但不包含 is_standalone）
@@ -649,6 +650,7 @@ export interface AdminApiKey {
   total_requests?: number
   total_tokens?: number | null
   total_cost_usd?: number
+  billing_multiplier?: number
   rate_limit?: number | null  // null = 跟随系统默认，0 = 不限制
   concurrent_limit?: number | null  // null = 跟随系统默认，0 = 不限制
   allowed_providers?: string[] | null  // 允许的提供商列表
@@ -672,6 +674,7 @@ export interface CreateStandaloneApiKeyRequest {
   ip_rules?: string[] | null
   rate_limit?: number | null  // null = 跟随系统默认，0 = 不限制
   concurrent_limit?: number | null  // null = 跟随系统默认，0 = 不限制
+  billing_multiplier?: number
   expires_at?: string | null  // RFC3339 时间，null = 永不过期
   initial_balance_usd: number | null  // 初始余额，null = 无限制
   unlimited_balance?: boolean | null  // 编辑时仅切换额度模式，不调整余额数值

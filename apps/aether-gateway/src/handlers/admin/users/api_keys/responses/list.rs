@@ -61,6 +61,7 @@ pub(crate) async fn build_admin_list_user_api_keys_response(
                 "is_locked": is_locked,
                 "total_requests": record.total_requests,
                 "total_cost_usd": record.total_cost_usd,
+                "billing_multiplier": record.billing_multiplier,
                 "rate_limit": record.rate_limit,
                 "concurrent_limit": record.concurrent_limit,
                 "feature_settings": record.feature_settings,
