@@ -35,7 +35,8 @@ SELECT
   api_keys.allowed_providers AS api_key_allowed_providers,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
-  api_keys.ip_rules AS api_key_ip_rules
+  api_keys.ip_rules AS api_key_ip_rules,
+  api_keys.feature_settings AS api_key_feature_settings
 FROM api_keys
 JOIN users ON users.id = api_keys.user_id
 "#;
@@ -975,7 +976,11 @@ fn map_auth_api_key_snapshot_row(
     .with_api_key_ip_rules(optional_json_from_string(
         row.try_get("api_key_ip_rules").map_sql_err()?,
         "api_keys.ip_rules",
-    )?)?;
+    )?)?
+    .with_api_key_feature_settings(optional_json_from_string(
+        row.try_get("api_key_feature_settings").map_sql_err()?,
+        "api_keys.feature_settings",
+    )?);
     Ok(snapshot.with_user_rate_limit(row.try_get("user_rate_limit").map_sql_err()?))
 }
 

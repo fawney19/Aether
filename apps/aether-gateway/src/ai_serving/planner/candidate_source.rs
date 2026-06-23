@@ -244,7 +244,9 @@ pub(crate) struct LocalCandidatePreselectionPageCursor<'a> {
     use_api_format_alias_match: bool,
     key_mode: LocalCandidatePreselectionKeyMode,
     candidate_api_formats: Vec<String>,
-    model_directive_enabled_api_formats: BTreeSet<String>,
+    model_directive_enabled_api_format_models: BTreeSet<(String, String)>,
+    requested_models: Vec<String>,
+    requested_model_index: usize,
     ordering_config: SchedulerOrderingConfig,
     priority_page_emitted: bool,
     deferred_pages_by_format: BTreeMap<
@@ -279,22 +281,57 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         use_api_format_alias_match: bool,
         key_mode: LocalCandidatePreselectionKeyMode,
     ) -> Self {
+        Self::new_with_requested_model_order(
+            state,
+            client_api_format,
+            requested_model,
+            &[],
+            require_streaming,
+            required_capabilities,
+            auth_snapshot,
+            routing_policy,
+            client_session_affinity,
+            use_api_format_alias_match,
+            key_mode,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn new_with_requested_model_order(
+        state: PlannerAppState<'a>,
+        client_api_format: &str,
+        requested_model: &str,
+        requested_model_order: &[String],
+        require_streaming: bool,
+        required_capabilities: Option<&serde_json::Value>,
+        auth_snapshot: &GatewayAuthApiKeySnapshot,
+        routing_policy: Option<&ResolvedRoutingPolicy>,
+        client_session_affinity: Option<&ClientSessionAffinity>,
+        use_api_format_alias_match: bool,
+        key_mode: LocalCandidatePreselectionKeyMode,
+    ) -> Self {
         let candidate_api_formats =
             crate::ai_serving::request_candidate_api_formats(client_api_format, require_streaming)
                 .into_iter()
                 .map(str::to_string)
                 .collect::<Vec<_>>();
-        let mut model_directive_enabled_api_formats = BTreeSet::new();
-        for api_format in &candidate_api_formats {
-            if crate::system_features::reasoning_model_directive_enabled_for_api_format_and_model(
-                state.app(),
-                api_format,
-                Some(requested_model),
-            )
-            .await
-            {
-                model_directive_enabled_api_formats
-                    .insert(crate::ai_serving::normalize_api_format_alias(api_format));
+        let requested_models = requested_model_scan_order(requested_model, requested_model_order);
+        let mut model_directive_enabled_api_format_models = BTreeSet::new();
+        for requested_model in &requested_models {
+            for api_format in &candidate_api_formats {
+                if crate::system_features::reasoning_model_directive_enabled_for_api_format_and_model(
+                    state.app(),
+                    api_format,
+                    Some(requested_model),
+                )
+                .await
+                {
+                    model_directive_enabled_api_format_models.insert((
+                        requested_model.clone(),
+                        crate::ai_serving::normalize_api_format_alias(api_format),
+                    ));
+                }
             }
         }
 
@@ -317,7 +354,9 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             use_api_format_alias_match,
             key_mode,
             candidate_api_formats,
-            model_directive_enabled_api_formats,
+            model_directive_enabled_api_format_models,
+            requested_models,
+            requested_model_index: 0,
             ordering_config,
             priority_page_emitted: false,
             deferred_pages_by_format: BTreeMap::new(),
@@ -342,33 +381,71 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         >,
         GatewayError,
     > {
-        if !self.priority_page_emitted {
-            self.priority_page_emitted = true;
-            let priority_page = self.next_priority_page().await?;
-            if !priority_page.candidates.is_empty() || !priority_page.skipped_candidates.is_empty()
-            {
-                return Ok(Some(priority_page));
+        while self.requested_model_index < self.requested_models.len() {
+            if !self.priority_page_emitted {
+                self.priority_page_emitted = true;
+                let priority_page = self.next_priority_page().await?;
+                if !priority_page.candidates.is_empty()
+                    || !priority_page.skipped_candidates.is_empty()
+                {
+                    return Ok(Some(priority_page));
+                }
             }
-        }
 
-        while self.format_index < self.candidate_api_formats.len() {
-            let candidate_api_format = self.candidate_api_formats[self.format_index].clone();
-            if let Some(outcome) = self.pop_deferred_page(&candidate_api_format) {
+            while self.format_index < self.candidate_api_formats.len() {
+                let candidate_api_format = self.candidate_api_formats[self.format_index].clone();
+                if let Some(outcome) = self.pop_deferred_page(&candidate_api_format) {
+                    return Ok(Some(outcome));
+                }
+                let Some(outcome) = self.next_page_for_api_format(&candidate_api_format).await?
+                else {
+                    self.format_index += 1;
+                    continue;
+                };
+                if outcome.candidates.is_empty() && outcome.skipped_candidates.is_empty() {
+                    continue;
+                }
                 return Ok(Some(outcome));
             }
-            let Some(outcome) = self.next_page_for_api_format(&candidate_api_format).await? else {
-                self.format_index += 1;
-                continue;
-            };
-            if outcome.candidates.is_empty() && outcome.skipped_candidates.is_empty() {
-                continue;
-            }
-            return Ok(Some(outcome));
+
+            self.requested_model_index += 1;
+            self.reset_current_requested_model_scan();
         }
         Ok(None)
     }
 
-    pub(crate) fn restart_scan(&mut self) {
+    pub(crate) fn has_requested_model_order(&self) -> bool {
+        self.requested_models.len() > 1
+            || self.requested_models.first() != Some(&self.requested_model)
+    }
+
+    pub(crate) fn requested_model_for_page(
+        &self,
+        page: &AiCandidatePreselectionOutcome<
+            SchedulerMinimalCandidateSelectionCandidate,
+            SkippedLocalExecutionCandidate,
+        >,
+    ) -> String {
+        if !self.has_requested_model_order() {
+            return self.requested_model.clone();
+        }
+        if let Some(candidate) = page.candidates.first() {
+            return candidate.global_model_name.clone();
+        }
+        if let Some(skipped) = page.skipped_candidates.first() {
+            return skipped.candidate.global_model_name.clone();
+        }
+        self.current_requested_model().to_string()
+    }
+
+    fn current_requested_model(&self) -> &str {
+        self.requested_models
+            .get(self.requested_model_index)
+            .map(String::as_str)
+            .unwrap_or(self.requested_model.as_str())
+    }
+
+    fn reset_current_requested_model_scan(&mut self) {
         self.format_index = 0;
         self.requested_name_indexes.clear();
         self.requested_name_offsets.clear();
@@ -378,6 +455,11 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         self.seen_candidate_keys.clear();
         self.priority_page_emitted = false;
         self.deferred_pages_by_format.clear();
+    }
+
+    pub(crate) fn restart_scan(&mut self) {
+        self.requested_model_index = 0;
+        self.reset_current_requested_model_scan();
     }
 
     async fn next_priority_page(
@@ -549,15 +631,17 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         >,
         GatewayError,
     > {
+        let requested_model = self.current_requested_model().to_string();
         let normalized_api_format = normalize_api_format(candidate_api_format);
         if normalized_api_format.is_empty() {
             return Ok(None);
         }
-        let enable_model_directives = self.model_directive_enabled_api_formats.contains(
-            &crate::ai_serving::normalize_api_format_alias(candidate_api_format),
-        );
+        let enable_model_directives = self.model_directive_enabled_api_format_models.contains(&(
+            requested_model.clone(),
+            crate::ai_serving::normalize_api_format_alias(candidate_api_format),
+        ));
         let requested_names =
-            requested_model_candidate_names(&self.requested_model, enable_model_directives);
+            requested_model_candidate_names(&requested_model, enable_model_directives);
         let scanned = *self
             .scanned_rows_by_format
             .get(&normalized_api_format)
@@ -576,6 +660,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
                     .next_fallback_page_for_api_format(
                         candidate_api_format,
                         &normalized_api_format,
+                        &requested_model,
                         enable_model_directives,
                     )
                     .await;
@@ -603,7 +688,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             let page = read_requested_model_rows_fast_path_page(
                 self.state.app().data.as_ref(),
                 &normalized_api_format,
-                &self.requested_model,
+                &requested_model,
                 requested_name,
                 offset,
                 limit,
@@ -627,6 +712,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
                         .next_fallback_page_for_api_format(
                             candidate_api_format,
                             &normalized_api_format,
+                            &requested_model,
                             enable_model_directives,
                         )
                         .await;
@@ -638,6 +724,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
                 .build_page_outcome_from_rows(
                     candidate_api_format,
                     &normalized_api_format,
+                    &requested_model,
                     enable_model_directives,
                     page.rows,
                 )
@@ -652,6 +739,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         &mut self,
         candidate_api_format: &str,
         normalized_api_format: &str,
+        requested_model: &str,
         enable_model_directives: bool,
     ) -> Result<
         Option<
@@ -680,7 +768,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             .filter(|row| {
                 row_supports_requested_model_with_model_directives(
                     row,
-                    &self.requested_model,
+                    requested_model,
                     normalized_api_format,
                     enable_model_directives,
                 )
@@ -690,6 +778,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         self.build_page_outcome_from_rows(
             candidate_api_format,
             normalized_api_format,
+            requested_model,
             enable_model_directives,
             rows,
         )
@@ -700,6 +789,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         &mut self,
         candidate_api_format: &str,
         normalized_api_format: &str,
+        requested_model: &str,
         enable_model_directives: bool,
         rows: Vec<StoredMinimalCandidateSelectionRow>,
     ) -> Result<
@@ -729,7 +819,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             } else {
                 let Some(value) = resolve_requested_global_model_name_with_model_directives(
                     &rows,
-                    &self.requested_model,
+                    requested_model,
                     normalized_api_format,
                     enable_model_directives,
                 ) else {
@@ -755,7 +845,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             EnumerateMinimalCandidateSelectionInput {
                 rows,
                 normalized_api_format,
-                requested_model_name: &self.requested_model,
+                requested_model_name: requested_model,
                 resolved_global_model_name: resolved_global_model_name.as_str(),
                 require_streaming: self.require_streaming,
                 required_capabilities: self.required_capabilities.as_ref(),
@@ -769,6 +859,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             if !self.candidate_allowed_for_page(
                 &candidate,
                 candidate_api_format,
+                requested_model,
                 enable_model_directives,
             ) {
                 continue;
@@ -807,6 +898,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
                 self.skipped_candidate_allowed_for_page(
                     skipped_candidate,
                     candidate_api_format,
+                    requested_model,
                     enable_model_directives,
                 )
             })
@@ -822,6 +914,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         &self,
         candidate: &SchedulerMinimalCandidateSelectionCandidate,
         candidate_api_format: &str,
+        requested_model: &str,
         enable_model_directives: bool,
     ) -> bool {
         routing_policy_allows_provider(self.routing_policy.as_ref(), candidate)
@@ -831,7 +924,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
                 &self.client_api_format,
             ) || auth_snapshot_allows_cross_format_candidate(
                 &self.auth_snapshot,
-                &self.requested_model,
+                requested_model,
                 candidate,
                 enable_model_directives,
             ))
@@ -841,6 +934,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         &self,
         skipped_candidate: &SkippedLocalExecutionCandidate,
         candidate_api_format: &str,
+        requested_model: &str,
         enable_model_directives: bool,
     ) -> bool {
         routing_policy_allows_provider(self.routing_policy.as_ref(), &skipped_candidate.candidate)
@@ -850,11 +944,34 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
                 &self.client_api_format,
             ) || auth_snapshot_allows_cross_format_candidate(
                 &self.auth_snapshot,
-                &self.requested_model,
+                requested_model,
                 &skipped_candidate.candidate,
                 enable_model_directives,
             ))
     }
+}
+
+fn requested_model_scan_order(
+    requested_model: &str,
+    requested_model_order: &[String],
+) -> Vec<String> {
+    let mut models = requested_model_order
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+        .fold(Vec::<String>::new(), |mut models, model| {
+            if !models.iter().any(|existing| existing == model) {
+                models.push(model.to_string());
+            }
+            models
+        });
+    if models.is_empty() {
+        let requested_model = requested_model.trim();
+        if !requested_model.is_empty() {
+            models.push(requested_model.to_string());
+        }
+    }
+    models
 }
 
 fn skipped_local_execution_candidate_from_scheduler_skip(
@@ -997,6 +1114,7 @@ mod tests {
             api_key_allowed_api_formats: None,
             api_key_allowed_models: None,
             api_key_ip_rules: None,
+            api_key_feature_settings: None,
             currently_usable: true,
         }
     }
@@ -1142,6 +1260,22 @@ mod tests {
         )
         .expect("key transport should build");
         (provider, endpoint, key)
+    }
+
+    fn openai_responses_mapping_row_for_global_model(
+        global_model_name: &str,
+        suffix: &str,
+    ) -> StoredMinimalCandidateSelectionRow {
+        let mut row = openai_responses_mapping_row();
+        row.provider_id = format!("provider-openai-responses-mapped-{suffix}");
+        row.endpoint_id = format!("endpoint-openai-responses-mapped-{suffix}");
+        row.key_id = format!("key-openai-responses-mapped-{suffix}");
+        row.model_id = format!("model-openai-responses-mapped-{suffix}");
+        row.global_model_id = format!("global-model-openai-responses-mapped-{suffix}");
+        row.global_model_name = global_model_name.to_string();
+        row.global_model_mappings = None;
+        row.model_provider_model_name = format!("{global_model_name}-upstream");
+        row
     }
 
     fn opg_deepseek_row(
@@ -1407,5 +1541,60 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["provider-openai-responses-regular"]
         );
+    }
+
+    #[tokio::test]
+    async fn paged_preselection_scans_requested_models_in_failover_order() {
+        let repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed([
+                openai_responses_mapping_row_for_global_model("glm-4.6", "glm"),
+                openai_responses_mapping_row_for_global_model("deepseek-v3.2", "deepseek"),
+            ]));
+        let data_state =
+            GatewayDataState::with_minimal_candidate_selection_reader_for_tests(repository);
+        let app = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(data_state);
+        let auth_snapshot = unrestricted_auth_snapshot();
+        let requested_model_order = vec!["glm-4.6".to_string(), "deepseek-v3.2".to_string()];
+        let mut cursor = LocalCandidatePreselectionPageCursor::new_with_requested_model_order(
+            PlannerAppState::new(&app),
+            "openai:responses",
+            "gpt-5.5",
+            requested_model_order.as_slice(),
+            false,
+            None,
+            &auth_snapshot,
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+        )
+        .await;
+
+        let first_page = cursor
+            .next_page()
+            .await
+            .expect("first preselection should succeed")
+            .expect("first configured global model should be scanned");
+
+        assert_eq!(first_page.skipped_candidates.len(), 0);
+        assert_eq!(first_page.candidates.len(), 1);
+        assert_eq!(first_page.candidates[0].global_model_name, "glm-4.6");
+
+        let second_page = cursor
+            .next_page()
+            .await
+            .expect("second preselection should succeed")
+            .expect("second configured global model should be scanned");
+
+        assert_eq!(second_page.skipped_candidates.len(), 0);
+        assert_eq!(second_page.candidates.len(), 1);
+        assert_eq!(second_page.candidates[0].global_model_name, "deepseek-v3.2");
+        assert!(cursor
+            .next_page()
+            .await
+            .expect("preselection exhaustion should succeed")
+            .is_none());
     }
 }

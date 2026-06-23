@@ -73,6 +73,7 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       port: 5173,
+      allowedHosts: ['.trycloudflare.com'],
       proxy: {
         // 只代理真正的 API 路径；目标端口由根目录 APP_PORT 控制
         '/api/': {

@@ -34,6 +34,9 @@ use super::super::cache::{
     DirectPlanBypassCache, JsonValueCache, SchedulerAffinityCache, SchedulerAffinitySnapshotEntry,
     SchedulerAffinityTarget, SystemConfigCache, ValueCache,
 };
+use super::super::codex_adapter::config::{
+    parse_codex_adapter_runtime_config, CodexAdapterRuntimeConfig, CodexAdapterRuntimeConfigCache,
+};
 use super::super::data::{GatewayDataConfig, GatewayDataState};
 use super::super::fallback_metrics;
 use super::super::fallback_metrics::{GatewayFallbackMetricKind, GatewayFallbackReason};
@@ -92,6 +95,21 @@ fn system_config_key_affects_auth(key: &str) -> bool {
 fn system_config_key_affects_frontdoor_rpm(key: &str) -> bool {
     let key = key.trim();
     FRONTDOOR_RPM_AFFECTING_SYSTEM_CONFIG_KEYS.contains(&key)
+}
+
+fn system_config_key_affects_codex_adapter(key: &str) -> bool {
+    matches!(
+        key.trim(),
+        aether_admin::codex_adapter::CODEX_ADAPTER_ENABLED_CONFIG_KEY
+            | aether_admin::codex_adapter::CODEX_ADAPTER_ROUTES_CONFIG_KEY
+    )
+}
+
+fn codex_adapter_bad_request(message: String) -> GatewayError {
+    GatewayError::Client {
+        status: http::StatusCode::BAD_REQUEST,
+        message,
+    }
 }
 
 impl AppState {
@@ -173,6 +191,7 @@ impl AppState {
         self.invalidate_scheduler_affinity_cache();
         self.invalidate_auth_context_cache();
         self.system_config_cache.clear();
+        self.codex_adapter_config_cache.clear();
         self.frontdoor_user_rpm.clear_system_default_cache();
         let data = Arc::new(
             (*data)
@@ -255,6 +274,7 @@ impl AppState {
             scheduler_affinity_epoch: Arc::new(AtomicU64::new(0)),
             dashboard_response_cache: Arc::new(DashboardResponseCache::default()),
             system_config_cache: Arc::new(SystemConfigCache::default()),
+            codex_adapter_config_cache: Arc::new(CodexAdapterRuntimeConfigCache::default()),
             fallback_metrics: Arc::new(fallback_metrics::GatewayFallbackMetrics::default()),
             request_candidate_queue: None,
             frontdoor_cors: None,
@@ -550,12 +570,51 @@ impl AppState {
         Ok(value)
     }
 
+    pub(crate) async fn read_codex_adapter_runtime_config(
+        &self,
+    ) -> Result<Arc<CodexAdapterRuntimeConfig>, GatewayError> {
+        if let Some(config) = self.codex_adapter_config_cache.get() {
+            return Ok(config);
+        }
+
+        let stored = self
+            .read_system_config_json_value(
+                aether_admin::codex_adapter::CODEX_ADAPTER_ROUTES_CONFIG_KEY,
+            )
+            .await?
+            .unwrap_or(serde_json::Value::Null);
+        let normalized =
+            aether_admin::codex_adapter::normalize_codex_adapter_routes_config_value(stored)
+                .map_err(codex_adapter_bad_request)?;
+        let config = Arc::new(
+            parse_codex_adapter_runtime_config(normalized).map_err(codex_adapter_bad_request)?,
+        );
+        self.codex_adapter_config_cache.store(Arc::clone(&config));
+        Ok(config)
+    }
+
+    pub(crate) async fn system_config_bool_for_codex_adapter_enabled(
+        &self,
+    ) -> Result<bool, GatewayError> {
+        Ok(self
+            .read_system_config_json_value(
+                aether_admin::codex_adapter::CODEX_ADAPTER_ENABLED_CONFIG_KEY,
+            )
+            .await?
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false))
+    }
+
     pub(crate) async fn upsert_system_config_json_value(
         &self,
         key: &str,
         value: &serde_json::Value,
         description: Option<&str>,
     ) -> Result<serde_json::Value, GatewayError> {
+        crate::codex_adapter::compatibility_validation::validate_codex_adapter_routes_config_write(
+            self, key, value,
+        )
+        .await?;
         let value = self
             .data
             .upsert_system_config_value(key, value, description)
@@ -580,6 +639,10 @@ impl AppState {
         value: &serde_json::Value,
         description: Option<&str>,
     ) -> Result<crate::data::state::StoredSystemConfigEntry, GatewayError> {
+        crate::codex_adapter::compatibility_validation::validate_codex_adapter_routes_config_write(
+            self, key, value,
+        )
+        .await?;
         let entry = self
             .data
             .upsert_system_config_entry(key, value, description)
@@ -605,6 +668,9 @@ impl AppState {
         }
         if deleted && system_config_key_affects_frontdoor_rpm(key) {
             self.frontdoor_user_rpm.clear_system_default_cache();
+        }
+        if system_config_key_affects_codex_adapter(key) {
+            self.codex_adapter_config_cache.clear();
         }
         Ok(deleted)
     }
@@ -645,6 +711,9 @@ impl AppState {
         if system_config_key_affects_frontdoor_rpm(key) {
             self.frontdoor_user_rpm.clear_system_default_cache();
         }
+        if system_config_key_affects_codex_adapter(key) {
+            self.codex_adapter_config_cache.clear();
+        }
     }
 
     pub(crate) async fn read_admin_system_stats(
@@ -673,6 +742,7 @@ impl AppState {
                 | aether_data::repository::system::AdminSystemPurgeTarget::Stats
         ) {
             self.system_config_cache.clear();
+            self.codex_adapter_config_cache.clear();
             self.invalidate_provider_routing_caches();
         }
         Ok(summary)
@@ -1547,6 +1617,102 @@ mod tests {
                 .expect("default rpm limit should use refreshed value"),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn codex_adapter_runtime_config_uses_cache_until_routes_write_invalidates() {
+        let routes_key = aether_admin::codex_adapter::CODEX_ADAPTER_ROUTES_CONFIG_KEY;
+        let old_routes = json!([{
+            "codex_model": "gpt-5.5",
+            "enabled": true,
+            "scheduling_mode": "priority",
+            "candidates": [{
+                "global_model": "glm-4.6",
+                "enabled": true,
+                "priority": 0,
+                "weight": 1
+            }]
+        }]);
+        let new_routes = json!([{
+            "codex_model": "gpt-5.6",
+            "enabled": true,
+            "scheduling_mode": "priority",
+            "candidates": [{
+                "global_model": "deepseek-v3.2",
+                "enabled": true,
+                "priority": 0,
+                "weight": 1
+            }]
+        }]);
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_system_config_values_for_tests([(routes_key.to_string(), old_routes)]),
+            );
+
+        let cached = state
+            .read_codex_adapter_runtime_config()
+            .await
+            .expect("codex adapter config should read");
+        assert_eq!(cached.routes[0].codex_model, "gpt-5.5");
+
+        state
+            .data
+            .upsert_system_config_value(routes_key, &new_routes, None)
+            .await
+            .expect("direct data write should succeed");
+        let still_cached = state
+            .read_codex_adapter_runtime_config()
+            .await
+            .expect("codex adapter config should use parsed cache");
+        assert_eq!(still_cached.routes[0].codex_model, "gpt-5.5");
+
+        state
+            .upsert_system_config_entry(routes_key, &new_routes, None)
+            .await
+            .expect("app config write should succeed");
+        let refreshed = state
+            .read_codex_adapter_runtime_config()
+            .await
+            .expect("codex adapter config should refresh");
+        assert_eq!(refreshed.routes[0].codex_model, "gpt-5.6");
+
+        state
+            .delete_system_config_value(routes_key)
+            .await
+            .expect("app config delete should succeed");
+        let deleted = state
+            .read_codex_adapter_runtime_config()
+            .await
+            .expect("deleted codex adapter config should default empty");
+        assert!(deleted.routes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn codex_adapter_enabled_helper_reads_true_only() {
+        let enabled_key = aether_admin::codex_adapter::CODEX_ADAPTER_ENABLED_CONFIG_KEY;
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_system_config_values_for_tests([(enabled_key.to_string(), json!(true))]),
+            );
+
+        assert!(state
+            .system_config_bool_for_codex_adapter_enabled()
+            .await
+            .expect("enabled flag should read"));
+
+        state
+            .upsert_system_config_entry(enabled_key, &json!("true"), None)
+            .await
+            .expect("app config write should succeed");
+
+        assert!(!state
+            .system_config_bool_for_codex_adapter_enabled()
+            .await
+            .expect("non-bool enabled flag should read as false"));
     }
 
     #[tokio::test]

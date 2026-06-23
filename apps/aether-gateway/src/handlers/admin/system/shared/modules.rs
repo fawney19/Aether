@@ -75,6 +75,18 @@ pub(crate) const ADMIN_MODULE_DEFINITIONS: &[AdminModuleDefinition] = &[
         admin_menu_order: 59,
     },
     AdminModuleDefinition {
+        name: "codex_adapter",
+        display_name: "Codex 适配器",
+        description: "为 Codex 专用用户 API Key 配置 Responses 模型映射和模型级调度",
+        category: "integration",
+        env_key: "CODEX_ADAPTER_AVAILABLE",
+        default_available: true,
+        admin_route: Some("/admin/modules/codex-adapter"),
+        admin_menu_icon: Some("Route"),
+        admin_menu_group: Some("system"),
+        admin_menu_order: 59,
+    },
+    AdminModuleDefinition {
         name: "important_notification",
         display_name: "通知服务",
         description: "统一管理通知项、模板和推送服务选择，供后台任务和用户通知使用",

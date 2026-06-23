@@ -39,6 +39,9 @@ fn ccswitch_usage_auth_error_response(
         Some(GatewayLocalAuthRejection::BalanceDenied { .. }) => {
             build_auth_error_response(http::StatusCode::FORBIDDEN, "API Key 余额不足", false)
         }
+        Some(GatewayLocalAuthRejection::CodexAdapter { .. }) => {
+            build_auth_error_response(http::StatusCode::FORBIDDEN, "Codex 适配器请求被拒绝", false)
+        }
     }
 }
 

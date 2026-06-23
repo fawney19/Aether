@@ -20,6 +20,7 @@ use crate::ai_serving::planner::candidate_source::{
 };
 use crate::ai_serving::planner::common::extract_standard_requested_model;
 use crate::ai_serving::planner::decision_input::{
+    attach_codex_adapter_route_to_local_requested_model_input,
     attach_routing_policy_to_local_requested_model_input,
     build_local_requested_model_decision_input, resolve_local_authenticated_decision_input,
 };
@@ -134,6 +135,16 @@ pub(crate) async fn resolve_local_openai_responses_decision_input(
     let mut input = build_local_requested_model_decision_input(resolved_input, requested_model);
     input.request_auth_channel = decision.request_auth_channel.clone();
     input.client_session_affinity = client_session_affinity_from_parts(parts, Some(body_json));
+    if let Err(err) =
+        attach_codex_adapter_route_to_local_requested_model_input(state, trace_id, &mut input).await
+    {
+        warn!(
+            trace_id = %trace_id,
+            error = ?err,
+            "gateway local openai responses decision codex adapter route resolution failed"
+        );
+        return Err(err);
+    }
     if let Err(err) = attach_routing_policy_to_local_requested_model_input(
         state,
         parts,
@@ -283,6 +294,7 @@ pub(crate) async fn build_local_openai_responses_candidate_attempt_source<'a>(
             trace_id,
             spec_metadata.api_format,
             &input.requested_model,
+            input.requested_model_order(),
             spec_metadata.require_streaming,
             &input.auth_snapshot,
             input.client_session_affinity.as_ref(),

@@ -317,6 +317,12 @@ pub(crate) fn build_local_auth_rejection_response(
             StatusCode::FORBIDDEN,
             &format!("{ACCESS_POLICY_SUBJECT}不允许访问模型 {model}"),
         ),
+        GatewayLocalAuthRejection::CodexAdapter { reason } => build_local_http_error_response(
+            trace_id,
+            control_decision,
+            reason.status_code(),
+            reason.code(),
+        ),
         GatewayLocalAuthRejection::IpNotAllowed { remote_ip } => build_local_http_error_response(
             trace_id,
             control_decision,

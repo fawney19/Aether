@@ -286,11 +286,12 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
     let auth_header = prepared_candidate.auth_header;
     let auth_value = prepared_candidate.auth_value;
     let mapped_model = prepared_candidate.mapped_model;
+    let model_directive_lookup_model = input.model_directive_lookup_model(candidate);
     let enable_model_directives =
         crate::system_features::reasoning_model_directive_enabled_for_api_format_and_model(
             state,
             provider_api_format,
-            Some(&input.requested_model),
+            Some(model_directive_lookup_model),
         )
         .await;
     let redaction = resolve_provider_chat_pii_redaction(
@@ -391,7 +392,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
         crate::system_features::reasoning_model_directive_mapping_for_api_format_and_model(
             state,
             provider_api_format,
-            Some(&input.requested_model),
+            Some(model_directive_lookup_model),
         )
         .await
     {

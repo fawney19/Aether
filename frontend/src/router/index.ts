@@ -285,6 +285,12 @@ const routes: RouteRecordRaw[] = [
         meta: { module: 'chat_pii_redaction' }
       },
       {
+        path: 'modules/codex-adapter',
+        name: 'CodexAdapterModule',
+        component: () => importWithRetry(() => import('@/views/admin/modules/CodexAdapter.vue')),
+        meta: { module: 'codex_adapter' }
+      },
+      {
         path: 'modules/s3-backup',
         name: 'S3BackupSettings',
         component: () => importWithRetry(() => import('@/views/admin/modules/S3BackupSettings.vue')),

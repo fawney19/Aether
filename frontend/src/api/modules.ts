@@ -48,6 +48,22 @@ export interface ChatPiiRedactionConfig {
   placeholder_prefix: string
 }
 
+export type CodexAdapterSchedulingMode = 'priority' | 'sticky' | 'load_balance'
+
+export interface CodexAdapterCandidateConfig {
+  global_model: string
+  enabled: boolean
+  priority: number
+  weight: number
+}
+
+export interface CodexAdapterRouteConfig {
+  codex_model: string
+  enabled: boolean
+  scheduling_mode: CodexAdapterSchedulingMode
+  candidates: CodexAdapterCandidateConfig[]
+}
+
 export const CHAT_PII_REDACTION_DEFAULT_RULES: ChatPiiRedactionRule[] = [
   { id: 'email', name: '邮箱', pattern: '(?i)[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,253}\\.[A-Z]{2,63}', enabled: true, features: { validator: 'email' }, system: true },
   { id: 'cn_phone', name: '手机号', pattern: '(?:\\+?86[- ]?)?(?:1[3-9]\\d[- ]?\\d{4}[- ]?\\d{4}|0\\d{2,3}[- ]\\d{7,8}(?:-\\d{1,6})?)', enabled: true, features: { validator: 'cn_phone' }, system: true },
@@ -68,6 +84,10 @@ const CHAT_PII_REDACTION_CONFIG_KEYS = {
   rules: 'module.chat_pii_redaction.rules',
   cache_ttl_seconds: 'module.chat_pii_redaction.cache_ttl_seconds',
   placeholder_prefix: 'module.chat_pii_redaction.placeholder_prefix',
+} as const
+
+const CODEX_ADAPTER_CONFIG_KEYS = {
+  routes: 'module.codex_adapter.routes',
 } as const
 
 const CHAT_PII_REDACTION_DEFAULT_CONFIG: ChatPiiRedactionConfig = {
@@ -158,6 +178,139 @@ function normalizePlaceholderPrefix(value: unknown): string {
   return /^[A-Z0-9_]{1,32}$/.test(normalized)
     ? normalized
     : CHAT_PII_REDACTION_DEFAULT_CONFIG.placeholder_prefix
+}
+
+export function createDefaultCodexAdapterCandidateConfig(): CodexAdapterCandidateConfig {
+  return {
+    global_model: '',
+    enabled: true,
+    priority: 0,
+    weight: 100,
+  }
+}
+
+export function createDefaultCodexAdapterRouteConfig(): CodexAdapterRouteConfig {
+  return {
+    codex_model: '',
+    enabled: true,
+    scheduling_mode: 'priority',
+    candidates: [createDefaultCodexAdapterCandidateConfig()],
+  }
+}
+
+function normalizeCodexAdapterSchedulingMode(value: unknown): CodexAdapterSchedulingMode {
+  return value === 'sticky' || value === 'load_balance' ? value : 'priority'
+}
+
+function normalizeCodexAdapterCandidate(value: unknown): CodexAdapterCandidateConfig | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const candidate = value as Record<string, unknown>
+  const globalModel = typeof candidate.global_model === 'string'
+    ? candidate.global_model.trim()
+    : ''
+  const priority = Number.isInteger(candidate.priority) ? Number(candidate.priority) : 0
+  const weight = Number.isInteger(candidate.weight) && Number(candidate.weight) > 0
+    ? Number(candidate.weight)
+    : 100
+
+  return {
+    global_model: globalModel,
+    enabled: candidate.enabled !== false,
+    priority,
+    weight,
+  }
+}
+
+export function normalizeCodexAdapterConfig(value: unknown): CodexAdapterRouteConfig[] {
+  if (!Array.isArray(value)) return []
+
+  const seenModels = new Set<string>()
+  const routes: CodexAdapterRouteConfig[] = []
+
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const route = item as Record<string, unknown>
+    const codexModel = typeof route.codex_model === 'string'
+      ? route.codex_model.trim()
+      : ''
+    if (!codexModel || seenModels.has(codexModel)) continue
+    seenModels.add(codexModel)
+
+    const candidates = Array.isArray(route.candidates)
+      ? route.candidates
+        .map(normalizeCodexAdapterCandidate)
+        .filter((candidate): candidate is CodexAdapterCandidateConfig => candidate !== null)
+      : []
+
+    routes.push({
+      codex_model: codexModel,
+      enabled: route.enabled !== false,
+      scheduling_mode: normalizeCodexAdapterSchedulingMode(route.scheduling_mode),
+      candidates,
+    })
+  }
+
+  return routes
+}
+
+export function serializeCodexAdapterConfig(routes: CodexAdapterRouteConfig[]): CodexAdapterRouteConfig[] {
+  return routes.map(route => ({
+    codex_model: route.codex_model.trim(),
+    enabled: route.enabled,
+    scheduling_mode: normalizeCodexAdapterSchedulingMode(route.scheduling_mode),
+    candidates: route.candidates.map(candidate => ({
+      global_model: candidate.global_model.trim(),
+      enabled: candidate.enabled,
+      priority: Number.isFinite(Number(candidate.priority))
+        ? Math.trunc(Number(candidate.priority))
+        : 0,
+      weight: Number.isInteger(candidate.weight) && candidate.weight > 0
+        ? candidate.weight
+        : Number(candidate.weight) > 0
+          ? Math.trunc(Number(candidate.weight))
+          : 0,
+    })),
+  }))
+}
+
+export function validateCodexAdapterConfig(routes: CodexAdapterRouteConfig[]): string | null {
+  const normalized = serializeCodexAdapterConfig(routes)
+  const routeModels = new Set<string>()
+
+  for (let routeIndex = 0; routeIndex < normalized.length; routeIndex += 1) {
+    const route = normalized[routeIndex]
+    const routeLabel = `第 ${routeIndex + 1} 条路由`
+
+    if (!route.codex_model) return `${routeLabel} 的 Codex 请求模型不能为空`
+    if (routeModels.has(route.codex_model)) return `Codex 请求模型 ${route.codex_model} 不能重复`
+    routeModels.add(route.codex_model)
+
+    const candidateModels = new Set<string>()
+    let enabledCandidates = 0
+
+    for (let candidateIndex = 0; candidateIndex < route.candidates.length; candidateIndex += 1) {
+      const candidate = route.candidates[candidateIndex]
+      const candidateLabel = `${routeLabel} 的第 ${candidateIndex + 1} 个候选模型`
+
+      if (!candidate.global_model) return `${candidateLabel} 不能为空`
+      if (candidateModels.has(candidate.global_model)) {
+        return `${route.codex_model} 下的候选模型 ${candidate.global_model} 不能重复`
+      }
+      candidateModels.add(candidate.global_model)
+
+      if (!Number.isInteger(candidate.priority)) return `${candidateLabel} 的优先级必须是整数`
+      if (!Number.isInteger(candidate.weight) || candidate.weight <= 0) {
+        return `${candidateLabel} 的权重必须大于 0`
+      }
+      if (candidate.enabled) enabledCandidates += 1
+    }
+
+    if (route.enabled && enabledCandidates === 0) {
+      return `${route.codex_model} 已启用时至少需要一个启用中的候选模型`
+    }
+  }
+
+  return null
 }
 
 async function getSystemConfigValue(key: string): Promise<unknown> {
@@ -260,6 +413,20 @@ export const modulesApi = {
       cache_ttl_seconds: cacheTtlSeconds,
       placeholder_prefix: placeholderPrefix,
     })
+  },
+
+  async getCodexAdapterConfig(): Promise<CodexAdapterRouteConfig[]> {
+    const routes = await getSystemConfigValue(CODEX_ADAPTER_CONFIG_KEYS.routes)
+    return normalizeCodexAdapterConfig(routes)
+  },
+
+  async updateCodexAdapterConfig(config: CodexAdapterRouteConfig[]): Promise<CodexAdapterRouteConfig[]> {
+    const routes = await updateSystemConfigValue(
+      CODEX_ADAPTER_CONFIG_KEYS.routes,
+      serializeCodexAdapterConfig(config),
+      'Codex 适配器模型映射与候选调度配置',
+    )
+    return normalizeCodexAdapterConfig(routes)
   },
 
   /**

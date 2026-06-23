@@ -5,7 +5,7 @@ use aether_routing_core::{
     rank_vector_for_candidate, CandidateKind, ResolvedRoutingPolicy, RoutingCandidateFacts,
     RoutingCandidateTrace, RoutingDecisionTrace, RoutingPoolExpansionTrace, RoutingRulePhase,
 };
-use aether_scheduler_core::ClientSessionAffinity;
+use aether_scheduler_core::{ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate};
 use async_trait::async_trait;
 use http::StatusCode;
 use http::{HeaderMap, HeaderName, HeaderValue};
@@ -16,6 +16,9 @@ use crate::ai_serving::planner::common::extract_standard_requested_model;
 use crate::ai_serving::{ExecutionRuntimeAuthContext, GatewayAuthApiKeySnapshot, PlannerAppState};
 use crate::client_session_affinity::client_session_affinity_from_request;
 use crate::clock::current_unix_secs;
+use crate::codex_adapter::planner::{
+    resolve_codex_adapter_planner_route, CodexAdapterPlannerRoute,
+};
 use crate::routing::{
     apply_routing_mutation_plan, build_routing_trace_seed, resolve_gateway_routing_policy,
     select_gateway_routing_group, GatewayRoutingPolicyInput, GatewayRoutingSelectionError,
@@ -41,6 +44,7 @@ pub(crate) struct LocalRequestedModelDecisionInput {
     pub(crate) routing_policy: Option<ResolvedRoutingPolicy>,
     pub(crate) routing_trace_seed: Option<RoutingDecisionTrace>,
     pub(crate) routing_context: Option<LocalRoutingRequestContext>,
+    pub(crate) codex_adapter_route: Option<CodexAdapterPlannerRoute>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +79,23 @@ impl LocalRequestedModelDecisionInput {
             .as_ref()
             .map(|context| &context.effective_headers)
             .unwrap_or(fallback)
+    }
+
+    pub(crate) fn requested_model_order(&self) -> Option<&[String]> {
+        self.codex_adapter_route
+            .as_ref()
+            .map(|route| route.ordered_global_models.as_slice())
+    }
+
+    pub(crate) fn model_directive_lookup_model<'a>(
+        &'a self,
+        candidate: &'a SchedulerMinimalCandidateSelectionCandidate,
+    ) -> &'a str {
+        if self.codex_adapter_route.is_some() {
+            candidate.global_model_name.as_str()
+        } else {
+            self.requested_model.as_str()
+        }
     }
 }
 
@@ -208,7 +229,25 @@ pub(crate) fn build_local_requested_model_decision_input(
         routing_policy: None,
         routing_trace_seed: None,
         routing_context: None,
+        codex_adapter_route: None,
     }
+}
+
+pub(crate) async fn attach_codex_adapter_route_to_local_requested_model_input(
+    state: &AppState,
+    trace_id: &str,
+    input: &mut LocalRequestedModelDecisionInput,
+) -> Result<(), GatewayError> {
+    input.codex_adapter_route = resolve_codex_adapter_planner_route(
+        state,
+        &input.auth_context,
+        &input.auth_snapshot,
+        input.requested_model.as_str(),
+        trace_id,
+        input.client_session_affinity.as_ref(),
+    )
+    .await?;
+    Ok(())
 }
 
 pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
@@ -634,6 +673,7 @@ mod tests {
             api_key_allowed_api_formats: None,
             api_key_allowed_models: None,
             api_key_ip_rules: None,
+            api_key_feature_settings: None,
             currently_usable: true,
         }
     }
@@ -684,6 +724,7 @@ mod tests {
                     }]
                 }),
             }),
+            codex_adapter_route: None,
         }
     }
 

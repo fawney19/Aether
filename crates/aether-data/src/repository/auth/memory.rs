@@ -86,6 +86,9 @@ impl InMemoryAuthApiKeySnapshotRepository {
                             .map(|value| serde_json::json!(value)),
                     )
                 })
+                .map(|record| {
+                    record.with_feature_settings(snapshot.api_key_feature_settings.clone())
+                })
                 .expect("derived auth api key export record should build"),
             );
             if let Some(key_hash) = key_hash {
@@ -505,6 +508,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 api_key_allowed_api_formats: record.allowed_api_formats.clone(),
                 api_key_allowed_models: record.allowed_models.clone(),
                 api_key_ip_rules: record.ip_rules.clone(),
+                api_key_feature_settings: None,
                 ..template
             }
         } else {
@@ -641,6 +645,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 api_key_allowed_api_formats: record.allowed_api_formats.clone(),
                 api_key_allowed_models: record.allowed_models.clone(),
                 api_key_ip_rules: record.ip_rules.clone(),
+                api_key_feature_settings: None,
                 ..template
             }
         } else {
@@ -1007,13 +1012,17 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
         if snapshot.user_id != user_id || snapshot.api_key_is_standalone {
             return Ok(None);
         }
-        let Some(export) = index.export_by_api_key_id.get_mut(api_key_id) else {
-            return Ok(None);
-        };
-        export.feature_settings = match feature_settings {
+        let normalized = match feature_settings {
             Some(serde_json::Value::Null) | None => None,
             Some(value) => Some(value),
         };
+        if let Some(snapshot) = index.by_api_key_id.get_mut(api_key_id) {
+            snapshot.api_key_feature_settings = normalized.clone();
+        }
+        let Some(export) = index.export_by_api_key_id.get_mut(api_key_id) else {
+            return Ok(None);
+        };
+        export.feature_settings = normalized;
         Ok(Some(export.clone()))
     }
 
@@ -1092,13 +1101,17 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
         if !snapshot.api_key_is_standalone {
             return Ok(None);
         }
-        let Some(export) = index.export_by_api_key_id.get_mut(api_key_id) else {
-            return Ok(None);
-        };
-        export.feature_settings = match feature_settings {
+        let normalized = match feature_settings {
             Some(serde_json::Value::Null) | None => None,
             Some(value) => Some(value),
         };
+        if let Some(snapshot) = index.by_api_key_id.get_mut(api_key_id) {
+            snapshot.api_key_feature_settings = normalized.clone();
+        }
+        let Some(export) = index.export_by_api_key_id.get_mut(api_key_id) else {
+            return Ok(None);
+        };
+        export.feature_settings = normalized;
         Ok(Some(export.clone()))
     }
 }
@@ -1108,8 +1121,9 @@ mod tests {
     use super::InMemoryAuthApiKeySnapshotRepository;
     use crate::repository::auth::{
         AuthApiKeyLookupKey, AuthApiKeyReadRepository, AuthApiKeyWriteRepository,
-        StandaloneApiKeyExportListQuery, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
-        UpdateStandaloneApiKeyBasicRecord, UpdateUserApiKeyBasicRecord,
+        CreateStandaloneApiKeyRecord, CreateUserApiKeyRecord, StandaloneApiKeyExportListQuery,
+        StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot, UpdateStandaloneApiKeyBasicRecord,
+        UpdateUserApiKeyBasicRecord,
     };
 
     fn sample_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
@@ -1361,5 +1375,85 @@ mod tests {
             .expect("find should succeed")
             .expect("snapshot should exist");
         assert_eq!(snapshot.api_key_concurrent_limit, Some(13));
+    }
+
+    #[tokio::test]
+    async fn create_api_keys_do_not_inherit_template_feature_settings() {
+        let settings = serde_json::json!({"codex_adapter": {"enabled": true}});
+        let user_template = sample_snapshot("key-user-template", "user-1")
+            .with_api_key_feature_settings(Some(settings.clone()));
+        let mut standalone_template = sample_snapshot("key-standalone-template", "admin-1")
+            .with_api_key_feature_settings(Some(settings));
+        standalone_template.api_key_is_standalone = true;
+        let repository = InMemoryAuthApiKeySnapshotRepository::seed(vec![
+            (Some("hash-user-template".to_string()), user_template),
+            (
+                Some("hash-standalone-template".to_string()),
+                standalone_template,
+            ),
+        ]);
+
+        repository
+            .create_user_api_key(CreateUserApiKeyRecord {
+                user_id: "user-1".to_string(),
+                api_key_id: "key-user-new".to_string(),
+                key_hash: "hash-user-new".to_string(),
+                key_encrypted: None,
+                name: Some("new user key".to_string()),
+                allowed_providers: None,
+                allowed_api_formats: None,
+                allowed_models: None,
+                ip_rules: None,
+                rate_limit: 60,
+                concurrent_limit: None,
+                force_capabilities: None,
+                is_active: true,
+                expires_at_unix_secs: None,
+                auto_delete_on_expiry: false,
+                total_requests: 0,
+                total_tokens: 0,
+                total_cost_usd: 0.0,
+            })
+            .await
+            .expect("create user api key should succeed")
+            .expect("user api key should be created");
+        repository
+            .create_standalone_api_key(CreateStandaloneApiKeyRecord {
+                user_id: "admin-1".to_string(),
+                api_key_id: "key-standalone-new".to_string(),
+                key_hash: "hash-standalone-new".to_string(),
+                key_encrypted: None,
+                name: Some("new standalone key".to_string()),
+                allowed_providers: None,
+                allowed_api_formats: None,
+                allowed_models: None,
+                ip_rules: None,
+                rate_limit: None,
+                concurrent_limit: None,
+                force_capabilities: None,
+                is_active: true,
+                expires_at_unix_secs: None,
+                auto_delete_on_expiry: false,
+                total_requests: 0,
+                total_tokens: 0,
+                total_cost_usd: 0.0,
+            })
+            .await
+            .expect("create standalone api key should succeed")
+            .expect("standalone api key should be created");
+
+        let user_snapshot = repository
+            .find_api_key_snapshot(AuthApiKeyLookupKey::ApiKeyId("key-user-new"))
+            .await
+            .expect("find user key should succeed")
+            .expect("user key should exist");
+        let standalone_snapshot = repository
+            .find_api_key_snapshot(AuthApiKeyLookupKey::ApiKeyId("key-standalone-new"))
+            .await
+            .expect("find standalone key should succeed")
+            .expect("standalone key should exist");
+
+        assert!(user_snapshot.api_key_feature_settings.is_none());
+        assert!(standalone_snapshot.api_key_feature_settings.is_none());
     }
 }

@@ -246,6 +246,7 @@ pub(super) async fn build_local_standard_candidate_attempt_source<'a>(
             trace_id,
             spec_metadata.api_format,
             &input.requested_model,
+            input.requested_model_order(),
             spec_metadata.require_streaming,
             &input.auth_snapshot,
             input.client_session_affinity.as_ref(),

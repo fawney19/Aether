@@ -4,6 +4,9 @@ use axum::http::Uri;
 use super::super::GatewayControlDecision;
 use super::credentials::{contains_string, extract_requested_model};
 use super::GatewayControlAuthContext;
+use crate::codex_adapter::request_guard::{
+    codex_adapter_request_rejection, CodexAdapterRequestRejection,
+};
 use crate::{AppState, GatewayError};
 
 const DAILY_QUOTA_EPSILON_USD: f64 = 0.000_000_01;
@@ -13,11 +16,24 @@ pub(crate) enum GatewayLocalAuthRejection {
     InvalidApiKey,
     LockedApiKey,
     WalletUnavailable,
-    BalanceDenied { remaining: Option<f64> },
-    ProviderNotAllowed { provider: String },
-    ApiFormatNotAllowed { api_format: String },
-    ModelNotAllowed { model: String },
-    IpNotAllowed { remote_ip: String },
+    BalanceDenied {
+        remaining: Option<f64>,
+    },
+    ProviderNotAllowed {
+        provider: String,
+    },
+    ApiFormatNotAllowed {
+        api_format: String,
+    },
+    ModelNotAllowed {
+        model: String,
+    },
+    CodexAdapter {
+        reason: CodexAdapterRequestRejection,
+    },
+    IpNotAllowed {
+        remote_ip: String,
+    },
 }
 
 pub(crate) fn trusted_auth_local_rejection(
@@ -64,6 +80,19 @@ pub(crate) async fn request_model_local_rejection(
         return Ok(None);
     };
     let requested_model = extract_requested_model(decision, uri, headers, body);
+    if let Some(rejection) = codex_adapter_request_rejection(
+        state,
+        decision,
+        auth_context,
+        uri,
+        requested_model.as_deref(),
+    )
+    .await?
+    {
+        return Ok(Some(GatewayLocalAuthRejection::CodexAdapter {
+            reason: rejection,
+        }));
+    }
     if let (Some(allowed_models), Some(requested_model)) = (
         auth_context.allowed_models.as_deref(),
         requested_model.as_deref(),
@@ -572,9 +601,42 @@ mod tests {
             user_rate_limit: None,
             api_key_rate_limit: None,
             api_key_is_standalone: false,
+            api_key_codex_adapter_enabled: false,
             admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: Some(allowed_models),
+            ip_rules: None,
+        });
+        decision
+    }
+
+    fn codex_adapter_decision(path: &str) -> GatewayControlDecision {
+        let (route_kind, auth_endpoint_signature) = if path == "/v1/responses" {
+            ("responses", "openai:responses")
+        } else {
+            ("chat", "openai:chat")
+        };
+        let mut decision = GatewayControlDecision::synthetic(
+            path,
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some(route_kind.to_string()),
+            Some(auth_endpoint_signature.to_string()),
+        );
+        decision.auth_context = Some(GatewayControlAuthContext {
+            user_id: "user-1".to_string(),
+            api_key_id: "api-key-1".to_string(),
+            username: None,
+            api_key_name: None,
+            balance_remaining: None,
+            access_allowed: true,
+            user_rate_limit: None,
+            api_key_rate_limit: None,
+            api_key_is_standalone: false,
+            api_key_codex_adapter_enabled: true,
+            admin_bypass_limits: false,
+            local_rejection: None,
+            allowed_models: None,
             ip_rules: None,
         });
         decision
@@ -586,6 +648,37 @@ mod tests {
         AppState::new()
             .expect("state should build")
             .with_data_state_for_tests(data)
+    }
+
+    fn state_with_codex_adapter(enabled: bool, routes: serde_json::Value) -> AppState {
+        AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled().with_system_config_values_for_tests([
+                    (
+                        aether_admin::codex_adapter::CODEX_ADAPTER_ENABLED_CONFIG_KEY.to_string(),
+                        json!(enabled),
+                    ),
+                    (
+                        aether_admin::codex_adapter::CODEX_ADAPTER_ROUTES_CONFIG_KEY.to_string(),
+                        routes,
+                    ),
+                ]),
+            )
+    }
+
+    fn codex_adapter_routes() -> serde_json::Value {
+        json!([{
+            "codex_model": "gpt-5.5",
+            "enabled": true,
+            "scheduling_mode": "priority",
+            "candidates": [{
+                "global_model": "glm-4.6",
+                "enabled": true,
+                "priority": 0,
+                "weight": 1
+            }]
+        }])
     }
 
     fn state_with_quota_and_wallet(
@@ -785,6 +878,101 @@ mod tests {
                 model: "gpt-5.2".to_string(),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn codex_adapter_key_rejects_when_module_disabled() {
+        let state = state_with_codex_adapter(false, codex_adapter_routes());
+        let decision = codex_adapter_decision("/v1/responses");
+        let uri: Uri = "/v1/responses".parse().expect("uri should parse");
+        let body = Bytes::from_static(br#"{"model":"gpt-5.5","input":"hello"}"#);
+
+        let rejection =
+            request_model_local_rejection(&state, Some(&decision), &uri, &json_headers(), &body)
+                .await
+                .expect("codex adapter rejection should resolve");
+
+        assert_eq!(
+            rejection,
+            Some(GatewayLocalAuthRejection::CodexAdapter {
+                reason: crate::codex_adapter::request_guard::CodexAdapterRequestRejection::Disabled,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_adapter_key_requires_openai_responses_route() {
+        let state = state_with_codex_adapter(true, codex_adapter_routes());
+        let decision = codex_adapter_decision("/v1/chat/completions");
+        let uri: Uri = "/v1/chat/completions".parse().expect("uri should parse");
+        let body = Bytes::from_static(br#"{"model":"gpt-5.5","messages":[]}"#);
+
+        let rejection =
+            request_model_local_rejection(&state, Some(&decision), &uri, &json_headers(), &body)
+                .await
+                .expect("codex adapter rejection should resolve");
+
+        assert_eq!(
+            rejection,
+            Some(GatewayLocalAuthRejection::CodexAdapter {
+                reason: crate::codex_adapter::request_guard::CodexAdapterRequestRejection::RequiresResponses,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_adapter_key_rejects_unconfigured_model() {
+        let state = state_with_codex_adapter(true, codex_adapter_routes());
+        let decision = codex_adapter_decision("/v1/responses");
+        let uri: Uri = "/v1/responses".parse().expect("uri should parse");
+        let body = Bytes::from_static(br#"{"model":"gpt-6","input":"hello"}"#);
+
+        let rejection =
+            request_model_local_rejection(&state, Some(&decision), &uri, &json_headers(), &body)
+                .await
+                .expect("codex adapter rejection should resolve");
+
+        assert_eq!(
+            rejection,
+            Some(GatewayLocalAuthRejection::CodexAdapter {
+                reason: crate::codex_adapter::request_guard::CodexAdapterRequestRejection::ModelNotConfigured,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_key_does_not_enter_codex_adapter_guard() {
+        let state = state_with_codex_adapter(true, codex_adapter_routes());
+        let mut decision = codex_adapter_decision("/v1/responses");
+        decision
+            .auth_context
+            .as_mut()
+            .expect("auth context should exist")
+            .api_key_codex_adapter_enabled = false;
+        let uri: Uri = "/v1/responses".parse().expect("uri should parse");
+        let body = Bytes::from_static(br#"{"model":"gpt-6","input":"hello"}"#);
+
+        let rejection =
+            request_model_local_rejection(&state, Some(&decision), &uri, &json_headers(), &body)
+                .await
+                .expect("ordinary key rejection should resolve");
+
+        assert_eq!(rejection, None);
+    }
+
+    #[tokio::test]
+    async fn codex_adapter_key_allows_configured_responses_model() {
+        let state = state_with_codex_adapter(true, codex_adapter_routes());
+        let decision = codex_adapter_decision("/v1/responses");
+        let uri: Uri = "/v1/responses".parse().expect("uri should parse");
+        let body = Bytes::from_static(br#"{"model":"gpt-5.5","input":"hello"}"#);
+
+        let rejection =
+            request_model_local_rejection(&state, Some(&decision), &uri, &json_headers(), &body)
+                .await
+                .expect("codex adapter guard should resolve");
+
+        assert_eq!(rejection, None);
     }
 
     #[tokio::test]

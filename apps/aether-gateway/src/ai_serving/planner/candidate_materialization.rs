@@ -694,6 +694,7 @@ pub(crate) async fn build_lazy_requested_model_execution_candidate_attempt_sourc
     trace_id: &str,
     client_api_format: &str,
     requested_model: &str,
+    requested_model_order: Option<&[String]>,
     require_streaming: bool,
     auth_snapshot: &GatewayAuthApiKeySnapshot,
     client_session_affinity: Option<&ClientSessionAffinity>,
@@ -717,19 +718,36 @@ where
     let _ = build_available_extra_data;
     let decorate_skipped_candidate = Arc::new(decorate_skipped_candidate);
     let record_runtime_miss_diagnostic = persistence_policy.skipped.record_runtime_miss_diagnostic;
-    let page_cursor = LocalCandidatePreselectionPageCursor::new(
-        state,
-        client_api_format,
-        requested_model,
-        require_streaming,
-        required_capabilities,
-        auth_snapshot,
-        routing_policy,
-        client_session_affinity,
-        use_api_format_alias_match,
-        key_mode,
-    )
-    .await;
+    let page_cursor = if let Some(requested_model_order) = requested_model_order {
+        LocalCandidatePreselectionPageCursor::new_with_requested_model_order(
+            state,
+            client_api_format,
+            requested_model,
+            requested_model_order,
+            require_streaming,
+            required_capabilities,
+            auth_snapshot,
+            routing_policy,
+            client_session_affinity,
+            use_api_format_alias_match,
+            key_mode,
+        )
+        .await
+    } else {
+        LocalCandidatePreselectionPageCursor::new(
+            state,
+            client_api_format,
+            requested_model,
+            require_streaming,
+            required_capabilities,
+            auth_snapshot,
+            routing_policy,
+            client_session_affinity,
+            use_api_format_alias_match,
+            key_mode,
+        )
+        .await
+    };
     let mut cursor = RequestedModelAttemptPageCursor {
         state,
         trace_id: trace_id.to_string(),
@@ -825,6 +843,7 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                     return false;
                 }
             };
+            let page_requested_model = self.page_cursor.requested_model_for_page(&page);
 
             if page_is_exact_auth_api_key_concurrency_limited(&page) {
                 if self.wait_for_auth_api_key_concurrency_retry().await {
@@ -840,7 +859,7 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                     self.state,
                     page.candidates,
                     &self.client_api_format,
-                    Some(&self.requested_model),
+                    Some(page_requested_model.as_str()),
                     Some(&self.auth_snapshot),
                     self.client_session_affinity.as_ref(),
                     self.required_capabilities.as_ref(),
@@ -869,7 +888,7 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                     Some(&self.auth_snapshot),
                     self.client_session_affinity.as_ref(),
                     &self.client_api_format,
-                    Some(&self.requested_model),
+                    Some(page_requested_model.as_str()),
                     &candidates,
                 );
                 self.remembered_affinity = true;
@@ -881,7 +900,7 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                 Some(&self.trace_id),
                 self.record_runtime_miss_diagnostic,
                 self.sticky_session_token.as_deref(),
-                Some(&self.requested_model),
+                Some(page_requested_model.as_str()),
                 self.request_auth_channel.as_deref(),
                 self.routing_policy.as_ref(),
                 Some(PoolGroupExhaustionPersistenceContext {

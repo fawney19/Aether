@@ -3,6 +3,8 @@ use std::net::IpAddr;
 
 use serde_json::{Map, Value};
 
+use crate::codex_adapter::feature_settings::normalize_codex_adapter_feature_settings;
+
 pub(crate) fn normalize_string_list(values: Option<Vec<String>>) -> Option<Vec<String>> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
@@ -55,6 +57,7 @@ pub(crate) fn normalize_feature_settings(value: Option<Value>) -> Result<Option<
         Value::Object(ref mut settings) => {
             normalize_chat_pii_redaction_feature_settings(settings)?;
             normalize_notification_push_service_feature_settings(settings)?;
+            normalize_codex_adapter_feature_settings(settings)?;
             if settings.is_empty() {
                 Ok(None)
             } else {
@@ -445,6 +448,42 @@ mod tests {
             normalized["notification_push_service"]["enabled"],
             json!(true)
         );
+    }
+
+    #[test]
+    fn normalize_feature_settings_preserves_enabled_codex_adapter() {
+        let normalized = normalize_feature_settings(Some(json!({
+            "codex_adapter": {"enabled": true},
+            "chat_pii_redaction": {"enabled": true, "inject_model_instruction": false}
+        })))
+        .expect("feature settings should normalize")
+        .expect("feature settings should remain set");
+
+        assert_eq!(normalized["codex_adapter"]["enabled"], json!(true));
+        assert_eq!(normalized["chat_pii_redaction"]["enabled"], json!(true));
+    }
+
+    #[test]
+    fn normalize_feature_settings_removes_disabled_codex_adapter() {
+        let normalized = normalize_feature_settings(Some(json!({
+            "codex_adapter": {"enabled": false},
+            "chat_pii_redaction": {"enabled": true}
+        })))
+        .expect("feature settings should normalize")
+        .expect("chat pii redaction should remain set");
+
+        assert!(normalized.get("codex_adapter").is_none());
+        assert_eq!(normalized["chat_pii_redaction"]["enabled"], json!(true));
+    }
+
+    #[test]
+    fn normalize_feature_settings_rejects_non_bool_codex_adapter_enabled() {
+        let err = normalize_feature_settings(Some(json!({
+            "codex_adapter": {"enabled": "yes"}
+        })))
+        .expect_err("invalid codex adapter enabled should fail");
+
+        assert!(err.contains("codex_adapter.enabled"));
     }
 
     #[test]
