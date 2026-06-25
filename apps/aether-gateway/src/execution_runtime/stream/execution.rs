@@ -5053,6 +5053,51 @@ mod tests {
     use crate::tunnel::{tunnel_protocol, TunnelProxyConn};
     use crate::AppState;
 
+    struct UsageRuntimeWorkerGuard(tokio::task::JoinHandle<()>);
+
+    impl Drop for UsageRuntimeWorkerGuard {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    fn app_state_with_stream_usage_runtime(
+        request_candidate_repository: Arc<InMemoryRequestCandidateRepository>,
+        usage_repository: Arc<InMemoryUsageReadRepository>,
+        suffix: &str,
+    ) -> AppState {
+        let usage_worker_queue: Arc<dyn aether_runtime_state::RuntimeQueueStore> =
+            Arc::new(aether_runtime_state::RuntimeState::memory(
+                aether_runtime_state::MemoryRuntimeStateConfig::default(),
+            ));
+        AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                    request_candidate_repository,
+                    usage_repository,
+                )
+                .with_usage_worker_queue(Some(usage_worker_queue)),
+            )
+            .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                enabled: true,
+                queue_lifecycle_events: true,
+                stream_key: format!("usage:events:test:stream-execution:{suffix}"),
+                consumer_group: format!("usage_consumers_test_stream_execution_{suffix}"),
+                consumer_block_ms: 1,
+                ..UsageRuntimeConfig::default()
+            })
+    }
+
+    fn spawn_usage_runtime_worker_for_tests(state: &AppState) -> UsageRuntimeWorkerGuard {
+        UsageRuntimeWorkerGuard(
+            state
+                .usage_runtime
+                .spawn_worker(Arc::clone(&state.data))
+                .expect("usage runtime worker should spawn for stream test"),
+        )
+    }
+
     fn provider_catalog_stop_429_for_plan(
         plan: &ExecutionPlan,
     ) -> InMemoryProviderCatalogReadRepository {
@@ -7369,19 +7414,13 @@ mod tests {
 
         let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
         let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
-        let state = AppState::new()
-            .expect("app state should build")
-            .with_data_state_for_tests(
-                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
-                    Arc::clone(&request_candidate_repository),
-                    Arc::clone(&usage_repository),
-                ),
-            )
-            .with_usage_runtime_for_tests(UsageRuntimeConfig {
-                enabled: true,
-                ..UsageRuntimeConfig::default()
-            })
-            .with_execution_runtime_override_base_url(format!("http://{addr}"));
+        let state = app_state_with_stream_usage_runtime(
+            Arc::clone(&request_candidate_repository),
+            Arc::clone(&usage_repository),
+            "first-data",
+        )
+        .with_execution_runtime_override_base_url(format!("http://{addr}"));
+        let _usage_worker = spawn_usage_runtime_worker_for_tests(&state);
         let plan = ExecutionPlan {
             request_id: "req-live-stream-first-data".into(),
             candidate_id: Some("cand-live-stream-first-data".into()),
@@ -7534,19 +7573,13 @@ mod tests {
 
         let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
         let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
-        let state = AppState::new()
-            .expect("app state should build")
-            .with_data_state_for_tests(
-                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
-                    Arc::clone(&request_candidate_repository),
-                    Arc::clone(&usage_repository),
-                ),
-            )
-            .with_usage_runtime_for_tests(UsageRuntimeConfig {
-                enabled: true,
-                ..UsageRuntimeConfig::default()
-            })
-            .with_execution_runtime_override_base_url(format!("http://{addr}"));
+        let state = app_state_with_stream_usage_runtime(
+            Arc::clone(&request_candidate_repository),
+            Arc::clone(&usage_repository),
+            "first-event",
+        )
+        .with_execution_runtime_override_base_url(format!("http://{addr}"));
+        let _usage_worker = spawn_usage_runtime_worker_for_tests(&state);
         let plan = ExecutionPlan {
             request_id: "req-live-stream-first-event".into(),
             candidate_id: Some("cand-live-stream-first-event".into()),
@@ -7773,19 +7806,13 @@ mod tests {
 
         let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
         let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
-        let state = AppState::new()
-            .expect("app state should build")
-            .with_data_state_for_tests(
-                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
-                    Arc::clone(&request_candidate_repository),
-                    Arc::clone(&usage_repository),
-                ),
-            )
-            .with_usage_runtime_for_tests(UsageRuntimeConfig {
-                enabled: true,
-                ..UsageRuntimeConfig::default()
-            })
-            .with_execution_runtime_override_base_url(format!("http://{addr}"));
+        let state = app_state_with_stream_usage_runtime(
+            Arc::clone(&request_candidate_repository),
+            Arc::clone(&usage_repository),
+            "redirect",
+        )
+        .with_execution_runtime_override_base_url(format!("http://{addr}"));
+        let _usage_worker = spawn_usage_runtime_worker_for_tests(&state);
         let plan = ExecutionPlan {
             request_id: "req-remote-runtime-stream-redirect".into(),
             candidate_id: Some("cand-remote-runtime-stream-redirect".into()),
@@ -7929,14 +7956,25 @@ mod tests {
                 .and_then(|body| body.pointer("/error/upstream_status")),
             Some(&json!(302))
         );
-        let candidates = request_candidate_repository
-            .list_by_request_id("req-remote-runtime-stream-redirect")
-            .await
-            .expect("candidate trace should read");
-        let candidate_extra = candidates
-            .first()
-            .and_then(|candidate| candidate.extra_data.as_ref())
-            .expect("failed candidate extra_data should exist");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let candidate_extra = loop {
+            let candidates = request_candidate_repository
+                .list_by_request_id("req-remote-runtime-stream-redirect")
+                .await
+                .expect("candidate trace should read");
+            if let Some(extra_data) = candidates.iter().find_map(|candidate| {
+                (candidate.status == RequestCandidateStatus::Failed)
+                    .then(|| candidate.extra_data.clone())
+                    .flatten()
+            }) {
+                break extra_data;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "failed candidate extra_data should exist"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
         assert_eq!(
             candidate_extra["upstream_response"]["status_code"],
             json!(302)
