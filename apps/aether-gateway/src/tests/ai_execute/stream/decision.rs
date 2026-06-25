@@ -2323,10 +2323,35 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
         seen_execution_runtime_requests[1].authorization,
         "Bearer sk-upstream-openai-backup"
     );
-    let stored_candidates = request_candidate_repository
-        .list_by_request_id("trace-openai-chat-local-stream-failover-123")
-        .await
-        .expect("request candidate trace should read");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let stored_candidates = loop {
+        let stored_candidates = request_candidate_repository
+            .list_by_request_id("trace-openai-chat-local-stream-failover-123")
+            .await
+            .expect("request candidate trace should read");
+        if stored_candidates.len() == 2
+            && stored_candidates[0].candidate_index == 0
+            && stored_candidates[0].status == RequestCandidateStatus::Failed
+            && stored_candidates[0].status_code == Some(429)
+            && stored_candidates[0]
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("upstream_response"))
+                .is_some()
+            && stored_candidates[1].candidate_index == 1
+            && stored_candidates[1].status == RequestCandidateStatus::Success
+            && stored_candidates[1].status_code == Some(200)
+            && stored_candidates[1].started_at_unix_ms.is_some()
+            && stored_candidates[1].finished_at_unix_ms.is_some()
+        {
+            break stored_candidates;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "request candidate trace should include failed primary and successful backup candidates"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
     assert_eq!(stored_candidates.len(), 2);
     assert_eq!(stored_candidates[0].candidate_index, 0);
     assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Failed);
