@@ -331,6 +331,7 @@ async fn run_tunnel_curve(
             concurrency: relay_concurrency,
             timeout: config.timeout,
             response_mode: HttpLoadProbeResponseMode::FullBody,
+            ..HttpLoadProbeConfig::default()
         };
         let started_at = Instant::now();
         let result = run_http_load_probe(&probe)
@@ -480,6 +481,7 @@ fn execution_probe_config(
         concurrency,
         timeout,
         response_mode: HttpLoadProbeResponseMode::FullBody,
+        ..HttpLoadProbeConfig::default()
     }
 }
 
@@ -506,6 +508,7 @@ fn chat_probe_config(
         concurrency,
         timeout,
         response_mode: HttpLoadProbeResponseMode::FullBody,
+        ..HttpLoadProbeConfig::default()
     }
 }
 

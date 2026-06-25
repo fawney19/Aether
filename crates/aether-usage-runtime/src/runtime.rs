@@ -928,7 +928,7 @@ fn fnv_hash(bytes: &[u8]) -> u64 {
 }
 
 fn should_log_usage_retry_counter(value: u64) -> bool {
-    value <= 8 || value.is_power_of_two() || value % 1_000 == 0
+    value <= 8 || value.is_power_of_two() || value.is_multiple_of(1_000)
 }
 
 async fn build_pending_usage_event_offthread(

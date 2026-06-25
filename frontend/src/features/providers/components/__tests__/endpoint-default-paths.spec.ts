@@ -142,6 +142,13 @@ describe('endpoint default paths', () => {
     })).toBe('/chat/completions')
 
     expect(getDefaultEndpointPath({
+      apiFormat: 'openai:chat',
+      providerType: 'custom',
+      baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+      apiFormats,
+    })).toBe('/chat/completions')
+
+    expect(getDefaultEndpointPath({
       apiFormat: 'openai:responses',
       providerType: 'custom',
       baseUrl: 'https://api.openai.example/v1',
@@ -227,6 +234,11 @@ describe('endpoint default paths', () => {
       apiFormat: 'openai:chat',
       baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
     })).toBe('https://open.bigmodel.cn/api/coding/paas/v4')
+
+    expect(getDefaultEndpointBaseUrl({
+      apiFormat: 'openai:chat',
+      baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+    })).toBe('https://api.z.ai/api/coding/paas/v4')
 
     expect(getDefaultEndpointBaseUrl({
       apiFormat: 'openai:chat',

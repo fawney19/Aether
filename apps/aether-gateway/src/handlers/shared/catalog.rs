@@ -686,6 +686,21 @@ fn quota_windows_all_exhausted(windows: &[Value]) -> bool {
     total > 0 && exhausted == total
 }
 
+fn quota_windows_any_exhausted(windows: &[Value]) -> bool {
+    windows.iter().filter_map(Value::as_object).any(|window| {
+        window
+            .get("is_exhausted")
+            .and_then(admin_provider_quota_pure::coerce_json_bool)
+            .or_else(|| {
+                window
+                    .get("used_ratio")
+                    .and_then(Value::as_f64)
+                    .map(|value| value >= 1.0 - 1e-6)
+            })
+            .unwrap_or(false)
+    })
+}
+
 fn preserve_quota_window_usage_state(current_status_snapshot: Option<&Value>, quota: &mut Value) {
     let Some(current_windows) = current_status_snapshot
         .and_then(Value::as_object)
@@ -1522,6 +1537,192 @@ fn build_antigravity_quota_status_snapshot(
     }))
 }
 
+struct GlmCodingPlanQuotaWindowSpec<'a> {
+    code: &'a str,
+    label: &'a str,
+    unit: &'a str,
+    percent_key: &'a str,
+    used_key: &'a str,
+    limit_key: &'a str,
+    reset_at_key: &'a str,
+    official_request_count_key: &'a str,
+    official_total_tokens_key: &'a str,
+    window_minutes: u64,
+}
+
+fn glm_coding_plan_quota_window_snapshot(
+    metadata: &Map<String, Value>,
+    spec: &GlmCodingPlanQuotaWindowSpec<'_>,
+) -> Option<Value> {
+    let used_percent = metadata
+        .get(spec.percent_key)
+        .and_then(admin_provider_quota_pure::coerce_json_f64);
+    let used_value = metadata
+        .get(spec.used_key)
+        .or_else(|| metadata.get("token_current_usage"))
+        .and_then(admin_provider_quota_pure::coerce_json_f64);
+    let limit_value = metadata
+        .get(spec.limit_key)
+        .or_else(|| metadata.get("token_usage_limit"))
+        .and_then(admin_provider_quota_pure::coerce_json_f64)
+        .filter(|value| *value > 0.0);
+    let remaining_value = used_value
+        .zip(limit_value)
+        .map(|(used, limit)| (limit - used).max(0.0));
+    let used_ratio = used_percent
+        .map(|value| (value / 100.0).clamp(0.0, 1.0))
+        .or_else(|| {
+            used_value
+                .zip(limit_value)
+                .map(|(used, limit)| (used / limit).clamp(0.0, 1.0))
+        });
+    let remaining_ratio = used_ratio.map(|value| (1.0 - value).max(0.0)).or_else(|| {
+        remaining_value
+            .zip(limit_value)
+            .map(|(remaining, limit)| (remaining / limit).clamp(0.0, 1.0))
+    });
+    let reset_at = provider_quota_timestamp_unix_secs(metadata.get(spec.reset_at_key));
+    let reset_seconds = reset_at.and_then(|reset| {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+        Some(reset.saturating_sub(now.as_secs()))
+    });
+    let request_count = metadata
+        .get(spec.official_request_count_key)
+        .and_then(admin_provider_quota_pure::coerce_json_u64);
+    let total_tokens = metadata
+        .get(spec.official_total_tokens_key)
+        .and_then(admin_provider_quota_pure::coerce_json_u64);
+    let usage = if request_count.is_some() || total_tokens.is_some() {
+        Some(json!({
+            "request_count": request_count,
+            "total_tokens": total_tokens,
+        }))
+    } else {
+        None
+    };
+
+    if used_ratio.is_none()
+        && remaining_ratio.is_none()
+        && used_value.is_none()
+        && remaining_value.is_none()
+        && limit_value.is_none()
+        && usage.is_none()
+    {
+        return None;
+    }
+
+    Some(json!({
+        "code": spec.code,
+        "label": spec.label,
+        "scope": "account",
+        "unit": spec.unit,
+        "used_ratio": used_ratio,
+        "remaining_ratio": remaining_ratio,
+        "used_value": used_value,
+        "remaining_value": remaining_value,
+        "limit_value": limit_value,
+        "reset_at": reset_at,
+        "reset_seconds": reset_seconds,
+        "window_minutes": spec.window_minutes,
+        "is_exhausted": used_ratio.is_some_and(|value| value >= 1.0 - 1e-6)
+            || remaining_value.is_some_and(|value| value <= 0.0),
+        "usage": usage,
+    }))
+}
+
+fn build_glm_coding_plan_quota_status_snapshot(
+    upstream_metadata: Option<&Value>,
+    source: &str,
+) -> Option<Value> {
+    let metadata = provider_quota_metadata_bucket(upstream_metadata, "glm_coding_plan")?;
+    let observed_at_unix_secs = provider_quota_timestamp_unix_secs(metadata.get("updated_at"));
+    let plan_type = provider_quota_metadata_string(metadata, &["plan_type", "level", "tier"])
+        .or_else(|| {
+            metadata
+                .get("quota_limit")
+                .and_then(Value::as_object)
+                .and_then(|quota_limit| {
+                    provider_quota_metadata_string(quota_limit, &["plan_type", "level", "tier"])
+                })
+        })
+        .map(|value| value.to_ascii_lowercase());
+    let pool_tier = provider_quota_metadata_string(metadata, &["pool_tier", "level", "tier"])
+        .or_else(|| {
+            metadata
+                .get("quota_limit")
+                .and_then(Value::as_object)
+                .and_then(|quota_limit| {
+                    provider_quota_metadata_string(quota_limit, &["pool_tier", "level", "tier"])
+                })
+        })
+        .or_else(|| plan_type.clone());
+    let windows = [
+        glm_coding_plan_quota_window_snapshot(
+            metadata,
+            &GlmCodingPlanQuotaWindowSpec {
+                code: "tokens_5h",
+                label: "5h",
+                unit: "tokens",
+                percent_key: "token_5h_used_percent",
+                used_key: "token_5h_current_usage",
+                limit_key: "token_5h_usage_limit",
+                reset_at_key: "token_5h_reset_at",
+                official_request_count_key: "official_usage_5h_request_count",
+                official_total_tokens_key: "official_usage_5h_total_tokens",
+                window_minutes: 300,
+            },
+        ),
+        glm_coding_plan_quota_window_snapshot(
+            metadata,
+            &GlmCodingPlanQuotaWindowSpec {
+                code: "tokens_weekly",
+                label: "周",
+                unit: "tokens",
+                percent_key: "token_weekly_used_percent",
+                used_key: "token_weekly_current_usage",
+                limit_key: "token_weekly_usage_limit",
+                reset_at_key: "token_weekly_reset_at",
+                official_request_count_key: "official_usage_weekly_request_count",
+                official_total_tokens_key: "official_usage_weekly_total_tokens",
+                window_minutes: 10_080,
+            },
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+
+    if windows.is_empty() && observed_at_unix_secs.is_none() {
+        return None;
+    }
+
+    let usage_ratio = quota_windows_usage_ratio(&windows);
+    let exhausted = quota_windows_any_exhausted(&windows);
+
+    Some(json!({
+        "version": 2,
+        "provider_type": "glm_coding_plan",
+        "code": if exhausted { "exhausted" } else { "ok" },
+        "label": if exhausted { Some("额度耗尽") } else { None::<&str> },
+        "reason": if exhausted {
+            Some("GLM Coding Plan 额度窗口已耗尽")
+        } else {
+            None::<&str>
+        },
+        "freshness": "fresh",
+        "source": source,
+        "observed_at": observed_at_unix_secs,
+        "exhausted": exhausted,
+        "usage_ratio": usage_ratio,
+        "updated_at": observed_at_unix_secs,
+        "reset_at": serde_json::Value::Null,
+        "reset_seconds": serde_json::Value::Null,
+        "plan_type": plan_type,
+        "pool_tier": pool_tier,
+        "windows": windows,
+    }))
+}
+
 fn build_grok_quota_status_snapshot(
     upstream_metadata: Option<&Value>,
     source: &str,
@@ -1828,6 +2029,7 @@ pub(crate) fn sync_provider_key_quota_status_snapshot(
         "chatgpt_web" => build_chatgpt_web_quota_status_snapshot(upstream_metadata, source),
         "windsurf" => build_windsurf_quota_status_snapshot(upstream_metadata, source),
         "antigravity" => build_antigravity_quota_status_snapshot(upstream_metadata, source),
+        "glm_coding_plan" => build_glm_coding_plan_quota_status_snapshot(upstream_metadata, source),
         "grok" => build_grok_quota_status_snapshot(upstream_metadata, source),
         "gemini_cli" => build_gemini_cli_quota_status_snapshot(upstream_metadata, source),
         _ => None,
@@ -2878,6 +3080,138 @@ mod tests {
         assert_eq!(auto.get("remaining_value"), Some(&json!(60.0)));
         assert_eq!(auto.get("limit_value"), Some(&json!(150.0)));
         assert_eq!(auto.get("used_value"), Some(&json!(90.0)));
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_backfills_glm_coding_plan_quota() {
+        let mut key = sample_catalog_key();
+        key.upstream_metadata = Some(json!({
+            "glm_coding_plan": {
+                "updated_at": 1_778_067_246u64,
+                "plan_type": "max",
+                "pool_tier": "max",
+                "token_5h_used_percent": 25.0,
+                "token_5h_current_usage": 2500.0,
+                "token_5h_usage_limit": 10000.0,
+                "token_weekly_used_percent": 50.0,
+                "official_usage_5h_request_count": 90,
+                "official_usage_5h_total_tokens": 3_718_682,
+                "official_usage_weekly_request_count": 7357,
+                "official_usage_weekly_total_tokens": 490_408_764
+            }
+        }));
+
+        let payload = provider_key_status_snapshot_payload(&key, "glm_coding_plan");
+        let quota = payload
+            .get("quota")
+            .and_then(Value::as_object)
+            .expect("quota snapshot should be object");
+        let windows = quota
+            .get("windows")
+            .and_then(Value::as_array)
+            .expect("GLM quota windows should exist");
+        let token_window = windows
+            .iter()
+            .filter_map(Value::as_object)
+            .find(|window| window.get("code") == Some(&json!("tokens_5h")))
+            .expect("5h token quota window should exist");
+        let weekly_window = windows
+            .iter()
+            .filter_map(Value::as_object)
+            .find(|window| window.get("code") == Some(&json!("tokens_weekly")))
+            .expect("weekly token quota window should exist");
+
+        assert_eq!(quota.get("provider_type"), Some(&json!("glm_coding_plan")));
+        assert_eq!(quota.get("code"), Some(&json!("ok")));
+        assert_eq!(quota.get("plan_type"), Some(&json!("max")));
+        assert_eq!(quota.get("pool_tier"), Some(&json!("max")));
+        assert_eq!(quota.get("usage_ratio"), Some(&json!(0.5)));
+        assert_eq!(token_window.get("label"), Some(&json!("5h")));
+        assert_eq!(token_window.get("remaining_ratio"), Some(&json!(0.75)));
+        assert_eq!(token_window.get("remaining_value"), Some(&json!(7500.0)));
+        assert_eq!(token_window.get("limit_value"), Some(&json!(10000.0)));
+        assert_eq!(token_window.get("unit"), Some(&json!("tokens")));
+        assert_eq!(token_window.get("window_minutes"), Some(&json!(300u64)));
+        assert_eq!(
+            token_window
+                .get("usage")
+                .and_then(|usage| usage.get("request_count")),
+            Some(&json!(90))
+        );
+        assert_eq!(
+            token_window
+                .get("usage")
+                .and_then(|usage| usage.get("total_tokens")),
+            Some(&json!(3_718_682))
+        );
+        assert_eq!(weekly_window.get("remaining_ratio"), Some(&json!(0.5)));
+        assert_eq!(weekly_window.get("unit"), Some(&json!("tokens")));
+        assert_eq!(weekly_window.get("window_minutes"), Some(&json!(10_080u64)));
+        assert_eq!(
+            weekly_window
+                .get("usage")
+                .and_then(|usage| usage.get("request_count")),
+            Some(&json!(7357))
+        );
+        assert_eq!(
+            weekly_window
+                .get("usage")
+                .and_then(|usage| usage.get("total_tokens")),
+            Some(&json!(490_408_764))
+        );
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_leaves_glm_weekly_usage_empty_when_official_data_missing(
+    ) {
+        let mut key = sample_catalog_key();
+        key.upstream_metadata = Some(json!({
+            "glm_coding_plan": {
+                "updated_at": 1_778_067_246u64,
+                "token_5h_used_percent": 25.0,
+                "token_weekly_used_percent": 50.0,
+                "official_usage_5h_request_count": 90,
+                "official_usage_5h_total_tokens": 3_718_682
+            }
+        }));
+
+        let payload = provider_key_status_snapshot_payload(&key, "glm_coding_plan");
+        let windows = payload["quota"]["windows"]
+            .as_array()
+            .expect("GLM quota windows should exist");
+        let weekly_window = windows
+            .iter()
+            .filter_map(Value::as_object)
+            .find(|window| window.get("code") == Some(&json!("tokens_weekly")))
+            .expect("weekly token quota window should exist");
+
+        assert_eq!(weekly_window.get("remaining_ratio"), Some(&json!(0.5)));
+        assert!(weekly_window.get("usage").is_none_or(Value::is_null));
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_marks_glm_coding_plan_exhausted_when_any_limit_is_full()
+    {
+        let mut key = sample_catalog_key();
+        key.upstream_metadata = Some(json!({
+            "glm_coding_plan": {
+                "updated_at": 1_778_067_246u64,
+                "token_5h_used_percent": 100.0,
+                "token_5h_current_usage": 10000.0,
+                "token_5h_usage_limit": 10000.0,
+                "token_weekly_used_percent": 50.0
+            }
+        }));
+
+        let payload = provider_key_status_snapshot_payload(&key, "glm_coding_plan");
+        let quota = payload
+            .get("quota")
+            .and_then(Value::as_object)
+            .expect("quota snapshot should be object");
+
+        assert_eq!(quota.get("code"), Some(&json!("exhausted")));
+        assert_eq!(quota.get("exhausted"), Some(&json!(true)));
+        assert_eq!(quota.get("usage_ratio"), Some(&json!(1.0)));
     }
 
     #[test]

@@ -524,6 +524,319 @@ fn parse_gemini_cli_reset_timestamp(value: &serde_json::Value) -> Option<u64> {
         .and_then(|timestamp| u64::try_from(timestamp.timestamp()).ok())
 }
 
+fn normalize_glm_limit_type(value: &str) -> String {
+    value.trim().to_ascii_uppercase()
+}
+
+fn glm_usage_data(value: &serde_json::Value) -> &serde_json::Value {
+    value.get("data").unwrap_or(value)
+}
+
+fn glm_usage_business_error_message(value: &serde_json::Value) -> Option<String> {
+    let object = value.as_object()?;
+    let success = object
+        .get("success")
+        .and_then(coerce_json_bool)
+        .unwrap_or(true);
+    let code = object.get("code").and_then(coerce_json_i64);
+    if success && code.is_none_or(|value| value == 0 || value == 200) {
+        return None;
+    }
+    ["msg", "message", "error"]
+        .iter()
+        .find_map(|key| {
+            object
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| code.map(|value| format!("GLM Coding Plan returned code {value}")))
+}
+
+fn coerce_json_i64(value: &serde_json::Value) -> Option<i64> {
+    if let Some(value) = value.as_i64() {
+        return Some(value);
+    }
+    value.as_str()?.trim().parse::<i64>().ok()
+}
+
+pub fn glm_coding_plan_business_error_message(value: &serde_json::Value) -> Option<String> {
+    glm_usage_business_error_message(value)
+}
+
+pub fn parse_glm_coding_plan_usage_response(
+    value: &serde_json::Value,
+    usage_kind: &str,
+    usage_window: Option<&str>,
+    updated_at_unix_secs: u64,
+) -> Option<serde_json::Value> {
+    if glm_usage_business_error_message(value).is_some() {
+        return None;
+    }
+    let data = glm_usage_data(value);
+    if data.is_null() {
+        return None;
+    }
+
+    let mut result = serde_json::Map::new();
+    result.insert("updated_at".to_string(), json!(updated_at_unix_secs));
+    let normalized_window = normalize_glm_usage_window(usage_window);
+    let usage_key = normalized_window
+        .map(|window| format!("{usage_kind}_{window}_usage"))
+        .unwrap_or_else(|| format!("{usage_kind}_usage"));
+    result.insert(usage_key, data.clone());
+    if usage_kind == "model" {
+        if let Some(window) = normalized_window {
+            insert_glm_model_usage_stats(&mut result, data, window);
+        }
+    }
+    Some(serde_json::Value::Object(result))
+}
+
+fn normalize_glm_usage_window(value: Option<&str>) -> Option<&'static str> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        "5h" | "tokens_5h" | "token_5h" => Some("5h"),
+        "week" | "weekly" | "tokens_weekly" | "token_weekly" => Some("weekly"),
+        _ => None,
+    }
+}
+
+fn insert_glm_model_usage_stats(
+    result: &mut serde_json::Map<String, serde_json::Value>,
+    data: &serde_json::Value,
+    window: &str,
+) {
+    if let Some(request_count) = glm_model_usage_request_count(data) {
+        result.insert(
+            format!("official_usage_{window}_request_count"),
+            json!(request_count),
+        );
+    }
+    if let Some(total_tokens) = glm_model_usage_total_tokens(data) {
+        result.insert(
+            format!("official_usage_{window}_total_tokens"),
+            json!(total_tokens),
+        );
+    }
+}
+
+fn glm_model_usage_total_tokens(data: &serde_json::Value) -> Option<u64> {
+    glm_usage_explicit_u64(
+        data,
+        &[
+            "totalTokensUsage",
+            "total_tokens_usage",
+            "totalTokens",
+            "total_tokens",
+            "totalTokenCount",
+            "total_token_count",
+        ],
+    )
+    .or_else(|| {
+        glm_usage_sum_object_array_values(
+            data,
+            &[
+                "modelSummaryList",
+                "model_summary_list",
+                "modelDataList",
+                "model_data_list",
+                "items",
+                "records",
+            ],
+            &[
+                "totalTokens",
+                "total_tokens",
+                "totalTokenCount",
+                "total_token_count",
+                "tokens",
+                "token_count",
+            ],
+        )
+    })
+    .or_else(|| glm_usage_sum_number_array_values(data, &["tokensUsage", "tokens_usage"]))
+}
+
+fn glm_model_usage_request_count(data: &serde_json::Value) -> Option<u64> {
+    glm_usage_explicit_u64(
+        data,
+        &[
+            "totalModelCallCount",
+            "total_model_call_count",
+            "requestCount",
+            "request_count",
+            "totalRequests",
+            "total_requests",
+            "totalCount",
+            "total_count",
+            "count",
+        ],
+    )
+    .or_else(|| glm_usage_sum_number_array_values(data, &["modelCallCount", "model_call_count"]))
+    .or_else(|| glm_usage_array_len(data, &["items", "records"]))
+}
+
+fn glm_usage_explicit_u64(data: &serde_json::Value, keys: &[&str]) -> Option<u64> {
+    data.get("totalUsage")
+        .or_else(|| data.get("total_usage"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|object| glm_usage_u64_from_object(object, keys))
+        .or_else(|| {
+            data.as_object()
+                .and_then(|object| glm_usage_u64_from_object(object, keys))
+        })
+}
+
+fn glm_usage_u64_from_object(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(coerce_json_u64))
+}
+
+fn glm_usage_sum_object_array_values(
+    data: &serde_json::Value,
+    array_keys: &[&str],
+    value_keys: &[&str],
+) -> Option<u64> {
+    for array_key in array_keys {
+        let Some(items) = data.get(*array_key).and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let mut total = 0u64;
+        let mut found = false;
+        for item in items.iter().filter_map(serde_json::Value::as_object) {
+            if let Some(value) = glm_usage_u64_from_object(item, value_keys) {
+                total = total.saturating_add(value);
+                found = true;
+            }
+        }
+        if found {
+            return Some(total);
+        }
+    }
+    None
+}
+
+fn glm_usage_sum_number_array_values(data: &serde_json::Value, array_keys: &[&str]) -> Option<u64> {
+    for array_key in array_keys {
+        let Some(items) = data.get(*array_key).and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let mut total = 0u64;
+        let mut found = false;
+        for item in items {
+            if let Some(value) = coerce_json_u64(item) {
+                total = total.saturating_add(value);
+                found = true;
+            }
+        }
+        if found {
+            return Some(total);
+        }
+    }
+    None
+}
+
+fn glm_usage_array_len(data: &serde_json::Value, array_keys: &[&str]) -> Option<u64> {
+    for array_key in array_keys {
+        let Some(items) = data.get(*array_key).and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        if let Ok(len) = u64::try_from(items.len()) {
+            return Some(len);
+        }
+    }
+    None
+}
+
+pub fn parse_glm_coding_plan_quota_limit_response(
+    value: &serde_json::Value,
+    updated_at_unix_secs: u64,
+) -> Option<serde_json::Value> {
+    if glm_usage_business_error_message(value).is_some() {
+        return None;
+    }
+    let data = glm_usage_data(value);
+    let limits = data.get("limits").and_then(serde_json::Value::as_array)?;
+    let mut result = serde_json::Map::new();
+    let mut max_token_percent: Option<f64> = None;
+    if let Some(plan_type) = coerce_json_string(
+        data.get("level")
+            .or_else(|| data.get("plan_type"))
+            .or_else(|| data.get("planType"))
+            .or_else(|| data.get("tier")),
+    ) {
+        let normalized = plan_type.to_ascii_lowercase();
+        result.insert("plan_type".to_string(), json!(normalized));
+        result.insert("pool_tier".to_string(), json!(plan_type));
+    }
+
+    for item in limits.iter().filter_map(serde_json::Value::as_object) {
+        let limit_type = item
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(normalize_glm_limit_type)
+            .unwrap_or_default();
+        if limit_type.is_empty() {
+            continue;
+        }
+
+        let percentage = item.get("percentage").and_then(coerce_json_f64);
+        let current_value = item
+            .get("currentValue")
+            .or_else(|| item.get("current_value"))
+            .and_then(coerce_json_f64);
+        let usage = item.get("usage").and_then(coerce_json_f64);
+        let unit = item.get("unit").and_then(coerce_json_u64).unwrap_or(0);
+        let number = item.get("number").and_then(coerce_json_u64).unwrap_or(0);
+        let next_reset_ms = item
+            .get("nextResetTime")
+            .or_else(|| item.get("next_reset_time"))
+            .and_then(coerce_json_u64);
+
+        if limit_type.as_str() != "TOKENS_LIMIT" {
+            continue;
+        }
+        let window = match (unit, number) {
+            (3, 5) => "5h",
+            (6, 1) => "weekly",
+            _ => "other",
+        };
+        if let Some(percentage) = percentage {
+            max_token_percent = Some(max_token_percent.map_or(percentage, |m| m.max(percentage)));
+            result.insert(format!("token_{window}_used_percent"), json!(percentage));
+        }
+        if let Some(reset_ms) = next_reset_ms {
+            result.insert(format!("token_{window}_reset_at"), json!(reset_ms / 1000));
+        }
+        if let Some(current_value) = current_value {
+            result.insert(
+                format!("token_{window}_current_usage"),
+                json!(current_value),
+            );
+            result.insert("token_current_usage".to_string(), json!(current_value));
+        }
+        if let Some(usage) = usage {
+            result.insert(format!("token_{window}_usage_limit"), json!(usage));
+            result.insert("token_usage_limit".to_string(), json!(usage));
+        }
+    }
+
+    if let Some(max_pct) = max_token_percent {
+        result.insert("token_used_percent".to_string(), json!(max_pct));
+    }
+
+    if result.is_empty() {
+        return None;
+    }
+    result.insert("updated_at".to_string(), json!(updated_at_unix_secs));
+    result.insert("quota_limit".to_string(), data.clone());
+    Some(serde_json::Value::Object(result))
+}
+
 pub fn normalize_codex_plan_type(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -1765,7 +2078,8 @@ mod tests {
         codex_build_invalid_state, codex_runtime_invalid_reason,
         parse_chatgpt_web_conversation_init_response, parse_codex_backend_me_response,
         parse_codex_wham_usage_response, parse_gemini_cli_retrieve_user_quota_response,
-        parse_gemini_cli_v1internal_credits_response, parse_windsurf_model_configs_response,
+        parse_gemini_cli_v1internal_credits_response, parse_glm_coding_plan_quota_limit_response,
+        parse_glm_coding_plan_usage_response, parse_windsurf_model_configs_response,
         parse_windsurf_rate_limit_response, parse_windsurf_user_status_response,
         quota_refresh_success_invalid_state, should_auto_remove_structured_reason,
         OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
@@ -2272,6 +2586,154 @@ mod tests {
             Some(&json!("trace-upstream-sync-1"))
         );
         assert_eq!(parsed.get("updated_at"), Some(&json!(1_777_000_123u64)));
+    }
+
+    #[test]
+    fn parses_glm_coding_plan_quota_limit_response() {
+        let parsed = parse_glm_coding_plan_quota_limit_response(
+            &json!({
+                "data": {
+                    "level": "max",
+                    "limits": [
+                        {
+                            "type": "TOKENS_LIMIT",
+                            "unit": 3,
+                            "number": 5,
+                            "percentage": 2,
+                            "currentValue": 20,
+                            "usage": 1000,
+                            "nextResetTime": 1782257194399_u64
+                        },
+                        {
+                            "type": "TOKENS_LIMIT",
+                            "unit": 6,
+                            "number": 1,
+                            "percentage": 36,
+                            "currentValue": 360,
+                            "usage": 1000,
+                            "nextResetTime": 1782698593995_u64
+                        },
+                        {
+                            "type": "TIME_LIMIT",
+                            "unit": 5,
+                            "number": 1,
+                            "percentage": 0,
+                            "currentValue": 0,
+                            "usage": 4000,
+                            "nextResetTime": 1783303393993_u64
+                        }
+                    ]
+                }
+            }),
+            1_234,
+        )
+        .expect("glm coding plan quota limit should parse");
+
+        assert_eq!(parsed.get("updated_at"), Some(&json!(1_234)));
+        assert_eq!(parsed.get("token_used_percent"), Some(&json!(36.0)));
+        assert_eq!(parsed.get("plan_type"), Some(&json!("max")));
+        assert_eq!(parsed.get("pool_tier"), Some(&json!("max")));
+        assert_eq!(parsed.get("token_5h_used_percent"), Some(&json!(2.0)));
+        assert_eq!(parsed.get("token_5h_current_usage"), Some(&json!(20.0)));
+        assert_eq!(parsed.get("token_5h_usage_limit"), Some(&json!(1000.0)));
+        assert_eq!(parsed.get("token_weekly_used_percent"), Some(&json!(36.0)));
+        assert_eq!(
+            parsed.get("token_weekly_current_usage"),
+            Some(&json!(360.0))
+        );
+        assert_eq!(parsed.get("token_weekly_usage_limit"), Some(&json!(1000.0)));
+        assert_eq!(
+            parsed.get("token_5h_reset_at"),
+            Some(&json!(1782257194_u64))
+        );
+        assert_eq!(
+            parsed.get("token_weekly_reset_at"),
+            Some(&json!(1782698593_u64))
+        );
+        assert!(parsed.get("mcp_used_percent").is_none());
+        assert!(parsed.get("mcp_usage_limit").is_none());
+    }
+
+    #[test]
+    fn parses_glm_coding_plan_model_usage_payloads_into_official_window_stats() {
+        let parsed = parse_glm_coding_plan_usage_response(
+            &json!({
+                "data": {
+                    "totalUsage": {
+                        "totalModelCallCount": 90,
+                        "totalTokensUsage": 3_718_682
+                    },
+                    "tokensUsage": [1_000, 2_000],
+                    "modelCallCount": [10, 20],
+                    "modelSummaryList": [
+                        {"modelName": "GLM-5.2", "totalTokens": 3_700_000}
+                    ]
+                }
+            }),
+            "model",
+            Some("5h"),
+            1_234,
+        )
+        .expect("glm coding plan usage should parse");
+
+        assert_eq!(parsed.get("updated_at"), Some(&json!(1_234)));
+        assert_eq!(
+            parsed["model_5h_usage"]["totalUsage"]["totalTokensUsage"],
+            json!(3_718_682)
+        );
+        assert_eq!(
+            parsed.get("official_usage_5h_request_count"),
+            Some(&json!(90))
+        );
+        assert_eq!(
+            parsed.get("official_usage_5h_total_tokens"),
+            Some(&json!(3_718_682))
+        );
+    }
+
+    #[test]
+    fn parses_glm_coding_plan_model_usage_with_items_fallback() {
+        let parsed = parse_glm_coding_plan_usage_response(
+            &json!({
+                "data": {
+                    "items": [
+                        {"model": "glm-a", "totalTokens": 100},
+                        {"model": "glm-b", "totalTokens": 250}
+                    ]
+                }
+            }),
+            "model",
+            Some("weekly"),
+            1_234,
+        )
+        .expect("glm coding plan fallback usage should parse");
+
+        assert_eq!(
+            parsed.get("official_usage_weekly_request_count"),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            parsed.get("official_usage_weekly_total_tokens"),
+            Some(&json!(350))
+        );
+    }
+
+    #[test]
+    fn rejects_glm_coding_plan_business_error_payloads() {
+        let payload = json!({
+            "code": 401,
+            "msg": "token expired or incorrect",
+            "success": false
+        });
+
+        assert_eq!(
+            parse_glm_coding_plan_usage_response(&payload, "model", Some("5h"), 1_234),
+            None
+        );
+        assert_eq!(
+            parse_glm_coding_plan_quota_limit_response(&payload, 1_234),
+            None
+        );
     }
 
     #[test]

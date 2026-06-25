@@ -152,6 +152,7 @@ async fn run_suite(
         concurrency: config.concurrency,
         timeout: config.timeout,
         response_mode: HttpLoadProbeResponseMode::FullBody,
+        ..HttpLoadProbeConfig::default()
     })
     .await
     .map_err(std::io::Error::other)?;

@@ -352,6 +352,7 @@ fn execution_runtime_sync_probe_config(
         concurrency: config.execution_runtime_concurrency,
         timeout: config.timeout,
         response_mode: HttpLoadProbeResponseMode::FullBody,
+        ..HttpLoadProbeConfig::default()
     }
 }
 
@@ -377,6 +378,7 @@ fn chat_probe_config(
         concurrency,
         timeout,
         response_mode: HttpLoadProbeResponseMode::FullBody,
+        ..HttpLoadProbeConfig::default()
     }
 }
 

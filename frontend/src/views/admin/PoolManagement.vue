@@ -685,12 +685,12 @@
                       <span
                         class="text-center text-[9px] font-semibold text-muted-foreground/80"
                         data-testid="pool-stats-cycle-group-5h"
-                      >5H</span>
+                      >{{ getPoolKeyCycleStatsGroupLabel(key, '5h') }}</span>
                       <span class="text-center text-muted-foreground/50">|</span>
                       <span
                         class="text-center text-[9px] font-semibold text-muted-foreground/80"
                         data-testid="pool-stats-cycle-group-weekly"
-                      >周</span>
+                      >{{ getPoolKeyCycleStatsGroupLabel(key, 'weekly') }}</span>
 
                       <template
                         v-for="row in getPoolKeyCycleStatsRows(key)"
@@ -1020,12 +1020,12 @@
                       <span
                         class="text-center text-[10px] font-semibold text-foreground"
                         data-testid="pool-mobile-stats-cycle-group-5h"
-                      >5H</span>
+                      >{{ getPoolKeyCycleStatsGroupLabel(key, '5h') }}</span>
                       <span class="text-center text-muted-foreground/50">|</span>
                       <span
                         class="text-center text-[10px] font-semibold text-foreground"
                         data-testid="pool-mobile-stats-cycle-group-weekly"
-                      >周</span>
+                      >{{ getPoolKeyCycleStatsGroupLabel(key, 'weekly') }}</span>
 
                       <template
                         v-for="row in getPoolKeyCycleStatsRows(key)"
@@ -2094,6 +2094,7 @@ watch(showAdaptiveHotPoolMetricsButton, (enabled) => {
 
 const showAccountQuotaColumn = computed(() => {
   return selectedProviderType.value === 'codex'
+    || selectedProviderType.value === 'glm_coding_plan'
     || selectedProviderType.value === 'gemini_cli'
     || selectedProviderType.value === 'kiro'
     || selectedProviderType.value === 'windsurf'
@@ -2360,8 +2361,8 @@ interface PoolCodexCycleStatsRow {
   weekly: PoolStatsMetric
 }
 
-const CODEX_CYCLE_STAT_KEYS: Array<PoolStatsMetric['key']> = ['request_count', 'total_tokens', 'total_cost_usd']
-const CODEX_CYCLE_STAT_LABELS: Record<PoolStatsMetric['key'], string> = {
+const DEFAULT_CYCLE_STAT_KEYS: Array<PoolStatsMetric['key']> = ['request_count', 'total_tokens', 'total_cost_usd']
+const POOL_CYCLE_STAT_LABELS: Record<PoolStatsMetric['key'], string> = {
   request_count: '请求',
   total_tokens: 'Token',
   total_cost_usd: '费用',
@@ -2459,13 +2460,32 @@ function getPoolKeyCycleStatsGroups(key: PoolKeyDetail): PoolCodexCycleStatsGrou
   return display.kind === 'codex_cycle' ? display.groups : []
 }
 
+function getPoolKeyCycleStatsGroupLabel(
+  key: PoolKeyDetail,
+  code: PoolCodexCycleStatsGroup['code'],
+): string {
+  const group = getPoolKeyCycleStatsGroups(key).find(item => item.code === code)
+  if (group?.label) return group.label
+  return code === '5h' ? '5H' : '周'
+}
+
 function createMissingCycleMetric(key: PoolStatsMetric['key']): PoolStatsMetric {
   return {
     key,
-    label: CODEX_CYCLE_STAT_LABELS[key],
+    label: POOL_CYCLE_STAT_LABELS[key],
     value: '—',
     missing: true,
   }
+}
+
+function getPoolKeyCycleStatsMetricKeys(groups: PoolCodexCycleStatsGroup[]): Array<PoolStatsMetric['key']> {
+  const keys: Array<PoolStatsMetric['key']> = []
+  for (const group of groups) {
+    for (const metric of group.metrics) {
+      if (!keys.includes(metric.key)) keys.push(metric.key)
+    }
+  }
+  return keys.length > 0 ? keys : DEFAULT_CYCLE_STAT_KEYS
 }
 
 function findCycleMetric(
@@ -2480,12 +2500,12 @@ function getPoolKeyCycleStatsRows(key: PoolKeyDetail): PoolCodexCycleStatsRow[] 
   const fiveHGroup = groups.find(group => group.code === '5h')
   const weeklyGroup = groups.find(group => group.code === 'weekly')
 
-  return CODEX_CYCLE_STAT_KEYS.map((metricKey) => {
+  return getPoolKeyCycleStatsMetricKeys(groups).map((metricKey) => {
     const fiveH = findCycleMetric(fiveHGroup, metricKey)
     const weekly = findCycleMetric(weeklyGroup, metricKey)
     return {
       key: metricKey,
-      label: CODEX_CYCLE_STAT_LABELS[metricKey],
+      label: POOL_CYCLE_STAT_LABELS[metricKey],
       fiveH,
       weekly,
     }
@@ -2501,6 +2521,7 @@ function getPoolKeyAccountStatsMetrics(key: PoolKeyDetail): PoolStatsMetric[] {
 
 const quotaRefreshSupported = computed(() => {
   return selectedProviderType.value === 'codex'
+    || selectedProviderType.value === 'glm_coding_plan'
     || selectedProviderType.value === 'kiro'
     || selectedProviderType.value === 'gemini_cli'
     || selectedProviderType.value === 'windsurf'
@@ -3730,6 +3751,7 @@ function normalizeQuotaLabel(label: string): string {
   if (!normalized) return '额度'
   if (/spark\s*5h/i.test(normalized) || normalized.includes('Spark5H')) return 'Spark5H'
   if (/spark/i.test(normalized) && normalized.includes('周')) return 'Spark周'
+  if (normalized === '5h') return '5h'
   if (normalized.includes('5H')) return '5H'
   if (normalized.includes('周')) return '周'
   if (normalized.includes('最低剩余')) return '最低'
@@ -3739,6 +3761,7 @@ function normalizeQuotaLabel(label: string): string {
 
 function getQuotaProgressLabel(label: string): string {
   if (label === '日') return '日'
+  if (label === '5h') return '5h'
   if (label === '5H') return '5H'
   if (label === '周') return '周'
   if (label === 'Spark5H') return 'Spark5H'
@@ -3749,7 +3772,7 @@ function getQuotaProgressLabel(label: string): string {
 }
 
 function getQuotaProgressCountdown(item: QuotaProgressItem) {
-  const staticResetLabels = ['日', '5H', '周', 'Spark5H', 'Spark周', 'Auto', 'Fast', 'Expert', 'Heavy', 'Grok 4.3', '生图']
+  const staticResetLabels = ['日', '5h', '5H', '周', 'Spark5H', 'Spark周', 'Auto', 'Fast', 'Expert', 'Heavy', 'Grok 4.3', '生图']
   if (!item.allowDynamicReset && !staticResetLabels.includes(item.label)) return null
   if (item.resetAtSeconds == null && item.resetSeconds == null) return null
   return getCodexResetCountdown(
@@ -3809,7 +3832,7 @@ function getQuotaLabelOrder(label: string): number {
   if (label === 'Heavy') return 3
   if (label === 'Grok 4.3') return 4
   if (label === '日') return 5
-  if (label === '5H') return 6
+  if (label === '5h' || label === '5H') return 6
   if (label === '周') return 7
   if (label === 'Spark5H') return 8
   if (label === 'Spark周') return 9
@@ -4004,6 +4027,26 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
         remainingPercent,
         resetAtSeconds: normalizeUnixSeconds(window?.reset_at ?? quotaResetAtSeconds ?? null),
         resetSeconds: normalizeRemainingSeconds(window?.reset_seconds ?? quotaResetSeconds ?? null),
+        updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
+      })
+    }
+    return items
+  }
+
+  if (providerType === 'glm_coding_plan') {
+    const items: QuotaProgressItem[] = []
+    for (const [label, code] of [
+      ['5h', 'tokens_5h'],
+      ['周', 'tokens_weekly'],
+    ] as const) {
+      const window = getQuotaSnapshotWindow(quota, code)
+      const remainingPercent = getQuotaWindowRemainingPercent(window)
+      if (remainingPercent == null) continue
+      items.push({
+        label,
+        remainingPercent,
+        resetAtSeconds: normalizeUnixSeconds(window?.reset_at ?? null),
+        resetSeconds: normalizeRemainingSeconds(window?.reset_seconds ?? null),
         updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
       })
     }

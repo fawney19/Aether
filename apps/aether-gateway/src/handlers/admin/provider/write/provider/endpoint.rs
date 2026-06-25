@@ -44,7 +44,9 @@ pub(crate) fn build_admin_fixed_provider_endpoint_defaults(
         api_family: api_family.to_string(),
         endpoint_kind: endpoint_kind.to_string(),
         is_active: true,
-        base_url: normalize_admin_base_url(template.base_url)?,
+        base_url: normalize_admin_base_url(
+            endpoint_template.base_url.unwrap_or(template.base_url),
+        )?,
         header_rules: None,
         body_rules,
         max_retries: Some(provider.max_retries.unwrap_or(2)),

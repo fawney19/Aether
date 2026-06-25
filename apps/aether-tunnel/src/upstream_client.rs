@@ -971,6 +971,7 @@ mod tests {
             &config,
             Arc::new(DnsCache::new(Duration::from_secs(60), 16)),
             true,
+            false,
         )
         .expect("client should build")
     }

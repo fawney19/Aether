@@ -38,6 +38,7 @@ pub struct FixedProviderEndpointConfigDefault {
 pub struct FixedProviderEndpointTemplate {
     pub item_key: &'static str,
     pub api_format: &'static str,
+    pub base_url: Option<&'static str>,
     pub custom_path: Option<&'static str>,
     pub config_defaults: &'static [FixedProviderEndpointConfigDefault],
 }
@@ -265,6 +266,17 @@ const GROK_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     ..STANDARD_RUNTIME_POLICY
 };
 
+const GLM_CODING_PLAN_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    fixed_provider: true,
+    api_format_inheritance: ProviderApiFormatInheritance::None,
+    enable_format_conversion_by_default: true,
+    oauth_is_bearer_like: true,
+    supports_model_fetch: false,
+    supports_local_openai_chat_transport: false,
+    supports_local_same_format_transport: true,
+    ..STANDARD_RUNTIME_POLICY
+};
+
 const WINDSURF_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     fixed_provider: true,
     api_format_inheritance: ProviderApiFormatInheritance::OAuthOrBearer,
@@ -283,6 +295,7 @@ const CLAUDE_CODE_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProvider
     endpoints: &[FixedProviderEndpointTemplate {
         item_key: "claude:messages",
         api_format: "claude:messages",
+        base_url: None,
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
@@ -297,18 +310,21 @@ const CODEX_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTempla
         FixedProviderEndpointTemplate {
             item_key: "openai:responses",
             api_format: "openai:responses",
+            base_url: None,
             custom_path: None,
             config_defaults: FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS,
         },
         FixedProviderEndpointTemplate {
             item_key: "openai:responses:compact",
             api_format: "openai:responses:compact",
+            base_url: None,
             custom_path: None,
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
         FixedProviderEndpointTemplate {
             item_key: "openai:image",
             api_format: "openai:image",
+            base_url: None,
             custom_path: None,
             config_defaults: FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS,
         },
@@ -323,6 +339,7 @@ const CHATGPT_WEB_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProvider
     endpoints: &[FixedProviderEndpointTemplate {
         item_key: "openai:image",
         api_format: "openai:image",
+        base_url: None,
         custom_path: None,
         config_defaults: FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS,
     }],
@@ -336,6 +353,7 @@ const KIRO_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplat
     endpoints: &[FixedProviderEndpointTemplate {
         item_key: "claude:messages",
         api_format: "claude:messages",
+        base_url: None,
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
@@ -349,6 +367,7 @@ const GEMINI_CLI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderT
     endpoints: &[FixedProviderEndpointTemplate {
         item_key: "gemini:generate_content",
         api_format: "gemini:generate_content",
+        base_url: None,
         custom_path: Some("/v1internal:{action}"),
         config_defaults: AUTO_STREAM_ENDPOINT_CONFIG_DEFAULTS,
     }],
@@ -363,18 +382,21 @@ const VERTEX_AI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTe
         FixedProviderEndpointTemplate {
             item_key: "gemini:generate_content",
             api_format: "gemini:generate_content",
+            base_url: None,
             custom_path: None,
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
         FixedProviderEndpointTemplate {
             item_key: "gemini:embedding",
             api_format: "gemini:embedding",
+            base_url: None,
             custom_path: None,
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
         FixedProviderEndpointTemplate {
             item_key: "claude:messages",
             api_format: "claude:messages",
+            base_url: None,
             custom_path: None,
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
@@ -389,6 +411,7 @@ const ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProvider
     endpoints: &[FixedProviderEndpointTemplate {
         item_key: "gemini:generate_content",
         api_format: "gemini:generate_content",
+        base_url: None,
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
@@ -403,29 +426,56 @@ const GROK_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplat
         FixedProviderEndpointTemplate {
             item_key: "openai:chat",
             api_format: "openai:chat",
+            base_url: None,
             custom_path: None,
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
         FixedProviderEndpointTemplate {
             item_key: "openai:responses",
             api_format: "openai:responses",
+            base_url: None,
             custom_path: None,
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
         FixedProviderEndpointTemplate {
             item_key: "claude:messages",
             api_format: "claude:messages",
+            base_url: None,
             custom_path: None,
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
         FixedProviderEndpointTemplate {
             item_key: "openai:image",
             api_format: "openai:image",
+            base_url: None,
             custom_path: None,
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
     ],
     runtime_policy: GROK_RUNTIME_POLICY,
+};
+
+const GLM_CODING_PLAN_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
+    provider_type: "glm_coding_plan",
+    version: 1,
+    base_url: "https://open.bigmodel.cn/api/anthropic",
+    endpoints: &[
+        FixedProviderEndpointTemplate {
+            item_key: "claude:messages",
+            api_format: "claude:messages",
+            base_url: None,
+            custom_path: None,
+            config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+        },
+        FixedProviderEndpointTemplate {
+            item_key: "openai:chat",
+            api_format: "openai:chat",
+            base_url: Some("https://open.bigmodel.cn/api/coding/paas/v4"),
+            custom_path: Some("/chat/completions"),
+            config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+        },
+    ],
+    runtime_policy: GLM_CODING_PLAN_RUNTIME_POLICY,
 };
 
 const WINDSURF_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
@@ -435,6 +485,7 @@ const WINDSURF_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTem
     endpoints: &[FixedProviderEndpointTemplate {
         item_key: "openai:chat",
         api_format: "openai:chat",
+        base_url: None,
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
@@ -489,6 +540,7 @@ pub fn fixed_provider_template(provider_type: &str) -> Option<&'static FixedProv
         "chatgpt_web" => Some(&CHATGPT_WEB_FIXED_PROVIDER_TEMPLATE),
         "kiro" => Some(&KIRO_FIXED_PROVIDER_TEMPLATE),
         "grok" => Some(&GROK_FIXED_PROVIDER_TEMPLATE),
+        "glm_coding_plan" => Some(&GLM_CODING_PLAN_FIXED_PROVIDER_TEMPLATE),
         "gemini_cli" => Some(&GEMINI_CLI_FIXED_PROVIDER_TEMPLATE),
         "vertex_ai" => Some(&VERTEX_AI_FIXED_PROVIDER_TEMPLATE),
         "antigravity" => Some(&ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE),
@@ -792,6 +844,49 @@ mod tests {
         assert!(policy.oauth_is_bearer_like);
         assert!(!policy.supports_model_fetch);
         assert!(!policy.supports_local_same_format_transport);
+    }
+
+    #[test]
+    fn glm_coding_plan_fixed_provider_template_exposes_zhipu_messages_and_chat_defaults() {
+        let template = fixed_provider_template("glm_coding_plan")
+            .expect("glm coding plan template should exist");
+        assert_eq!(template.provider_type, "glm_coding_plan");
+        assert_eq!(template.base_url, "https://open.bigmodel.cn/api/anthropic");
+        assert_eq!(template.version, 1);
+        assert_eq!(
+            template
+                .endpoints
+                .iter()
+                .map(|item| item.api_format)
+                .collect::<Vec<_>>(),
+            vec!["claude:messages", "openai:chat"]
+        );
+
+        let messages_template =
+            fixed_provider_endpoint_template_by_api_format("glm_coding_plan", "claude:messages")
+                .expect("GLM messages endpoint should exist");
+        let chat_template =
+            fixed_provider_endpoint_template_by_api_format("glm_coding_plan", "openai:chat")
+                .expect("GLM chat endpoint should exist");
+        assert_eq!(messages_template.base_url, None);
+        assert_eq!(
+            chat_template.base_url,
+            Some("https://open.bigmodel.cn/api/coding/paas/v4")
+        );
+        assert_eq!(chat_template.custom_path, Some("/chat/completions"));
+
+        let policy = provider_runtime_policy("glm_coding_plan");
+        assert!(policy.fixed_provider);
+        assert!(policy.enable_format_conversion_by_default);
+        assert!(policy.oauth_is_bearer_like);
+        assert!(!policy.supports_model_fetch);
+        assert!(!policy.supports_local_openai_chat_transport);
+        assert!(policy.supports_local_same_format_transport);
+        assert!(!fixed_provider_key_inherits_api_formats(
+            "glm_coding_plan",
+            "bearer",
+            None
+        ));
     }
 
     #[test]
