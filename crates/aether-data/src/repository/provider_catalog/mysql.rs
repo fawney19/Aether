@@ -740,6 +740,19 @@ WHERE id = ?
                 "provider_api_keys.last_models_fetch_at",
             )?)
             .bind(&key.last_models_fetch_error)
+            .bind(optional_json_to_string(
+                &key.upstream_metadata,
+                "provider_api_keys.upstream_metadata",
+            )?)
+            .bind(optional_i64_from_u64(
+                key.oauth_invalid_at_unix_secs,
+                "provider_api_keys.oauth_invalid_at",
+            )?)
+            .bind(&key.oauth_invalid_reason)
+            .bind(optional_json_to_string(
+                &key.status_snapshot,
+                "provider_api_keys.status_snapshot",
+            )?)
             .bind(updated_at)
             .bind(&key.id)
             .execute(&self.pool)
@@ -1306,6 +1319,10 @@ SET
   last_rpm_peak = ?,
   last_models_fetch_at = ?,
   last_models_fetch_error = ?,
+  upstream_metadata = ?,
+  oauth_invalid_at = ?,
+  oauth_invalid_reason = ?,
+  status_snapshot = ?,
   updated_at = ?
 WHERE id = ?
 "#
