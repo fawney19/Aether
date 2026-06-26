@@ -859,6 +859,7 @@ const PROVIDER_TYPE_LABELS: Record<string, string> = {
   antigravity: 'Antigravity',
   kiro: 'Kiro',
   grok: 'Grok',
+  glm_coding_plan: 'GLM Coding Plan',
 }
 
 function formatProviderType(type?: string): string {

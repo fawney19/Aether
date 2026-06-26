@@ -61,7 +61,7 @@
                     Gemini CLI
                   </SelectItem>
                   <SelectItem value="glm_coding_plan">
-                    Zhipu
+                    GLM Coding Plan
                   </SelectItem>
                   <SelectItem value="grok">
                     Grok
@@ -97,7 +97,7 @@
                     Gemini CLI
                   </SelectItem>
                   <SelectItem value="glm_coding_plan">
-                    Zhipu
+                    GLM Coding Plan
                   </SelectItem>
                   <SelectItem value="grok">
                     Grok
@@ -118,7 +118,7 @@
               v-if="!isEditMode && form.provider_type !== 'custom'"
               class="text-xs text-muted-foreground"
             >
-              {{ form.provider_type === 'glm_coding_plan' ? 'Zhipu Coding Plan 使用固定格式端点，Base URL 可在端点管理中切换' : '反代使用固定端点且不可修改' }}
+              {{ form.provider_type === 'glm_coding_plan' ? 'GLM Coding Plan 使用固定格式端点，Base URL 可在端点管理中切换' : '反代使用固定端点且不可修改' }}
             </p>
           </div>
           <div class="space-y-1.5">
