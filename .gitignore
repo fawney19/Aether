@@ -248,3 +248,7 @@ src/_version.py
 analysis/
 new-api/
 apps/aether-tunnel/aether-tunnel.toml
+
+
+# codegraph
+.codegraph
