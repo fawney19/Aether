@@ -31,7 +31,7 @@ impl ReasoningEffort {
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
-            "xhigh" => Some(Self::XHigh),
+            "xhigh" | "extra" => Some(Self::XHigh),
             "max" => Some(Self::Max),
             _ => None,
         }
@@ -489,6 +489,13 @@ mod tests {
                 overrides: vec![ModelOverride::ReasoningEffort(ReasoningEffort::Max)],
             })
         );
+        assert_eq!(
+            parse_model_directive("gpt-5.4-extra"),
+            Some(ModelDirective {
+                base_model: "gpt-5.4".to_string(),
+                overrides: vec![ModelOverride::ReasoningEffort(ReasoningEffort::XHigh)],
+            })
+        );
     }
 
     #[test]
@@ -544,7 +551,7 @@ mod tests {
             &mut responses,
             "openai:responses",
             "gpt-5-upstream",
-            "gpt-5.4-max",
+            "gpt-5.4-extra",
         )
         .expect("directive should apply");
         assert_eq!(responses["reasoning"]["effort"], "xhigh");
