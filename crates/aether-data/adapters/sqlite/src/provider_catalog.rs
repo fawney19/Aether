@@ -1172,6 +1172,19 @@ WHERE id = ?
                 "provider_api_keys.last_models_fetch_at",
             )?)
             .bind(&key.last_models_fetch_error)
+            .bind(optional_json_to_string(
+                &key.upstream_metadata,
+                "provider_api_keys.upstream_metadata",
+            )?)
+            .bind(optional_i64_from_u64(
+                key.oauth_invalid_at_unix_secs,
+                "provider_api_keys.oauth_invalid_at",
+            )?)
+            .bind(&key.oauth_invalid_reason)
+            .bind(optional_json_to_string(
+                &key.status_snapshot,
+                "provider_api_keys.status_snapshot",
+            )?)
             .bind(updated_at)
             .bind(&key.id)
             .execute(&self.pool)
@@ -1978,6 +1991,10 @@ SET
   last_rpm_peak = ?,
   last_models_fetch_at = ?,
   last_models_fetch_error = ?,
+  upstream_metadata = ?,
+  oauth_invalid_at = ?,
+  oauth_invalid_reason = ?,
+  status_snapshot = ?,
   updated_at = ?
 WHERE id = ?
 "#
@@ -2553,6 +2570,14 @@ mod tests {
         updated_key.name = "Updated Key".to_string();
         updated_key.is_active = false;
         updated_key.upstream_metadata = Some(json!({"models":["gpt-4.1"]}));
+        updated_key.oauth_invalid_at_unix_secs = Some(1_730_000_300);
+        updated_key.oauth_invalid_reason = Some("quota refresh marker".to_string());
+        updated_key.status_snapshot = Some(json!({
+            "quota": {
+                "provider_type": "codex",
+                "windows": [{"code": "5h", "remaining_ratio": 0.5}]
+            }
+        }));
         updated_key.last_models_fetch_at_unix_secs = Some(1_730_000_200);
         updated_key.last_models_fetch_error = None;
         let updated_key = repository
@@ -2566,6 +2591,24 @@ mod tests {
             Some(1_730_000_200)
         );
         assert_eq!(updated_key.last_models_fetch_error, None);
+        assert_eq!(
+            updated_key.upstream_metadata,
+            Some(json!({"models":["gpt-4.1"]}))
+        );
+        assert_eq!(updated_key.oauth_invalid_at_unix_secs, Some(1_730_000_300));
+        assert_eq!(
+            updated_key.oauth_invalid_reason.as_deref(),
+            Some("quota refresh marker")
+        );
+        assert_eq!(
+            updated_key.status_snapshot,
+            Some(json!({
+                "quota": {
+                    "provider_type": "codex",
+                    "windows": [{"code": "5h", "remaining_ratio": 0.5}]
+                }
+            }))
+        );
 
         assert!(repository
             .update_key_upstream_metadata(
