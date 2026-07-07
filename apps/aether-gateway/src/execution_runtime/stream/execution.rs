@@ -6171,6 +6171,7 @@ mod tests {
                 stream_key: format!("usage:events:test:stream-execution:{suffix}"),
                 consumer_group: format!("usage_consumers_test_stream_execution_{suffix}"),
                 consumer_block_ms: 1,
+                lifecycle_enqueue_delay_ms: 0,
                 ..UsageRuntimeConfig::default()
             })
     }
