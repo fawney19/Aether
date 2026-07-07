@@ -315,17 +315,6 @@ impl<'a> AdminAppState<'a> {
             return Err("Gemini CLI Endpoint 由系统固定管理，不允许修改".to_string());
         }
 
-        if self.provider_type_is_fixed(&provider.provider_type) {
-            let base_url_edit_allowed = provider_type == "glm_coding_plan";
-            if fields.contains("custom_path")
-                || (fields.contains("base_url") && !base_url_edit_allowed)
-            {
-                return Err(
-                    "固定类型 Provider 的 Endpoint 不允许修改 base_url/custom_path".to_string(),
-                );
-            }
-        }
-
         let mut update_fields = admin_provider_endpoints_pure::AdminProviderEndpointUpdateFields {
             base_url: payload.base_url,
             custom_path: payload.custom_path,

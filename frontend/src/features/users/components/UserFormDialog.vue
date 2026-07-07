@@ -21,10 +21,10 @@
           </div>
           <div class="flex-1 min-w-0">
             <h3 class="text-lg font-semibold text-foreground leading-tight">
-              {{ isEditMode ? '编辑用户' : '新增用户' }}
+              {{ legacyT(isEditMode ? '编辑用户' : '新增用户') }}
             </h3>
             <p class="text-xs text-muted-foreground">
-              {{ isEditMode ? '修改用户账户信息' : '创建新的系统用户账户' }}
+              {{ legacyT(isEditMode ? '修改用户账户信息' : '创建新的系统用户账户') }}
             </p>
           </div>
         </div>
@@ -41,7 +41,7 @@
             <Label
               for="form-username"
               class="text-sm font-medium"
-            >用户名 <span class="text-muted-foreground">*</span></Label>
+            >{{ legacyT('用户名') }} <span class="text-muted-foreground">*</span></Label>
             <Input
               id="form-username"
               v-model="form.username"
@@ -64,7 +64,7 @@
             <Label
               for="form-role"
               class="text-sm font-medium"
-            >用户角色</Label>
+            >{{ legacyT('用户角色') }}</Label>
             <div class="w-full">
               <Select v-model="form.role">
                 <SelectTrigger
@@ -75,13 +75,13 @@
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="user">
-                    普通用户
+                    {{ legacyT('普通用户') }}
                   </SelectItem>
                   <SelectItem value="admin">
-                    管理员
+                    {{ legacyT('管理员') }}
                   </SelectItem>
                   <SelectItem value="audit_admin">
-                    审计管理员
+                    {{ legacyT('审计管理员') }}
                   </SelectItem>
                 </SelectContent>
               </Select>
@@ -93,7 +93,7 @@
           <Label
             for="form-email"
             class="text-sm font-medium"
-          >邮箱</Label>
+          >{{ legacyT('邮箱') }}</Label>
           <Input
             id="form-email"
             v-model="form.email"
@@ -106,7 +106,7 @@
 
         <div class="space-y-2">
           <Label class="text-sm font-medium">
-            {{ isEditMode ? '新密码 (留空保持不变)' : '密码' }}
+            {{ legacyT(isEditMode ? '新密码 (留空保持不变)' : '密码') }}
             <span
               v-if="!isEditMode"
               class="text-muted-foreground"
@@ -122,7 +122,7 @@
             :name="`field-${formNonce}`"
             :required="!isEditMode"
             minlength="6"
-            :placeholder="isEditMode ? '留空保持原密码' : getPasswordPolicyPlaceholder(passwordPolicyLevel)"
+            :placeholder="isEditMode ? legacyT('留空保持原密码') : legacyT(getPasswordPolicyPlaceholder(passwordPolicyLevel))"
             class="h-10"
             :class="[
               passwordError ? 'border-destructive' : '',
@@ -132,13 +132,13 @@
             v-if="passwordError"
             class="text-xs text-destructive"
           >
-            {{ passwordError }}
+            {{ legacyT(passwordError) }}
           </p>
           <p
             v-else-if="!isEditMode"
             class="text-xs text-muted-foreground"
           >
-            {{ passwordHint }}
+            {{ legacyT(passwordHint) }}
           </p>
         </div>
 
@@ -147,7 +147,7 @@
           class="space-y-2"
         >
           <Label class="text-sm font-medium">
-            确认新密码 <span class="text-muted-foreground">*</span>
+            {{ legacyT('确认新密码') }} <span class="text-muted-foreground">*</span>
           </Label>
           <Input
             :id="`pwd-confirm-${formNonce}`"
@@ -160,7 +160,7 @@
             :name="`confirm-${formNonce}`"
             required
             minlength="6"
-            placeholder="再次输入新密码"
+            :placeholder="legacyT('再次输入新密码')"
             class="h-10"
           />
           <p
@@ -170,24 +170,24 @@
             "
             class="text-xs text-destructive"
           >
-            两次输入的密码不一致
+            {{ legacyT('两次输入的密码不一致') }}
           </p>
         </div>
 
         <div class="space-y-2">
-          <Label class="text-sm font-medium">所属分组</Label>
+          <Label class="text-sm font-medium">{{ legacyT('所属分组') }}</Label>
           <MultiSelect
             v-model="form.group_ids"
             :options="groupOptions"
             :search-threshold="0"
-            placeholder="可选择多个分组"
-            empty-text="暂无分组"
-            no-results-text="未找到匹配的分组"
+            :placeholder="legacyT('可选择多个分组')"
+            :empty-text="legacyT('暂无分组')"
+            :no-results-text="legacyT('未找到匹配的分组')"
           />
         </div>
 
         <div class="space-y-2">
-          <Label class="text-sm font-medium">额度</Label>
+          <Label class="text-sm font-medium">{{ legacyT('额度') }}</Label>
           <div class="flex items-center gap-3">
             <div class="flex-1 min-w-0">
               <Input
@@ -197,14 +197,14 @@
                 type="number"
                 step="0.01"
                 min="0.01"
-                placeholder="初始额度 (USD)"
+                :placeholder="legacyT('初始额度 (USD)')"
                 class="h-10"
                 @update:model-value="(v) => form.initial_gift_usd = parseNumberInput(v, { allowFloat: true, min: 0.01 })"
               />
               <span
                 v-else
                 class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
-              >{{ form.unlimited ? '无限制' : '按钱包余额限制' }}</span>
+              >{{ legacyT(form.unlimited ? '无限制' : '按钱包余额限制') }}</span>
             </div>
             <Switch
               v-model="form.unlimited"
@@ -215,14 +215,14 @@
 
         <div class="rounded-lg border border-border bg-muted/30 p-3">
           <div class="mb-3 text-xs font-semibold text-muted-foreground">
-            功能权限
+            {{ legacyT('功能权限') }}
           </div>
           <div class="flex items-center justify-between gap-3">
-            <Label class="text-sm font-medium">敏感信息保护</Label>
+            <Label class="text-sm font-medium">{{ legacyT('敏感信息保护') }}</Label>
             <Switch v-model="form.chat_pii_redaction_enabled" />
           </div>
           <div class="mt-3 flex items-center justify-between gap-3">
-            <Label class="text-sm font-medium">占位符说明</Label>
+            <Label class="text-sm font-medium">{{ legacyT('占位符说明') }}</Label>
             <Switch
               v-model="form.chat_pii_redaction_placeholder_notice"
               :disabled="!form.chat_pii_redaction_enabled"
@@ -230,9 +230,9 @@
           </div>
           <div class="mt-3 flex items-center justify-between gap-3 border-t border-border/60 pt-3">
             <div>
-              <Label class="text-sm font-medium">通知推送服务</Label>
+              <Label class="text-sm font-medium">{{ legacyT('通知推送服务') }}</Label>
               <p class="mt-1 text-xs text-muted-foreground">
-                允许用户配置自己的第三方推送渠道
+                {{ legacyT('允许用户配置自己的第三方推送渠道') }}
               </p>
             </div>
             <Switch v-model="form.notification_push_service_enabled" />
@@ -248,14 +248,14 @@
         class="h-10 px-5"
         @click="handleCancel"
       >
-        取消
+        {{ legacyT('取消') }}
       </Button>
       <Button
         class="h-10 px-5"
         :disabled="saving || !isFormValid"
         @click="handleSubmit"
       >
-        {{ saving ? '处理中...' : isEditMode ? '更新' : '创建' }}
+        {{ legacyT(saving ? '处理中...' : isEditMode ? '更新' : '创建') }}
       </Button>
     </template>
   </Dialog>
@@ -280,6 +280,7 @@ import { useFormDialog } from '@/composables/useFormDialog'
 import { MultiSelect } from '@/components/common'
 import { adminApi } from '@/api/admin'
 import { log } from '@/utils/logger'
+import { useI18n } from '@/i18n'
 import { parseNumberInput } from '@/utils/form'
 import {
   mergeChatPiiRedactionFeatureSettings,
@@ -344,6 +345,7 @@ const groupOptions = computed(() => (props.groups || []).map((group) => ({
   label: group.name,
   value: group.id,
 })))
+const { legacyT } = useI18n()
 
 function createFieldNonce(): string {
   return Math.random().toString(36).slice(2, 10)
@@ -403,10 +405,10 @@ const usernameRegex = /^[a-zA-Z0-9_.-]+$/
 const usernameError = computed(() => {
   const username = form.value.username.trim()
   if (!username) return ''
-  if (username.length < 3) return '用户名长度至少为3个字符'
-  if (username.length > 30) return '用户名长度不能超过30个字符'
+  if (username.length < 3) return legacyT('用户名长度至少为3个字符')
+  if (username.length > 30) return legacyT('用户名长度不能超过30个字符')
   if (!usernameRegex.test(username))
-    return '用户名只能包含字母、数字、下划线、连字符和点号'
+    return legacyT('用户名只能包含字母、数字、下划线、连字符和点号')
   return ''
 })
 

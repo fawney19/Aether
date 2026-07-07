@@ -31,19 +31,19 @@
             v-model="localDescriptionValue"
             v-auto-focus
             class="flex-1 min-w-0 text-xs px-1.5 py-0.5 rounded border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary/50"
-            placeholder="输入备注..."
+            :placeholder="legacyT('输入备注...')"
             @keydown="handleDescriptionKeydown"
           >
           <button
             class="shrink-0 p-0.5 rounded hover:bg-muted text-primary"
-            title="保存"
+            :title="legacyT('保存')"
             @click="handleSave"
           >
             <Check class="w-3.5 h-3.5" />
           </button>
           <button
             class="shrink-0 p-0.5 rounded hover:bg-muted text-muted-foreground"
-            title="取消"
+            :title="legacyT('取消')"
             @click="handleCancel"
           >
             <X class="w-3.5 h-3.5" />
@@ -59,7 +59,7 @@
           v-else
           class="text-xs text-muted-foreground cursor-pointer hover:text-foreground/70 transition-colors"
           @click="handleStartEdit"
-        >添加备注</span>
+        >{{ legacyT('添加备注') }}</span>
       </div>
     </TableCell>
     <TableCell class="py-3.5">
@@ -79,7 +79,7 @@
     </TableCell>
     <TableCell class="py-3.5 text-center">
       <div class="inline-grid grid-cols-[1.75rem_1.75rem_1.75rem] gap-x-0.5 gap-y-0.5 text-xs text-left">
-        <span class="text-muted-foreground/70">端点:</span>
+        <span class="text-muted-foreground/70">{{ legacyT('端点:') }}</span>
         <span class="font-medium text-foreground/90 tabular-nums text-right">{{ provider.active_endpoints }}</span>
         <span class="text-muted-foreground/50 tabular-nums">/{{ provider.total_endpoints }}</span>
 
@@ -87,7 +87,7 @@
         <span class="font-medium text-foreground/90 tabular-nums text-right">{{ provider.active_keys }}</span>
         <span class="text-muted-foreground/50 tabular-nums">/{{ provider.total_keys }}</span>
 
-        <span class="text-muted-foreground/70">模型:</span>
+        <span class="text-muted-foreground/70">{{ legacyT('模型:') }}</span>
         <span class="font-medium text-foreground/90 tabular-nums text-right">{{ provider.active_models }}</span>
         <span class="text-muted-foreground/50 tabular-nums">/{{ provider.total_models }}</span>
       </div>
@@ -101,7 +101,7 @@
           v-for="endpoint in sortEndpoints(provider.endpoint_health_details)"
           :key="endpoint.api_format"
           class="flex flex-col gap-1.5"
-          :title="getEndpointTooltip(endpoint)"
+          :title="getEndpointTooltip(endpoint, locale)"
         >
           <!-- 上排：缩写 + 百分比 -->
           <div class="flex items-center justify-between text-[10px] leading-none">
@@ -126,14 +126,14 @@
       <span
         v-else
         class="text-xs text-muted-foreground/50"
-      >暂无端点</span>
+      >{{ legacyT('暂无端点') }}</span>
     </TableCell>
     <TableCell class="py-3.5 text-center">
       <Badge
         :variant="provider.is_active ? 'success' : 'secondary'"
         class="text-xs"
       >
-        {{ provider.is_active ? '活跃' : '停用' }}
+        {{ legacyT(provider.is_active ? '活跃' : '停用') }}
       </Badge>
     </TableCell>
     <TableCell
@@ -145,7 +145,7 @@
           variant="ghost"
           size="icon"
           class="h-7 w-7 text-muted-foreground/70 hover:text-foreground"
-          title="查看详情"
+          :title="legacyT('查看详情')"
           @click="$emit('viewDetail', provider.id)"
         >
           <Eye class="h-3.5 w-3.5" />
@@ -154,7 +154,7 @@
           variant="ghost"
           size="icon"
           class="h-7 w-7 text-muted-foreground/70 hover:text-foreground"
-          title="编辑提供商"
+          :title="legacyT('编辑提供商')"
           @click="$emit('editProvider', provider)"
         >
           <Edit class="h-3.5 w-3.5" />
@@ -163,7 +163,7 @@
           variant="ghost"
           size="icon"
           class="h-7 w-7 text-muted-foreground/70 hover:text-foreground"
-          title="扩展操作配置"
+          :title="legacyT('扩展操作配置')"
           @click="$emit('openOpsConfig', provider)"
         >
           <KeyRound class="h-3.5 w-3.5" />
@@ -172,7 +172,7 @@
           variant="ghost"
           size="icon"
           class="h-7 w-7 text-muted-foreground/70 hover:text-foreground"
-          :title="provider.is_active ? '停用提供商' : '启用提供商'"
+          :title="legacyT(provider.is_active ? '停用提供商' : '启用提供商')"
           @click="$emit('toggleStatus', provider)"
         >
           <Power class="h-3.5 w-3.5" />
@@ -181,7 +181,7 @@
           variant="ghost"
           size="icon"
           class="h-7 w-7 text-muted-foreground/70 hover:text-destructive"
-          title="删除提供商"
+          :title="legacyT('删除提供商')"
           @click="$emit('deleteProvider', provider)"
         >
           <Trash2 class="h-3.5 w-3.5" />
@@ -212,6 +212,7 @@ import ProviderBalanceCell from './ProviderBalanceCell.vue'
 import { type ProviderWithEndpointsSummary, formatApiFormatShort } from '@/api/endpoints'
 import { sortEndpoints, isEndpointAvailable, getEndpointDotColor, getEndpointTooltip } from '@/features/providers/composables/useEndpointStatus'
 import type { BalanceExtraItem } from '@/features/providers/auth-templates'
+import { useI18n } from '@/i18n'
 
 const props = defineProps<{
   provider: ProviderWithEndpointsSummary
@@ -247,6 +248,7 @@ const vAutoFocus = {
 }
 
 const localDescriptionValue = ref('')
+const { legacyT, locale } = useI18n()
 
 // 当进入编辑模式时，同步 props 的 description
 watch(
@@ -282,8 +284,8 @@ function handleDescriptionKeydown(event: KeyboardEvent) {
   }
 }
 
-function getCredentialLabel(provider: ProviderWithEndpointsSummary): '账号' | '密钥' {
+function getCredentialLabel(provider: ProviderWithEndpointsSummary): string {
   const providerType = String(provider.provider_type || '').trim().toLowerCase()
-  return providerType && providerType !== 'custom' ? '账号' : '密钥'
+  return legacyT(providerType && providerType !== 'custom' ? '账号' : '密钥')
 }
 </script>

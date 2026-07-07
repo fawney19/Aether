@@ -18,7 +18,9 @@ use crate::{
     AiExecutionDecision, AppState, GatewayError,
 };
 
-use super::request::resolve_local_openai_chat_candidate_payload_parts;
+use super::request::{
+    resolve_local_openai_chat_candidate_payload_parts, LocalOpenAiChatRequestPreparation,
+};
 use super::support::{LocalOpenAiChatCandidateAttempt, LocalOpenAiChatDecisionInput};
 
 #[allow(clippy::too_many_arguments)]
@@ -28,6 +30,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
     trace_id: &str,
     body_json: &serde_json::Value,
     input: &LocalOpenAiChatDecisionInput,
+    preparation: Option<&mut LocalOpenAiChatRequestPreparation>,
     attempt: LocalOpenAiChatCandidateAttempt,
     decision_kind: &str,
     report_kind: &str,
@@ -48,6 +51,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         trace_id,
         body_json,
         input,
+        preparation,
         &eligible,
         candidate_index,
         &candidate_id,

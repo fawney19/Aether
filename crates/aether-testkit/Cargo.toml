@@ -11,7 +11,7 @@ async-stream.workspace = true
 aether-data.workspace = true
 aether-data-contracts.workspace = true
 aether-contracts.workspace = true
-aether-gateway.workspace = true
+aether-gateway = { workspace = true, features = ["testkit"] }
 aether-http.workspace = true
 aether-runtime.workspace = true
 aether-runtime-state.workspace = true
@@ -22,8 +22,10 @@ futures-util.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 libc = "0.2"
 sysinfo = "0.32"
 tokio.workspace = true
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+uuid.workspace = true

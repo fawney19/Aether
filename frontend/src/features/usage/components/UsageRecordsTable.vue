@@ -1057,8 +1057,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
-import { useDebounceFn, useLocalStorage } from '@vueuse/core'
+import { ref, computed, onBeforeUnmount, watch } from 'vue'
+import { useLocalStorage } from '@vueuse/core'
 import {
   TableCard,
   Badge,
@@ -1355,10 +1355,26 @@ const timeRangeModel = computed({
 })
 
 // 通用搜索（输入防抖）
+const SEARCH_EMIT_DEBOUNCE_MS = 300
 const localSearch = ref(props.filterSearch)
-const emitSearchDebounced = useDebounceFn((value: string) => {
-  emit('update:filterSearch', value)
-}, 300)
+let searchEmitTimer: ReturnType<typeof setTimeout> | null = null
+
+function cancelPendingSearchEmit() {
+  if (searchEmitTimer !== null) {
+    clearTimeout(searchEmitTimer)
+    searchEmitTimer = null
+  }
+}
+
+function scheduleSearchEmit(value: string) {
+  cancelPendingSearchEmit()
+  searchEmitTimer = setTimeout(() => {
+    searchEmitTimer = null
+    if (value !== props.filterSearch) {
+      emit('update:filterSearch', value)
+    }
+  }, SEARCH_EMIT_DEBOUNCE_MS)
+}
 
 function getDisplayStatus(record: UsageRecord) {
   return resolveDisplayRequestStatus(record)
@@ -1422,12 +1438,18 @@ function formatRecordProviderSegment(record: UsageRecord): string {
 
 watch(() => props.filterSearch, (value) => {
   if (value !== localSearch.value) {
+    cancelPendingSearchEmit()
     localSearch.value = value
   }
 })
 
 watch(localSearch, (value) => {
-  emitSearchDebounced(value)
+  if (value === props.filterSearch) return
+  scheduleSearchEmit(value)
+})
+
+onBeforeUnmount(() => {
+  cancelPendingSearchEmit()
 })
 
 // 使用复用的行点击逻辑

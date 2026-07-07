@@ -252,6 +252,12 @@ impl UsageRuntimeAccess for GatewayDataState {
         GatewayDataState::usage_worker_queue(self)
     }
 
+    fn usage_worker_should_defer_for_database_pressure(&self) -> bool {
+        self.database_pool_summary()
+            .as_ref()
+            .is_some_and(GatewayDataState::database_pool_summary_under_usage_worker_pressure)
+    }
+
     async fn body_capture_policy(&self) -> Result<UsageBodyCapturePolicy, DataLayerError> {
         let value = match GatewayDataState::find_system_config_value(self, REQUEST_RECORD_LEVEL_KEY)
             .await?

@@ -9,7 +9,11 @@ use std::collections::BTreeMap;
 
 use crate::ai_serving::api::{
     is_matching_stream_request, resolve_execution_runtime_stream_plan_kind,
-    supports_stream_execution_decision_kind, AiStreamAttempt, OPENAI_VIDEO_CONTENT_PLAN_KIND,
+    supports_stream_execution_decision_kind, AiStreamAttempt, CLAUDE_CHAT_STREAM_PLAN_KIND,
+    CLAUDE_CLI_STREAM_PLAN_KIND, GEMINI_CHAT_STREAM_PLAN_KIND, GEMINI_CLI_STREAM_PLAN_KIND,
+    GEMINI_FILES_DOWNLOAD_PLAN_KIND, OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND,
+    OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND, OPENAI_RESPONSES_STREAM_PLAN_KIND,
+    OPENAI_VIDEO_CONTENT_PLAN_KIND,
 };
 use crate::api::response::build_client_response_from_parts;
 use crate::control::GatewayControlDecision;
@@ -34,22 +38,76 @@ pub(crate) async fn maybe_execute_via_stream_decision_path(
     trace_id: &str,
     decision: &GatewayControlDecision,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
+    let plan_kind_started_at = std::time::Instant::now();
     let Some(plan_kind) = resolve_execution_runtime_stream_plan_kind(parts, decision) else {
+        observe_gateway_stage_ms(
+            "frontdoor_stream_plan_kind",
+            plan_kind_started_at.elapsed().as_millis() as u64,
+        );
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
+    observe_gateway_stage_ms(
+        "frontdoor_stream_plan_kind",
+        plan_kind_started_at.elapsed().as_millis() as u64,
+    );
 
+    let parse_started_at = std::time::Instant::now();
     let Some((body_json, body_base64)) = parse_local_request_body(parts, body_bytes) else {
+        observe_gateway_stage_ms(
+            "frontdoor_stream_parse",
+            parse_started_at.elapsed().as_millis() as u64,
+        );
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
+    observe_gateway_stage_ms(
+        "frontdoor_stream_parse",
+        parse_started_at.elapsed().as_millis() as u64,
+    );
 
-    if !is_matching_stream_request(plan_kind, parts, &body_json, body_base64.as_deref()) {
+    let match_started_at = std::time::Instant::now();
+    let stream_matches =
+        is_matching_stream_request(plan_kind, parts, &body_json, body_base64.as_deref());
+    observe_gateway_stage_ms(
+        "frontdoor_stream_match",
+        match_started_at.elapsed().as_millis() as u64,
+    );
+    if !stream_matches {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
 
+    let bypass_started_at = std::time::Instant::now();
     let bypass_cache_key =
         build_direct_plan_bypass_cache_key(plan_kind, parts, body_bytes, decision);
-    if should_skip_direct_plan(state, &bypass_cache_key) {
+    let skip_direct_plan = should_skip_direct_plan(state, &bypass_cache_key);
+    observe_gateway_stage_ms(
+        "frontdoor_stream_bypass",
+        bypass_started_at.elapsed().as_millis() as u64,
+    );
+    if skip_direct_plan {
         return Ok(LocalExecutionRequestOutcome::NoPath);
+    }
+
+    if plan_kind == OPENAI_CHAT_STREAM_PLAN_KIND
+        && supports_stream_execution_decision_kind(plan_kind)
+        && decision.route_family.as_deref() == Some("openai")
+    {
+        let fast_path_started_at = std::time::Instant::now();
+        let outcome = execute_openai_chat_stream_fast_path(
+            state,
+            parts,
+            trace_id,
+            decision,
+            &body_json,
+            body_base64,
+            plan_kind,
+            bypass_cache_key,
+        )
+        .await;
+        observe_gateway_stage_ms(
+            "frontdoor_stream_fast_path_total",
+            fast_path_started_at.elapsed().as_millis() as u64,
+        );
+        return outcome;
     }
 
     let port = GatewayStreamExecutionPathPort {
@@ -67,6 +125,64 @@ pub(crate) async fn maybe_execute_via_stream_decision_path(
     Ok(from_ai_serving_outcome(
         run_ai_stream_execution_path(&port).await?,
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_openai_chat_stream_fast_path(
+    state: &AppState,
+    parts: &http::request::Parts,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    body_json: &serde_json::Value,
+    body_base64: Option<String>,
+    plan_kind: &str,
+    bypass_cache_key: String,
+) -> Result<LocalExecutionRequestOutcome, GatewayError> {
+    let started_at = std::time::Instant::now();
+    let local_outcome = maybe_execute_stream_via_local_decision(
+        state, parts, trace_id, decision, body_json, plan_kind,
+    )
+    .await?;
+    observe_gateway_stage_ms(
+        "stream_openai_chat_local_decision",
+        started_at.elapsed().as_millis() as u64,
+    );
+    match local_outcome {
+        LocalExecutionRequestOutcome::Responded(response) => {
+            return Ok(LocalExecutionRequestOutcome::Responded(response));
+        }
+        LocalExecutionRequestOutcome::Exhausted(outcome) => {
+            return Ok(LocalExecutionRequestOutcome::Exhausted(outcome));
+        }
+        LocalExecutionRequestOutcome::NoPath => {}
+    }
+
+    if let Some(response) = maybe_execute_stream_via_remote_decision(
+        state, parts, trace_id, decision, body_json, plan_kind,
+    )
+    .await?
+    {
+        return Ok(LocalExecutionRequestOutcome::Responded(response));
+    }
+
+    let fallback_started_at = std::time::Instant::now();
+    let fallback_outcome = maybe_execute_stream_via_plan_fallback(
+        state,
+        parts,
+        trace_id,
+        decision,
+        body_json,
+        body_base64,
+        plan_kind,
+        bypass_cache_key,
+        GatewayFallbackReason::RemoteDecisionMiss,
+    )
+    .await?;
+    observe_gateway_stage_ms(
+        "frontdoor_stream_fast_path",
+        fallback_started_at.elapsed().as_millis() as u64,
+    );
+    Ok(fallback_outcome)
 }
 
 struct GatewayStreamExecutionPathPort<'a> {
@@ -89,6 +205,10 @@ impl AiStreamExecutionPathPort for GatewayStreamExecutionPathPort<'_> {
 
     fn scheduler_decision_supported(&self) -> bool {
         self.scheduler_supported
+    }
+
+    fn stream_execution_steps(&self) -> &'static [AiStreamExecutionStep] {
+        stream_execution_steps_for_plan_kind(self.plan_kind)
     }
 
     async fn execute_stream_step(
@@ -194,6 +314,10 @@ impl AiStreamExecutionPathPort for GatewayStreamExecutionPathPort<'_> {
             "stream_path_step",
             step_started_at.elapsed().as_millis() as u64,
         );
+        observe_gateway_stage_ms(
+            stream_path_stage_name(step),
+            step_started_at.elapsed().as_millis() as u64,
+        );
         Ok(to_ai_serving_outcome(outcome))
     }
 
@@ -214,6 +338,62 @@ impl AiStreamExecutionPathPort for GatewayStreamExecutionPathPort<'_> {
         )
         .await?;
         Ok(to_ai_serving_outcome(outcome))
+    }
+}
+
+const STREAM_STEPS_VIDEO_CONTENT: &[AiStreamExecutionStep] = &[
+    AiStreamExecutionStep::LocalVideoContent,
+    AiStreamExecutionStep::RemoteDecision,
+];
+const STREAM_STEPS_OPENAI_IMAGE: &[AiStreamExecutionStep] = &[
+    AiStreamExecutionStep::LocalImage,
+    AiStreamExecutionStep::RemoteDecision,
+];
+const STREAM_STEPS_OPENAI_CHAT: &[AiStreamExecutionStep] = &[
+    AiStreamExecutionStep::LocalOpenAiChat,
+    AiStreamExecutionStep::RemoteDecision,
+];
+const STREAM_STEPS_OPENAI_RESPONSES: &[AiStreamExecutionStep] = &[
+    AiStreamExecutionStep::LocalOpenAiResponses,
+    AiStreamExecutionStep::RemoteDecision,
+];
+const STREAM_STEPS_STANDARD_TEXT: &[AiStreamExecutionStep] = &[
+    AiStreamExecutionStep::LocalStandardFamily,
+    AiStreamExecutionStep::LocalSameFormatProvider,
+    AiStreamExecutionStep::RemoteDecision,
+];
+const STREAM_STEPS_GEMINI_FILES: &[AiStreamExecutionStep] = &[
+    AiStreamExecutionStep::LocalGeminiFiles,
+    AiStreamExecutionStep::RemoteDecision,
+];
+
+fn stream_execution_steps_for_plan_kind(plan_kind: &str) -> &'static [AiStreamExecutionStep] {
+    match plan_kind {
+        OPENAI_VIDEO_CONTENT_PLAN_KIND => STREAM_STEPS_VIDEO_CONTENT,
+        OPENAI_IMAGE_STREAM_PLAN_KIND => STREAM_STEPS_OPENAI_IMAGE,
+        OPENAI_CHAT_STREAM_PLAN_KIND => STREAM_STEPS_OPENAI_CHAT,
+        OPENAI_RESPONSES_STREAM_PLAN_KIND | OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND => {
+            STREAM_STEPS_OPENAI_RESPONSES
+        }
+        CLAUDE_CHAT_STREAM_PLAN_KIND
+        | CLAUDE_CLI_STREAM_PLAN_KIND
+        | GEMINI_CHAT_STREAM_PLAN_KIND
+        | GEMINI_CLI_STREAM_PLAN_KIND => STREAM_STEPS_STANDARD_TEXT,
+        GEMINI_FILES_DOWNLOAD_PLAN_KIND => STREAM_STEPS_GEMINI_FILES,
+        _ => aether_ai_serving::DEFAULT_STREAM_EXECUTION_STEPS,
+    }
+}
+
+fn stream_path_stage_name(step: AiStreamExecutionStep) -> &'static str {
+    match step {
+        AiStreamExecutionStep::LocalVideoContent => "stream_path_step_video_content",
+        AiStreamExecutionStep::LocalImage => "stream_path_step_image",
+        AiStreamExecutionStep::LocalOpenAiChat => "stream_path_step_openai_chat",
+        AiStreamExecutionStep::LocalOpenAiResponses => "stream_path_step_openai_responses",
+        AiStreamExecutionStep::LocalStandardFamily => "stream_path_step_standard_family",
+        AiStreamExecutionStep::LocalSameFormatProvider => "stream_path_step_same_format_provider",
+        AiStreamExecutionStep::LocalGeminiFiles => "stream_path_step_gemini_files",
+        AiStreamExecutionStep::RemoteDecision => "stream_path_step_remote_decision",
     }
 }
 

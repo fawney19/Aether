@@ -13,6 +13,18 @@ const AUTH_API_KEY_SNAPSHOT_RUNTIME_CACHE_TTL: Duration = Duration::from_secs(30
 use super::super::super::{AUTH_API_KEY_LAST_USED_MAX_ENTRIES, AUTH_API_KEY_LAST_USED_TTL};
 
 impl AppState {
+    async fn acquire_auth_snapshot_load_gate(
+        &self,
+    ) -> Result<Option<aether_runtime::ConcurrencyPermit>, GatewayError> {
+        let Some(gate) = self.auth_snapshot_load_gate.as_ref() else {
+            return Ok(None);
+        };
+        gate.acquire()
+            .await
+            .map(Some)
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn read_cached_auth_api_key_snapshot(
         &self,
         user_id: &str,
@@ -28,6 +40,7 @@ impl AppState {
                 cache_key,
                 AUTH_API_KEY_SNAPSHOT_RUNTIME_CACHE_TTL,
                 || async move {
+                    let _permit = self.acquire_auth_snapshot_load_gate().await?;
                     self.data
                         .read_auth_api_key_snapshot(user_id, api_key_id, now_unix_secs)
                         .await
@@ -52,6 +65,7 @@ impl AppState {
                 cache_key.clone(),
                 AUTH_API_KEY_SNAPSHOT_RUNTIME_CACHE_TTL,
                 || async move {
+                    let _permit = self.acquire_auth_snapshot_load_gate().await?;
                     self.data
                         .read_auth_api_key_snapshot_by_key_hash(key_hash, now_unix_secs)
                         .await

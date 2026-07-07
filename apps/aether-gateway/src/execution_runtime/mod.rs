@@ -48,6 +48,15 @@ pub use server::{
     build_execution_runtime_router_with_request_gates, serve_execution_runtime_tcp,
     serve_execution_runtime_unix,
 };
+pub use transport::DirectH2cSenderPrewarmReport;
+
+pub async fn prewarm_direct_h2c_sender_cache_from_env_for_startup(
+) -> Result<Option<DirectH2cSenderPrewarmReport>, String> {
+    transport::prewarm_direct_h2c_sender_cache_from_env()
+        .await
+        .map_err(|err| err.to_string())
+}
+
 pub(crate) use stream::execute_execution_runtime_stream;
 pub(crate) use stream_pump::build_direct_execution_frame_stream;
 pub(crate) use sync::{

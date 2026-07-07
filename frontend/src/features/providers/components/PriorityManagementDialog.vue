@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="internalOpen"
-    title="优先级管理"
-    description="拖拽调整顺序，点击序号可编辑（相同数字为同级），保存后自动切换对应的调度策略"
+    :title="legacyT('优先级管理')"
+    :description="legacyT('拖拽调整顺序，点击序号可编辑（相同数字为同级），保存后自动切换对应的调度策略')"
     :icon="ListOrdered"
     size="2xl"
     @update:model-value="handleDialogUpdate"
@@ -21,7 +21,7 @@
           @click="activeMainTab = 'provider'"
         >
           <Layers class="w-4 h-4" />
-          <span>提供商优先</span>
+          <span>{{ legacyT('提供商优先') }}</span>
         </button>
         <button
           type="button"
@@ -34,7 +34,7 @@
           @click="activeMainTab = 'key'"
         >
           <Key class="w-4 h-4" />
-          <span>Key 优先</span>
+          <span>{{ legacyT('Key 优先') }}</span>
         </button>
       </div>
 
@@ -51,7 +51,7 @@
             class="flex flex-col items-center justify-center py-20 text-muted-foreground"
           >
             <Layers class="w-10 h-10 mb-3 opacity-20" />
-            <span class="text-sm">暂无提供商</span>
+            <span class="text-sm">{{ legacyT('暂无提供商') }}</span>
           </div>
 
           <!-- 提供商列表 -->
@@ -98,7 +98,7 @@
                 <div
                   v-else
                   class="w-6 h-6 rounded-md bg-muted/50 flex items-center justify-center text-xs font-medium text-muted-foreground cursor-pointer hover:bg-primary/10 hover:text-primary transition-colors"
-                  title="点击编辑优先级，相同数字为同级"
+                  :title="legacyT('点击编辑优先级，相同数字为同级')"
                   @click.stop="startEditProviderPriority(provider)"
                 >
                   {{ provider.provider_priority }}
@@ -113,7 +113,7 @@
                   variant="secondary"
                   class="text-[10px] px-1.5 h-5 shrink-0"
                 >
-                  停用
+                  {{ legacyT('停用') }}
                 </Badge>
               </div>
               <div class="flex items-center gap-3 shrink-0 ml-2">
@@ -156,7 +156,7 @@
           >
             <div class="flex flex-col items-center gap-2">
               <div class="animate-spin rounded-full h-5 w-5 border-2 border-muted border-t-primary" />
-              <span class="text-xs text-muted-foreground">加载中...</span>
+              <span class="text-xs text-muted-foreground">{{ legacyT('加载中...') }}</span>
             </div>
           </div>
 
@@ -166,7 +166,7 @@
             class="flex flex-col items-center justify-center py-20 text-muted-foreground"
           >
             <Key class="w-10 h-10 mb-3 opacity-20" />
-            <span class="text-sm">暂无 API Key</span>
+            <span class="text-sm">{{ legacyT('暂无 API Key') }}</span>
           </div>
 
           <!-- 左右布局：格式列表 + Key 列表 -->
@@ -261,7 +261,7 @@
                       <div
                         v-else
                         class="w-5 h-5 rounded bg-muted/50 flex items-center justify-center text-[11px] font-medium transition-colors text-muted-foreground cursor-pointer hover:bg-primary/10 hover:text-primary"
-                        title="点击编辑优先级"
+                        :title="legacyT('点击编辑优先级')"
                         @click.stop="startEditKeyPriority(format, key)"
                       >
                         {{ key.priority }}
@@ -281,28 +281,28 @@
                           variant="outline"
                           class="text-[9px] h-4 px-1 shrink-0"
                         >
-                          号池
+                          {{ legacyT('号池') }}
                         </Badge>
                         <Badge
                           v-else-if="key.circuit_breaker_open"
                           variant="destructive"
                           class="text-[9px] h-4 px-1 shrink-0"
                         >
-                          熔断
+                          {{ legacyT('熔断') }}
                         </Badge>
                         <Badge
                           v-else-if="!key.is_active && key.provider_active"
                           variant="secondary"
                           class="text-[9px] h-4 px-1 shrink-0"
                         >
-                          停用
+                          {{ legacyT('停用') }}
                         </Badge>
                       </div>
                       <!-- 第二行：密钥脱敏 · Provider 名称 + Provider 级别状态 -->
                       <div class="flex items-center gap-0 mt-0.5">
                         <template v-if="key.is_pool_aggregate">
                           <span class="text-[10px] text-muted-foreground/70 truncate">
-                            号池: {{ key.pool_active_key_count ?? 0 }}/{{ key.pool_key_count ?? 0 }}
+                            {{ poolKeySummary(key) }}
                           </span>
                           <template v-if="key.provider_type">
                             <span class="text-[10px] text-muted-foreground/40 mx-1">·</span>
@@ -319,7 +319,7 @@
                           variant="secondary"
                           class="text-[9px] h-4 px-1 shrink-0 ml-1"
                         >
-                          停用
+                          {{ legacyT('停用') }}
                         </Badge>
                       </div>
                     </div>
@@ -341,7 +341,7 @@
                           --
                         </div>
                         <div class="text-[10px] text-muted-foreground tabular-nums">
-                          {{ key.is_pool_aggregate ? 'Pool' : (key.rate_multipliers?.[format] ?? 1) + 'x' }}
+                          {{ key.is_pool_aggregate ? legacyT('Pool') : (key.rate_multipliers?.[format] ?? 1) + 'x' }}
                         </div>
                       </div>
                       <!-- 快捷启用/禁用开关 -->
@@ -353,12 +353,12 @@
                             ? 'text-foreground/70 hover:bg-muted hover:text-foreground'
                             : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
                         :title="key.is_pool_aggregate
-                          ? '号池聚合项不支持在此单独开关'
+                          ? legacyT('号池聚合项不支持在此单独开关')
                           : !key.provider_active
-                            ? 'Provider 停用'
+                            ? legacyT('Provider 停用')
                             : key.is_active
-                              ? '点击停用'
-                              : '点击启用'"
+                              ? legacyT('点击停用')
+                              : legacyT('点击启用')"
                         :disabled="key.is_pool_aggregate || !key.provider_active"
                         @click.stop="!key.is_pool_aggregate && toggleKeyActive(format, key)"
                       >
@@ -373,7 +373,7 @@
                   class="flex flex-col items-center justify-center py-20 text-muted-foreground"
                 >
                   <Key class="w-10 h-10 mb-3 opacity-20" />
-                  <span class="text-sm">暂无 {{ format }} 格式的 Key</span>
+                  <span class="text-sm">{{ emptyFormatKeyText(format) }}</span>
                 </div>
               </div>
             </div>
@@ -386,10 +386,10 @@
       <div class="flex items-center justify-between w-full">
         <div class="flex items-center gap-3">
           <div class="text-xs text-muted-foreground whitespace-nowrap">
-            当前模式: <span class="font-medium text-foreground/80">{{ activeMainTab === 'provider' ? '提供商优先' : 'Key 优先' }}</span>
+            {{ legacyT('当前模式:') }} <span class="font-medium text-foreground/80">{{ activeMainTabLabel }}</span>
           </div>
           <div class="flex items-center gap-1.5 pl-3 border-l border-border/60">
-            <span class="text-xs text-muted-foreground">调度:</span>
+            <span class="text-xs text-muted-foreground">{{ legacyT('调度:') }}</span>
             <div class="flex gap-0.5 p-0.5 bg-muted/40 rounded-md">
               <button
                 type="button"
@@ -399,10 +399,10 @@
                     ? 'bg-primary text-primary-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
                 ]"
-                title="优先使用已缓存的Provider，利用Prompt Cache"
+                :title="legacyT('优先使用已缓存的Provider，利用Prompt Cache')"
                 @click="schedulingMode = 'cache_affinity'"
               >
-                缓存亲和
+                {{ legacyT('缓存亲和') }}
               </button>
               <button
                 type="button"
@@ -412,10 +412,10 @@
                     ? 'bg-primary text-primary-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
                 ]"
-                title="同优先级内随机轮换，不考虑缓存"
+                :title="legacyT('同优先级内随机轮换，不考虑缓存')"
                 @click="schedulingMode = 'load_balance'"
               >
-                负载均衡
+                {{ legacyT('负载均衡') }}
               </button>
               <button
                 type="button"
@@ -425,10 +425,10 @@
                     ? 'bg-primary text-primary-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
                 ]"
-                title="严格按优先级顺序，不考虑缓存"
+                :title="legacyT('严格按优先级顺序，不考虑缓存')"
                 @click="schedulingMode = 'fixed_order'"
               >
-                固定顺序
+                {{ legacyT('固定顺序') }}
               </button>
             </div>
           </div>
@@ -444,7 +444,7 @@
               v-if="saving"
               class="w-3.5 h-3.5 mr-1.5 animate-spin"
             />
-            {{ saving ? '保存中' : '保存' }}
+            {{ saving ? legacyT('保存中') : legacyT('保存') }}
           </Button>
           <Button
             variant="outline"
@@ -452,7 +452,7 @@
             class="min-w-[72px]"
             @click="close"
           >
-            取消
+            {{ legacyT('取消') }}
           </Button>
         </div>
       </div>
@@ -468,6 +468,7 @@ import Button from '@/components/ui/button.vue'
 import Badge from '@/components/ui/badge.vue'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
+import { useI18n } from '@/i18n'
 import { updateProvider, updateProviderKey } from '@/api/endpoints'
 import { getProvidersSummary, type ProviderWithEndpointsSummary } from '@/api/endpoints'
 import { adminApi } from '@/api/admin'
@@ -519,6 +520,7 @@ const emit = defineEmits<{
 }>()
 
 const { success, error: showError } = useToast()
+const { legacyT } = useI18n()
 
 // 内部状态
 const internalOpen = computed(() => props.modelValue)
@@ -561,6 +563,22 @@ const schedulingMode = ref<'fixed_order' | 'load_balance' | 'cache_affinity'>('c
 
 // 余额数据缓存 {providerId: ActionResultResponse}
 const balanceCache = ref<Record<string, ActionResultResponse>>({})
+
+const activeMainTabLabel = computed(() =>
+  legacyT(activeMainTab.value === 'provider' ? '提供商优先' : 'Key 优先')
+)
+
+function poolKeySummary(key: KeyWithMeta): string {
+  return `${legacyT('号池')}: ${key.pool_active_key_count ?? 0}/${key.pool_key_count ?? 0}`
+}
+
+function emptyFormatKeyText(format: string): string {
+  return legacyT(`暂无 ${format} 格式的 Key`)
+}
+
+function localizedApiError(error: unknown, fallback: string): string {
+  return legacyT(parseApiError(error, fallback))
+}
 
 // 类型守卫函数
 function isBalanceInfo(data: unknown): data is BalanceInfo {
@@ -864,7 +882,7 @@ const PROVIDER_TYPE_LABELS: Record<string, string> = {
 
 function formatProviderType(type?: string): string {
   if (!type) return ''
-  return PROVIDER_TYPE_LABELS[type] || type
+  return legacyT(PROVIDER_TYPE_LABELS[type] || type)
 }
 
 function isPoolManagedProvider(providerId: string): boolean {
@@ -929,7 +947,7 @@ function buildPoolAggregateItem(format: string, providerId: string, sourceKeys: 
     ? Number(poolPriorityRaw)
     : fallbackPriority
 
-  const providerName = provider?.name || sourceKeys[0]?.provider_name || '未知 Provider'
+  const providerName = provider?.name || sourceKeys[0]?.provider_name || 'Unknown Provider'
   const activeKeyCount = sourceKeys.filter((k) => k.is_active).length
   const providerActive = provider?.is_active ?? sourceKeys.some((k) => k.provider_active)
   const healthCandidates = sourceKeys.map((k) => k.health_score).filter((v): v is number => v != null)
@@ -1172,7 +1190,7 @@ async function loadKeysByFormat() {
     }
   } catch (err: unknown) {
     originalKeyPriorityById = new Map()
-    showError(parseApiError(err, '加载 Key 列表失败'), '错误')
+    showError(localizedApiError(err, '加载 Key 列表失败'), legacyT('错误'))
   } finally {
     loadingKeys.value = false
   }
@@ -1196,9 +1214,9 @@ async function toggleKeyActive(format: string, key: KeyWithMeta) {
     for (const fmt of Object.keys(keysByFormat.value)) {
       keysByFormat.value[fmt] = sortKeysByActiveAndPriority(keysByFormat.value[fmt])
     }
-    success(newStatus ? 'Key 已启用' : 'Key 已停用')
+    success(legacyT(newStatus ? 'Key 已启用' : 'Key 已停用'))
   } catch (err: unknown) {
-    showError(parseApiError(err, '操作失败'), '错误')
+    showError(localizedApiError(err, '操作失败'), legacyT('错误'))
   }
 }
 
@@ -1540,7 +1558,7 @@ async function save() {
     )
     snapshotCurrentPriorityBaseline()
 
-    success('优先级已保存')
+    success(legacyT('优先级已保存'))
     emit('saved')
 
     // 提供商优先模式保存后关闭，Key 优先模式保存后保持打开方便继续调整
@@ -1548,7 +1566,7 @@ async function save() {
       close()
     }
   } catch (err: unknown) {
-    showError(parseApiError(err, '保存失败'), '错误')
+    showError(localizedApiError(err, '保存失败'), legacyT('错误'))
   } finally {
     saving.value = false
   }

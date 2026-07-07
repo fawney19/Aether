@@ -56,6 +56,11 @@ const props = withDefaults(defineProps<{
   entityLabel?: string
   entityName?: string | null
 }>(), {
+  timeline: null,
+  timelineDetails: null,
+  timeRangeStart: null,
+  timeRangeEnd: null,
+  generatedAt: null,
   lookbackHours: 6,
   fallbackSegments: 60,
   entityLabel: '',

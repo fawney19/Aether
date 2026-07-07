@@ -10,10 +10,10 @@
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0">
             <DialogTitle>
-              {{ title }}
+              {{ displayTitle }}
             </DialogTitle>
             <DialogDescription>
-              {{ description }}
+              {{ displayDescription }}
             </DialogDescription>
           </div>
           <Badge
@@ -39,7 +39,7 @@
           </div>
           <div class="space-y-1">
             <div class="text-xs text-muted-foreground">
-              支付方式
+              {{ legacyT('支付方式') }}
             </div>
             <div class="text-sm text-foreground">
               {{ stripeDisplayName }}
@@ -47,7 +47,7 @@
           </div>
           <div class="space-y-1">
             <div class="text-xs text-muted-foreground">
-              应付金额
+              {{ legacyT('应付金额') }}
             </div>
             <div class="text-sm text-foreground">
               {{ stripeAmountLabel }}
@@ -55,7 +55,7 @@
           </div>
           <div class="space-y-1">
             <div class="text-xs text-muted-foreground">
-              支付通道
+              {{ legacyT('支付通道') }}
             </div>
             <div class="flex flex-wrap gap-1.5">
               <Badge
@@ -87,7 +87,7 @@
           class="absolute inset-3 flex items-center justify-center gap-2 rounded-lg bg-background/80 text-sm text-muted-foreground backdrop-blur-sm"
         >
           <Loader2 class="h-4 w-4 animate-spin" />
-          正在加载 Stripe 支付组件...
+          {{ legacyT('正在加载 Stripe 支付组件...') }}
         </div>
       </div>
 
@@ -105,7 +105,7 @@
         :disabled="initializing || submitting"
         @click="closeDialog"
       >
-        关闭
+        {{ legacyT('关闭') }}
       </Button>
       <Button
         :disabled="!canSubmit"
@@ -115,7 +115,7 @@
           v-if="submitting"
           class="mr-2 h-4 w-4 animate-spin"
         />
-        {{ submitting ? '支付中...' : confirmText }}
+        {{ submitting ? legacyT('支付中...') : displayConfirmText }}
       </Button>
     </template>
   </Dialog>
@@ -131,6 +131,7 @@ import {
   type PaymentInstructionMap,
 } from '@/utils/paymentInstructions'
 import { paymentMethodLabel } from '@/utils/walletDisplay'
+import { useI18n } from '@/i18n'
 
 interface Props {
   open: boolean
@@ -152,11 +153,15 @@ const emit = defineEmits<{
   'update:open': [value: boolean]
   success: [payload: { intentId: string; status?: string | null }]
 }>()
+const { legacyT } = useI18n()
 
 const dialogOpen = computed({
   get: () => props.open,
   set: value => emit('update:open', value),
 })
+const displayTitle = computed(() => legacyT(props.title))
+const displayDescription = computed(() => legacyT(props.description))
+const displayConfirmText = computed(() => legacyT(props.confirmText))
 
 const paymentElementRoot = ref<HTMLDivElement | null>(null)
 const stripeInstance = ref<Stripe | null>(null)
@@ -218,7 +223,7 @@ async function initializeStripe() {
   const instructions = stripeInstructions.value
   if (!props.open) return
   if (!instructions) {
-    errorMessage.value = '缺少 Stripe 支付参数'
+    errorMessage.value = legacyT('缺少 Stripe 支付参数')
     return
   }
 
@@ -243,12 +248,12 @@ async function initializeStripe() {
   try {
     await nextTick()
     if (!paymentElementRoot.value) {
-      throw new Error('支付容器未准备好')
+      throw new Error(legacyT('支付容器未准备好'))
     }
 
     const stripe = await loadStripeCached(instructions.publishableKey)
     if (!stripe) {
-      throw new Error('Stripe 初始化失败')
+      throw new Error(legacyT('Stripe 初始化失败'))
     }
     if (sequence !== mountSequence) return
 
@@ -277,7 +282,7 @@ async function initializeStripe() {
 async function submitPayment() {
   const instructions = stripeInstructions.value
   if (!instructions || !stripeInstance.value || !elementsInstance.value) {
-    errorMessage.value = 'Stripe 支付组件未就绪'
+    errorMessage.value = legacyT('Stripe 支付组件未就绪')
     return
   }
 
@@ -287,7 +292,7 @@ async function submitPayment() {
   try {
     const submitResult = await elementsInstance.value.submit()
     if (submitResult.error) {
-      errorMessage.value = submitResult.error.message || '请检查支付信息'
+      errorMessage.value = submitResult.error.message || legacyT('请检查支付信息')
       return
     }
 
@@ -300,7 +305,7 @@ async function submitPayment() {
     })
 
     if (error) {
-      errorMessage.value = error.message || '支付失败'
+      errorMessage.value = error.message || legacyT('支付失败')
       return
     }
 
@@ -315,8 +320,8 @@ async function submitPayment() {
     }
 
     errorMessage.value = paymentIntent?.status
-      ? `当前支付状态: ${paymentIntent.status}`
-      : '支付已提交，请稍后刷新订单状态'
+      ? `${legacyT('当前支付状态')}: ${paymentIntent.status}`
+      : legacyT('支付已提交，请稍后刷新订单状态')
   } catch (error) {
     errorMessage.value = formatStripeError(error)
   } finally {
@@ -370,18 +375,19 @@ function formatStripeError(error: unknown): string {
       return message.trim()
     }
   }
-  return 'Stripe 支付处理失败'
+  return legacyT('Stripe 支付处理失败')
 }
 
 function paymentMethodTypeLabel(method: string): string {
   const labels: Record<string, string> = {
-    card: '银行卡/信用卡',
-    alipay: '支付宝',
-    wechat_pay: '微信支付',
+    card: legacyT('银行卡/信用卡'),
+    alipay: legacyT('支付宝'),
+    wechat_pay: legacyT('微信支付'),
     link: 'Link',
-    us_bank_account: '美国银行账户',
+    us_bank_account: legacyT('美国银行账户'),
   }
-  return labels[method] || paymentMethodLabel(method) || method
+  const fallback = paymentMethodLabel(method)
+  return labels[method] || (fallback ? legacyT(fallback) : method)
 }
 
 function buildReturnUrl(): string {

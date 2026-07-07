@@ -20,6 +20,7 @@ const props = withDefaults(defineProps<{
   filterTitle?: string
   filterContentClass?: string
 }>(), {
+  class: undefined,
   columnKey: undefined,
   sortable: true,
   activeKey: null,

@@ -1,4 +1,3 @@
-/* eslint-disable vue/one-component-per-file, vue/require-default-prop */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import OAuthAccountDialog from '@/features/providers/components/OAuthAccountDialog.vue'

@@ -38,6 +38,17 @@ pub enum AiStreamExecutionStep {
     RemoteDecision,
 }
 
+pub const DEFAULT_STREAM_EXECUTION_STEPS: &[AiStreamExecutionStep] = &[
+    AiStreamExecutionStep::LocalVideoContent,
+    AiStreamExecutionStep::LocalImage,
+    AiStreamExecutionStep::LocalOpenAiChat,
+    AiStreamExecutionStep::LocalOpenAiResponses,
+    AiStreamExecutionStep::LocalStandardFamily,
+    AiStreamExecutionStep::LocalSameFormatProvider,
+    AiStreamExecutionStep::LocalGeminiFiles,
+    AiStreamExecutionStep::RemoteDecision,
+];
+
 #[async_trait]
 pub trait AiSyncExecutionPathPort: Send + Sync {
     type Response: Send;
@@ -64,6 +75,10 @@ pub trait AiStreamExecutionPathPort: Send + Sync {
     type Error: Send;
 
     fn scheduler_decision_supported(&self) -> bool;
+
+    fn stream_execution_steps(&self) -> &'static [AiStreamExecutionStep] {
+        DEFAULT_STREAM_EXECUTION_STEPS
+    }
 
     async fn execute_stream_step(
         &self,
@@ -135,29 +150,13 @@ where
 {
     let mut exhausted = None;
 
-    if let Some(response) = absorb_stream_step(
-        port,
-        AiStreamExecutionStep::LocalVideoContent,
-        &mut exhausted,
-    )
-    .await?
-    {
-        return Ok(response);
-    }
-
-    if port.scheduler_decision_supported() {
-        for step in [
-            AiStreamExecutionStep::LocalImage,
-            AiStreamExecutionStep::LocalOpenAiChat,
-            AiStreamExecutionStep::LocalOpenAiResponses,
-            AiStreamExecutionStep::LocalStandardFamily,
-            AiStreamExecutionStep::LocalSameFormatProvider,
-            AiStreamExecutionStep::LocalGeminiFiles,
-            AiStreamExecutionStep::RemoteDecision,
-        ] {
-            if let Some(response) = absorb_stream_step(port, step, &mut exhausted).await? {
-                return Ok(response);
-            }
+    for step in port.stream_execution_steps() {
+        if *step != AiStreamExecutionStep::LocalVideoContent && !port.scheduler_decision_supported()
+        {
+            continue;
+        }
+        if let Some(response) = absorb_stream_step(port, *step, &mut exhausted).await? {
+            return Ok(response);
         }
     }
 
@@ -279,6 +278,7 @@ mod tests {
     #[derive(Default)]
     struct TestStreamPort {
         scheduler_supported: bool,
+        stream_steps: Option<&'static [AiStreamExecutionStep]>,
         outcomes: Mutex<VecDeque<AiServingExecutionOutcome<&'static str, &'static str>>>,
         calls: Mutex<Vec<String>>,
     }
@@ -291,6 +291,11 @@ mod tests {
 
         fn scheduler_decision_supported(&self) -> bool {
             self.scheduler_supported
+        }
+
+        fn stream_execution_steps(&self) -> &'static [AiStreamExecutionStep] {
+            self.stream_steps
+                .unwrap_or(super::DEFAULT_STREAM_EXECUTION_STEPS)
         }
 
         async fn execute_stream_step(
@@ -405,6 +410,7 @@ mod tests {
     async fn stream_path_stops_at_first_response() {
         let port = TestStreamPort {
             scheduler_supported: true,
+            stream_steps: None,
             outcomes: Mutex::new(VecDeque::from([
                 AiServingExecutionOutcome::NoPath,
                 AiServingExecutionOutcome::Responded("image_response"),
@@ -425,9 +431,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_path_runs_preferred_steps_only() {
+        const CHAT_ONLY: &[AiStreamExecutionStep] = &[AiStreamExecutionStep::LocalOpenAiChat];
+        let port = TestStreamPort {
+            scheduler_supported: true,
+            stream_steps: Some(CHAT_ONLY),
+            outcomes: Mutex::new(VecDeque::from([AiServingExecutionOutcome::Responded(
+                "chat_response",
+            )])),
+            calls: Mutex::default(),
+        };
+
+        let outcome = run_ai_stream_execution_path(&port).await.unwrap();
+
+        assert!(matches!(
+            outcome,
+            AiServingExecutionOutcome::Responded("chat_response")
+        ));
+        assert_eq!(port.calls.lock().unwrap().as_slice(), ["LocalOpenAiChat"]);
+    }
+
+    #[tokio::test]
     async fn stream_path_returns_last_exhaustion_without_plan_fallback() {
         let port = TestStreamPort {
             scheduler_supported: true,
+            stream_steps: None,
             outcomes: Mutex::new(VecDeque::from([
                 AiServingExecutionOutcome::NoPath,
                 AiServingExecutionOutcome::Exhausted("local_image_exhausted"),

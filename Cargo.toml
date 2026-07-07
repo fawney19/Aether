@@ -30,6 +30,9 @@ members = [
     "crates/aether-runtime",
     "crates/aether-testkit",
 ]
+default-members = [
+    "apps/aether-gateway",
+]
 resolver = "2"
 
 [workspace.package]

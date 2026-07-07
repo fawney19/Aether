@@ -151,33 +151,86 @@ ON DUPLICATE KEY UPDATE
   has_format_conversion = VALUES(has_format_conversion),
   is_stream = VALUES(is_stream),
   upstream_is_stream = VALUES(upstream_is_stream),
-  input_tokens = VALUES(input_tokens),
-  output_tokens = VALUES(output_tokens),
-  total_tokens = VALUES(total_tokens),
-  cache_creation_input_tokens = VALUES(cache_creation_input_tokens),
-  cache_creation_ephemeral_5m_input_tokens = VALUES(cache_creation_ephemeral_5m_input_tokens),
-  cache_creation_ephemeral_1h_input_tokens = VALUES(cache_creation_ephemeral_1h_input_tokens),
-  cache_read_input_tokens = VALUES(cache_read_input_tokens),
-  cache_creation_cost_usd = VALUES(cache_creation_cost_usd),
-  cache_read_cost_usd = VALUES(cache_read_cost_usd),
-  output_price_per_1m = VALUES(output_price_per_1m),
-  total_cost_usd = VALUES(total_cost_usd),
-  actual_total_cost_usd = VALUES(actual_total_cost_usd),
-  status_code = VALUES(status_code),
-  error_message = VALUES(error_message),
-  error_category = VALUES(error_category),
+  input_tokens = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN input_tokens
+    ELSE VALUES(input_tokens)
+  END,
+  output_tokens = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN output_tokens
+    ELSE VALUES(output_tokens)
+  END,
+  total_tokens = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN total_tokens
+    ELSE VALUES(total_tokens)
+  END,
+  cache_creation_input_tokens = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN cache_creation_input_tokens
+    ELSE VALUES(cache_creation_input_tokens)
+  END,
+  cache_creation_ephemeral_5m_input_tokens = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN cache_creation_ephemeral_5m_input_tokens
+    ELSE VALUES(cache_creation_ephemeral_5m_input_tokens)
+  END,
+  cache_creation_ephemeral_1h_input_tokens = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN cache_creation_ephemeral_1h_input_tokens
+    ELSE VALUES(cache_creation_ephemeral_1h_input_tokens)
+  END,
+  cache_read_input_tokens = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN cache_read_input_tokens
+    ELSE VALUES(cache_read_input_tokens)
+  END,
+  cache_creation_cost_usd = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN cache_creation_cost_usd
+    ELSE VALUES(cache_creation_cost_usd)
+  END,
+  cache_read_cost_usd = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN cache_read_cost_usd
+    ELSE VALUES(cache_read_cost_usd)
+  END,
+  output_price_per_1m = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN output_price_per_1m
+    ELSE VALUES(output_price_per_1m)
+  END,
+  total_cost_usd = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN total_cost_usd
+    ELSE VALUES(total_cost_usd)
+  END,
+  actual_total_cost_usd = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN actual_total_cost_usd
+    ELSE VALUES(actual_total_cost_usd)
+  END,
+  status_code = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN status_code
+    WHEN status = 'streaming' AND VALUES(status) = 'pending' THEN status_code
+    WHEN status = 'streaming' AND VALUES(status) = 'streaming' AND VALUES(status_code) IS NULL THEN status_code
+    ELSE VALUES(status_code)
+  END,
+  error_message = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN error_message
+    WHEN status = 'streaming' AND VALUES(status) = 'pending' THEN error_message
+    ELSE VALUES(error_message)
+  END,
+  error_category = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN error_category
+    WHEN status = 'streaming' AND VALUES(status) = 'pending' THEN error_category
+    ELSE VALUES(error_category)
+  END,
   response_time_ms = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN response_time_ms
     WHEN VALUES(response_time_ms) IS NULL OR VALUES(response_time_ms) = 0
     THEN COALESCE(response_time_ms, VALUES(response_time_ms))
     ELSE VALUES(response_time_ms)
   END,
   first_byte_time_ms = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN first_byte_time_ms
     WHEN VALUES(first_byte_time_ms) IS NULL OR VALUES(first_byte_time_ms) = 0
     THEN COALESCE(first_byte_time_ms, VALUES(first_byte_time_ms))
     ELSE VALUES(first_byte_time_ms)
   END,
-  status = VALUES(status),
-  billing_status = VALUES(billing_status),
+  billing_status = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN billing_status
+    ELSE VALUES(billing_status)
+  END,
   request_metadata = VALUES(request_metadata),
   candidate_id = VALUES(candidate_id),
   candidate_index = VALUES(candidate_index),
@@ -187,8 +240,19 @@ ON DUPLICATE KEY UPDATE
   route_kind = VALUES(route_kind),
   execution_path = VALUES(execution_path),
   local_execution_runtime_miss_reason = VALUES(local_execution_runtime_miss_reason),
-  finalized_at = VALUES(finalized_at),
-  updated_at_unix_secs = VALUES(updated_at_unix_secs)
+  finalized_at = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN finalized_at
+    ELSE VALUES(finalized_at)
+  END,
+  updated_at_unix_secs = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN updated_at_unix_secs
+    ELSE VALUES(updated_at_unix_secs)
+  END,
+  status = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN status
+    WHEN status = 'streaming' AND VALUES(status) = 'pending' THEN status
+    ELSE VALUES(status)
+  END
 "#;
 
 const SELECT_STALE_PENDING_USAGE_BATCH_SQL: &str = r#"
@@ -1548,6 +1612,23 @@ mod tests {
             source.contains("CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS total_requests")
         );
         assert!(source.contains("CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS requests"));
+    }
+
+    #[test]
+    fn mysql_usage_upsert_keeps_terminal_state_when_streaming_arrives_late() {
+        assert!(super::UPSERT_USAGE_SQL.contains(
+            "status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming')"
+        ));
+        assert!(super::UPSERT_USAGE_SQL.contains("input_tokens = CASE"));
+        assert!(super::UPSERT_USAGE_SQL.contains("status_code = CASE"));
+        assert!(super::UPSERT_USAGE_SQL.contains("billing_status = CASE"));
+        assert!(super::UPSERT_USAGE_SQL.contains("finalized_at = CASE"));
+        assert!(super::UPSERT_USAGE_SQL.contains("updated_at_unix_secs = CASE"));
+        assert!(super::UPSERT_USAGE_SQL
+            .contains("WHEN status = 'streaming' AND VALUES(status) = 'pending' THEN status"));
+        assert!(super::UPSERT_USAGE_SQL.contains(
+            "WHEN status = 'streaming' AND VALUES(status) = 'streaming' AND VALUES(status_code) IS NULL THEN status_code"
+        ));
     }
 
     #[tokio::test]

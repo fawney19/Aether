@@ -77,6 +77,7 @@ pub(crate) async fn resolve_provider_chat_pii_redaction<'a>(
     };
     let request_cache_key = request_redaction_cache_key(format, body_json);
     if let Some(cached) = slot.cached_request_redaction(&request_cache_key) {
+        crate::stage_metrics::record_chat_pii_redaction_request_cache_hit();
         observe_gateway_stage_ms("chat_pii_redaction_request_cache_hit", 0);
         return Ok(provider_redaction_from_cached(
             slot,
@@ -85,6 +86,7 @@ pub(crate) async fn resolve_provider_chat_pii_redaction<'a>(
             cached,
         ));
     }
+    crate::stage_metrics::record_chat_pii_redaction_request_cache_miss();
 
     let runtime_config_started_at = Instant::now();
     let runtime_config = read_chat_pii_redaction_runtime_config(state)

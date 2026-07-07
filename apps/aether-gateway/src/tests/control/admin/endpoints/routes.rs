@@ -668,6 +668,71 @@ async fn gateway_updates_admin_provider_endpoint_locally_with_trusted_admin_prin
 }
 
 #[tokio::test]
+async fn gateway_updates_fixed_provider_endpoint_base_url_as_template_override() {
+    let mut provider = sample_provider("provider-codex", "codex", 10);
+    provider.provider_type = "codex".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-codex-responses",
+            "provider-codex",
+            "openai:responses",
+            "https://chatgpt.com/backend-api/codex",
+        )],
+        vec![],
+    ));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .put(format!(
+            "{gateway_url}/api/admin/endpoints/endpoint-codex-responses"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "base_url": "http://127.0.0.1:18181/v1",
+            "max_retries": 0
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={payload}");
+    assert_eq!(payload["base_url"], "http://127.0.0.1:18181/v1");
+
+    let endpoints = provider_catalog_repository
+        .list_endpoints_by_ids(&["endpoint-codex-responses".to_string()])
+        .await
+        .expect("endpoints should read");
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].base_url, "http://127.0.0.1:18181/v1");
+    assert_eq!(endpoints[0].max_retries, Some(0));
+    assert!(endpoints[0]
+        .config
+        .as_ref()
+        .and_then(|value| value.get("_aether_fixed_provider_template"))
+        .and_then(|value| value.get("overrides"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("base_url"))));
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_deletes_admin_provider_endpoint_locally_with_trusted_admin_principal() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);

@@ -1,8 +1,8 @@
 use super::{
-    any, build_router_with_state, build_state_with_execution_runtime_override, json, start_server,
-    to_bytes, Arc, Body, Bytes, HeaderName, HeaderValue, Infallible, Json, Mutex, Request,
-    Response, Router, StatusCode, EXECUTION_PATH_EXECUTION_RUNTIME_STREAM, EXECUTION_PATH_HEADER,
-    TRACE_ID_HEADER,
+    any, build_router_with_state, build_state_with_execution_runtime_override, json,
+    run_stream_cli_test, start_server, to_bytes, Arc, Body, Bytes, HeaderName, HeaderValue,
+    Infallible, Json, Mutex, Request, Response, Router, StatusCode,
+    EXECUTION_PATH_EXECUTION_RUNTIME_STREAM, EXECUTION_PATH_HEADER, TRACE_ID_HEADER,
 };
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::auth::{
@@ -22,8 +22,16 @@ use aether_data_contracts::repository::provider_catalog::{
 };
 use sha2::{Digest, Sha256};
 
-#[tokio::test]
-async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gate_with_local_stream_decision(
+#[test]
+fn gateway_executes_openai_responses_compact_stream_via_local_decision_gate_with_local_stream_decision(
+) {
+    run_stream_cli_test(
+        "gateway_executes_openai_responses_compact_stream_via_local_decision_gate_with_local_stream_decision",
+        gateway_executes_openai_responses_compact_stream_via_local_decision_gate_with_local_stream_decision_impl,
+    );
+}
+
+async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gate_with_local_stream_decision_impl(
 ) {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeStreamRequest {

@@ -27,6 +27,30 @@ use crate::constants::{
 };
 use crate::data::GatewayDataState;
 
+const PROVIDER_KEYS_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_provider_keys_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(PROVIDER_KEYS_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("provider keys test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 struct SummaryNullingProviderCatalogReadRepository {
     inner: InMemoryProviderCatalogReadRepository,
 }
@@ -879,8 +903,15 @@ async fn provider_key_concurrent_limit_reads_existing_list_response() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_fetches_allowed_models_immediately_when_creating_key_with_auto_fetch() {
+#[test]
+fn gateway_fetches_allowed_models_immediately_when_creating_key_with_auto_fetch() {
+    run_provider_keys_test(
+        "gateway_fetches_allowed_models_immediately_when_creating_key_with_auto_fetch",
+        gateway_fetches_allowed_models_immediately_when_creating_key_with_auto_fetch_impl,
+    );
+}
+
+async fn gateway_fetches_allowed_models_immediately_when_creating_key_with_auto_fetch_impl() {
     let execution_runtime_hits = Arc::new(Mutex::new(0usize));
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
     let execution_runtime = Router::new().route(
@@ -1759,8 +1790,15 @@ async fn provider_key_concurrent_limit_update_presence_semantics() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_clears_allowed_models_when_disabling_auto_fetch_on_provider_key_update() {
+#[test]
+fn gateway_clears_allowed_models_when_disabling_auto_fetch_on_provider_key_update() {
+    run_provider_keys_test(
+        "gateway_clears_allowed_models_when_disabling_auto_fetch_on_provider_key_update",
+        gateway_clears_allowed_models_when_disabling_auto_fetch_on_provider_key_update_impl,
+    );
+}
+
+async fn gateway_clears_allowed_models_when_disabling_auto_fetch_on_provider_key_update_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -1835,8 +1873,15 @@ async fn gateway_clears_allowed_models_when_disabling_auto_fetch_on_provider_key
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_overwrites_allowed_models_immediately_when_enabling_auto_fetch() {
+#[test]
+fn gateway_overwrites_allowed_models_immediately_when_enabling_auto_fetch() {
+    run_provider_keys_test(
+        "gateway_overwrites_allowed_models_immediately_when_enabling_auto_fetch",
+        gateway_overwrites_allowed_models_immediately_when_enabling_auto_fetch_impl,
+    );
+}
+
+async fn gateway_overwrites_allowed_models_immediately_when_enabling_auto_fetch_impl() {
     let execution_runtime_hits = Arc::new(Mutex::new(0usize));
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
     let execution_runtime = Router::new().route(
@@ -1948,8 +1993,16 @@ async fn gateway_overwrites_allowed_models_immediately_when_enabling_auto_fetch(
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_fetches_allowed_models_immediately_when_enabling_auto_fetch_from_empty_state() {
+#[test]
+fn gateway_fetches_allowed_models_immediately_when_enabling_auto_fetch_from_empty_state() {
+    run_provider_keys_test(
+        "gateway_fetches_allowed_models_immediately_when_enabling_auto_fetch_from_empty_state",
+        gateway_fetches_allowed_models_immediately_when_enabling_auto_fetch_from_empty_state_impl,
+    );
+}
+
+async fn gateway_fetches_allowed_models_immediately_when_enabling_auto_fetch_from_empty_state_impl()
+{
     let execution_runtime_hits = Arc::new(Mutex::new(0usize));
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
     let execution_runtime = Router::new().route(
@@ -2054,8 +2107,16 @@ async fn gateway_fetches_allowed_models_immediately_when_enabling_auto_fetch_fro
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_refreshes_allowed_models_when_updating_include_patterns_with_auto_fetch_enabled() {
+#[test]
+fn gateway_refreshes_allowed_models_when_updating_include_patterns_with_auto_fetch_enabled() {
+    run_provider_keys_test(
+        "gateway_refreshes_allowed_models_when_updating_include_patterns_with_auto_fetch_enabled",
+        gateway_refreshes_allowed_models_when_updating_include_patterns_with_auto_fetch_enabled_impl,
+    );
+}
+
+async fn gateway_refreshes_allowed_models_when_updating_include_patterns_with_auto_fetch_enabled_impl(
+) {
     let execution_runtime_hits = Arc::new(Mutex::new(0usize));
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
     let execution_runtime = Router::new().route(
@@ -2158,8 +2219,16 @@ async fn gateway_refreshes_allowed_models_when_updating_include_patterns_with_au
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_refreshes_allowed_models_when_updating_exclude_patterns_with_auto_fetch_enabled() {
+#[test]
+fn gateway_refreshes_allowed_models_when_updating_exclude_patterns_with_auto_fetch_enabled() {
+    run_provider_keys_test(
+        "gateway_refreshes_allowed_models_when_updating_exclude_patterns_with_auto_fetch_enabled",
+        gateway_refreshes_allowed_models_when_updating_exclude_patterns_with_auto_fetch_enabled_impl,
+    );
+}
+
+async fn gateway_refreshes_allowed_models_when_updating_exclude_patterns_with_auto_fetch_enabled_impl(
+) {
     let execution_runtime_hits = Arc::new(Mutex::new(0usize));
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
     let execution_runtime = Router::new().route(

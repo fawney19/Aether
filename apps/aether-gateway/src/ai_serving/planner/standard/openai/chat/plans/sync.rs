@@ -134,6 +134,7 @@ impl LocalOpenAiChatSyncAttemptSource<'_> {
             self.trace_id,
             &self.body_json,
             &self.input,
+            None,
             attempt,
             OPENAI_CHAT_SYNC_PLAN_KIND,
             "openai_chat_sync_success",

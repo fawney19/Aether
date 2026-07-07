@@ -24,7 +24,7 @@ pub(crate) struct GatewayRoutingSelectionInput<'a> {
     pub user_group_ids: &'a [String],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct GatewayRoutingGroupSelection {
     pub group: Option<StoredRoutingGroup>,
     pub source: String,

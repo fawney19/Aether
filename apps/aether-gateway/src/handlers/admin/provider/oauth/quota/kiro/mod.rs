@@ -6,8 +6,8 @@ use self::plan::execute_kiro_quota_plan;
 use super::shared::{
     build_quota_snapshot_payload, extract_execution_error_message,
     oauth_refresh_auto_removed_result, persist_provider_quota_refresh_state,
-    persist_quota_oauth_refresh_failure_state, quota_refresh_success_invalid_state,
-    ProviderQuotaExecutionOutcome,
+    persist_quota_oauth_refresh_failure_state, provider_auto_remove_quota_exhausted_keys,
+    quota_refresh_success_invalid_state, ProviderQuotaExecutionOutcome,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminLocalOAuthRefreshError};
 use crate::GatewayError;
@@ -97,6 +97,8 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
     let mut success_count = 0usize;
     let mut failed_count = 0usize;
     let mut auto_removed_count = 0usize;
+    let auto_remove_quota_exhausted_keys =
+        provider_auto_remove_quota_exhausted_keys(provider.config.as_ref());
 
     for key in keys {
         let transport = match state
@@ -304,6 +306,23 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
             continue;
         }
 
+        let auto_removed_quota_exhausted = if auto_remove_quota_exhausted_keys {
+            state
+                .cleanup_provider_catalog_key_if_current(provider, &key.id, |latest_key| {
+                    aether_admin::provider::pool::admin_pool_key_account_quota_exhausted(
+                        latest_key,
+                        provider.provider_type.as_str(),
+                    )
+                })
+                .await?
+        } else {
+            false
+        };
+        if auto_removed_quota_exhausted {
+            auto_removed_count += 1;
+            status = "quota_exhausted".to_string();
+        }
+
         if status == "success" {
             success_count += 1;
         } else {
@@ -330,6 +349,10 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
             metadata_update.as_ref(),
         ) {
             payload.insert("quota_snapshot".to_string(), quota_snapshot);
+        }
+        if auto_removed_quota_exhausted {
+            payload.insert("auto_removed".to_string(), json!(true));
+            payload.insert("auto_removed_quota_exhausted".to_string(), json!(true));
         }
         results.push(serde_json::Value::Object(payload));
     }

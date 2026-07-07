@@ -87,7 +87,10 @@ impl AppState {
                 ),
                 created_at_unix_ms: chrono::Utc::now().timestamp().max(0) as u64,
             };
-            return Ok(Some((wallet.clone(), transaction)));
+            let updated_wallet = wallet.clone();
+            drop(guard);
+            self.invalidate_auth_context_cache();
+            return Ok(Some((updated_wallet, transaction)));
         }
 
         Ok(self
@@ -153,7 +156,10 @@ impl AppState {
                 credited_at_unix_secs: Some(created_at),
                 expires_at_unix_secs: None,
             };
-            return Ok(Some((wallet.clone(), order)));
+            let updated_wallet = wallet.clone();
+            drop(guard);
+            self.invalidate_auth_context_cache();
+            return Ok(Some((updated_wallet, order)));
         }
 
         let now = chrono::Utc::now();

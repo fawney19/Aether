@@ -1,6 +1,5 @@
 import { computed, type Ref } from 'vue'
-import { Apple, Box, Layers, Monitor, Puzzle, Terminal, Users } from 'lucide-vue-next'
-import type { Component } from 'vue'
+import { Layers, Puzzle, Users } from 'lucide-vue-next'
 
 // Section index constants
 export const SECTIONS = {
@@ -15,31 +14,31 @@ export type SectionIndex = (typeof SECTIONS)[keyof typeof SECTIONS]
 
 // Section navigation configuration
 export const sections = [
-  { name: '首页' },
-  { name: 'Claude' },
-  { name: 'OpenAI' },
-  { name: 'Gemini' },
-  { name: '更多' }
+  { nameKey: 'site.home.section.home' },
+  { nameKey: 'site.home.section.claude' },
+  { nameKey: 'site.home.section.codex' },
+  { nameKey: 'site.home.section.gemini' },
+  { nameKey: 'site.home.section.more' }
 ] as const
 
 // Feature cards data
 export const featureCards = [
   {
     icon: Layers,
-    title: 'Claude / OpenAI / Gemini',
-    desc: '已完整接入三大主流 AI 编程助手的标准 API',
+    titleKey: 'site.home.feature.cards.multi',
+    descKey: 'site.home.feature.cards.multiDesc',
     status: 'completed' as const
   },
   {
     icon: Puzzle,
-    title: '格式转换',
-    desc: '开启/关闭API格式相互转换、自定义请求头',
+    titleKey: 'site.home.feature.cards.format',
+    descKey: 'site.home.feature.cards.formatDesc',
     status: 'completed' as const
   },
   {
     icon: Users,
-    title: '协同开发',
-    desc: '远程开发、Skill分享、Playground等功能即将到来',
+    titleKey: 'site.home.feature.cards.collaboration',
+    descKey: 'site.home.feature.cards.collaborationDesc',
     status: 'in-progress' as const
   }
 ]
@@ -107,48 +106,6 @@ export const panelClasses = {
     'transition hover:bg-[#f0f0eb] dark:hover:bg-[#3a3731]'
   ].join(' ')
 } as const
-
-// Platform option type
-export interface PlatformOption {
-  value: string
-  label: string
-  hint: string
-  icon: Component
-  command: string
-}
-
-// Platform presets configuration
-export const platformPresets = {
-  claude: {
-    options: [
-      { value: 'mac', label: 'Mac / Linux', hint: 'Terminal', icon: Terminal, command: 'curl -fsSL https://claude.ai/install.sh | bash' },
-      { value: 'windows', label: 'Windows', hint: 'PowerShell', icon: Monitor, command: 'irm https://claude.ai/install.ps1 | iex' },
-      { value: 'nodejs', label: 'Node.js', hint: 'npm', icon: Box, command: 'npm install -g @anthropic-ai/claude-code' },
-      { value: 'homebrew', label: 'Mac', hint: 'Homebrew', icon: Apple, command: 'brew install --cask claude-code' }
-    ] as PlatformOption[],
-    defaultValue: 'mac'
-  },
-  codex: {
-    options: [
-      { value: 'nodejs', label: 'Node.js', hint: 'npm', icon: Box, command: 'npm install -g @openai/codex' },
-      { value: 'homebrew', label: 'Mac', hint: 'Homebrew', icon: Apple, command: 'brew install --cask codex' }
-    ] as PlatformOption[],
-    defaultValue: 'nodejs'
-  },
-  gemini: {
-    options: [
-      { value: 'nodejs', label: 'Node.js', hint: 'npm', icon: Box, command: 'npm install -g @google/gemini-cli' },
-      { value: 'homebrew', label: 'Mac', hint: 'Homebrew', icon: Apple, command: 'brew install gemini-cli' }
-    ] as PlatformOption[],
-    defaultValue: 'nodejs'
-  }
-} as const
-
-// Helper to get command by platform value
-export function getInstallCommand(preset: keyof typeof platformPresets, value: string): string {
-  const config = platformPresets[preset]
-  return config.options.find((opt) => opt.value === value)?.command ?? ''
-}
 
 // Logo type mapping
 export function getLogoType(section: number): 'claude' | 'openai' | 'gemini' | 'aether' {

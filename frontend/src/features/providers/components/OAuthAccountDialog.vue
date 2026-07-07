@@ -1,7 +1,7 @@
 <template>
   <Dialog
     :model-value="isOpen"
-    title="添加账号"
+    :title="legacyT('添加账号')"
     :icon="UserPlus"
     size="md"
     @update:model-value="handleDialogUpdate"
@@ -18,7 +18,7 @@
             :class="selectedProxyNodeId
               ? 'text-blue-500 bg-blue-500/10 hover:bg-blue-500/20'
               : 'text-muted-foreground hover:text-foreground hover:bg-muted'"
-            :title="selectedProxyNodeId ? `代理: ${getSelectedNodeLabel()}` : '设置代理节点'"
+            :title="selectedProxyNodeId ? `${legacyT('代理')}: ${getSelectedNodeLabel()}` : legacyT('设置代理节点')"
           >
             <Globe class="w-4 h-4" />
           </button>
@@ -31,18 +31,18 @@
           <div class="space-y-2">
             <div class="flex items-center justify-between">
               <div class="flex items-center gap-1.5">
-                <span class="text-xs font-medium">代理节点</span>
+                <span class="text-xs font-medium">{{ legacyT('代理节点') }}</span>
                 <span
                   v-if="!proxyNodesStore.loading && proxyNodesStore.onlineNodes.length === 0"
                   class="text-[10px] text-muted-foreground"
-                >· 前往「模块管理 · 代理节点」添加</span>
+                >· {{ legacyT('前往「模块管理 · 代理节点」添加') }}</span>
               </div>
               <button
                 v-if="selectedProxyNodeId"
                 class="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
                 @click="selectedProxyNodeId = ''; proxyPopoverOpen = false"
               >
-                清除
+                {{ legacyT('清除') }}
               </button>
             </div>
             <ProxyNodeSelect
@@ -51,7 +51,7 @@
               @update:model-value="(v: string) => { selectedProxyNodeId = v; proxyPopoverOpen = false }"
             />
             <p class="text-[10px] text-muted-foreground">
-              {{ selectedProxyNodeId ? `${providerCredentialActionLabel}、刷新、额度查询均走此代理` : '未设置，依次回退到提供商代理 → 系统代理' }}
+              {{ selectedProxyNodeId ? proxyUsageDescription : legacyT('未设置，依次回退到提供商代理 → 系统代理') }}
             </p>
           </div>
         </PopoverContent>
@@ -73,7 +73,7 @@
           ]"
           @click="switchMode('oauth')"
         >
-          {{ isDeviceBrowserProvider ? (isWindsurfProvider ? '浏览器登录' : '设备授权') : '获取授权' }}
+          {{ authorizationModeLabel }}
         </button>
         <button
           class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-all"
@@ -110,7 +110,7 @@
                     : 'border-border text-muted-foreground hover:text-foreground hover:border-foreground/20'"
                   @click="selectWindsurfLoginOption(opt.key)"
                 >
-                  {{ opt.label }}
+                  {{ legacyT(opt.label) }}
                 </button>
               </div>
 
@@ -124,10 +124,10 @@
                   </div>
                   <div class="space-y-1">
                     <p class="text-sm font-medium text-destructive">
-                      {{ device.status === 'expired' ? '授权已过期' : '授权失败' }}
+                      {{ legacyT(device.status === 'expired' ? '授权已过期' : '授权失败') }}
                     </p>
                     <p class="text-xs text-muted-foreground">
-                      {{ device.error || '请重试' }}
+                      {{ legacyT(device.error || '请重试') }}
                     </p>
                   </div>
                   <Button
@@ -135,7 +135,7 @@
                     variant="outline"
                     @click="resetDevice"
                   >
-                    重新开始
+                    {{ legacyT('重新开始') }}
                   </Button>
                 </div>
               </div>
@@ -147,7 +147,7 @@
                 <div class="text-center">
                   <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-primary mx-auto mb-3" />
                   <p class="text-xs text-muted-foreground">
-                    正在准备登录...
+                    {{ legacyT('正在准备登录...') }}
                   </p>
                 </div>
               </div>
@@ -159,7 +159,7 @@
                 <div class="space-y-2">
                   <div class="flex items-center gap-2">
                     <span class="flex items-center justify-center w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-semibold shrink-0">1</span>
-                    <span class="text-xs font-medium">前往登录</span>
+                    <span class="text-xs font-medium">{{ legacyT('前往登录') }}</span>
                   </div>
                   <div class="flex gap-2 pl-6">
                     <Button
@@ -168,7 +168,7 @@
                       @click="openDeviceVerificationUrl"
                     >
                       <ExternalLink class="w-3 h-3 mr-1" />
-                      打开
+                      {{ legacyT('打开') }}
                     </Button>
                     <Button
                       size="sm"
@@ -177,7 +177,7 @@
                       @click="copyToClipboard(device.verification_uri_complete)"
                     >
                       <Copy class="w-3 h-3 mr-1" />
-                      复制
+                      {{ legacyT('复制') }}
                     </Button>
                     <Button
                       v-if="!device.session_id"
@@ -186,7 +186,7 @@
                       :disabled="device.starting"
                       @click="startDeviceAuth"
                     >
-                      开始
+                      {{ legacyT('开始') }}
                     </Button>
                   </div>
                 </div>
@@ -194,7 +194,7 @@
                 <div class="space-y-2">
                   <div class="flex items-center gap-2">
                     <span class="flex items-center justify-center w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-semibold shrink-0">2</span>
-                    <span class="text-xs font-medium">粘贴回调 URL 或 token</span>
+                    <span class="text-xs font-medium">{{ legacyT('粘贴回调 URL 或 token') }}</span>
                   </div>
                   <div class="pl-6">
                     <Textarea
@@ -210,7 +210,7 @@
                     class="pl-6 flex items-center gap-1.5 text-[11px] text-muted-foreground"
                   >
                     <div class="animate-spin rounded-full h-3 w-3 border-[1.5px] border-primary/30 border-t-primary" />
-                    <span>会话剩余 {{ deviceCountdownFormatted }}</span>
+                    <span>{{ sessionRemainingText }}</span>
                   </div>
                 </div>
               </div>
@@ -253,10 +253,10 @@
                     </div>
                     <div class="space-y-1">
                       <p class="text-sm font-medium text-destructive">
-                        {{ device.status === 'expired' ? '授权已过期' : '授权失败' }}
+                        {{ legacyT(device.status === 'expired' ? '授权已过期' : '授权失败') }}
                       </p>
                       <p class="text-xs text-muted-foreground">
-                        {{ device.error || '请重试' }}
+                        {{ legacyT(device.error || '请重试') }}
                       </p>
                     </div>
                     <Button
@@ -264,7 +264,7 @@
                       variant="outline"
                       @click="resetDevice"
                     >
-                      重新开始
+                      {{ legacyT('重新开始') }}
                     </Button>
                   </div>
                 </div>
@@ -277,7 +277,7 @@
                   <div class="text-center">
                     <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-primary mx-auto mb-3" />
                     <p class="text-xs text-muted-foreground">
-                      正在注册设备...
+                      {{ legacyT('正在注册设备...') }}
                     </p>
                   </div>
                 </div>
@@ -290,7 +290,7 @@
                   <div class="space-y-2 shrink-0">
                     <div class="flex items-center gap-2">
                       <span class="flex items-center justify-center w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-semibold shrink-0">1</span>
-                      <span class="text-xs font-medium">前往授权</span>
+                      <span class="text-xs font-medium">{{ legacyT('前往授权') }}</span>
                     </div>
                     <div class="flex gap-2 pl-6">
                       <Button
@@ -299,7 +299,7 @@
                         @click="openDeviceVerificationUrl"
                       >
                         <ExternalLink class="w-3 h-3 mr-1" />
-                        打开
+                        {{ legacyT('打开') }}
                       </Button>
                       <Button
                         size="sm"
@@ -308,7 +308,7 @@
                         @click="copyToClipboard(device.verification_uri_complete)"
                       >
                         <Copy class="w-3 h-3 mr-1" />
-                        复制
+                        {{ legacyT('复制') }}
                       </Button>
                     </div>
                   </div>
@@ -316,7 +316,7 @@
                   <div class="flex min-h-0 flex-1 flex-col gap-2">
                     <div class="flex items-center gap-2">
                       <span class="flex items-center justify-center w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-semibold shrink-0">2</span>
-                      <span class="text-xs font-medium">粘贴回调 URL</span>
+                      <span class="text-xs font-medium">{{ legacyT('粘贴回调 URL') }}</span>
                     </div>
                     <div class="min-h-0 flex-1 pl-6">
                       <Textarea
@@ -345,16 +345,16 @@
 
                     <div class="space-y-1">
                       <p class="text-sm font-medium">
-                        在浏览器中完成授权
+                        {{ legacyT('在浏览器中完成授权') }}
                       </p>
                       <p class="text-xs text-muted-foreground">
-                        授权完成后此页面将自动更新
+                        {{ legacyT('授权完成后此页面将自动更新') }}
                       </p>
                     </div>
 
                     <div class="flex items-center gap-1.5 text-xs text-muted-foreground">
                       <div class="animate-spin rounded-full h-3 w-3 border-[1.5px] border-primary/30 border-t-primary" />
-                      <span>剩余 {{ deviceCountdownFormatted }}</span>
+                      <span>{{ remainingText }}</span>
                     </div>
 
                     <div
@@ -364,7 +364,7 @@
                       <div class="flex items-center justify-between">
                         <div class="flex items-center gap-2">
                           <ShieldCheck class="w-3.5 h-3.5 text-primary" />
-                          <span class="text-[10px] text-muted-foreground">MFA 验证码</span>
+                          <span class="text-[10px] text-muted-foreground">{{ legacyT('MFA 验证码') }}</span>
                         </div>
                         <div class="flex items-center gap-1.5">
                           <span
@@ -372,7 +372,7 @@
                           >{{ totp.code.value }}</span>
                           <button
                             class="p-1 rounded hover:bg-muted transition-colors"
-                            title="复制验证码"
+                            :title="legacyT('复制验证码')"
                             @click="copyToClipboard(totp.code.value)"
                           >
                             <Copy class="w-3 h-3 text-muted-foreground" />
@@ -401,7 +401,7 @@
                         @click="openDeviceVerificationUrl"
                       >
                         <ExternalLink class="w-3.5 h-3.5 mr-1.5" />
-                        打开授权页面
+                        {{ legacyT('打开授权页面') }}
                       </Button>
                       <Button
                         size="sm"
@@ -423,14 +423,14 @@
                     v-if="isSocialDeviceAuth"
                     class="text-xs text-muted-foreground text-center"
                   >
-                    授权后复制浏览器地址栏的 localhost 回调 URL。
+                    {{ legacyT('授权后复制浏览器地址栏的 localhost 回调 URL。') }}
                   </p>
 
                   <p
                     v-else-if="device.auth_type === 'builder_id'"
                     class="text-xs text-muted-foreground text-center"
                   >
-                    使用个人 AWS Builder ID 进行设备授权，无需额外配置。
+                    {{ legacyT('使用个人 AWS Builder ID 进行设备授权，无需额外配置。') }}
                   </p>
 
                   <div
@@ -458,7 +458,7 @@
                         <ComboboxAnchor class="relative w-full">
                           <ComboboxInput
                             :display-value="() => device.region"
-                            placeholder="输入或选择 Region"
+                            :placeholder="legacyT('输入或选择 Region')"
                             class="w-full h-8 px-2 pr-7 text-xs rounded-md border border-border bg-background font-mono focus:outline-none focus:ring-1 focus:ring-ring focus:relative focus:z-10"
                             spellcheck="false"
                             @input="(e: Event) => regionSearch = (e.target as HTMLInputElement).value"
@@ -474,7 +474,7 @@
                         >
                           <ComboboxViewport>
                             <ComboboxEmpty class="px-2 py-1.5 text-xs text-muted-foreground">
-                              {{ awsRegionsLoaded ? '无匹配结果，回车使用自定义值' : '加载中...' }}
+                              {{ awsRegionsLoaded ? legacyT('无匹配结果，回车使用自定义值') : legacyT('加载中...') }}
                             </ComboboxEmpty>
                             <ComboboxItem
                               v-for="r in filteredRegions"
@@ -493,7 +493,7 @@
                       </ComboboxRoot>
                     </div>
                     <div class="space-y-1.5">
-                      <label class="text-xs font-medium text-muted-foreground">TOTP Secret (可选, 2FA认证)</label>
+                      <label class="text-xs font-medium text-muted-foreground">{{ legacyT('TOTP Secret (可选, 2FA认证)') }}</label>
                       <input
                         v-model="device.totp_secret"
                         type="text"
@@ -509,7 +509,7 @@
                     :disabled="device.starting || (device.auth_type === 'identity_center' && !device.start_url.trim())"
                     @click="startDeviceAuth"
                   >
-                    {{ device.starting ? '正在准备授权...' : '开始授权' }}
+                    {{ device.starting ? legacyT('正在准备授权...') : legacyT('开始授权') }}
                   </Button>
                 </div>
               </div>
@@ -525,7 +525,7 @@
               <div class="text-center">
                 <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-primary mx-auto mb-3" />
                 <p class="text-xs text-muted-foreground">
-                  正在准备授权...
+                  {{ legacyT('正在准备授权...') }}
                 </p>
               </div>
             </div>
@@ -534,7 +534,7 @@
               <div class="space-y-2">
                 <div class="flex items-center gap-2">
                   <span class="flex items-center justify-center w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-semibold shrink-0">1</span>
-                  <span class="text-xs font-medium">前往授权</span>
+                  <span class="text-xs font-medium">{{ legacyT('前往授权') }}</span>
                 </div>
                 <div class="flex gap-2 pl-6">
                   <Button
@@ -543,7 +543,7 @@
                     @click="openAuthorizationUrl"
                   >
                     <ExternalLink class="w-3 h-3 mr-1" />
-                    打开
+                    {{ legacyT('打开') }}
                   </Button>
                   <Button
                     size="sm"
@@ -552,7 +552,7 @@
                     @click="copyToClipboard(oauth.authorization_url)"
                   >
                     <Copy class="w-3 h-3 mr-1" />
-                    复制
+                    {{ legacyT('复制') }}
                   </Button>
                 </div>
               </div>
@@ -560,7 +560,7 @@
               <div class="space-y-2">
                 <div class="flex items-center gap-2">
                   <span class="flex items-center justify-center w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-semibold shrink-0">2</span>
-                  <span class="text-xs font-medium">粘贴回调 URL</span>
+                  <span class="text-xs font-medium">{{ legacyT('粘贴回调 URL') }}</span>
                 </div>
                 <div class="pl-6">
                   <Textarea
@@ -598,7 +598,7 @@
               :disabled="importing"
               @click="setWindsurfImportMethod(method.key)"
             >
-              {{ method.label }}
+              {{ legacyT(method.label) }}
             </button>
           </div>
 
@@ -607,7 +607,7 @@
             class="space-y-3"
           >
             <div class="space-y-1.5">
-              <label class="text-xs font-medium">邮箱</label>
+              <label class="text-xs font-medium">{{ legacyT('邮箱') }}</label>
               <input
                 v-model="windsurfEmail"
                 type="email"
@@ -619,24 +619,24 @@
               >
             </div>
             <div class="space-y-1.5">
-              <label class="text-xs font-medium">密码</label>
+              <label class="text-xs font-medium">{{ legacyT('密码') }}</label>
               <input
                 v-model="windsurfPassword"
                 type="password"
                 autocomplete="current-password"
                 :disabled="importing"
-                placeholder="Windsurf 密码"
+                :placeholder="legacyT('Windsurf 密码')"
                 class="w-full h-9 px-2.5 text-xs rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring focus:relative focus:z-10"
               >
             </div>
             <div class="space-y-1.5">
-              <label class="text-xs font-medium text-muted-foreground">名称（可选）</label>
+              <label class="text-xs font-medium text-muted-foreground">{{ legacyT('名称（可选）') }}</label>
               <input
                 v-model="windsurfAccountName"
                 type="text"
                 autocomplete="off"
                 :disabled="importing"
-                placeholder="未填写时使用邮箱"
+                :placeholder="legacyT('未填写时使用邮箱')"
                 class="w-full h-9 px-2.5 text-xs rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring focus:relative focus:z-10"
                 spellcheck="false"
               >
@@ -677,8 +677,8 @@
               />
             </div>
             <div class="flex items-center justify-between text-[11px] text-muted-foreground">
-              <span>进度 {{ importTask.processed }}/{{ importTask.total }}</span>
-              <span>成功 {{ importTask.success }} · 失败 {{ importTask.failed }}</span>
+              <span>{{ importProgressText(importTask) }}</span>
+              <span>{{ importResultSummaryText(importTask) }}</span>
             </div>
             <p
               v-if="importTaskMessageText"
@@ -691,14 +691,14 @@
               class="space-y-1"
             >
               <p class="text-[11px] text-destructive">
-                最近错误
+                {{ legacyT('最近错误') }}
               </p>
               <p
                 v-for="item in importTask.error_samples.slice(0, 3)"
                 :key="`${item.index}-${item.error || item.status}`"
                 class="text-[11px] text-destructive/90"
               >
-                #{{ item.index + 1 }} {{ item.error || '导入失败' }}
+                {{ importErrorSampleText(item) }}
               </p>
             </div>
           </div>
@@ -711,21 +711,21 @@
         variant="outline"
         @click="handleClose"
       >
-        取消
+        {{ legacyT('取消') }}
       </Button>
       <Button
         v-if="mode === 'oauth' && showAuthorizationMode && !isDeviceBrowserProvider"
         :disabled="!canCompleteOAuth"
         @click="handleCompleteOAuth"
       >
-        {{ oauth.completing ? '验证中...' : '验证' }}
+        {{ oauth.completing ? legacyT('验证中...') : legacyT('验证') }}
       </Button>
       <Button
         v-if="mode === 'oauth' && isManualDeviceCallbackMode"
         :disabled="!canCompleteDeviceAuth"
         @click="completeDeviceAuth"
       >
-        {{ device.completing ? '验证中...' : '验证' }}
+        {{ device.completing ? legacyT('验证中...') : legacyT('验证') }}
       </Button>
       <Button
         v-if="mode === 'import'"
@@ -756,6 +756,7 @@ import { useToast } from '@/composables/useToast'
 import { useClipboard } from '@/composables/useClipboard'
 import { useTotp } from '@/composables/useTotp'
 import { parseApiError } from '@/utils/errorParser'
+import { useI18n } from '@/i18n'
 import {
   startProviderLevelOAuth,
   completeProviderLevelOAuth,
@@ -788,6 +789,7 @@ const emit = defineEmits<{
 
 const { success, error: showError } = useToast()
 const { copyToClipboard } = useClipboard()
+const { legacyT, locale } = useI18n()
 const proxyNodesStore = useProxyNodesStore()
 const totp = useTotp()
 
@@ -832,6 +834,14 @@ function getSelectedNodeLabel(): string {
   if (!selectedProxyNodeId.value) return ''
   const node = proxyNodesStore.nodes.find(n => n.id === selectedProxyNodeId.value)
   return node ? node.name : `${selectedProxyNodeId.value.slice(0, 8)  }...`
+}
+
+function isEnglishLocale(): boolean {
+  return locale.value === 'en-US'
+}
+
+function localizedApiError(error: unknown, fallback: string): string {
+  return legacyT(parseApiError(error, fallback))
 }
 
 // 模式
@@ -959,9 +969,15 @@ const isManualDeviceCallbackPending = computed(() =>
   && device.value.status === 'pending'
 )
 
+const authorizationModeLabel = computed(() => {
+  if (isWindsurfProvider.value) return legacyT('浏览器登录')
+  if (isDeviceBrowserProvider.value) return legacyT('设备授权')
+  return legacyT('获取授权')
+})
+
 const deviceCallbackPlaceholder = computed(() =>
   isWindsurfProvider.value
-    ? `粘贴包含 token=...&state=... 的回调 URL；session token/apiKey 也可直接粘贴，普通 token 请用导入授权`
+    ? legacyT('粘贴包含 token=...&state=... 的回调 URL；session token/apiKey 也可直接粘贴，普通 token 请用导入授权')
     : `http://localhost:49153/oauth/callback?login_option=${device.value.auth_type}&code=...&state=...`
 )
 
@@ -971,6 +987,18 @@ const deviceCountdownFormatted = computed(() => {
   const sec = s % 60
   return `${min}:${String(sec).padStart(2, '0')}`
 })
+
+const sessionRemainingText = computed(() => (
+  isEnglishLocale()
+    ? `Session remaining ${deviceCountdownFormatted.value}`
+    : `会话剩余 ${deviceCountdownFormatted.value}`
+))
+
+const remainingText = computed(() => (
+  isEnglishLocale()
+    ? `${deviceCountdownFormatted.value} remaining`
+    : `剩余 ${deviceCountdownFormatted.value}`
+))
 
 const oauthBusy = computed(() =>
   oauth.value.starting || oauth.value.completing
@@ -997,33 +1025,42 @@ const canImport = computed(() => {
   return importText.value.trim().length > 0 && !importing.value
 })
 
-const importModeLabel = computed(() => (isGrokProvider.value ? '导入账号' : '导入授权'))
-const importButtonLabel = computed(() => (isGrokProvider.value ? '导入账号' : '导入'))
+const importModeLabel = computed(() => legacyT(isGrokProvider.value ? '导入账号' : '导入授权'))
+const importButtonLabel = computed(() => legacyT(isGrokProvider.value ? '导入账号' : '导入'))
 const importDropTitle = computed(() => (
-  isGrokProvider.value ? '拖入 Grok 账号文件或点击选择' : '拖入授权文件或点击选择'
+  legacyT(isGrokProvider.value ? '拖入 Grok 账号文件或点击选择' : '拖入授权文件或点击选择')
 ))
 const importDropHint = computed(() => (
-  isGrokProvider.value ? '支持 .json / .txt，可多选、批量导入' : '支持 .json / .txt，可多选'
+  legacyT(isGrokProvider.value ? '支持 .json / .txt，可多选、批量导入' : '支持 .json / .txt，可多选')
 ))
 const importManualPlaceholder = computed(() => (
   isGrokProvider.value
-    ? '粘贴 Grok sso/session token，支持每行一个；或粘贴包含 token、sso_token、access_token、plan_type、pool_tier 的 JSON'
+    ? legacyT('粘贴 Grok sso/session token，支持每行一个；或粘贴包含 token、sso_token、access_token、plan_type、pool_tier 的 JSON')
     : isWindsurfProvider.value
-      ? '粘贴 show-auth-token Token、API key 或 JSON 内容'
-      : '粘贴 Refresh Token / Access Token 或 JSON 内容'
+      ? legacyT('粘贴 show-auth-token Token、API key 或 JSON 内容')
+      : legacyT('粘贴 Refresh Token / Access Token 或 JSON 内容')
 ))
 const importManualDescription = computed(() => (
   isGrokProvider.value
-    ? 'plan_type / pool_tier 会作为账号套餐与能力特征保存，不是路由池选择。'
+    ? legacyT('plan_type / pool_tier 会作为账号套餐与能力特征保存，不是路由池选择。')
     : ''
 ))
 const importPasteToggleText = computed(() => (
-  isGrokProvider.value ? '或手动粘贴 Grok Token' : '或手动粘贴 Token'
+  legacyT(isGrokProvider.value ? '或手动粘贴 Grok Token' : '或手动粘贴 Token')
 ))
 const importFileToggleText = computed(() => (
-  isGrokProvider.value ? '或选择 Grok Token 文件导入' : '或选择 JSON 文件导入'
+  legacyT(isGrokProvider.value ? '或选择 Grok Token 文件导入' : '或选择 JSON 文件导入')
 ))
-const providerCredentialActionLabel = computed(() => (isGrokProvider.value ? '导入' : '授权'))
+const proxyUsageDescription = computed(() => {
+  if (isEnglishLocale()) {
+    return isGrokProvider.value
+      ? 'Import, refresh, and quota queries use this proxy'
+      : 'Authorization, refresh, and quota queries use this proxy'
+  }
+  return isGrokProvider.value
+    ? '导入、刷新、额度查询均走此代理'
+    : '授权、刷新、额度查询均走此代理'
+})
 const isWindsurfEmailPasswordImport = computed(() =>
   isWindsurfProvider.value && windsurfImportMethod.value === 'email_password'
 )
@@ -1031,18 +1068,34 @@ const isWindsurfEmailPasswordImport = computed(() =>
 const importButtonText = computed(() => {
   if (importing.value) {
     return importTask.value && !isWindsurfEmailPasswordImport.value
-      ? `导入中 ${importTask.value.progress_percent}%`
-      : '导入中...'
+      ? (isEnglishLocale() ? `Importing ${importTask.value.progress_percent}%` : `导入中 ${importTask.value.progress_percent}%`)
+      : legacyT('导入中...')
   }
-  return isWindsurfEmailPasswordImport.value ? '登录并导入' : importButtonLabel.value
+  return isWindsurfEmailPasswordImport.value ? legacyT('登录并导入') : importButtonLabel.value
 })
 
 const importTaskMessageText = computed(() => {
   const message = importTask.value?.message?.trim()
   if (!message) return ''
   // 后端进度 message 已由“进度 x/y”展示，避免在导入中重复显示“处理中 x/y”。
-  return redundantImportTaskMessagePattern.test(message) ? '' : message
+  return redundantImportTaskMessagePattern.test(message) ? '' : legacyT(message)
 })
+
+function importProgressText(task: OAuthBatchImportTaskStatusResponse): string {
+  return isEnglishLocale()
+    ? `Progress ${task.processed}/${task.total}`
+    : `进度 ${task.processed}/${task.total}`
+}
+
+function importResultSummaryText(task: OAuthBatchImportTaskStatusResponse): string {
+  return isEnglishLocale()
+    ? `Success ${task.success} · Failed ${task.failed}`
+    : `成功 ${task.success} · 失败 ${task.failed}`
+}
+
+function importErrorSampleText(item: OAuthBatchImportTaskStatusResponse['error_samples'][number]): string {
+  return `#${item.index + 1} ${legacyT(item.error || '导入失败')}`
+}
 
 function stopImportPolling() {
   if (importPollTimer) {
@@ -1055,15 +1108,15 @@ function stopImportPolling() {
 function getImportTaskStatusText(status: OAuthBatchImportTaskStatus): string {
   switch (status) {
     case 'submitted':
-      return '任务已提交'
+      return legacyT('任务已提交')
     case 'processing':
-      return '正在导入'
+      return legacyT('正在导入')
     case 'completed':
-      return '导入完成'
+      return legacyT('导入完成')
     case 'failed':
-      return '导入失败'
+      return legacyT('导入失败')
     default:
-      return '处理中'
+      return legacyT('处理中')
   }
 }
 
@@ -1073,6 +1126,19 @@ function getOAuthSuccessMessage(
 ): string {
   const email = typeof options?.email === 'string' ? options.email.trim() : ''
   const replaced = options?.replaced === true
+  const actionText = legacyT(action)
+
+  if (isEnglishLocale()) {
+    if (email) {
+      return replaced
+        ? `${actionText} succeeded: ${email} (replaced existing account)`
+        : `${actionText} succeeded: ${email}`
+    }
+    return replaced
+      ? `${actionText} succeeded; replaced existing account`
+      : `${actionText} succeeded; account added`
+  }
+
   if (email) {
     return replaced
       ? `${action}成功: ${email}（已替换旧账号）`
@@ -1089,27 +1155,36 @@ function getBatchImportSuccessMessage(task: OAuthBatchImportTaskStatusResponse):
   const parts: string[] = []
 
   if (createdCount > 0) {
-    parts.push(`新增 ${createdCount} 个`)
+    parts.push(isEnglishLocale() ? `${createdCount} added` : `新增 ${createdCount} 个`)
   }
   if (replacedCount > 0) {
-    parts.push(`替换 ${replacedCount} 个`)
+    parts.push(isEnglishLocale() ? `${replacedCount} replaced` : `替换 ${replacedCount} 个`)
   }
   if (task.failed > 0) {
-    parts.push(`失败 ${task.failed} 个`)
+    parts.push(isEnglishLocale() ? `${task.failed} failed` : `失败 ${task.failed} 个`)
   }
 
   if (parts.length === 0) {
+    if (isEnglishLocale()) {
+      return task.failed > 0 ? `Batch import complete: ${task.failed} failed` : 'Batch import complete'
+    }
     return task.failed > 0 ? `批量导入完成：失败 ${task.failed} 个` : '批量导入完成'
   }
   if (task.failed === 0 && createdCount > 0 && replacedCount === 0) {
+    if (isEnglishLocale()) return `Batch import succeeded: ${createdCount} accounts added`
     return `批量导入成功：${createdCount} 个账号已添加`
   }
   if (task.failed === 0 && createdCount === 0 && replacedCount > 0) {
+    if (isEnglishLocale()) return `Batch import succeeded: ${replacedCount} existing accounts replaced`
     return `批量导入成功：已替换 ${replacedCount} 个旧账号`
   }
 
-  const prefix = task.failed > 0 ? '批量导入完成' : '批量导入成功'
-  return `${prefix}：${parts.join('，')}`
+  const prefix = task.failed > 0
+    ? legacyT('批量导入完成')
+    : legacyT('批量导入成功')
+  return isEnglishLocale()
+    ? `${prefix}: ${parts.join(', ')}`
+    : `${prefix}：${parts.join('，')}`
 }
 
 function scheduleImportPoll(taskId: string, delayMs = 1200) {
@@ -1135,7 +1210,7 @@ async function pollImportTaskStatus(taskId: string) {
         emit('saved')
         handleClose()
       } else {
-        showError(task.error || '批量导入失败', '导入失败')
+        showError(legacyT(task.error || '批量导入失败'), legacyT('导入失败'))
       }
       return
     }
@@ -1143,7 +1218,7 @@ async function pollImportTaskStatus(taskId: string) {
     if (task.status === 'failed') {
       stopImportPolling()
       importing.value = false
-      showError(task.error || task.message || '批量导入失败', '导入失败')
+      showError(legacyT(task.error || task.message || '批量导入失败'), legacyT('导入失败'))
       return
     }
 
@@ -1305,8 +1380,8 @@ async function initOAuth() {
     oauth.value.provider_type = resp.provider_type
   } catch (err: unknown) {
     if (requestId !== oauthInitRequestId) return
-    const errorMessage = parseApiError(err, '初始化授权失败')
-    showError(errorMessage, '错误')
+    const errorMessage = localizedApiError(err, '初始化授权失败')
+    showError(errorMessage, legacyT('错误'))
     mode.value = 'import'
   } finally {
     if (requestId === oauthInitRequestId) {
@@ -1331,8 +1406,8 @@ async function handleCompleteOAuth() {
     handleClose()
   } catch (err: unknown) {
     if (requestId !== oauthCompleteRequestId) return
-    const errorMessage = parseApiError(err, '完成授权失败')
-    showError(errorMessage, '错误')
+    const errorMessage = localizedApiError(err, '完成授权失败')
+    showError(errorMessage, legacyT('错误'))
   } finally {
     if (requestId === oauthCompleteRequestId) {
       oauth.value.completing = false
@@ -1618,7 +1693,7 @@ function decodeBase64Url(value: string): string {
 }
 
 function handleImportInputError(payload: { message: string; title?: string }) {
-  showError(payload.message, payload.title)
+  showError(legacyT(payload.message), payload.title ? legacyT(payload.title) : undefined)
 }
 
 function setWindsurfImportMethod(method: WindsurfImportMethod) {
@@ -1633,7 +1708,7 @@ async function handleWindsurfEmailPasswordImport() {
   const email = windsurfEmail.value.trim()
   const password = windsurfPassword.value.trim()
   if (!email || !password) {
-    showError('请输入邮箱和密码', '格式错误')
+    showError(legacyT('请输入邮箱和密码'), legacyT('格式错误'))
     return
   }
 
@@ -1649,8 +1724,8 @@ async function handleWindsurfEmailPasswordImport() {
     emit('saved')
     handleClose()
   } catch (err: unknown) {
-    const errorMessage = parseApiError(err, '导入失败')
-    showError(errorMessage, '错误')
+    const errorMessage = localizedApiError(err, '导入失败')
+    showError(errorMessage, legacyT('错误'))
   } finally {
     importing.value = false
   }
@@ -1665,13 +1740,13 @@ async function handleImport() {
 
   const inputText = importText.value.trim()
   if (!inputText) {
-    showError('请输入凭据数据', '格式错误')
+    showError(legacyT('请输入凭据数据'), legacyT('格式错误'))
     return
   }
 
   const normalizedCredentials = normalizeBatchImportCredentials(inputText)
   if (!normalizedCredentials.ok) {
-    showError(normalizedCredentials.message, '格式错误')
+    showError(legacyT(normalizedCredentials.message), legacyT('格式错误'))
     return
   }
 
@@ -1708,7 +1783,7 @@ async function handleImport() {
       // 单条导入
       const parsed = parseImportText(normalizedCredentials.credentials)
       if (!parsed) {
-        showError('无法解析输入内容，请检查格式', '格式错误')
+        showError(legacyT('无法解析输入内容，请检查格式'), legacyT('格式错误'))
         return
       }
       const result = await importProviderRefreshToken(props.providerId, {
@@ -1720,8 +1795,8 @@ async function handleImport() {
       handleClose()
     }
   } catch (err: unknown) {
-    const errorMessage = parseApiError(err, '导入失败')
-    showError(errorMessage, '错误')
+    const errorMessage = localizedApiError(err, '导入失败')
+    showError(errorMessage, legacyT('错误'))
   } finally {
     if (!keepImporting) {
       importing.value = false
@@ -1796,8 +1871,8 @@ async function startDeviceAuth() {
     }
   } catch (err: unknown) {
     if (requestId !== deviceAuthRequestId || device.value.auth_type !== requestedAuthType) return
-    const errorMessage = parseApiError(err, '发起设备授权失败')
-    showError(errorMessage, '错误')
+    const errorMessage = localizedApiError(err, '发起设备授权失败')
+    showError(errorMessage, legacyT('错误'))
     device.value.status = 'error'
     device.value.error = errorMessage
   } finally {
@@ -1895,8 +1970,8 @@ async function pollDevice(withCallback = false) {
     }
   } catch (err: unknown) {
     if (withCallback) {
-      const errorMessage = parseApiError(err, '完成授权失败')
-      showError(errorMessage, '错误')
+      const errorMessage = localizedApiError(err, '完成授权失败')
+      showError(errorMessage, legacyT('错误'))
     }
     // 网络错误等，继续轮询
     if (!withCallback && !device.value.callback_required) {

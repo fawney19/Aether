@@ -1,5 +1,7 @@
 import { ref } from 'vue'
 import { TOAST_CONFIG } from '@/config/constants'
+import { getI18nLocale } from '@/i18n'
+import { translateLegacyText } from '@/i18n/messages'
 
 export type ToastVariant = 'success' | 'error' | 'warning' | 'info'
 
@@ -11,15 +13,31 @@ export interface Toast {
   duration?: number
 }
 
+export type ToastOptions = Omit<Toast, 'id' | 'variant'> & {
+  description?: string
+  variant?: ToastVariant | 'destructive'
+}
+
 const toasts = ref<Toast[]>([])
 
 export function useToast() {
-  function showToast(options: Omit<Toast, 'id'>) {
+  function localizeToastText(value: string | undefined): string | undefined {
+    return value === undefined ? undefined : translateLegacyText(value, getI18nLocale())
+  }
+
+  function normalizeToastVariant(variant: ToastOptions['variant']): ToastVariant {
+    return variant === 'destructive' ? 'error' : variant || 'info'
+  }
+
+  function showToast(options: ToastOptions) {
+    const { description, ...toastOptions } = options
     const toast: Toast = {
       id: Date.now().toString(),
-      variant: 'info',
       duration: 5000,
-      ...options
+      ...toastOptions,
+      variant: normalizeToastVariant(options.variant),
+      title: localizeToastText(options.title),
+      message: localizeToastText(options.message ?? description),
     }
 
 
@@ -66,6 +84,7 @@ export function useToast() {
     toasts,
     showToast,
     removeToast,
+    toast: showToast,
     success,
     error,
     warning,

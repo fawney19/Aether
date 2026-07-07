@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sqlx::{sqlite::SqliteRow, Row};
 
 use super::{
-    finite_wallet_available_usd, plan_finite_wallet_debit,
+    finite_wallet_available_usd, plan_finite_wallet_debit, settlement_billable_cost_usd,
     settlement_billing_status_for_usage_status, SettlementWriteRepository, StoredUsageSettlement,
     UsageSettlementInput, SETTLEMENT_EPSILON_USD,
 };
@@ -490,13 +490,14 @@ LIMIT 1
                 settlement.wallet_gift_balance_after = Some(before_gift);
             }
 
+            let billable_cost_usd = settlement_billable_cost_usd(&input);
             let wallet_debit_cost_usd = if !api_key_is_standalone {
                 if let Some(user_id) = input.user_id.as_deref().filter(|value| !value.is_empty()) {
                     let quota = consume_daily_quota_sqlite(
                         &mut tx,
                         user_id,
                         &input.request_id,
-                        input.total_cost_usd,
+                        billable_cost_usd,
                         wallet_available_usd,
                         wallet_can_overdraft,
                         updated_at,
@@ -507,13 +508,13 @@ LIMIT 1
                         settlement.billing_status = final_billing_status.clone();
                         0.0
                     } else {
-                        (input.total_cost_usd - quota.debited_usd).max(0.0)
+                        (billable_cost_usd - quota.debited_usd).max(0.0)
                     }
                 } else {
-                    input.total_cost_usd
+                    billable_cost_usd
                 }
             } else {
-                input.total_cost_usd
+                billable_cost_usd
             };
             if final_billing_status != "settled" {
                 sqlx::query(UPSERT_USAGE_SETTLEMENT_SNAPSHOT_SQL)
@@ -720,7 +721,7 @@ mod tests {
                 status: "completed".to_string(),
                 billing_status: "pending".to_string(),
                 total_cost_usd: 3.0,
-                actual_total_cost_usd: 2.0,
+                actual_total_cost_usd: 6.0,
                 finalized_at_unix_secs: Some(1_234),
             })
             .await
@@ -730,10 +731,10 @@ mod tests {
         assert_eq!(settlement.billing_status, "settled");
         assert_eq!(settlement.wallet_id.as_deref(), Some("wallet-1"));
         assert_eq!(settlement.wallet_balance_before, Some(12.0));
-        assert_eq!(settlement.wallet_balance_after, Some(9.0));
-        assert_eq!(settlement.wallet_recharge_balance_after, Some(7.0));
+        assert_eq!(settlement.wallet_balance_after, Some(6.0));
+        assert_eq!(settlement.wallet_recharge_balance_after, Some(4.0));
         assert_eq!(settlement.wallet_gift_balance_after, Some(2.0));
-        assert_eq!(settlement.provider_monthly_used_usd, Some(7.0));
+        assert_eq!(settlement.provider_monthly_used_usd, Some(11.0));
 
         let wallet = sqlx::query(
             "SELECT balance, gift_balance, total_consumed FROM wallets WHERE id = 'wallet-1'",
@@ -741,9 +742,9 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("wallet should load");
-        assert_eq!(wallet.try_get::<f64, _>("balance").unwrap(), 7.0);
+        assert_eq!(wallet.try_get::<f64, _>("balance").unwrap(), 4.0);
         assert_eq!(wallet.try_get::<f64, _>("gift_balance").unwrap(), 2.0);
-        assert_eq!(wallet.try_get::<f64, _>("total_consumed").unwrap(), 3.0);
+        assert_eq!(wallet.try_get::<f64, _>("total_consumed").unwrap(), 6.0);
 
         let second = repository
             .settle_usage(UsageSettlementInput {
@@ -755,7 +756,7 @@ mod tests {
                 status: "completed".to_string(),
                 billing_status: "pending".to_string(),
                 total_cost_usd: 3.0,
-                actual_total_cost_usd: 2.0,
+                actual_total_cost_usd: 6.0,
                 finalized_at_unix_secs: Some(9_999),
             })
             .await
@@ -768,7 +769,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("provider should load");
-        assert_eq!(provider_used, 7.0);
+        assert_eq!(provider_used, 11.0);
     }
 
     #[tokio::test]
@@ -834,7 +835,7 @@ mod tests {
                 status: "completed".to_string(),
                 billing_status: "pending".to_string(),
                 total_cost_usd: 15.0,
-                actual_total_cost_usd: 7.5,
+                actual_total_cost_usd: 15.0,
                 finalized_at_unix_secs: Some(1_236),
             })
             .await
@@ -847,7 +848,7 @@ mod tests {
         assert_eq!(settlement.wallet_balance_after, Some(-3.0));
         assert_eq!(settlement.wallet_recharge_balance_after, Some(-3.0));
         assert_eq!(settlement.wallet_gift_balance_after, Some(0.0));
-        assert_eq!(settlement.provider_monthly_used_usd, Some(12.5));
+        assert_eq!(settlement.provider_monthly_used_usd, Some(20.0));
 
         let wallet = sqlx::query(
             "SELECT balance, gift_balance, total_consumed FROM wallets WHERE id = 'wallet-1'",
@@ -883,7 +884,7 @@ mod tests {
                 status: "completed".to_string(),
                 billing_status: "pending".to_string(),
                 total_cost_usd: 3.0,
-                actual_total_cost_usd: 2.0,
+                actual_total_cost_usd: 6.0,
                 finalized_at_unix_secs: Some(1_260),
             })
             .await
@@ -909,7 +910,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("quota ledger should load");
-        assert_eq!(quota_used, 3.0);
+        assert_eq!(quota_used, 6.0);
     }
 
     async fn seed_settlement_rows(pool: &sqlx::SqlitePool) {
@@ -929,9 +930,9 @@ INSERT INTO "usage" (
   request_id, user_id, provider_id, status, billing_status, total_cost_usd, actual_total_cost_usd
 )
 VALUES
-  ('request-1', 'user-1', 'provider-1', 'completed', 'pending', 3.0, 2.0),
+  ('request-1', 'user-1', 'provider-1', 'completed', 'pending', 3.0, 6.0),
   ('request-2', 'user-1', 'provider-1', 'failed', 'pending', 3.0, 2.0),
-  ('request-overdraw', 'user-1', 'provider-1', 'completed', 'pending', 15.0, 7.5);
+  ('request-overdraw', 'user-1', 'provider-1', 'completed', 'pending', 15.0, 15.0);
 "#,
         )
         .execute(pool)
@@ -961,7 +962,7 @@ INSERT INTO "usage" (
   total_cost_usd, actual_total_cost_usd
 ) VALUES (
   'request-quota-covered', 'user-quota', 'key-quota', 'completed',
-  'pending', 3.0, 2.0
+  'pending', 3.0, 6.0
 );
 
 INSERT INTO billing_plans (

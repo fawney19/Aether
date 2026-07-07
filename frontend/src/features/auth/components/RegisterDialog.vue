@@ -14,10 +14,10 @@
           >
         </div>
         <h2 class="text-2xl font-semibold text-slate-900 dark:text-white">
-          注册新账户
+          {{ registerUi.title }}
         </h2>
         <p class="mt-1 text-sm text-muted-foreground">
-          {{ emailConfigured ? '请填写您的信息完成注册' : '请填写用户名和密码完成注册' }}
+          {{ emailConfigured ? registerUi.fillEmailInfo : registerUi.fillBasicInfo }}
         </p>
       </div>
 
@@ -34,7 +34,7 @@
           class="space-y-2"
         >
           <Label for="reg-email">
-            邮箱
+            {{ registerUi.email }}
             <span
               v-if="requireEmailVerification"
               class="text-destructive"
@@ -42,7 +42,7 @@
             <span
               v-else
               class="text-muted-foreground text-xs"
-            >（可选）</span>
+            >{{ registerUi.optional }}</span>
           </Label>
           <Input
             id="reg-email"
@@ -59,7 +59,7 @@
           v-if="turnstileRequired"
           class="space-y-2"
         >
-          <Label>人机验证 <span class="text-destructive">*</span></Label>
+          <Label>{{ registerUi.turnstile }} <span class="text-destructive">*</span></Label>
           <TurnstileWidget
             ref="turnstileWidgetRef"
             v-model="turnstileToken"
@@ -76,7 +76,7 @@
           class="space-y-3"
         >
           <div class="flex items-center justify-between">
-            <Label>验证码 <span class="text-destructive">*</span></Label>
+            <Label>{{ registerUi.verificationCode }} <span class="text-destructive">*</span></Label>
             <Button
               type="button"
               variant="link"
@@ -143,12 +143,12 @@
 
         <!-- Username -->
         <div class="space-y-2">
-          <Label for="reg-uname">用户名 <span class="text-destructive">*</span></Label>
+          <Label for="reg-uname">{{ registerUi.username }} <span class="text-destructive">*</span></Label>
           <Input
             id="reg-uname"
             v-model="formData.username"
             type="text"
-            placeholder="请输入用户名"
+            :placeholder="registerUi.usernamePlaceholder"
             required
             disable-autofill
             :disabled="isLoading"
@@ -164,7 +164,9 @@
 
         <!-- Password -->
         <div class="space-y-2">
-          <Label :for="`pwd-${formNonce}`">密码 <span class="text-destructive">*</span></Label>
+          <Label :for="`pwd-${formNonce}`">
+            {{ registerUi.password }} <span class="text-destructive">*</span>
+          </Label>
           <Input
             :id="`pwd-${formNonce}`"
             v-model="formData.password"
@@ -192,7 +194,7 @@
 
         <!-- Confirm Password -->
         <div class="space-y-2">
-          <Label :for="`pwd-confirm-${formNonce}`">确认密码 <span class="text-destructive">*</span></Label>
+          <Label :for="`pwd-confirm-${formNonce}`">{{ registerUi.confirmPassword }} <span class="text-destructive">*</span></Label>
           <Input
             :id="`pwd-confirm-${formNonce}`"
             v-model="formData.confirmPassword"
@@ -200,7 +202,7 @@
             autocomplete="new-password"
             disable-autofill
             :name="`pwd-confirm-${formNonce}`"
-            placeholder="再次输入密码"
+            :placeholder="registerUi.confirmPasswordPlaceholder"
             required
             :disabled="isLoading"
           />
@@ -208,7 +210,7 @@
             v-if="formData.confirmPassword && formData.password !== formData.confirmPassword"
             class="text-xs text-destructive"
           >
-            两次输入的密码不一致
+            {{ registerUi.passwordMismatch }}
           </p>
         </div>
 
@@ -216,7 +218,7 @@
           v-if="inviteCode"
           class="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-muted-foreground"
         >
-          已识别邀请码 <span class="font-mono font-semibold text-foreground">{{ inviteCode }}</span>
+          {{ inviteCodeText }}
         </div>
 
         <div
@@ -230,38 +232,38 @@
               @update:checked="privacyAccepted = !!$event"
             />
             <span class="leading-6">
-              我已阅读并同意
+              {{ registerUi.privacyPrefix }}
               <button
                 type="button"
                 class="font-medium text-primary underline-offset-4 hover:underline"
                 @click="privacyDialogOpen = true"
               >
-                隐私政策
+                {{ registerUi.privacyTitle }}
               </button>
               <RouterLink
                 to="/privacy-policy"
                 target="_blank"
                 class="ml-1 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
               >
-                新窗口打开
+                {{ registerUi.openInNewWindow }}
               </RouterLink>
             </span>
           </label>
           <p class="mt-2 text-xs text-muted-foreground">
-            当前版本：{{ privacyPolicyVersion }}
+            {{ privacyVersionText }}
           </p>
         </div>
       </form>
 
       <!-- 登录链接 -->
       <div class="text-center text-sm">
-        已有账户？
+        {{ registerUi.hasAccount }}
         <Button
           variant="link"
           class="h-auto p-0"
           @click="handleSwitchToLogin"
         >
-          立即登录
+          {{ registerUi.switchToLogin }}
         </Button>
       </div>
     </div>
@@ -274,14 +276,14 @@
         :disabled="isLoading"
         @click="handleCancel"
       >
-        取消
+        {{ registerUi.cancel }}
       </Button>
       <Button
         class="w-full sm:w-auto bg-primary hover:bg-primary/90 text-white border-0"
         :disabled="isLoading || !canSubmit"
         @click="handleSubmit"
       >
-        {{ isLoading ? loadingText : '注册' }}
+        {{ isLoading ? loadingText : registerUi.submit }}
       </Button>
     </template>
   </Dialog>
@@ -289,7 +291,7 @@
   <Dialog
     v-model="privacyDialogOpen"
     size="2xl"
-    title="隐私政策"
+    :title="registerUi.privacyTitle"
   >
     <!-- eslint-disable vue/no-v-html -->
     <div
@@ -302,7 +304,7 @@
         type="button"
         @click="privacyDialogOpen = false"
       >
-        我知道了
+        {{ registerUi.acknowledge }}
       </Button>
     </template>
   </Dialog>
@@ -314,6 +316,7 @@ import { RouterLink } from 'vue-router'
 import { marked } from 'marked'
 import { authApi, type RegisterRequest, type RegistrationPrivacyPolicySettings } from '@/api/auth'
 import { useToast } from '@/composables/useToast'
+import { useI18n } from '@/i18n'
 import { parseApiError } from '@/utils/errorParser'
 import { sanitizeHtml, sanitizeMarkdown } from '@/utils/sanitize'
 import {
@@ -365,6 +368,35 @@ interface Emits {
 }
 
 const { success, error: showError } = useToast()
+const { t } = useI18n()
+
+const registerUi = computed(() => ({
+  title: t('auth.register.title'),
+  fillEmailInfo: t('auth.register.fillEmailInfo'),
+  fillBasicInfo: t('auth.register.fillBasicInfo'),
+  email: t('auth.register.email'),
+  optional: t('auth.register.optional'),
+  turnstile: t('auth.register.turnstile'),
+  verificationCode: t('auth.register.verificationCode'),
+  username: t('auth.register.username'),
+  usernamePlaceholder: t('auth.register.usernamePlaceholder'),
+  password: t('auth.register.password'),
+  confirmPassword: t('auth.register.confirmPassword'),
+  confirmPasswordPlaceholder: t('auth.register.confirmPasswordPlaceholder'),
+  passwordMismatch: t('auth.register.passwordMismatch'),
+  inviteCode: (code: string) => t('auth.register.inviteCode', { code }),
+  privacyPrefix: t('auth.register.privacyPrefix'),
+  privacyTitle: t('site.privacy.title'),
+  openInNewWindow: t('auth.register.openInNewWindow'),
+  hasAccount: t('auth.register.hasAccount'),
+  switchToLogin: t('auth.register.switchToLogin'),
+  submit: t('auth.register.submit'),
+  acknowledge: t('auth.register.acknowledge'),
+  cancel: t('common.cancel'),
+}))
+
+const inviteCodeText = computed(() => inviteCode.value ? registerUi.value.inviteCode(inviteCode.value) : '')
+const privacyVersionText = computed(() => t('site.privacy.currentVersion', { version: privacyPolicyVersion.value }))
 
 // Form nonce for password fields (prevent autofill)
 const formNonce = ref(createFormNonce())
@@ -468,7 +500,7 @@ const formData = ref({
 })
 
 const isLoading = ref(false)
-const loadingText = ref('注册中...')
+const loadingText = ref(t('auth.register.submit'))
 const isSendingCode = ref(false)
 const emailVerified = ref(false)
 const verificationError = ref(false)
@@ -494,7 +526,7 @@ const resetTurnstile = () => {
 }
 
 const handleTurnstileError = (message: string) => {
-  showError(message, '人机验证失败')
+  showError(message, t('auth.register.turnstile'))
 }
 
 const inviteCode = ref<string | null>(null)
@@ -504,7 +536,7 @@ const privacyPolicyEnabled = computed(() => !!props.privacyPolicy?.enabled)
 const privacyPolicyVersion = computed(() => props.privacyPolicy?.version || '1')
 const renderedPrivacyPolicy = computed(() => {
   const policy = props.privacyPolicy
-  if (!policy?.content) return '<p>暂无隐私政策内容</p>'
+  if (!policy?.content) return `<p>${t('site.privacy.empty')}</p>`
   if (policy.format === 'html') {
     return sanitizeHtml(policy.content)
   }
@@ -536,28 +568,28 @@ const canSendCode = computed(() => {
 })
 
 const sendCodeButtonText = computed(() => {
-  if (isSendingCode.value) return '发送中...'
-  if (emailVerified.value) return '验证成功'
-  if (cooldownSeconds.value > 0) return `${cooldownSeconds.value}秒后重试`
+  if (isSendingCode.value) return t('auth.register.sendingCode')
+  if (emailVerified.value) return t('auth.register.verified')
+  if (cooldownSeconds.value > 0) return t('auth.register.retryAfterSeconds', { seconds: cooldownSeconds.value })
   if (
     turnstileRequired.value &&
     currentTurnstileAction.value === 'send_verification_code' &&
     !turnstileToken.value
-  ) return '请先完成人机验证'
-  if (codeSentAt.value) return '重新发送验证码'
-  return '发送验证码'
+  ) return t('auth.register.completeTurnstile')
+  if (codeSentAt.value) return t('auth.register.resendCode')
+  return t('auth.register.sendCode')
 })
 
-const sendCodeLoadingText = computed(() => '正在发送验证码...')
+const sendCodeLoadingText = computed(() => t('auth.register.sendingCode'))
 
 // 用户名验证
 const usernameRegex = /^[a-zA-Z0-9_.-]+$/
 const usernameError = computed(() => {
   const username = formData.value.username.trim()
   if (!username) return ''
-  if (username.length < 3) return '用户名长度至少为3个字符'
-  if (username.length > 30) return '用户名长度不能超过30个字符'
-  if (!usernameRegex.test(username)) return '用户名只能包含字母、数字、下划线、连字符和点号'
+  if (username.length < 3) return t('auth.register.usernameTooShort')
+  if (username.length > 30) return t('auth.register.usernameTooLong')
+  if (!usernameRegex.test(username)) return t('auth.register.usernameInvalid')
   return ''
 })
 
@@ -743,14 +775,14 @@ const resetForm = () => {
 
 const handleSendCode = async () => {
   if (!formData.value.email) {
-    showError('请输入邮箱')
+    showError(t('auth.register.emailRequired'))
     return
   }
 
   // Basic email validation
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
   if (!emailRegex.test(formData.value.email)) {
-    showError('请输入有效的邮箱地址', '邮箱格式错误')
+    showError(t('auth.register.emailInvalid'), t('auth.register.emailFormatError'))
     return
   }
 
@@ -769,7 +801,7 @@ const handleSendCode = async () => {
         expireMinutes.value = response.expire_minutes
       }
 
-      success(`请查收邮件，验证码有效期 ${expireMinutes.value} 分钟`, '验证码已发送')
+      success(t('auth.register.codeSent', { minutes: expireMinutes.value }), t('auth.register.codeSentTitle'))
 
       // Start 60 second cooldown
       startCooldown(60)
@@ -780,11 +812,11 @@ const handleSendCode = async () => {
       })
     } else {
       resetTurnstile()
-      showError(response.message || '请稍后重试', '发送失败')
+      showError(response.message || t('auth.register.tryAgainLater'), t('auth.register.sendFailed'))
     }
   } catch (error: unknown) {
     resetTurnstile()
-    showError(parseApiError(error, '网络错误，请重试'), '发送失败')
+    showError(parseApiError(error, t('auth.register.networkRetry')), t('auth.register.sendFailed'))
   } finally {
     isSendingCode.value = false
     resetTurnstile()
@@ -798,7 +830,7 @@ const handleCodeComplete = async (code: string) => {
   if (emailVerified.value) return
 
   isLoading.value = true
-  loadingText.value = '验证中...'
+  loadingText.value = t('auth.register.verifying')
   verificationError.value = false
 
   try {
@@ -806,16 +838,16 @@ const handleCodeComplete = async (code: string) => {
 
     if (response.success) {
       emailVerified.value = true
-      success('邮箱验证通过，请继续完成注册', '验证成功')
+      success(t('auth.register.emailVerified'), t('auth.register.verifySuccess'))
     } else {
       verificationError.value = true
-      showError(response.message || '验证码错误', '验证失败')
+      showError(response.message || t('auth.register.codeInvalid'), t('auth.register.verifyFailed'))
       // Clear the code input
       clearCodeInputs()
     }
   } catch (error: unknown) {
     verificationError.value = true
-    showError(parseApiError(error, '验证码错误，请重试'), '验证失败')
+    showError(parseApiError(error, t('auth.register.codeRetry')), t('auth.register.verifyFailed'))
     // Clear the code input
     clearCodeInputs()
   } finally {
@@ -826,18 +858,18 @@ const handleCodeComplete = async (code: string) => {
 const handleSubmit = async () => {
   // Validate password match
   if (formData.value.password !== formData.value.confirmPassword) {
-    showError('两次输入的密码不一致', '密码不匹配')
+    showError(t('auth.register.passwordMismatch'), t('auth.register.passwordError'))
     return
   }
 
   if (passwordError.value) {
-    showError(passwordError.value, '密码错误')
+    showError(passwordError.value, t('auth.register.passwordError'))
     return
   }
 
   // Check email verification if required
   if (props.requireEmailVerification && !emailVerified.value) {
-    showError('请先完成邮箱验证')
+    showError(t('auth.register.completeEmailVerification'))
     return
   }
   if (
@@ -845,17 +877,17 @@ const handleSubmit = async () => {
     currentTurnstileAction.value === 'register' &&
     !turnstileToken.value
   ) {
-    showError('请先完成人机验证')
+    showError(t('auth.register.completeTurnstile'))
     return
   }
 
   if (privacyPolicyEnabled.value && !privacyAccepted.value) {
-    showError('请先阅读并同意隐私政策')
+    showError(t('auth.register.agreePrivacy'))
     return
   }
 
   isLoading.value = true
-  loadingText.value = '注册中...'
+  loadingText.value = t('auth.register.submitting')
 
   try {
     // 构建请求数据：邮箱可选
@@ -880,13 +912,13 @@ const handleSubmit = async () => {
 
     const response = await authApi.register(registerData)
 
-    success(response.message || '欢迎加入！请登录以继续', '注册成功')
+    success(response.message || t('auth.register.successMessage'), t('auth.register.successTitle'))
 
     emit('success')
     isOpen.value = false
   } catch (error: unknown) {
     resetTurnstile()
-    showError(parseApiError(error, '注册失败，请重试'), '注册失败')
+    showError(parseApiError(error, t('auth.register.submitRetry')), t('auth.register.submitFailed'))
   } finally {
     isLoading.value = false
     resetTurnstile()

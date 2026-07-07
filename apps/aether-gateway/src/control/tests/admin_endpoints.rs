@@ -438,6 +438,23 @@ fn classifies_admin_refresh_provider_quota_as_admin_proxy_route() {
 }
 
 #[test]
+fn classifies_admin_codex_reset_credit_consume_as_admin_proxy_route() {
+    let headers = http::HeaderMap::new();
+    let uri: Uri = "/api/admin/endpoints/keys/key-codex/codex-reset-credit/consume"
+        .parse()
+        .expect("uri should parse");
+    let decision = classify_control_route(&http::Method::POST, &uri, &headers)
+        .expect("decision should resolve");
+    assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(decision.route_family.as_deref(), Some("endpoints_manage"));
+    assert_eq!(
+        decision.route_kind.as_deref(),
+        Some("codex_reset_credit_consume")
+    );
+    assert!(!decision.is_execution_runtime_candidate());
+}
+
+#[test]
 fn admin_refresh_provider_quota_buffers_request_body_for_key_selection() {
     let headers = headers(&[]);
     let uri: Uri = "/api/admin/endpoints/providers/provider-codex/refresh-quota"

@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error as _;
 use std::future::Future;
 use std::io::Read;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use aether_contracts::{
@@ -22,13 +22,22 @@ use base64::Engine as _;
 use flate2::read::{DeflateDecoder, GzDecoder};
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming as HyperIncomingBody;
+use hyper::client::conn::http2::SendRequest as HyperH2cSendRequest;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::Client as HyperLegacyClient;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::redirect::Policy;
 use serde::Serialize;
 use serde_json::json;
 use serde_json::Value;
 use thiserror::Error;
+use tokio::net::TcpStream;
+use tokio::sync::OnceCell as TokioOnceCell;
 
 use crate::ai_serving::api::extract_provider_private_stream_error_body;
 #[cfg(test)]
@@ -51,18 +60,46 @@ const DEFAULT_NON_STREAM_TOTAL_TIMEOUT_MS: u64 = 300_000;
 const MIN_TUNNEL_TIMEOUT_SECS: u64 = 1;
 const MAX_TUNNEL_TIMEOUT_SECS: u64 = 300;
 const DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV: &str = "AETHER_GATEWAY_DIRECT_REQWEST_H2_CLIENT_SHARDS";
+const DIRECT_REQWEST_CLIENT_SHARDS_ENV: &str = "AETHER_GATEWAY_DIRECT_REQWEST_CLIENT_SHARDS";
 const DIRECT_REQWEST_H2_TARGET_STREAMS_PER_CLIENT_ENV: &str =
     "AETHER_GATEWAY_DIRECT_REQWEST_H2_TARGET_STREAMS_PER_CLIENT";
+const DIRECT_REQWEST_HTTP1_TARGET_STREAMS_PER_CLIENT_ENV: &str =
+    "AETHER_GATEWAY_DIRECT_REQWEST_HTTP1_TARGET_STREAMS_PER_CLIENT";
+const DIRECT_REQWEST_STREAM_HTTP_MODE_ENV: &str = "AETHER_GATEWAY_DIRECT_REQWEST_STREAM_HTTP_MODE";
+const DIRECT_REQWEST_CACHE_PER_ORIGIN_ENV: &str = "AETHER_GATEWAY_DIRECT_REQWEST_CACHE_PER_ORIGIN";
+const DIRECT_H2C_FAST_PATH_ENV: &str = "AETHER_GATEWAY_DIRECT_H2C_FAST_PATH";
+const DIRECT_H2C_CLIENT_SHARDS_ENV: &str = "AETHER_GATEWAY_DIRECT_H2C_CLIENT_SHARDS";
+const DIRECT_H2C_POOL_MAX_IDLE_PER_HOST_ENV: &str =
+    "AETHER_GATEWAY_DIRECT_H2C_POOL_MAX_IDLE_PER_HOST";
+const DIRECT_H2C_TARGET_STREAMS_PER_CLIENT_ENV: &str =
+    "AETHER_GATEWAY_DIRECT_H2C_TARGET_STREAMS_PER_CLIENT";
+const DIRECT_H2C_SENDER_SELECT_WINDOW_ENV: &str = "AETHER_GATEWAY_DIRECT_H2C_SENDER_SELECT_WINDOW";
+const DIRECT_H2C_PREWARM_URLS_ENV: &str = "AETHER_GATEWAY_DIRECT_H2C_PREWARM_URLS";
+const DIRECT_H2C_PREWARM_READY_ENV: &str = "AETHER_GATEWAY_DIRECT_H2C_PREWARM_READY";
+const DIRECT_H2C_PREWARM_CONNECT_TIMEOUT_MS_ENV: &str =
+    "AETHER_GATEWAY_DIRECT_H2C_PREWARM_CONNECT_TIMEOUT_MS";
 const DIRECT_REQWEST_SYNC_WARM_CLIENTS_ENV: &str =
     "AETHER_GATEWAY_DIRECT_REQWEST_SYNC_WARM_CLIENTS";
-const UPSTREAM_TARGET_GATE_LIMIT_ENV: &str = "AETHER_GATEWAY_UPSTREAM_TARGET_GATE_LIMIT";
-const DEFAULT_UPSTREAM_TARGET_GATE_LIMIT: usize = 2_000;
-const DEFAULT_H2_TARGET_STREAMS_PER_CLIENT: usize = 200;
+const DIRECT_REQWEST_PREWARM_SYNC_CLIENTS_ENV: &str =
+    "AETHER_GATEWAY_DIRECT_REQWEST_PREWARM_SYNC_CLIENTS";
+const DEFAULT_H2_TARGET_STREAMS_PER_CLIENT: usize = 8;
+const DEFAULT_HTTP1_TARGET_STREAMS_PER_CLIENT: usize = 512;
+const DEFAULT_DIRECT_H2C_POOL_MAX_IDLE_PER_HOST: usize = 512;
+const DEFAULT_DIRECT_H2C_TARGET_STREAMS_PER_CLIENT: usize = 128;
+const DEFAULT_DIRECT_H2C_SENDER_SELECT_WINDOW: usize = 4;
 const DEFAULT_DIRECT_REQWEST_SYNC_WARM_CLIENTS: usize = 4;
-const MAX_DIRECT_REQWEST_H2_CLIENT_SHARDS: usize = 128;
+const MAX_DIRECT_REQWEST_SYNC_WARM_CLIENTS: usize = 16;
+const MAX_DIRECT_H2C_CLIENT_SHARDS: usize = 512;
+const MAX_DIRECT_REQWEST_H2_CLIENT_SHARDS: usize = 2048;
+
+type DirectHyperH2cRequestBody = Full<Bytes>;
+type DirectHyperH2cClient = HyperLegacyClient<HttpConnector, DirectHyperH2cRequestBody>;
+type DirectHyperH2cSender = HyperH2cSendRequest<DirectHyperH2cRequestBody>;
+type DirectHyperH2cSenderCacheCell = TokioOnceCell<Arc<DirectHyperH2cSenderCacheEntry>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct DirectReqwestClientCacheKey {
+    upstream_origin: Option<String>,
     connect_timeout_ms: Option<u64>,
     proxy_url: Option<String>,
     follow_redirects: bool,
@@ -79,6 +116,13 @@ struct DirectReqwestTransportProfileCacheKey {
     pool_scope: String,
     header_fingerprint: Option<String>,
     extra: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DirectHyperH2cClientCacheKey {
+    upstream_origin: String,
+    connect_timeout_ms: Option<u64>,
+    pool_max_idle_per_host: usize,
 }
 
 struct DirectReqwestClientCacheEntry {
@@ -119,19 +163,247 @@ impl DirectReqwestClientCacheEntry {
     }
 }
 
+struct DirectHyperH2cClientCacheEntry {
+    clients: Vec<DirectHyperH2cClient>,
+    next: AtomicU64,
+    target_len: usize,
+}
+
+struct DirectHyperH2cSenderCacheEntry {
+    senders: Vec<Arc<DirectHyperH2cSenderSlot>>,
+    next: AtomicU64,
+    target_len: usize,
+}
+
+impl DirectHyperH2cSenderCacheEntry {
+    fn new(senders: Vec<DirectHyperH2cSender>, target_len: usize) -> Self {
+        Self {
+            senders: senders
+                .into_iter()
+                .map(DirectHyperH2cSenderSlot::new)
+                .collect(),
+            next: AtomicU64::new(0),
+            target_len: target_len.max(1),
+        }
+    }
+
+    fn select(&self) -> DirectHyperH2cSenderLease {
+        if self.senders.len() <= 1 {
+            let slot = self
+                .senders
+                .first()
+                .expect("direct h2c sender cache entry should contain a sender")
+                .clone();
+            return DirectHyperH2cSenderLease::new(slot);
+        }
+        let start = self.next.fetch_add(1, Ordering::Relaxed) as usize;
+        let window = direct_h2c_sender_select_window()
+            .min(self.senders.len())
+            .max(1);
+        let mut selected_index = start % self.senders.len();
+        let mut selected_load = self.senders[selected_index].in_flight();
+        for offset in 1..window {
+            let index = start.wrapping_add(offset) % self.senders.len();
+            let load = self.senders[index].in_flight();
+            if load < selected_load {
+                selected_index = index;
+                selected_load = load;
+                if load == 0 {
+                    break;
+                }
+            }
+        }
+        DirectHyperH2cSenderLease::new(Arc::clone(&self.senders[selected_index]))
+    }
+
+    fn len(&self) -> usize {
+        self.senders.len()
+    }
+
+    fn in_flight(&self) -> u64 {
+        self.senders.iter().map(|sender| sender.in_flight()).sum()
+    }
+
+    fn max_in_flight(&self) -> u64 {
+        self.senders
+            .iter()
+            .map(|sender| sender.max_in_flight())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+struct DirectHyperH2cSenderSlot {
+    sender: DirectHyperH2cSender,
+    in_flight: AtomicU64,
+    max_in_flight: AtomicU64,
+}
+
+impl DirectHyperH2cSenderSlot {
+    fn new(sender: DirectHyperH2cSender) -> Arc<Self> {
+        Arc::new(Self {
+            sender,
+            in_flight: AtomicU64::new(0),
+            max_in_flight: AtomicU64::new(0),
+        })
+    }
+
+    fn acquire(self: &Arc<Self>) -> DirectHyperH2cSenderLease {
+        let in_flight = self.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+        self.max_in_flight.fetch_max(in_flight, Ordering::AcqRel);
+        DirectHyperH2cSenderLease {
+            sender: self.sender.clone(),
+            slot: Some(Arc::clone(self)),
+        }
+    }
+
+    fn in_flight(&self) -> u64 {
+        self.in_flight.load(Ordering::Acquire)
+    }
+
+    fn max_in_flight(&self) -> u64 {
+        self.max_in_flight.load(Ordering::Acquire)
+    }
+}
+
+struct DirectHyperH2cSenderLease {
+    sender: DirectHyperH2cSender,
+    slot: Option<Arc<DirectHyperH2cSenderSlot>>,
+}
+
+impl DirectHyperH2cSenderLease {
+    fn new(slot: Arc<DirectHyperH2cSenderSlot>) -> Self {
+        slot.acquire()
+    }
+
+    fn sender(&mut self) -> &mut DirectHyperH2cSender {
+        &mut self.sender
+    }
+
+    fn release(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            slot.in_flight.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+impl Drop for DirectHyperH2cSenderLease {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl DirectHyperH2cClientCacheEntry {
+    fn new(clients: Vec<DirectHyperH2cClient>, target_len: usize) -> Self {
+        Self {
+            clients,
+            next: AtomicU64::new(0),
+            target_len: target_len.max(1),
+        }
+    }
+
+    fn select(&self) -> DirectHyperH2cClient {
+        if self.clients.len() <= 1 {
+            return self
+                .clients
+                .first()
+                .expect("direct h2c client cache entry should contain a client")
+                .clone();
+        }
+        let index = self.next.fetch_add(1, Ordering::Relaxed) as usize % self.clients.len();
+        self.clients[index].clone()
+    }
+
+    fn len(&self) -> usize {
+        self.clients.len()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectReqwestStreamHttpMode {
+    Http1,
+    Auto,
+}
+
 static DIRECT_REQWEST_CLIENT_CACHE: LazyLock<
     StdMutex<HashMap<DirectReqwestClientCacheKey, DirectReqwestClientCacheEntry>>,
 > = LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+static DIRECT_H2C_CLIENT_CACHE: LazyLock<
+    StdMutex<HashMap<DirectHyperH2cClientCacheKey, DirectHyperH2cClientCacheEntry>>,
+> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+static DIRECT_H2C_SENDER_CACHE: LazyLock<
+    StdMutex<HashMap<DirectHyperH2cClientCacheKey, Arc<DirectHyperH2cSenderCacheCell>>>,
+> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+static DIRECT_H2C_POOL_MAX_IDLE_PER_HOST: LazyLock<usize> = LazyLock::new(|| {
+    env_positive_usize(DIRECT_H2C_POOL_MAX_IDLE_PER_HOST_ENV)
+        .unwrap_or(DEFAULT_DIRECT_H2C_POOL_MAX_IDLE_PER_HOST)
+});
+
+static DIRECT_H2C_SENDER_SELECT_WINDOW: LazyLock<usize> = LazyLock::new(|| {
+    env_positive_usize(DIRECT_H2C_SENDER_SELECT_WINDOW_ENV)
+        .unwrap_or(DEFAULT_DIRECT_H2C_SENDER_SELECT_WINDOW)
+        .clamp(1, MAX_DIRECT_H2C_CLIENT_SHARDS)
+});
+
+static DIRECT_REQWEST_STREAM_HTTP_MODE: LazyLock<DirectReqwestStreamHttpMode> =
+    LazyLock::new(|| {
+        std::env::var(DIRECT_REQWEST_STREAM_HTTP_MODE_ENV)
+            .ok()
+            .map(|value| parse_direct_reqwest_stream_http_mode(&value))
+            .unwrap_or(DirectReqwestStreamHttpMode::Http1)
+    });
 
 #[derive(Debug, Default)]
 struct DirectReqwestClientCacheMetrics {
     hits: AtomicU64,
     misses: AtomicU64,
     builds: AtomicU64,
+    warm_enqueues: AtomicU64,
+    warm_skipped_total: AtomicU64,
+    http1_selections: AtomicU64,
+    h2c_selections: AtomicU64,
+    auto_selections: AtomicU64,
 }
 
 static DIRECT_REQWEST_CLIENT_CACHE_METRICS: LazyLock<DirectReqwestClientCacheMetrics> =
     LazyLock::new(DirectReqwestClientCacheMetrics::default);
+
+#[derive(Debug, Default)]
+struct DirectHyperH2cClientCacheMetrics {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    builds: AtomicU64,
+}
+
+static DIRECT_H2C_CLIENT_CACHE_METRICS: LazyLock<DirectHyperH2cClientCacheMetrics> =
+    LazyLock::new(DirectHyperH2cClientCacheMetrics::default);
+
+#[derive(Debug, Default)]
+struct DirectHyperH2cSenderCacheMetrics {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    builds: AtomicU64,
+    prewarm_requested: AtomicU64,
+    prewarm_success: AtomicU64,
+    prewarm_failed: AtomicU64,
+}
+
+static DIRECT_H2C_SENDER_CACHE_METRICS: LazyLock<DirectHyperH2cSenderCacheMetrics> =
+    LazyLock::new(DirectHyperH2cSenderCacheMetrics::default);
+
+#[derive(Debug, Clone, Default)]
+pub struct DirectH2cSenderPrewarmReport {
+    pub requested_urls: u64,
+    pub unique_targets: u64,
+    pub warmed_targets: u64,
+    pub failed_targets: u64,
+    pub ready_required: bool,
+    pub first_error: Option<String>,
+}
+
 pub(crate) fn format_upstream_request_error(err: &reqwest::Error) -> String {
     let mut kinds = Vec::new();
     if err.is_connect() {
@@ -224,6 +496,20 @@ pub(crate) fn format_wreq_upstream_request_error(err: &wreq::Error) -> String {
     detail
 }
 
+pub(crate) fn format_hyper_error_chain(err: &dyn std::error::Error) -> String {
+    let mut detail = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !cause_text.is_empty() && !detail.contains(&cause_text) {
+            detail.push_str(": ");
+            detail.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    detail
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum ExecutionRuntimeTransportError {
     #[error("stream execution is not supported for this plan")]
@@ -304,6 +590,7 @@ struct TunnelTimeoutMetadata {
 
 pub(crate) enum DirectUpstreamResponse {
     Reqwest(reqwest::Response),
+    HyperH2c(hyper::Response<HyperIncomingBody>),
     BrowserWreq(wreq::Response),
     LocalTunnel(tunnel::DirectRelayResponse),
 }
@@ -321,6 +608,12 @@ pub(crate) struct DirectUpstreamStreamExecution {
     pub(crate) upstream_target_permit: Option<UpstreamTargetAdmissionPermit>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct DirectSyncResponseStarted {
+    pub(crate) status_code: u16,
+    pub(crate) ttfb_ms: u64,
+}
+
 impl DirectSyncExecutionRuntime {
     pub(crate) const fn new() -> Self {
         Self
@@ -330,6 +623,17 @@ impl DirectSyncExecutionRuntime {
         &self,
         plan: &ExecutionPlan,
     ) -> Result<ExecutionResult, ExecutionRuntimeTransportError> {
+        self.execute_sync_with_response_started(plan, |_| {}).await
+    }
+
+    pub(crate) async fn execute_sync_with_response_started<F>(
+        &self,
+        plan: &ExecutionPlan,
+        on_response_started: F,
+    ) -> Result<ExecutionResult, ExecutionRuntimeTransportError>
+    where
+        F: FnOnce(DirectSyncResponseStarted),
+    {
         let body_bytes = build_request_body(plan)?;
 
         let started_at = Instant::now();
@@ -338,6 +642,10 @@ impl DirectSyncExecutionRuntime {
             let ttfb_ms = started_at.elapsed().as_millis() as u64;
             let status_code = response.status_code();
             let headers = response.headers();
+            on_response_started(DirectSyncResponseStarted {
+                status_code,
+                ttfb_ms,
+            });
             let (body_bytes, stream_ttfb_ms) =
                 response.bytes_with_stream_timeout(plan, started_at).await?;
             let decoded_body_bytes = decode_response_body_bytes(&headers, &body_bytes)
@@ -776,6 +1084,7 @@ async fn send_request_inner(
         return Err(ExecutionRuntimeTransportError::UpstreamRequest(detail));
     }
 
+    let prepare_started_at = Instant::now();
     let method = plan.method.parse::<reqwest::Method>()?;
     let transport_controls = resolve_execution_transport_controls(&plan.headers);
     let headers = build_request_headers(
@@ -789,6 +1098,10 @@ async fn send_request_inner(
         None
     };
     let stream_first_byte_timeout = resolve_stream_first_byte_timeout(plan);
+    observe_gateway_stage_ms(
+        "direct_request_prepare",
+        prepare_started_at.elapsed().as_millis() as u64,
+    );
 
     if transport_profile_uses_browser_wreq(plan.transport_profile.as_ref()) {
         return send_via_browser_wreq_transport(
@@ -819,17 +1132,42 @@ async fn send_request_inner(
         .map(DirectHttpResponse::Reqwest);
     }
 
+    let direct_transport_controls =
+        direct_reqwest_effective_transport_controls(plan, transport_controls);
+    if direct_h2c_fast_path_applies(plan, direct_transport_controls) {
+        return send_via_direct_h2c_fast_path(
+            plan,
+            method,
+            headers,
+            body_bytes,
+            stream_first_byte_timeout,
+        )
+        .await
+        .map(DirectHttpResponse::HyperH2c);
+    }
+
+    let client_select_started_at = Instant::now();
     let client = build_client(
+        &plan.url,
         plan.timeouts.as_ref(),
         plan.proxy.as_ref(),
         plan.transport_profile.as_ref(),
-        transport_controls,
+        direct_transport_controls,
     )?;
+    observe_gateway_stage_ms(
+        "direct_reqwest_client_select",
+        client_select_started_at.elapsed().as_millis() as u64,
+    );
+    let request_build_started_at = Instant::now();
     let mut request = client.request(method, &plan.url);
     request = request.headers(headers).body(body_bytes);
     if let Some(timeout) = total_timeout {
         request = request.timeout(timeout);
     }
+    observe_gateway_stage_ms(
+        "direct_reqwest_request_build",
+        request_build_started_at.elapsed().as_millis() as u64,
+    );
     send_reqwest_request(request, stream_first_byte_timeout)
         .await
         .map(DirectHttpResponse::Reqwest)
@@ -837,6 +1175,7 @@ async fn send_request_inner(
 
 pub(crate) enum DirectHttpResponse {
     Reqwest(reqwest::Response),
+    HyperH2c(hyper::Response<HyperIncomingBody>),
     BrowserWreq(wreq::Response),
 }
 
@@ -844,6 +1183,7 @@ impl DirectHttpResponse {
     pub(crate) fn status_code(&self) -> u16 {
         match self {
             DirectHttpResponse::Reqwest(response) => response.status().as_u16(),
+            DirectHttpResponse::HyperH2c(response) => response.status().as_u16(),
             DirectHttpResponse::BrowserWreq(response) => response.status().as_u16(),
         }
     }
@@ -851,6 +1191,7 @@ impl DirectHttpResponse {
     pub(crate) fn headers(&self) -> BTreeMap<String, String> {
         match self {
             DirectHttpResponse::Reqwest(response) => collect_response_headers(response.headers()),
+            DirectHttpResponse::HyperH2c(response) => collect_response_headers(response.headers()),
             DirectHttpResponse::BrowserWreq(response) => {
                 collect_response_headers(response.headers())
             }
@@ -862,6 +1203,14 @@ impl DirectHttpResponse {
             DirectHttpResponse::Reqwest(response) => response.bytes().await.map_err(|err| {
                 ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
             }),
+            DirectHttpResponse::HyperH2c(response) => response
+                .into_body()
+                .collect()
+                .await
+                .map(|collected| collected.to_bytes())
+                .map_err(|err| {
+                    ExecutionRuntimeTransportError::UpstreamRequest(format_hyper_error_chain(&err))
+                }),
             DirectHttpResponse::BrowserWreq(response) => response.bytes().await.map_err(|err| {
                 ExecutionRuntimeTransportError::BrowserBody(format_wreq_upstream_request_error(
                     &err,
@@ -884,6 +1233,9 @@ impl DirectHttpResponse {
             DirectHttpResponse::Reqwest(response) => {
                 collect_reqwest_stream_body(response, started_at, first_byte_timeout).await
             }
+            DirectHttpResponse::HyperH2c(response) => {
+                collect_hyper_stream_body(response, started_at, first_byte_timeout).await
+            }
             DirectHttpResponse::BrowserWreq(response) => {
                 collect_wreq_stream_body(response, started_at, first_byte_timeout).await
             }
@@ -893,6 +1245,7 @@ impl DirectHttpResponse {
     fn into_direct_upstream_response(self) -> DirectUpstreamResponse {
         match self {
             DirectHttpResponse::Reqwest(response) => DirectUpstreamResponse::Reqwest(response),
+            DirectHttpResponse::HyperH2c(response) => DirectUpstreamResponse::HyperH2c(response),
             DirectHttpResponse::BrowserWreq(response) => {
                 DirectUpstreamResponse::BrowserWreq(response)
             }
@@ -956,6 +1309,36 @@ async fn collect_reqwest_stream_body(
     Ok((Bytes::from(body_bytes), first_byte_ms))
 }
 
+async fn collect_hyper_stream_body(
+    response: hyper::Response<HyperIncomingBody>,
+    started_at: Instant,
+    first_byte_timeout: Option<Duration>,
+) -> Result<(Bytes, Option<u64>), ExecutionRuntimeTransportError> {
+    let mut stream = response.into_body().into_data_stream();
+    let mut body_bytes = Vec::new();
+    let mut first_byte_ms = None;
+
+    loop {
+        let item = if first_byte_ms.is_none() {
+            await_stream_body_first_item(stream.next(), started_at, first_byte_timeout).await?
+        } else {
+            stream.next().await
+        };
+        let Some(item) = item else {
+            break;
+        };
+        let chunk = item.map_err(|err| {
+            ExecutionRuntimeTransportError::UpstreamRequest(format_hyper_error_chain(&err))
+        })?;
+        if first_byte_ms.is_none() && !chunk.is_empty() {
+            first_byte_ms = Some(started_at.elapsed().as_millis() as u64);
+        }
+        body_bytes.extend_from_slice(&chunk);
+    }
+
+    Ok((Bytes::from(body_bytes), first_byte_ms))
+}
+
 async fn collect_wreq_stream_body(
     response: wreq::Response,
     started_at: Instant,
@@ -984,6 +1367,561 @@ async fn collect_wreq_stream_body(
     }
 
     Ok((Bytes::from(body_bytes), first_byte_ms))
+}
+
+fn direct_h2c_fast_path_applies(
+    plan: &ExecutionPlan,
+    transport_controls: ExecutionTransportControls,
+) -> bool {
+    if !direct_h2c_fast_path_enabled()
+        || !plan.stream
+        || transport_controls.http1_only
+        || transport_controls.accept_invalid_certs
+        || plan.proxy.is_some()
+        || !transport_profile_h2c_prior_knowledge(plan.transport_profile.as_ref())
+    {
+        return false;
+    }
+
+    reqwest::Url::parse(plan.url.as_str())
+        .ok()
+        .is_some_and(|url| url.scheme() == "http")
+}
+
+fn direct_h2c_fast_path_enabled() -> bool {
+    std::env::var(DIRECT_H2C_FAST_PATH_ENV)
+        .ok()
+        .is_some_and(|value| matches_truthy_env_value(value.trim()))
+}
+
+pub(crate) async fn prewarm_direct_h2c_sender_cache_from_env(
+) -> Result<Option<DirectH2cSenderPrewarmReport>, ExecutionRuntimeTransportError> {
+    let urls = direct_h2c_prewarm_urls_from_env();
+    if urls.is_empty() {
+        return Ok(None);
+    }
+
+    let ready_required = direct_h2c_prewarm_ready_required();
+    let report = prewarm_direct_h2c_sender_cache_urls(urls, ready_required).await;
+    if ready_required && report.failed_targets > 0 {
+        return Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
+            "direct h2c sender prewarm failed for {}/{} targets{}",
+            report.failed_targets,
+            report.unique_targets,
+            report
+                .first_error
+                .as_deref()
+                .map(|err| format!(": {err}"))
+                .unwrap_or_default()
+        )));
+    }
+    Ok(Some(report))
+}
+
+async fn prewarm_direct_h2c_sender_cache_urls(
+    urls: Vec<String>,
+    ready_required: bool,
+) -> DirectH2cSenderPrewarmReport {
+    let started_at = Instant::now();
+    let requested_urls = urls.len() as u64;
+    DIRECT_H2C_SENDER_CACHE_METRICS
+        .prewarm_requested
+        .fetch_add(requested_urls, Ordering::Relaxed);
+
+    let connect_timeout_ms =
+        env_positive_usize(DIRECT_H2C_PREWARM_CONNECT_TIMEOUT_MS_ENV).map(|value| value as u64);
+    let timeouts = connect_timeout_ms.map(|connect_ms| aether_contracts::ExecutionTimeouts {
+        connect_ms: Some(connect_ms),
+        ..Default::default()
+    });
+    let (keys, parse_failures, mut first_error) =
+        direct_h2c_sender_prewarm_cache_keys(&urls, timeouts.as_ref());
+    let unique_targets = keys.len() as u64;
+    if parse_failures > 0 {
+        DIRECT_H2C_SENDER_CACHE_METRICS
+            .prewarm_failed
+            .fetch_add(parse_failures, Ordering::Relaxed);
+    }
+
+    let mut warmed_targets = 0;
+    let mut failed_targets = parse_failures;
+    let mut pending = FuturesUnordered::new();
+    for key in keys {
+        pending.push(prewarm_direct_h2c_sender_cache_key(key));
+    }
+
+    while let Some(result) = pending.next().await {
+        match result {
+            Ok(()) => {
+                warmed_targets += 1;
+                DIRECT_H2C_SENDER_CACHE_METRICS
+                    .prewarm_success
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Err(err) => {
+                failed_targets += 1;
+                DIRECT_H2C_SENDER_CACHE_METRICS
+                    .prewarm_failed
+                    .fetch_add(1, Ordering::Relaxed);
+                if first_error.is_none() {
+                    first_error = Some(err.to_string());
+                }
+            }
+        }
+    }
+
+    observe_gateway_stage_ms(
+        "direct_h2c_sender_cache_prewarm",
+        started_at.elapsed().as_millis() as u64,
+    );
+    DirectH2cSenderPrewarmReport {
+        requested_urls,
+        unique_targets,
+        warmed_targets,
+        failed_targets,
+        ready_required,
+        first_error,
+    }
+}
+
+async fn prewarm_direct_h2c_sender_cache_key(
+    cache_key: DirectHyperH2cClientCacheKey,
+) -> Result<(), ExecutionRuntimeTransportError> {
+    let cell = direct_h2c_sender_cache_cell(&cache_key);
+    cell.get_or_try_init(|| async {
+        let target_len = direct_h2c_client_shard_count();
+        build_direct_h2c_sender_cache_entry_from_cache_key(&cache_key, target_len)
+            .await
+            .map(Arc::new)
+    })
+    .await?;
+    Ok(())
+}
+
+fn direct_h2c_sender_prewarm_cache_keys(
+    urls: &[String],
+    timeouts: Option<&aether_contracts::ExecutionTimeouts>,
+) -> (Vec<DirectHyperH2cClientCacheKey>, u64, Option<String>) {
+    let mut seen = HashSet::new();
+    let mut keys = Vec::new();
+    let mut failed = 0;
+    let mut first_error = None;
+    for url in urls {
+        match direct_h2c_client_cache_key(url, timeouts) {
+            Ok(key) => {
+                if seen.insert(key.clone()) {
+                    keys.push(key);
+                }
+            }
+            Err(err) => {
+                failed += 1;
+                if first_error.is_none() {
+                    first_error = Some(err.to_string());
+                }
+            }
+        }
+    }
+    (keys, failed, first_error)
+}
+
+fn direct_h2c_prewarm_urls_from_env() -> Vec<String> {
+    std::env::var(DIRECT_H2C_PREWARM_URLS_ENV)
+        .ok()
+        .map(|value| {
+            value
+                .split([',', ';', '\n', '\t', ' '])
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn direct_h2c_prewarm_ready_required() -> bool {
+    std::env::var(DIRECT_H2C_PREWARM_READY_ENV)
+        .ok()
+        .is_some_and(|value| matches_truthy_env_value(value.trim()))
+}
+
+async fn cached_direct_h2c_sender(
+    request_url: &str,
+    timeouts: Option<&aether_contracts::ExecutionTimeouts>,
+) -> Result<DirectHyperH2cSenderLease, ExecutionRuntimeTransportError> {
+    let cache_key = direct_h2c_client_cache_key(request_url, timeouts)?;
+    let cell = direct_h2c_sender_cache_cell(&cache_key);
+    let entry = cell
+        .get_or_try_init(|| async {
+            let target_len = direct_h2c_client_shard_count();
+            build_direct_h2c_sender_cache_entry_from_cache_key(&cache_key, target_len)
+                .await
+                .map(Arc::new)
+        })
+        .await?;
+    Ok(entry.select())
+}
+
+fn direct_h2c_sender_cache_cell(
+    cache_key: &DirectHyperH2cClientCacheKey,
+) -> Arc<DirectHyperH2cSenderCacheCell> {
+    let cache_lock_started_at = Instant::now();
+    if let Ok(mut cache) = DIRECT_H2C_SENDER_CACHE.lock() {
+        observe_gateway_stage_ms(
+            "direct_reqwest_client_cache_lock",
+            cache_lock_started_at.elapsed().as_millis() as u64,
+        );
+        if let Some(cell) = cache.get(cache_key) {
+            DIRECT_H2C_SENDER_CACHE_METRICS
+                .hits
+                .fetch_add(1, Ordering::Relaxed);
+            Arc::clone(cell)
+        } else {
+            DIRECT_H2C_SENDER_CACHE_METRICS
+                .misses
+                .fetch_add(1, Ordering::Relaxed);
+            let cell = Arc::new(TokioOnceCell::new());
+            cache.insert(cache_key.clone(), Arc::clone(&cell));
+            cell
+        }
+    } else {
+        observe_gateway_stage_ms(
+            "direct_reqwest_client_cache_lock",
+            cache_lock_started_at.elapsed().as_millis() as u64,
+        );
+        DIRECT_H2C_SENDER_CACHE_METRICS
+            .misses
+            .fetch_add(1, Ordering::Relaxed);
+        Arc::new(TokioOnceCell::new())
+    }
+}
+
+fn direct_h2c_client_cache_key(
+    request_url: &str,
+    timeouts: Option<&aether_contracts::ExecutionTimeouts>,
+) -> Result<DirectHyperH2cClientCacheKey, ExecutionRuntimeTransportError> {
+    let upstream_origin = direct_reqwest_upstream_origin(request_url).ok_or_else(|| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format!(
+            "invalid h2c upstream origin: {request_url}"
+        ))
+    })?;
+    Ok(DirectHyperH2cClientCacheKey {
+        upstream_origin,
+        connect_timeout_ms: timeouts.and_then(|timeouts| timeouts.connect_ms),
+        pool_max_idle_per_host: direct_h2c_pool_max_idle_per_host(),
+    })
+}
+
+async fn build_direct_h2c_sender_cache_entry_from_cache_key(
+    cache_key: &DirectHyperH2cClientCacheKey,
+    target_len: usize,
+) -> Result<DirectHyperH2cSenderCacheEntry, ExecutionRuntimeTransportError> {
+    let mut pending = FuturesUnordered::new();
+    for _ in 0..target_len {
+        pending.push(connect_direct_h2c_sender(cache_key));
+    }
+
+    let mut senders = Vec::with_capacity(target_len);
+    while let Some(sender) = pending.next().await {
+        senders.push(sender?);
+        DIRECT_H2C_SENDER_CACHE_METRICS
+            .builds
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(DirectHyperH2cSenderCacheEntry::new(senders, target_len))
+}
+
+async fn connect_direct_h2c_sender(
+    cache_key: &DirectHyperH2cClientCacheKey,
+) -> Result<DirectHyperH2cSender, ExecutionRuntimeTransportError> {
+    let upstream = reqwest::Url::parse(&cache_key.upstream_origin).map_err(|err| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format!(
+            "invalid h2c upstream origin {}: {err}",
+            cache_key.upstream_origin
+        ))
+    })?;
+    let host = upstream.host_str().ok_or_else(|| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format!(
+            "missing h2c upstream host: {}",
+            cache_key.upstream_origin
+        ))
+    })?;
+    let port = upstream.port_or_known_default().ok_or_else(|| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format!(
+            "missing h2c upstream port: {}",
+            cache_key.upstream_origin
+        ))
+    })?;
+    let connect = TcpStream::connect((host, port));
+    let stream = if let Some(timeout_ms) = cache_key.connect_timeout_ms {
+        let timeout = Duration::from_millis(timeout_ms);
+        tokio::time::timeout(timeout, connect)
+            .await
+            .map_err(|_| {
+                ExecutionRuntimeTransportError::UpstreamRequest(stream_first_byte_timeout_message(
+                    timeout,
+                ))
+            })?
+            .map_err(|err| {
+                ExecutionRuntimeTransportError::UpstreamRequest(format!(
+                    "failed to connect h2c upstream {}: {err}",
+                    cache_key.upstream_origin
+                ))
+            })?
+    } else {
+        connect.await.map_err(|err| {
+            ExecutionRuntimeTransportError::UpstreamRequest(format!(
+                "failed to connect h2c upstream {}: {err}",
+                cache_key.upstream_origin
+            ))
+        })?
+    };
+    stream.set_nodelay(true).map_err(|err| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format!(
+            "failed to configure h2c upstream socket {}: {err}",
+            cache_key.upstream_origin
+        ))
+    })?;
+    let io = TokioIo::new(stream);
+    let mut builder = hyper::client::conn::http2::Builder::new(TokioExecutor::new());
+    builder.adaptive_window(true);
+    let (sender, connection) = builder.handshake(io).await.map_err(|err| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format_hyper_error_chain(&err))
+    })?;
+    tokio::spawn(async move {
+        if let Err(err) = connection.await {
+            tracing::debug!(
+                error = %format_hyper_error_chain(&err),
+                "direct h2c sender connection closed"
+            );
+        }
+    });
+    Ok(sender)
+}
+
+fn cached_direct_h2c_client(
+    request_url: &str,
+    timeouts: Option<&aether_contracts::ExecutionTimeouts>,
+) -> Result<DirectHyperH2cClient, ExecutionRuntimeTransportError> {
+    let cache_key = direct_h2c_client_cache_key(request_url, timeouts)?;
+
+    let cache_lock_started_at = Instant::now();
+    if let Ok(mut cache) = DIRECT_H2C_CLIENT_CACHE.lock() {
+        observe_gateway_stage_ms(
+            "direct_reqwest_client_cache_lock",
+            cache_lock_started_at.elapsed().as_millis() as u64,
+        );
+        if let Some(entry) = cache.get(&cache_key) {
+            DIRECT_H2C_CLIENT_CACHE_METRICS
+                .hits
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(entry.select());
+        }
+
+        DIRECT_H2C_CLIENT_CACHE_METRICS
+            .misses
+            .fetch_add(1, Ordering::Relaxed);
+        let target_len = direct_h2c_client_shard_count();
+        let mut clients = Vec::with_capacity(target_len);
+        for _ in 0..target_len {
+            clients.push(build_direct_h2c_client_from_cache_key(&cache_key));
+            DIRECT_H2C_CLIENT_CACHE_METRICS
+                .builds
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        let entry = DirectHyperH2cClientCacheEntry::new(clients, target_len);
+        let client = entry.select();
+        cache.insert(cache_key, entry);
+        return Ok(client);
+    }
+
+    observe_gateway_stage_ms(
+        "direct_reqwest_client_cache_lock",
+        cache_lock_started_at.elapsed().as_millis() as u64,
+    );
+    DIRECT_H2C_CLIENT_CACHE_METRICS
+        .misses
+        .fetch_add(1, Ordering::Relaxed);
+    DIRECT_H2C_CLIENT_CACHE_METRICS
+        .builds
+        .fetch_add(1, Ordering::Relaxed);
+    Ok(build_direct_h2c_client_from_cache_key(&cache_key))
+}
+
+fn build_direct_h2c_client_from_cache_key(
+    cache_key: &DirectHyperH2cClientCacheKey,
+) -> DirectHyperH2cClient {
+    let mut connector = HttpConnector::new();
+    connector.enforce_http(true);
+    connector.set_nodelay(true);
+    connector.set_connect_timeout(cache_key.connect_timeout_ms.map(Duration::from_millis));
+
+    let mut builder = HyperLegacyClient::builder(TokioExecutor::new());
+    builder.http2_only(true);
+    builder.http2_adaptive_window(true);
+    builder.pool_max_idle_per_host(cache_key.pool_max_idle_per_host);
+    builder.build(connector)
+}
+
+fn direct_h2c_pool_max_idle_per_host() -> usize {
+    *DIRECT_H2C_POOL_MAX_IDLE_PER_HOST
+}
+
+fn direct_h2c_client_shard_count() -> usize {
+    if let Some(shards) = env_positive_usize(DIRECT_H2C_CLIENT_SHARDS_ENV) {
+        return shards.clamp(1, MAX_DIRECT_H2C_CLIENT_SHARDS);
+    }
+    let target_gate_limit = crate::state::upstream_target_gate_limit_from_env()
+        .unwrap_or_else(crate::state::upstream_target_gate_auto_limit);
+    let streams_per_client = env_positive_usize(DIRECT_H2C_TARGET_STREAMS_PER_CLIENT_ENV)
+        .unwrap_or(DEFAULT_DIRECT_H2C_TARGET_STREAMS_PER_CLIENT)
+        .max(1);
+    target_gate_limit
+        .max(1)
+        .div_ceil(streams_per_client)
+        .clamp(1, MAX_DIRECT_H2C_CLIENT_SHARDS)
+}
+
+fn direct_h2c_sender_select_window() -> usize {
+    *DIRECT_H2C_SENDER_SELECT_WINDOW
+}
+
+async fn send_via_direct_h2c_fast_path(
+    plan: &ExecutionPlan,
+    method: reqwest::Method,
+    headers: HeaderMap,
+    body_bytes: Vec<u8>,
+    stream_first_byte_timeout: Option<Duration>,
+) -> Result<hyper::Response<HyperIncomingBody>, ExecutionRuntimeTransportError> {
+    let client_select_started_at = Instant::now();
+    let sender = cached_direct_h2c_sender(&plan.url, plan.timeouts.as_ref()).await?;
+    observe_gateway_stage_ms(
+        "direct_h2c_client_select",
+        client_select_started_at.elapsed().as_millis() as u64,
+    );
+
+    let request_build_started_at = Instant::now();
+    let uri = plan.url.parse::<hyper::Uri>().map_err(|err| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format!("invalid h2c upstream uri: {err}"))
+    })?;
+    let authority = uri
+        .authority()
+        .map(|authority| authority.as_str().to_string());
+    let mut builder = hyper::Request::builder().method(method.as_str()).uri(uri);
+    {
+        let target_headers = builder.headers_mut().ok_or_else(|| {
+            ExecutionRuntimeTransportError::UpstreamRequest(
+                "failed to prepare h2c request headers".to_string(),
+            )
+        })?;
+        *target_headers = headers;
+        if !target_headers.contains_key(reqwest::header::HOST) {
+            if let Some(authority) = authority.as_deref() {
+                let value = HeaderValue::from_str(authority).map_err(|_| {
+                    ExecutionRuntimeTransportError::InvalidHeaderValue("host".to_string())
+                })?;
+                target_headers.insert(reqwest::header::HOST, value);
+            }
+        }
+    }
+    let request = builder
+        .body(Full::new(Bytes::from(body_bytes)))
+        .map_err(|err| {
+            ExecutionRuntimeTransportError::UpstreamRequest(format!(
+                "failed to build h2c request: {err}"
+            ))
+        })?;
+    observe_gateway_stage_ms(
+        "direct_h2c_request_build",
+        request_build_started_at.elapsed().as_millis() as u64,
+    );
+
+    send_hyper_h2c_request(sender, request, stream_first_byte_timeout).await
+}
+
+async fn send_hyper_h2c_request(
+    mut sender: DirectHyperH2cSenderLease,
+    request: hyper::Request<DirectHyperH2cRequestBody>,
+    stream_first_byte_timeout: Option<Duration>,
+) -> Result<hyper::Response<HyperIncomingBody>, ExecutionRuntimeTransportError> {
+    let started_at = Instant::now();
+    let deadline = stream_first_byte_timeout.map(|timeout| (timeout, Instant::now() + timeout));
+
+    let ready_started_at = Instant::now();
+    let ready_result = if let Some((timeout, deadline)) = deadline {
+        match direct_h2c_remaining_timeout(deadline) {
+            Some(remaining) => match tokio::time::timeout(remaining, sender.sender().ready()).await
+            {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(err)) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                    format_hyper_error_chain(&err),
+                )),
+                Err(_) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                    stream_first_byte_timeout_message(timeout),
+                )),
+            },
+            None => Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                stream_first_byte_timeout_message(timeout),
+            )),
+        }
+    } else {
+        sender.sender().ready().await.map_err(|err| {
+            ExecutionRuntimeTransportError::UpstreamRequest(format_hyper_error_chain(&err))
+        })
+    };
+    observe_gateway_stage_ms(
+        "direct_h2c_sender_ready_wait",
+        ready_started_at.elapsed().as_millis() as u64,
+    );
+    ready_result?;
+
+    let headers_started_at = Instant::now();
+    let dispatch_started_at = Instant::now();
+    let response_future = sender.sender().send_request(request);
+    observe_gateway_stage_ms(
+        "direct_h2c_request_dispatch",
+        dispatch_started_at.elapsed().as_millis() as u64,
+    );
+
+    let response_headers_started_at = Instant::now();
+    let response_result = if let Some((timeout, deadline)) = deadline {
+        match direct_h2c_remaining_timeout(deadline) {
+            Some(remaining) => match tokio::time::timeout(remaining, response_future).await {
+                Ok(Ok(response)) => Ok(response),
+                Ok(Err(err)) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                    format_hyper_error_chain(&err),
+                )),
+                Err(_) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                    stream_first_byte_timeout_message(timeout),
+                )),
+            },
+            None => Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                stream_first_byte_timeout_message(timeout),
+            )),
+        }
+    } else {
+        response_future.await.map_err(|err| {
+            ExecutionRuntimeTransportError::UpstreamRequest(format_hyper_error_chain(&err))
+        })
+    };
+    observe_gateway_stage_ms(
+        "direct_h2c_response_headers_wait",
+        response_headers_started_at.elapsed().as_millis() as u64,
+    );
+    observe_gateway_stage_ms(
+        "direct_h2c_request_headers_wait",
+        headers_started_at.elapsed().as_millis() as u64,
+    );
+    let response = response_result?;
+    sender.release();
+    observe_gateway_stage_ms(
+        "direct_h2c_request_send",
+        started_at.elapsed().as_millis() as u64,
+    );
+    Ok(response)
+}
+
+fn direct_h2c_remaining_timeout(deadline: Instant) -> Option<Duration> {
+    deadline.checked_duration_since(Instant::now())
 }
 
 async fn send_via_browser_wreq_transport(
@@ -1327,9 +2265,16 @@ async fn send_reqwest_request(
     request: reqwest::RequestBuilder,
     stream_first_byte_timeout: Option<Duration>,
 ) -> Result<reqwest::Response, ExecutionRuntimeTransportError> {
+    let started_at = Instant::now();
     if let Some(timeout) = stream_first_byte_timeout {
         return match tokio::time::timeout(timeout, request.send()).await {
-            Ok(Ok(response)) => Ok(response),
+            Ok(Ok(response)) => {
+                observe_gateway_stage_ms(
+                    "direct_reqwest_request_send",
+                    started_at.elapsed().as_millis() as u64,
+                );
+                Ok(response)
+            }
             Ok(Err(error)) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
                 format_upstream_request_error(&error),
             )),
@@ -1339,9 +2284,14 @@ async fn send_reqwest_request(
         };
     }
 
-    request.send().await.map_err(|err| {
+    let response = request.send().await.map_err(|err| {
         ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
-    })
+    })?;
+    observe_gateway_stage_ms(
+        "direct_reqwest_request_send",
+        started_at.elapsed().as_millis() as u64,
+    );
+    Ok(response)
 }
 
 async fn send_wreq_request(
@@ -1445,6 +2395,7 @@ fn resolve_local_tunnel_node_id(state: &AppState, proxy: Option<&ProxySnapshot>)
 }
 
 fn build_client(
+    request_url: &str,
     timeouts: Option<&aether_contracts::ExecutionTimeouts>,
     proxy: Option<&ProxySnapshot>,
     transport_profile: Option<&ResolvedTransportProfile>,
@@ -1453,12 +2404,40 @@ fn build_client(
     validate_reqwest_transport_profile(transport_profile)?;
     let resolved_proxy_url = resolve_proxy_url(proxy)?;
     let cache_key = direct_reqwest_client_cache_key(
+        request_url,
         timeouts,
         resolved_proxy_url,
         transport_profile,
         transport_controls,
     );
     cached_direct_reqwest_client(cache_key)
+}
+
+fn direct_reqwest_effective_transport_controls(
+    plan: &ExecutionPlan,
+    mut transport_controls: ExecutionTransportControls,
+) -> ExecutionTransportControls {
+    if transport_controls.http1_only || !plan.stream {
+        return transport_controls;
+    }
+    if transport_profile_h2c_prior_knowledge(plan.transport_profile.as_ref()) {
+        return transport_controls;
+    }
+    if direct_reqwest_stream_http_mode() == DirectReqwestStreamHttpMode::Http1 {
+        transport_controls.http1_only = true;
+    }
+    transport_controls
+}
+
+fn direct_reqwest_stream_http_mode() -> DirectReqwestStreamHttpMode {
+    *DIRECT_REQWEST_STREAM_HTTP_MODE
+}
+
+fn parse_direct_reqwest_stream_http_mode(value: &str) -> DirectReqwestStreamHttpMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" | "profile" | "provider" => DirectReqwestStreamHttpMode::Auto,
+        _ => DirectReqwestStreamHttpMode::Http1,
+    }
 }
 
 pub(crate) fn prewarm_direct_reqwest_client_cache_for_plan(plan: &ExecutionPlan) {
@@ -1489,10 +2468,17 @@ fn try_prewarm_direct_reqwest_client_cache_for_plan(
         return Ok(false);
     }
 
-    let transport_controls = resolve_execution_transport_controls(&plan.headers);
+    let transport_controls = direct_reqwest_effective_transport_controls(
+        plan,
+        resolve_execution_transport_controls(&plan.headers),
+    );
+    if direct_h2c_fast_path_applies(plan, transport_controls) {
+        return Ok(false);
+    }
     validate_reqwest_transport_profile(plan.transport_profile.as_ref())?;
     let resolved_proxy_url = resolve_proxy_url(plan.proxy.as_ref())?;
     let cache_key = direct_reqwest_client_cache_key(
+        &plan.url,
         plan.timeouts.as_ref(),
         resolved_proxy_url,
         plan.transport_profile.as_ref(),
@@ -1506,7 +2492,12 @@ fn prewarm_direct_reqwest_client_cache(
     cache_key: DirectReqwestClientCacheKey,
 ) -> Result<(), ExecutionRuntimeTransportError> {
     let mut warm_after_unlock = None;
+    let cache_lock_started_at = Instant::now();
     if let Ok(mut cache) = DIRECT_REQWEST_CLIENT_CACHE.lock() {
+        observe_gateway_stage_ms(
+            "direct_reqwest_client_cache_lock",
+            cache_lock_started_at.elapsed().as_millis() as u64,
+        );
         if let Some(entry) = cache.get_mut(&cache_key) {
             if entry.should_warm() {
                 entry.warming = true;
@@ -1527,7 +2518,7 @@ fn prewarm_direct_reqwest_client_cache(
         }
 
         let target_len = direct_reqwest_client_shard_count(&cache_key);
-        let initial_len = direct_reqwest_initial_client_shard_count(target_len);
+        let initial_len = direct_reqwest_prewarm_client_shard_count(target_len);
         let mut clients = Vec::with_capacity(initial_len);
         for _ in 0..initial_len {
             clients.push(build_direct_reqwest_client_from_cache_key(&cache_key)?);
@@ -1550,6 +2541,11 @@ fn prewarm_direct_reqwest_client_cache(
                 mark_direct_reqwest_client_cache_not_warming(&cache_key);
             }
         }
+    } else {
+        observe_gateway_stage_ms(
+            "direct_reqwest_client_cache_lock",
+            cache_lock_started_at.elapsed().as_millis() as u64,
+        );
     }
     Ok(())
 }
@@ -1558,11 +2554,17 @@ fn cached_direct_reqwest_client(
     cache_key: DirectReqwestClientCacheKey,
 ) -> Result<reqwest::Client, ExecutionRuntimeTransportError> {
     let mut warm_after_unlock = None;
+    let cache_lock_started_at = Instant::now();
     if let Ok(mut cache) = DIRECT_REQWEST_CLIENT_CACHE.lock() {
+        observe_gateway_stage_ms(
+            "direct_reqwest_client_cache_lock",
+            cache_lock_started_at.elapsed().as_millis() as u64,
+        );
         if let Some(entry) = cache.get_mut(&cache_key) {
             DIRECT_REQWEST_CLIENT_CACHE_METRICS
                 .hits
                 .fetch_add(1, Ordering::Relaxed);
+            record_direct_reqwest_client_protocol_selection(&cache_key);
             let client = entry.select();
             if entry.should_warm() {
                 entry.warming = true;
@@ -1595,6 +2597,7 @@ fn cached_direct_reqwest_client(
         }
         let entry =
             DirectReqwestClientCacheEntry::new(clients, target_len, target_len > initial_len);
+        record_direct_reqwest_client_protocol_selection(&cache_key);
         let client = entry.select();
         let warm_key = (target_len > initial_len).then(|| cache_key.clone());
         cache.insert(cache_key, entry);
@@ -1612,9 +2615,14 @@ fn cached_direct_reqwest_client(
         return Ok(client);
     }
 
+    observe_gateway_stage_ms(
+        "direct_reqwest_client_cache_lock",
+        cache_lock_started_at.elapsed().as_millis() as u64,
+    );
     DIRECT_REQWEST_CLIENT_CACHE_METRICS
         .misses
         .fetch_add(1, Ordering::Relaxed);
+    record_direct_reqwest_client_protocol_selection(&cache_key);
     let client = build_direct_reqwest_client_from_cache_key(&cache_key)?;
     DIRECT_REQWEST_CLIENT_CACHE_METRICS
         .builds
@@ -1628,11 +2636,21 @@ fn spawn_direct_reqwest_client_cache_warm(
     target_len: usize,
 ) -> bool {
     if target_len <= existing_len {
+        DIRECT_REQWEST_CLIENT_CACHE_METRICS
+            .warm_skipped_total
+            .fetch_add(1, Ordering::Relaxed);
         return false;
     }
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        DIRECT_REQWEST_CLIENT_CACHE_METRICS
+            .warm_skipped_total
+            .fetch_add(1, Ordering::Relaxed);
         return false;
     };
+    DIRECT_REQWEST_CLIENT_CACHE_METRICS
+        .warm_enqueues
+        .fetch_add(1, Ordering::Relaxed);
+    let enqueue_started_at = Instant::now();
     handle.spawn_blocking(move || {
         for _ in existing_len..target_len {
             match build_direct_reqwest_client_from_cache_key(&cache_key) {
@@ -1675,6 +2693,10 @@ fn spawn_direct_reqwest_client_cache_warm(
         };
         entry.warming = false;
     });
+    observe_gateway_stage_ms(
+        "direct_reqwest_client_cache_warm_enqueue",
+        enqueue_started_at.elapsed().as_millis() as u64,
+    );
     true
 }
 
@@ -1695,12 +2717,16 @@ fn mark_direct_reqwest_client_cache_not_warming(cache_key: &DirectReqwestClientC
 }
 
 fn direct_reqwest_client_cache_key(
+    request_url: &str,
     timeouts: Option<&aether_contracts::ExecutionTimeouts>,
     proxy_url: Option<String>,
     transport_profile: Option<&ResolvedTransportProfile>,
     transport_controls: ExecutionTransportControls,
 ) -> DirectReqwestClientCacheKey {
     DirectReqwestClientCacheKey {
+        upstream_origin: direct_reqwest_cache_per_origin()
+            .then(|| direct_reqwest_upstream_origin(request_url))
+            .flatten(),
         connect_timeout_ms: timeouts.and_then(|timeouts| timeouts.connect_ms),
         proxy_url,
         follow_redirects: transport_controls.follow_redirects == Some(true),
@@ -1708,6 +2734,30 @@ fn direct_reqwest_client_cache_key(
         accept_invalid_certs: transport_controls.accept_invalid_certs,
         transport_profile: transport_profile.map(direct_reqwest_transport_profile_cache_key),
     }
+}
+
+fn direct_reqwest_cache_per_origin() -> bool {
+    std::env::var(DIRECT_REQWEST_CACHE_PER_ORIGIN_ENV)
+        .ok()
+        .is_some_and(|value| matches_truthy_env_value(value.trim()))
+}
+
+fn matches_truthy_env_value(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn direct_reqwest_upstream_origin(request_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(request_url).ok()?;
+    let scheme = url.scheme();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let host = url.host_str()?;
+    let port = url.port_or_known_default()?;
+    Some(format!("{scheme}://{host}:{port}"))
 }
 
 fn direct_reqwest_transport_profile_cache_key(
@@ -1743,13 +2793,22 @@ fn build_direct_reqwest_client_cache_entry_from_cache_key(
 }
 
 fn direct_reqwest_client_shard_count(cache_key: &DirectReqwestClientCacheKey) -> usize {
+    if let Some(shards) = env_positive_usize(DIRECT_REQWEST_CLIENT_SHARDS_ENV) {
+        return shards.clamp(1, MAX_DIRECT_REQWEST_H2_CLIENT_SHARDS);
+    }
+    let target_gate_limit = crate::state::upstream_target_gate_limit_from_env()
+        .unwrap_or_else(crate::state::upstream_target_gate_auto_limit);
     if !direct_reqwest_client_cache_key_uses_http2(cache_key) {
-        return 1;
+        return direct_reqwest_client_shards_from_config(
+            None,
+            target_gate_limit,
+            env_positive_usize(DIRECT_REQWEST_HTTP1_TARGET_STREAMS_PER_CLIENT_ENV)
+                .unwrap_or(DEFAULT_HTTP1_TARGET_STREAMS_PER_CLIENT),
+        );
     }
     direct_reqwest_h2_client_shards_from_config(
         env_positive_usize(DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV),
-        env_positive_usize(UPSTREAM_TARGET_GATE_LIMIT_ENV)
-            .unwrap_or(DEFAULT_UPSTREAM_TARGET_GATE_LIMIT),
+        target_gate_limit,
         env_positive_usize(DIRECT_REQWEST_H2_TARGET_STREAMS_PER_CLIENT_ENV)
             .unwrap_or(DEFAULT_H2_TARGET_STREAMS_PER_CLIENT),
     )
@@ -1759,13 +2818,49 @@ fn direct_reqwest_client_cache_key_uses_http2(cache_key: &DirectReqwestClientCac
     if cache_key.http1_only {
         return false;
     }
-    let Some(profile) = cache_key.transport_profile.as_ref() else {
-        return false;
-    };
-    profile.http_mode != TRANSPORT_HTTP_MODE_HTTP1_ONLY
+    direct_reqwest_client_cache_key_uses_h2c_prior_knowledge(cache_key)
+}
+
+fn direct_reqwest_client_cache_key_uses_h2c_prior_knowledge(
+    cache_key: &DirectReqwestClientCacheKey,
+) -> bool {
+    cache_key
+        .transport_profile
+        .as_ref()
+        .is_some_and(|profile| profile.http_mode == TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE)
+}
+
+fn record_direct_reqwest_client_protocol_selection(cache_key: &DirectReqwestClientCacheKey) {
+    if cache_key.http1_only {
+        DIRECT_REQWEST_CLIENT_CACHE_METRICS
+            .http1_selections
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    if direct_reqwest_client_cache_key_uses_h2c_prior_knowledge(cache_key) {
+        DIRECT_REQWEST_CLIENT_CACHE_METRICS
+            .h2c_selections
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    DIRECT_REQWEST_CLIENT_CACHE_METRICS
+        .auto_selections
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 fn direct_reqwest_h2_client_shards_from_config(
+    explicit_shards: Option<usize>,
+    target_gate_limit: usize,
+    target_streams_per_client: usize,
+) -> usize {
+    direct_reqwest_client_shards_from_config(
+        explicit_shards,
+        target_gate_limit,
+        target_streams_per_client,
+    )
+}
+
+fn direct_reqwest_client_shards_from_config(
     explicit_shards: Option<usize>,
     target_gate_limit: usize,
     target_streams_per_client: usize,
@@ -1783,7 +2878,14 @@ fn direct_reqwest_h2_client_shards_from_config(
 fn direct_reqwest_initial_client_shard_count(target_len: usize) -> usize {
     env_positive_usize(DIRECT_REQWEST_SYNC_WARM_CLIENTS_ENV)
         .unwrap_or(DEFAULT_DIRECT_REQWEST_SYNC_WARM_CLIENTS)
-        .clamp(1, target_len.max(1))
+        .clamp(1, target_len.clamp(1, MAX_DIRECT_REQWEST_SYNC_WARM_CLIENTS))
+}
+
+fn direct_reqwest_prewarm_client_shard_count(target_len: usize) -> usize {
+    let request_path_cap = direct_reqwest_initial_client_shard_count(target_len);
+    env_positive_usize(DIRECT_REQWEST_PREWARM_SYNC_CLIENTS_ENV)
+        .unwrap_or(request_path_cap)
+        .clamp(1, target_len.max(1).min(request_path_cap))
 }
 
 fn env_positive_usize(name: &str) -> Option<usize> {
@@ -1822,7 +2924,11 @@ fn build_direct_reqwest_client_from_cache_key(
             ..HttpClientConfig::default()
         },
     );
-    builder = apply_transport_profile_cache_key(builder, cache_key.transport_profile.as_ref());
+    builder = apply_transport_profile_cache_key(
+        builder,
+        cache_key.transport_profile.as_ref(),
+        cache_key.http1_only,
+    );
     if cache_key.accept_invalid_certs {
         builder = builder.danger_accept_invalid_certs(true);
     }
@@ -1846,15 +2952,98 @@ fn direct_reqwest_pool_max_idle_per_host() -> usize {
 }
 
 pub(crate) fn direct_reqwest_client_cache_metric_samples() -> Vec<MetricSample> {
-    let (entries, clients) = DIRECT_REQWEST_CLIENT_CACHE
+    let (entries, clients, target_clients, ready_entries, warming_entries, pending_clients) =
+        DIRECT_REQWEST_CLIENT_CACHE
+            .lock()
+            .map(|cache| {
+                let entries = cache.len() as u64;
+                let clients = cache.values().map(|entry| entry.len() as u64).sum();
+                let target_clients = cache.values().map(|entry| entry.target_len as u64).sum();
+                let ready_entries = cache
+                    .values()
+                    .filter(|entry| entry.len() >= entry.target_len)
+                    .count() as u64;
+                let warming_entries = cache.values().filter(|entry| entry.warming).count() as u64;
+                let pending_clients = cache
+                    .values()
+                    .map(|entry| entry.target_len.saturating_sub(entry.len()) as u64)
+                    .sum();
+                (
+                    entries,
+                    clients,
+                    target_clients,
+                    ready_entries,
+                    warming_entries,
+                    pending_clients,
+                )
+            })
+            .unwrap_or((0, 0, 0, 0, 0, 0));
+    let (h2c_entries, h2c_clients, h2c_target_clients) = DIRECT_H2C_CLIENT_CACHE
         .lock()
         .map(|cache| {
             let entries = cache.len() as u64;
             let clients = cache.values().map(|entry| entry.len() as u64).sum();
-            (entries, clients)
+            let target_clients = cache.values().map(|entry| entry.target_len as u64).sum();
+            (entries, clients, target_clients)
         })
-        .unwrap_or((0, 0));
-    vec![
+        .unwrap_or((0, 0, 0));
+    let (
+        h2c_sender_entries,
+        h2c_sender_ready_entries,
+        h2c_senders,
+        h2c_target_senders,
+        h2c_pending_senders,
+        h2c_sender_in_flight,
+        h2c_sender_max_in_flight,
+    ) = DIRECT_H2C_SENDER_CACHE
+        .lock()
+        .map_or((0, 0, 0, 0, 0, 0, 0), |cache| {
+            let entries = cache.len() as u64;
+            let ready_entries = cache
+                .values()
+                .filter_map(|cell| cell.get())
+                .filter(|entry| entry.len() >= entry.target_len)
+                .count() as u64;
+            let senders = cache
+                .values()
+                .filter_map(|cell| cell.get())
+                .map(|entry| entry.len() as u64)
+                .sum();
+            let target_senders = cache
+                .values()
+                .filter_map(|cell| cell.get())
+                .map(|entry| entry.target_len as u64)
+                .sum();
+            let pending_senders = cache
+                .values()
+                .map(|cell| {
+                    cell.get()
+                        .map(|entry| entry.target_len.saturating_sub(entry.len()) as u64)
+                        .unwrap_or_else(|| direct_h2c_client_shard_count() as u64)
+                })
+                .sum();
+            let in_flight = cache
+                .values()
+                .filter_map(|cell| cell.get())
+                .map(|entry| entry.in_flight())
+                .sum();
+            let max_in_flight = cache
+                .values()
+                .filter_map(|cell| cell.get())
+                .map(|entry| entry.max_in_flight())
+                .max()
+                .unwrap_or(0);
+            (
+                entries,
+                ready_entries,
+                senders,
+                target_senders,
+                pending_senders,
+                in_flight,
+                max_in_flight,
+            )
+        });
+    let mut samples = vec![
         MetricSample::new(
             "direct_reqwest_client_cache_entries",
             "Number of cached direct reqwest clients.",
@@ -1866,6 +3055,30 @@ pub(crate) fn direct_reqwest_client_cache_metric_samples() -> Vec<MetricSample> 
             "Number of direct reqwest clients across all cache entries.",
             MetricKind::Gauge,
             clients,
+        ),
+        MetricSample::new(
+            "direct_reqwest_client_cache_target_clients",
+            "Target number of direct reqwest clients across all cache entries.",
+            MetricKind::Gauge,
+            target_clients,
+        ),
+        MetricSample::new(
+            "direct_reqwest_client_cache_ready_entries",
+            "Number of direct reqwest client cache entries at target shard count.",
+            MetricKind::Gauge,
+            ready_entries,
+        ),
+        MetricSample::new(
+            "direct_reqwest_client_cache_warming_entries",
+            "Number of direct reqwest client cache entries currently warming in the background.",
+            MetricKind::Gauge,
+            warming_entries,
+        ),
+        MetricSample::new(
+            "direct_reqwest_client_cache_pending_clients",
+            "Number of direct reqwest client shards still missing from target cache size.",
+            MetricKind::Gauge,
+            pending_clients,
         ),
         MetricSample::new(
             "direct_reqwest_client_cache_hits_total",
@@ -1891,7 +3104,178 @@ pub(crate) fn direct_reqwest_client_cache_metric_samples() -> Vec<MetricSample> 
                 .builds
                 .load(Ordering::Relaxed),
         ),
-    ]
+        MetricSample::new(
+            "direct_reqwest_client_cache_warm_enqueue_total",
+            "Number of background direct reqwest client cache warm jobs enqueued.",
+            MetricKind::Counter,
+            DIRECT_REQWEST_CLIENT_CACHE_METRICS
+                .warm_enqueues
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "direct_reqwest_client_cache_warm_skipped_total",
+            "Number of direct reqwest client cache warm attempts skipped before enqueue.",
+            MetricKind::Counter,
+            DIRECT_REQWEST_CLIENT_CACHE_METRICS
+                .warm_skipped_total
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "direct_reqwest_client_http1_select_total",
+            "Number of direct reqwest client selections using forced HTTP/1.",
+            MetricKind::Counter,
+            DIRECT_REQWEST_CLIENT_CACHE_METRICS
+                .http1_selections
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "direct_reqwest_client_h2c_select_total",
+            "Number of direct reqwest client selections using h2c prior knowledge.",
+            MetricKind::Counter,
+            DIRECT_REQWEST_CLIENT_CACHE_METRICS
+                .h2c_selections
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "direct_reqwest_client_auto_select_total",
+            "Number of direct reqwest client selections using reqwest automatic protocol negotiation.",
+            MetricKind::Counter,
+            DIRECT_REQWEST_CLIENT_CACHE_METRICS
+                .auto_selections
+                .load(Ordering::Relaxed),
+        ),
+    ];
+    samples.extend([
+        MetricSample::new(
+            "direct_h2c_client_cache_entries",
+            "Number of cached direct H2C client entries.",
+            MetricKind::Gauge,
+            h2c_entries,
+        ),
+        MetricSample::new(
+            "direct_h2c_client_cache_clients",
+            "Number of direct H2C clients across all cache entries.",
+            MetricKind::Gauge,
+            h2c_clients,
+        ),
+        MetricSample::new(
+            "direct_h2c_client_cache_target_clients",
+            "Target number of direct H2C clients across all cache entries.",
+            MetricKind::Gauge,
+            h2c_target_clients,
+        ),
+        MetricSample::new(
+            "direct_h2c_client_cache_hits_total",
+            "Number of direct H2C client cache hits.",
+            MetricKind::Counter,
+            DIRECT_H2C_CLIENT_CACHE_METRICS.hits.load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "direct_h2c_client_cache_misses_total",
+            "Number of direct H2C client cache misses.",
+            MetricKind::Counter,
+            DIRECT_H2C_CLIENT_CACHE_METRICS
+                .misses
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "direct_h2c_client_cache_builds_total",
+            "Number of direct H2C clients built after cache misses.",
+            MetricKind::Counter,
+            DIRECT_H2C_CLIENT_CACHE_METRICS
+                .builds
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "direct_h2c_sender_cache_entries",
+            "Number of cached direct H2C sender entries.",
+            MetricKind::Gauge,
+            h2c_sender_entries,
+        ),
+        MetricSample::new(
+            "direct_h2c_sender_cache_senders",
+            "Number of direct H2C senders across all cache entries.",
+            MetricKind::Gauge,
+            h2c_senders,
+        ),
+        MetricSample::new(
+            "direct_h2c_sender_cache_ready_entries",
+            "Number of direct H2C sender cache entries at target sender count.",
+            MetricKind::Gauge,
+            h2c_sender_ready_entries,
+        ),
+        MetricSample::new(
+            "direct_h2c_sender_cache_target_senders",
+            "Target number of direct H2C senders across all cache entries.",
+            MetricKind::Gauge,
+            h2c_target_senders,
+        ),
+        MetricSample::new(
+            "direct_h2c_sender_cache_pending_senders",
+            "Number of direct H2C sender connections still missing from target cache size.",
+            MetricKind::Gauge,
+            h2c_pending_senders,
+        ),
+        MetricSample::new(
+            "direct_h2c_sender_cache_in_flight",
+            "Current number of direct H2C requests waiting for upstream headers across sender slots.",
+            MetricKind::Gauge,
+            h2c_sender_in_flight,
+        ),
+        MetricSample::new(
+            "direct_h2c_sender_cache_max_slot_in_flight",
+            "Highest observed in-flight request count on a single direct H2C sender slot.",
+            MetricKind::Gauge,
+            h2c_sender_max_in_flight,
+        ),
+        MetricSample::new(
+            "direct_h2c_sender_cache_hits_total",
+            "Number of direct H2C sender cache hits.",
+            MetricKind::Counter,
+            DIRECT_H2C_SENDER_CACHE_METRICS.hits.load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "direct_h2c_sender_cache_misses_total",
+            "Number of direct H2C sender cache misses.",
+            MetricKind::Counter,
+            DIRECT_H2C_SENDER_CACHE_METRICS
+                .misses
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "direct_h2c_sender_cache_builds_total",
+            "Number of direct H2C senders built after cache misses.",
+            MetricKind::Counter,
+            DIRECT_H2C_SENDER_CACHE_METRICS
+                .builds
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "direct_h2c_sender_cache_prewarm_requested_total",
+            "Number of direct H2C sender prewarm URLs requested.",
+            MetricKind::Counter,
+            DIRECT_H2C_SENDER_CACHE_METRICS
+                .prewarm_requested
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "direct_h2c_sender_cache_prewarm_success_total",
+            "Number of direct H2C sender cache targets successfully prewarmed.",
+            MetricKind::Counter,
+            DIRECT_H2C_SENDER_CACHE_METRICS
+                .prewarm_success
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "direct_h2c_sender_cache_prewarm_failed_total",
+            "Number of direct H2C sender cache prewarm targets or URLs that failed.",
+            MetricKind::Counter,
+            DIRECT_H2C_SENDER_CACHE_METRICS
+                .prewarm_failed
+                .load(Ordering::Relaxed),
+        ),
+    ]);
+    samples
 }
 
 pub(crate) fn build_browser_wreq_client(
@@ -2093,12 +3477,15 @@ fn apply_transport_profile(
 
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    builder.use_preconfigured_tls(build_best_effort_transport_tls_config())
+    builder.use_preconfigured_tls(build_best_effort_transport_tls_config(
+        transport_profile_http1_only(transport_profile),
+    ))
 }
 
 fn apply_transport_profile_cache_key(
     builder: reqwest::ClientBuilder,
     transport_profile: Option<&DirectReqwestTransportProfileCacheKey>,
+    http1_only: bool,
 ) -> reqwest::ClientBuilder {
     let Some(profile) = transport_profile else {
         return builder;
@@ -2110,10 +3497,10 @@ fn apply_transport_profile_cache_key(
 
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    builder.use_preconfigured_tls(build_best_effort_transport_tls_config())
+    builder.use_preconfigured_tls(build_best_effort_transport_tls_config(http1_only))
 }
 
-fn build_best_effort_transport_tls_config() -> rustls::ClientConfig {
+fn build_best_effort_transport_tls_config(http1_only: bool) -> rustls::ClientConfig {
     let root_store =
         rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut config = rustls::ClientConfig::builder_with_protocol_versions(&[
@@ -2122,7 +3509,11 @@ fn build_best_effort_transport_tls_config() -> rustls::ClientConfig {
     ])
     .with_root_certificates(root_store)
     .with_no_client_auth();
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = if http1_only {
+        vec![b"http/1.1".to_vec()]
+    } else {
+        vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+    };
     config
 }
 
@@ -2383,12 +3774,12 @@ pub(crate) fn build_execution_response_body(
 mod tests {
     use std::collections::BTreeMap;
     use std::io::Read;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
     use aether_contracts::{
         ExecutionPlan, ExecutionTimeouts, ProxySnapshot, RequestBody, ResolvedTransportProfile,
         EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
-        TRANSPORT_BACKEND_BROWSER_WREQ, TRANSPORT_BACKEND_REQWEST_RUSTLS,
+        TRANSPORT_BACKEND_BROWSER_WREQ, TRANSPORT_BACKEND_REQWEST_RUSTLS, TRANSPORT_HTTP_MODE_AUTO,
         TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE, TRANSPORT_HTTP_MODE_HTTP1_ONLY,
     };
     use aether_data::repository::proxy_nodes::{
@@ -2483,6 +3874,7 @@ mod tests {
 
         for proxy_url in ["socks5://127.0.0.1:1080", "socks5h://127.0.0.1:1080"] {
             build_client(
+                "https://api.example.test/v1/chat/completions",
                 Some(&timeouts),
                 Some(&aether_contracts::ProxySnapshot {
                     enabled: Some(true),
@@ -2499,8 +3891,36 @@ mod tests {
         }
     }
 
+    struct TestEnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl Drop for TestEnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn set_test_env_var(key: &'static str, value: &str) -> TestEnvVarGuard {
+        let previous = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        TestEnvVarGuard { key, previous }
+    }
+
+    fn direct_reqwest_env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("direct reqwest env lock")
+    }
+
     #[test]
     fn direct_reqwest_client_cache_key_includes_transport_profile() {
+        let _guard = direct_reqwest_env_lock();
         let timeouts = ExecutionTimeouts {
             connect_ms: Some(5_000),
             ..ExecutionTimeouts::default()
@@ -2523,30 +3943,33 @@ mod tests {
         };
 
         let left = super::direct_reqwest_client_cache_key(
+            "http://127.0.0.1:18184/v1/chat/completions",
             Some(&timeouts),
             None,
             Some(&h2c_profile),
             ExecutionTransportControls::default(),
         );
         let right = super::direct_reqwest_client_cache_key(
+            "http://127.0.0.1:18184/v1/responses",
             Some(&timeouts),
             None,
             Some(&same_h2c_profile),
             ExecutionTransportControls::default(),
         );
         let different_mode = super::direct_reqwest_client_cache_key(
+            "http://127.0.0.1:18184/v1/chat/completions",
             Some(&timeouts),
             None,
             Some(&http1_profile),
             ExecutionTransportControls::default(),
         );
         let different_proxy = super::direct_reqwest_client_cache_key(
+            "http://127.0.0.1:18184/v1/chat/completions",
             Some(&timeouts),
             Some("http://127.0.0.1:8080".into()),
             Some(&h2c_profile),
             ExecutionTransportControls::default(),
         );
-
         assert_eq!(left, right);
         assert_ne!(left, different_mode);
         assert_ne!(left, different_proxy);
@@ -2557,27 +3980,265 @@ mod tests {
     }
 
     #[test]
-    fn direct_reqwest_h2_client_shards_scale_from_target_gate() {
+    fn direct_reqwest_client_cache_key_splits_origin_only_when_enabled() {
+        let _guard = direct_reqwest_env_lock();
+        let profile = ResolvedTransportProfile {
+            profile_id: "mock-h2c-origin".into(),
+            backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
+            http_mode: TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE.into(),
+            pool_scope: "key".into(),
+            header_fingerprint: None,
+            extra: None,
+        };
+
+        let shared_left = super::direct_reqwest_client_cache_key(
+            "http://127.0.0.1:18184/v1/chat/completions",
+            None,
+            None,
+            Some(&profile),
+            ExecutionTransportControls::default(),
+        );
+        let shared_right = super::direct_reqwest_client_cache_key(
+            "http://127.0.0.1:18185/v1/chat/completions",
+            None,
+            None,
+            Some(&profile),
+            ExecutionTransportControls::default(),
+        );
+        assert_eq!(shared_left, shared_right);
+
+        let _per_origin = set_test_env_var(super::DIRECT_REQWEST_CACHE_PER_ORIGIN_ENV, "true");
+        let split_left = super::direct_reqwest_client_cache_key(
+            "http://127.0.0.1:18184/v1/chat/completions",
+            None,
+            None,
+            Some(&profile),
+            ExecutionTransportControls::default(),
+        );
+        let split_right = super::direct_reqwest_client_cache_key(
+            "http://127.0.0.1:18185/v1/chat/completions",
+            None,
+            None,
+            Some(&profile),
+            ExecutionTransportControls::default(),
+        );
+        assert_ne!(split_left, split_right);
+    }
+
+    #[test]
+    fn direct_reqwest_auto_profile_is_not_classified_as_h2() {
+        let auto_profile = ResolvedTransportProfile {
+            profile_id: "auto-profile".into(),
+            backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
+            http_mode: TRANSPORT_HTTP_MODE_AUTO.into(),
+            pool_scope: "key".into(),
+            header_fingerprint: None,
+            extra: None,
+        };
+        let h2c_profile = ResolvedTransportProfile {
+            http_mode: TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE.into(),
+            ..auto_profile.clone()
+        };
+
+        let auto_key = super::direct_reqwest_client_cache_key(
+            "http://127.0.0.1:18184/v1/chat/completions",
+            None,
+            None,
+            Some(&auto_profile),
+            ExecutionTransportControls::default(),
+        );
+        let h2c_key = super::direct_reqwest_client_cache_key(
+            "http://127.0.0.1:18184/v1/chat/completions",
+            None,
+            None,
+            Some(&h2c_profile),
+            ExecutionTransportControls::default(),
+        );
+
+        assert!(!super::direct_reqwest_client_cache_key_uses_http2(
+            &auto_key
+        ));
+        assert!(super::direct_reqwest_client_cache_key_uses_http2(&h2c_key));
+    }
+
+    #[test]
+    fn direct_reqwest_stream_http_mode_parser_defaults_to_http1() {
         assert_eq!(
-            super::direct_reqwest_h2_client_shards_from_config(None, 12_000, 200),
-            60
+            super::parse_direct_reqwest_stream_http_mode(""),
+            super::DirectReqwestStreamHttpMode::Http1
         );
         assert_eq!(
-            super::direct_reqwest_h2_client_shards_from_config(None, 2_000, 200),
-            10
+            super::parse_direct_reqwest_stream_http_mode("http1_only"),
+            super::DirectReqwestStreamHttpMode::Http1
         );
         assert_eq!(
-            super::direct_reqwest_h2_client_shards_from_config(Some(4), 12_000, 200),
-            4
-        );
-        assert_eq!(
-            super::direct_reqwest_h2_client_shards_from_config(None, 100_000, 100),
-            super::MAX_DIRECT_REQWEST_H2_CLIENT_SHARDS
+            super::parse_direct_reqwest_stream_http_mode("auto"),
+            super::DirectReqwestStreamHttpMode::Auto
         );
     }
 
     #[test]
+    fn direct_reqwest_stream_http1_default_preserves_explicit_h2c_profile() {
+        let mut plan = ExecutionPlan {
+            request_id: "req-h2c-controls".into(),
+            candidate_id: None,
+            provider_name: Some("mock".into()),
+            provider_id: "provider-1".into(),
+            endpoint_id: "endpoint-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "http://127.0.0.1:18184/v1/chat/completions".into(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"stream": true})),
+            stream: true,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("mock-model".into()),
+            proxy: None,
+            transport_profile: Some(ResolvedTransportProfile {
+                profile_id: "mock-h2c".into(),
+                backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
+                http_mode: TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE.into(),
+                pool_scope: "key".into(),
+                header_fingerprint: None,
+                extra: None,
+            }),
+            timeouts: None,
+        };
+
+        let controls = super::direct_reqwest_effective_transport_controls(
+            &plan,
+            ExecutionTransportControls::default(),
+        );
+        assert!(!controls.http1_only);
+
+        plan.transport_profile = None;
+        if super::direct_reqwest_stream_http_mode() == super::DirectReqwestStreamHttpMode::Http1 {
+            let controls = super::direct_reqwest_effective_transport_controls(
+                &plan,
+                ExecutionTransportControls::default(),
+            );
+            assert!(controls.http1_only);
+        }
+    }
+
+    #[test]
+    fn direct_reqwest_h2_client_shards_scale_from_target_gate() {
+        assert_eq!(
+            super::direct_reqwest_h2_client_shards_from_config(None, 12_000, 64),
+            188
+        );
+        assert_eq!(
+            super::direct_reqwest_h2_client_shards_from_config(None, 2_000, 64),
+            32
+        );
+        assert_eq!(
+            super::direct_reqwest_h2_client_shards_from_config(Some(4), 12_000, 64),
+            4
+        );
+        assert_eq!(
+            super::direct_reqwest_h2_client_shards_from_config(None, 200_000, 100),
+            2_000
+        );
+    }
+
+    #[test]
+    fn direct_reqwest_http1_client_shards_scale_from_target_gate() {
+        assert_eq!(
+            super::direct_reqwest_client_shards_from_config(None, 10_000, 512),
+            20
+        );
+        assert_eq!(
+            super::direct_reqwest_client_shards_from_config(None, 2_000, 512),
+            4
+        );
+        assert_eq!(
+            super::direct_reqwest_client_shards_from_config(Some(8), 10_000, 512),
+            8
+        );
+    }
+
+    #[test]
+    fn direct_h2c_client_shards_respect_explicit_env() {
+        let _guard = direct_reqwest_env_lock();
+        let _shards = set_test_env_var(super::DIRECT_H2C_CLIENT_SHARDS_ENV, "7");
+        assert_eq!(super::direct_h2c_client_shard_count(), 7);
+    }
+
+    #[test]
+    fn direct_h2c_prewarm_urls_parse_env_list() {
+        let _guard = direct_reqwest_env_lock();
+        let _urls = set_test_env_var(
+            super::DIRECT_H2C_PREWARM_URLS_ENV,
+            " http://127.0.0.1:18184/v1/chat/completions,;http://127.0.0.1:18185/v1/chat/completions\nhttp://127.0.0.1:18186/v1/chat/completions ",
+        );
+
+        assert_eq!(
+            super::direct_h2c_prewarm_urls_from_env(),
+            vec![
+                "http://127.0.0.1:18184/v1/chat/completions".to_string(),
+                "http://127.0.0.1:18185/v1/chat/completions".to_string(),
+                "http://127.0.0.1:18186/v1/chat/completions".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_h2c_prewarm_cache_keys_dedup_by_origin() {
+        let _guard = direct_reqwest_env_lock();
+        let urls = vec![
+            "http://127.0.0.1:18184/v1/chat/completions".to_string(),
+            "http://127.0.0.1:18184/v1/responses".to_string(),
+            "http://127.0.0.1:18185/v1/chat/completions".to_string(),
+            "not-a-url".to_string(),
+        ];
+
+        let (keys, failures, first_error) =
+            super::direct_h2c_sender_prewarm_cache_keys(&urls, None);
+
+        assert_eq!(failures, 1);
+        assert!(first_error
+            .as_deref()
+            .is_some_and(|err| err.contains("invalid h2c upstream origin")));
+        assert_eq!(keys.len(), 2);
+        assert!(keys
+            .iter()
+            .any(|key| key.upstream_origin == "http://127.0.0.1:18184"));
+        assert!(keys
+            .iter()
+            .any(|key| key.upstream_origin == "http://127.0.0.1:18185"));
+    }
+
+    #[test]
+    fn direct_h2c_client_cache_splits_by_origin_and_shards() {
+        let _guard = direct_reqwest_env_lock();
+        let _shards = set_test_env_var(super::DIRECT_H2C_CLIENT_SHARDS_ENV, "3");
+        super::DIRECT_H2C_CLIENT_CACHE
+            .lock()
+            .expect("h2c cache lock")
+            .clear();
+
+        let left =
+            super::cached_direct_h2c_client("http://127.0.0.1:18184/v1/chat/completions", None)
+                .expect("left client");
+        let right =
+            super::cached_direct_h2c_client("http://127.0.0.1:18185/v1/chat/completions", None)
+                .expect("right client");
+        drop((left, right));
+
+        let cache = super::DIRECT_H2C_CLIENT_CACHE
+            .lock()
+            .expect("h2c cache lock");
+        assert_eq!(cache.len(), 2);
+        assert!(cache.values().all(|entry| entry.len() == 3));
+        assert!(cache.values().all(|entry| entry.target_len == 3));
+    }
+
+    #[test]
     fn direct_reqwest_initial_client_shards_are_bounded_by_target() {
+        let _guard = direct_reqwest_env_lock();
         assert_eq!(super::direct_reqwest_initial_client_shard_count(1), 1);
         assert_eq!(super::direct_reqwest_initial_client_shard_count(2), 2);
         assert_eq!(
@@ -2587,7 +4248,38 @@ mod tests {
     }
 
     #[test]
+    fn direct_reqwest_initial_client_shards_cap_large_sync_env() {
+        let _guard = direct_reqwest_env_lock();
+        let _sync = set_test_env_var(super::DIRECT_REQWEST_SYNC_WARM_CLIENTS_ENV, "128");
+        assert_eq!(
+            super::direct_reqwest_initial_client_shard_count(128),
+            super::MAX_DIRECT_REQWEST_SYNC_WARM_CLIENTS
+        );
+    }
+
+    #[test]
+    fn direct_reqwest_prewarm_client_shards_default_to_initial() {
+        let _guard = direct_reqwest_env_lock();
+        assert_eq!(super::direct_reqwest_prewarm_client_shard_count(1), 1);
+        assert_eq!(
+            super::direct_reqwest_prewarm_client_shard_count(96),
+            super::direct_reqwest_initial_client_shard_count(96)
+        );
+    }
+
+    #[test]
+    fn direct_reqwest_prewarm_client_shards_do_not_exceed_request_path_cap() {
+        let _guard = direct_reqwest_env_lock();
+        let _sync = set_test_env_var(super::DIRECT_REQWEST_SYNC_WARM_CLIENTS_ENV, "4");
+        let _prewarm = set_test_env_var(super::DIRECT_REQWEST_PREWARM_SYNC_CLIENTS_ENV, "128");
+
+        assert_eq!(super::direct_reqwest_prewarm_client_shard_count(128), 4);
+    }
+
+    #[test]
     fn direct_reqwest_prewarm_populates_cache_for_plan() {
+        let _guard = direct_reqwest_env_lock();
+        let _shards = set_test_env_var(super::DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV, "4");
         let profile = ResolvedTransportProfile {
             profile_id: "mock-h2c-prewarm".into(),
             backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
@@ -2627,19 +4319,182 @@ mod tests {
         );
 
         let cache_key = super::direct_reqwest_client_cache_key(
+            &plan.url,
             plan.timeouts.as_ref(),
             None,
             Some(&profile),
             super::ExecutionTransportControls::default(),
         );
         let target_len = super::direct_reqwest_client_shard_count(&cache_key);
-        let expected_initial_len = super::direct_reqwest_initial_client_shard_count(target_len);
         let cache = super::DIRECT_REQWEST_CLIENT_CACHE
             .lock()
             .expect("cache lock");
         let entry = cache.get(&cache_key).expect("cache entry");
-        assert_eq!(entry.len(), expected_initial_len);
+        assert_eq!(
+            entry.len(),
+            super::direct_reqwest_prewarm_client_shard_count(target_len)
+        );
         assert_eq!(entry.target_len, target_len);
+    }
+
+    #[test]
+    fn direct_reqwest_prewarm_plan_keeps_large_sync_env_off_request_path() {
+        let _guard = direct_reqwest_env_lock();
+        let _shards = set_test_env_var(super::DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV, "128");
+        let _sync = set_test_env_var(super::DIRECT_REQWEST_SYNC_WARM_CLIENTS_ENV, "4");
+        let _prewarm = set_test_env_var(super::DIRECT_REQWEST_PREWARM_SYNC_CLIENTS_ENV, "128");
+        let profile = ResolvedTransportProfile {
+            profile_id: "mock-h2c-large-prewarm".into(),
+            backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
+            http_mode: TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE.into(),
+            pool_scope: "key".into(),
+            header_fingerprint: None,
+            extra: None,
+        };
+        let plan = ExecutionPlan {
+            request_id: "req-large-prewarm".into(),
+            candidate_id: Some("candidate-large-prewarm".into()),
+            provider_name: Some("mock".into()),
+            provider_id: "provider-1".into(),
+            endpoint_id: "endpoint-large-prewarm".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "http://127.0.0.1:18184/v1/chat/completions".into(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"stream": true})),
+            stream: true,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("mock-model".into()),
+            proxy: None,
+            transport_profile: Some(profile.clone()),
+            timeouts: Some(ExecutionTimeouts {
+                connect_ms: Some(5_000),
+                ..ExecutionTimeouts::default()
+            }),
+        };
+
+        assert!(
+            super::try_prewarm_direct_reqwest_client_cache_for_plan(&plan)
+                .expect("prewarm should succeed")
+        );
+
+        let cache_key = super::direct_reqwest_client_cache_key(
+            &plan.url,
+            plan.timeouts.as_ref(),
+            None,
+            Some(&profile),
+            super::ExecutionTransportControls::default(),
+        );
+        let cache = super::DIRECT_REQWEST_CLIENT_CACHE
+            .lock()
+            .expect("cache lock");
+        let entry = cache.get(&cache_key).expect("cache entry");
+        assert_eq!(entry.len(), 4);
+        assert_eq!(entry.target_len, 128);
+    }
+
+    #[test]
+    fn direct_reqwest_prewarm_skips_h2c_fast_path() {
+        let _guard = direct_reqwest_env_lock();
+        let _fast_path = set_test_env_var(super::DIRECT_H2C_FAST_PATH_ENV, "1");
+        let profile = ResolvedTransportProfile {
+            profile_id: "mock-h2c-fast-path-prewarm-skip".into(),
+            backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
+            http_mode: TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE.into(),
+            pool_scope: "key".into(),
+            header_fingerprint: None,
+            extra: None,
+        };
+        let plan = ExecutionPlan {
+            request_id: "req-h2c-fast-path-prewarm-skip".into(),
+            candidate_id: Some("candidate-h2c-fast-path-prewarm-skip".into()),
+            provider_name: Some("mock".into()),
+            provider_id: "provider-1".into(),
+            endpoint_id: "endpoint-h2c-fast-path-prewarm-skip".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "http://127.0.0.1:18184/v1/chat/completions".into(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"stream": true})),
+            stream: true,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("mock-model".into()),
+            proxy: None,
+            transport_profile: Some(profile.clone()),
+            timeouts: None,
+        };
+
+        assert!(
+            !super::try_prewarm_direct_reqwest_client_cache_for_plan(&plan)
+                .expect("prewarm skip should succeed")
+        );
+
+        let cache_key = super::direct_reqwest_client_cache_key(
+            &plan.url,
+            plan.timeouts.as_ref(),
+            None,
+            Some(&profile),
+            super::ExecutionTransportControls::default(),
+        );
+        let cache = super::DIRECT_REQWEST_CLIENT_CACHE
+            .lock()
+            .expect("cache lock");
+        assert!(!cache.contains_key(&cache_key));
+    }
+
+    #[test]
+    fn direct_reqwest_cache_metrics_expose_ready_state() {
+        let _guard = direct_reqwest_env_lock();
+        let _shards = set_test_env_var(super::DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV, "1");
+        let profile = ResolvedTransportProfile {
+            profile_id: "mock-h2c-ready-metrics".into(),
+            backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
+            http_mode: TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE.into(),
+            pool_scope: "key".into(),
+            header_fingerprint: None,
+            extra: None,
+        };
+        let plan = ExecutionPlan {
+            request_id: "req-ready-metrics".into(),
+            candidate_id: Some("candidate-ready-metrics".into()),
+            provider_name: Some("mock".into()),
+            provider_id: "provider-1".into(),
+            endpoint_id: "endpoint-ready-metrics".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "http://127.0.0.1:18184/v1/chat/completions".into(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"stream": true})),
+            stream: true,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("mock-model".into()),
+            proxy: None,
+            transport_profile: Some(profile),
+            timeouts: None,
+        };
+
+        super::try_prewarm_direct_reqwest_client_cache_for_plan(&plan)
+            .expect("prewarm should succeed");
+
+        let samples = super::direct_reqwest_client_cache_metric_samples();
+        assert!(samples
+            .iter()
+            .any(|sample| sample.name == "direct_reqwest_client_cache_ready_entries"));
+        assert!(samples
+            .iter()
+            .any(|sample| sample.name == "direct_reqwest_client_cache_pending_clients"));
+        assert!(samples
+            .iter()
+            .any(|sample| sample.name == "direct_reqwest_client_cache_warming_entries"));
     }
 
     #[test]
@@ -4322,71 +6177,72 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn direct_sync_execution_runtime_supports_h2c_prior_knowledge_profile() {
-        let listener = crate::test_support::bind_loopback_listener()
-            .await
-            .expect("listener should bind");
-        let addr = listener.local_addr().expect("local addr should resolve");
-        let app = Router::new().route(
-            "/chat",
-            post(|| async {
-                (
-                    axum::http::StatusCode::OK,
-                    Json(json!({"transport_profile": "h2c"})),
-                )
+    #[test]
+    fn direct_sync_execution_runtime_prepares_h2c_prior_knowledge_profile() {
+        let profile = ResolvedTransportProfile {
+            profile_id: "mock-h2c".into(),
+            backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
+            http_mode: TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE.into(),
+            pool_scope: "key".into(),
+            header_fingerprint: None,
+            extra: None,
+        };
+        let plan = ExecutionPlan {
+            request_id: "req-h2c-1".into(),
+            candidate_id: Some("cand-h2c-1".into()),
+            provider_name: Some("mock".into()),
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "http://127.0.0.1:18184/chat".into(),
+            headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "mock-model"})),
+            stream: false,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("mock-model".into()),
+            proxy: None,
+            transport_profile: Some(profile.clone()),
+            timeouts: Some(ExecutionTimeouts {
+                connect_ms: Some(5_000),
+                total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
+                ..ExecutionTimeouts::default()
             }),
+        };
+
+        let transport_controls = super::direct_reqwest_effective_transport_controls(
+            &plan,
+            super::ExecutionTransportControls::default(),
         );
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("test server should run");
-        });
+        let cache_key = super::direct_reqwest_client_cache_key(
+            &plan.url,
+            plan.timeouts.as_ref(),
+            None,
+            Some(&profile),
+            transport_controls,
+        );
 
-        let execution_runtime = DirectSyncExecutionRuntime::new();
-        let result = execution_runtime
-            .execute_sync(&ExecutionPlan {
-                request_id: "req-h2c-1".into(),
-                candidate_id: Some("cand-h2c-1".into()),
-                provider_name: Some("mock".into()),
-                provider_id: "prov-1".into(),
-                endpoint_id: "ep-1".into(),
-                key_id: "key-1".into(),
-                method: "POST".into(),
-                url: format!("http://{addr}/chat"),
-                headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
-                content_type: Some("application/json".into()),
-                content_encoding: None,
-                body: RequestBody::from_json(json!({"model": "mock-model"})),
-                stream: false,
-                client_api_format: "openai:chat".into(),
-                provider_api_format: "openai:chat".into(),
-                model_name: Some("mock-model".into()),
-                proxy: None,
-                transport_profile: Some(ResolvedTransportProfile {
-                    profile_id: "mock-h2c".into(),
-                    backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
-                    http_mode: TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE.into(),
-                    pool_scope: "key".into(),
-                    header_fingerprint: None,
-                    extra: None,
-                }),
-                timeouts: Some(ExecutionTimeouts {
-                    connect_ms: Some(5_000),
-                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
-                    ..ExecutionTimeouts::default()
-                }),
-            })
-            .await
-            .expect("h2c prior-knowledge execution should succeed");
-
-        server.abort();
-
-        assert_eq!(result.status_code, 200);
+        assert!(!transport_controls.http1_only);
+        assert!(!super::direct_h2c_fast_path_applies(
+            &plan,
+            transport_controls
+        ));
+        assert!(super::direct_reqwest_client_cache_key_uses_http2(
+            &cache_key
+        ));
+        assert!(super::direct_reqwest_client_cache_key_uses_h2c_prior_knowledge(&cache_key));
         assert_eq!(
-            result.body.and_then(|body| body.json_body),
-            Some(json!({"transport_profile": "h2c"}))
+            cache_key
+                .transport_profile
+                .as_ref()
+                .map(|profile| profile.http_mode.as_str()),
+            Some(TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE)
         );
+        super::build_direct_reqwest_client_from_cache_key(&cache_key)
+            .expect("h2c prior-knowledge client should build");
     }
 
     #[test]
@@ -4401,6 +6257,7 @@ mod tests {
         };
 
         let error = match build_client(
+            "https://api.example.test/v1/chat/completions",
             None,
             None,
             Some(&profile),

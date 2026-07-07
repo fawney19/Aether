@@ -6,6 +6,16 @@ license.workspace = true
 repository.workspace = true
 description = "Rust ingress gateway for Aether phase 3a transparent proxy"
 
+[features]
+default = []
+jemalloc = [
+    "dep:tikv-jemallocator",
+    "dep:tikv-jemalloc-sys",
+    "tikv-jemallocator/stats",
+    "tikv-jemalloc-sys/stats",
+]
+testkit = []
+
 [dependencies]
 aether-admin.workspace = true
 aether-ai-formats.workspace = true
@@ -46,7 +56,11 @@ flate2.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
 http.workspace = true
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "client-pool", "server-auto", "service", "tokio"] }
 ldap3 = { version = "0.11", default-features = false, features = ["sync", "tls-rustls"] }
+libc = "0.2"
 md-5 = "0.10"
 object_store.workspace = true
 parking_lot = "0.12"
@@ -61,6 +75,7 @@ sha2 = { workspace = true, features = ["oid"] }
 socket2.workspace = true
 tar.workspace = true
 sqlx.workspace = true
+sysinfo = "0.32"
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -75,7 +90,8 @@ wreq-util.workspace = true
 zstd.workspace = true
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
-tikv-jemallocator = "0.6"
+tikv-jemallocator = { version = "0.6", optional = true }
+tikv-jemalloc-sys = { version = "0.6", optional = true }
 
 [dev-dependencies]
 aether-testkit.workspace = true

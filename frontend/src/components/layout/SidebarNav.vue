@@ -29,8 +29,6 @@
                 ? 'bg-primary/10 text-primary font-medium'
                 : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
             ]"
-            @mouseenter="emit('prefetch', item.href)"
-            @focus="emit('prefetch', item.href)"
             @pointerdown="emit('prefetch', item.href)"
             @click="handleNavigate(item.href)"
           >

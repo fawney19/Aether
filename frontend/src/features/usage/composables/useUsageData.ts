@@ -62,6 +62,8 @@ export function useUsageData(options: UseUsageDataOptions) {
   const currentDateRange = ref<DateRangeParams | undefined>(undefined)
   let loadStatsRequestId = 0
   let loadRecordsRequestId = 0
+  let currentAdminRecordTotalState: { key: string; exact: boolean } | null = null
+  const adminRecordExactTotalCache = new Map<string, number>()
 
   // 可用的筛选选项（从统计数据获取，而不是从记录中）
   const availableModels = ref<string[]>([])
@@ -76,6 +78,47 @@ export function useUsageData(options: UseUsageDataOptions) {
         : '-'
     }))
   })
+
+  function buildAdminRecordTotalKey(params: Record<string, unknown>): string {
+    return JSON.stringify(
+      Object.entries(params)
+        .filter(([key, value]) =>
+          !['limit', 'offset', 'include_total', 'total_only'].includes(key) &&
+          value !== undefined &&
+          value !== null &&
+          value !== ''
+        )
+        .sort(([left], [right]) => left.localeCompare(right))
+    )
+  }
+
+  function applyAdminRecordTotal(
+    totalKey: string,
+    total: number,
+    totalIsEstimated: boolean
+  ) {
+    const normalizedTotal = Number.isFinite(total) && total > 0 ? total : 0
+
+    if (!totalIsEstimated) {
+      totalRecords.value = normalizedTotal
+      currentAdminRecordTotalState = { key: totalKey, exact: true }
+      adminRecordExactTotalCache.set(totalKey, normalizedTotal)
+      return
+    }
+
+    const cachedExactTotal = adminRecordExactTotalCache.get(totalKey)
+    if (cachedExactTotal !== undefined) {
+      totalRecords.value = cachedExactTotal
+      currentAdminRecordTotalState = { key: totalKey, exact: true }
+      return
+    }
+
+    const previousTotal = currentAdminRecordTotalState?.key === totalKey
+      ? totalRecords.value
+      : 0
+    totalRecords.value = Math.max(previousTotal, normalizedTotal)
+    currentAdminRecordTotalState = { key: totalKey, exact: false }
+  }
 
   // 加载统计数据（不加载记录）
   async function loadStats(dateRange?: DateRangeParams, options: LoadStatsOptions = {}): Promise<boolean> {
@@ -375,9 +418,10 @@ export function useUsageData(options: UseUsageDataOptions) {
         }
         const nextRecords = (response.records || []) as UsageRecord[]
         currentRecords.value = mergeRecordStatus(currentRecords.value, nextRecords)
-        totalRecords.value = response.total || 0
+        const totalKey = buildAdminRecordTotalKey(params)
+        applyAdminRecordTotal(totalKey, response.total ?? 0, response.total_is_estimated === true)
         if (response.total_is_estimated === true) {
-          void refreshAdminRecordTotal(params, requestId)
+          void refreshAdminRecordTotal(params, requestId, totalKey)
         }
       } else {
         // 用户页面：使用用户 API
@@ -405,11 +449,14 @@ export function useUsageData(options: UseUsageDataOptions) {
 
   async function refreshAdminRecordTotal(
     params: Record<string, unknown>,
-    requestId: number
+    requestId: number,
+    totalKey: string
   ): Promise<void> {
     try {
       const total = await usageApi.getAllUsageRecordTotal(params)
       if (requestId === loadRecordsRequestId) {
+        adminRecordExactTotalCache.set(totalKey, total)
+        currentAdminRecordTotalState = { key: totalKey, exact: true }
         totalRecords.value = total
       }
     } catch (error) {

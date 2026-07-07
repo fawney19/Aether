@@ -2,7 +2,7 @@
   <div class="min-h-screen flex items-center justify-center px-6">
     <Card class="w-full max-w-md p-6 space-y-2">
       <h1 class="text-lg font-semibold text-foreground">
-        正在处理认证...
+        {{ t('site.auth.processing') }}
       </h1>
       <p class="text-sm text-muted-foreground">
         {{ hint }}
@@ -18,13 +18,15 @@ import Card from '@/components/ui/card.vue'
 import apiClient from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
+import { useI18n } from '@/i18n'
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 const { success, error: showError } = useToast()
+const { t } = useI18n()
 
-const hint = ref('请稍候...')
+const hint = ref(t('site.auth.waiting'))
 
 function consumeRedirectPath(): string | null {
   const redirectPath = sessionStorage.getItem('redirectPath')
@@ -44,31 +46,31 @@ function clearUrlState() {
 
 function errorMessageFromCode(code: string): string {
   const map: Record<string, string> = {
-    authorization_denied: '你已取消授权',
-    provider_disabled: '该 OAuth Provider 已被禁用',
-    provider_unavailable: 'OAuth Provider 不可用',
-    invalid_callback: '回调参数无效',
-    invalid_state: '登录状态已失效，请重试',
-    token_exchange_failed: '令牌兑换失败',
-    userinfo_fetch_failed: '获取用户信息失败',
-    email_exists_local: '该邮箱已存在，请先登录后再绑定 OAuth',
-    email_is_ldap: '该邮箱属于 LDAP 账号，请使用 LDAP 登录',
-    email_is_oauth: '该邮箱已关联其他 OAuth 账号，请使用原账号登录',
-    registration_disabled: '系统未开放注册，无法创建新账号',
-    oauth_already_bound: '该第三方账号已被其他用户绑定',
-    already_bound_provider: '你已绑定该 Provider',
-    last_oauth_binding: '解绑失败：至少需要保留一个 OAuth 绑定',
-    last_login_method: '解绑失败：解绑后将无法登录',
-    ldap_no_oauth: 'LDAP 用户不支持 OAuth 绑定',
+    authorization_denied: t('site.auth.cancelled'),
+    provider_disabled: t('site.auth.providerDisabled'),
+    provider_unavailable: t('site.auth.providerUnavailable'),
+    invalid_callback: t('site.auth.invalidCallback'),
+    invalid_state: t('site.auth.invalidState'),
+    token_exchange_failed: t('site.auth.tokenExchangeFailed'),
+    userinfo_fetch_failed: t('site.auth.userinfoFetchFailed'),
+    email_exists_local: t('site.auth.emailExistsLocal'),
+    email_is_ldap: t('site.auth.emailIsLdap'),
+    email_is_oauth: t('site.auth.emailIsOauth'),
+    registration_disabled: t('site.auth.registrationDisabled'),
+    oauth_already_bound: t('site.auth.oauthAlreadyBound'),
+    already_bound_provider: t('site.auth.alreadyBoundProvider'),
+    last_oauth_binding: t('site.auth.lastOauthBinding'),
+    last_login_method: t('site.auth.lastLoginMethod'),
+    ldap_no_oauth: t('site.auth.ldapNoOauth'),
   }
-  return map[code] || '认证失败，请重试'
+  return map[code] || t('site.auth.failed')
 }
 
 onMounted(async () => {
   // 1) 绑定成功提示
   const oauthBound = route.query.oauth_bound
   if (typeof oauthBound === 'string' && oauthBound) {
-    success(`已绑定 ${oauthBound}`)
+    success(t('site.auth.bound', { provider: oauthBound }))
     clearUrlState()
     const redirectPath = consumeRedirectPath()
     await router.replace(redirectPath || '/dashboard/settings')
@@ -93,20 +95,20 @@ onMounted(async () => {
   clearUrlState()
 
   if (!accessToken) {
-    showError('未获取到访问令牌')
+    showError(t('site.auth.noToken'))
     await router.replace('/')
     return
   }
 
-  hint.value = '正在写入登录态...'
+  hint.value = t('site.auth.writing')
   apiClient.setToken(accessToken)
 
   authStore.syncToken()
 
-  hint.value = '正在获取用户信息...'
+  hint.value = t('site.auth.fetchingUser')
   await authStore.fetchCurrentUser()
 
-  success('登录成功')
+  success(t('site.auth.success'))
 
   const redirectPath = consumeRedirectPath()
   const target = redirectPath || (authStore.canAccessAdmin ? '/admin/dashboard' : '/dashboard')

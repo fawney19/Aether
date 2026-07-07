@@ -2701,6 +2701,21 @@ fn persisted_usage_body_ref(
         })
 }
 
+fn merge_usage_status_code(
+    existing: Option<&StoredRequestUsageAudit>,
+    incoming_status: &str,
+    incoming_status_code: Option<u16>,
+) -> Option<u16> {
+    if existing.is_some_and(|existing| {
+        existing.status == "streaming"
+            && incoming_status == "streaming"
+            && incoming_status_code.is_none()
+    }) {
+        return existing.and_then(|existing| existing.status_code);
+    }
+    incoming_status_code
+}
+
 #[async_trait]
 impl UsageWriteRepository for InMemoryUsageReadRepository {
     async fn upsert(
@@ -2867,7 +2882,11 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
                     .map(|existing| existing.actual_total_cost_usd)
                     .unwrap_or_default()
             }),
-            status_code: usage.status_code,
+            status_code: merge_usage_status_code(
+                existing.as_ref(),
+                usage.status.as_str(),
+                usage.status_code,
+            ),
             error_message: usage.error_message,
             error_category: usage.error_category,
             response_time_ms: merge_usage_timing(
@@ -3939,7 +3958,7 @@ mod tests {
         let mut refresh = sample_upsert_usage_record("req-streaming-refresh");
         refresh.is_stream = Some(true);
         refresh.status = "streaming".to_string();
-        refresh.status_code = Some(200);
+        refresh.status_code = None;
         repository
             .upsert(refresh)
             .await
@@ -3951,6 +3970,7 @@ mod tests {
             .expect("usage lookup should succeed")
             .expect("usage should exist");
         assert_eq!(stored.status, "streaming");
+        assert_eq!(stored.status_code, Some(200));
         assert_eq!(stored.response_time_ms, Some(45));
         assert_eq!(stored.first_byte_time_ms, Some(12));
     }

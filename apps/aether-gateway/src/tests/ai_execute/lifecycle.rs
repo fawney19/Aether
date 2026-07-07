@@ -22,6 +22,30 @@ use sha2::{Digest, Sha256};
 use crate::data::GatewayDataState;
 use crate::tests::next_non_keepalive_chunk;
 
+const LIFECYCLE_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_lifecycle_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(LIFECYCLE_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("lifecycle test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 fn hash_api_key(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
@@ -163,8 +187,15 @@ fn sample_local_openai_key() -> StoredProviderCatalogKey {
     .expect("key transport should build")
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gateway_completes_sync_response_on_local_execution_runtime_path() {
+#[test]
+fn gateway_completes_sync_response_on_local_execution_runtime_path() {
+    run_lifecycle_test(
+        "gateway_completes_sync_response_on_local_execution_runtime_path",
+        gateway_completes_sync_response_on_local_execution_runtime_path_impl,
+    );
+}
+
+async fn gateway_completes_sync_response_on_local_execution_runtime_path_impl() {
     let public_hits = Arc::new(Mutex::new(0usize));
     let public_hits_clone = Arc::clone(&public_hits);
     let upstream = Router::new().route(
@@ -261,8 +292,15 @@ async fn gateway_completes_sync_response_on_local_execution_runtime_path() {
     upstream_handle.abort();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gateway_stops_execution_runtime_stream_when_client_disconnects() {
+#[test]
+fn gateway_stops_execution_runtime_stream_when_client_disconnects() {
+    run_lifecycle_test(
+        "gateway_stops_execution_runtime_stream_when_client_disconnects",
+        gateway_stops_execution_runtime_stream_when_client_disconnects_impl,
+    );
+}
+
+async fn gateway_stops_execution_runtime_stream_when_client_disconnects_impl() {
     let seen_report = Arc::new(Mutex::new(0usize));
     let seen_report_clone = Arc::clone(&seen_report);
     let public_hits = Arc::new(Mutex::new(0usize));
@@ -388,8 +426,15 @@ async fn gateway_stops_execution_runtime_stream_when_client_disconnects() {
     upstream_handle.abort();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gateway_returns_error_body_when_prefetch_detects_embedded_stream_error() {
+#[test]
+fn gateway_returns_error_body_when_prefetch_detects_embedded_stream_error() {
+    run_lifecycle_test(
+        "gateway_returns_error_body_when_prefetch_detects_embedded_stream_error",
+        gateway_returns_error_body_when_prefetch_detects_embedded_stream_error_impl,
+    );
+}
+
+async fn gateway_returns_error_body_when_prefetch_detects_embedded_stream_error_impl() {
     let public_hits = Arc::new(Mutex::new(0usize));
     let public_hits_clone = Arc::clone(&public_hits);
 

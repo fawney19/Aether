@@ -183,16 +183,17 @@ describe('RegisterDialog Turnstile verification flow', () => {
     emailInput.dispatchEvent(new Event('input'))
     await settle()
 
-    const sendButtonBeforeToken = Array.from(root.querySelectorAll('button'))
-      .find((button) => button.textContent?.includes('请先完成人机验证')) as HTMLButtonElement
-    expect(sendButtonBeforeToken.disabled).toBe(true)
+    const buttons = Array.from(root.querySelectorAll('button')) as HTMLButtonElement[]
+    const sendButtonBeforeToken = buttons.find((button) => button.type === 'button' && button.disabled && !button.dataset.testid)
+    expect(sendButtonBeforeToken).toBeDefined()
+    expect(sendButtonBeforeToken?.disabled).toBe(true)
 
     const turnstileButton = root.querySelector('[data-testid="turnstile-widget"]') as HTMLButtonElement
     turnstileButton.click()
     await settle()
 
-    const sendButton = Array.from(root.querySelectorAll('button'))
-      .find((button) => button.textContent?.includes('发送验证码')) as HTMLButtonElement
+    const sendButton = buttons.find((button) => button.disabled === false && button.type === 'button' && button !== turnstileButton) as HTMLButtonElement
+    expect(sendButton).toBeDefined()
     expect(sendButton.disabled).toBe(false)
     sendButton.click()
     await settle()

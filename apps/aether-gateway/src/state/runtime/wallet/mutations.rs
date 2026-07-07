@@ -44,10 +44,15 @@ impl AppState {
         &self,
         input: ProcessPaymentCallbackInput,
     ) -> Result<Option<ProcessPaymentCallbackOutcome>, GatewayError> {
-        self.data
+        let outcome = self
+            .data
             .process_payment_callback(input)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if matches!(outcome, Some(ProcessPaymentCallbackOutcome::Applied { .. })) {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(outcome)
     }
 
     pub(crate) async fn adjust_wallet_balance(
@@ -60,10 +65,15 @@ impl AppState {
         )>,
         GatewayError,
     > {
-        self.data
+        let result = self
+            .data
             .adjust_wallet_balance(input)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if result.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(result)
     }
 
     pub(crate) async fn create_manual_wallet_recharge(
@@ -76,10 +86,15 @@ impl AppState {
         )>,
         GatewayError,
     > {
-        self.data
+        let result = self
+            .data
             .create_manual_wallet_recharge(input)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if result.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(result)
     }
 
     pub(crate) async fn process_admin_wallet_refund(
@@ -95,10 +110,15 @@ impl AppState {
         >,
         GatewayError,
     > {
-        self.data
+        let outcome = self
+            .data
             .process_admin_wallet_refund(input)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if matches!(outcome, Some(WalletMutationOutcome::Applied(_))) {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(outcome)
     }
 
     pub(crate) async fn complete_admin_wallet_refund(
@@ -127,10 +147,18 @@ impl AppState {
         >,
         GatewayError,
     > {
-        self.data
+        let outcome = self
+            .data
             .fail_admin_wallet_refund(input)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if matches!(
+            outcome,
+            Some(WalletMutationOutcome::Applied((_, _, Some(_))))
+        ) {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(outcome)
     }
 
     pub(crate) async fn expire_admin_payment_order(
@@ -176,9 +204,14 @@ impl AppState {
         >,
         GatewayError,
     > {
-        self.data
+        let outcome = self
+            .data
             .credit_admin_payment_order(input)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if matches!(outcome, Some(WalletMutationOutcome::Applied((_, true)))) {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(outcome)
     }
 }

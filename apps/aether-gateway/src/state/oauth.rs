@@ -479,34 +479,29 @@ impl<'a> provider_transport::LocalOAuthHttpExecutor for GatewayLocalOAuthHttpExe
 
 impl AppState {
     pub(crate) fn clear_provider_transport_snapshot_cache(&self) {
-        self.provider_transport_snapshot_cache
-            .write()
-            .expect("provider transport snapshot cache should lock")
-            .clear();
+        self.provider_transport_snapshot_cache.clear();
+        self.provider_transport_snapshot_inflight.clear();
     }
 
     fn get_cached_provider_transport_snapshot_arc(
         &self,
         cache_key: &ProviderTransportSnapshotCacheKey,
     ) -> Option<Arc<provider_transport::GatewayProviderTransportSnapshot>> {
-        let cached = {
-            let cache = self
-                .provider_transport_snapshot_cache
-                .read()
-                .expect("provider transport snapshot cache should lock");
-            cache.get(cache_key).cloned()
-        }?;
+        let cached = self
+            .provider_transport_snapshot_cache
+            .get(cache_key)
+            .map(|entry| entry.clone())?;
         if cached.loaded_at.elapsed() <= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL {
             return Some(cached.snapshot);
         }
-        let mut cache = self
+        if self
             .provider_transport_snapshot_cache
-            .write()
-            .expect("provider transport snapshot cache should lock");
-        if cache.get(cache_key).is_some_and(|entry| {
-            entry.loaded_at.elapsed() > PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL
-        }) {
-            cache.remove(cache_key);
+            .get(cache_key)
+            .is_some_and(|entry| {
+                entry.loaded_at.elapsed() > PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL
+            })
+        {
+            self.provider_transport_snapshot_cache.remove(cache_key);
         }
         None
     }
@@ -516,19 +511,19 @@ impl AppState {
         cache_key: ProviderTransportSnapshotCacheKey,
         snapshot: Arc<provider_transport::GatewayProviderTransportSnapshot>,
     ) {
-        let mut cache = self
-            .provider_transport_snapshot_cache
-            .write()
-            .expect("provider transport snapshot cache should lock");
-        if cache.len() >= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES {
-            cache.retain(|_, entry| {
+        if self.provider_transport_snapshot_cache.len()
+            >= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES
+        {
+            self.provider_transport_snapshot_cache.retain(|_, entry| {
                 entry.loaded_at.elapsed() <= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL
             });
-            if cache.len() >= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES {
-                cache.clear();
+            if self.provider_transport_snapshot_cache.len()
+                >= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES
+            {
+                self.provider_transport_snapshot_cache.clear();
             }
         }
-        cache.insert(
+        self.provider_transport_snapshot_cache.insert(
             cache_key,
             CachedProviderTransportSnapshot {
                 loaded_at: std::time::Instant::now(),
@@ -828,18 +823,37 @@ impl AppState {
             return Ok(Some(snapshot));
         }
 
-        let snapshot = self
-            .read_provider_transport_snapshot_uncached(provider_id, endpoint_id, key_id)
-            .await?;
-        match snapshot {
-            Some(snapshot) => {
-                let snapshot = self.apply_global_format_conversion_override(snapshot).await;
-                let snapshot = Arc::new(snapshot);
-                self.put_cached_provider_transport_snapshot(cache_key, Arc::clone(&snapshot));
+        let inflight = self
+            .provider_transport_snapshot_inflight
+            .entry(cache_key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let result = {
+            let _inflight_guard = inflight.lock().await;
+            if let Some(snapshot) = self.get_cached_provider_transport_snapshot_arc(&cache_key) {
                 Ok(Some(snapshot))
+            } else {
+                match self
+                    .read_provider_transport_snapshot_uncached(provider_id, endpoint_id, key_id)
+                    .await
+                {
+                    Ok(Some(snapshot)) => {
+                        let snapshot = self.apply_global_format_conversion_override(snapshot).await;
+                        let snapshot = Arc::new(snapshot);
+                        self.put_cached_provider_transport_snapshot(
+                            cache_key.clone(),
+                            Arc::clone(&snapshot),
+                        );
+                        Ok(Some(snapshot))
+                    }
+                    Ok(None) => Ok(None),
+                    Err(err) => Err(err),
+                }
             }
-            None => Ok(None),
-        }
+        };
+        self.provider_transport_snapshot_inflight
+            .remove_if(&cache_key, |_, current| Arc::ptr_eq(current, &inflight));
+        result
     }
 
     pub(crate) async fn read_provider_transport_snapshot(
@@ -1766,6 +1780,19 @@ mod tests {
             .expect("snapshot read should succeed")
             .expect("snapshot should exist");
         assert!(!snapshot.provider.enable_format_conversion);
+    }
+
+    #[tokio::test]
+    async fn provider_transport_snapshot_inflight_entry_is_removed_after_read() {
+        let state = state_with_global_format_conversion(false);
+
+        let snapshot = state
+            .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("snapshot read should succeed");
+
+        assert!(snapshot.is_some());
+        assert!(state.provider_transport_snapshot_inflight.is_empty());
     }
 
     #[test]

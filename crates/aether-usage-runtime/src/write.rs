@@ -422,6 +422,29 @@ pub fn build_streaming_usage_record_from_seed(
     })
 }
 
+pub(crate) fn build_active_usage_event_from_owned_seed(
+    seed: LifecycleUsageSeed,
+    updated_at_unix_secs: u64,
+) -> Result<UsageEvent, DataLayerError> {
+    let record = build_lifecycle_usage_record_owned(OwnedLifecycleUsageRecordInput {
+        seed,
+        options: LifecycleUsageRecordOptions {
+            lifecycle_state: UsageLifecycleState::Streaming,
+            status_code: None,
+            response_time_ms: None,
+            first_byte_time_ms: None,
+            response_headers: None,
+            client_response_headers: None,
+            updated_at_unix_secs,
+            trusted_request_metadata: false,
+        },
+    })?;
+    Ok(build_lifecycle_usage_event_from_record(
+        record,
+        UsageEventType::Streaming,
+    ))
+}
+
 pub(crate) fn build_streaming_usage_record_from_owned_seed(
     seed: LifecycleUsageSeed,
     status_code: u16,

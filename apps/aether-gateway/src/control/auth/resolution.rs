@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, info};
 
-use crate::wallet_runtime::{local_rejection_from_wallet_access, resolve_wallet_auth_gate};
+use crate::wallet_runtime::{
+    local_rejection_from_wallet_access, resolve_wallet_auth_gate, resolve_wallet_auth_gate_uncached,
+};
 use crate::{AppState, GatewayError};
 
 use super::super::GatewayControlDecision;
@@ -700,7 +702,7 @@ pub(crate) async fn refresh_execution_runtime_auth_context(
         return Ok(denied);
     };
 
-    let wallet_access = resolve_wallet_auth_gate(state, &snapshot).await?;
+    let wallet_access = resolve_wallet_auth_gate_uncached(state, &snapshot).await?;
     Ok(build_data_backed_auth_context(
         state,
         snapshot,

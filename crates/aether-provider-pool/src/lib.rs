@@ -16,7 +16,8 @@ pub use presets::{
 pub use provider::{ProviderPoolAdapter, ProviderPoolMemberInput};
 pub use providers::{
     build_antigravity_pool_quota_request, build_chatgpt_web_pool_quota_request,
-    build_codex_pool_quota_request, build_gemini_cli_pool_quota_request,
+    build_codex_pool_quota_request, build_codex_pool_reset_credit_consume_request,
+    build_codex_pool_reset_credits_request, build_gemini_cli_pool_quota_request,
     build_glm_coding_plan_pool_quota_request_with_base_url, build_kiro_pool_quota_request,
     build_windsurf_pool_model_configs_request,
     build_windsurf_pool_model_configs_request_with_base_url, build_windsurf_pool_quota_request,
@@ -28,7 +29,8 @@ pub use providers::{
     DefaultProviderPoolAdapter, GeminiCliProviderPoolAdapter, GlmCodingPlanProviderPoolAdapter,
     GrokProviderPoolAdapter, KiroPoolQuotaAuthInput, KiroProviderPoolAdapter,
     UnsupportedQuotaProviderPoolAdapter, ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH,
-    CHATGPT_WEB_CONVERSATION_INIT_PATH, CHATGPT_WEB_DEFAULT_BASE_URL, CODEX_WHAM_USAGE_URL,
+    CHATGPT_WEB_CONVERSATION_INIT_PATH, CHATGPT_WEB_DEFAULT_BASE_URL,
+    CODEX_WHAM_RESET_CREDITS_CONSUME_URL, CODEX_WHAM_RESET_CREDITS_URL, CODEX_WHAM_USAGE_URL,
     GEMINI_CLI_RETRIEVE_USER_QUOTA_PATH, GEMINI_CLI_USER_AGENT,
     GLM_CODING_PLAN_DEFAULT_ZAI_ANTHROPIC_BASE_URL, GLM_CODING_PLAN_DEFAULT_ZAI_OPENAI_BASE_URL,
     GLM_CODING_PLAN_DEFAULT_ZHIPU_ANTHROPIC_BASE_URL,
@@ -221,6 +223,65 @@ mod tests {
             Some("application/json")
         );
         assert_eq!(spec.model_name.as_deref(), Some("codex-wham-usage"));
+    }
+
+    #[test]
+    fn codex_reset_credits_request_uses_wham_detail_endpoint() {
+        let spec = build_codex_pool_reset_credits_request(
+            "key-1",
+            Some(("authorization".to_string(), "Bearer access".to_string())),
+            None,
+            Some(&json!({
+                "plan_type": "plus",
+                "account_id": "acct-1"
+            })),
+        )
+        .expect("spec should build");
+
+        assert_eq!(spec.method, "GET");
+        assert_eq!(spec.url, CODEX_WHAM_RESET_CREDITS_URL);
+        assert_eq!(
+            spec.headers.get("authorization").map(String::as_str),
+            Some("Bearer access")
+        );
+        assert_eq!(
+            spec.headers.get("chatgpt-account-id").map(String::as_str),
+            Some("acct-1")
+        );
+        assert_eq!(spec.model_name.as_deref(), Some("codex-wham-reset-credits"));
+    }
+
+    #[test]
+    fn codex_reset_credit_consume_request_posts_redeem_request_id() {
+        let spec = build_codex_pool_reset_credit_consume_request(
+            "key-1",
+            Some(("authorization".to_string(), "Bearer access".to_string())),
+            None,
+            None,
+            "8ae6f1c7-7e9e-4f5d-9b8a-000000000000",
+        )
+        .expect("spec should build");
+
+        assert_eq!(spec.method, "POST");
+        assert_eq!(spec.url, CODEX_WHAM_RESET_CREDITS_CONSUME_URL);
+        assert_eq!(spec.content_type.as_deref(), Some("application/json"));
+        assert_eq!(
+            spec.json_body
+                .as_ref()
+                .and_then(|body| body.get("redeem_request_id")),
+            Some(&json!("8ae6f1c7-7e9e-4f5d-9b8a-000000000000"))
+        );
+        assert_eq!(
+            spec.json_body
+                .as_ref()
+                .and_then(|body| body.as_object())
+                .map(|body| body.len()),
+            Some(1)
+        );
+        assert_eq!(
+            spec.model_name.as_deref(),
+            Some("codex-wham-reset-credit-consume")
+        );
     }
 
     #[test]

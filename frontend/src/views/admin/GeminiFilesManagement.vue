@@ -415,6 +415,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
 import { useToast } from '@/composables/useToast'
+import { useI18n } from '@/i18n'
 import Card from '@/components/ui/card.vue'
 import Badge from '@/components/ui/badge.vue'
 import Button from '@/components/ui/button.vue'
@@ -441,6 +442,7 @@ import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
 
 const { toast } = useToast()
+const { legacyT } = useI18n()
 
 // 状态
 const loading = ref(false)
@@ -543,7 +545,7 @@ async function fetchMappings() {
 }
 
 async function deleteMapping(mapping: FileMappingResponse) {
-  if (!confirm(`确定要删除映射 "${mapping.file_name}" 吗？\n\n注意：这只会删除映射记录，不会删除 Google 上的实际文件。`)) {
+  if (!confirm(legacyT(`确定要删除映射 "${mapping.file_name}" 吗？\n\n注意：这只会删除映射记录，不会删除 Google 上的实际文件。`))) {
     return
   }
 
@@ -564,7 +566,7 @@ async function deleteMapping(mapping: FileMappingResponse) {
 }
 
 async function cleanupExpired() {
-  if (!confirm('确定要清理所有过期的文件映射吗？')) {
+  if (!confirm(legacyT('确定要清理所有过期的文件映射吗？'))) {
     return
   }
 

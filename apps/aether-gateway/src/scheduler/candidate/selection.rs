@@ -225,6 +225,7 @@ pub(super) async fn collect_selectable_enumerated_candidates_with_skip_reasons(
     );
     let cached_affinity_target = if ordering_config.scheduling_mode
         == SchedulerSchedulingMode::CacheAffinity
+        && has_explicit_session_affinity(client_session_affinity)
     {
         affinity_cache_key.as_deref().and_then(|cache_key| {
             runtime_state.read_cached_scheduler_affinity_target(cache_key, SCHEDULER_AFFINITY_TTL)

@@ -54,7 +54,19 @@ return {1, 0, 0, remaining}
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RedisRuntimeDiagnostics {
     pub connected_clients: Option<u64>,
+    pub blocked_clients: Option<u64>,
     pub total_connections_received: Option<u64>,
+    pub rejected_connections: Option<u64>,
+    pub total_commands_processed: Option<u64>,
+    pub instantaneous_ops_per_sec: Option<u64>,
+    pub total_error_replies: Option<u64>,
+    pub expired_keys: Option<u64>,
+    pub evicted_keys: Option<u64>,
+    pub keyspace_hits: Option<u64>,
+    pub keyspace_misses: Option<u64>,
+    pub used_memory_bytes: Option<u64>,
+    pub maxmemory_bytes: Option<u64>,
+    pub memory_fragmentation_ratio_basis_points: Option<u64>,
     pub lanes: Vec<RedisLaneDiagnostics>,
 }
 
@@ -646,7 +658,22 @@ impl RedisRuntimeRunner {
 fn parse_diagnostics(info: &str, lanes: Vec<RedisLaneDiagnostics>) -> RedisRuntimeDiagnostics {
     RedisRuntimeDiagnostics {
         connected_clients: parse_info_u64(info, "connected_clients"),
+        blocked_clients: parse_info_u64(info, "blocked_clients"),
         total_connections_received: parse_info_u64(info, "total_connections_received"),
+        rejected_connections: parse_info_u64(info, "rejected_connections"),
+        total_commands_processed: parse_info_u64(info, "total_commands_processed"),
+        instantaneous_ops_per_sec: parse_info_u64(info, "instantaneous_ops_per_sec"),
+        total_error_replies: parse_info_u64(info, "total_error_replies"),
+        expired_keys: parse_info_u64(info, "expired_keys"),
+        evicted_keys: parse_info_u64(info, "evicted_keys"),
+        keyspace_hits: parse_info_u64(info, "keyspace_hits"),
+        keyspace_misses: parse_info_u64(info, "keyspace_misses"),
+        used_memory_bytes: parse_info_u64(info, "used_memory"),
+        maxmemory_bytes: parse_info_u64(info, "maxmemory"),
+        memory_fragmentation_ratio_basis_points: parse_info_f64_basis_points(
+            info,
+            "mem_fragmentation_ratio",
+        ),
         lanes,
     }
 }
@@ -657,6 +684,17 @@ fn parse_info_u64(info: &str, key: &str) -> Option<u64> {
         (name == key)
             .then(|| value.trim().parse::<u64>().ok())
             .flatten()
+    })
+}
+
+fn parse_info_f64_basis_points(info: &str, key: &str) -> Option<u64> {
+    info.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name != key {
+            return None;
+        }
+        let parsed = value.trim().parse::<f64>().ok()?;
+        (parsed.is_finite() && parsed >= 0.0).then(|| (parsed * 10_000.0).round() as u64)
     })
 }
 
@@ -675,7 +713,7 @@ mod tests {
     #[test]
     fn parses_runtime_diagnostics_from_info() {
         let parsed = parse_diagnostics(
-            "# Clients\r\nconnected_clients:5\r\n# Stats\r\ntotal_connections_received:42\r\n",
+            "# Clients\r\nconnected_clients:5\r\nblocked_clients:2\r\n# Memory\r\nused_memory:1048576\r\nmaxmemory:8388608\r\nmem_fragmentation_ratio:1.25\r\n# Stats\r\ntotal_connections_received:42\r\nrejected_connections:0\r\ntotal_commands_processed:99\r\ninstantaneous_ops_per_sec:7\r\ntotal_error_replies:1\r\nexpired_keys:3\r\nevicted_keys:4\r\nkeyspace_hits:10\r\nkeyspace_misses:2\r\n",
             Vec::new(),
         );
 
@@ -683,7 +721,19 @@ mod tests {
             parsed,
             RedisRuntimeDiagnostics {
                 connected_clients: Some(5),
+                blocked_clients: Some(2),
                 total_connections_received: Some(42),
+                rejected_connections: Some(0),
+                total_commands_processed: Some(99),
+                instantaneous_ops_per_sec: Some(7),
+                total_error_replies: Some(1),
+                expired_keys: Some(3),
+                evicted_keys: Some(4),
+                keyspace_hits: Some(10),
+                keyspace_misses: Some(2),
+                used_memory_bytes: Some(1_048_576),
+                maxmemory_bytes: Some(8_388_608),
+                memory_fragmentation_ratio_basis_points: Some(12_500),
                 lanes: Vec::new(),
             }
         );

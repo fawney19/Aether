@@ -5,850 +5,70 @@
       variant="default"
       class="overflow-hidden"
     >
-      <!-- 标题和筛选器 -->
-      <div class="px-4 sm:px-6 py-3.5 border-b border-border/60">
-        <!-- 移动端：标题行 + 筛选器行 -->
-        <div class="flex flex-col gap-3 sm:hidden">
-          <div class="flex items-center justify-between">
-            <h3 class="text-base font-semibold">
-              用户管理
-            </h3>
-            <div class="flex items-center gap-2">
-              <!-- 新增用户按钮 -->
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8"
-                title="分组管理"
-                @click="showUserGroupsDialog = true"
-              >
-                <FolderKanban class="w-3.5 h-3.5" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8"
-                title="新增用户"
-                @click="openCreateDialog"
-              >
-                <Plus class="w-3.5 h-3.5" />
-              </Button>
-              <!-- 刷新按钮 -->
-              <RefreshButton
-                :loading="usersStore.loading"
-                @click="refreshUsers"
-              />
-            </div>
-          </div>
-          <!-- 筛选器 -->
-          <div class="flex flex-wrap items-center gap-2">
-            <div class="relative min-w-40 flex-1">
-              <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground z-10 pointer-events-none" />
-              <Input
-                id="users-search-mobile"
-                v-model="searchQuery"
-                type="text"
-                placeholder="搜索..."
-                class="w-full pl-8 pr-3 h-8 text-sm bg-background/50 border-border/60"
-              />
-            </div>
-            <Select
-              v-model="filterRole"
-            >
-              <SelectTrigger class="w-24 h-8 text-xs border-border/60">
-                <SelectValue placeholder="角色" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  全部
-                </SelectItem>
-                <SelectItem value="admin">
-                  管理员
-                </SelectItem>
-                <SelectItem value="audit_admin">
-                  审计管理员
-                </SelectItem>
-                <SelectItem value="user">
-                  用户
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <Select
-              v-model="filterGroup"
-            >
-              <SelectTrigger class="w-24 h-8 text-xs border-border/60">
-                <SelectValue placeholder="分组" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  全部
-                </SelectItem>
-                <SelectItem
-                  v-for="group in userGroups"
-                  :key="group.id"
-                  :value="group.id"
-                >
-                  {{ group.name }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <Select
-              v-model="filterStatus"
-            >
-              <SelectTrigger class="w-20 h-8 text-xs border-border/60">
-                <SelectValue placeholder="状态" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  全部
-                </SelectItem>
-                <SelectItem value="active">
-                  活跃
-                </SelectItem>
-                <SelectItem value="inactive">
-                  禁用
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <Select
-              v-model="sortOption"
-            >
-              <SelectTrigger class="w-32 h-8 text-xs border-border/60">
-                <SelectValue placeholder="排序" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem
-                  v-for="option in userSortOptions"
-                  :key="option.value"
-                  :value="option.value"
-                >
-                  {{ option.label }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
+      <UserManagementHeader
+        :search-query="searchQuery"
+        :filter-role="filterRole"
+        :filter-group="filterGroup"
+        :filter-status="filterStatus"
+        :sort-option="sortOption"
+        :user-groups="userGroups"
+        :role-options="userRoleFilterOptions"
+        :status-options="userStatusFilterOptions"
+        :sort-options="userSortOptions"
+        :loading="usersStore.loading"
+        :can-operate-admin="authStore.canOperateAdmin"
+        @update:search-query="searchQuery = $event"
+        @update:filter-role="filterRole = $event"
+        @update:filter-group="filterGroup = $event"
+        @update:filter-status="filterStatus = $event"
+        @update:sort-option="sortOption = $event"
+        @open-groups="showUserGroupsDialog = true"
+        @create-user="openCreateDialog"
+        @refresh="refreshUsers"
+      />
 
-        <!-- 桌面端：单行布局 -->
-        <div class="hidden sm:flex items-center justify-between gap-4">
-          <h3 class="text-base font-semibold">
-            用户管理
-          </h3>
+      <UserSelectionToolbar
+        :is-all-filtered-selected="isAllFilteredSelected"
+        :is-partially-filtered-selected="isPartiallyFilteredSelected"
+        :filtered-user-count="filteredUserCount"
+        :current-page-count="paginatedUsers.length"
+        :selected-count="selectedCount"
+        :is-current-page-fully-selected="isCurrentPageFullySelected"
+        :can-clear-selection="canClearSelection"
+        :select-all-filtered="selectAllFiltered"
+        :loading="usersStore.loading"
+        :can-operate-admin="authStore.canOperateAdmin"
+        :group-count="userGroups.length"
+        @toggle-select-filtered="toggleSelectFiltered"
+        @toggle-select-current-page="toggleSelectCurrentPage"
+        @clear-selection="clearSelection"
+        @open-batch-dialog="openUserBatchDialog"
+      />
 
-          <!-- 筛选器和操作按钮 -->
-          <div class="flex items-center gap-2">
-            <!-- 搜索框 -->
-            <div class="relative">
-              <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground z-10 pointer-events-none" />
-              <Input
-                id="users-search"
-                v-model="searchQuery"
-                type="text"
-                placeholder="搜索用户名或邮箱..."
-                class="w-48 pl-8 pr-3 h-8 text-sm bg-background/50 border-border/60 focus:border-primary/40 transition-colors"
-              />
-            </div>
-
-            <!-- 分隔线 -->
-            <div class="h-4 w-px bg-border" />
-
-            <!-- 角色筛选 -->
-            <div class="xl:hidden">
-              <Select
-                v-model="filterRole"
-              >
-                <SelectTrigger class="w-32 h-8 text-xs border-border/60">
-                  <SelectValue placeholder="全部角色" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">
-                    全部角色
-                  </SelectItem>
-                  <SelectItem value="admin">
-                    管理员
-                  </SelectItem>
-                  <SelectItem value="audit_admin">
-                    审计管理员
-                  </SelectItem>
-                  <SelectItem value="user">
-                    普通用户
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <!-- 状态筛选 -->
-            <div class="xl:hidden">
-              <Select
-                v-model="filterStatus"
-              >
-                <SelectTrigger class="w-28 h-8 text-xs border-border/60">
-                  <SelectValue placeholder="全部状态" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">
-                    全部状态
-                  </SelectItem>
-                  <SelectItem value="active">
-                    活跃
-                  </SelectItem>
-                  <SelectItem value="inactive">
-                    禁用
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <Select v-model="filterGroup">
-              <SelectTrigger class="w-32 h-8 text-xs border-border/60">
-                <SelectValue placeholder="全部分组" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  全部分组
-                </SelectItem>
-                <SelectItem
-                  v-for="group in userGroups"
-                  :key="group.id"
-                  :value="group.id"
-                >
-                  {{ group.name }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-
-            <div class="xl:hidden">
-              <Select v-model="sortOption">
-                <SelectTrigger class="w-40 h-8 text-xs border-border/60">
-                  <SelectValue placeholder="排序" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
-                    v-for="option in userSortOptions"
-                    :key="option.value"
-                    :value="option.value"
-                  >
-                    {{ option.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <!-- 分隔线 -->
-            <div class="h-4 w-px bg-border" />
-
-            <!-- 新增用户按钮 -->
-            <Button
-              v-if="authStore.canOperateAdmin"
-              variant="ghost"
-              size="icon"
-              class="h-8 w-8"
-              title="分组管理"
-              @click="showUserGroupsDialog = true"
-            >
-              <FolderKanban class="w-3.5 h-3.5" />
-            </Button>
-
-            <!-- 新增用户按钮 -->
-            <Button
-              v-if="authStore.canOperateAdmin"
-              variant="ghost"
-              size="icon"
-              class="h-8 w-8"
-              title="新增用户"
-              @click="openCreateDialog"
-            >
-              <Plus class="w-3.5 h-3.5" />
-            </Button>
-
-            <!-- 刷新按钮 -->
-            <RefreshButton
-              :loading="usersStore.loading"
-              @click="refreshUsers"
-            />
-          </div>
-        </div>
-      </div>
-
-      <div class="flex flex-col gap-2 border-b border-border/60 bg-muted/20 px-4 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between sm:px-6 xl:px-4">
-        <div class="flex flex-wrap items-center gap-2 text-muted-foreground">
-          <label class="flex items-center gap-2">
-            <Checkbox
-              :checked="isAllFilteredSelected"
-              :indeterminate="isPartiallyFilteredSelected"
-              :disabled="filteredUserCount === 0 || usersStore.loading"
-              @update:checked="toggleSelectFiltered"
-            />
-            <span>全选筛选结果</span>
-          </label>
-          <span>匹配 {{ filteredUserCount }} 个，当前页 {{ paginatedUsers.length }} 个，已选 {{ selectedCount }} 个</span>
-        </div>
-        <div class="flex flex-wrap items-center gap-1.5">
-          <Button
-            variant="ghost"
-            size="sm"
-            class="h-7 px-2 text-[11px]"
-            :disabled="paginatedUsers.length === 0 || selectAllFiltered || usersStore.loading"
-            @click="toggleSelectCurrentPage"
-          >
-            {{ isCurrentPageFullySelected ? '取消本页全选' : '本页全选' }}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            class="h-7 px-2 text-[11px]"
-            :disabled="!canClearSelection || usersStore.loading"
-            @click="clearSelection"
-          >
-            清空选择
-          </Button>
-          <Button
-            v-if="authStore.canOperateAdmin"
-            size="sm"
-            class="h-7 px-3 text-[11px]"
-            :disabled="(selectedCount === 0 && userGroups.length === 0) || usersStore.loading"
-            @click="openUserBatchDialog"
-          >
-            批量操作
-          </Button>
-        </div>
-      </div>
-
-      <!-- 桌面端表格 -->
-      <div class="hidden xl:block overflow-x-auto">
-        <Table>
-          <TableHeader>
-            <TableRow class="border-b border-border/60 hover:bg-transparent">
-              <TableHead class="w-[44px] h-12 px-4">
-                <Checkbox
-                  :checked="isCurrentPageFullySelected || isAllFilteredSelected"
-                  :indeterminate="isPartiallyFilteredSelected && !isCurrentPageFullySelected"
-                  :disabled="paginatedUsers.length === 0 || selectAllFiltered || usersStore.loading"
-                  @update:checked="toggleSelectCurrentPage"
-                />
-              </TableHead>
-              <SortableTableHead
-                class="w-[260px] h-12 font-semibold"
-                column-key="role"
-                :sortable="false"
-                :filter-active="filterRole !== 'all'"
-                filter-title="筛选角色"
-                filter-content-class="w-40 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
-              >
-                用户信息
-                <template #filter="{ close }">
-                  <TableFilterMenu
-                    v-model="filterRole"
-                    :options="userRoleFilterOptions"
-                    @select="close"
-                  />
-                </template>
-              </SortableTableHead>
-              <TableHead class="w-[240px] h-12 font-semibold">
-                钱包
-              </TableHead>
-              <TableHead class="w-[170px] h-12 font-semibold">
-                统计/限速
-              </TableHead>
-              <SortableTableHead
-                class="w-[110px] h-12 font-semibold"
-                column-key="created_at"
-                :active-key="sortBy"
-                :direction="sortOrder"
-                default-direction="desc"
-                title="按创建时间排序"
-                @sort="handleTableSort"
-              >
-                创建时间
-              </SortableTableHead>
-              <SortableTableHead
-                class="w-[180px] h-12 font-semibold"
-                column-key="status"
-                :sortable="false"
-                :filter-active="filterStatus !== 'all'"
-                filter-title="筛选状态"
-                filter-content-class="w-40 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
-              >
-                状态
-                <template #filter="{ close }">
-                  <TableFilterMenu
-                    v-model="filterStatus"
-                    :options="userStatusFilterOptions"
-                    @select="close"
-                  />
-                </template>
-              </SortableTableHead>
-              <TableHead class="w-[260px] h-12 font-semibold text-center">
-                操作
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            <TableRow
-              v-for="user in paginatedUsers"
-              :key="user.id"
-              class="border-b border-border/40 hover:bg-muted/30 transition-colors"
-            >
-              <TableCell class="w-[44px] px-4 py-4">
-                <Checkbox
-                  :checked="selectAllFiltered || selectedIdSet.has(user.id)"
-                  :disabled="selectAllFiltered || usersStore.loading"
-                  @update:checked="(checked) => toggleOne(user.id, checked === true)"
-                />
-              </TableCell>
-              <TableCell class="py-4">
-                <div class="flex items-center gap-3">
-                  <Avatar class="h-10 w-10 ring-2 ring-background shadow-md">
-                    <AvatarFallback class="bg-primary text-sm font-bold text-white">
-                      {{ user.username.charAt(0).toUpperCase() }}
-                    </AvatarFallback>
-                  </Avatar>
-                  <div class="flex-1 min-w-0">
-                    <div class="mb-1 flex items-center gap-1.5">
-                      <div
-                        class="truncate text-sm font-semibold"
-                        :title="user.username"
-                      >
-                        {{ user.username }}
-                      </div>
-                      <Badge
-                        :variant="userRoleBadgeVariant(user.role)"
-                        class="h-5 px-1.5 py-0 text-[10px] font-medium flex-shrink-0"
-                      >
-                        {{ formatUserRole(user.role) }}
-                      </Badge>
-                    </div>
-                    <div
-                      class="truncate text-xs text-muted-foreground"
-                      :title="user.email || '-'"
-                    >
-                      {{ user.email || '-' }}
-                    </div>
-                    <div
-                      v-if="user.groups?.length"
-                      class="mt-1 flex flex-wrap gap-1"
-                    >
-                      <Badge
-                        v-for="group in user.groups"
-                        :key="group.id"
-                        variant="outline"
-                        class="h-5 px-1.5 py-0 text-[10px]"
-                      >
-                        {{ group.name }}
-                      </Badge>
-                    </div>
-                  </div>
-                </div>
-              </TableCell>
-              <TableCell class="py-4">
-                <div class="space-y-1.5">
-                  <div class="flex items-center gap-1 text-[11px] text-muted-foreground">
-                    <span>总可用：</span>
-                    <Badge
-                      v-if="isUserUnlimited(user)"
-                      variant="secondary"
-                      class="h-5 px-1.5 py-0 text-[10px] font-medium"
-                    >
-                      无限额度
-                    </Badge>
-                    <span
-                      v-else
-                      class="text-sm font-semibold tabular-nums"
-                      :class="isNegativeWalletValue(getUserWalletTotalBalance(user)) ? 'text-rose-600' : 'text-foreground'"
-                    >
-                      {{ formatCurrencyValue(getUserWalletTotalBalance(user), '-') }}
-                    </span>
-                  </div>
-                  <div
-                    v-if="!isUserUnlimited(user) && getUserWallet(user.id)"
-                    class="text-[11px] text-muted-foreground"
-                  >
-                    套餐 {{ formatCurrencyValue(getUserPackageBalance(user), '$0.00') }}
-                    · 钱包 {{ formatCurrencyValue(getUserWalletBalance(user), '$0.00') }}
-                  </div>
-                  <div class="flex items-center gap-2 text-[11px] text-muted-foreground flex-wrap">
-                    <span>
-                      已消费：
-                      <span class="font-medium tabular-nums text-foreground">${{ getUserWalletConsumed(user).toFixed(2) }}</span>
-                    </span>
-                  </div>
-                </div>
-              </TableCell>
-              <TableCell class="py-4">
-                <div class="space-y-1 text-xs">
-                  <div class="flex items-center text-muted-foreground">
-                    <span class="w-14">请求:</span>
-                    <span class="font-medium text-foreground">{{ formatNumber(user.request_count) }}</span>
-                  </div>
-                  <div class="flex items-center text-muted-foreground">
-                    <span class="w-14">Tokens:</span>
-                    <span class="font-medium text-foreground">{{ formatTokens(user.total_tokens ?? 0) }}</span>
-                  </div>
-                  <div class="flex items-center text-muted-foreground">
-                    <span class="w-14">限速:</span>
-                    <Badge
-                      v-if="isRateLimitInherited(user.rate_limit) || isRateLimitUnlimited(user.rate_limit)"
-                      variant="secondary"
-                      class="h-5 px-1.5 py-0 text-[10px] font-medium"
-                    >
-                      {{ formatRateLimitInheritable(user.rate_limit) }}
-                    </Badge>
-                    <span
-                      v-else
-                      class="font-medium text-foreground"
-                    >
-                      {{ formatRateLimitInheritable(user.rate_limit) }}
-                    </span>
-                  </div>
-                </div>
-              </TableCell>
-              <TableCell class="py-4 text-xs text-muted-foreground">
-                {{ formatDate(user.created_at) }}
-              </TableCell>
-              <TableCell class="py-4">
-                <div class="flex flex-col items-start gap-1.5">
-                  <Badge
-                    :variant="user.is_active ? 'success' : 'destructive'"
-                    class="h-5 px-1.5 py-0 text-[10px] font-medium"
-                  >
-                    {{ user.is_active ? '活跃' : '禁用' }}
-                  </Badge>
-                  <Badge
-                    v-if="getUserWallet(user.id)"
-                    :variant="walletStatusBadge(getUserWalletStatus(user.id))"
-                    class="h-5 px-1.5 py-0 text-[10px] font-medium"
-                  >
-                    {{ walletStatusLabel(getUserWalletStatus(user.id)) }}
-                  </Badge>
-                </div>
-              </TableCell>
-              <TableCell class="py-4">
-                <div class="flex justify-center gap-1">
-                  <Button
-                    v-if="authStore.canOperateAdmin"
-                    variant="ghost"
-                    size="icon"
-                    class="h-8 w-8"
-                    title="编辑用户"
-                    @click="editUser(user)"
-                  >
-                    <SquarePen class="h-4 w-4" />
-                  </Button>
-                  <Button
-                    v-if="authStore.canOperateAdmin"
-                    variant="ghost"
-                    size="icon"
-                    class="h-8 w-8"
-                    title="资金操作"
-                    @click="openWalletActionDialog(user)"
-                  >
-                    <DollarSign class="h-4 w-4" />
-                  </Button>
-                  <Button
-                    v-if="authStore.canOperateAdmin"
-                    variant="ghost"
-                    size="icon"
-                    class="h-8 w-8"
-                    title="套餐"
-                    @click="manageUserPlans(user)"
-                  >
-                    <PackageCheck class="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    class="h-8 w-8"
-                    title="API Keys"
-                    @click="manageApiKeys(user)"
-                  >
-                    <Key class="h-4 w-4" />
-                  </Button>
-                  <Button
-                    v-if="authStore.canOperateAdmin"
-                    variant="ghost"
-                    size="icon"
-                    class="h-8 w-8"
-                    title="登录设备"
-                    @click="manageUserSessions(user)"
-                  >
-                    <MonitorSmartphone class="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    class="h-8 w-8"
-                    :title="user.is_active ? '禁用用户' : '启用用户'"
-                    @click="toggleUserStatus(user)"
-                  >
-                    <PauseCircle
-                      v-if="user.is_active"
-                      class="h-4 w-4"
-                    />
-                    <PlayCircle
-                      v-else
-                      class="h-4 w-4"
-                    />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    class="h-8 w-8"
-                    title="删除用户"
-                    @click="deleteUser(user)"
-                  >
-                    <Trash2 class="h-4 w-4" />
-                  </Button>
-                </div>
-              </TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
-      </div>
-
-      <!-- 移动端卡片列表 -->
-      <div class="xl:hidden bg-muted/[0.14] p-3 sm:p-4">
-        <div
-          v-if="paginatedUsers.length === 0"
-          class="rounded-2xl border border-dashed border-border/60 bg-card/70 px-6 py-10 text-center"
-        >
-          <Avatar class="mx-auto mb-3 h-12 w-12">
-            <AvatarFallback class="bg-muted text-base font-semibold text-muted-foreground">
-              U
-            </AvatarFallback>
-          </Avatar>
-          <p class="text-sm font-medium text-foreground">
-            {{ searchQuery || filterRole !== 'all' || filterStatus !== 'all' || filterGroup !== 'all' ? '未找到匹配的用户' : '暂无用户' }}
-          </p>
-          <p
-            v-if="searchQuery || filterRole !== 'all' || filterStatus !== 'all' || filterGroup !== 'all'"
-            class="mt-1 text-xs text-muted-foreground"
-          >
-            尝试调整筛选条件
-          </p>
-        </div>
-
-        <div
-          v-else
-          class="space-y-3.5"
-        >
-          <div
-            v-for="user in paginatedUsers"
-            :key="user.id"
-            class="rounded-2xl border border-border/60 bg-card/95 p-4 shadow-[0_10px_26px_-22px_hsl(var(--foreground))]"
-          >
-            <div class="space-y-4">
-              <div class="flex items-start gap-3">
-                <Checkbox
-                  class="mt-2 shrink-0"
-                  :checked="selectAllFiltered || selectedIdSet.has(user.id)"
-                  :disabled="selectAllFiltered || usersStore.loading"
-                  @update:checked="(checked) => toggleOne(user.id, checked === true)"
-                />
-                <Avatar class="h-10 w-10 ring-2 ring-background shadow-md flex-shrink-0">
-                  <AvatarFallback class="bg-primary text-sm font-bold text-white">
-                    {{ user.username.charAt(0).toUpperCase() }}
-                  </AvatarFallback>
-                </Avatar>
-                <div class="min-w-0 flex-1 space-y-1.5">
-                  <div class="flex items-center gap-1.5">
-                    <div
-                      class="truncate text-sm font-semibold text-foreground"
-                      :title="user.username"
-                    >
-                      {{ user.username }}
-                    </div>
-                    <Badge
-                      :variant="userRoleBadgeVariant(user.role)"
-                      class="h-5 px-1.5 py-0 text-[10px] font-medium flex-shrink-0"
-                    >
-                      {{ formatUserRole(user.role) }}
-                    </Badge>
-                  </div>
-                  <div
-                    class="truncate text-[11px] text-muted-foreground"
-                    :title="user.email || '-'"
-                  >
-                    {{ user.email || '-' }}
-                  </div>
-                </div>
-              </div>
-
-              <div class="flex flex-wrap items-center gap-1.5">
-                <Badge
-                  :variant="user.is_active ? 'success' : 'destructive'"
-                  class="h-5 px-1.5 py-0 text-[10px] font-medium"
-                >
-                  {{ user.is_active ? '活跃' : '禁用' }}
-                </Badge>
-                <Badge
-                  v-if="getUserWallet(user.id)"
-                  :variant="walletStatusBadge(getUserWalletStatus(user.id))"
-                  class="h-5 px-1.5 py-0 text-[10px] font-medium"
-                >
-                  {{ walletStatusLabel(getUserWalletStatus(user.id)) }}
-                </Badge>
-                <Badge
-                  variant="secondary"
-                  class="h-5 px-1.5 py-0 text-[10px] font-medium"
-                  :title="formatUserEffectiveRateLimitSource(user)"
-                >
-                  {{ formatRateLimitInheritable(user.rate_limit) }}
-                </Badge>
-                <Badge
-                  v-for="group in user.groups || []"
-                  :key="group.id"
-                  variant="outline"
-                  class="h-5 px-1.5 py-0 text-[10px] font-medium"
-                >
-                  {{ group.name }}
-                </Badge>
-              </div>
-
-              <div class="rounded-xl border border-border/60 bg-muted/40 p-3.5">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="space-y-1">
-                    <p class="text-[11px] text-muted-foreground">
-                      总可用：
-                    </p>
-                    <Badge
-                      v-if="isUserUnlimited(user)"
-                      variant="secondary"
-                      class="h-5 px-1.5 py-0 text-[10px] font-medium"
-                    >
-                      无限额度
-                    </Badge>
-                    <p
-                      v-else
-                      class="text-base font-semibold tabular-nums leading-none"
-                      :class="isNegativeWalletValue(getUserWalletTotalBalance(user)) ? 'text-rose-600' : 'text-foreground'"
-                    >
-                      {{ formatCurrencyValue(getUserWalletTotalBalance(user), '-') }}
-                    </p>
-                    <p
-                      v-if="!isUserUnlimited(user) && getUserWallet(user.id)"
-                      class="text-[11px] text-muted-foreground"
-                    >
-                      套餐 {{ formatCurrencyValue(getUserPackageBalance(user), '$0.00') }}
-                      · 钱包 {{ formatCurrencyValue(getUserWalletBalance(user), '$0.00') }}
-                    </p>
-                  </div>
-                  <div class="text-right">
-                    <p class="text-[11px] text-muted-foreground">
-                      已消费：
-                    </p>
-                    <p class="text-sm font-medium tabular-nums text-foreground">
-                      ${{ getUserWalletConsumed(user).toFixed(2) }}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div class="grid grid-cols-2 gap-2.5 text-xs">
-                <div class="rounded-lg border border-border/50 bg-background/70 p-2.5">
-                  <div class="mb-1 text-muted-foreground">
-                    请求次数
-                  </div>
-                  <div class="font-semibold text-foreground">
-                    {{ formatNumber(user.request_count) }}
-                  </div>
-                </div>
-                <div class="rounded-lg border border-border/50 bg-background/70 p-2.5">
-                  <div class="mb-1 text-muted-foreground">
-                    Tokens
-                  </div>
-                  <div class="font-semibold text-foreground">
-                    {{ formatTokens(user.total_tokens ?? 0) }}
-                  </div>
-                </div>
-              </div>
-
-              <div class="rounded-lg bg-muted/35 p-2.5 text-[11px] text-muted-foreground">
-                <div class="flex items-center justify-between gap-2">
-                  <span>创建时间</span>
-                  <span class="font-medium text-foreground">{{ formatDate(user.created_at) }}</span>
-                </div>
-              </div>
-
-              <div class="grid grid-cols-2 gap-2 pt-0.5">
-                <Button
-                  v-if="authStore.canOperateAdmin"
-                  variant="outline"
-                  size="sm"
-                  class="h-8 text-xs"
-                  @click="editUser(user)"
-                >
-                  <SquarePen class="mr-1.5 h-3.5 w-3.5" />
-                  编辑
-                </Button>
-                <Button
-                  v-if="authStore.canOperateAdmin"
-                  variant="outline"
-                  size="sm"
-                  class="h-8 text-xs"
-                  @click="openWalletActionDialog(user)"
-                >
-                  <DollarSign class="mr-1.5 h-3.5 w-3.5" />
-                  资金
-                </Button>
-                <Button
-                  v-if="authStore.canOperateAdmin"
-                  variant="outline"
-                  size="sm"
-                  class="h-8 text-xs"
-                  @click="manageUserPlans(user)"
-                >
-                  <PackageCheck class="mr-1.5 h-3.5 w-3.5" />
-                  套餐
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="h-8 text-xs"
-                  @click="manageApiKeys(user)"
-                >
-                  <Key class="mr-1.5 h-3.5 w-3.5" />
-                  API Keys
-                </Button>
-                <Button
-                  v-if="authStore.canOperateAdmin"
-                  variant="outline"
-                  size="sm"
-                  class="h-8 text-xs"
-                  @click="manageUserSessions(user)"
-                >
-                  <MonitorSmartphone class="mr-1.5 h-3.5 w-3.5" />
-                  设备
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="h-8 text-xs"
-                  @click="toggleUserStatus(user)"
-                >
-                  <PauseCircle
-                    v-if="user.is_active"
-                    class="mr-1.5 h-3.5 w-3.5"
-                  />
-                  <PlayCircle
-                    v-else
-                    class="mr-1.5 h-3.5 w-3.5"
-                  />
-                  {{ user.is_active ? '禁用' : '启用' }}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="col-span-2 h-8 border-rose-200 text-xs text-rose-600 hover:bg-rose-50 dark:border-rose-900/60 dark:hover:bg-rose-950/40"
-                  @click="deleteUser(user)"
-                >
-                  <Trash2 class="mr-1.5 h-3.5 w-3.5" />
-                  删除
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+      <UserManagementList
+        :rows="userRows"
+        :selected-id-set="selectedIdSet"
+        :select-all-filtered="selectAllFiltered"
+        :is-all-filtered-selected="isAllFilteredSelected"
+        :is-partially-filtered-selected="isPartiallyFilteredSelected"
+        :is-current-page-fully-selected="isCurrentPageFullySelected"
+        :selection-disabled="selectAllFiltered || usersStore.loading"
+        :loading="usersStore.loading"
+        :can-operate-admin="authStore.canOperateAdmin"
+        :has-filters="hasUserFilters"
+        :sort-by="sortBy"
+        :sort-order="sortOrder"
+        @toggle-selected="toggleOne"
+        @toggle-select-current-page="toggleSelectCurrentPage"
+        @edit="editUser"
+        @wallet="openWalletActionDialog"
+        @plans="manageUserPlans"
+        @api-keys="manageApiKeys"
+        @sessions="manageUserSessions"
+        @toggle-status="toggleUserStatus"
+        @delete="deleteUser"
+        @sort="handleTableSort"
+      />
 
       <!-- 分页控件 -->
       <Pagination
@@ -889,621 +109,82 @@
       @changed="handleUserGroupsChanged"
     />
 
-    <Dialog
-      v-model="showUserPlansDialog"
-      size="xl"
-    >
-      <template #header>
-        <div class="border-b border-border px-6 py-4">
-          <div class="flex items-center gap-3">
-            <div class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-kraft/10">
-              <PackageCheck class="h-5 w-5 text-kraft" />
-            </div>
-            <div class="min-w-0 flex-1">
-              <h3 class="text-lg font-semibold leading-tight text-foreground">
-                用户套餐
-              </h3>
-              <p class="text-xs text-muted-foreground">
-                {{ selectedUser?.username || '-' }} · 查看当前套餐并手动发放
-              </p>
-            </div>
-          </div>
-        </div>
-      </template>
+    <UserPlanDialog
+      :open="showUserPlansDialog"
+      :user-id="selectedUser?.id || null"
+      :user-name="selectedUser?.username || ''"
+      :entitlements="userPlanEntitlements"
+      :plans="grantableBillingPlans"
+      :selected-plan-id="selectedGrantPlanId"
+      :grant-reason="grantReason"
+      :loading-entitlements="loadingUserPlans"
+      :loading-plans="loadingBillingPlans"
+      :granting="grantingUserPlan"
+      :format-date-time="formatDateTime"
+      :format-plan-price="formatPlanPrice"
+      :format-plan-duration="formatPlanDuration"
+      :entitlement-labels="entitlementLabels"
+      @close="showUserPlansDialog = false"
+      @update:selected-plan-id="selectedGrantPlanId = $event"
+      @update:grant-reason="grantReason = $event"
+      @refresh-entitlements="loadUserPlanEntitlements"
+      @grant="grantPlanToSelectedUser"
+    />
 
-      <div class="max-h-[64vh] space-y-4 overflow-y-auto">
-        <div class="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2.5 text-xs text-amber-100/90">
-          后台发放会立即生效；如果新套餐包含每日额度或会员权益，用户已有的同类旧套餐会自动失效。
-        </div>
+    <UserApiKeysDialog
+      :open="showApiKeysDialog"
+      :api-keys="userApiKeys"
+      :creating="creatingApiKey"
+      :format-rate-limit="formatRateLimitSimple"
+      :format-concurrent-limit="formatConcurrentLimitSimple"
+      :format-ip-rules="formatIpRules"
+      @close="showApiKeysDialog = false"
+      @create-key="openCreateUserApiKeyDialog"
+      @edit-key="openEditUserApiKeyDialog"
+      @toggle-lock="toggleLockApiKey"
+      @delete-key="deleteApiKey"
+      @copy-full-key="copyFullKey"
+    />
 
-        <section class="space-y-2.5">
-          <div class="flex items-center justify-between gap-3">
-            <h4 class="text-sm font-semibold text-foreground">
-              当前有效套餐
-            </h4>
-            <Button
-              variant="ghost"
-              size="sm"
-              class="h-7 px-2 text-[11px]"
-              :disabled="loadingUserPlans || !selectedUser"
-              @click="selectedUser && loadUserPlanEntitlements(selectedUser.id)"
-            >
-              {{ loadingUserPlans ? '加载中...' : '刷新' }}
-            </Button>
-          </div>
+    <UserApiKeyFormDialog
+      :open="showUserApiKeyFormDialog"
+      :form="userApiKeyForm"
+      :is-editing="Boolean(editingUserApiKey)"
+      :creating="creatingApiKey"
+      @close="closeUserApiKeyFormDialog"
+      @update:form="userApiKeyForm = $event"
+      @submit="submitUserApiKeyForm"
+    />
 
-          <div
-            v-if="loadingUserPlans"
-            class="rounded-lg border border-dashed border-border/60 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground"
-          >
-            正在加载用户套餐...
-          </div>
-          <div
-            v-else-if="userPlanEntitlements.length === 0"
-            class="rounded-lg border border-dashed border-border/60 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground"
-          >
-            当前没有有效套餐
-          </div>
-          <div
-            v-else
-            class="space-y-2.5"
-          >
-            <div
-              v-for="item in userPlanEntitlements"
-              :key="item.id"
-              class="rounded-lg border border-border bg-card/80 p-3"
-            >
-              <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div class="min-w-0 flex-1">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class="font-medium text-foreground">
-                      {{ item.plan_title || item.plan?.title || item.plan_id }}
-                    </span>
-                    <Badge
-                      :variant="item.active ? 'success' : 'secondary'"
-                      class="h-5 px-1.5 py-0 text-[10px]"
-                    >
-                      {{ item.active ? '生效中' : item.status }}
-                    </Badge>
-                  </div>
-                  <div class="mt-2 flex flex-wrap gap-1.5">
-                    <Badge
-                      v-for="label in entitlementLabels(item.entitlements)"
-                      :key="label"
-                      variant="outline"
-                      class="h-5 px-1.5 py-0 text-[10px]"
-                    >
-                      {{ label }}
-                    </Badge>
-                  </div>
-                </div>
-                <div class="text-left text-[11px] text-muted-foreground sm:text-right">
-                  <div>开始：{{ formatDateTime(item.starts_at) }}</div>
-                  <div>到期：{{ formatDateTime(item.expires_at) }}</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section class="space-y-3 rounded-lg border border-border bg-card/70 p-4">
-          <div class="space-y-1">
-            <h4 class="text-sm font-semibold text-foreground">
-              发放套餐
-            </h4>
-            <p class="text-xs text-muted-foreground">
-              仅发放套餐权益，不产生用户付款；同类旧套餐会按现有规则自动替换。
-            </p>
-          </div>
-
-          <Select v-model="selectedGrantPlanId">
-            <SelectTrigger
-              class="h-9 rounded-md bg-muted/50 px-3"
-              :disabled="loadingBillingPlans || grantableBillingPlans.length === 0"
-            >
-              <SelectValue :placeholder="loadingBillingPlans ? '加载套餐中...' : '选择要发放的套餐'" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem
-                v-for="plan in grantableBillingPlans"
-                :key="plan.id"
-                :value="plan.id"
-              >
-                <div class="flex min-w-0 items-center gap-2">
-                  <span class="truncate">{{ plan.title }}</span>
-                  <span class="shrink-0 text-xs text-muted-foreground">
-                    {{ formatPlanPrice(plan) }} · {{ formatPlanDuration(plan) }}
-                  </span>
-                  <span
-                    v-if="!plan.enabled"
-                    class="shrink-0 text-[10px] text-amber-400"
-                  >
-                    已下架
-                  </span>
-                </div>
-              </SelectItem>
-            </SelectContent>
-          </Select>
-
-          <Textarea
-            v-model="grantReason"
-            class="min-h-[60px] resize-y rounded-md bg-muted/50 text-sm"
-            maxlength="512"
-            placeholder="备注（可选，例如：人工补偿、活动赠送）"
-          />
-
-          <div class="flex justify-end">
-            <Button
-              size="sm"
-              :disabled="grantingUserPlan || !selectedUser || !selectedGrantPlanId"
-              @click="grantPlanToSelectedUser"
-            >
-              {{ grantingUserPlan ? '发放中...' : '发放套餐' }}
-            </Button>
-          </div>
-        </section>
-      </div>
-
-      <template #footer>
-        <Button
-          variant="outline"
-          class="h-10 px-5"
-          @click="showUserPlansDialog = false"
-        >
-          关闭
-        </Button>
-      </template>
-    </Dialog>
-
-    <!-- API Keys 管理对话框 -->
-    <Dialog
-      v-model="showApiKeysDialog"
-      size="xl"
-    >
-      <template #header>
-        <div class="border-b border-border px-6 py-4">
-          <div class="flex items-center gap-3">
-            <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-kraft/10 flex-shrink-0">
-              <Key class="h-5 w-5 text-kraft" />
-            </div>
-            <div class="flex-1 min-w-0">
-              <h3 class="text-lg font-semibold text-foreground leading-tight">
-                管理 API Keys
-              </h3>
-              <p class="text-xs text-muted-foreground">
-                查看和管理用户的 API 密钥
-              </p>
-            </div>
-          </div>
-        </div>
-      </template>
-
-      <div class="max-h-[60vh] overflow-y-auto space-y-3">
-        <template v-if="userApiKeys.length > 0">
-          <div
-            v-for="apiKey in userApiKeys"
-            :key="apiKey.id"
-            class="rounded-lg border border-border bg-card p-4 hover:border-primary/30 transition-colors"
-          >
-            <div class="flex items-center justify-between gap-3">
-              <!-- 左侧信息 -->
-              <div class="flex items-center gap-3 min-w-0 flex-1">
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-center gap-2 flex-wrap">
-                    <span class="font-semibold text-foreground">
-                      {{ apiKey.name || '未命名 API Key' }}
-                    </span>
-                    <Badge
-                      :variant="apiKey.is_active ? 'success' : 'secondary'"
-                      class="text-xs"
-                    >
-                      {{ apiKey.is_active ? '活跃' : '禁用' }}
-                    </Badge>
-                    <Badge
-                      v-if="apiKey.is_locked"
-                      variant="secondary"
-                      class="text-xs"
-                    >
-                      已锁定
-                    </Badge>
-                    <Badge
-                      v-if="apiKey.is_standalone"
-                      variant="default"
-                      class="text-xs bg-purple-500"
-                    >
-                      独立余额
-                    </Badge>
-                    <Badge
-                      variant="secondary"
-                      class="text-xs"
-                    >
-                      {{ formatRateLimitSimple(apiKey.rate_limit) }}
-                    </Badge>
-                    <Badge
-                      variant="secondary"
-                      class="text-xs"
-                    >
-                      {{ formatConcurrentLimitSimple(apiKey.concurrent_limit) }}
-                    </Badge>
-                  </div>
-                  <div class="flex items-center gap-1 mt-0.5">
-                    <code class="text-xs font-mono text-muted-foreground">
-                      {{ apiKey.key_display || '****' }}
-                    </code>
-                    <span class="text-xs text-muted-foreground">
-                      IP 限制：{{ formatIpRules(apiKey.ip_rules) }}
-                    </span>
-                    <button
-                      class="p-0.5 hover:bg-muted rounded transition-colors"
-                      title="复制完整密钥"
-                      @click="copyFullKey(apiKey)"
-                    >
-                      <Copy class="w-3 h-3 text-muted-foreground" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-              <!-- 右侧统计和操作 -->
-              <div class="flex items-center gap-4 flex-shrink-0">
-                <div class="text-right text-sm">
-                  <div class="text-muted-foreground">
-                    {{ (apiKey.total_requests || 0).toLocaleString() }} 次
-                  </div>
-                  <div class="font-semibold text-rose-600">
-                    ${{ (apiKey.total_cost_usd || 0).toFixed(4) }}
-                  </div>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-8 w-8"
-                  title="编辑"
-                  @click="openEditUserApiKeyDialog(apiKey)"
-                >
-                  <SquarePen class="h-4 w-4" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-8 w-8"
-                  :title="apiKey.is_locked ? '解锁' : '锁定'"
-                  @click="toggleLockApiKey(apiKey)"
-                >
-                  <Lock
-                    v-if="apiKey.is_locked"
-                    class="h-4 w-4"
-                  />
-                  <LockOpen
-                    v-else
-                    class="h-4 w-4"
-                  />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-8 w-8"
-                  title="删除"
-                  @click="deleteApiKey(apiKey)"
-                >
-                  <Trash2 class="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-          </div>
-        </template>
-        <div
-          v-else
-          class="rounded-lg border-2 border-dashed border-muted-foreground/20 bg-muted/20 px-4 py-12 text-center"
-        >
-          <div class="flex flex-col items-center gap-3">
-            <div class="flex h-14 w-14 items-center justify-center rounded-full bg-muted">
-              <Key class="h-6 w-6 text-muted-foreground/50" />
-            </div>
-            <div>
-              <p class="mb-1 text-base font-semibold text-foreground">
-                暂无 API Keys
-              </p>
-              <p class="text-sm text-muted-foreground">
-                点击下方按钮创建
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <template #footer>
-        <Button
-          variant="outline"
-          class="h-10 px-5"
-          @click="showApiKeysDialog = false"
-        >
-          取消
-        </Button>
-        <Button
-          class="h-10 px-5"
-          :disabled="creatingApiKey"
-          @click="openCreateUserApiKeyDialog"
-        >
-          {{ creatingApiKey ? '创建中...' : '创建' }}
-        </Button>
-      </template>
-    </Dialog>
-
-    <Dialog
-      v-model="showUserApiKeyFormDialog"
-      size="lg"
-    >
-      <template #header>
-        <div class="border-b border-border px-6 py-4">
-          <div class="flex items-center gap-3">
-            <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-kraft/10 flex-shrink-0">
-              <Key class="h-5 w-5 text-kraft" />
-            </div>
-            <div class="flex-1 min-w-0">
-              <h3 class="text-lg font-semibold text-foreground leading-tight">
-                {{ editingUserApiKey ? '编辑 API Key' : '创建 API Key' }}
-              </h3>
-              <p class="text-xs text-muted-foreground">
-                {{ editingUserApiKey ? '更新用户 API Key 的名称、速率限制和并发限制' : '为用户创建新的 API Key' }}
-              </p>
-            </div>
-          </div>
-        </div>
-      </template>
-
-      <div class="space-y-4">
-        <div class="space-y-2">
-          <Label
-            for="admin-user-key-name"
-            class="text-sm font-medium"
-          >密钥名称</Label>
-          <Input
-            id="admin-user-key-name"
-            v-model="userApiKeyForm.name"
-            class="h-10"
-            placeholder="例如：生产环境 Key"
-          />
-        </div>
-        <div class="space-y-2">
-          <Label
-            for="admin-user-key-rate-limit"
-            class="text-sm font-medium"
-          >速率限制 (请求/分钟)</Label>
-          <Input
-            id="admin-user-key-rate-limit"
-            :model-value="userApiKeyForm.rate_limit ?? ''"
-            type="number"
-            min="0"
-            max="10000"
-            class="h-10"
-            placeholder="留空不限"
-            @update:model-value="(v) => userApiKeyForm.rate_limit = parseNumberInput(v, { min: 0, max: 10000 })"
-          />
-          <p class="text-xs text-muted-foreground">
-            留空表示不限制
-          </p>
-        </div>
-        <div class="space-y-2">
-          <Label
-            for="admin-user-key-concurrent-limit"
-            class="text-sm font-medium"
-          >并发限制</Label>
-          <Input
-            id="admin-user-key-concurrent-limit"
-            :model-value="userApiKeyForm.concurrent_limit ?? ''"
-            type="number"
-            min="0"
-            max="10000"
-            class="h-10"
-            placeholder="0 = 不限并发"
-            @update:model-value="(v) => userApiKeyForm.concurrent_limit = parseNumberInput(v, { min: 0, max: 10000 })"
-          />
-          <p class="text-xs text-muted-foreground">
-            {{ editingUserApiKey ? '留空表示保持当前值，填 0 表示不限并发' : '留空表示不限并发，填 0 也表示不限并发' }}
-          </p>
-        </div>
-        <div class="space-y-2">
-          <Label
-            for="admin-user-key-ip-rules"
-            class="text-sm font-medium"
-          >IP 限制</Label>
-          <Input
-            id="admin-user-key-ip-rules"
-            v-model="userApiKeyForm.ip_rules_text"
-            class="h-10"
-            placeholder="例如：203.0.113.10, 10.0.0.0/24, !10.0.0.13"
-          />
-          <p class="text-xs text-muted-foreground">
-            留空表示不限制；支持 IP、CIDR、IPv4 通配符、*，用 ! 前缀拒绝，多个规则用英文逗号分隔
-          </p>
-        </div>
-
-        <div class="rounded-lg border border-border bg-muted/30 p-3 space-y-3">
-          <div class="flex items-center justify-between gap-3">
-            <Label class="text-sm font-medium">敏感信息保护</Label>
-            <Switch v-model="userApiKeyForm.chat_pii_redaction_enabled" />
-          </div>
-          <div class="flex items-center justify-between gap-3">
-            <Label class="text-sm font-medium">占位符说明</Label>
-            <Switch
-              v-model="userApiKeyForm.chat_pii_redaction_placeholder_notice"
-              :disabled="!userApiKeyForm.chat_pii_redaction_enabled"
-            />
-          </div>
-        </div>
-      </div>
-
-      <template #footer>
-        <Button
-          variant="outline"
-          class="h-10 px-5"
-          @click="closeUserApiKeyFormDialog"
-        >
-          取消
-        </Button>
-        <Button
-          class="h-10 px-5"
-          :disabled="creatingApiKey"
-          @click="submitUserApiKeyForm"
-        >
-          {{ creatingApiKey ? (editingUserApiKey ? '保存中...' : '创建中...') : (editingUserApiKey ? '保存' : '创建') }}
-        </Button>
-      </template>
-    </Dialog>
-
-    <Dialog
-      v-model="showUserSessionsDialog"
-      size="xl"
-    >
-      <template #header>
-        <div class="border-b border-border px-6 py-4">
-          <div class="flex items-center gap-3">
-            <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 flex-shrink-0">
-              <MonitorSmartphone class="h-5 w-5 text-primary" />
-            </div>
-            <div class="flex-1 min-w-0">
-              <h3 class="text-lg font-semibold text-foreground leading-tight">
-                登录设备
-              </h3>
-              <p class="text-xs text-muted-foreground">
-                查看并强制下线该用户的设备会话
-              </p>
-            </div>
-          </div>
-        </div>
-      </template>
-
-      <div class="max-h-[60vh] overflow-y-auto space-y-3">
-        <div
-          v-if="loadingUserSessions"
-          class="rounded-lg border border-dashed border-border/60 bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground"
-        >
-          正在加载设备会话...
-        </div>
-        <div
-          v-else-if="userSessions.length === 0"
-          class="rounded-lg border border-dashed border-border/60 bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground"
-        >
-          暂无在线设备
-        </div>
-        <div
-          v-else
-          class="space-y-3"
-        >
-          <div
-            v-for="session in userSessions"
-            :key="session.id"
-            class="rounded-lg border border-border bg-card p-4 hover:border-primary/30 transition-colors"
-          >
-            <div class="flex items-center justify-between gap-3">
-              <div class="min-w-0 flex-1">
-                <div class="font-semibold text-foreground">
-                  {{ session.device_label }}
-                </div>
-                <div class="mt-1 text-xs text-muted-foreground">
-                  {{ formatSessionMeta(session) }}
-                </div>
-                <div class="mt-1 text-xs text-muted-foreground">
-                  最近活跃 {{ formatDate(session.last_seen_at || session.created_at) }}
-                  <span v-if="session.ip_address"> · IP {{ session.ip_address }}</span>
-                </div>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                :disabled="sessionDialogActionLoading === session.id"
-                @click="revokeSelectedUserSession(session.id)"
-              >
-                {{ sessionDialogActionLoading === session.id ? '处理中...' : '强制下线' }}
-              </Button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <template #footer>
-        <Button
-          variant="outline"
-          class="h-10 px-5"
-          @click="showUserSessionsDialog = false"
-        >
-          关闭
-        </Button>
-        <Button
-          class="h-10 px-5"
-          :disabled="loadingUserSessions || userSessions.length === 0 || sessionDialogActionLoading === 'all'"
-          @click="revokeAllSelectedUserSessions"
-        >
-          {{ sessionDialogActionLoading === 'all' ? '处理中...' : '全部下线' }}
-        </Button>
-      </template>
-    </Dialog>
+    <UserSessionsDialog
+      :open="showUserSessionsDialog"
+      :sessions="userSessions"
+      :loading="loadingUserSessions"
+      :action-loading="sessionDialogActionLoading"
+      :format-date="formatDate"
+      :format-session-meta="formatSessionMeta"
+      @close="showUserSessionsDialog = false"
+      @revoke-session="revokeSelectedUserSession"
+      @revoke-all="revokeAllSelectedUserSessions"
+    />
 
     <WalletOpsDrawer
       :open="showWalletActionDialogState"
       :wallet="walletActionTarget?.wallet || null"
       :owner-name="walletActionTarget?.user.username || ''"
-      :owner-subtitle="walletActionTarget?.user.email || '未设置邮箱'"
-      context-label="用户钱包"
+      :owner-subtitle="walletActionTarget?.user.email || legacyT('未设置邮箱')"
+      :context-label="legacyT('用户钱包')"
       accent="emerald"
       @close="closeWalletActionDrawer"
       @changed="handleWalletDrawerChanged"
     />
 
-    <!-- 新 API Key 显示对话框 -->
-    <Dialog
-      v-model="showNewApiKeyDialog"
-      size="lg"
-    >
-      <template #header>
-        <div class="border-b border-border px-6 py-4">
-          <div class="flex items-center gap-3">
-            <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-100 dark:bg-emerald-900/30 flex-shrink-0">
-              <CheckCircle class="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
-            </div>
-            <div class="flex-1 min-w-0">
-              <h3 class="text-lg font-semibold text-foreground leading-tight">
-                创建成功
-              </h3>
-              <p class="text-xs text-muted-foreground">
-                请妥善保管, 切勿泄露给他人.
-              </p>
-            </div>
-          </div>
-        </div>
-      </template>
-
-      <div class="space-y-4">
-        <div class="space-y-2">
-          <Label class="text-sm font-medium">API Key</Label>
-          <div class="flex items-center gap-2">
-            <Input
-              ref="apiKeyInput"
-              type="text"
-              :value="newApiKey"
-              readonly
-              class="flex-1 font-mono text-sm bg-muted/50 h-11"
-              @click="selectApiKey"
-            />
-            <Button
-              class="h-11"
-              @click="copyApiKey"
-            >
-              复制
-            </Button>
-          </div>
-        </div>
-      </div>
-
-      <template #footer>
-        <Button
-          class="h-10 px-5"
-          @click="closeNewApiKeyDialog"
-        >
-          确定
-        </Button>
-      </template>
-    </Dialog>
+    <NewApiKeyDialog
+      :open="showNewApiKeyDialog"
+      :api-key="newApiKey"
+      @close="closeNewApiKeyDialog"
+      @copy="copyApiKey"
+    />
   </div>
 </template>
 
@@ -1534,72 +215,51 @@ import { walletStatusBadge, walletStatusLabel } from '@/utils/walletDisplay'
 
 // UI 组件
 import {
-  Dialog,
   Card,
-  Button,
-  Badge,
-  Input,
-  Label,
-  Textarea,
-  Select,
-  SelectTrigger,
-  SelectValue,
-  SelectContent,
-  SelectItem,
-  Table,
-  TableHeader,
-  TableBody,
-  TableRow,
-  TableHead,
-  SortableTableHead,
-  TableFilterMenu,
-  TableCell,
-  Avatar,
-  AvatarFallback,
   Pagination,
-  RefreshButton,
-  Checkbox,
-  Switch
 } from '@/components/ui'
 
-import {
-  Plus,
-  SquarePen,
-  Key,
-  PauseCircle,
-  PlayCircle,
-  DollarSign,
-  Trash2,
-  Copy,
-  Search,
-  CheckCircle,
-  Lock,
-  LockOpen,
-  MonitorSmartphone,
-  FolderKanban,
-  PackageCheck,
-} from 'lucide-vue-next'
-
 // 功能组件
+import NewApiKeyDialog from '@/features/users/components/NewApiKeyDialog.vue'
+import UserApiKeyFormDialog, { type UserApiKeyFormState } from '@/features/users/components/UserApiKeyFormDialog.vue'
+import UserApiKeysDialog from '@/features/users/components/UserApiKeysDialog.vue'
 import UserFormDialog, { type UserFormData } from '@/features/users/components/UserFormDialog.vue'
 import UserBatchActionDialog from '@/features/users/components/UserBatchActionDialog.vue'
 import UserGroupsDialog from '@/features/users/components/UserGroupsDialog.vue'
+import UserManagementHeader from '@/features/users/components/UserManagementHeader.vue'
+import UserManagementList from '@/features/users/components/UserManagementList.vue'
+import UserPlanDialog from '@/features/users/components/UserPlanDialog.vue'
+import UserSelectionToolbar from '@/features/users/components/UserSelectionToolbar.vue'
+import UserSessionsDialog from '@/features/users/components/UserSessionsDialog.vue'
+import type { UserManagementRow } from '@/features/users/components/user-management-types'
+import {
+  USER_ROLE_FILTER_OPTIONS,
+  USER_SORT_OPTIONS,
+  USER_STATUS_FILTER_OPTIONS,
+  formatUserRoleLabel,
+  userRoleBadgeVariant,
+} from '@/features/users/components/user-management-config'
 import WalletOpsDrawer from '@/features/wallet/components/WalletOpsDrawer.vue'
 import { parseApiError } from '@/utils/errorParser'
 import { formatTokens, formatRateLimitInheritable, formatRateLimitSimple, isRateLimitInherited, isRateLimitUnlimited } from '@/utils/format'
-import { parseNumberInput } from '@/utils/form'
 import {
   mergeChatPiiRedactionFeatureSettings,
   readChatPiiRedactionFeatureSettings,
 } from '@/utils/featureSettings'
 import { log } from '@/utils/logger'
 import { useBatchSelection } from '@/composables/useBatchSelection'
+import { useI18n } from '@/i18n'
 
 const { success, error } = useToast()
 const { confirmDanger } = useConfirm()
 const { copyToClipboard } = useClipboard()
+const { legacyT, locale } = useI18n()
 const usersStore = useUsersStore()
 const authStore = useAuthStore()
+
+function localizedApiError(err: unknown, fallback: string): string {
+  return legacyT(parseApiError(err, fallback))
+}
 
 // 用户表单对话框状态
 const showUserFormDialog = ref(false)
@@ -1626,12 +286,11 @@ const loadingUserPlans = ref(false)
 const loadingBillingPlans = ref(false)
 const grantingUserPlan = ref(false)
 const sessionDialogActionLoading = ref<string | null>(null)
-const apiKeyInput = ref<HTMLInputElement>()
 const editingUserApiKey = ref<ApiKey | null>(null)
-const userApiKeyForm = ref({
+const userApiKeyForm = ref<UserApiKeyFormState>({
   name: '',
-  rate_limit: undefined as number | undefined,
-  concurrent_limit: undefined as number | undefined,
+  rate_limit: undefined,
+  concurrent_limit: undefined,
   ip_rules_text: '',
   chat_pii_redaction_enabled: false,
   chat_pii_redaction_placeholder_notice: true,
@@ -1652,22 +311,9 @@ const filterStatus = ref<'all' | 'active' | 'inactive'>('all')
 const filterGroup = ref('all')
 const sortOption = ref<'default' | 'created_at_desc' | 'created_at_asc'>('default')
 const userGroups = ref<UserGroup[]>([])
-const userRoleFilterOptions = [
-  { value: 'all', label: '全部角色' },
-  { value: 'admin', label: '管理员' },
-  { value: 'audit_admin', label: '审计管理员' },
-  { value: 'user', label: '普通用户' },
-]
-const userStatusFilterOptions = [
-  { value: 'all', label: '全部状态' },
-  { value: 'active', label: '活跃' },
-  { value: 'inactive', label: '禁用' },
-]
-const userSortOptions = [
-  { value: 'default', label: '默认排序' },
-  { value: 'created_at_desc', label: '创建时间 新到旧' },
-  { value: 'created_at_asc', label: '创建时间 旧到新' },
-]
+const userRoleFilterOptions = USER_ROLE_FILTER_OPTIONS
+const userStatusFilterOptions = USER_STATUS_FILTER_OPTIONS
+const userSortOptions = USER_SORT_OPTIONS
 const sortBy = computed<AdminUserSortBy | null>(() =>
   sortOption.value === 'default' ? null : 'created_at'
 )
@@ -1722,6 +368,42 @@ const grantableBillingPlans = computed(() =>
   availableBillingPlans.value.filter((plan) => hasPackageEntitlement(plan.entitlements))
 )
 
+const hasUserFilters = computed(() =>
+  Boolean(searchQuery.value.trim())
+  || filterRole.value !== 'all'
+  || filterStatus.value !== 'all'
+  || filterGroup.value !== 'all'
+)
+
+const userRows = computed<UserManagementRow[]>(() =>
+  paginatedUsers.value.map((user) => {
+    const totalBalance = getUserWalletTotalBalance(user)
+    const walletStatus = getUserWalletStatus(user.id)
+    return {
+      user,
+      roleLabel: legacyT(formatUserRoleLabel(user.role)),
+      roleBadgeVariant: userRoleBadgeVariant(user.role),
+      isUnlimited: isUserUnlimited(user),
+      hasWallet: Boolean(getUserWallet(user.id)),
+      totalBalanceLabel: formatCurrencyValue(totalBalance, '-'),
+      packageBalanceLabel: formatCurrencyValue(getUserPackageBalance(user), '$0.00'),
+      walletBalanceLabel: formatCurrencyValue(getUserWalletBalance(user), '$0.00'),
+      consumedLabel: `$${getUserWalletConsumed(user).toFixed(2)}`,
+      isNegativeBalance: isNegativeWalletValue(totalBalance),
+      walletStatusLabel: walletStatusLabel(walletStatus),
+      walletStatusVariant: walletStatusBadge(walletStatus),
+      requestCountLabel: formatNumber(user.request_count),
+      tokensLabel: formatTokens(user.total_tokens ?? 0),
+      rateLimitLabel: formatRateLimitInheritable(user.rate_limit),
+      rateLimitSource: formatUserEffectiveRateLimitSource(user),
+      rateLimitAsBadge: isRateLimitInherited(user.rate_limit) || isRateLimitUnlimited(user.rate_limit),
+      createdAtLabel: formatDate(user.created_at),
+      statusLabel: legacyT(user.is_active ? '活跃' : '禁用'),
+      statusVariant: user.is_active ? 'success' : 'destructive',
+    }
+  })
+)
+
 // Watch filter changes and reset to first page
 watch([searchQuery, filterRole, filterStatus, filterGroup, sortOption], () => {
   currentPage.value = 1
@@ -1730,16 +412,6 @@ watch([searchQuery, filterRole, filterStatus, filterGroup, sortOption], () => {
 })
 
 watch(paginatedUsers, (users) => rememberBatchPageUsers(users), { immediate: true })
-
-function formatUserRole(role: string) {
-  if (role === 'admin') return '管理员'
-  if (role === 'audit_admin') return '审计管理员'
-  return '普通用户'
-}
-
-function userRoleBadgeVariant(role: string) {
-  return role === 'admin' ? 'default' : 'secondary'
-}
 
 onMounted(() => {
   void refreshUsers({ preferCache: true })
@@ -1815,12 +487,12 @@ function invalidateUserOptions(): void {
 }
 
 function formatDate(dateString: string) {
-  return new Date(dateString).toLocaleDateString('zh-CN')
+  return new Date(dateString).toLocaleDateString(locale.value)
 }
 
 function formatDateTime(value?: string | null): string {
   if (!value) return '-'
-  return new Date(value).toLocaleString('zh-CN', {
+  return new Date(value).toLocaleString(locale.value, {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -1835,25 +507,25 @@ function formatPlanPrice(plan: BillingPlan): string {
 
 function formatPlanDuration(plan: BillingPlan): string {
   const labels: Record<string, string> = {
-    day: '天',
-    month: '个月',
-    year: '年',
-    custom: '天',
+    day: legacyT('天'),
+    month: legacyT('个月'),
+    year: legacyT('年'),
+    custom: legacyT('天'),
   }
-  const unit = labels[plan.duration_unit] || '天'
+  const unit = labels[plan.duration_unit] || legacyT('天')
   return `${Number(plan.duration_value || 1)}${unit}`
 }
 
 function entitlementLabels(items: BillingEntitlement[] | undefined): string[] {
   return (items || []).map((item) => {
     if (item.type === 'wallet_credit') {
-      return `附赠余额 $${Number(item.amount_usd || 0).toFixed(2)}`
+      return `${legacyT('附赠余额')} $${Number(item.amount_usd || 0).toFixed(2)}`
     }
     if (item.type === 'daily_quota') {
-      return `每日额度 $${Number(item.daily_quota_usd || 0).toFixed(2)}`
+      return `${legacyT('每日额度')} $${Number(item.daily_quota_usd || 0).toFixed(2)}`
     }
     if (item.type === 'membership_group') {
-      return '会员权益'
+      return legacyT('会员权益')
     }
     return item.type
   })
@@ -1942,13 +614,13 @@ function formatCurrencyValue(value: number | null, nullLabel = '-'): string {
 
 function formatConcurrentLimitSimple(concurrentLimit?: number | null): string {
   if (concurrentLimit == null || concurrentLimit === 0) {
-    return '不限并发'
+    return legacyT('不限并发')
   }
-  return `${concurrentLimit} 并发`
+  return locale.value === 'en-US' ? `${concurrentLimit} concurrent` : `${concurrentLimit} 并发`
 }
 
 function formatIpRules(ipRules?: string[] | null): string {
-  return ipRules && ipRules.length > 0 ? ipRules.join(', ') : '不限制'
+  return ipRules && ipRules.length > 0 ? ipRules.join(', ') : legacyT('不限制')
 }
 
 function parseIpRulesInput(value: string): string[] | null {
@@ -1963,16 +635,16 @@ function formatUserEffectiveRateLimitSource(user: User): string {
   const source = user.effective_policy?.rate_limit
   if (!source) return ''
   if (source.source === 'group' && source.group_name) {
-    return `继承自分组：${source.group_name}`
+    return `${legacyT('继承自分组：')}${source.group_name}`
   }
   if (source.source === 'combined') {
-    const groupNames = Array.isArray(source.group_names) ? source.group_names.join('、') : ''
-    return groupNames ? `用户额外限制与分组叠加：${groupNames}` : '用户额外限制与分组叠加'
+    const groupNames = Array.isArray(source.group_names) ? source.group_names.join(locale.value === 'en-US' ? ', ' : '、') : ''
+    return groupNames ? `${legacyT('用户额外限制与分组叠加：')}${groupNames}` : legacyT('用户额外限制与分组叠加')
   }
   if (source.source === 'user') {
-    return '用户单独配置'
+    return legacyT('用户单独配置')
   }
-  return '系统默认'
+  return legacyT('系统默认')
 }
 
 function isNegativeWalletValue(value: number | null): boolean {
@@ -1981,10 +653,13 @@ function isNegativeWalletValue(value: number | null): boolean {
 
 async function toggleUserStatus(user: User) {
   const action = user.is_active ? '禁用' : '启用'
+  const localizedAction = legacyT(action)
   const confirmed = await confirmDanger(
-    `确定要${action}用户 ${user.username} 吗？`,
-    `${action}用户`,
-    action
+    locale.value === 'en-US'
+      ? `${localizedAction} user ${user.username}?`
+      : `确定要${action}用户 ${user.username} 吗？`,
+    locale.value === 'en-US' ? `${localizedAction} user` : `${action}用户`,
+    localizedAction
   )
 
   if (!confirmed) return
@@ -1993,9 +668,9 @@ async function toggleUserStatus(user: User) {
     await usersStore.updateUser(user.id, { is_active: !user.is_active })
     invalidateUserOptions()
     await refreshUsers()
-    success(`用户已${action}`)
+    success(legacyT(`用户已${action}`))
   } catch (err: unknown) {
-    error(parseApiError(err, '未知错误'), `${action}用户失败`)
+    error(localizedApiError(err, '未知错误'), legacyT(`${action}用户失败`))
   }
 }
 
@@ -2044,7 +719,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
       }
       await usersStore.updateUser(data.id, updateData)
       invalidateUserOptions()
-      success('用户信息已更新')
+      success(legacyT('用户信息已更新'))
     } else {
       // 创建用户
       const newUser = await usersStore.createUser({
@@ -2062,13 +737,13 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
         await usersStore.updateUser(newUser.id, { is_active: false })
       }
       invalidateUserOptions()
-      success('用户创建成功')
+      success(legacyT('用户创建成功'))
     }
     closeUserFormDialog()
     await refreshUsers()
   } catch (err: unknown) {
     const title = data.id ? '更新用户失败' : '创建用户失败'
-    error(parseApiError(err, '未知错误'), title)
+    error(localizedApiError(err, '未知错误'), legacyT(title))
   } finally {
     userFormDialogRef.value?.setSaving(false)
   }
@@ -2087,7 +762,7 @@ async function manageUserSessions(user: User) {
   try {
     userSessions.value = await usersStore.getUserSessions(user.id)
   } catch (err) {
-    error(parseApiError(err, '加载用户设备会话失败'))
+    error(localizedApiError(err, '加载用户设备会话失败'), legacyT('加载用户设备会话失败'))
   } finally {
     loadingUserSessions.value = false
   }
@@ -2113,7 +788,7 @@ async function loadUserPlanEntitlements(userId: string) {
     const response = await usersApi.listUserPlanEntitlements(userId)
     userPlanEntitlements.value = response.items
   } catch (err) {
-    error(parseApiError(err, '加载用户套餐失败'))
+    error(localizedApiError(err, '加载用户套餐失败'), legacyT('加载用户套餐失败'))
     userPlanEntitlements.value = []
   } finally {
     loadingUserPlans.value = false
@@ -2132,7 +807,7 @@ async function loadAvailableBillingPlans() {
       selectedGrantPlanId.value = ''
     }
   } catch (err) {
-    error(parseApiError(err, '加载套餐列表失败'))
+    error(localizedApiError(err, '加载套餐列表失败'), legacyT('加载套餐列表失败'))
     availableBillingPlans.value = []
   } finally {
     loadingBillingPlans.value = false
@@ -2149,9 +824,9 @@ async function grantPlanToSelectedUser() {
     })
     userPlanEntitlements.value = response.items
     grantReason.value = ''
-    success('套餐已发放')
+    success(legacyT('套餐已发放'))
   } catch (err) {
-    error(parseApiError(err, '发放套餐失败'))
+    error(localizedApiError(err, '发放套餐失败'), legacyT('发放套餐失败'))
   } finally {
     grantingUserPlan.value = false
   }
@@ -2210,7 +885,7 @@ function closeUserApiKeyFormDialog() {
 async function submitUserApiKeyForm() {
   if (!selectedUser.value) return
   if (!userApiKeyForm.value.name.trim()) {
-    error('请输入密钥名称', editingUserApiKey.value ? '更新 API Key 失败' : '创建 API Key 失败')
+    error(legacyT('请输入密钥名称'), legacyT(editingUserApiKey.value ? '更新 API Key 失败' : '创建 API Key 失败'))
     return
   }
 
@@ -2228,7 +903,7 @@ async function submitUserApiKeyForm() {
           inject_model_instruction: userApiKeyForm.value.chat_pii_redaction_placeholder_notice,
         }),
       })
-      success('API Key已更新')
+      success(legacyT('API Key已更新'))
     } else {
       const response = await usersStore.createApiKey(selectedUser.value.id, {
         name: userApiKeyForm.value.name,
@@ -2242,12 +917,12 @@ async function submitUserApiKeyForm() {
       })
       newApiKey.value = response.key || ''
       showNewApiKeyDialog.value = true
-      success('API Key创建成功')
+      success(legacyT('API Key创建成功'))
     }
     await loadUserApiKeys(selectedUser.value.id)
     closeUserApiKeyFormDialog()
   } catch (err: unknown) {
-    error(parseApiError(err, '未知错误'), editingUserApiKey.value ? '更新 API Key 失败' : '创建 API Key 失败')
+    error(localizedApiError(err, '未知错误'), legacyT(editingUserApiKey.value ? '更新 API Key 失败' : '创建 API Key 失败'))
   } finally {
     creatingApiKey.value = false
   }
@@ -2259,9 +934,9 @@ async function revokeSelectedUserSession(sessionId: string) {
   try {
     await usersStore.revokeUserSession(selectedUser.value.id, sessionId)
     userSessions.value = userSessions.value.filter((session) => session.id !== sessionId)
-    success('设备已强制下线')
+    success(legacyT('设备已强制下线'))
   } catch (err) {
-    error(parseApiError(err, '强制下线失败'))
+    error(localizedApiError(err, '强制下线失败'), legacyT('强制下线失败'))
   } finally {
     sessionDialogActionLoading.value = null
   }
@@ -2273,16 +948,14 @@ async function revokeAllSelectedUserSessions() {
   try {
     const result = await usersStore.revokeAllUserSessions(selectedUser.value.id)
     userSessions.value = []
-    success(result.revoked_count > 0 ? `已强制下线 ${result.revoked_count} 个设备` : '没有可下线的设备')
+    success(result.revoked_count > 0
+      ? legacyT(`已强制下线 ${result.revoked_count} 个设备`)
+      : legacyT('没有可下线的设备'))
   } catch (err) {
-    error(parseApiError(err, '强制下线全部设备失败'))
+    error(localizedApiError(err, '强制下线全部设备失败'), legacyT('强制下线全部设备失败'))
   } finally {
     sessionDialogActionLoading.value = null
   }
-}
-
-function selectApiKey() {
-  apiKeyInput.value?.select()
 }
 
 async function copyApiKey() {
@@ -2296,8 +969,10 @@ async function closeNewApiKeyDialog() {
 
 async function deleteApiKey(apiKey: ApiKey) {
   const confirmed = await confirmDanger(
-    `确定要删除这个API Key吗？\n\n${apiKey.key_display || '****'}\n\n此操作无法撤销。`,
-    '删除 API Key'
+    locale.value === 'en-US'
+      ? `Delete this API key?\n\n${apiKey.key_display || '****'}\n\nThis action cannot be undone.`
+      : `确定要删除这个API Key吗？\n\n${apiKey.key_display || '****'}\n\n此操作无法撤销。`,
+    legacyT('删除 API Key')
   )
 
   if (!confirmed) return
@@ -2305,9 +980,9 @@ async function deleteApiKey(apiKey: ApiKey) {
   try {
     await usersStore.deleteApiKey(selectedUser.value.id, apiKey.id)
     await loadUserApiKeys(selectedUser.value.id)
-    success('API Key已删除')
+    success(legacyT('API Key已删除'))
   } catch (err: unknown) {
-    error(parseApiError(err, '未知错误'), '删除 API Key 失败')
+    error(localizedApiError(err, '未知错误'), legacyT('删除 API Key 失败'))
   }
 }
 
@@ -2320,10 +995,10 @@ async function toggleLockApiKey(apiKey: ApiKey) {
     if (index !== -1) {
       userApiKeys.value[index].is_locked = response.is_locked
     }
-    success(response.message)
+    success(legacyT(response.message))
   } catch (err: unknown) {
     log.error('切换密钥锁定状态失败:', err)
-    error(parseApiError(err, '操作失败'), '锁定/解锁失败')
+    error(localizedApiError(err, '操作失败'), legacyT('锁定/解锁失败'))
   }
 }
 
@@ -2334,14 +1009,14 @@ async function copyFullKey(apiKey: ApiKey) {
     await copyToClipboard(response.key)
   } catch (err: unknown) {
     log.error('复制密钥失败:', err)
-    error(parseApiError(err, '未知错误'), '复制密钥失败')
+    error(localizedApiError(err, '未知错误'), legacyT('复制密钥失败'))
   }
 }
 
 function openWalletActionDialog(user: User) {
   const wallet = getUserWallet(user.id)
   if (!wallet) {
-    error('该用户的钱包尚未初始化，暂时无法进行资金操作')
+    error(legacyT('该用户的钱包尚未初始化，暂时无法进行资金操作'))
     return
   }
 
@@ -2367,8 +1042,10 @@ async function handleWalletDrawerChanged() {
 
 async function deleteUser(user: User) {
   const confirmed = await confirmDanger(
-    `确定要删除用户 ${user.username} 吗？\n\n此操作将删除：\n• 用户账户\n• 所有API密钥\n• 所有使用记录\n\n此操作无法撤销！`,
-    '删除用户'
+    locale.value === 'en-US'
+      ? `Delete user ${user.username}?\n\nThis will delete:\n- User account\n- All API keys\n- All usage records\n\nThis action cannot be undone.`
+      : `确定要删除用户 ${user.username} 吗？\n\n此操作将删除：\n• 用户账户\n• 所有API密钥\n• 所有使用记录\n\n此操作无法撤销！`,
+    legacyT('删除用户')
   )
 
   if (!confirmed) return
@@ -2380,9 +1057,9 @@ async function deleteUser(user: User) {
       currentPage.value -= 1
     }
     await refreshUsers()
-    success('用户已删除')
+    success(legacyT('用户已删除'))
   } catch (err: unknown) {
-    error(parseApiError(err, '未知错误'), '删除用户失败')
+    error(localizedApiError(err, '未知错误'), legacyT('删除用户失败'))
   }
 }
 </script>

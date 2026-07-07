@@ -6,7 +6,7 @@
         class="flex h-9 w-9 items-center justify-center rounded-lg transition"
         :class="buttonClass"
         :title="buttonTitle"
-        aria-label="版本信息"
+        :aria-label="$legacyT('版本信息')"
       >
         <Info
           v-if="!isReconnecting"
@@ -30,7 +30,7 @@
         <div class="flex items-center justify-between gap-3 border-b border-border/60 bg-muted/30 px-3 py-2.5">
           <div>
             <div class="text-xs font-semibold text-foreground">
-              版本信息
+              {{ $legacyT('版本信息') }}
             </div>
             <div class="mt-0.5 text-[10px] uppercase tracking-[0.3em] text-muted-foreground">
               System version
@@ -48,7 +48,7 @@
           <div class="rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5">
             <div>
               <p class="text-xs text-muted-foreground">
-                当前版本
+                {{ $legacyT('当前版本') }}
               </p>
               <p class="mt-1 break-all font-mono text-sm text-foreground">
                 {{ currentVersionLabel }}
@@ -59,7 +59,7 @@
               class="mt-2"
             >
               <p class="text-xs text-muted-foreground">
-                最新版本
+                {{ $legacyT('最新版本') }}
               </p>
               <p class="mt-1 break-all font-mono text-sm text-foreground">
                 {{ latestVersionLabel }}
@@ -71,7 +71,7 @@
             v-if="status?.error"
             class="text-xs text-muted-foreground"
           >
-            检查更新失败：{{ status.error }}
+            {{ $legacyT('检查更新失败：') }}{{ $legacyT(status.error) }}
           </p>
 
           <p
@@ -87,7 +87,7 @@
             class="flex items-center justify-center gap-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-primary"
           >
             <RefreshCw class="h-3.5 w-3.5 animate-spin" />
-            <span class="text-xs font-medium">服务重启中，请稍候...</span>
+            <span class="text-xs font-medium">{{ $legacyT('服务重启中，请稍候...') }}</span>
           </div>
 
           <div
@@ -126,7 +126,7 @@
                 class="mr-2 h-3.5 w-3.5"
                 :class="loading ? 'animate-spin' : ''"
               />
-              重新检查
+              {{ $legacyT('重新检查') }}
             </Button>
             <Button
               v-if="rollbackAvailable"
@@ -173,7 +173,7 @@
                 class="h-3 w-3 transition-transform"
                 :class="showReleases ? 'rotate-90' : ''"
               />
-              历史版本
+              {{ $legacyT('历史版本') }}
               <span
                 v-if="releases.length > 0"
                 class="text-[10px] text-muted-foreground/60"
@@ -209,15 +209,15 @@
                     <span
                       v-if="release.is_current"
                       class="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary"
-                    >当前</span>
+                    >{{ $legacyT('当前') }}</span>
                     <span
                       v-else-if="release.is_newer"
                       class="shrink-0 rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"
-                    >新</span>
+                    >{{ $legacyT('新') }}</span>
                     <span
                       v-if="release.is_newer && release.updatable === false"
                       class="shrink-0 rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
-                    >不可在线更新</span>
+                    >{{ $legacyT('不可在线更新') }}</span>
                   </div>
                   <div
                     v-if="release.published_at"
@@ -233,14 +233,14 @@
                   </div>
                 </div>
                 <span class="ml-2 shrink-0 text-[10px] font-medium text-muted-foreground">
-                  详情
+                  {{ $legacyT('详情') }}
                 </span>
               </button>
               <p
                 v-if="!loadingReleases && releases.length === 0 && !releasesError"
                 class="py-2 text-center text-xs text-muted-foreground"
               >
-                暂无版本信息
+                {{ $legacyT('暂无版本信息') }}
               </p>
             </div>
           </div>
@@ -267,19 +267,19 @@
           v-if="selectedRelease.is_current"
           class="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary"
         >
-          当前运行版本
+          {{ $legacyT('当前运行版本') }}
         </span>
         <span
           v-else-if="selectedRelease.is_newer"
           class="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400"
         >
-          可升级版本
+          {{ $legacyT('可升级版本') }}
         </span>
         <span
           v-else
           class="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground"
         >
-          历史版本
+          {{ $legacyT('历史版本') }}
         </span>
       </div>
 
@@ -290,16 +290,18 @@
         {{ selectedReleaseHelpText }}
       </p>
 
+      <!-- eslint-disable vue/no-v-html -->
       <div
         v-if="selectedReleaseDisplayNotes"
         class="max-h-[26rem] overflow-y-auto rounded-xl border border-border/60 bg-muted/25 px-4 py-3 text-sm leading-6 text-foreground/90 shadow-inner shadow-black/[0.02] max-w-none prose prose-sm dark:prose-invert prose-headings:mb-2 prose-headings:mt-4 prose-headings:font-semibold prose-headings:text-foreground prose-h3:text-sm prose-p:my-2 prose-ul:my-2 prose-ul:list-disc prose-ul:pl-5 prose-li:my-1 prose-li:marker:text-primary prose-a:text-primary prose-strong:text-foreground prose-code:rounded prose-code:bg-muted prose-code:px-1 prose-code:py-0.5"
         v-html="selectedReleaseNotesHtml"
       />
+      <!-- eslint-enable vue/no-v-html -->
       <p
         v-else
         class="rounded-lg bg-muted/30 px-3 py-4 text-sm text-muted-foreground"
       >
-        这个版本没有附带更新说明。
+        {{ $legacyT('这个版本没有附带更新说明。') }}
       </p>
     </div>
 
@@ -308,7 +310,7 @@
         variant="outline"
         @click="showReleaseDetails = false"
       >
-        关闭
+        {{ $legacyT('关闭') }}
       </Button>
       <Button
         v-if="selectedRelease?.release_url"
@@ -316,7 +318,7 @@
         @click="handleOpenSelectedReleasePage"
       >
         <ExternalLink class="mr-2 h-3.5 w-3.5" />
-        查看标签页
+        {{ $legacyT('查看标签页') }}
       </Button>
       <Button
         v-if="canUseSelectedRelease"
@@ -342,6 +344,7 @@ import { normalizeReleaseNotesForDisplay } from '@/utils/releaseNotes'
 import { formatDisplayVersion } from '@/utils/version'
 import { describeUpdateStatus } from '@/utils/updateStatus'
 import { sanitizeMarkdown } from '@/utils/sanitize'
+import { useI18n } from '@/i18n'
 import { marked } from 'marked'
 import { ChevronRight, ExternalLink, Info, RefreshCw } from 'lucide-vue-next'
 
@@ -363,6 +366,7 @@ const emit = defineEmits<{
   previewRelease: [release: ReleaseEntry]
   rollback: []
 }>()
+const { legacyT, locale } = useI18n()
 const SOURCE_BUILD_UPDATE_HINT = '当前为源码构建，请使用 git pull 后重新编译。'
 const SOURCE_BUILD_RELEASE_HINT = '当前为源码构建，请手动切换到对应标签后重新编译。'
 
@@ -385,7 +389,7 @@ const isReconnecting = computed(() => updatePhase.value === 'reconnecting')
 const isDownloadingUpdate = computed(() => updating.value && updatePhase.value === 'download')
 const isBusy = computed(() => updating.value || rollingBack.value || isReconnecting.value)
 const canApplyUpdate = computed(() => updateSupported.value && props.status?.updatable !== false)
-const downloadProgressText = computed(() => props.downloadProgressText || '正在下载更新包...')
+const downloadProgressText = computed(() => legacyT(props.downloadProgressText || '正在下载更新包...'))
 const downloadProgressPercent = computed(() => {
   const value = props.downloadProgressPercent
   return typeof value === 'number' && Number.isFinite(value)
@@ -397,11 +401,11 @@ const progressBarWidth = computed(() => {
 })
 const updateBlockerText = computed(() => {
   if (!updateSupported.value) {
-    return props.status?.update_blocker || SOURCE_BUILD_UPDATE_HINT
+    return legacyT(props.status?.update_blocker || SOURCE_BUILD_UPDATE_HINT)
   }
-  return props.status?.update_blocker || '当前版本暂不支持在线更新'
+  return legacyT(props.status?.update_blocker || '当前版本暂不支持在线更新')
 })
-const releaseButtonLabel = computed(() => updateSupported.value ? '查看更新' : '查看发布')
+const releaseButtonLabel = computed(() => legacyT(updateSupported.value ? '查看更新' : '查看发布'))
 const buttonClass = computed(() => {
   const classes = []
 
@@ -427,15 +431,15 @@ const buttonClass = computed(() => {
   return classes
 })
 const statusLabel = computed(() => {
-  if (isReconnecting.value) return '重启中'
-  if (rollingBack.value) return '回滚中'
-  if (updating.value) return '更新中'
-  return describeUpdateStatus(props.status)
+  if (isReconnecting.value) return legacyT('重启中')
+  if (rollingBack.value) return legacyT('回滚中')
+  if (updating.value) return legacyT('更新中')
+  return legacyT(describeUpdateStatus(props.status))
 })
 const currentVersionLabel = computed(() => {
   return props.status?.current_version
     ? formatDisplayVersion(props.status.current_version)
-    : '加载中...'
+    : legacyT('加载中...')
 })
 const latestVersionLabel = computed(() => {
   return props.status?.latest_version
@@ -452,25 +456,25 @@ const statusPillClass = computed(() => {
   return 'border-border/60 bg-background/70 text-muted-foreground'
 })
 const buttonTitle = computed(() => {
-  if (isReconnecting.value) return '服务重启中...'
-  if (!props.status) return '版本信息'
-  return `版本信息：${statusLabel.value}`
+  if (isReconnecting.value) return legacyT('服务重启中...')
+  if (!props.status) return legacyT('版本信息')
+  return `${legacyT('版本信息：')}${statusLabel.value}`
 })
 const actionButtonLabel = computed(() => {
   if (updating.value) {
-    return updatePhase.value === 'restart' ? '重启中...' : '下载中...'
+    return legacyT(updatePhase.value === 'restart' ? '重启中...' : '下载中...')
   }
-  return updatePhase.value === 'restart' ? '立即重启' : '立即更新'
+  return legacyT(updatePhase.value === 'restart' ? '立即重启' : '立即更新')
 })
 const selectedReleaseTitle = computed(() => {
   return selectedRelease.value
-    ? `版本详情 · ${formatDisplayVersion(selectedRelease.value.version)}`
-    : '版本详情'
+    ? `${legacyT('版本详情')} · ${formatDisplayVersion(selectedRelease.value.version)}`
+    : legacyT('版本详情')
 })
 const selectedReleaseDescription = computed(() => {
   return selectedRelease.value?.published_at
-    ? `发布于 ${formatDate(selectedRelease.value.published_at)}`
-    : '查看该版本的发布说明'
+    ? `${legacyT('发布于')} ${formatDate(selectedRelease.value.published_at)}`
+    : legacyT('查看该版本的发布说明')
 })
 const canUseSelectedRelease = computed(() => {
   return !!selectedRelease.value &&
@@ -479,19 +483,19 @@ const canUseSelectedRelease = computed(() => {
     updateSupported.value
 })
 const selectedReleaseActionLabel = computed(() => {
-  if (!selectedRelease.value) return '切换到此版本'
-  return selectedRelease.value.is_newer ? '更新到此版本' : '切换到此版本'
+  if (!selectedRelease.value) return legacyT('切换到此版本')
+  return legacyT(selectedRelease.value.is_newer ? '更新到此版本' : '切换到此版本')
 })
 const selectedReleaseHelpText = computed(() => {
   if (!selectedRelease.value) return ''
-  if (selectedRelease.value.is_current) return '当前正在运行这个版本。'
+  if (selectedRelease.value.is_current) return legacyT('当前正在运行这个版本。')
   if (!updateSupported.value) {
-    return selectedRelease.value.update_blocker || SOURCE_BUILD_RELEASE_HINT
+    return legacyT(selectedRelease.value.update_blocker || SOURCE_BUILD_RELEASE_HINT)
   }
-  if (selectedRelease.value.update_blocker) return selectedRelease.value.update_blocker
-  return selectedRelease.value.is_newer
+  if (selectedRelease.value.update_blocker) return legacyT(selectedRelease.value.update_blocker)
+  return legacyT(selectedRelease.value.is_newer
     ? '将这个版本作为在线更新目标。'
-    : '将切换到这个历史版本。'
+    : '将切换到这个历史版本。')
 })
 const selectedReleaseDisplayNotes = computed(() => {
   return normalizeReleaseNotesForDisplay(selectedRelease.value?.release_notes)
@@ -516,7 +520,7 @@ const selectedReleaseNotesHtml = computed(() => {
 function formatDate(dateStr: string): string {
   try {
     const date = new Date(dateStr)
-    return date.toLocaleDateString('zh-CN', {
+    return date.toLocaleDateString(locale.value, {
       year: 'numeric',
       month: 'short',
       day: 'numeric'
@@ -533,10 +537,10 @@ async function fetchReleases(force = false) {
   try {
     const data = await adminApi.getSystemReleases(force)
     releases.value = data.releases
-    releasesError.value = data.error
+    releasesError.value = data.error ? legacyT(data.error) : null
     releasesFetched = true
   } catch (err) {
-    releasesError.value = err instanceof Error ? err.message : '获取版本列表失败'
+    releasesError.value = legacyT(err instanceof Error ? err.message : '获取版本列表失败')
   } finally {
     loadingReleases.value = false
   }

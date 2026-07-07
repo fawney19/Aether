@@ -1,5 +1,8 @@
 <template>
-  <Card variant="default" class="overflow-hidden">
+  <Card
+    variant="default"
+    class="overflow-hidden"
+  >
     <HealthMonitorHeader
       v-model:lookback-hours="lookbackHours"
       :title="title"
@@ -23,10 +26,15 @@
       >
         <Bot class="w-12 h-12 mb-3 opacity-30" />
         <p>暂无模型健康监控数据</p>
-        <p class="text-xs mt-1">模型尚未产生请求记录</p>
+        <p class="text-xs mt-1">
+          模型尚未产生请求记录
+        </p>
       </div>
 
-      <div v-else class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      <div
+        v-else
+        class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"
+      >
         <div
           v-for="monitor in monitors"
           :key="monitor.model"
@@ -46,7 +54,10 @@
                 {{ monitor.display_name || monitor.model }}
               </h4>
             </div>
-            <Badge :variant="getHealthBadgeVariant(monitor)" class="shrink-0">
+            <Badge
+              :variant="getHealthBadgeVariant(monitor)"
+              class="shrink-0"
+            >
               {{ getHealthLabel(monitor) }}
             </Badge>
           </div>

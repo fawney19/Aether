@@ -286,6 +286,42 @@ export async function refreshProviderQuota(
   return response.data
 }
 
+export interface ConsumeCodexResetCreditPayload {
+  idempotency_key: string
+}
+
+export interface ConsumeCodexResetCreditResult {
+  key_id: string
+  status: 'success' | 'noop' | 'unknown' | 'error' | string
+  outcome:
+    | 'reset'
+    | 'already_redeemed'
+    | 'nothing_to_reset'
+    | 'no_credit'
+    | 'unknown'
+    | 'error'
+    | string
+  idempotency_key: string
+  refresh_status?: 'success' | 'failed' | string
+  refresh_error?: string | null
+  metadata?: Record<string, unknown>
+  quota_snapshot?: QuotaStatusSnapshot
+  message?: string
+  status_code?: number
+}
+
+export async function consumeCodexResetCredit(
+  keyId: string,
+  payload: ConsumeCodexResetCreditPayload,
+): Promise<ConsumeCodexResetCreditResult> {
+  const response = await client.post(
+    `/api/admin/endpoints/keys/${keyId}/codex-reset-credit/consume`,
+    payload,
+    { timeout: 5 * 60 * 1000 },
+  )
+  return response.data
+}
+
 /**
  * 批量导入 OAuth 凭据（通用）
  * 支持的 Provider 类型：Codex、Antigravity、GeminiCli、ClaudeCode、Kiro

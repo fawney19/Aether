@@ -19,7 +19,7 @@ const MARKDOWN_STRUCTURE_PATTERNS = [
 const SENTENCE_END_PUNCTUATION = /[，。,.!?！？；;]$/
 const SECTION_HEADING_SUFFIX = /[:：]\s*$/
 const URL_PATTERN = /https?:\/\/|www\./i
-const BRACKET_PREFIX_PATTERN = /^[\[(（【<]/
+const BRACKET_PREFIX_PATTERN = /^[[（【<]/
 const SECTION_HEADING_TEXT_PATTERN = /[\u3400-\u9FFFA-Za-z]/
 
 function isStructuredMarkdownLine(line: string): boolean {

@@ -850,6 +850,7 @@ import {
 import { EmptyState, LoadingState, MultiSelect } from '@/components/common'
 import { CardSection, PageContainer, PageHeader } from '@/components/layout'
 import { useToast } from '@/composables/useToast'
+import { useI18n } from '@/i18n'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
 
@@ -887,6 +888,7 @@ interface PlanFormState {
 }
 
 const { success, error: showError } = useToast()
+const { legacyT } = useI18n()
 
 const loading = ref(true)
 const saving = ref(false)
@@ -1366,7 +1368,7 @@ async function togglePlanStatus(plan: BillingPlan) {
 async function deletePlan(plan: BillingPlan) {
   if (deletingPlanId.value) return
   const confirmed = window.confirm(
-    `确定删除套餐「${plan.title}」吗？\n\n已有订单或权益的套餐不能删除，请改为停用。删除后无法恢复。`
+    legacyT(`确定删除套餐「${plan.title}」吗？\n\n已有订单或权益的套餐不能删除，请改为停用。删除后无法恢复。`)
   )
   if (!confirmed) return
 

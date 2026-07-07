@@ -49,8 +49,15 @@ where
     }
 }
 
-#[tokio::test]
-async fn gateway_executes_openai_responses_sync_upstream_stream_via_local_finalize_response() {
+#[test]
+fn gateway_executes_openai_responses_sync_upstream_stream_via_local_finalize_response() {
+    run_kiro_claude_cli_finalize_test(
+        "gateway_executes_openai_responses_sync_upstream_stream_via_local_finalize_response",
+        gateway_executes_openai_responses_sync_upstream_stream_via_local_finalize_response_impl,
+    );
+}
+
+async fn gateway_executes_openai_responses_sync_upstream_stream_via_local_finalize_response_impl() {
     use base64::Engine as _;
 
     #[derive(Debug, Clone)]

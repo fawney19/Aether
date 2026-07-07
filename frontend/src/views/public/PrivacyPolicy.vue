@@ -15,7 +15,7 @@
               {{ siteName }}
             </div>
             <div class="text-xs text-muted-foreground">
-              隐私政策
+              {{ t('site.privacy.title') }}
             </div>
           </div>
         </RouterLink>
@@ -23,7 +23,7 @@
           to="/"
           class="rounded-lg border border-border px-3 py-1.5 text-sm text-muted-foreground transition hover:text-foreground"
         >
-          返回首页
+          {{ t('site.privacy.backHome') }}
         </RouterLink>
       </div>
     </header>
@@ -31,10 +31,10 @@
     <section class="mx-auto max-w-4xl px-5 py-8">
       <div class="mb-6">
         <h1 class="text-2xl font-semibold">
-          隐私政策
+          {{ t('site.privacy.title') }}
         </h1>
         <p class="mt-2 text-sm text-muted-foreground">
-          当前版本：{{ policy.version || '1' }}
+          {{ t('site.privacy.currentVersion', { version: policy.version || '1' }) }}
         </p>
       </div>
 
@@ -42,7 +42,7 @@
         v-if="loading"
         class="rounded-lg border border-border bg-background/70 p-6 text-sm text-muted-foreground"
       >
-        正在加载...
+        {{ t('site.privacy.loading') }}
       </div>
       <div
         v-else-if="loadError"
@@ -67,9 +67,11 @@ import { marked } from 'marked'
 import { authApi, type RegistrationPrivacyPolicySettings } from '@/api/auth'
 import HeaderLogo from '@/components/HeaderLogo.vue'
 import { useSiteInfo } from '@/composables/useSiteInfo'
+import { useI18n } from '@/i18n'
 import { sanitizeHtml, sanitizeMarkdown } from '@/utils/sanitize'
 
 const { siteName } = useSiteInfo()
+const { t } = useI18n()
 const loading = ref(true)
 const loadError = ref('')
 const policy = ref<RegistrationPrivacyPolicySettings>({
@@ -80,7 +82,7 @@ const policy = ref<RegistrationPrivacyPolicySettings>({
 })
 
 const renderedPolicy = computed(() => {
-  if (!policy.value.content) return '<p>暂无隐私政策内容。</p>'
+  if (!policy.value.content) return `<p>${t('site.privacy.empty')}</p>`
   if (policy.value.format === 'html') {
     return sanitizeHtml(policy.value.content)
   }
@@ -94,7 +96,7 @@ onMounted(async () => {
     const settings = await authApi.getRegistrationSettings()
     policy.value = settings.privacy_policy ?? policy.value
   } catch {
-    loadError.value = '隐私政策加载失败，请稍后重试。'
+    loadError.value = t('site.privacy.loadError')
   } finally {
     loading.value = false
   }

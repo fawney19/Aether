@@ -44,6 +44,13 @@ export function sumMetricValues(
   }, 0)
 }
 
+export function findMetricSamples(
+  samples: PrometheusSample[],
+  metricName: string
+): PrometheusSample[] {
+  return samples.filter(sample => metricNameMatches(sample.name, metricName))
+}
+
 function metricNameMatches(actual: string, expected: string): boolean {
   return actual === expected || actual.split('_').pop() === expected || actual.endsWith(`_${expected}`)
 }

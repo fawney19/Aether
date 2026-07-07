@@ -1468,8 +1468,15 @@ async fn gateway_executes_openai_chat_cross_format_tool_use_upstream_stream_via_
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_transport_unsupported(
+#[test]
+fn gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_transport_unsupported() {
+    run_openai_chat_finalize_test(
+        "gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_transport_unsupported",
+        gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_transport_unsupported_impl,
+    );
+}
+
+async fn gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_transport_unsupported_impl(
 ) {
     fn hash_api_key(value: &str) -> String {
         let mut hasher = Sha256::new();

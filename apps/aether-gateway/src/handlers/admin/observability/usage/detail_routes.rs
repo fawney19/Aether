@@ -7,6 +7,9 @@ use super::replay::{
     admin_usage_resolve_request_capture_body_for_item, build_admin_usage_curl_response,
     build_admin_usage_detail_payload, build_admin_usage_replay_response,
 };
+use super::summary_routes::{
+    admin_usage_terminal_candidate_state_override, apply_admin_usage_state_override,
+};
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{attach_admin_audit_response, query_param_bool};
 use crate::GatewayError;
@@ -233,6 +236,19 @@ pub(super) async fn maybe_build_local_admin_usage_detail_response(
             let provider_key_name = admin_usage_provider_key_name(&item, &provider_key_names);
 
             let mut detail_item = item.clone();
+            if matches!(detail_item.status.as_str(), "pending" | "streaming")
+                && state.has_request_candidate_data_reader()
+            {
+                let candidates = state
+                    .app()
+                    .read_request_candidates_by_request_id(&detail_item.request_id)
+                    .await?;
+                if let Some(override_payload) =
+                    admin_usage_terminal_candidate_state_override(&candidates)
+                {
+                    apply_admin_usage_state_override(&mut detail_item, &override_payload);
+                }
+            }
             let mut body_load_errors = serde_json::Map::new();
             let request_body = if include_bodies {
                 let (request_body, provider_request_body, response_body, client_response_body) = tokio::join!(

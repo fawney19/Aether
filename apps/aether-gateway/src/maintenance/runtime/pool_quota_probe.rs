@@ -1255,6 +1255,23 @@ async fn perform_pool_quota_probe_for_provider(
             );
         }
     }
+    if aether_admin::provider::quota::provider_auto_remove_quota_exhausted_keys(
+        provider.config.as_ref(),
+    ) {
+        let auto_removed = admin_state
+            .cleanup_quota_exhausted_provider_catalog_keys(provider, provider_type)
+            .await?;
+        if auto_removed > 0 {
+            summary.auto_removed += auto_removed;
+            info!(
+                event_name = "auto_removed_quota_exhausted",
+                provider_id = %provider_short_id,
+                provider_type,
+                auto_removed,
+                "gateway pool quota probe auto-cleaned quota-exhausted provider keys"
+            );
+        }
+    }
 
     let Some(endpoint) = endpoint_for_probe_with_reconcile(
         state,

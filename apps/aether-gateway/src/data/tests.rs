@@ -98,6 +98,39 @@ fn maintenance_pool_pressure_keeps_idle_reserve_for_foreground_work() {
 }
 
 #[test]
+fn usage_worker_pool_pressure_only_defers_near_pool_exhaustion() {
+    let comfortable = aether_data::DatabasePoolSummary {
+        driver: DatabaseDriver::Postgres,
+        checked_out: 56,
+        pool_size: 64,
+        idle: 8,
+        max_connections: 64,
+        usage_rate: 87.5,
+    };
+    assert!(!GatewayDataState::database_pool_summary_under_usage_worker_pressure(&comfortable));
+
+    let last_idle_left = aether_data::DatabasePoolSummary {
+        driver: DatabaseDriver::Postgres,
+        checked_out: 63,
+        pool_size: 64,
+        idle: 1,
+        max_connections: 64,
+        usage_rate: 98.4375,
+    };
+    assert!(GatewayDataState::database_pool_summary_under_usage_worker_pressure(&last_idle_left));
+
+    let exhausted = aether_data::DatabasePoolSummary {
+        driver: DatabaseDriver::Postgres,
+        checked_out: 64,
+        pool_size: 64,
+        idle: 0,
+        max_connections: 64,
+        usage_rate: 100.0,
+    };
+    assert!(GatewayDataState::database_pool_summary_under_usage_worker_pressure(&exhausted));
+}
+
+#[test]
 fn maintenance_pool_pressure_deferral_has_timeout() {
     let mut deferred_since = None;
     assert!(

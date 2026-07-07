@@ -1,7 +1,14 @@
+import { getI18nLocale } from '@/i18n'
+import { translateLegacyText } from '@/i18n/messages'
+
 export type PasswordPolicyLevel = 'weak' | 'medium' | 'strong'
 export const PASSWORD_MAX_BYTES = 72
 
 const textEncoder = new TextEncoder()
+
+function tr(value: string): string {
+  return translateLegacyText(value, getI18nLocale())
+}
 
 function getPasswordByteLength(password: string): number {
   return textEncoder.encode(password).length
@@ -39,24 +46,24 @@ export function normalizePasswordPolicyLevel(value: unknown): PasswordPolicyLeve
 export function getPasswordPolicyHint(level: unknown): string {
   switch (normalizePasswordPolicyLevel(level)) {
     case 'medium':
-      return '至少 8 个字符，且需包含字母和数字'
+      return tr('至少 8 个字符，且需包含字母和数字')
     case 'strong':
-      return '至少 8 个字符，且需包含大写字母、小写字母、数字和特殊字符'
+      return tr('至少 8 个字符，且需包含大写字母、小写字母、数字和特殊字符')
     case 'weak':
     default:
-      return '至少 6 个字符'
+      return tr('至少 6 个字符')
   }
 }
 
 export function getPasswordPolicyPlaceholder(level: unknown): string {
   switch (normalizePasswordPolicyLevel(level)) {
     case 'medium':
-      return '至少 8 位，含字母和数字'
+      return tr('至少 8 位，含字母和数字')
     case 'strong':
-      return '至少 8 位，含大小写字母、数字和特殊字符'
+      return tr('至少 8 位，含大小写字母、数字和特殊字符')
     case 'weak':
     default:
-      return '至少 6 个字符'
+      return tr('至少 6 个字符')
   }
 }
 
@@ -64,7 +71,7 @@ export function getPasswordPolicyPlaceholder(level: unknown): string {
  * 返回所有未满足的密码策略条件。
  * 空数组 = 密码合规。
  */
-export function getPasswordPolicyErrors(password: string, level: unknown): string[] {
+function getPasswordPolicyErrorSources(password: string, level: unknown): string[] {
   if (!password) return []
 
   const normalized = normalizePasswordPolicyLevel(level)
@@ -96,15 +103,23 @@ export function getPasswordPolicyErrors(password: string, level: unknown): strin
   return errors
 }
 
+export function getPasswordPolicyErrors(password: string, level: unknown): string[] {
+  return getPasswordPolicyErrorSources(password, level).map(tr)
+}
+
 /**
  * 兼容旧接口：返回单条错误字符串，空字符串表示通过。
  * 多条未满足条件时用顿号连接。
  */
 export function validatePasswordByPolicy(password: string, level: unknown): string {
-  const errors = getPasswordPolicyErrors(password, level)
+  const rawErrors = getPasswordPolicyErrorSources(password, level)
+  const errors = rawErrors.map(tr)
   if (errors.length === 0) return ''
-  if (errors.length === 1 && errors[0].startsWith('长度不能超过')) {
-    return `密码${  errors[0]}`
+  if (rawErrors.length === 1 && rawErrors[0].startsWith('长度不能超过')) {
+    return tr(`密码${rawErrors[0]}`)
   }
-  return `密码需要：${  errors.join('、')}`
+  if (getI18nLocale() === 'en-US') {
+    return `Password requires: ${errors.join(', ')}`
+  }
+  return `密码需要：${errors.join('、')}`
 }

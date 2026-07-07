@@ -1022,7 +1022,7 @@
         variant="outline"
         @click="handleClose"
       >
-        关闭
+        {{ legacyT('关闭') }}
       </Button>
     </template>
   </Dialog>
@@ -1030,10 +1030,10 @@
   <!-- 删除端点确认弹窗 -->
   <AlertDialog
     :model-value="deleteConfirmOpen"
-    title="删除端点"
+    :title="legacyT('删除端点')"
     :description="deleteConfirmDescription"
-    confirm-text="删除"
-    cancel-text="取消"
+    :confirm-text="legacyT('删除')"
+    :cancel-text="legacyT('取消')"
     type="danger"
     @update:model-value="deleteConfirmOpen = $event"
     @confirm="confirmDeleteEndpoint"
@@ -1067,6 +1067,7 @@ import { Settings, Trash2, Check, X, Power, ChevronRight, Plus, Shuffle, RotateC
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
+import { useI18n } from '@/i18n'
 import AlertDialog from '@/components/common/AlertDialog.vue'
 import EndpointConditionEditor from './EndpointConditionEditor.vue'
 import ProxyNodeSelect from './ProxyNodeSelect.vue'
@@ -1162,16 +1163,21 @@ const isEndpointFormatConversionDisabled = computed(() => {
 // 获取禁用提示
 const formatConversionDisabledTooltip = computed(() => {
   if (props.systemFormatConversionEnabled) {
-    return '请先关闭系统级开关'
+    return legacyT('请先关闭系统级开关')
   }
   if (props.providerFormatConversionEnabled) {
-    return '请先关闭提供商级开关'
+    return legacyT('请先关闭提供商级开关')
   }
   return ''
 })
 
 const { success, error: showError } = useToast()
 const proxyNodesStore = useProxyNodesStore()
+const { legacyT, locale } = useI18n()
+
+function localizedApiError(error: unknown, fallback: string): string {
+  return legacyT(parseApiError(error, fallback))
+}
 
 // 规则 Select 的展开状态（与 Collapsible 分开管理）
 const ruleSelectOpen = ref<Record<string, boolean>>({})
@@ -1508,58 +1514,70 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
+function formatJsonRuleFieldLabel(label: string, index: number, field: string): string {
+  return locale.value === 'en-US'
+    ? `${label} entry ${index + 1}: ${field}`
+    : `${label}第 ${index + 1} 条：${field}`
+}
+
+function formatJsonRuleError(label: string, index: number, message: string): string {
+  return locale.value === 'en-US'
+    ? `${label} entry ${index + 1}: ${legacyT(message)}`
+    : `${label}第 ${index + 1} 条：${legacyT(message)}`
+}
+
 function readJsonRulesArray(root: Record<string, unknown>, key: keyof EndpointRulesJsonPayload, label: string): { value: unknown[]; error: string | null } {
   const raw = root[key]
   if (raw === undefined || raw === null) return { value: [], error: null }
-  if (!Array.isArray(raw)) return { value: [], error: `${label} 必须是数组或 null` }
+  if (!Array.isArray(raw)) return { value: [], error: `${label} ${legacyT('必须是数组或 null')}` }
   return { value: raw, error: null }
 }
 
 function validateJsonCondition(rule: Record<string, unknown>, label: string, index: number): string | null {
   const raw = rule.condition
   if (raw === undefined || raw === null) return null
-  if (!isJsonObject(raw)) return `${label}第 ${index + 1} 条：condition 必须是对象`
-  const shapeError = validateJsonConditionShape(raw, `${label}第 ${index + 1} 条：condition`)
+  if (!isJsonObject(raw)) return formatJsonRuleError(label, index, 'condition 必须是对象')
+  const shapeError = validateJsonConditionShape(raw, formatJsonRuleFieldLabel(label, index, 'condition'))
   if (shapeError) return shapeError
   const editable = conditionToEditable(raw as BodyRule['condition'])
   const err = validateEditableCondition(editable)
-  return err ? `${label}第 ${index + 1} 条：${err}` : null
+  return err ? formatJsonRuleError(label, index, err) : null
 }
 
 function validateJsonConditionShape(condition: Record<string, unknown>, label: string): string | null {
   if (Object.prototype.hasOwnProperty.call(condition, 'all')) {
-    if (!Array.isArray(condition.all)) return `${label}.all 必须是数组`
+    if (!Array.isArray(condition.all)) return `${label}.all ${legacyT('必须是数组')}`
     for (let i = 0; i < condition.all.length; i++) {
       const child = condition.all[i]
-      if (!isJsonObject(child)) return `${label}.all[${i}] 必须是对象`
+      if (!isJsonObject(child)) return `${label}.all[${i}] ${legacyT('必须是对象')}`
       const err = validateJsonConditionShape(child, `${label}.all[${i}]`)
       if (err) return err
     }
     return null
   }
   if (Object.prototype.hasOwnProperty.call(condition, 'any')) {
-    if (!Array.isArray(condition.any)) return `${label}.any 必须是数组`
+    if (!Array.isArray(condition.any)) return `${label}.any ${legacyT('必须是数组')}`
     for (let i = 0; i < condition.any.length; i++) {
       const child = condition.any[i]
-      if (!isJsonObject(child)) return `${label}.any[${i}] 必须是对象`
+      if (!isJsonObject(child)) return `${label}.any[${i}] ${legacyT('必须是对象')}`
       const err = validateJsonConditionShape(child, `${label}.any[${i}]`)
       if (err) return err
     }
     return null
   }
 
-  if (typeof condition.path !== 'string') return `${label}.path 必须是字符串`
+  if (typeof condition.path !== 'string') return `${label}.path ${legacyT('必须是字符串')}`
   if (typeof condition.op !== 'string' || !CONDITION_JSON_OPS.has(condition.op)) {
-    return `${label}.op 无效`
+    return `${label}.op ${legacyT('无效')}`
   }
   if (condition.source !== undefined && (typeof condition.source !== 'string' || !CONDITION_JSON_SOURCES.has(condition.source))) {
-    return `${label}.source 无效`
+    return `${label}.source ${legacyT('无效')}`
   }
   return null
 }
 
 function requireJsonString(rule: Record<string, unknown>, key: string, label: string, index: number): string | null {
-  return typeof rule[key] === 'string' ? null : `${label}第 ${index + 1} 条：${key} 必须是字符串`
+  return typeof rule[key] === 'string' ? null : formatJsonRuleError(label, index, `${key} ${legacyT('必须是字符串')}`)
 }
 
 function normalizeHeaderRuleName(raw: string): string {
@@ -1568,12 +1586,12 @@ function normalizeHeaderRuleName(raw: string): string {
 
 function reservedHeaderRuleError(raw: string): string | null {
   const name = normalizeHeaderRuleName(raw)
-  return name && RESERVED_HEADERS.has(name) ? `"${raw}" 是系统保留的请求头` : null
+  return name && RESERVED_HEADERS.has(name) ? `"${raw}" ${legacyT('是系统保留的请求头')}` : null
 }
 
 function reservedResponseHeaderRuleError(raw: string): string | null {
   const name = normalizeHeaderRuleName(raw)
-  return name && RESERVED_RESPONSE_HEADERS.has(name) ? `"${raw}" 是系统保留的响应头` : null
+  return name && RESERVED_RESPONSE_HEADERS.has(name) ? `"${raw}" ${legacyT('是系统保留的响应头')}` : null
 }
 
 function bodyRuleTopLevelField(rawPath: string): string | null {
@@ -1587,7 +1605,7 @@ function bodyRuleTopLevelField(rawPath: string): string | null {
 function reservedBodyRuleFieldError(rawPath: string): string | null {
   const topField = bodyRuleTopLevelField(rawPath)
   return topField && RESERVED_BODY_FIELDS.has(topField)
-    ? `"${topField}" 是系统保留的顶层字段`
+    ? `"${topField}" ${legacyT('是系统保留的顶层字段')}`
     : null
 }
 
@@ -1597,13 +1615,13 @@ function validateHeaderRuleJson(
   index: number,
   reservedNameError: (raw: string) => string | null = reservedHeaderRuleError
 ): string | null {
-  if (!isJsonObject(rule)) return `${label}第 ${index + 1} 条必须是对象`
+  if (!isJsonObject(rule)) return formatJsonRuleError(label, index, '必须是对象')
   if (rule.enabled !== undefined && typeof rule.enabled !== 'boolean') {
-    return `${label}第 ${index + 1} 条：enabled 必须是布尔值`
+    return formatJsonRuleError(label, index, 'enabled 必须是布尔值')
   }
   const action = rule.action
   if (action !== 'set' && action !== 'drop' && action !== 'rename') {
-    return `${label}第 ${index + 1} 条：action 必须是 set/drop/rename`
+    return formatJsonRuleError(label, index, 'action 必须是 set/drop/rename')
   }
   if (action === 'set') {
     return requireJsonString(rule, 'key', label, index)
@@ -1624,19 +1642,19 @@ function validateHeaderRuleJson(
 }
 
 function validateBodyRuleJson(rule: unknown, label: string, index: number): string | null {
-  if (!isJsonObject(rule)) return `${label}第 ${index + 1} 条必须是对象`
+  if (!isJsonObject(rule)) return formatJsonRuleError(label, index, '必须是对象')
   if (rule.enabled !== undefined && typeof rule.enabled !== 'boolean') {
-    return `${label}第 ${index + 1} 条：enabled 必须是布尔值`
+    return formatJsonRuleError(label, index, 'enabled 必须是布尔值')
   }
   const action = typeof rule.action === 'string' ? rule.action : ''
   if (!BODY_RULE_JSON_ACTIONS.has(action)) {
-    return `${label}第 ${index + 1} 条：action 无效`
+    return formatJsonRuleError(label, index, 'action 无效')
   }
 
   if (action === 'set' || action === 'append') {
     return requireJsonString(rule, 'path', label, index)
       || reservedBodyRuleFieldError(rule.path as string)
-      || (Object.prototype.hasOwnProperty.call(rule, 'value') ? null : `${label}第 ${index + 1} 条：value 不能为空`)
+      || (Object.prototype.hasOwnProperty.call(rule, 'value') ? null : formatJsonRuleError(label, index, 'value 不能为空'))
       || validateJsonCondition(rule, label, index)
   }
   if (action === 'drop') {
@@ -1654,20 +1672,20 @@ function validateBodyRuleJson(rule: unknown, label: string, index: number): stri
   if (action === 'insert') {
     if (requireJsonString(rule, 'path', label, index)) return requireJsonString(rule, 'path', label, index)
     if (reservedBodyRuleFieldError(rule.path as string)) return reservedBodyRuleFieldError(rule.path as string)
-    if (!Number.isInteger(rule.index)) return `${label}第 ${index + 1} 条：index 必须是整数`
-    if (!Object.prototype.hasOwnProperty.call(rule, 'value')) return `${label}第 ${index + 1} 条：value 不能为空`
+    if (!Number.isInteger(rule.index)) return formatJsonRuleError(label, index, 'index 必须是整数')
+    if (!Object.prototype.hasOwnProperty.call(rule, 'value')) return formatJsonRuleError(label, index, 'value 不能为空')
     return validateJsonCondition(rule, label, index)
   }
   if (action === 'regex_replace') {
     if (requireJsonString(rule, 'path', label, index)) return requireJsonString(rule, 'path', label, index)
     if (reservedBodyRuleFieldError(rule.path as string)) return reservedBodyRuleFieldError(rule.path as string)
     if (requireJsonString(rule, 'pattern', label, index)) return requireJsonString(rule, 'pattern', label, index)
-    if (typeof rule.replacement !== 'string') return `${label}第 ${index + 1} 条：replacement 必须是字符串`
-    if (rule.flags !== undefined && typeof rule.flags !== 'string') return `${label}第 ${index + 1} 条：flags 必须是字符串`
-    if (rule.count !== undefined && !Number.isInteger(rule.count)) return `${label}第 ${index + 1} 条：count 必须是整数`
+    if (typeof rule.replacement !== 'string') return formatJsonRuleError(label, index, 'replacement 必须是字符串')
+    if (rule.flags !== undefined && typeof rule.flags !== 'string') return formatJsonRuleError(label, index, 'flags 必须是字符串')
+    if (rule.count !== undefined && !Number.isInteger(rule.count)) return formatJsonRuleError(label, index, 'count 必须是整数')
     return validateJsonCondition(rule, label, index)
   }
-  return `${label}第 ${index + 1} 条：action 无效`
+  return formatJsonRuleError(label, index, 'action 无效')
 }
 
 function parseEndpointRulesJsonDraft(draft: string): { value: EndpointRulesJsonPayload | null; error: string | null } {
@@ -1680,9 +1698,9 @@ function parseEndpointRulesJsonDraft(draft: string): { value: EndpointRulesJsonP
   try {
     parsed = JSON.parse(raw)
   } catch (error: unknown) {
-    return { value: null, error: error instanceof Error ? error.message : 'JSON 格式无效' }
+    return { value: null, error: error instanceof Error ? error.message : legacyT('JSON 格式无效') }
   }
-  if (!isJsonObject(parsed)) return { value: null, error: '规则 JSON 必须是对象' }
+  if (!isJsonObject(parsed)) return { value: null, error: legacyT('规则 JSON 必须是对象') }
 
   const header = readJsonRulesArray(parsed, 'header_rules', 'header_rules')
   if (header.error) return { value: null, error: header.error }
@@ -1727,14 +1745,14 @@ function applyEndpointRulesJsonDraft(
   const parsed = parseEndpointRulesJsonDraft(endpointRulesJsonDraft.value[endpointId] ?? '')
   if (!parsed.value) {
     endpointRulesJsonError.value[endpointId] = parsed.error
-    if (notifyError) showError(parsed.error || '规则 JSON 无效')
+    if (notifyError) showError(legacyT(parsed.error || '规则 JSON 无效'))
     return false
   }
 
   const state = ensureEndpointEditState(endpointId)
   if (!state) {
-    endpointRulesJsonError.value[endpointId] = '端点编辑状态不可用'
-    if (notifyError) showError('端点编辑状态不可用')
+    endpointRulesJsonError.value[endpointId] = legacyT('端点编辑状态不可用')
+    if (notifyError) showError(legacyT('端点编辑状态不可用'))
     return false
   }
 
@@ -1754,14 +1772,14 @@ function applyEndpointRulesJsonDraft(
     || getBodyValidationErrorForEndpoint(endpointId)
   if (validationError) {
     endpointRulesJsonError.value[endpointId] = validationError
-    if (notifyError) showError(validationError)
+    if (notifyError) showError(legacyT(validationError))
     return false
   }
 
   endpointRulesJsonDraft.value[endpointId] = stringifyEndpointRulesJsonPayload(parsed.value)
   endpointRulesJsonError.value[endpointId] = null
   endpointRulesJsonDirty.value[endpointId] = false
-  if (options.notify !== false) success('JSON 规则已应用')
+  if (options.notify !== false) success(legacyT('JSON 规则已应用'))
   return true
 }
 
@@ -1922,7 +1940,9 @@ const availableFormats = computed(() => {
 const deleteConfirmDescription = computed(() => {
   if (!endpointToDelete.value) return ''
   const formatLabel = formatApiFormat(endpointToDelete.value.api_format)
-  return `确定要删除 ${formatLabel} 端点吗？关联密钥将移除对该 API 格式的支持。`
+  return locale.value === 'en-US'
+    ? `Delete the ${formatLabel} endpoint? Linked keys will no longer support this API format.`
+    : `确定要删除 ${formatLabel} 端点吗？关联密钥将移除对该 API 格式的支持。`
 })
 
 function defaultBodyRulesCacheKey(apiFormat: string): string {
@@ -2039,14 +2059,14 @@ function endpointProxyNodeId(endpoint: ProviderEndpoint): string {
 
 function getEndpointProxyNodeName(endpoint: ProviderEndpoint): string {
   const nodeId = endpointProxyNodeId(endpoint)
-  if (!nodeId) return '未知节点'
+  if (!nodeId) return legacyT('未知节点')
   const node = proxyNodesStore.nodes.find(n => n.id === nodeId)
   return node ? node.name : `${nodeId.slice(0, 8)}...`
 }
 
 function getEndpointProxyTitle(endpoint: ProviderEndpoint): string {
   const nodeId = endpointProxyNodeId(endpoint)
-  return nodeId ? `端点代理: ${getEndpointProxyNodeName(endpoint)}` : '设置端点代理节点'
+  return nodeId ? `${legacyT('端点代理')}: ${getEndpointProxyNodeName(endpoint)}` : legacyT('设置端点代理节点')
 }
 
 function handleEndpointProxyPopoverToggle(endpointId: string, open: boolean) {
@@ -2073,10 +2093,10 @@ async function setEndpointProxy(endpoint: ProviderEndpoint, nodeId: string) {
     })
     replaceLocalEndpoint(updated)
     endpointProxyPopoverOpen.value[endpoint.id] = false
-    success('端点代理已更新')
+    success(legacyT('端点代理已更新'))
     emit('endpointUpdated')
   } catch (error: unknown) {
-    showError(parseApiError(error, '更新代理失败'), '错误')
+    showError(localizedApiError(error, '更新代理失败'), legacyT('错误'))
   } finally {
     savingEndpointId.value = null
   }
@@ -2088,10 +2108,10 @@ async function clearEndpointProxy(endpoint: ProviderEndpoint) {
     const updated = await updateEndpoint(endpoint.id, { proxy: null })
     replaceLocalEndpoint(updated)
     endpointProxyPopoverOpen.value[endpoint.id] = false
-    success('端点代理已清除')
+    success(legacyT('端点代理已清除'))
     emit('endpointUpdated')
   } catch (error: unknown) {
-    showError(parseApiError(error, '清除代理失败'), '错误')
+    showError(localizedApiError(error, '清除代理失败'), legacyT('错误'))
   } finally {
     savingEndpointId.value = null
   }
@@ -2453,7 +2473,7 @@ function validateRuleKeyForEndpoint(endpointId: string, key: string, index: numb
     )
   )
   if (duplicate >= 0) {
-    return '请求头名称重复'
+    return legacyT('请求头名称重复')
   }
 
   return null
@@ -2477,7 +2497,7 @@ function validateRenameFromForEndpoint(endpointId: string, from: string, index: 
        (r.action === 'rename' && r.from.trim().toLowerCase() === trimmedFrom))
   )
   if (duplicate >= 0) {
-    return '该请求头已被其他规则处理'
+    return legacyT('该请求头已被其他规则处理')
   }
 
   return null
@@ -2500,7 +2520,7 @@ function validateRenameToForEndpoint(endpointId: string, to: string, index: numb
        (r.action === 'rename' && r.to.trim().toLowerCase() === trimmedTo))
   )
   if (duplicate >= 0) {
-    return '请求头名称重复'
+    return legacyT('请求头名称重复')
   }
 
   return null
@@ -2629,7 +2649,7 @@ function validateBodyRulePathForEndpoint(endpointId: string, path: string, index
   const dotPart = raw.includes('[') ? raw.slice(0, raw.indexOf('[')) : raw
   const parts = dotPart ? parseBodyRulePathParts(dotPart) : [raw.split('[')[0] || raw]
   if (!parts) {
-    return '路径格式无效'
+    return legacyT('路径格式无效')
   }
 
   const reservedErr = reservedBodyRuleFieldError(raw)
@@ -2648,7 +2668,7 @@ function validateBodyRulePathForEndpoint(endpointId: string, path: string, index
     )
   )
   if (duplicate >= 0) {
-    return '字段路径重复'
+    return legacyT('字段路径重复')
   }
 
   return null
@@ -2661,7 +2681,7 @@ function validateBodyRenameFromForEndpoint(endpointId: string, from: string, ind
 
   const parts = parseBodyRulePathParts(raw)
   if (!parts) {
-    return '路径格式无效（不允许 .a / a. / a..b）'
+    return legacyT('路径格式无效（不允许 .a / a. / a..b）')
   }
 
   const reservedErr = reservedBodyRuleFieldError(raw)
@@ -2679,7 +2699,7 @@ function validateBodyRenameFromForEndpoint(endpointId: string, from: string, ind
        (r.action === 'rename' && r.from.trim().toLowerCase() === normalizedFrom))
   )
   if (duplicate >= 0) {
-    return '该路径已被其他规则处理'
+    return legacyT('该路径已被其他规则处理')
   }
 
   return null
@@ -2692,7 +2712,7 @@ function validateBodyRenameToForEndpoint(endpointId: string, to: string, index: 
 
   const parts = parseBodyRulePathParts(raw)
   if (!parts) {
-    return '路径格式无效（不允许 .a / a. / a..b）'
+    return legacyT('路径格式无效（不允许 .a / a. / a..b）')
   }
 
   const reservedErr = reservedBodyRuleFieldError(raw)
@@ -2709,7 +2729,7 @@ function validateBodyRenameToForEndpoint(endpointId: string, to: string, index: 
        (r.action === 'rename' && r.to.trim().toLowerCase() === normalizedTo))
   )
   if (duplicate >= 0) {
-    return '字段路径重复'
+    return legacyT('字段路径重复')
   }
 
   return null
@@ -2719,12 +2739,12 @@ function validateBodySetValue(rule: EditableBodyRule): string | null {
   if (rule.action !== 'set' && rule.action !== 'append' && rule.action !== 'insert') return null
 
   const raw = rule.value.trim()
-  if (!raw) return '值不能为空'
+  if (!raw) return legacyT('值不能为空')
   try {
     JSON.parse(prepareValueForJsonParse(raw))
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
-    return `JSON 格式错误：${msg}`
+    return locale.value === 'en-US' ? `JSON format error: ${msg}` : `JSON 格式错误：${msg}`
   }
   return null
 }
@@ -2766,12 +2786,12 @@ function getRegexPatternValidation(rule: EditableBodyRule): boolean | null {
 // 获取正则验证提示
 function getRegexPatternValidationTip(rule: EditableBodyRule): string {
   const validation = getRegexPatternValidation(rule)
-  if (validation === null) return '输入正则表达式'
-  if (validation === true) return '有效的正则表达式'
+  if (validation === null) return legacyT('输入正则表达式')
+  if (validation === true) return legacyT('有效的正则表达式')
   try {
     new RegExp(rule.pattern.trim())
     // 正则有效但 flags 无效
-    return '无效的 flags（仅允许 i/m/s）'
+    return legacyT('无效的 flags（仅允许 i/m/s）')
   } catch (err: unknown) {
     return err instanceof Error ? err.message : String(err)
   }
@@ -2780,11 +2800,21 @@ function getRegexPatternValidationTip(rule: EditableBodyRule): string {
 // 获取验证提示
 function getBodySetValueValidationTip(rule: EditableBodyRule): string {
   const validation = getBodySetValueValidation(rule)
-  if (validation === null) return '点击验证 JSON'
+  if (validation === null) return legacyT('点击验证 JSON')
   if (validation === true) {
     const parsed = restoreOriginalPlaceholder(JSON.parse(prepareValueForJsonParse(rule.value.trim())))
-    const type = Array.isArray(parsed) ? '数组' : typeof parsed === 'object' && parsed !== null ? '对象' : typeof parsed === 'string' ? '字符串' : typeof parsed === 'number' ? '数字' : typeof parsed === 'boolean' ? '布尔' : 'null'
-    return `有效的 JSON (${type})`
+    const type = Array.isArray(parsed)
+      ? legacyT('数组')
+      : typeof parsed === 'object' && parsed !== null
+        ? legacyT('对象')
+        : typeof parsed === 'string'
+          ? legacyT('字符串')
+          : typeof parsed === 'number'
+            ? legacyT('数字')
+            : typeof parsed === 'boolean'
+              ? legacyT('布尔')
+              : 'null'
+    return `${legacyT('有效的 JSON')} (${type})`
   }
   try {
     JSON.parse(prepareValueForJsonParse(rule.value.trim()))
@@ -2847,43 +2877,43 @@ function getTotalRulesCount(endpoint: ProviderEndpoint): number {
 // 格式化请求头规则的显示标签
 function _formatHeaderRuleLabel(rule: EditableRule): string {
   if (rule.action === 'set') {
-    if (!rule.key) return '(未设置)'
+    if (!rule.key) return legacyT('(未设置)')
     return `${rule.key}=${rule.value || '...'}`
   } else if (rule.action === 'drop') {
-    if (!rule.key) return '(未设置)'
+    if (!rule.key) return legacyT('(未设置)')
     return `-${rule.key}`
   } else if (rule.action === 'rename') {
-    if (!rule.from || !rule.to) return '(未设置)'
+    if (!rule.from || !rule.to) return legacyT('(未设置)')
     return `${rule.from}→${rule.to}`
   }
-  return '(未知)'
+  return legacyT('(未知)')
 }
 
 // 格式化请求体规则的显示标签
 function _formatBodyRuleLabel(rule: EditableBodyRule): string {
   if (rule.action === 'set') {
-    if (!rule.path) return '(未设置)'
+    if (!rule.path) return legacyT('(未设置)')
     return `${rule.path}=${rule.value || '...'}`
   } else if (rule.action === 'drop') {
-    if (!rule.path) return '(未设置)'
+    if (!rule.path) return legacyT('(未设置)')
     return `-${rule.path}`
   } else if (rule.action === 'rename') {
-    if (!rule.from || !rule.to) return '(未设置)'
+    if (!rule.from || !rule.to) return legacyT('(未设置)')
     return `${rule.from}→${rule.to}`
   } else if (rule.action === 'append') {
-    if (!rule.path) return '(未设置)'
+    if (!rule.path) return legacyT('(未设置)')
     return `${rule.path}[]+=${rule.value || '...'}`
   } else if (rule.action === 'insert') {
-    if (!rule.path) return '(未设置)'
-    const idx = rule.index?.trim() || '末尾'
+    if (!rule.path) return legacyT('(未设置)')
+    const idx = rule.index?.trim() || legacyT('末尾')
     return `${rule.path}[${idx}]+=${rule.value || '...'}`
   } else if (rule.action === 'regex_replace') {
-    if (!rule.path || !rule.pattern) return '(未设置)'
+    if (!rule.path || !rule.pattern) return legacyT('(未设置)')
     const flags = rule.flags.trim()
     const count = rule.count.trim()
     return `${rule.path}: s/${rule.pattern}/${rule.replacement || ''}/${flags}${count ? ` ×${count}` : ''}`
   }
-  return '(未知)'
+  return legacyT('(未知)')
 }
 
 // 检查端点请求体规则是否有修改
@@ -2975,7 +3005,7 @@ function getBodyValidationErrorForEndpoint(endpointId: string): string | null {
   for (let i = 0; i < rules.length; i++) {
     const rule = rules[i]
     if (!rule.enabled) continue
-    const prefix = `第 ${i + 1} 条请求体规则：`
+    const prefix = locale.value === 'en-US' ? `Body rule ${i + 1}: ` : `第 ${i + 1} 条请求体规则：`
 
     if (rule.action === 'set' || rule.action === 'drop') {
       const pathErr = validateBodyRulePathForEndpoint(endpointId, rule.path, i)
@@ -2998,29 +3028,32 @@ function getBodyValidationErrorForEndpoint(endpointId: string): string | null {
       const pathErr = validateBodyRulePathForEndpoint(endpointId, rule.path, i)
       if (pathErr) return `${prefix}${pathErr}`
       const indexStr = rule.index.trim()
-      if (!indexStr) return `${prefix}插入位置不能为空`
-      if (!isStrictIntegerString(indexStr)) return `${prefix}位置必须为整数`
+      if (!indexStr) return `${prefix}${legacyT('插入位置不能为空')}`
+      if (!isStrictIntegerString(indexStr)) return `${prefix}${legacyT('位置必须为整数')}`
       const valueErr = validateBodySetValue(rule)
       if (valueErr) return `${prefix}${valueErr}`
     } else if (rule.action === 'regex_replace') {
       const pathErr = validateBodyRulePathForEndpoint(endpointId, rule.path, i)
       if (pathErr) return `${prefix}${pathErr}`
-      if (!rule.pattern.trim()) return `${prefix}正则表达式不能为空`
+      if (!rule.pattern.trim()) return `${prefix}${legacyT('正则表达式不能为空')}`
       try {
         new RegExp(rule.pattern.trim())
       } catch (err: unknown) {
-        return `${prefix}正则表达式无效：${err instanceof Error ? err.message : String(err)}`
+        const message = err instanceof Error ? err.message : String(err)
+        return locale.value === 'en-US'
+          ? `${prefix}Invalid regular expression: ${message}`
+          : `${prefix}正则表达式无效：${message}`
       }
       const flags = rule.flags.trim()
       if (flags) {
         const validFlags = new Set(['i', 'm', 's'])
         for (const f of flags) {
-          if (!validFlags.has(f)) return `${prefix}flags 仅允许 i/m/s，非法字符: ${f}`
+          if (!validFlags.has(f)) return `${prefix}${legacyT('flags 仅允许 i/m/s，非法字符')}: ${f}`
         }
       }
       const count = rule.count.trim()
       if (count) {
-        if (!isStrictNonNegativeIntegerString(count)) return `${prefix}替换次数必须是大于等于 0 的整数`
+        if (!isStrictNonNegativeIntegerString(count)) return `${prefix}${legacyT('替换次数必须是大于等于 0 的整数')}`
       }
     }
 
@@ -3112,7 +3145,7 @@ async function handleResetBodyRulesToDefault(endpoint: ProviderEndpoint) {
   try {
     const defaultRules = await loadDefaultBodyRulesForFormat(endpoint.api_format, true)
     if (!defaultRules.length) {
-      showError('该端点没有默认请求体规则')
+      showError(legacyT('该端点没有默认请求体规则'))
       return
     }
 
@@ -3133,9 +3166,9 @@ async function handleResetBodyRulesToDefault(endpoint: ProviderEndpoint) {
     if (isEndpointRulesJsonMode(endpoint.id)) {
       refreshEndpointRulesJsonDraft(endpoint.id)
     }
-    success('已重置请求体为默认规则，请点击保存生效')
+    success(legacyT('已重置请求体为默认规则，请点击保存生效'))
   } catch (error: unknown) {
-    showError(parseApiError(error, '重置失败'), '错误')
+    showError(localizedApiError(error, '重置失败'), legacyT('错误'))
   } finally {
     resettingDefaultRulesEndpointId.value = null
   }
@@ -3175,7 +3208,7 @@ function getHeaderValidationErrorForEndpoint(endpointId: string): string | null 
   for (let i = 0; i < rules.length; i++) {
     const rule = rules[i]
     if (!rule.enabled) continue
-    const prefix = `第 ${i + 1} 条请求头规则：`
+    const prefix = locale.value === 'en-US' ? `Header rule ${i + 1}: ` : `第 ${i + 1} 条请求头规则：`
     if (rule.action === 'set' || rule.action === 'drop') {
       const err = validateRuleKeyForEndpoint(endpointId, rule.key, i)
       if (err) return `${prefix}${err}`
@@ -3210,7 +3243,7 @@ function validateResponseHeaderNameForEndpoint(endpointId: string, name: string,
     )
   )
   if (duplicate >= 0) {
-    return field === 'from' ? '该响应头已被其他规则处理' : '响应头名称重复'
+    return legacyT(field === 'from' ? '该响应头已被其他规则处理' : '响应头名称重复')
   }
 
   return null
@@ -3221,7 +3254,7 @@ function getResponseHeaderValidationErrorForEndpoint(endpointId: string): string
   for (let i = 0; i < rules.length; i++) {
     const rule = rules[i]
     if (!rule.enabled) continue
-    const prefix = `第 ${i + 1} 条响应头规则：`
+    const prefix = locale.value === 'en-US' ? `Response header rule ${i + 1}: ` : `第 ${i + 1} 条响应头规则：`
     if (rule.action === 'set' || rule.action === 'drop') {
       const err = validateResponseHeaderNameForEndpoint(endpointId, rule.key, i, 'key')
       if (err) return `${prefix}${err}`
@@ -3328,20 +3361,20 @@ async function saveEndpoint(endpoint: ProviderEndpoint) {
   // 检查规则是否有验证错误
   const headerErr = getHeaderValidationErrorForEndpoint(endpoint.id)
   if (headerErr) {
-    showError(headerErr)
+    showError(legacyT(headerErr))
     return
   }
 
   const responseHeaderErr = getResponseHeaderValidationErrorForEndpoint(endpoint.id)
   if (responseHeaderErr) {
-    showError(responseHeaderErr)
+    showError(legacyT(responseHeaderErr))
     return
   }
 
   // 检查请求体规则是否有验证错误
   const bodyErr = getBodyValidationErrorForEndpoint(endpoint.id)
   if (bodyErr) {
-    showError(bodyErr)
+    showError(legacyT(bodyErr))
     return
   }
 
@@ -3369,10 +3402,10 @@ async function saveEndpoint(endpoint: ProviderEndpoint) {
     if (Object.keys(payload).length === 0) return
 
     await updateEndpoint(endpoint.id, payload)
-    success('端点已更新')
+    success(legacyT('端点已更新'))
     emit('endpointUpdated')
   } catch (error: unknown) {
-    showError(parseApiError(error, '更新失败'), '错误')
+    showError(localizedApiError(error, '更新失败'), legacyT('错误'))
   } finally {
     savingEndpointId.value = null
   }
@@ -3388,10 +3421,10 @@ async function handleToggleFormatConversion(endpoint: ProviderEndpoint) {
     await updateEndpoint(endpoint.id, {
       format_acceptance_config: newEnabled ? { enabled: true } : null,
     })
-    success(newEnabled ? '已启用格式转换' : '已关闭格式转换')
+    success(legacyT(newEnabled ? '已启用格式转换' : '已关闭格式转换'))
     emit('endpointUpdated')
   } catch (error: unknown) {
-    showError(parseApiError(error, '操作失败'), '错误')
+    showError(localizedApiError(error, '操作失败'), legacyT('错误'))
   } finally {
     togglingFormatEndpointId.value = null
   }
@@ -3423,11 +3456,11 @@ function getUpstreamStreamButtonClass(endpoint: ProviderEndpoint): string {
 
 // 获取上游流式按钮的提示文字
 function getUpstreamStreamTooltip(endpoint: ProviderEndpoint): string {
-  if (isUpstreamStreamPolicyLocked(endpoint)) return '固定流式（Codex OpenAI Responses，已锁定）'
+  if (isUpstreamStreamPolicyLocked(endpoint)) return legacyT('固定流式（Codex OpenAI Responses，已锁定）')
   const policy = getCurrentUpstreamStreamPolicy(endpoint)
-  if (policy === 'force_stream') return '固定流式（点击切换为固定非流）'
-  if (policy === 'force_non_stream') return '固定非流（点击切换为跟随请求）'
-  return '跟随请求（点击切换为固定流式）'
+  if (policy === 'force_stream') return legacyT('固定流式（点击切换为固定非流）')
+  if (policy === 'force_non_stream') return legacyT('固定非流（点击切换为跟随请求）')
+  return legacyT('跟随请求（点击切换为固定流式）')
 }
 
 // 循环切换上游流式策略并直接保存
@@ -3441,13 +3474,13 @@ async function handleCycleUpstreamStream(endpoint: ProviderEndpoint) {
   // 循环：auto -> force_stream -> force_non_stream -> auto
   if (currentPolicy === 'auto') {
     nextPolicy = 'force_stream'
-    nextLabel = '固定流式'
+    nextLabel = legacyT('固定流式')
   } else if (currentPolicy === 'force_stream') {
     nextPolicy = 'force_non_stream'
-    nextLabel = '固定非流'
+    nextLabel = legacyT('固定非流')
   } else {
     nextPolicy = 'auto'
-    nextLabel = '跟随请求'
+    nextLabel = legacyT('跟随请求')
   }
 
   savingEndpointId.value = endpoint.id
@@ -3471,10 +3504,10 @@ async function handleCycleUpstreamStream(endpoint: ProviderEndpoint) {
       endpointEditStates.value[endpoint.id].upstreamStreamPolicy = nextPolicy
     }
 
-    success(`已切换为${nextLabel}`)
+    success(locale.value === 'en-US' ? `Switched to ${nextLabel}` : `已切换为${nextLabel}`)
     emit('endpointUpdated')
   } catch (error: unknown) {
-    showError(parseApiError(error, '操作失败'), '错误')
+    showError(localizedApiError(error, '操作失败'), legacyT('错误'))
   } finally {
     savingEndpointId.value = null
   }
@@ -3487,7 +3520,7 @@ async function handleAddEndpoint() {
   // 如果没有输入 base_url，使用按格式规范化后的提供商 website 作为默认值。
   const baseUrl = getNewEndpointBaseUrl()
   if (!baseUrl) {
-    showError('请输入 Base URL')
+    showError(legacyT('请输入 Base URL'))
     return
   }
 
@@ -3500,12 +3533,14 @@ async function handleAddEndpoint() {
       custom_path: newEndpoint.value.custom_path || undefined,
       is_active: true,
     })
-    success(`已添加 ${formatApiFormat(newEndpoint.value.api_format)} 端点`)
+    success(locale.value === 'en-US'
+      ? `Added ${formatApiFormat(newEndpoint.value.api_format)} endpoint`
+      : `已添加 ${formatApiFormat(newEndpoint.value.api_format)} 端点`)
     // 重置表单，保留 URL
     newEndpoint.value = { api_format: '', base_url: baseUrl, custom_path: '' }
     emit('endpointCreated')
   } catch (error: unknown) {
-    showError(parseApiError(error, '添加失败'), '错误')
+    showError(localizedApiError(error, '添加失败'), legacyT('错误'))
   } finally {
     addingEndpoint.value = false
   }
@@ -3517,10 +3552,10 @@ async function handleToggleEndpoint(endpoint: ProviderEndpoint) {
   try {
     const newStatus = !endpoint.is_active
     await updateEndpoint(endpoint.id, { is_active: newStatus })
-    success(newStatus ? '端点已启用' : '端点已停用')
+    success(legacyT(newStatus ? '端点已启用' : '端点已停用'))
     emit('endpointUpdated')
   } catch (error: unknown) {
-    showError(parseApiError(error, '操作失败'), '错误')
+    showError(localizedApiError(error, '操作失败'), legacyT('错误'))
   } finally {
     togglingEndpointId.value = null
   }
@@ -3542,10 +3577,12 @@ async function confirmDeleteEndpoint() {
 
   try {
     await deleteEndpoint(endpoint.id)
-    success(`已删除 ${formatApiFormat(endpoint.api_format)} 端点`)
+    success(locale.value === 'en-US'
+      ? `Deleted ${formatApiFormat(endpoint.api_format)} endpoint`
+      : `已删除 ${formatApiFormat(endpoint.api_format)} 端点`)
     emit('endpointUpdated')
   } catch (error: unknown) {
-    showError(parseApiError(error, '删除失败'), '错误')
+    showError(localizedApiError(error, '删除失败'), legacyT('错误'))
   } finally {
     deletingEndpointId.value = null
     endpointToDelete.value = null

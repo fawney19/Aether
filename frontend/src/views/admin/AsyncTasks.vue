@@ -862,6 +862,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { asyncTasksApi, type AsyncTaskItem, type AsyncTaskDetail, type AsyncTaskStatsResponse, type AsyncTaskStatus } from '@/api/async-tasks'
 import { useToast } from '@/composables/useToast'
 import { useClipboard } from '@/composables/useClipboard'
+import { useI18n } from '@/i18n'
 import Card from '@/components/ui/card.vue'
 import Button from '@/components/ui/button.vue'
 import Input from '@/components/ui/input.vue'
@@ -904,6 +905,7 @@ import { log } from '@/utils/logger'
 const authStore = useAuthStore()
 const isAdmin = computed(() => authStore.canAccessAdmin)
 const { toast } = useToast()
+const { legacyT } = useI18n()
 const { copyToClipboard } = useClipboard()
 
 // 状态
@@ -1108,7 +1110,7 @@ async function openUsageRecord(task: AsyncTaskItem) {
 
 // 取消任务
 async function cancelTask(task: AsyncTaskItem | AsyncTaskDetail) {
-  if (!confirm('确定要取消这个任务吗？')) return
+  if (!confirm(legacyT('确定要取消这个任务吗？'))) return
   try {
     await asyncTasksApi.cancel(task.id)
     toast({

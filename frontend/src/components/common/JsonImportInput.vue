@@ -26,10 +26,10 @@
         </div>
         <div class="text-center">
           <p class="text-xs font-medium">
-            {{ dropTitle }}
+            {{ localizedDropTitle }}
           </p>
           <p class="text-[11px] text-muted-foreground mt-0.5">
-            {{ dropHint }}
+            {{ localizedDropHint }}
           </p>
         </div>
       </div>
@@ -40,12 +40,12 @@
       class="space-y-1.5"
     >
       <Label v-if="manualLabel">
-        {{ manualLabel }}
+        {{ localizedManualLabel }}
       </Label>
       <Textarea
         :model-value="modelValue"
         :disabled="disabled"
-        :placeholder="manualPlaceholder"
+        :placeholder="localizedManualPlaceholder"
         :class="textareaClass"
         spellcheck="false"
         @update:model-value="emit('update:modelValue', $event)"
@@ -54,7 +54,7 @@
         v-if="manualDescription"
         class="text-xs text-muted-foreground"
       >
-        {{ manualDescription }}
+        {{ localizedManualDescription }}
       </p>
     </div>
 
@@ -65,7 +65,7 @@
         class="text-sm text-muted-foreground hover:text-foreground transition-colors"
         @click="showManualInput = true"
       >
-        {{ pasteToggleText }}
+        {{ localizedPasteToggleText }}
       </button>
       <button
         v-else
@@ -73,7 +73,7 @@
         class="text-sm text-muted-foreground hover:text-foreground transition-colors"
         @click="switchToFileMode"
       >
-        {{ fileToggleText }}
+        {{ localizedFileToggleText }}
       </button>
     </div>
   </div>
@@ -83,6 +83,7 @@
 import { computed, ref, watch } from 'vue'
 import { Upload } from 'lucide-vue-next'
 import { Label, Textarea } from '@/components/ui'
+import { useI18n } from '@/i18n'
 
 interface ImportInputErrorPayload {
   message: string
@@ -122,10 +123,18 @@ const emit = defineEmits<{
   'update:modelValue': [value: string]
   error: [payload: ImportInputErrorPayload]
 }>()
+const { legacyT } = useI18n()
 
 const showManualInput = ref(false)
 const isDragging = ref(false)
 const fileInputRef = ref<HTMLInputElement | null>(null)
+const localizedDropTitle = computed(() => legacyT(props.dropTitle))
+const localizedDropHint = computed(() => legacyT(props.dropHint))
+const localizedManualLabel = computed(() => props.manualLabel ? legacyT(props.manualLabel) : '')
+const localizedManualPlaceholder = computed(() => props.manualPlaceholder ? legacyT(props.manualPlaceholder) : '')
+const localizedManualDescription = computed(() => props.manualDescription ? legacyT(props.manualDescription) : '')
+const localizedPasteToggleText = computed(() => legacyT(props.pasteToggleText))
+const localizedFileToggleText = computed(() => legacyT(props.fileToggleText))
 
 const acceptParts = computed(() => {
   return props.accept
@@ -146,7 +155,10 @@ function resetUiState() {
 }
 
 function emitError(message: string, title?: string) {
-  emit('error', { message, title })
+  emit('error', {
+    message: legacyT(message),
+    title: title ? legacyT(title) : undefined,
+  })
 }
 
 function isValidFileType(file: File): boolean {
@@ -180,9 +192,9 @@ function readFileAsText(file: File): Promise<string> {
         resolve(content)
         return
       }
-      reject(new Error('读取失败'))
+      reject(new Error(legacyT('读取失败')))
     }
-    reader.onerror = () => reject(new Error('读取失败'))
+    reader.onerror = () => reject(new Error(legacyT('读取失败')))
     reader.readAsText(file)
   })
 }

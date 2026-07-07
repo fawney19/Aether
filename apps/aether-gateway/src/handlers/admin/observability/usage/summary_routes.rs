@@ -301,7 +301,7 @@ fn admin_usage_unix_millis_to_rfc3339(unix_ms: u64) -> Option<String> {
         .map(|timestamp| timestamp.to_rfc3339())
 }
 
-fn admin_usage_terminal_candidate_state_override(
+pub(super) fn admin_usage_terminal_candidate_state_override(
     candidates: &[StoredRequestCandidate],
 ) -> Option<serde_json::Value> {
     let candidate = admin_usage_current_candidate(candidates)?;
@@ -341,6 +341,49 @@ fn admin_usage_terminal_candidate_state_override(
         payload["error_message"] = json!(error_message);
     }
     Some(payload)
+}
+
+pub(super) fn apply_admin_usage_state_override(
+    item: &mut StoredRequestUsageAudit,
+    override_payload: &serde_json::Value,
+) {
+    if !matches!(item.status.as_str(), "pending" | "streaming") {
+        return;
+    }
+
+    let Some(object) = override_payload.as_object() else {
+        return;
+    };
+
+    if let Some(status) = object
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| matches!(*value, "completed" | "failed" | "cancelled"))
+    {
+        item.status = status.to_string();
+    }
+    if let Some(status_code) = object
+        .get("status_code")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+    {
+        item.status_code = Some(status_code);
+    }
+    if let Some(response_time_ms) = object
+        .get("response_time_ms")
+        .and_then(serde_json::Value::as_u64)
+    {
+        item.response_time_ms = Some(response_time_ms);
+    }
+    if let Some(error_message) = object
+        .get("error_message")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        item.error_message = Some(error_message.to_string());
+    }
 }
 
 fn admin_usage_matches_attempt_status(
@@ -900,6 +943,21 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                     (records, total, !include_total)
                 }
             };
+
+            let active_candidate_state =
+                resolve_admin_usage_active_candidate_state(state, &usage).await?;
+            let usage = usage
+                .into_iter()
+                .map(|mut item| {
+                    if let Some(override_payload) = active_candidate_state
+                        .state_overrides_by_request_id
+                        .get(&item.request_id)
+                    {
+                        apply_admin_usage_state_override(&mut item, override_payload);
+                    }
+                    item
+                })
+                .collect::<Vec<_>>();
 
             let user_ids: Vec<String> = usage
                 .iter()

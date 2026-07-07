@@ -2,7 +2,7 @@
   <Teleport to="body">
     <div
       v-if="isOpen"
-      class="fixed inset-0 overflow-y-auto pointer-events-none"
+      class="fixed inset-0 overflow-hidden pointer-events-none"
       :style="{ zIndex: containerZIndex }"
     >
       <!-- 背景遮罩 -->
@@ -22,7 +22,7 @@
         />
       </Transition>
 
-      <div class="relative flex min-h-full items-end justify-center px-3 py-4 text-center sm:items-center sm:p-0 pointer-events-none">
+      <div class="relative flex h-full items-end justify-center overflow-hidden px-3 py-4 text-center sm:items-center sm:p-0 pointer-events-none">
         <!-- 对话框内容 -->
         <Transition
           enter-active-class="duration-300 ease-out"
@@ -34,7 +34,7 @@
         >
           <div
             v-if="isOpen"
-            class="relative transform rounded-lg bg-background text-left shadow-2xl transition-all w-full sm:my-8 sm:w-full border border-border pointer-events-auto"
+            class="relative flex max-h-[calc(100dvh-2rem)] w-full transform flex-col overflow-hidden rounded-lg border border-border bg-background text-left shadow-2xl transition-all pointer-events-auto sm:my-8 sm:w-full sm:max-h-[calc(100dvh-4rem)]"
             :style="{ zIndex: contentZIndex }"
             :class="maxWidthClass"
             @click.stop
@@ -43,7 +43,7 @@
             <slot name="header">
               <div
                 v-if="title"
-                class="border-b border-border px-4 py-4 sm:px-6"
+                class="shrink-0 border-b border-border px-4 py-4 sm:px-6"
               >
                 <div class="flex items-center gap-3">
                   <div
@@ -73,14 +73,14 @@
             </slot>
 
             <!-- 内容区域：可选添加 padding -->
-            <div :class="noPadding ? '' : 'px-4 py-3 sm:px-6'">
+            <div :class="contentBodyClass">
               <slot />
             </div>
 
             <!-- Footer 区域：如果有 footer 插槽，自动添加样式 -->
             <div
               v-if="slots.footer"
-              class="border-t border-border bg-muted/10 px-4 py-4 sm:px-6 flex flex-row-reverse gap-3"
+              class="shrink-0 border-t border-border bg-muted/10 px-4 py-4 sm:px-6 flex flex-row-reverse gap-3"
             >
               <slot name="footer" />
             </div>
@@ -167,6 +167,11 @@ const maxWidthClass = computed(() => {
   }
   return sizes[sizeValue]
 })
+
+const contentBodyClass = computed(() => [
+  'min-h-0 overflow-y-auto overscroll-contain',
+  props.noPadding ? '' : 'px-4 py-3 sm:px-6',
+].filter(Boolean).join(' '))
 
 // Z-index computed values for nested dialogs support
 const containerZIndex = computed(() => props.zIndex || 60)

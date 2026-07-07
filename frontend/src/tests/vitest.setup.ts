@@ -1,3 +1,5 @@
+import { beforeEach } from 'vitest'
+
 function createMemoryStorage(): Storage {
   const store = new Map<string, string>()
 
@@ -41,3 +43,24 @@ function installStorage(name: 'localStorage' | 'sessionStorage') {
 
 installStorage('localStorage')
 installStorage('sessionStorage')
+
+if (typeof globalThis.requestAnimationFrame !== 'function') {
+  Object.defineProperty(globalThis, 'requestAnimationFrame', {
+    value: (callback: FrameRequestCallback) => window.setTimeout(() => callback(Date.now()), 16),
+    configurable: true,
+  })
+}
+
+if (typeof globalThis.cancelAnimationFrame !== 'function') {
+  Object.defineProperty(globalThis, 'cancelAnimationFrame', {
+    value: (handle: number) => window.clearTimeout(handle),
+    configurable: true,
+  })
+}
+
+beforeEach(async () => {
+  localStorage.clear()
+  sessionStorage.clear()
+  const { setI18nLocale } = await import('@/i18n')
+  setI18nLocale('zh-CN')
+})

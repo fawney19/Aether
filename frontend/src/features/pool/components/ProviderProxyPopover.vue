@@ -22,7 +22,7 @@
     >
       <div class="space-y-2">
         <div class="flex items-center justify-between">
-          <span class="text-xs font-medium">提供商代理节点</span>
+          <span class="text-xs font-medium">{{ legacyT('提供商代理节点') }}</span>
           <Button
             v-if="nodeId"
             variant="ghost"
@@ -31,7 +31,7 @@
             :disabled="saving"
             @click="emit('clear')"
           >
-            清除
+            {{ legacyT('清除') }}
           </Button>
         </div>
         <ProxyNodeSelect
@@ -40,7 +40,7 @@
           @update:model-value="emit('select', $event)"
         />
         <p class="text-[10px] text-muted-foreground">
-          {{ nodeId ? '当前使用提供商独立代理' : '未设置，使用系统默认网络出口' }}
+          {{ legacyT(nodeId ? '当前使用提供商独立代理' : '未设置，使用系统默认网络出口') }}
         </p>
       </div>
     </PopoverContent>
@@ -50,6 +50,7 @@
 <script setup lang="ts">
 import { Globe } from 'lucide-vue-next'
 import { Button, Popover, PopoverTrigger, PopoverContent } from '@/components/ui'
+import { useI18n } from '@/i18n'
 import ProxyNodeSelect from '@/features/providers/components/ProxyNodeSelect.vue'
 
 defineProps<{
@@ -64,4 +65,6 @@ const emit = defineEmits<{
   select: [nodeId: string]
   clear: []
 }>()
+
+const { legacyT } = useI18n()
 </script>

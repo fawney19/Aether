@@ -1496,7 +1496,7 @@ const formatConversionPair = (source: string, target: string): string =>
   `${formatApiFormat(source.trim())} → ${formatApiFormat(target.trim())}`
 
 const extractFieldDetail = (message: string): string => {
-  const fieldMatch = message.match(/field\s+([^;=]+?)\s*=\s*(\"(?:\\.|[^"\\])*\"|[^;]+)/i)
+  const fieldMatch = message.match(/field\s+([^;=]+?)\s*=\s*("(?:\\.|[^"\\])*"|[^;]+)/i)
   const unsupportedFieldMatch = message.match(/field\s+([^;]+?)\s+is unsupported/i)
   if (fieldMatch?.[1]) {
     return `字段 ${normalizeDiagnosticFieldPath(fieldMatch[1])} = ${fieldMatch[2].trim()}`

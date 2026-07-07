@@ -30,5 +30,6 @@ pub(crate) use runtime::{
     ProxyUpgradeRolloutCancelSummary, ProxyUpgradeRolloutConflictClearSummary,
     ProxyUpgradeRolloutNodeActionSummary, ProxyUpgradeRolloutProbeConfig,
     ProxyUpgradeRolloutSkippedRestoreSummary, ProxyUpgradeRolloutStatus,
-    ProxyUpgradeRolloutTrackedNodeState,
+    ProxyUpgradeRolloutTrackedNodeState, UsageCounterFlushRuntimeMetrics,
+    UsageCounterFlushWorkerConfig,
 };

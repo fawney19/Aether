@@ -132,13 +132,48 @@ DO UPDATE SET
   provider_id = COALESCE(EXCLUDED.provider_id, request_candidates.provider_id),
   endpoint_id = COALESCE(EXCLUDED.endpoint_id, request_candidates.endpoint_id),
   key_id = COALESCE(EXCLUDED.key_id, request_candidates.key_id),
-  status = EXCLUDED.status,
+  status = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.status
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.status
+    ELSE EXCLUDED.status
+  END,
   skip_reason = COALESCE(EXCLUDED.skip_reason, request_candidates.skip_reason),
   is_cached = COALESCE($14, request_candidates.is_cached),
-  status_code = COALESCE(EXCLUDED.status_code, request_candidates.status_code),
-  error_type = COALESCE(EXCLUDED.error_type, request_candidates.error_type),
-  error_message = COALESCE(EXCLUDED.error_message, request_candidates.error_message),
-  latency_ms = COALESCE(EXCLUDED.latency_ms, request_candidates.latency_ms),
+  status_code = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.status_code
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.status_code
+    ELSE COALESCE(EXCLUDED.status_code, request_candidates.status_code)
+  END,
+  error_type = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.error_type
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.error_type
+    ELSE COALESCE(EXCLUDED.error_type, request_candidates.error_type)
+  END,
+  error_message = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.error_message
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.error_message
+    ELSE COALESCE(EXCLUDED.error_message, request_candidates.error_message)
+  END,
+  latency_ms = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.latency_ms
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.latency_ms
+    ELSE COALESCE(EXCLUDED.latency_ms, request_candidates.latency_ms)
+  END,
   concurrent_requests = COALESCE(EXCLUDED.concurrent_requests, request_candidates.concurrent_requests),
   extra_data = CASE
     WHEN request_candidates.extra_data IS NULL THEN EXCLUDED.extra_data
@@ -155,7 +190,14 @@ DO UPDATE SET
     ELSE request_candidates.created_at
   END,
   started_at = COALESCE(EXCLUDED.started_at, request_candidates.started_at),
-  finished_at = COALESCE(EXCLUDED.finished_at, request_candidates.finished_at)
+  finished_at = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.finished_at
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.finished_at
+    ELSE COALESCE(EXCLUDED.finished_at, request_candidates.finished_at)
+  END
 RETURNING
   id,
   request_id,
@@ -193,13 +235,48 @@ DO UPDATE SET
   provider_id = COALESCE(EXCLUDED.provider_id, request_candidates.provider_id),
   endpoint_id = COALESCE(EXCLUDED.endpoint_id, request_candidates.endpoint_id),
   key_id = COALESCE(EXCLUDED.key_id, request_candidates.key_id),
-  status = EXCLUDED.status,
+  status = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.status
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.status
+    ELSE EXCLUDED.status
+  END,
   skip_reason = COALESCE(EXCLUDED.skip_reason, request_candidates.skip_reason),
   is_cached = COALESCE(EXCLUDED.is_cached, request_candidates.is_cached),
-  status_code = COALESCE(EXCLUDED.status_code, request_candidates.status_code),
-  error_type = COALESCE(EXCLUDED.error_type, request_candidates.error_type),
-  error_message = COALESCE(EXCLUDED.error_message, request_candidates.error_message),
-  latency_ms = COALESCE(EXCLUDED.latency_ms, request_candidates.latency_ms),
+  status_code = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.status_code
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.status_code
+    ELSE COALESCE(EXCLUDED.status_code, request_candidates.status_code)
+  END,
+  error_type = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.error_type
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.error_type
+    ELSE COALESCE(EXCLUDED.error_type, request_candidates.error_type)
+  END,
+  error_message = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.error_message
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.error_message
+    ELSE COALESCE(EXCLUDED.error_message, request_candidates.error_message)
+  END,
+  latency_ms = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.latency_ms
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.latency_ms
+    ELSE COALESCE(EXCLUDED.latency_ms, request_candidates.latency_ms)
+  END,
   concurrent_requests = COALESCE(EXCLUDED.concurrent_requests, request_candidates.concurrent_requests),
   extra_data = CASE
     WHEN request_candidates.extra_data IS NULL THEN EXCLUDED.extra_data
@@ -216,7 +293,14 @@ DO UPDATE SET
     ELSE request_candidates.created_at
   END,
   started_at = COALESCE(EXCLUDED.started_at, request_candidates.started_at),
-  finished_at = COALESCE(EXCLUDED.finished_at, request_candidates.finished_at)
+  finished_at = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.finished_at
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.finished_at
+    ELSE COALESCE(EXCLUDED.finished_at, request_candidates.finished_at)
+  END
 "#;
 
 const UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL: &str = r#"
@@ -229,13 +313,48 @@ DO UPDATE SET
   provider_id = COALESCE(EXCLUDED.provider_id, request_candidates.provider_id),
   endpoint_id = COALESCE(EXCLUDED.endpoint_id, request_candidates.endpoint_id),
   key_id = COALESCE(EXCLUDED.key_id, request_candidates.key_id),
-  status = EXCLUDED.status,
+  status = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.status
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.status
+    ELSE EXCLUDED.status
+  END,
   skip_reason = COALESCE(EXCLUDED.skip_reason, request_candidates.skip_reason),
   is_cached = request_candidates.is_cached,
-  status_code = COALESCE(EXCLUDED.status_code, request_candidates.status_code),
-  error_type = COALESCE(EXCLUDED.error_type, request_candidates.error_type),
-  error_message = COALESCE(EXCLUDED.error_message, request_candidates.error_message),
-  latency_ms = COALESCE(EXCLUDED.latency_ms, request_candidates.latency_ms),
+  status_code = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.status_code
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.status_code
+    ELSE COALESCE(EXCLUDED.status_code, request_candidates.status_code)
+  END,
+  error_type = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.error_type
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.error_type
+    ELSE COALESCE(EXCLUDED.error_type, request_candidates.error_type)
+  END,
+  error_message = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.error_message
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.error_message
+    ELSE COALESCE(EXCLUDED.error_message, request_candidates.error_message)
+  END,
+  latency_ms = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.latency_ms
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.latency_ms
+    ELSE COALESCE(EXCLUDED.latency_ms, request_candidates.latency_ms)
+  END,
   concurrent_requests = COALESCE(EXCLUDED.concurrent_requests, request_candidates.concurrent_requests),
   extra_data = CASE
     WHEN request_candidates.extra_data IS NULL THEN EXCLUDED.extra_data
@@ -252,7 +371,14 @@ DO UPDATE SET
     ELSE request_candidates.created_at
   END,
   started_at = COALESCE(EXCLUDED.started_at, request_candidates.started_at),
-  finished_at = COALESCE(EXCLUDED.finished_at, request_candidates.finished_at)
+  finished_at = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.finished_at
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+      THEN request_candidates.finished_at
+    ELSE COALESCE(EXCLUDED.finished_at, request_candidates.finished_at)
+  END
 "#;
 
 const UPSERT_MANY_PREFIX_SQL: &str = r#"
@@ -1015,7 +1141,10 @@ fn to_i32_u64(value: u64) -> Result<i32, DataLayerError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SqlxRequestCandidateReadRepository, UPSERT_SQL};
+    use super::{
+        SqlxRequestCandidateReadRepository, UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL,
+        UPSERT_CONFLICT_SQL, UPSERT_SQL,
+    };
     use crate::driver::postgres::{PostgresPoolConfig, PostgresPoolFactory};
 
     #[test]
@@ -1028,6 +1157,27 @@ mod tests {
         assert!(UPSERT_SQL.contains("NOW()"));
         assert!(UPSERT_SQL.contains("request_candidates.created_at <= TO_TIMESTAMP(1)"));
         assert!(UPSERT_SQL.contains("THEN EXCLUDED.created_at"));
+    }
+
+    #[test]
+    fn upsert_sql_keeps_terminal_candidate_state_when_lifecycle_events_arrive_late() {
+        for sql in [
+            UPSERT_SQL,
+            UPSERT_CONFLICT_SQL,
+            UPSERT_CONFLICT_INHERIT_IS_CACHED_SQL,
+        ] {
+            assert!(sql.contains(
+                "request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')"
+            ));
+            assert!(
+                sql.contains("EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')")
+            );
+            assert!(sql.contains(
+                "request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'"
+            ));
+            assert!(sql.contains("THEN request_candidates.status"));
+            assert!(sql.contains("THEN request_candidates.latency_ms"));
+        }
     }
 
     #[tokio::test]

@@ -8,107 +8,108 @@ import {
   Blocks,
   HelpCircle
 } from 'lucide-vue-next'
+import type { MessageKey } from '@/i18n'
 
 // 导航配置
 export interface GuideNavItem {
   id: string
-  name: string
+  nameKey: MessageKey
   path: string
   icon: Component
-  description?: string
-  subItems?: { name: string; hash: string }[]
+  descriptionKey?: MessageKey
+  subItems?: { nameKey: MessageKey; hash: string }[]
 }
 
 export const guideNavItems: GuideNavItem[] = [
   {
     id: 'overview',
-    name: '快速开始',
+    nameKey: 'guide.nav.overview',
     path: '/guide',
     icon: Rocket,
-    description: '部署后的配置指南',
+    descriptionKey: 'guide.nav.overview.description',
     subItems: [
-      { name: '部署', hash: '#production' },
-      { name: '配置流程', hash: '#config-steps' },
-      { name: '反向代理', hash: '#reverse-proxy' },
-      { name: '异步任务', hash: '#async-tasks' },
-      { name: '代理配置', hash: '#proxy-config' }
+      { nameKey: 'guide.nav.overview.production', hash: '#production' },
+      { nameKey: 'guide.nav.overview.configSteps', hash: '#config-steps' },
+      { nameKey: 'guide.nav.overview.reverseProxy', hash: '#reverse-proxy' },
+      { nameKey: 'guide.nav.overview.asyncTasks', hash: '#async-tasks' },
+      { nameKey: 'guide.nav.overview.proxyConfig', hash: '#proxy-config' }
     ]
   },
   {
     id: 'architecture',
-    name: '架构说明',
+    nameKey: 'guide.nav.architecture',
     path: '/guide/architecture',
     icon: Network,
-    description: '系统架构'
+    descriptionKey: 'guide.nav.architecture.description'
   },
   {
     id: 'concepts',
-    name: '相关概念',
+    nameKey: 'guide.nav.concepts',
     path: '/guide/concepts',
     icon: BookOpen,
-    description: '核心概念',
+    descriptionKey: 'guide.nav.concepts.description',
     subItems: [
-      { name: '创建统一模型', hash: '#create-model' },
-      { name: '添加提供商', hash: '#add-provider' },
-      { name: '添加端点', hash: '#add-endpoint' },
-      { name: '添加密钥', hash: '#add-key' },
-      { name: '模型权限', hash: '#model-permission' },
-      { name: '关联模型', hash: '#link-model' },
-      { name: '模型映射', hash: '#model-mapping' },
-      { name: '反向代理', hash: '#reverse-proxy' },
-      { name: '优先级管理', hash: '#priority-management' }
+      { nameKey: 'guide.nav.concepts.createModel', hash: '#create-model' },
+      { nameKey: 'guide.nav.concepts.addProvider', hash: '#add-provider' },
+      { nameKey: 'guide.nav.concepts.addEndpoint', hash: '#add-endpoint' },
+      { nameKey: 'guide.nav.concepts.addKey', hash: '#add-key' },
+      { nameKey: 'guide.nav.concepts.modelPermission', hash: '#model-permission' },
+      { nameKey: 'guide.nav.concepts.linkModel', hash: '#link-model' },
+      { nameKey: 'guide.nav.concepts.modelMapping', hash: '#model-mapping' },
+      { nameKey: 'guide.nav.overview.reverseProxy', hash: '#reverse-proxy' },
+      { nameKey: 'guide.nav.concepts.priorityManagement', hash: '#priority-management' }
     ]
   },
   {
     id: 'strategy',
-    name: '关键策略',
+    nameKey: 'guide.nav.strategy',
     path: '/guide/strategy',
     icon: Target,
-    description: '关键策略',
+    descriptionKey: 'guide.nav.strategy.description',
     subItems: [
-      { name: '请求体记录', hash: '#request-logging' },
-      { name: '调度模式', hash: '#scheduling' },
-      { name: '访问限制', hash: '#rate-limit' },
-      { name: '请求体清理', hash: '#payload-cleanup' },
-      { name: '定时任务', hash: '#cron-tasks' }
+      { nameKey: 'guide.nav.strategy.requestLogging', hash: '#request-logging' },
+      { nameKey: 'guide.nav.strategy.scheduling', hash: '#scheduling' },
+      { nameKey: 'guide.nav.strategy.rateLimit', hash: '#rate-limit' },
+      { nameKey: 'guide.nav.strategy.payloadCleanup', hash: '#payload-cleanup' },
+      { nameKey: 'guide.nav.strategy.cronTasks', hash: '#cron-tasks' }
     ]
   },
   {
     id: 'advanced',
-    name: '高级功能',
+    nameKey: 'guide.nav.advanced',
     path: '/guide/advanced',
     icon: Settings,
-    description: '高级功能',
+    descriptionKey: 'guide.nav.advanced.description',
     subItems: [
-      { name: '格式转换', hash: '#format-conversion' },
-      { name: '流式/非流式', hash: '#stream-policy' },
-      { name: '请求头/体编辑', hash: '#header-body-edit' },
-      { name: '模型映射', hash: '#model-mapping' },
-      { name: '正则映射', hash: '#regex-mapping' },
-      { name: '余额监控', hash: '#balance-monitor' },
-      { name: '配置导入/出', hash: '#config-export' },
-      { name: '锁定用户密钥', hash: '#lock-key' }
+      { nameKey: 'guide.nav.advanced.formatConversion', hash: '#format-conversion' },
+      { nameKey: 'guide.nav.advanced.streamPolicy', hash: '#stream-policy' },
+      { nameKey: 'guide.nav.advanced.headerBodyEdit', hash: '#header-body-edit' },
+      { nameKey: 'guide.nav.concepts.modelMapping', hash: '#model-mapping' },
+      { nameKey: 'guide.nav.advanced.regexMapping', hash: '#regex-mapping' },
+      { nameKey: 'guide.nav.advanced.balanceMonitor', hash: '#balance-monitor' },
+      { nameKey: 'guide.nav.advanced.configExport', hash: '#config-export' },
+      { nameKey: 'guide.nav.advanced.lockKey', hash: '#lock-key' }
     ]
   },
   {
     id: 'modules',
-    name: '模块管理',
+    nameKey: 'guide.nav.modules',
     path: '/guide/modules',
     icon: Blocks,
-    description: '模块管理',
+    descriptionKey: 'guide.nav.modules.description',
     subItems: [
-      { name: '访问令牌', hash: '#management-tokens' },
-      { name: '邮件配置', hash: '#email-config' },
-      { name: 'OAuth登录', hash: '#oauth-login' },
-      { name: 'LDAP认证', hash: '#ldap-auth' }
+      { nameKey: 'guide.nav.modules.managementTokens', hash: '#management-tokens' },
+      { nameKey: 'guide.nav.modules.emailConfig', hash: '#email-config' },
+      { nameKey: 'guide.nav.modules.oauthLogin', hash: '#oauth-login' },
+      { nameKey: 'guide.nav.modules.ldapAuth', hash: '#ldap-auth' }
     ]
   },
   {
     id: 'faq',
-    name: '常见问题',
+    nameKey: 'guide.nav.faq',
     path: '/guide/faq',
     icon: HelpCircle,
-    description: '常见问题'
+    descriptionKey: 'guide.nav.faq.description'
   }
 ]
 

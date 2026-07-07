@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 #![allow(
     dead_code,
     unused_assignments,
@@ -26,6 +27,7 @@
 
 mod admin_api;
 mod ai_serving;
+mod allocator_metrics;
 mod api;
 mod async_task;
 mod audit;
@@ -57,6 +59,7 @@ mod model_fetch;
 mod oauth;
 mod orchestration;
 mod privacy;
+mod process_metrics;
 mod provider_key_auth;
 mod provider_pool_demand;
 pub(crate) use aether_provider_transport as provider_transport;
@@ -73,6 +76,9 @@ mod stage_metrics;
 mod state;
 mod system_features;
 mod task_runtime;
+#[cfg(feature = "testkit")]
+pub mod testkit;
+mod tokio_metrics;
 mod tunnel;
 mod upstream_admission;
 mod usage;
@@ -96,7 +102,8 @@ pub(crate) use self::execution_runtime::{
 };
 pub use self::execution_runtime::{
     build_execution_runtime_router, build_execution_runtime_router_with_request_concurrency_limit,
-    build_execution_runtime_router_with_request_gates, serve_execution_runtime_tcp,
+    build_execution_runtime_router_with_request_gates,
+    prewarm_direct_h2c_sender_cache_from_env_for_startup, serve_execution_runtime_tcp,
     serve_execution_runtime_unix,
 };
 pub(crate) use self::fallback_metrics::{GatewayFallbackMetricKind, GatewayFallbackReason};

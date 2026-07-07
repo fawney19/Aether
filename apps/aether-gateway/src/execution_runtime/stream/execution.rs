@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::io::Error as IoError;
+use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
@@ -18,16 +19,16 @@ use aether_scheduler_core::{
 };
 use aether_usage_runtime::{
     build_lifecycle_usage_seed, build_stream_terminal_usage_payload_seed,
-    build_sync_terminal_usage_payload_seed, build_terminal_usage_context_seed,
-    build_usage_event_data_seed, LifecycleUsageSeed, UsageEvent, UsageEventType,
+    build_sync_terminal_usage_payload_seed, build_terminal_usage_context_seed, LifecycleUsageSeed,
     DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
 };
 use async_stream::stream;
 use axum::body::{Body, Bytes};
 use axum::http::Response;
 use base64::Engine as _;
-use futures_util::stream::BoxStream;
+use futures_util::stream::{self as futures_stream, BoxStream};
 use futures_util::{StreamExt, TryStreamExt};
+use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
@@ -80,7 +81,7 @@ use crate::execution_runtime::submission::{
     strip_utf8_bom_and_ws, submit_local_core_error_or_sync_finalize,
 };
 use crate::execution_runtime::transport::{
-    execute_stream_plan_via_local_tunnel, format_upstream_request_error,
+    execute_stream_plan_via_local_tunnel, format_hyper_error_chain, format_upstream_request_error,
     format_wreq_upstream_request_error, record_manual_proxy_request_failure,
     record_manual_proxy_request_success, record_manual_proxy_stream_error,
     stream_first_byte_timeout_message, DirectSyncExecutionRuntime, DirectUpstreamResponse,
@@ -109,6 +110,7 @@ use crate::provider_pool_demand::{
 use crate::request_candidate_runtime::{
     ensure_execution_request_candidate_slot, record_local_request_candidate_status,
     record_local_request_candidate_status_snapshot, snapshot_local_request_candidate_status,
+    LocalRequestCandidateStatusSnapshot,
 };
 use crate::request_diagnostics::{
     attach_current_request_diagnostics_to_report_context,
@@ -116,7 +118,7 @@ use crate::request_diagnostics::{
 };
 use crate::stage_metrics::{
     attach_stage_trace_to_report_context, observe_gateway_stage_ms, observe_gateway_stage_trace_ms,
-    RequestStageTrace,
+    record_stream_pre_first_byte_spawn, RequestStageTrace,
 };
 use crate::usage::submit_stream_report;
 use crate::usage::{GatewayStreamReportRequest, GatewaySyncReportRequest};
@@ -132,6 +134,11 @@ const SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES: usize = 1024 * 1024;
 const STREAM_IDLE_LOG_INTERVAL: Duration = Duration::from_secs(60);
 const STREAM_IDLE_LOG_INTERVAL_MS: u64 = 60_000;
 const REWRITTEN_STREAM_PREFETCH_TIMEOUT: Duration = Duration::from_millis(750);
+const DEFAULT_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY: usize = 16;
+const MAX_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY: usize = 1024;
+const DIRECT_PASSTHROUGH_CHANNEL_CAPACITY_ENV: &str =
+    "AETHER_GATEWAY_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY";
+const DIRECT_PASSTHROUGH_MODE_ENV: &str = "AETHER_GATEWAY_DIRECT_PASSTHROUGH_MODE";
 
 struct StageElapsedGuard {
     stage: &'static str,
@@ -183,9 +190,57 @@ fn report_context_with_request_diagnostics(
     attach_request_diagnostics_to_report_context(report_context, diagnostics)
 }
 
+fn request_accepted_elapsed_ms(diagnostics: Option<&Arc<RequestDiagnostics>>) -> Option<u64> {
+    diagnostics.and_then(|diagnostics| {
+        diagnostics
+            .request_accepted_at()
+            .map(|accepted_at| accepted_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+    })
+}
+
+fn observe_request_accepted_stage_trace_ms(
+    trace: &mut RequestStageTrace,
+    diagnostics: Option<&Arc<RequestDiagnostics>>,
+    stage: &'static str,
+) {
+    if let Some(elapsed_ms) = request_accepted_elapsed_ms(diagnostics) {
+        observe_gateway_stage_trace_ms(trace, stage, elapsed_ms);
+    }
+}
+
 impl Drop for StageElapsedGuard {
     fn drop(&mut self) {
         observe_gateway_stage_ms(self.stage, self.started_at.elapsed().as_millis() as u64);
+    }
+}
+
+fn direct_passthrough_channel_capacity() -> usize {
+    std::env::var(DIRECT_PASSTHROUGH_CHANNEL_CAPACITY_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY)
+        .clamp(1, MAX_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectPassthroughMode {
+    Inline,
+    Legacy,
+}
+
+fn direct_passthrough_mode() -> DirectPassthroughMode {
+    std::env::var(DIRECT_PASSTHROUGH_MODE_ENV)
+        .ok()
+        .as_deref()
+        .map(parse_direct_passthrough_mode)
+        .unwrap_or(DirectPassthroughMode::Inline)
+}
+
+fn parse_direct_passthrough_mode(value: &str) -> DirectPassthroughMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "legacy" | "pump" | "mpsc" => DirectPassthroughMode::Legacy,
+        _ => DirectPassthroughMode::Inline,
     }
 }
 
@@ -293,7 +348,7 @@ fn record_stream_terminal_usage(
     );
 }
 
-async fn record_stream_admission_timeout_terminal_state(
+async fn record_stream_admission_timeout_candidate_failure(
     state: &AppState,
     plan: &ExecutionPlan,
     report_context: Option<&Value>,
@@ -327,32 +382,6 @@ async fn record_stream_admission_timeout_terminal_state(
         },
     )
     .await;
-
-    if !state.usage_runtime.is_enabled() {
-        return;
-    }
-
-    let mut usage_data = build_usage_event_data_seed(plan, report_context);
-    usage_data.status_code = Some(status_code);
-    usage_data.error_message = Some(error_message.clone());
-    usage_data.error_category = Some("client_error".to_string());
-    usage_data.response_time_ms = Some(latency_ms);
-    let error_body = json!({
-        "error": {
-            "type": error_type,
-            "message": error_message,
-            "code": status_code,
-        }
-    });
-    usage_data.response_headers = Some(json!({"content-type": "application/json"}));
-    usage_data.response_body = Some(error_body.clone());
-    usage_data.client_response_headers = Some(json!({"content-type": "application/json"}));
-    usage_data.client_response_body = Some(error_body);
-
-    state.usage_runtime.submit_terminal_event(
-        state.data.as_ref(),
-        UsageEvent::new(UsageEventType::Failed, plan.request_id.clone(), usage_data),
-    );
 }
 
 fn build_stream_body_capture(
@@ -982,6 +1011,11 @@ fn should_use_direct_sse_passthrough(
     if plan_kind == OPENAI_IMAGE_STREAM_PLAN_KIND {
         return false;
     }
+    if is_openai_responses_family_format(plan.provider_api_format.as_str())
+        || is_openai_responses_family_format(plan.client_api_format.as_str())
+    {
+        return false;
+    }
     if !response_headers_indicate_sse(&execution.headers) {
         return false;
     }
@@ -1014,13 +1048,20 @@ fn should_use_direct_sse_passthrough(
     )
 }
 
+type DirectUpstreamByteStream = BoxStream<'static, Result<Bytes, String>>;
+
 fn direct_upstream_response_byte_stream(
     response: DirectUpstreamResponse,
-) -> BoxStream<'static, Result<Bytes, String>> {
+) -> DirectUpstreamByteStream {
     match response {
         DirectUpstreamResponse::Reqwest(response) => response
             .bytes_stream()
             .map(|item| item.map_err(|err| format_upstream_request_error(&err)))
+            .boxed(),
+        DirectUpstreamResponse::HyperH2c(response) => response
+            .into_body()
+            .into_data_stream()
+            .map(|item| item.map_err(|err| format_hyper_error_chain(&err)))
             .boxed(),
         DirectUpstreamResponse::BrowserWreq(response) => response
             .bytes_stream()
@@ -1077,6 +1118,7 @@ async fn forward_direct_passthrough_client_chunk(
     max_stream_body_buffer_bytes: usize,
     stream_started_at: Instant,
     last_client_chunk_elapsed_ms: &mut u64,
+    first_client_chunk: bool,
     trace_id: &str,
     request_id_for_log: &str,
     candidate_id: Option<&str>,
@@ -1107,10 +1149,11 @@ async fn forward_direct_passthrough_client_chunk(
         *downstream_dropped = true;
         return false;
     }
-    observe_gateway_stage_ms(
-        "direct_passthrough_body_send_wait",
-        send_started_at.elapsed().as_millis() as u64,
-    );
+    let send_wait_ms = send_started_at.elapsed().as_millis() as u64;
+    observe_gateway_stage_ms("direct_passthrough_body_send_wait", send_wait_ms);
+    if first_client_chunk {
+        observe_gateway_stage_ms("direct_passthrough_first_client_send_wait", send_wait_ms);
+    }
 
     *client_visible_stream_completed |=
         client_stream_completion_tracker.observe_chunk(chunk.as_ref());
@@ -1119,6 +1162,914 @@ async fn forward_direct_passthrough_client_chunk(
         .elapsed()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64;
+    true
+}
+
+struct DirectPassthroughFinalizer {
+    core: Option<DirectPassthroughFinalizerCore>,
+}
+
+struct DirectPassthroughFinalizerCore {
+    state: AppState,
+    plan: ExecutionPlan,
+    trace_id: String,
+    report_kind: Option<String>,
+    report_context: Option<Value>,
+    lifecycle_seed: LifecycleUsageSeed,
+    direct_stream_finalize_kind: Option<String>,
+    stream_started_at: Instant,
+    stage_trace: RequestStageTrace,
+    request_diagnostics: Option<Arc<RequestDiagnostics>>,
+    request_id_for_log: String,
+    candidate_id: Option<String>,
+    request_candidate_status_snapshot: Option<LocalRequestCandidateStatusSnapshot>,
+    candidate_started_unix_secs: u64,
+    status_code: u16,
+    headers: BTreeMap<String, String>,
+    stream_usage_report_context: Option<Value>,
+    stream_usage_observer: Option<StreamingStandardTerminalObserver>,
+    stream_usage_observer_buffered: Vec<u8>,
+    provider_buffered_body: Vec<u8>,
+    buffered_body: Vec<u8>,
+    provider_body_truncated: bool,
+    client_body_truncated: bool,
+    client_stream_completion_tracker: ClientVisibleStreamCompletionTracker,
+    client_visible_stream_completed: bool,
+    usage_stream_telemetry: Option<ExecutionTelemetry>,
+    telemetry: Option<ExecutionTelemetry>,
+    provider_stream_bytes: u64,
+    client_stream_bytes: u64,
+    last_client_chunk_elapsed_ms: u64,
+    pending_recorded: bool,
+    stream_started_recorded: bool,
+    terminal_failure: Option<StreamFailureReport>,
+    _provider_pool_in_flight_guard: Option<ProviderPoolInFlightGuard>,
+    _upstream_target_permit: Option<crate::upstream_admission::UpstreamTargetAdmissionPermit>,
+}
+
+impl DirectPassthroughFinalizer {
+    fn new(core: DirectPassthroughFinalizerCore) -> Self {
+        Self { core: Some(core) }
+    }
+
+    fn core(&self) -> &DirectPassthroughFinalizerCore {
+        self.core
+            .as_ref()
+            .expect("direct passthrough finalizer core should exist")
+    }
+
+    fn core_mut(&mut self) -> &mut DirectPassthroughFinalizerCore {
+        self.core
+            .as_mut()
+            .expect("direct passthrough finalizer core should exist")
+    }
+
+    fn stream_started_at(&self) -> Instant {
+        self.core().stream_started_at
+    }
+
+    fn ttfb_observed(&self) -> bool {
+        self.core()
+            .usage_stream_telemetry
+            .as_ref()
+            .and_then(|telemetry| telemetry.ttfb_ms)
+            .is_some()
+    }
+
+    fn terminal_failure(&self) -> Option<&StreamFailureReport> {
+        self.core().terminal_failure.as_ref()
+    }
+
+    fn set_terminal_failure(&mut self, failure: StreamFailureReport) {
+        self.core_mut().terminal_failure = Some(failure);
+    }
+
+    fn log_terminal_error_event_encode_failed(&self, err: impl std::fmt::Debug) {
+        let core = self.core();
+        warn!(
+            event_name = "direct_passthrough_terminal_error_event_encode_failed",
+            log_type = "ops",
+            trace_id = %core.trace_id,
+            request_id = %core.request_id_for_log,
+            candidate_id = ?core.candidate_id.as_deref(),
+            error = ?err,
+            "gateway direct passthrough failed to encode terminal SSE error event"
+        );
+    }
+
+    fn observe_first_body_poll(&mut self) {
+        let core = self.core_mut();
+        observe_gateway_stage_trace_ms(
+            &mut core.stage_trace,
+            "stream_body_inline_first_poll",
+            stream_elapsed_ms_since(core.stream_started_at),
+        );
+        let request_diagnostics = core.request_diagnostics.clone();
+        observe_request_accepted_stage_trace_ms(
+            &mut core.stage_trace,
+            request_diagnostics.as_ref(),
+            "frontdoor_to_stream_body_first_poll",
+        );
+    }
+
+    fn observe_upstream_chunk(&mut self, chunk: &Bytes, observed_at: Instant) {
+        let core = self.core_mut();
+        if core.provider_stream_bytes == 0 {
+            observe_gateway_stage_trace_ms(
+                &mut core.stage_trace,
+                "direct_passthrough_upstream_body_first",
+                stream_elapsed_ms_at(core.stream_started_at, observed_at),
+            );
+        }
+        let captured_first_stream_event = maybe_capture_first_stream_event_telemetry(
+            core.stream_started_at,
+            observed_at,
+            core.telemetry.as_ref(),
+            &mut core.usage_stream_telemetry,
+        );
+        if captured_first_stream_event && core.provider_stream_bytes == 0 {
+            observe_gateway_stage_trace_ms(
+                &mut core.stage_trace,
+                "stream_first_data",
+                stream_elapsed_ms_at(core.stream_started_at, observed_at),
+            );
+        }
+
+        core.provider_stream_bytes = core
+            .provider_stream_bytes
+            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        append_stream_capture_bytes(
+            &mut core.provider_buffered_body,
+            chunk.as_ref(),
+            DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
+            &mut core.provider_body_truncated,
+        );
+        if let (Some(observer), Some(report_context)) = (
+            core.stream_usage_observer.as_mut(),
+            core.stream_usage_report_context.as_ref(),
+        ) {
+            observe_stream_usage_bytes(
+                observer,
+                report_context,
+                &mut core.stream_usage_observer_buffered,
+                chunk.as_ref(),
+            );
+        }
+        if let Some(error_body_json) = extract_provider_private_stream_error_body(
+            core.stream_usage_report_context.as_ref(),
+            chunk.as_ref(),
+        ) {
+            let error_status_code =
+                resolve_local_sync_error_status_code(core.status_code, &error_body_json);
+            core.terminal_failure = Some(build_stream_failure_from_provider_error_body(
+                error_status_code,
+                &error_body_json,
+            ));
+        }
+    }
+
+    fn observe_client_chunk(&mut self, chunk: &Bytes) {
+        if chunk.is_empty() {
+            return;
+        }
+        let core = self.core_mut();
+        append_stream_capture_bytes(
+            &mut core.buffered_body,
+            chunk.as_ref(),
+            DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
+            &mut core.client_body_truncated,
+        );
+        core.client_visible_stream_completed |= core
+            .client_stream_completion_tracker
+            .observe_chunk(chunk.as_ref());
+        core.client_stream_bytes = core
+            .client_stream_bytes
+            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        core.last_client_chunk_elapsed_ms = core
+            .stream_started_at
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+    }
+
+    fn observe_first_client_yield(&mut self) {
+        let core = self.core_mut();
+        let elapsed_ms = stream_elapsed_ms_since(core.stream_started_at);
+        observe_gateway_stage_trace_ms(
+            &mut core.stage_trace,
+            "direct_passthrough_first_client_send",
+            elapsed_ms,
+        );
+        observe_gateway_stage_trace_ms(
+            &mut core.stage_trace,
+            "stream_first_client_yield",
+            elapsed_ms,
+        );
+        let request_diagnostics = core.request_diagnostics.clone();
+        observe_request_accepted_stage_trace_ms(
+            &mut core.stage_trace,
+            request_diagnostics.as_ref(),
+            "frontdoor_to_stream_first_client_yield",
+        );
+    }
+
+    fn release_upstream_target_permit_after_first_yield(&mut self) {
+        let core = self.core_mut();
+        if core._upstream_target_permit.take().is_some() {
+            observe_gateway_stage_trace_ms(
+                &mut core.stage_trace,
+                "stream_upstream_target_permit_release",
+                stream_elapsed_ms_since(core.stream_started_at),
+            );
+        }
+    }
+
+    async fn record_client_visible_stream_started_if_needed(&mut self) {
+        let Some(core) = self.core.as_mut() else {
+            return;
+        };
+        core.record_client_visible_stream_started_if_needed().await;
+    }
+
+    async fn finalize(&mut self, downstream_dropped: bool) {
+        let Some(core) = self.core.take() else {
+            return;
+        };
+        core.finalize(downstream_dropped).await;
+    }
+}
+
+impl Drop for DirectPassthroughFinalizer {
+    fn drop(&mut self) {
+        let Some(core) = self.core.take() else {
+            return;
+        };
+        observe_gateway_stage_ms("stream_finalizer_enqueue", 0);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                core.finalize(true).await;
+            });
+        }
+    }
+}
+
+impl DirectPassthroughFinalizerCore {
+    async fn record_client_visible_stream_started_if_needed(&mut self) {
+        if self.stream_started_recorded || self.client_stream_bytes == 0 {
+            return;
+        }
+        if !self.pending_recorded {
+            self.pending_recorded = true;
+            let usage_data = self.state.data.as_ref().clone();
+            self.state
+                .usage_runtime
+                .record_pending_direct(&usage_data, self.lifecycle_seed.clone())
+                .await;
+        }
+        self.stream_started_recorded = true;
+        self.state.usage_runtime.record_stream_started(
+            self.state.data.as_ref(),
+            &self.lifecycle_seed,
+            self.status_code,
+            self.usage_stream_telemetry.as_ref(),
+        );
+        if let Some(snapshot) = self.request_candidate_status_snapshot.as_ref() {
+            record_local_request_candidate_status_snapshot(
+                &self.state,
+                snapshot,
+                SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Streaming,
+                    status_code: Some(self.status_code),
+                    error_type: None,
+                    error_message: None,
+                    latency_ms: None,
+                    started_at_unix_ms: Some(self.candidate_started_unix_secs),
+                    finished_at_unix_ms: None,
+                },
+            )
+            .await;
+        }
+    }
+
+    async fn finalize(mut self, mut downstream_dropped: bool) {
+        self.record_client_visible_stream_started_if_needed().await;
+        observe_gateway_stage_ms(
+            "stream_total",
+            stream_elapsed_ms_since(self.stream_started_at),
+        );
+        let stream_terminal_summary = finalize_stream_usage_observer(
+            &mut self.stream_usage_observer,
+            self.stream_usage_report_context.as_ref(),
+            &mut self.stream_usage_observer_buffered,
+        );
+
+        let DirectPassthroughFinalizerCore {
+            state,
+            plan,
+            trace_id,
+            report_kind,
+            report_context,
+            lifecycle_seed: _,
+            direct_stream_finalize_kind,
+            stream_started_at,
+            stage_trace,
+            request_diagnostics,
+            request_id_for_log,
+            candidate_id,
+            request_candidate_status_snapshot: _,
+            candidate_started_unix_secs,
+            status_code,
+            headers,
+            stream_usage_report_context,
+            stream_usage_observer: _,
+            stream_usage_observer_buffered: _,
+            provider_buffered_body,
+            buffered_body,
+            provider_body_truncated,
+            client_body_truncated,
+            client_stream_completion_tracker: _,
+            client_visible_stream_completed,
+            usage_stream_telemetry,
+            telemetry,
+            provider_stream_bytes,
+            client_stream_bytes: _,
+            last_client_chunk_elapsed_ms: _,
+            pending_recorded: _,
+            stream_started_recorded: _,
+            terminal_failure,
+            _provider_pool_in_flight_guard,
+            _upstream_target_permit,
+        } = self;
+
+        if downstream_dropped && client_visible_stream_completed && terminal_failure.is_none() {
+            debug!(
+                event_name = "direct_passthrough_downstream_closed_after_done",
+                log_type = "debug",
+                trace_id = %trace_id,
+                request_id = %request_id_for_log,
+                candidate_id = ?candidate_id.as_deref(),
+                "gateway treats direct passthrough downstream close after terminal SSE event as completed"
+            );
+            downstream_dropped = false;
+        }
+
+        if let Some(failure) = terminal_failure {
+            record_manual_proxy_stream_error(&state, &plan).await;
+            let terminal_telemetry = Some(build_terminal_stream_telemetry(
+                stream_started_at,
+                telemetry.as_ref(),
+                usage_stream_telemetry.as_ref(),
+                provider_stream_bytes,
+            ));
+            let report_context_for_payload = report_context_with_stage_trace(
+                report_context,
+                stage_trace,
+                stream_started_at,
+                terminal_telemetry.as_ref(),
+            );
+            let report_context_for_payload = report_context_with_request_diagnostics(
+                report_context_for_payload,
+                request_diagnostics.as_ref(),
+            );
+            submit_midstream_stream_failure(
+                &state,
+                &trace_id,
+                &plan,
+                direct_stream_finalize_kind.as_deref(),
+                report_context_for_payload,
+                headers,
+                terminal_telemetry,
+                &provider_buffered_body,
+                candidate_started_unix_secs,
+                failure,
+            )
+            .await;
+            return;
+        }
+
+        if downstream_dropped {
+            let terminal_telemetry = Some(build_terminal_stream_telemetry(
+                stream_started_at,
+                telemetry.as_ref(),
+                usage_stream_telemetry.as_ref(),
+                provider_stream_bytes,
+            ));
+            let report_context_for_payload = report_context_with_stage_trace(
+                report_context,
+                stage_trace,
+                stream_started_at,
+                terminal_telemetry.as_ref(),
+            );
+            let report_context_for_payload = report_context_with_request_diagnostics(
+                report_context_for_payload,
+                request_diagnostics.as_ref(),
+            );
+            let usage_payload = build_stream_usage_payload(
+                trace_id,
+                report_kind.unwrap_or_default(),
+                report_context_for_payload,
+                499,
+                headers,
+                &provider_buffered_body,
+                provider_body_truncated,
+                &buffered_body,
+                client_body_truncated,
+                stream_terminal_summary,
+                terminal_telemetry,
+            );
+            record_stream_terminal_usage(
+                &state,
+                &plan,
+                usage_payload.report_context.as_ref(),
+                &usage_payload,
+                true,
+            );
+            record_local_request_candidate_status(
+                &state,
+                &plan,
+                usage_payload.report_context.as_ref(),
+                SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Cancelled,
+                    status_code: Some(499),
+                    error_type: Some("downstream_disconnect".to_string()),
+                    error_message: Some("client disconnected before stream completion".to_string()),
+                    latency_ms: usage_payload
+                        .telemetry
+                        .as_ref()
+                        .and_then(|value| value.elapsed_ms),
+                    started_at_unix_ms: Some(candidate_started_unix_secs),
+                    finished_at_unix_ms: Some(current_request_candidate_unix_ms()),
+                },
+            )
+            .await;
+            return;
+        }
+
+        let mut stream_terminal_summary = stream_terminal_summary;
+        maybe_apply_kiro_prompt_cache_usage_to_stream_summary(
+            &state,
+            &plan,
+            report_context.as_ref(),
+            &mut stream_terminal_summary,
+        )
+        .await;
+        let requires_observed_terminal_event = stream_requires_observed_terminal_event(
+            plan.provider_api_format.as_str(),
+            stream_usage_report_context.as_ref(),
+        );
+        ensure_stream_terminal_summary_for_missing_observed_finish(
+            &mut stream_terminal_summary,
+            requires_observed_terminal_event,
+        );
+        let missing_observed_finish =
+            stream_terminal_summary_missing_observed_finish_with_requirement(
+                stream_terminal_summary.as_ref(),
+                requires_observed_terminal_event,
+            );
+        let stream_failed = stream_terminal_summary_represents_failure_with_requirement(
+            stream_terminal_summary.as_ref(),
+            requires_observed_terminal_event,
+        );
+        let stream_terminal_error_message = stream_terminal_summary
+            .as_ref()
+            .and_then(|summary| summary.parser_error.clone())
+            .or_else(|| {
+                missing_observed_finish.then(|| {
+                    "execution runtime stream ended before provider terminal event".to_string()
+                })
+            });
+        let should_submit_report = report_kind.is_some();
+        let terminal_telemetry = Some(build_terminal_stream_telemetry(
+            stream_started_at,
+            telemetry.as_ref(),
+            usage_stream_telemetry.as_ref(),
+            provider_stream_bytes,
+        ));
+        let report_context_for_payload = report_context_with_stage_trace(
+            report_context,
+            stage_trace,
+            stream_started_at,
+            terminal_telemetry.as_ref(),
+        );
+        let report_context_for_payload = report_context_with_request_diagnostics(
+            report_context_for_payload,
+            request_diagnostics.as_ref(),
+        );
+        let usage_payload = build_stream_usage_payload(
+            trace_id.clone(),
+            report_kind.unwrap_or_default(),
+            report_context_for_payload,
+            status_code,
+            headers,
+            &provider_buffered_body,
+            provider_body_truncated,
+            &buffered_body,
+            client_body_truncated,
+            stream_terminal_summary,
+            terminal_telemetry,
+        );
+        if stream_failed {
+            warn!(
+                event_name = "direct_passthrough_stream_failed",
+                log_type = "ops",
+                trace_id = %trace_id,
+                request_id = %request_id_for_log,
+                candidate_id = ?candidate_id.as_deref(),
+                status_code,
+                error_message = stream_terminal_error_message.as_deref().unwrap_or_default(),
+                "gateway direct passthrough stream ended with a failed terminal state"
+            );
+        } else {
+            apply_local_execution_effect(
+                &state,
+                LocalExecutionEffectContext {
+                    plan: &plan,
+                    report_context: usage_payload.report_context.as_ref(),
+                },
+                LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+            )
+            .await;
+            apply_local_execution_effect(
+                &state,
+                LocalExecutionEffectContext {
+                    plan: &plan,
+                    report_context: usage_payload.report_context.as_ref(),
+                },
+                LocalExecutionEffect::AdaptiveSuccess(LocalAdaptiveSuccessEffect),
+            )
+            .await;
+            apply_local_execution_effect(
+                &state,
+                LocalExecutionEffectContext {
+                    plan: &plan,
+                    report_context: usage_payload.report_context.as_ref(),
+                },
+                LocalExecutionEffect::PoolSuccessStream {
+                    payload: &usage_payload,
+                },
+            )
+            .await;
+        }
+        record_stream_terminal_usage(
+            &state,
+            &plan,
+            usage_payload.report_context.as_ref(),
+            &usage_payload,
+            false,
+        );
+        record_local_request_candidate_status(
+            &state,
+            &plan,
+            usage_payload.report_context.as_ref(),
+            SchedulerRequestCandidateStatusUpdate {
+                status: if stream_failed {
+                    RequestCandidateStatus::Failed
+                } else {
+                    RequestCandidateStatus::Success
+                },
+                status_code: Some(status_code),
+                error_type: if stream_failed {
+                    if missing_observed_finish {
+                        Some("stream_missing_terminal_event".to_string())
+                    } else {
+                        Some("stream_terminal_error".to_string())
+                    }
+                } else {
+                    None
+                },
+                error_message: stream_failed
+                    .then_some(stream_terminal_error_message)
+                    .flatten(),
+                latency_ms: usage_payload
+                    .telemetry
+                    .as_ref()
+                    .and_then(|value| value.elapsed_ms),
+                started_at_unix_ms: Some(candidate_started_unix_secs),
+                finished_at_unix_ms: Some(current_request_candidate_unix_ms()),
+            },
+        )
+        .await;
+
+        if should_submit_report {
+            if let Err(err) = submit_stream_report(&state, usage_payload).await {
+                warn!(
+                    event_name = "execution_report_submit_failed",
+                    log_type = "ops",
+                    trace_id = %trace_id,
+                    request_id = %request_id_for_log,
+                    candidate_id = ?candidate_id.as_deref(),
+                    report_scope = "direct_passthrough_stream",
+                    error = ?err,
+                    "gateway failed to submit direct passthrough stream execution report"
+                );
+            }
+        }
+    }
+}
+
+fn build_direct_passthrough_inline_body_stream(
+    finalizer: DirectPassthroughFinalizer,
+    response: DirectUpstreamResponse,
+    upstream_started_at: Instant,
+    stream_first_byte_timeout: Option<Duration>,
+) -> impl futures_util::Stream<Item = Result<Bytes, IoError>> + Send + 'static {
+    let state = DirectPassthroughInlineBodyState::new(
+        finalizer,
+        response,
+        upstream_started_at,
+        stream_first_byte_timeout,
+    );
+    futures_stream::unfold(state, |state| async move { state.next_item().await })
+}
+
+struct DirectPassthroughInlineBodyState {
+    finalizer: Option<DirectPassthroughFinalizer>,
+    upstream: Option<DirectUpstreamByteStream>,
+    upstream_control_filter: Option<SseControlBlockFilter>,
+    upstream_started_at: Instant,
+    stream_first_byte_timeout: Option<Duration>,
+    observed_first_body_poll: bool,
+    observed_first_client_yield: bool,
+    start_record_needed: bool,
+    upstream_done: bool,
+    control_filter_flushed: bool,
+    terminal_error_sent: bool,
+    finalized: bool,
+}
+
+impl DirectPassthroughInlineBodyState {
+    fn new(
+        finalizer: DirectPassthroughFinalizer,
+        response: DirectUpstreamResponse,
+        upstream_started_at: Instant,
+        stream_first_byte_timeout: Option<Duration>,
+    ) -> Self {
+        Self {
+            finalizer: Some(finalizer),
+            upstream: Some(direct_upstream_response_byte_stream(response)),
+            upstream_control_filter: Some(SseControlBlockFilter::default()),
+            upstream_started_at,
+            stream_first_byte_timeout,
+            observed_first_body_poll: false,
+            observed_first_client_yield: false,
+            start_record_needed: false,
+            upstream_done: false,
+            control_filter_flushed: false,
+            terminal_error_sent: false,
+            finalized: false,
+        }
+    }
+
+    async fn next_item(mut self) -> Option<(Result<Bytes, IoError>, Self)> {
+        if self.finalized {
+            return None;
+        }
+        if !self.observed_first_body_poll {
+            self.observed_first_body_poll = true;
+            if let Some(finalizer) = self.finalizer.as_mut() {
+                finalizer.observe_first_body_poll();
+            }
+        }
+        if self.start_record_needed {
+            self.start_record_needed = false;
+            if let Some(finalizer) = self.finalizer.as_mut() {
+                finalizer
+                    .record_client_visible_stream_started_if_needed()
+                    .await;
+            }
+        }
+
+        loop {
+            if self.upstream_done
+                || self
+                    .finalizer
+                    .as_ref()
+                    .and_then(DirectPassthroughFinalizer::terminal_failure)
+                    .is_some()
+            {
+                break;
+            }
+
+            let item = self.next_upstream_item().await;
+            let Some(item) = item else {
+                self.upstream_done = true;
+                break;
+            };
+            let chunk = match item {
+                Ok(chunk) => chunk,
+                Err(message) => {
+                    self.log_upstream_read_error_and_fail(message);
+                    self.upstream_done = true;
+                    break;
+                }
+            };
+            if chunk.is_empty() {
+                continue;
+            }
+
+            let observed_at = Instant::now();
+            if let Some(finalizer) = self.finalizer.as_mut() {
+                finalizer.observe_upstream_chunk(&chunk, observed_at);
+            }
+            if let Some(client_chunk) =
+                filter_upstream_sse_control_chunk(&mut self.upstream_control_filter, chunk)
+            {
+                self.prepare_client_chunk_yield(&client_chunk);
+                return Some((Ok(client_chunk), self));
+            }
+        }
+
+        if !self.control_filter_flushed
+            && self
+                .finalizer
+                .as_ref()
+                .and_then(DirectPassthroughFinalizer::terminal_failure)
+                .is_none()
+        {
+            self.control_filter_flushed = true;
+            if let Some(client_chunk) =
+                flush_upstream_sse_control_filter(&mut self.upstream_control_filter)
+            {
+                self.prepare_client_chunk_yield(&client_chunk);
+                return Some((Ok(client_chunk), self));
+            }
+        }
+
+        if !self.terminal_error_sent {
+            if let Some(finalizer) = self.finalizer.as_mut() {
+                if let Some(failure) = finalizer.terminal_failure() {
+                    self.terminal_error_sent = true;
+                    match encode_terminal_sse_error_event(failure) {
+                        Ok(error_event) => {
+                            self.prepare_client_chunk_yield(&error_event);
+                            return Some((Ok(error_event), self));
+                        }
+                        Err(err) => finalizer.log_terminal_error_event_encode_failed(err),
+                    }
+                }
+            }
+        }
+
+        self.finalize(false).await;
+        None
+    }
+
+    async fn next_upstream_item(&mut self) -> Option<Result<Bytes, String>> {
+        let needs_first_byte_timeout = self
+            .finalizer
+            .as_ref()
+            .is_some_and(|finalizer| !finalizer.ttfb_observed());
+        let upstream = self.upstream.as_mut()?;
+        if needs_first_byte_timeout {
+            match await_direct_passthrough_first_item(
+                upstream.next(),
+                self.upstream_started_at,
+                self.stream_first_byte_timeout,
+            )
+            .await
+            {
+                Ok(item) => item,
+                Err(timeout) => {
+                    if let Some(finalizer) = self.finalizer.as_mut() {
+                        finalizer.set_terminal_failure(build_stream_failure_report(
+                            "first_byte_timeout",
+                            stream_first_byte_timeout_message(timeout),
+                            504,
+                        ));
+                    }
+                    None
+                }
+            }
+        } else {
+            upstream.next().await
+        }
+    }
+
+    fn prepare_client_chunk_yield(&mut self, chunk: &Bytes) {
+        let Some(finalizer) = self.finalizer.as_mut() else {
+            return;
+        };
+        finalizer.observe_client_chunk(chunk);
+        if !self.observed_first_client_yield {
+            self.observed_first_client_yield = true;
+            finalizer.observe_first_client_yield();
+            finalizer.release_upstream_target_permit_after_first_yield();
+        }
+        self.start_record_needed = true;
+    }
+
+    fn log_upstream_read_error_and_fail(&mut self, message: String) {
+        let Some(finalizer) = self.finalizer.as_mut() else {
+            return;
+        };
+        let core = finalizer.core();
+        warn!(
+            event_name = "direct_passthrough_body_read_error",
+            log_type = "ops",
+            trace_id = %core.trace_id,
+            request_id = %core.request_id_for_log,
+            candidate_id = ?core.candidate_id.as_deref(),
+            upstream_bytes = core.provider_stream_bytes,
+            error = %message,
+            "gateway direct passthrough upstream body read failed"
+        );
+        finalizer.set_terminal_failure(build_stream_failure_report(
+            "execution_runtime_stream_read_error",
+            message,
+            502,
+        ));
+    }
+
+    async fn finalize(&mut self, downstream_dropped: bool) {
+        if self.finalized {
+            return;
+        }
+        self.finalized = true;
+        self.upstream.take();
+        if let Some(finalizer) = self.finalizer.as_mut() {
+            finalizer.finalize(downstream_dropped).await;
+        }
+        self.finalizer.take();
+    }
+}
+
+impl Drop for DirectPassthroughInlineBodyState {
+    fn drop(&mut self) {
+        if self.finalized {
+            return;
+        }
+        self.upstream.take();
+        if let Some(finalizer) = self.finalizer.take() {
+            observe_gateway_stage_ms("stream_finalizer_enqueue", 0);
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let mut finalizer = finalizer;
+                    finalizer.finalize(true).await;
+                });
+            }
+        }
+    }
+}
+
+async fn record_stream_pending_lifecycle(
+    state: &AppState,
+    lifecycle_seed: &LifecycleUsageSeed,
+    stage_trace: &mut RequestStageTrace,
+) {
+    let usage_pending_started_at = Instant::now();
+    let usage_data = state.data.as_ref().clone();
+    state
+        .usage_runtime
+        .record_pending_direct(&usage_data, lifecycle_seed.clone())
+        .await;
+    observe_gateway_stage_trace_ms(
+        stage_trace,
+        "stream_usage_pending",
+        usage_pending_started_at.elapsed().as_millis() as u64,
+    );
+}
+
+fn should_defer_stream_pending_for_direct_inline(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    plan_kind: &str,
+    report_context: Option<&Value>,
+) -> bool {
+    if direct_passthrough_mode() != DirectPassthroughMode::Inline {
+        return false;
+    }
+    #[cfg(test)]
+    if state
+        .execution_runtime_override_base_url()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return false;
+    }
+    if plan_kind == OPENAI_IMAGE_STREAM_PLAN_KIND {
+        return false;
+    }
+    if is_openai_responses_family_format(plan.provider_api_format.as_str())
+        || is_openai_responses_family_format(plan.client_api_format.as_str())
+    {
+        return false;
+    }
+    if !plan
+        .provider_api_format
+        .eq_ignore_ascii_case(plan.client_api_format.as_str())
+    {
+        return false;
+    }
+    if client_format_allows_proxy_generated_sse_control_blocks(plan) {
+        return false;
+    }
+    if maybe_build_provider_private_stream_normalizer(report_context).is_some() {
+        return false;
+    }
+    let normalized_stream_report_context =
+        normalize_provider_private_report_context(report_context);
+    if maybe_build_stream_response_rewriter(normalized_stream_report_context.as_ref()).is_some() {
+        return false;
+    }
     true
 }
 
@@ -1136,6 +2087,7 @@ async fn execute_stream_from_direct_passthrough(
     mut stage_trace: RequestStageTrace,
     execution: DirectUpstreamStreamExecution,
     in_flight_guard: Option<ProviderPoolInFlightGuard>,
+    pending_recorded: bool,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let DirectUpstreamStreamExecution {
         request_id: _,
@@ -1164,21 +2116,20 @@ async fn execute_stream_from_direct_passthrough(
     }
 
     let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
-    state.usage_runtime.record_stream_started(
-        state.data.as_ref(),
-        &lifecycle_seed,
-        status_code,
-        None,
-    );
-
     let request_candidate_status_snapshot =
         snapshot_local_request_candidate_status(&plan, report_context.as_ref());
-    if let Some(snapshot) = request_candidate_status_snapshot {
-        let state_bg = state.clone();
-        tokio::spawn(async move {
+    let passthrough_mode = direct_passthrough_mode();
+    if passthrough_mode == DirectPassthroughMode::Legacy {
+        state.usage_runtime.record_stream_started(
+            state.data.as_ref(),
+            &lifecycle_seed,
+            status_code,
+            None,
+        );
+        if let Some(snapshot) = request_candidate_status_snapshot.as_ref() {
             record_local_request_candidate_status_snapshot(
-                &state_bg,
-                &snapshot,
+                state,
+                snapshot,
                 SchedulerRequestCandidateStatusUpdate {
                     status: RequestCandidateStatus::Streaming,
                     status_code: Some(status_code),
@@ -1190,7 +2141,7 @@ async fn execute_stream_from_direct_passthrough(
                 },
             )
             .await;
-        });
+        }
     }
 
     apply_endpoint_response_header_rules(state, &plan, &mut headers, None).await?;
@@ -1208,7 +2159,84 @@ async fn execute_stream_from_direct_passthrough(
     }
     headers.remove("content-length");
 
-    let (tx, rx) = mpsc::channel::<Result<Bytes, IoError>>(128);
+    if passthrough_mode == DirectPassthroughMode::Inline {
+        let direct_stream_finalize_kind =
+            resolve_core_stream_direct_finalize_report_kind(plan_kind);
+        let normalized_stream_report_context =
+            normalize_provider_private_report_context(report_context.as_ref());
+        let stream_usage_report_context = normalized_stream_report_context.clone().or_else(|| {
+            Some(serde_json::json!({
+                "provider_api_format": plan.provider_api_format.as_str(),
+                "client_api_format": plan.client_api_format.as_str(),
+            }))
+        });
+        let stream_usage_observer = stream_usage_report_context
+            .as_ref()
+            .map(|_| StreamingStandardTerminalObserver::default());
+        observe_gateway_stage_trace_ms(
+            &mut stage_trace,
+            "stream_response_ready",
+            stream_elapsed_ms_since(stream_started_at),
+        );
+        let request_diagnostics = current_request_diagnostics();
+        observe_request_accepted_stage_trace_ms(
+            &mut stage_trace,
+            request_diagnostics.as_ref(),
+            "frontdoor_to_stream_response_ready",
+        );
+        let finalizer = DirectPassthroughFinalizer::new(DirectPassthroughFinalizerCore {
+            state: state.clone(),
+            plan,
+            trace_id: trace_id.to_string(),
+            report_kind,
+            report_context,
+            lifecycle_seed,
+            direct_stream_finalize_kind,
+            stream_started_at,
+            stage_trace,
+            request_diagnostics,
+            request_id_for_log,
+            candidate_id,
+            request_candidate_status_snapshot,
+            candidate_started_unix_secs,
+            status_code,
+            headers: headers_for_report,
+            stream_usage_report_context,
+            stream_usage_observer,
+            stream_usage_observer_buffered: Vec::new(),
+            provider_buffered_body: Vec::new(),
+            buffered_body: Vec::new(),
+            provider_body_truncated: false,
+            client_body_truncated: false,
+            client_stream_completion_tracker: ClientVisibleStreamCompletionTracker::default(),
+            client_visible_stream_completed: false,
+            usage_stream_telemetry: None,
+            telemetry: None,
+            provider_stream_bytes: 0,
+            client_stream_bytes: 0,
+            last_client_chunk_elapsed_ms: 0,
+            pending_recorded,
+            stream_started_recorded: false,
+            terminal_failure: None,
+            _provider_pool_in_flight_guard: in_flight_guard,
+            _upstream_target_permit: upstream_target_permit,
+        });
+        let body_stream = build_direct_passthrough_inline_body_stream(
+            finalizer,
+            response,
+            upstream_started_at,
+            stream_first_byte_timeout,
+        );
+        return Ok(Some(build_client_response_from_parts(
+            status_code,
+            &headers,
+            Body::from_stream(body_stream),
+            trace_id,
+            Some(decision),
+        )?));
+    }
+
+    let (tx, rx) = mpsc::channel::<Result<Bytes, IoError>>(direct_passthrough_channel_capacity());
     let state_for_report = state.clone();
     let plan_for_report = plan;
     let trace_id_owned = trace_id.to_string();
@@ -1225,12 +2253,18 @@ async fn execute_stream_from_direct_passthrough(
         "stream_response_ready",
         stream_elapsed_ms_since(stream_started_at),
     );
-    let stage_trace_for_report = stage_trace;
     let request_diagnostics_for_report = current_request_diagnostics();
+    observe_request_accepted_stage_trace_ms(
+        &mut stage_trace,
+        request_diagnostics_for_report.as_ref(),
+        "frontdoor_to_stream_response_ready",
+    );
+    let stage_trace_for_report = stage_trace;
     let request_id_for_report = request_id.clone();
     let request_id_for_report_log = request_id_for_log.clone();
     let candidate_id_for_report = candidate_id.clone();
     let provider_pool_in_flight_guard_for_report = in_flight_guard;
+    record_stream_pre_first_byte_spawn();
     tokio::spawn(async move {
         let mut stage_trace_for_report = stage_trace_for_report;
         let _stream_total_guard =
@@ -1386,6 +2420,7 @@ async fn execute_stream_from_direct_passthrough(
                     max_stream_body_buffer_bytes,
                     stream_started_at_for_report,
                     &mut last_client_chunk_elapsed_ms,
+                    !observed_first_client_send,
                     trace_id_owned.as_str(),
                     request_id_for_report_log.as_str(),
                     candidate_id_for_report.as_deref(),
@@ -1451,6 +2486,7 @@ async fn execute_stream_from_direct_passthrough(
                     max_stream_body_buffer_bytes,
                     stream_started_at_for_report,
                     &mut last_client_chunk_elapsed_ms,
+                    !observed_first_client_send,
                     trace_id_owned.as_str(),
                     request_id_for_report_log.as_str(),
                     candidate_id_for_report.as_deref(),
@@ -1474,6 +2510,7 @@ async fn execute_stream_from_direct_passthrough(
                         max_stream_body_buffer_bytes,
                         stream_started_at_for_report,
                         &mut last_client_chunk_elapsed_ms,
+                        !observed_first_client_send,
                         trace_id_owned.as_str(),
                         request_id_for_report_log.as_str(),
                         candidate_id_for_report.as_deref(),
@@ -1776,7 +2813,27 @@ async fn execute_stream_from_direct_passthrough(
 }
 
 #[allow(clippy::too_many_arguments)] // internal function, grouping would add unnecessary indirection
-pub(crate) async fn execute_execution_runtime_stream(
+pub(crate) fn execute_execution_runtime_stream<'a>(
+    state: &'a AppState,
+    plan: ExecutionPlan,
+    trace_id: &'a str,
+    decision: &'a GatewayControlDecision,
+    plan_kind: &'a str,
+    report_kind: Option<String>,
+    report_context: Option<serde_json::Value>,
+) -> Pin<Box<dyn Future<Output = Result<Option<Response<Body>>, GatewayError>> + Send + 'a>> {
+    Box::pin(execute_execution_runtime_stream_inner(
+        state,
+        plan,
+        trace_id,
+        decision,
+        plan_kind,
+        report_kind,
+        report_context,
+    ))
+}
+
+async fn execute_execution_runtime_stream_inner(
     state: &AppState,
     mut plan: ExecutionPlan,
     trace_id: &str,
@@ -1797,34 +2854,33 @@ pub(crate) async fn execute_execution_runtime_stream(
     let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
     let request_candidate_status_snapshot =
         snapshot_local_request_candidate_status(&plan, report_context.as_ref());
-    let usage_pending_started_at = Instant::now();
-    state
-        .usage_runtime
-        .record_pending(state.data.as_ref(), lifecycle_seed.clone());
-    observe_gateway_stage_trace_ms(
-        &mut stage_trace,
-        "stream_usage_pending",
-        usage_pending_started_at.elapsed().as_millis() as u64,
+    let defer_stream_pending_for_direct_inline = should_defer_stream_pending_for_direct_inline(
+        state,
+        &plan,
+        plan_kind,
+        report_context.as_ref(),
     );
+    let mut lifecycle_pending_recorded = false;
+    if !defer_stream_pending_for_direct_inline {
+        record_stream_pending_lifecycle(state, &lifecycle_seed, &mut stage_trace).await;
+        lifecycle_pending_recorded = true;
+    }
     let candidate_started_unix_secs = current_request_candidate_unix_ms();
     if let Some(snapshot) = request_candidate_status_snapshot.clone() {
-        let state_bg = state.clone();
-        tokio::spawn(async move {
-            record_local_request_candidate_status_snapshot(
-                &state_bg,
-                &snapshot,
-                SchedulerRequestCandidateStatusUpdate {
-                    status: RequestCandidateStatus::Pending,
-                    status_code: None,
-                    error_type: None,
-                    error_message: None,
-                    latency_ms: None,
-                    started_at_unix_ms: Some(candidate_started_unix_secs),
-                    finished_at_unix_ms: None,
-                },
-            )
-            .await;
-        });
+        record_local_request_candidate_status_snapshot(
+            state,
+            &snapshot,
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Pending,
+                status_code: None,
+                error_type: None,
+                error_message: None,
+                latency_ms: None,
+                started_at_unix_ms: Some(candidate_started_unix_secs),
+                finished_at_unix_ms: None,
+            },
+        )
+        .await;
     }
     let plan_request_id_for_log = short_request_id(plan.request_id.as_str());
     let provider_name = plan
@@ -2078,7 +3134,7 @@ pub(crate) async fn execute_execution_runtime_stream(
             Ok(execution) => execution,
             Err(InProcessStreamExecutionError::Gateway(err)) => {
                 if matches!(err, GatewayError::AdmissionTimeout { .. }) {
-                    record_stream_admission_timeout_terminal_state(
+                    record_stream_admission_timeout_candidate_failure(
                         state,
                         &plan,
                         report_context.as_ref(),
@@ -2130,7 +3186,7 @@ pub(crate) async fn execute_execution_runtime_stream(
         );
         if should_use_direct_sse_passthrough(&plan, plan_kind, report_context.as_ref(), &execution)
         {
-            return execute_stream_from_direct_passthrough(
+            return Box::pin(execute_stream_from_direct_passthrough(
                 state,
                 plan,
                 trace_id,
@@ -2143,8 +3199,13 @@ pub(crate) async fn execute_execution_runtime_stream(
                 stage_trace,
                 execution,
                 provider_pool_in_flight_guard.take(),
-            )
+                lifecycle_pending_recorded,
+            ))
             .await;
+        }
+        if !lifecycle_pending_recorded {
+            record_stream_pending_lifecycle(state, &lifecycle_seed, &mut stage_trace).await;
+            lifecycle_pending_recorded = true;
         }
         let frame_stream = build_direct_execution_frame_stream(execution).boxed();
         return execute_stream_from_frame_stream(
@@ -2181,7 +3242,7 @@ pub(crate) async fn execute_execution_runtime_stream(
                 Ok(execution) => execution,
                 Err(InProcessStreamExecutionError::Gateway(err)) => {
                     if matches!(err, GatewayError::AdmissionTimeout { .. }) {
-                        record_stream_admission_timeout_terminal_state(
+                        record_stream_admission_timeout_candidate_failure(
                             state,
                             &plan,
                             report_context.as_ref(),
@@ -2237,7 +3298,7 @@ pub(crate) async fn execute_execution_runtime_stream(
                 report_context.as_ref(),
                 &execution,
             ) {
-                return execute_stream_from_direct_passthrough(
+                return Box::pin(execute_stream_from_direct_passthrough(
                     state,
                     plan,
                     trace_id,
@@ -2250,8 +3311,13 @@ pub(crate) async fn execute_execution_runtime_stream(
                     stage_trace,
                     execution,
                     provider_pool_in_flight_guard.take(),
-                )
+                    lifecycle_pending_recorded,
+                ))
                 .await;
+            }
+            if !lifecycle_pending_recorded {
+                record_stream_pending_lifecycle(state, &lifecycle_seed, &mut stage_trace).await;
+                lifecycle_pending_recorded = true;
             }
             let frame_stream = build_direct_execution_frame_stream(execution).boxed();
             return execute_stream_from_frame_stream(
@@ -3845,26 +4911,23 @@ async fn execute_stream_from_frame_stream(
         initial_usage_telemetry.as_ref(),
     );
     if let Some(snapshot) = request_candidate_status_snapshot {
-        let state_bg = state.clone();
         let latency_ms = prefetched_telemetry
             .as_ref()
             .and_then(|telemetry| telemetry.elapsed_ms);
-        tokio::spawn(async move {
-            record_local_request_candidate_status_snapshot(
-                &state_bg,
-                &snapshot,
-                SchedulerRequestCandidateStatusUpdate {
-                    status: RequestCandidateStatus::Streaming,
-                    status_code: Some(status_code),
-                    error_type: None,
-                    error_message: None,
-                    latency_ms,
-                    started_at_unix_ms: Some(candidate_started_unix_secs),
-                    finished_at_unix_ms: None,
-                },
-            )
-            .await;
-        });
+        record_local_request_candidate_status_snapshot(
+            state,
+            &snapshot,
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Streaming,
+                status_code: Some(status_code),
+                error_type: None,
+                error_message: None,
+                latency_ms,
+                started_at_unix_ms: Some(candidate_started_unix_secs),
+                finished_at_unix_ms: None,
+            },
+        )
+        .await;
     }
 
     apply_endpoint_response_header_rules(state, &plan, &mut headers, None).await?;
@@ -4141,7 +5204,7 @@ async fn execute_stream_from_frame_stream(
             loop {
                 let next_frame_result = tokio::select! {
                     biased;
-                    _ = tx.closed(), if client_visible_stream_completed => {
+                    _ = tx.closed(), if !downstream_dropped => {
                         downstream_dropped = true;
                         break;
                     }
@@ -4183,15 +5246,23 @@ async fn execute_stream_from_frame_stream(
                             .as_ref()
                             .and_then(|telemetry| telemetry.ttfb_ms)
                             .is_some();
-                        maybe_record_first_stream_event_started(
-                            &state_for_report,
-                            &lifecycle_seed_for_report,
-                            status_code,
+                        if maybe_capture_first_stream_event_telemetry(
                             stream_started_at_for_report,
                             frame_observed_at,
                             telemetry.as_ref(),
                             &mut usage_stream_telemetry,
-                        );
+                        ) {
+                            let usage_data = state_for_report.data.as_ref().clone();
+                            state_for_report
+                                .usage_runtime
+                                .record_stream_started_direct(
+                                    &usage_data,
+                                    &lifecycle_seed_for_report,
+                                    status_code,
+                                    usage_stream_telemetry.as_ref(),
+                                )
+                                .await;
+                        }
                         let first_data_after = usage_stream_telemetry
                             .as_ref()
                             .and_then(|telemetry| telemetry.ttfb_ms)
@@ -4350,9 +5421,10 @@ async fn execute_stream_from_frame_stream(
                                 trace_id = %trace_id_owned,
                                 request_id = %request_id_for_report_log,
                                 candidate_id = ?candidate_id_for_report.as_deref(),
-                                "gateway stream downstream dropped; continuing to drain execution runtime stream"
+                                "gateway stream downstream dropped; cancelling execution runtime stream"
                             );
                             downstream_dropped = true;
+                            break;
                         } else {
                             client_visible_stream_completed |= client_stream_completion_tracker
                                 .observe_chunk(rewritten_chunk.as_ref());
@@ -4388,12 +5460,25 @@ async fn execute_stream_from_frame_stream(
                             &usage_frame_telemetry,
                         );
                         if should_refresh_stream_usage {
-                            state_for_report.usage_runtime.record_stream_started(
-                                state_for_report.data.as_ref(),
-                                &lifecycle_seed_for_report,
-                                status_code,
-                                Some(&usage_frame_telemetry),
-                            );
+                            if usage_frame_telemetry.ttfb_ms.is_some() {
+                                let usage_data = state_for_report.data.as_ref().clone();
+                                state_for_report
+                                    .usage_runtime
+                                    .record_stream_started_direct(
+                                        &usage_data,
+                                        &lifecycle_seed_for_report,
+                                        status_code,
+                                        Some(&usage_frame_telemetry),
+                                    )
+                                    .await;
+                            } else {
+                                state_for_report.usage_runtime.record_stream_started(
+                                    state_for_report.data.as_ref(),
+                                    &lifecycle_seed_for_report,
+                                    status_code,
+                                    Some(&usage_frame_telemetry),
+                                );
+                            }
                             usage_stream_telemetry = Some(usage_frame_telemetry);
                         }
                         telemetry = Some(frame_telemetry);
@@ -5041,12 +6126,13 @@ mod tests {
         ensure_stream_terminal_summary_for_missing_observed_finish,
         execute_execution_runtime_stream, execute_stream_from_frame_stream,
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary, merge_stream_terminal_summary,
-        should_limit_direct_finalize_prefetch, should_probe_success_failover_before_stream,
-        should_skip_direct_finalize_prefetch, stream_chunk_contains_sse_done,
-        stream_requires_observed_terminal_event, stream_terminal_summary_missing_observed_finish,
+        parse_direct_passthrough_mode, should_limit_direct_finalize_prefetch,
+        should_probe_success_failover_before_stream, should_skip_direct_finalize_prefetch,
+        stream_chunk_contains_sse_done, stream_requires_observed_terminal_event,
+        stream_terminal_summary_missing_observed_finish,
         stream_terminal_summary_missing_observed_finish_with_requirement,
         stream_terminal_summary_represents_failure_with_requirement,
-        ClientVisibleStreamCompletionTracker,
+        ClientVisibleStreamCompletionTracker, DirectPassthroughMode,
     };
     use crate::control::GatewayControlDecision;
     use crate::stage_metrics::RequestStageTrace;
@@ -6171,6 +7257,26 @@ mod tests {
     }
 
     #[test]
+    fn direct_passthrough_mode_defaults_inline_and_accepts_legacy() {
+        assert_eq!(
+            parse_direct_passthrough_mode(""),
+            DirectPassthroughMode::Inline
+        );
+        assert_eq!(
+            parse_direct_passthrough_mode("inline"),
+            DirectPassthroughMode::Inline
+        );
+        assert_eq!(
+            parse_direct_passthrough_mode("legacy"),
+            DirectPassthroughMode::Legacy
+        );
+        assert_eq!(
+            parse_direct_passthrough_mode("mpsc"),
+            DirectPassthroughMode::Legacy
+        );
+    }
+
+    #[test]
     fn openai_client_formats_disallow_proxy_generated_sse_control_blocks() {
         let mut plan = ExecutionPlan {
             request_id: "req-openai-keepalive".into(),
@@ -6906,7 +8012,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_stream_from_frame_stream_drains_upstream_when_client_drops_body() {
+    async fn execute_stream_from_frame_stream_cancels_upstream_when_client_drops_body() {
         let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
         let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
         let state = AppState::new()
@@ -7014,11 +8120,6 @@ mod tests {
         );
         tokio::time::sleep(Duration::from_millis(30)).await;
         drop(body_stream);
-        release_terminal.notify_one();
-
-        tokio::time::timeout(Duration::from_secs(1), terminal_frame_drained.notified())
-            .await
-            .expect("upstream frame stream should be drained after client disconnect");
         let candidates = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let candidates = request_candidate_repository
@@ -7059,11 +8160,11 @@ mod tests {
         })
         .await
         .expect("usage should be marked cancelled");
-        assert_eq!(stored_usage.billing_status, "pending");
+        assert_eq!(stored_usage.billing_status, "void");
         assert_eq!(stored_usage.status_code, Some(499));
-        assert_eq!(stored_usage.input_tokens, 7);
-        assert_eq!(stored_usage.output_tokens, 11);
-        assert_eq!(stored_usage.total_tokens, 18);
+        assert_eq!(stored_usage.input_tokens, 0);
+        assert_eq!(stored_usage.output_tokens, 0);
+        assert_eq!(stored_usage.total_tokens, 0);
         let first_byte_time_ms = stored_usage
             .first_byte_time_ms
             .expect("cancelled stream should retain first byte time");
@@ -7073,6 +8174,17 @@ mod tests {
         assert!(
             response_time_ms > first_byte_time_ms,
             "terminal duration should include time after the first byte"
+        );
+
+        release_terminal.notify_one();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                terminal_frame_drained.notified()
+            )
+            .await
+            .is_err(),
+            "upstream frame stream should stop when the client disconnects"
         );
     }
 

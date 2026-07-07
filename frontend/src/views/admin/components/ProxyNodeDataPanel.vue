@@ -4,13 +4,13 @@
       <div>
         <div class="flex items-center gap-2">
           <h4 class="text-sm font-semibold">
-            节点数据
+            {{ legacyT('节点数据') }}
           </h4>
           <Badge
             variant="outline"
             class="text-[10px] px-1.5 py-0"
           >
-            最近 24 小时
+            {{ legacyT('最近 24 小时') }}
           </Badge>
         </div>
         <p class="text-xs text-muted-foreground mt-1">
@@ -28,7 +28,7 @@
           class="h-3.5 w-3.5 mr-1"
           :class="state?.loading ? 'animate-spin' : ''"
         />
-        刷新
+        {{ legacyT('刷新') }}
       </Button>
     </div>
 
@@ -37,7 +37,7 @@
       class="py-8 flex items-center justify-center gap-2 text-sm text-muted-foreground"
     >
       <Loader2 class="h-4 w-4 animate-spin" />
-      加载节点数据...
+      {{ legacyT('加载节点数据...') }}
     </div>
 
     <div
@@ -59,7 +59,7 @@
           class="rounded-lg border border-border/50 bg-background/70 px-3 py-2 min-w-0"
         >
           <div class="text-[11px] text-muted-foreground truncate">
-            {{ item.label }}
+            {{ legacyT(item.label) }}
           </div>
           <div
             class="text-sm font-semibold tabular-nums truncate mt-0.5"
@@ -71,7 +71,7 @@
             v-if="item.hint"
             class="text-[10px] text-muted-foreground truncate mt-0.5"
           >
-            {{ item.hint }}
+            {{ legacyT(item.hint) }}
           </div>
         </div>
       </div>
@@ -81,13 +81,13 @@
           <div class="flex items-center justify-between gap-3 mb-3">
             <div>
               <h5 class="text-xs font-semibold">
-                在线率采样
+                {{ legacyT('在线率采样') }}
               </h5>
               <p class="text-[11px] text-muted-foreground mt-0.5">
-                1h 桶，颜色随在线率和错误数变化
+                {{ legacyT('1h 桶，颜色随在线率和错误数变化') }}
               </p>
             </div>
-            <span class="text-[11px] text-muted-foreground tabular-nums shrink-0">{{ formatNumber(bucketItems.length) }} 点</span>
+            <span class="text-[11px] text-muted-foreground tabular-nums shrink-0">{{ legacyT(`${formatNumber(bucketItems.length)} 点`) }}</span>
           </div>
           <div
             v-if="bucketItems.length > 0"
@@ -105,14 +105,14 @@
             v-else
             class="h-20 rounded-md bg-muted/30 flex items-center justify-center text-xs text-muted-foreground"
           >
-            暂无采样数据
+            {{ legacyT('暂无采样数据') }}
           </div>
         </section>
 
         <section class="rounded-lg border border-border/50 bg-background/70 p-3 min-w-0">
           <div class="flex items-center justify-between gap-2 mb-3">
             <h5 class="text-xs font-semibold">
-              最近事件
+              {{ legacyT('最近事件') }}
             </h5>
             <span class="text-[11px] text-muted-foreground tabular-nums">{{ recentEvents.length }}/8</span>
           </div>
@@ -120,7 +120,7 @@
             v-if="recentEvents.length === 0"
             class="h-20 rounded-md bg-muted/30 flex items-center justify-center text-xs text-muted-foreground"
           >
-            暂无关键事件
+            {{ legacyT('暂无关键事件') }}
           </div>
           <div
             v-else
@@ -135,12 +135,12 @@
                 :variant="eventTypeVariant(event.event_type)"
                 class="text-[10px] px-1.5 py-0 shrink-0"
               >
-                {{ eventTypeLabel(event.event_type) }}
+                {{ legacyT(eventTypeLabel(event.event_type)) }}
               </Badge>
               <span
                 class="text-muted-foreground truncate flex-1"
-                :title="eventTooltip(event)"
-              >{{ eventDetail(event) }}</span>
+                :title="legacyT(eventTooltip(event))"
+              >{{ legacyT(eventDetail(event)) }}</span>
               <span class="text-[10px] text-muted-foreground/70 tabular-nums shrink-0">{{ formatTime(event.created_at || null) }}</span>
             </div>
           </div>
@@ -150,7 +150,7 @@
       <div class="grid gap-4 lg:grid-cols-2">
         <section class="rounded-lg border border-border/50 bg-background/70 p-3 min-w-0">
           <h5 class="text-xs font-semibold mb-3">
-            硬件与资源
+            {{ legacyT('硬件与资源') }}
           </h5>
           <div class="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2">
             <div
@@ -159,19 +159,19 @@
               class="min-w-0"
             >
               <div class="text-[11px] text-muted-foreground truncate">
-                {{ item.label }}
+                {{ legacyT(item.label) }}
               </div>
               <div
                 class="text-xs font-medium tabular-nums truncate mt-0.5"
                 :class="item.tone"
               >
-                {{ item.value }}
+                {{ legacyT(item.value) }}
               </div>
               <div
                 v-if="item.hint"
                 class="text-[10px] text-muted-foreground truncate mt-0.5"
               >
-                {{ item.hint }}
+                {{ legacyT(item.hint) }}
               </div>
             </div>
           </div>
@@ -179,7 +179,7 @@
 
         <section class="rounded-lg border border-border/50 bg-background/70 p-3 min-w-0">
           <h5 class="text-xs font-semibold mb-3">
-            实时快照
+            {{ legacyT('实时快照') }}
           </h5>
           <div class="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2">
             <div
@@ -188,10 +188,10 @@
               class="min-w-0"
             >
               <div class="text-[11px] text-muted-foreground truncate">
-                {{ item.label }}
+                {{ legacyT(item.label) }}
               </div>
               <div class="text-xs font-medium tabular-nums truncate mt-0.5">
-                {{ item.value }}
+                {{ legacyT(item.value) }}
               </div>
             </div>
           </div>
@@ -199,7 +199,7 @@
 
         <section class="rounded-lg border border-border/50 bg-background/70 p-3 min-w-0">
           <h5 class="text-xs font-semibold mb-3">
-            隧道计数器
+            {{ legacyT('隧道计数器') }}
           </h5>
           <div
             v-if="tunnelMetrics"
@@ -211,10 +211,10 @@
               class="min-w-0"
             >
               <div class="text-[11px] text-muted-foreground truncate">
-                {{ item.label }}
+                {{ legacyT(item.label) }}
               </div>
               <div class="text-xs font-medium tabular-nums truncate mt-0.5">
-                {{ item.value }}
+                {{ legacyT(item.value) }}
               </div>
             </div>
           </div>
@@ -222,7 +222,7 @@
             v-else
             class="rounded-md bg-muted/30 py-4 text-center text-xs text-muted-foreground"
           >
-            暂无隧道计数器
+            {{ legacyT('暂无隧道计数器') }}
           </div>
         </section>
       </div>
@@ -234,6 +234,7 @@
 import { computed } from 'vue'
 import { AlertTriangle, Loader2, RefreshCw } from 'lucide-vue-next'
 import { Badge, Button } from '@/components/ui'
+import { useI18n } from '@/i18n'
 import { formatCompactNumber } from '@/utils/format'
 import type {
   ProxyNode,
@@ -260,6 +261,8 @@ defineEmits<{
   refresh: []
 }>()
 
+const { legacyT, locale } = useI18n()
+
 const detailNode = computed(() => props.state?.node ?? props.node)
 const metrics = computed(() => props.state?.metrics ?? null)
 const metricsSummary = computed(() => metrics.value?.summary ?? null)
@@ -271,9 +274,11 @@ const resourceUsage = computed(() => asRecord(metadata.value?.resource_usage))
 const tunnelMetrics = computed(() => asRecord(metadata.value?.tunnel_metrics))
 
 const loadedText = computed(() => {
-  if (props.state?.loading) return '正在刷新采样数据'
-  if (!props.state?.loadedAt) return '展开后自动读取 24 小时指标和最近关键事件'
-  return `数据刷新于 ${formatLoadedAt(props.state.loadedAt)}`
+  if (props.state?.loading) return legacyT('正在刷新采样数据')
+  if (!props.state?.loadedAt) return legacyT('展开后自动读取 24 小时指标和最近关键事件')
+  return locale.value === 'en-US'
+    ? `Data refreshed at ${formatLoadedAt(props.state.loadedAt)}`
+    : `数据刷新于 ${formatLoadedAt(props.state.loadedAt)}`
 })
 
 const summaryStats = computed(() => {
@@ -299,7 +304,7 @@ const summaryStats = computed(() => {
       tone: '',
     },
     {
-      label: '断开',
+      label: '断开次数',
       value: formatNumber(summary?.disconnects_delta ?? 0),
       hint: '24h delta',
       tone: (summary?.disconnects_delta ?? 0) > 0 ? 'text-yellow-600 dark:text-yellow-400' : '',
@@ -560,14 +565,20 @@ function formatTime(iso: string | null) {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return '-'
   const diff = (Date.now() - date.getTime()) / 1000
+  if (locale.value === 'en-US') {
+    if (diff >= 0 && diff < 60) return 'Just now'
+    if (diff >= 0 && diff < 3600) return `${Math.floor(diff / 60)}m ago`
+    if (diff >= 0 && diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+    return date.toLocaleDateString(locale.value, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  }
   if (diff >= 0 && diff < 60) return '刚刚'
   if (diff >= 0 && diff < 3600) return `${Math.floor(diff / 60)}分钟前`
   if (diff >= 0 && diff < 86400) return `${Math.floor(diff / 3600)}小时前`
-  return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  return date.toLocaleDateString(locale.value, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
 function formatLoadedAt(value: number) {
-  return new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return new Date(value).toLocaleTimeString(locale.value, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
 function bucketBarHeight(bucket: ProxyNodeMetricsBucket) {
@@ -591,20 +602,21 @@ function bucketBarColor(bucket: ProxyNodeMetricsBucket) {
 }
 
 function bucketTitle(bucket: ProxyNodeMetricsBucket) {
-  return [
+  const parts = [
     formatBucketTime(bucket.bucket_start),
-    `在线率 ${formatPercent(bucket.uptime_ratio)}`,
+    `${legacyT('在线率')} ${formatPercent(bucket.uptime_ratio)}`,
     `RTT ${formatMs(bucket.heartbeat_rtt_ms_avg)}`,
-    `断开 ${formatNumber(bucket.disconnects_delta)}`,
-    `错误 ${formatNumber(bucket.connect_errors_delta + bucket.error_events_delta)}`,
-  ].join('，')
+    `${legacyT('断开')} ${formatNumber(bucket.disconnects_delta)}`,
+    `${legacyT('错误')} ${formatNumber(bucket.connect_errors_delta + bucket.error_events_delta)}`,
+  ]
+  return parts.join(locale.value === 'en-US' ? ', ' : '，')
 }
 
 function formatBucketTime(value: string | null) {
   if (!value) return '-'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '-'
-  return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit' })
+  return date.toLocaleString(locale.value, { month: '2-digit', day: '2-digit', hour: '2-digit' })
 }
 
 function uptimeTone(value: number | null) {

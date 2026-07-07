@@ -11,6 +11,16 @@ use tokio::sync::Mutex;
 use crate::runtime::{BenchmarkRuntimeSampler, BenchmarkRuntimeSnapshot};
 
 const MAX_ERROR_SAMPLES: usize = 32;
+const MAX_STATUS_SAMPLES: usize = 32;
+const MAX_STATUS_SAMPLE_BODY_CHARS: usize = 512;
+const FIRST_BODY_BACKGROUND_DRAIN_CHUNKS_ENV: &str =
+    "AETHER_TESTKIT_FIRST_BODY_BACKGROUND_DRAIN_CHUNKS";
+const FIRST_BODY_BACKGROUND_DRAIN_MS_ENV: &str = "AETHER_TESTKIT_FIRST_BODY_BACKGROUND_DRAIN_MS";
+const FIRST_BODY_AUTO_CLIENT_SHARDS_MAX_ENV: &str =
+    "AETHER_TESTKIT_FIRST_BODY_AUTO_CLIENT_SHARDS_MAX";
+const DEFAULT_FIRST_BODY_BACKGROUND_DRAIN_CHUNKS: usize = 64;
+const DEFAULT_FIRST_BODY_BACKGROUND_DRAIN_MS: u64 = 100;
+const DEFAULT_FIRST_BODY_AUTO_CLIENT_SHARDS_MAX: usize = 512;
 
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, PartialEq, Eq)]
 pub enum HttpLoadProbeResponseMode {
@@ -26,6 +36,7 @@ pub struct HttpLoadProbeConfig {
     pub warmup_url: Option<String>,
     pub method: Method,
     pub headers: BTreeMap<String, String>,
+    pub header_sets: Vec<BTreeMap<String, String>>,
     pub body: Option<Vec<u8>>,
     pub total_requests: usize,
     pub concurrency: usize,
@@ -48,6 +59,7 @@ impl Default for HttpLoadProbeConfig {
             warmup_url: None,
             method: Method::GET,
             headers: BTreeMap::new(),
+            header_sets: Vec::new(),
             body: None,
             total_requests: 100,
             concurrency: 10,
@@ -85,6 +97,11 @@ impl HttpLoadProbeConfig {
         if self.client_shards == 0 {
             return Err("load probe client_shards must be positive".to_string());
         }
+        for (index, headers) in self.header_sets.iter().enumerate() {
+            if headers.is_empty() {
+                return Err(format!("load probe header_sets[{index}] cannot be empty"));
+            }
+        }
         if self.http1_only && self.http2_prior_knowledge {
             return Err(
                 "load probe cannot enable both http1_only and http2_prior_knowledge".to_string(),
@@ -104,6 +121,15 @@ pub struct HttpLoadProbeErrorSample {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct HttpLoadProbeStatusSample {
+    pub request_index: usize,
+    pub url: String,
+    pub status: u16,
+    pub elapsed_ms: u64,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
@@ -151,6 +177,8 @@ pub struct HttpLoadProbeResult {
     pub error_counts: BTreeMap<String, usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub error_samples: Vec<HttpLoadProbeErrorSample>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub non_success_status_samples: Vec<HttpLoadProbeStatusSample>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
@@ -199,6 +227,8 @@ pub struct MultiUrlHttpLoadProbeResult {
     pub error_counts: BTreeMap<String, usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub error_samples: Vec<HttpLoadProbeErrorSample>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub non_success_status_samples: Vec<HttpLoadProbeStatusSample>,
 }
 
 pub async fn run_http_load_probe(
@@ -245,6 +275,7 @@ pub async fn run_http_load_probe(
             status_counts: result.status_counts,
             error_counts: result.error_counts,
             error_samples: result.error_samples,
+            non_success_status_samples: result.non_success_status_samples,
         })
 }
 
@@ -263,9 +294,10 @@ async fn run_http_load_probe_against_urls(
     config: &HttpLoadProbeConfig,
     urls: &[String],
 ) -> Result<MultiUrlHttpLoadProbeResult, String> {
-    let clients = Arc::new(build_probe_clients(config)?);
+    let effective_client_shards = effective_probe_client_shards(config);
+    let clients = Arc::new(build_probe_clients(config, effective_client_shards)?);
     let total_requests = config.total_requests;
-    let request_headers = build_headers(&config.headers)?;
+    let request_headers = build_request_header_sets(config)?;
     let request_body = config.body.clone().map(Arc::new);
     let response_mode = config.response_mode;
     let first_body_hold = config.first_body_hold;
@@ -281,6 +313,7 @@ async fn run_http_load_probe_against_urls(
     let status_counts = Arc::new(Mutex::new(BTreeMap::<u16, usize>::new()));
     let error_counts = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
     let error_samples = Arc::new(Mutex::new(Vec::<HttpLoadProbeErrorSample>::new()));
+    let non_success_status_samples = Arc::new(Mutex::new(Vec::<HttpLoadProbeStatusSample>::new()));
     let target_request_counts = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
     let failed_requests = Arc::new(AtomicUsize::new(0));
     let completed_requests = Arc::new(AtomicUsize::new(0));
@@ -295,12 +328,13 @@ async fn run_http_load_probe_against_urls(
         let status_counts = Arc::clone(&status_counts);
         let error_counts = Arc::clone(&error_counts);
         let error_samples = Arc::clone(&error_samples);
+        let non_success_status_samples = Arc::clone(&non_success_status_samples);
         let target_request_counts = Arc::clone(&target_request_counts);
         let failed_requests = Arc::clone(&failed_requests);
         let completed_requests = Arc::clone(&completed_requests);
         let method = config.method.clone();
         let urls = urls.to_vec();
-        let request_headers = request_headers.clone();
+        let request_headers = Arc::clone(&request_headers);
         let request_body = request_body.clone();
         let start_delay = worker_start_delay(start_ramp, worker_index, config.concurrency);
 
@@ -317,7 +351,8 @@ async fn run_http_load_probe_against_urls(
                 let started_at = Instant::now();
                 let url = urls[current % urls.len()].clone();
                 let mut request = client.request(method.clone(), &url);
-                for (name, value) in request_headers.iter() {
+                let headers = &request_headers[current % request_headers.len()];
+                for (name, value) in headers.iter() {
                     request = request.header(name, value);
                 }
                 if let Some(body) = request_body.as_ref() {
@@ -348,6 +383,17 @@ async fn run_http_load_probe_against_urls(
                                 .await;
                             }
                             Ok(observation) => {
+                                if !(200..300).contains(&status) {
+                                    record_non_success_status_sample(
+                                        &non_success_status_samples,
+                                        current,
+                                        &url,
+                                        status,
+                                        started_at.elapsed().as_millis() as u64,
+                                        observation.body_sample.as_deref().unwrap_or_default(),
+                                    )
+                                    .await;
+                                }
                                 let mut counts = status_counts.lock().await;
                                 *counts.entry(status).or_insert(0) += 1;
                                 drop(counts);
@@ -395,6 +441,7 @@ async fn run_http_load_probe_against_urls(
     let status_counts = status_counts.lock().await.clone();
     let error_counts = error_counts.lock().await.clone();
     let error_samples = error_samples.lock().await.clone();
+    let non_success_status_samples = non_success_status_samples.lock().await.clone();
     let target_request_counts = target_request_counts.lock().await.clone();
     let mut latencies = latencies_ms.lock().await.clone();
     let mut header_latencies = header_latencies_ms.lock().await.clone();
@@ -423,7 +470,7 @@ async fn run_http_load_probe_against_urls(
         concurrency: config.concurrency,
         warmup_connections: config.warmup_connections,
         warmup_url: config.warmup_url.clone(),
-        client_shards: config.client_shards,
+        client_shards: effective_client_shards,
         start_ramp_ms: config.start_ramp.as_millis() as u64,
         pool_max_idle_per_host: config.pool_max_idle_per_host,
         http1_only: config.http1_only,
@@ -451,12 +498,33 @@ async fn run_http_load_probe_against_urls(
         status_counts,
         error_counts,
         error_samples,
+        non_success_status_samples,
     })
 }
 
-fn build_probe_clients(config: &HttpLoadProbeConfig) -> Result<Vec<Client>, String> {
-    let mut clients = Vec::with_capacity(config.client_shards);
-    for _ in 0..config.client_shards {
+fn effective_probe_client_shards(config: &HttpLoadProbeConfig) -> usize {
+    let configured = config.client_shards.max(1);
+    if configured != 1
+        || config.http1_only
+        || !config.http2_prior_knowledge
+        || config.response_mode != HttpLoadProbeResponseMode::FirstBodyByte
+    {
+        return configured;
+    }
+    let max_auto = env_usize(
+        FIRST_BODY_AUTO_CLIENT_SHARDS_MAX_ENV,
+        DEFAULT_FIRST_BODY_AUTO_CLIENT_SHARDS_MAX,
+    )
+    .max(1);
+    config.concurrency.max(1).min(max_auto)
+}
+
+fn build_probe_clients(
+    config: &HttpLoadProbeConfig,
+    client_shards: usize,
+) -> Result<Vec<Client>, String> {
+    let mut clients = Vec::with_capacity(client_shards);
+    for _ in 0..client_shards {
         let mut builder = Client::builder().timeout(config.timeout);
         if let Some(connect_timeout) = config.connect_timeout {
             builder = builder.connect_timeout(connect_timeout);
@@ -584,6 +652,26 @@ async fn record_load_error(
     }
 }
 
+async fn record_non_success_status_sample(
+    non_success_status_samples: &Arc<Mutex<Vec<HttpLoadProbeStatusSample>>>,
+    request_index: usize,
+    url: &str,
+    status: u16,
+    elapsed_ms: u64,
+    body: &str,
+) {
+    let mut samples = non_success_status_samples.lock().await;
+    if samples.len() < MAX_STATUS_SAMPLES {
+        samples.push(HttpLoadProbeStatusSample {
+            request_index,
+            url: url.to_string(),
+            status,
+            elapsed_ms,
+            body: compact_error_text(body, MAX_STATUS_SAMPLE_BODY_CHARS),
+        });
+    }
+}
+
 fn classify_reqwest_error(phase: &str, err: &reqwest::Error) -> ClassifiedLoadError {
     let kind = if err.is_timeout() && err.is_connect() {
         "connect_timeout"
@@ -660,16 +748,19 @@ async fn observe_response_body(
                     )
                 })?;
             let first_body_latency_ms = started_at.elapsed().as_millis() as u64;
-            drop(first);
+            let body_sample = compact_bytes_sample(&first, MAX_STATUS_SAMPLE_BODY_CHARS);
             if !first_body_hold.is_zero() {
                 tokio::time::sleep(first_body_hold).await;
             }
+            drain_first_body_response_tail(response).await?;
             Ok(BodyObservation {
                 first_body_latency_ms: Some(first_body_latency_ms),
+                body_sample: Some(body_sample),
             })
         }
         HttpLoadProbeResponseMode::FullBody => {
             let mut first_body_latency_ms = None;
+            let mut body_sample = Vec::new();
             while let Some(chunk) = response
                 .chunk()
                 .await
@@ -678,7 +769,7 @@ async fn observe_response_body(
                 if first_body_latency_ms.is_none() {
                     first_body_latency_ms = Some(started_at.elapsed().as_millis() as u64);
                 }
-                drop(chunk);
+                append_body_sample(&mut body_sample, &chunk, MAX_STATUS_SAMPLE_BODY_CHARS);
             }
             if first_body_latency_ms.is_none() {
                 return Err(ClassifiedLoadError::static_body(
@@ -688,14 +779,94 @@ async fn observe_response_body(
             }
             Ok(BodyObservation {
                 first_body_latency_ms,
+                body_sample: Some(String::from_utf8_lossy(&body_sample).into_owned()),
             })
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+fn compact_bytes_sample(bytes: &[u8], max_chars: usize) -> String {
+    compact_error_text(String::from_utf8_lossy(bytes), max_chars)
+}
+
+fn append_body_sample(target: &mut Vec<u8>, chunk: &[u8], max_chars: usize) {
+    if target.len() >= max_chars {
+        return;
+    }
+    let remaining = max_chars.saturating_sub(target.len());
+    target.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+}
+
+async fn drain_first_body_response_tail(
+    mut response: reqwest::Response,
+) -> Result<(), ClassifiedLoadError> {
+    let max_chunks = env_usize(
+        FIRST_BODY_BACKGROUND_DRAIN_CHUNKS_ENV,
+        DEFAULT_FIRST_BODY_BACKGROUND_DRAIN_CHUNKS,
+    );
+    if max_chunks == 0 {
+        return Ok(());
+    }
+    let timeout = Duration::from_millis(env_u64(
+        FIRST_BODY_BACKGROUND_DRAIN_MS_ENV,
+        DEFAULT_FIRST_BODY_BACKGROUND_DRAIN_MS,
+    ));
+    let drain = async {
+        for _ in 0..max_chunks {
+            let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|err| classify_reqwest_error("body", &err))?
+            else {
+                break;
+            };
+            drop(chunk);
+        }
+        Ok(())
+    };
+    if timeout.is_zero() {
+        return drain.await;
+    }
+    match tokio::time::timeout(timeout, drain).await {
+        Ok(result) => result,
+        Err(_) => Ok(()),
+    }
+}
+
+fn env_usize(key: &str, default_value: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default_value)
+}
+
+fn env_u64(key: &str, default_value: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(default_value)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct BodyObservation {
     first_body_latency_ms: Option<u64>,
+    body_sample: Option<String>,
+}
+
+fn build_request_header_sets(config: &HttpLoadProbeConfig) -> Result<Arc<Vec<HeaderMap>>, String> {
+    let raw_sets = if config.header_sets.is_empty() {
+        vec![config.headers.clone()]
+    } else {
+        config.header_sets.clone()
+    };
+    let mut sets = Vec::with_capacity(raw_sets.len().max(1));
+    for headers in raw_sets {
+        sets.push(build_headers(&headers)?);
+    }
+    if sets.is_empty() {
+        sets.push(HeaderMap::new());
+    }
+    Ok(Arc::new(sets))
 }
 
 fn build_headers(headers: &BTreeMap<String, String>) -> Result<HeaderMap, String> {
@@ -735,8 +906,8 @@ fn percentile(latencies: &[u64], percentile: u8) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_headers, summarize_latencies, worker_start_delay, HttpLoadProbeConfig,
-        HttpLoadProbeResponseMode,
+        build_headers, build_request_header_sets, summarize_latencies, worker_start_delay,
+        HttpLoadProbeConfig, HttpLoadProbeResponseMode,
     };
     use reqwest::Method;
     use std::collections::BTreeMap;
@@ -806,6 +977,7 @@ mod tests {
         assert_eq!(config.method, Method::GET);
         assert!(config.warmup_url.is_none());
         assert!(config.headers.is_empty());
+        assert!(config.header_sets.is_empty());
         assert!(config.body.is_none());
         assert_eq!(config.total_requests, 100);
         assert_eq!(config.concurrency, 10);
@@ -834,6 +1006,31 @@ mod tests {
         );
         let invalid = BTreeMap::from([("bad header".to_string(), "ok".to_string())]);
         assert!(build_headers(&invalid).is_err());
+    }
+
+    #[test]
+    fn validates_header_sets() {
+        let mut config = HttpLoadProbeConfig {
+            url: "http://127.0.0.1/".to_string(),
+            header_sets: vec![BTreeMap::new()],
+            ..HttpLoadProbeConfig::default()
+        };
+        assert!(config.validate().is_err());
+
+        config.header_sets = vec![BTreeMap::from([(
+            "authorization".to_string(),
+            "Bearer test".to_string(),
+        )])];
+        assert!(config.validate().is_ok());
+
+        let sets = build_request_header_sets(&config).expect("header set should build");
+        assert_eq!(sets.len(), 1);
+        assert_eq!(
+            sets[0]
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer test")
+        );
     }
 
     #[test]

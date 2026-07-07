@@ -131,6 +131,7 @@ impl AppState {
                     .insert(updated_order.id.clone(), updated_order);
             }
 
+            self.invalidate_auth_context_cache();
             return Ok(AdminWalletMutationOutcome::Applied((
                 updated_wallet,
                 updated_refund,
@@ -354,6 +355,7 @@ impl AppState {
                 .expect("admin wallet refund store should lock")
                 .insert(updated_refund.id.clone(), updated_refund.clone());
 
+            self.invalidate_auth_context_cache();
             return Ok(AdminWalletMutationOutcome::Applied((
                 updated_wallet,
                 updated_refund,

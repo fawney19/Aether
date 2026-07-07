@@ -1039,13 +1039,20 @@ async fn proxy_request_inner(
     request: Request,
 ) -> Result<Response<Body>, GatewayError> {
     let started_at = Instant::now();
-    if let Some(accepted_at) = request
+    let accepted_at = request
         .extensions()
         .get::<crate::middleware::GatewayRequestAcceptedAt>()
+        .map(|accepted_at| accepted_at.0)
+        .unwrap_or(started_at);
+    crate::request_diagnostics::record_request_accepted_at(accepted_at);
+    if request
+        .extensions()
+        .get::<crate::middleware::GatewayRequestAcceptedAt>()
+        .is_some()
     {
         observe_gateway_stage_ms(
             "frontdoor_handler_queue",
-            started_at.duration_since(accepted_at.0).as_millis() as u64,
+            started_at.duration_since(accepted_at).as_millis() as u64,
         );
     }
     let mut request_permit = match state.try_acquire_request_permit().await {

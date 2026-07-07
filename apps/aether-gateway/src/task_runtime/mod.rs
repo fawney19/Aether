@@ -6,8 +6,8 @@ use aether_data_contracts::repository::background_tasks::{
     UpsertBackgroundTaskRun,
 };
 use aether_runtime::task::spawn_named;
-pub(crate) use aether_task_runtime::TaskSupervisor;
 use aether_task_runtime::{RetryPolicy, TaskDefinition, TaskKind};
+pub(crate) use aether_task_runtime::{TaskSupervisor, TaskSupervisorMetrics};
 use serde_json::Value;
 use tokio::task::JoinHandle;
 use tracing::warn;

@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
 use std::io::Error as IoError;
+use std::pin::Pin;
 use std::time::Instant;
 
 use axum::body::{to_bytes, Body, Bytes};
@@ -52,6 +54,7 @@ use crate::executor::{
     LocalExecutionExhaustion, LocalExecutionRequestOutcome,
 };
 use crate::handlers::shared::system_config_bool;
+use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AiExecutionDecision, AppState, GatewayError};
 
 const ENABLE_OPENAI_IMAGE_SYNC_HEARTBEAT_CONFIG_KEY: &str = "enable_openai_image_sync_heartbeat";
@@ -192,15 +195,20 @@ pub(crate) async fn maybe_execute_stream_via_local_decision(
     body_json: &serde_json::Value,
     plan_kind: &str,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    let Some((attempt_source, candidate_count)) =
-        build_local_openai_chat_stream_attempt_source_for_kind(
-            state, parts, trace_id, decision, body_json, plan_kind,
-        )
-        .await?
-    else {
+    let attempt_source_started_at = std::time::Instant::now();
+    let attempt_source = build_local_openai_chat_stream_attempt_source_for_kind(
+        state, parts, trace_id, decision, body_json, plan_kind,
+    )
+    .await;
+    observe_gateway_stage_ms(
+        "stream_openai_chat_attempt_source_init",
+        attempt_source_started_at.elapsed().as_millis() as u64,
+    );
+    let Some((attempt_source, candidate_count)) = attempt_source? else {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
+    let attempt_source_execute_started_at = std::time::Instant::now();
     let outcome = execute_stream_attempt_source::<AiStreamAttempt, _>(
         state,
         trace_id,
@@ -208,7 +216,12 @@ pub(crate) async fn maybe_execute_stream_via_local_decision(
         plan_kind,
         attempt_source,
     )
-    .await?;
+    .await;
+    observe_gateway_stage_ms(
+        "stream_openai_chat_attempt_source_execute",
+        attempt_source_execute_started_at.elapsed().as_millis() as u64,
+    );
+    let outcome = outcome?;
 
     if let LocalExecutionRequestOutcome::Exhausted(_) = &outcome {
         set_local_openai_chat_execution_exhausted_diagnostic(
@@ -1414,66 +1427,72 @@ pub(crate) async fn maybe_execute_sync_via_local_video_decision(
     .await
 }
 
-pub(crate) async fn maybe_execute_sync_request(
-    state: &AppState,
-    parts: &http::request::Parts,
-    body_bytes: &axum::body::Bytes,
-    trace_id: &str,
-    decision: Option<&GatewayControlDecision>,
-) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    let Some(decision) = decision else {
-        return Ok(LocalExecutionRequestOutcome::NoPath);
-    };
-    #[cfg(not(test))]
-    {
-        if parts.method != http::Method::POST {
+pub(crate) fn maybe_execute_sync_request<'a>(
+    state: &'a AppState,
+    parts: &'a http::request::Parts,
+    body_bytes: &'a axum::body::Bytes,
+    trace_id: &'a str,
+    decision: Option<&'a GatewayControlDecision>,
+) -> Pin<Box<dyn Future<Output = Result<LocalExecutionRequestOutcome, GatewayError>> + Send + 'a>> {
+    Box::pin(async move {
+        let Some(decision) = decision else {
             return Ok(LocalExecutionRequestOutcome::NoPath);
-        }
-        return maybe_execute_sync_local_path(state, parts, body_bytes, trace_id, decision).await;
-    }
-    #[cfg(test)]
-    {
-        if state
-            .execution_runtime_override_base_url()
-            .unwrap_or_default()
-            .is_empty()
-            && parts.method != http::Method::POST
+        };
+        #[cfg(not(test))]
         {
-            return Ok(LocalExecutionRequestOutcome::NoPath);
+            if parts.method != http::Method::POST {
+                return Ok(LocalExecutionRequestOutcome::NoPath);
+            }
+            return maybe_execute_sync_local_path(state, parts, body_bytes, trace_id, decision)
+                .await;
         }
-        maybe_execute_sync_local_path(state, parts, body_bytes, trace_id, decision).await
-    }
+        #[cfg(test)]
+        {
+            if state
+                .execution_runtime_override_base_url()
+                .unwrap_or_default()
+                .is_empty()
+                && parts.method != http::Method::POST
+            {
+                return Ok(LocalExecutionRequestOutcome::NoPath);
+            }
+            maybe_execute_sync_local_path(state, parts, body_bytes, trace_id, decision).await
+        }
+    })
 }
 
-pub(crate) async fn maybe_execute_stream_request(
-    state: &AppState,
-    parts: &http::request::Parts,
-    body_bytes: &axum::body::Bytes,
-    trace_id: &str,
-    decision: Option<&GatewayControlDecision>,
-) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    let Some(decision) = decision else {
-        return Ok(LocalExecutionRequestOutcome::NoPath);
-    };
-    #[cfg(not(test))]
-    {
-        if parts.method != http::Method::POST {
+pub(crate) fn maybe_execute_stream_request<'a>(
+    state: &'a AppState,
+    parts: &'a http::request::Parts,
+    body_bytes: &'a axum::body::Bytes,
+    trace_id: &'a str,
+    decision: Option<&'a GatewayControlDecision>,
+) -> Pin<Box<dyn Future<Output = Result<LocalExecutionRequestOutcome, GatewayError>> + Send + 'a>> {
+    Box::pin(async move {
+        let Some(decision) = decision else {
             return Ok(LocalExecutionRequestOutcome::NoPath);
-        }
-        return maybe_execute_stream_local_path(state, parts, body_bytes, trace_id, decision).await;
-    }
-    #[cfg(test)]
-    {
-        if state
-            .execution_runtime_override_base_url()
-            .unwrap_or_default()
-            .is_empty()
-            && parts.method != http::Method::POST
+        };
+        #[cfg(not(test))]
         {
-            return Ok(LocalExecutionRequestOutcome::NoPath);
+            if parts.method != http::Method::POST {
+                return Ok(LocalExecutionRequestOutcome::NoPath);
+            }
+            return maybe_execute_stream_local_path(state, parts, body_bytes, trace_id, decision)
+                .await;
         }
-        maybe_execute_stream_local_path(state, parts, body_bytes, trace_id, decision).await
-    }
+        #[cfg(test)]
+        {
+            if state
+                .execution_runtime_override_base_url()
+                .unwrap_or_default()
+                .is_empty()
+                && parts.method != http::Method::POST
+            {
+                return Ok(LocalExecutionRequestOutcome::NoPath);
+            }
+            maybe_execute_stream_local_path(state, parts, body_bytes, trace_id, decision).await
+        }
+    })
 }
 
 pub(crate) fn planner_decision_action(action: &str) -> bool {

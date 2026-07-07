@@ -10,16 +10,18 @@ use aether_data::repository::proxy_nodes::{
     ProxyNodeTunnelStatusMutation, StoredProxyFleetMetricsBucket, StoredProxyNode,
     StoredProxyNodeEvent, StoredProxyNodeMetricsBucket,
 };
+use aether_data_contracts::repository::usage::UsageCounterHealthSnapshot;
 use aether_http::{build_http_client, HttpClientConfig};
 use aether_runtime::{
     service_up_sample, AdmissionPermit, ConcurrencyGate, ConcurrencySnapshot, MetricKind,
     MetricLabel, MetricSample,
 };
 use aether_runtime_state::{
-    MemoryRuntimeStateConfig, RuntimeQueueStore, RuntimeSemaphore, RuntimeSemaphoreError,
-    RuntimeSemaphoreSnapshot, RuntimeState,
+    MemoryRuntimeStateConfig, RedisRuntimeDiagnostics, RuntimeQueueStore, RuntimeSemaphore,
+    RuntimeSemaphoreError, RuntimeSemaphoreSnapshot, RuntimeState,
 };
 use aether_scheduler_core::PROVIDER_KEY_RPM_WINDOW_SECS;
+use dashmap::DashMap;
 use tracing::warn;
 
 use super::{
@@ -79,6 +81,10 @@ const AUTH_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &[
 ];
 const FRONTDOOR_RPM_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &["rate_limit_per_minute"];
 const CHAT_PII_REDACTION_SYSTEM_CONFIG_PREFIX: &str = "module.chat_pii_redaction.";
+const POSTGRES_OBSERVABILITY_METRICS_TIMEOUT: Duration = Duration::from_secs(2);
+const POSTGRES_ACTIVITY_GROUP_METRICS_TIMEOUT: Duration = Duration::from_millis(500);
+const POSTGRES_ACTIVITY_GROUP_METRICS_LIMIT: i64 = 8;
+const REDIS_RUNTIME_METRICS_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn system_config_key_affects_scheduler(key: &str) -> bool {
     let key = key.trim();
@@ -98,6 +104,10 @@ fn system_config_key_affects_frontdoor_rpm(key: &str) -> bool {
 fn system_config_key_affects_chat_pii_redaction(key: &str) -> bool {
     key.trim()
         .starts_with(CHAT_PII_REDACTION_SYSTEM_CONFIG_PREFIX)
+}
+
+fn system_config_key_affects_provider_transport_snapshot(key: &str) -> bool {
+    key.trim() == "enable_format_conversion"
 }
 
 impl AppState {
@@ -185,6 +195,7 @@ impl AppState {
         self.clear_provider_transport_snapshot_cache();
         self.invalidate_scheduler_affinity_cache();
         self.invalidate_auth_context_cache();
+        self.candidate_row_page_cache.clear();
         self.candidate_resolved_page_cache.clear();
         self.system_config_cache.clear();
         self.frontdoor_user_rpm.clear_system_default_cache();
@@ -193,6 +204,7 @@ impl AppState {
                 .clone()
                 .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
         );
+        self.candidate_row_page_cache.clear();
         self.candidate_page_cache.clear();
         self.candidate_resolved_page_cache.clear();
         self.tunnel = crate::tunnel::EmbeddedTunnelState::with_data_and_runtime_state(
@@ -255,6 +267,9 @@ impl AppState {
             video_task_poller: None,
             frontdoor_runtime_guards: Arc::clone(&frontdoor_runtime_guards),
             request_gate: None,
+            auth_snapshot_load_gate: frontdoor_runtime_guards
+                .auth_snapshot_load_gate_limit
+                .map(|limit| Arc::new(ConcurrencyGate::new("gateway_auth_snapshot_load", limit))),
             candidate_planning_gate: frontdoor_runtime_guards
                 .candidate_planning_gate_limit
                 .map(|limit| Arc::new(ConcurrencyGate::new("gateway_candidate_planning", limit))),
@@ -275,8 +290,12 @@ impl AppState {
             user_feature_settings_cache: Arc::new(JsonValueCache::default()),
             auth_api_key_force_capabilities_cache: Arc::new(JsonValueCache::default()),
             auth_api_key_feature_settings_cache: Arc::new(JsonValueCache::default()),
+            auth_daily_quota_availability_cache: Arc::new(ValueCache::default()),
+            auth_wallet_snapshot_cache: Arc::new(ValueCache::default()),
+            auth_request_cost_upper_bound_cache: Arc::new(ValueCache::default()),
             provider_quota_snapshot_cache: Arc::new(ValueCache::default()),
             user_groups_for_user_cache: Arc::new(ValueCache::default()),
+            routing_group_selection_cache: Arc::new(ValueCache::default()),
             auth_api_key_last_used_cache: Arc::new(AuthApiKeyLastUsedCache::default()),
             oauth_refresh: Arc::new(provider_transport::LocalOAuthRefreshCoordinator::new()),
             direct_plan_bypass_cache: Arc::new(DirectPlanBypassCache::default()),
@@ -284,6 +303,7 @@ impl AppState {
             scheduler_affinity_epoch: Arc::new(AtomicU64::new(0)),
             dashboard_response_cache: Arc::new(DashboardResponseCache::default()),
             system_config_cache: Arc::new(SystemConfigCache::default()),
+            candidate_row_page_cache: Arc::new(crate::cache::CandidateRowPageCache::default()),
             candidate_page_cache: Arc::new(crate::cache::CandidatePageCache::default()),
             candidate_resolved_page_cache: Arc::new(
                 crate::cache::CandidateResolvedPageCache::default(),
@@ -291,6 +311,13 @@ impl AppState {
             chat_pii_redaction_runtime_config_cache:
                 crate::privacy::new_chat_pii_redaction_runtime_config_cache(),
             fallback_metrics: Arc::new(fallback_metrics::GatewayFallbackMetrics::default()),
+            usage_counter_flush_metrics: Arc::new(
+                crate::maintenance::UsageCounterFlushRuntimeMetrics::default(),
+            ),
+            task_supervisor_metrics: crate::task_runtime::TaskSupervisorMetrics::default(),
+            process_resource_monitor: Arc::new(
+                crate::process_metrics::GatewayProcessResourceMonitor::new(),
+            ),
             request_candidate_queue: None,
             frontdoor_cors: None,
             frontdoor_user_rpm: Arc::new(FrontdoorUserRpmLimiter::new(
@@ -300,9 +327,10 @@ impl AppState {
                 data,
                 runtime_state.clone(),
             ),
-            provider_transport_snapshot_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            provider_transport_snapshot_cache: Arc::new(DashMap::new()),
+            provider_transport_snapshot_inflight: Arc::new(DashMap::new()),
             provider_key_rpm_resets: Arc::new(StdMutex::new(HashMap::new())),
-            local_execution_runtime_miss_diagnostics: Arc::new(StdMutex::new(HashMap::new())),
+            local_execution_runtime_miss_diagnostics: Arc::new(DashMap::new()),
             admin_monitoring_error_stats_reset_at: Arc::new(StdMutex::new(None)),
             provider_delete_tasks: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(test)]
@@ -671,12 +699,18 @@ impl AppState {
                 &self.chat_pii_redaction_runtime_config_cache,
             );
         }
+        if deleted && system_config_key_affects_provider_transport_snapshot(key) {
+            self.clear_provider_transport_snapshot_cache();
+        }
         Ok(deleted)
     }
 
     pub(crate) fn invalidate_provider_routing_caches(&self) {
         self.data.clear_minimal_candidate_selection_cache();
+        self.data.clear_routing_group_cache();
         self.data.clear_provider_catalog_cache();
+        self.routing_group_selection_cache.clear();
+        self.candidate_row_page_cache.clear();
         self.candidate_page_cache.clear();
         self.candidate_resolved_page_cache.clear();
         self.clear_provider_transport_snapshot_cache();
@@ -686,8 +720,15 @@ impl AppState {
     pub(crate) fn invalidate_provider_health_routing_caches(&self) {
         self.data.clear_minimal_candidate_selection_cache();
         self.data.clear_provider_catalog_cache();
+        self.candidate_row_page_cache.clear();
         self.candidate_page_cache.clear();
         self.candidate_resolved_page_cache.clear();
+        self.clear_provider_transport_snapshot_cache();
+    }
+
+    pub(crate) fn invalidate_provider_runtime_state_caches(&self) {
+        self.data.clear_minimal_candidate_selection_cache();
+        self.data.clear_provider_catalog_cache();
         self.clear_provider_transport_snapshot_cache();
     }
 
@@ -698,8 +739,13 @@ impl AppState {
         self.user_feature_settings_cache.clear();
         self.auth_api_key_force_capabilities_cache.clear();
         self.auth_api_key_feature_settings_cache.clear();
+        self.auth_daily_quota_availability_cache.clear();
+        self.auth_wallet_snapshot_cache.clear();
+        self.auth_request_cost_upper_bound_cache.clear();
         self.provider_quota_snapshot_cache.clear();
         self.user_groups_for_user_cache.clear();
+        self.routing_group_selection_cache.clear();
+        self.candidate_row_page_cache.clear();
         self.candidate_page_cache.clear();
         self.candidate_resolved_page_cache.clear();
     }
@@ -720,6 +766,9 @@ impl AppState {
             crate::privacy::clear_chat_pii_redaction_runtime_config_cache(
                 &self.chat_pii_redaction_runtime_config_cache,
             );
+        }
+        if system_config_key_affects_provider_transport_snapshot(key) {
+            self.clear_provider_transport_snapshot_cache();
         }
     }
 
@@ -984,6 +1033,12 @@ impl AppState {
         self.request_gate.as_ref().map(|gate| gate.snapshot())
     }
 
+    pub(crate) fn auth_snapshot_load_concurrency_snapshot(&self) -> Option<ConcurrencySnapshot> {
+        self.auth_snapshot_load_gate
+            .as_ref()
+            .map(|gate| gate.snapshot())
+    }
+
     pub(crate) fn candidate_planning_concurrency_snapshot(&self) -> Option<ConcurrencySnapshot> {
         self.candidate_planning_gate
             .as_ref()
@@ -1009,6 +1064,9 @@ impl AppState {
         let mut samples = vec![service_up_sample("aether-gateway")];
         if let Some(snapshot) = self.request_concurrency_snapshot() {
             samples.extend(snapshot.to_metric_samples("gateway_requests"));
+        }
+        if let Some(snapshot) = self.auth_snapshot_load_concurrency_snapshot() {
+            samples.extend(snapshot.to_metric_samples("gateway_auth_snapshot_load"));
         }
         if let Some(snapshot) = self.candidate_planning_concurrency_snapshot() {
             samples.extend(snapshot.to_metric_samples("gateway_candidate_planning"));
@@ -1038,9 +1096,81 @@ impl AppState {
         if let Some(summary) = self.data.database_pool_summary() {
             samples.extend(database_pool_metric_samples(&summary));
         }
+        match tokio::time::timeout(
+            POSTGRES_OBSERVABILITY_METRICS_TIMEOUT,
+            self.data.postgres_observability_snapshot(),
+        )
+        .await
+        {
+            Ok(Ok(snapshot)) => {
+                samples.extend(postgres_observability_metric_samples(snapshot.as_ref()))
+            }
+            Ok(Err(_)) | Err(_) => {
+                samples.extend(postgres_observability_unavailable_metric_samples())
+            }
+        }
+        match tokio::time::timeout(
+            POSTGRES_ACTIVITY_GROUP_METRICS_TIMEOUT,
+            self.data
+                .postgres_activity_groups(POSTGRES_ACTIVITY_GROUP_METRICS_LIMIT),
+        )
+        .await
+        {
+            Ok(Ok(groups)) => samples.extend(postgres_activity_group_metric_samples(&groups)),
+            Ok(Err(_)) | Err(_) => {
+                samples.extend(postgres_activity_group_unavailable_metric_samples())
+            }
+        }
+        match tokio::time::timeout(
+            REDIS_RUNTIME_METRICS_TIMEOUT,
+            self.runtime_state.redis_diagnostics(),
+        )
+        .await
+        {
+            Ok(Ok(snapshot)) => {
+                samples.extend(redis_runtime_metric_samples(snapshot.as_ref(), false))
+            }
+            Ok(Err(_)) | Err(_) => samples.extend(redis_runtime_metric_samples(
+                None,
+                self.runtime_state.is_redis(),
+            )),
+        }
         if let Some(queue) = self.request_candidate_queue.as_ref() {
             samples.extend(queue.metric_samples());
         }
+        samples.extend(usage_runtime_metric_samples(
+            &self.usage_runtime.metrics_snapshot(),
+        ));
+        match self
+            .usage_runtime
+            .queue_health_snapshot(self.data.as_ref())
+            .await
+        {
+            Ok(snapshot) => samples.extend(usage_queue_health_metric_samples(&snapshot)),
+            Err(_) => samples.push(MetricSample::new(
+                "usage_queue_health_unavailable",
+                "Whether usage runtime queue health could not be read for this scrape.",
+                MetricKind::Gauge,
+                1,
+            )),
+        }
+        match self.data.read_usage_counter_health().await {
+            Ok(snapshot) => samples.extend(usage_counter_health_metric_samples(
+                &snapshot,
+                crate::clock::current_unix_secs(),
+            )),
+            Err(_) => samples.push(MetricSample::new(
+                "usage_counter_health_unavailable",
+                "Whether usage counter outbox health could not be read for this scrape.",
+                MetricKind::Gauge,
+                1,
+            )),
+        }
+        samples.extend(self.usage_counter_flush_metrics.metric_samples());
+        samples.extend(task_supervisor_metric_samples(
+            &self.task_supervisor_metrics.snapshot(),
+        ));
+        samples.extend(crate::tokio_metrics::gateway_tokio_runtime_metric_samples());
         samples.extend(
             crate::execution_runtime::transport::direct_reqwest_client_cache_metric_samples(),
         );
@@ -1049,6 +1179,8 @@ impl AppState {
         samples.extend(crate::stage_metrics::gateway_stage_metric_samples());
         samples.extend(self.tunnel.metric_samples());
         samples.extend(self.fallback_metrics.metric_samples());
+        samples.extend(self.process_resource_monitor.metric_samples());
+        samples.extend(crate::allocator_metrics::gateway_allocator_metric_samples());
         samples
     }
 
@@ -1066,8 +1198,6 @@ impl AppState {
 
     pub(crate) fn clear_local_execution_runtime_miss_diagnostic(&self, trace_id: &str) {
         self.local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock")
             .remove(trace_id);
     }
 
@@ -1076,17 +1206,17 @@ impl AppState {
         trace_id: &str,
         diagnostic: LocalExecutionRuntimeMissDiagnostic,
     ) {
-        let mut diagnostics = self
+        if self
             .local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock");
-        if diagnostics
             .get(trace_id)
-            .is_some_and(|existing| should_preserve_runtime_miss_diagnostic(existing, &diagnostic))
+            .is_some_and(|existing| {
+                should_preserve_runtime_miss_diagnostic(existing.value(), &diagnostic)
+            })
         {
             return;
         }
-        diagnostics.insert(trace_id.to_string(), diagnostic);
+        self.local_execution_runtime_miss_diagnostics
+            .insert(trace_id.to_string(), diagnostic);
     }
 
     pub(crate) fn mutate_local_execution_runtime_miss_diagnostic<F>(
@@ -1096,12 +1226,11 @@ impl AppState {
     ) where
         F: FnOnce(&mut LocalExecutionRuntimeMissDiagnostic),
     {
-        let mut diagnostics = self
+        if let Some(mut diagnostic) = self
             .local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock");
-        if let Some(diagnostic) = diagnostics.get_mut(trace_id) {
-            mutate(diagnostic);
+            .get_mut(trace_id)
+        {
+            mutate(&mut diagnostic);
         }
     }
 
@@ -1110,10 +1239,10 @@ impl AppState {
         trace_id: &str,
     ) -> bool {
         self.local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock")
             .get(trace_id)
-            .is_some_and(runtime_miss_diagnostic_has_candidate_signal)
+            .is_some_and(|diagnostic| {
+                runtime_miss_diagnostic_has_candidate_signal(diagnostic.value())
+            })
     }
 
     pub(crate) fn take_local_execution_runtime_miss_diagnostic(
@@ -1121,9 +1250,8 @@ impl AppState {
         trace_id: &str,
     ) -> Option<LocalExecutionRuntimeMissDiagnostic> {
         self.local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock")
             .remove(trace_id)
+            .map(|(_, diagnostic)| diagnostic)
     }
 
     pub(crate) async fn try_acquire_request_permit(
@@ -1231,6 +1359,7 @@ impl AppState {
             .fetch_add(1, Ordering::AcqRel)
             .saturating_add(1);
         self.scheduler_affinity_cache.clear();
+        self.candidate_row_page_cache.clear();
         self.candidate_page_cache.clear();
         self.candidate_resolved_page_cache.clear();
         next_epoch
@@ -1308,7 +1437,8 @@ impl AppState {
     }
 
     pub fn spawn_background_tasks(&self) -> crate::task_runtime::TaskSupervisor {
-        let mut supervisor = crate::task_runtime::TaskSupervisor::new();
+        let mut supervisor =
+            crate::task_runtime::TaskSupervisor::with_metrics(self.task_supervisor_metrics.clone());
         let record_boot = |task_key: &'static str| {
             if !self.has_background_task_data_writer() {
                 return;
@@ -1323,6 +1453,15 @@ impl AppState {
                 definition.trigger,
             ));
         };
+
+        if let Some(handle) = self
+            .usage_runtime
+            .spawn_worker_supervisor(self.data.clone())
+        {
+            supervisor.supervise_handle(crate::task_runtime::TASK_KEY_USAGE_QUEUE_WORKER, handle);
+            record_boot(crate::task_runtime::TASK_KEY_USAGE_QUEUE_WORKER);
+        }
+
         let mut supervise_worker =
             |task_key: &'static str, handle: Option<tokio::task::JoinHandle<()>>| {
                 if let Some(handle) = handle {
@@ -1332,12 +1471,11 @@ impl AppState {
             };
 
         supervise_worker(
-            crate::task_runtime::TASK_KEY_USAGE_QUEUE_WORKER,
-            self.usage_runtime.spawn_worker(self.data.clone()),
-        );
-        supervise_worker(
             crate::task_runtime::TASK_KEY_USAGE_COUNTER_FLUSH,
-            spawn_usage_counter_flush_worker(self.data.clone()),
+            spawn_usage_counter_flush_worker(
+                self.data.clone(),
+                self.usage_counter_flush_metrics.clone(),
+            ),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_PROVIDER_QUOTA_RESET,
@@ -1432,6 +1570,132 @@ impl AppState {
     }
 }
 
+fn task_supervisor_metric_samples(
+    snapshot: &aether_task_runtime::TaskSupervisorMetricsSnapshot,
+) -> Vec<MetricSample> {
+    let unexpected_exits_total = snapshot
+        .completed_total
+        .saturating_add(snapshot.panicked_total)
+        .saturating_add(snapshot.aborted_total);
+    let mut samples = vec![
+        MetricSample::new(
+            "gateway_background_tasks_active",
+            "Current active background tasks supervised by the gateway task supervisor.",
+            MetricKind::Gauge,
+            snapshot.active_tasks,
+        ),
+        MetricSample::new(
+            "gateway_background_tasks_supervised_total",
+            "Total background tasks registered with the gateway task supervisor.",
+            MetricKind::Counter,
+            snapshot.supervised_total,
+        ),
+        MetricSample::new(
+            "gateway_background_tasks_completed_total",
+            "Total supervised gateway background tasks that returned without supervisor cancellation.",
+            MetricKind::Counter,
+            snapshot.completed_total,
+        ),
+        MetricSample::new(
+            "gateway_background_tasks_panicked_total",
+            "Total supervised gateway background tasks that ended with a panic.",
+            MetricKind::Counter,
+            snapshot.panicked_total,
+        ),
+        MetricSample::new(
+            "gateway_background_tasks_aborted_total",
+            "Total supervised gateway background tasks that were externally aborted.",
+            MetricKind::Counter,
+            snapshot.aborted_total,
+        ),
+        MetricSample::new(
+            "gateway_background_tasks_cancelled_total",
+            "Total supervised gateway background tasks cancelled by supervisor shutdown.",
+            MetricKind::Counter,
+            snapshot.cancelled_total,
+        ),
+        MetricSample::new(
+            "gateway_background_tasks_unexpected_exits_total",
+            "Total supervised gateway background tasks that exited without supervisor shutdown.",
+            MetricKind::Counter,
+            unexpected_exits_total,
+        ),
+    ];
+
+    for task in &snapshot.tasks {
+        let labels = vec![MetricLabel::new("task_key", task.task_name)];
+        let task_unexpected_exits_total = task
+            .completed_total
+            .saturating_add(task.panicked_total)
+            .saturating_add(task.aborted_total);
+        samples.push(
+            MetricSample::new(
+                "gateway_background_task_active",
+                "Current active supervised gateway background tasks by task key.",
+                MetricKind::Gauge,
+                task.active_tasks,
+            )
+            .with_labels(labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "gateway_background_task_supervised_total",
+                "Total supervised gateway background tasks registered by task key.",
+                MetricKind::Counter,
+                task.supervised_total,
+            )
+            .with_labels(labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "gateway_background_task_completed_total",
+                "Total supervised gateway background tasks that returned by task key.",
+                MetricKind::Counter,
+                task.completed_total,
+            )
+            .with_labels(labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "gateway_background_task_panicked_total",
+                "Total supervised gateway background tasks that panicked by task key.",
+                MetricKind::Counter,
+                task.panicked_total,
+            )
+            .with_labels(labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "gateway_background_task_aborted_total",
+                "Total supervised gateway background tasks externally aborted by task key.",
+                MetricKind::Counter,
+                task.aborted_total,
+            )
+            .with_labels(labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "gateway_background_task_cancelled_total",
+                "Total supervised gateway background tasks cancelled by supervisor shutdown by task key.",
+                MetricKind::Counter,
+                task.cancelled_total,
+            )
+            .with_labels(labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "gateway_background_task_unexpected_exits_total",
+                "Total supervised gateway background tasks that exited without supervisor shutdown by task key.",
+                MetricKind::Counter,
+                task_unexpected_exits_total,
+            )
+            .with_labels(labels),
+        );
+    }
+
+    samples
+}
+
 fn database_pool_metric_samples(summary: &aether_data::DatabasePoolSummary) -> Vec<MetricSample> {
     let labels = vec![MetricLabel::new("driver", summary.driver.to_string())];
     let usage_basis_points = if summary.usage_rate.is_finite() && summary.usage_rate > 0.0 {
@@ -1493,6 +1757,981 @@ fn database_pool_metric_samples(summary: &aether_data::DatabasePoolSummary) -> V
         )
         .with_labels(labels),
     ]
+}
+
+fn postgres_observability_metric_samples(
+    snapshot: Option<&aether_data::DatabasePostgresObservabilitySnapshot>,
+) -> Vec<MetricSample> {
+    let labels = vec![MetricLabel::new("driver", "postgres")];
+    let available = u64::from(snapshot.is_some());
+    let snapshot = snapshot.copied().unwrap_or_default();
+
+    let mut samples = Vec::new();
+    let mut push = |name: &'static str, description: &'static str, kind: MetricKind, value: u64| {
+        samples.push(MetricSample::new(name, description, kind, value).with_labels(labels.clone()));
+    };
+
+    push(
+        "postgres_observability_available",
+        "Whether Postgres system catalog observability is configured and available.",
+        MetricKind::Gauge,
+        available,
+    );
+    push(
+        "postgres_observability_unavailable",
+        "Whether Postgres system catalog observability could not be read for this scrape.",
+        MetricKind::Gauge,
+        0,
+    );
+    push(
+        "postgres_active_connections",
+        "Number of active connections reported by pg_stat_activity for the current database.",
+        MetricKind::Gauge,
+        snapshot.active_connections,
+    );
+    push(
+        "postgres_idle_connections",
+        "Number of idle connections reported by pg_stat_activity for the current database.",
+        MetricKind::Gauge,
+        snapshot.idle_connections,
+    );
+    push(
+        "postgres_idle_in_transaction_connections",
+        "Number of idle-in-transaction connections reported by pg_stat_activity for the current database.",
+        MetricKind::Gauge,
+        snapshot.idle_in_transaction_connections,
+    );
+    push(
+        "postgres_waiting_connections",
+        "Number of connections currently waiting on an event in pg_stat_activity for the current database.",
+        MetricKind::Gauge,
+        snapshot.waiting_connections,
+    );
+    push(
+        "postgres_lock_waiting_connections",
+        "Number of connections currently waiting on locks in pg_stat_activity for the current database.",
+        MetricKind::Gauge,
+        snapshot.lock_waiting_connections,
+    );
+    push(
+        "postgres_oldest_active_query_age_ms",
+        "Age in milliseconds of the oldest active Postgres query for the current database.",
+        MetricKind::Gauge,
+        snapshot.oldest_active_query_age_ms,
+    );
+    push(
+        "postgres_oldest_transaction_age_ms",
+        "Age in milliseconds of the oldest Postgres transaction for the current database.",
+        MetricKind::Gauge,
+        snapshot.oldest_transaction_age_ms,
+    );
+    push(
+        "postgres_deadlocks_total",
+        "Total Postgres deadlocks reported by pg_stat_database for the current database.",
+        MetricKind::Counter,
+        snapshot.deadlocks_total,
+    );
+    push(
+        "postgres_block_read_total",
+        "Total Postgres heap/index blocks read from storage for the current database.",
+        MetricKind::Counter,
+        snapshot.block_read_total,
+    );
+    push(
+        "postgres_block_hit_total",
+        "Total Postgres heap/index block cache hits for the current database.",
+        MetricKind::Counter,
+        snapshot.block_hit_total,
+    );
+    push(
+        "postgres_block_cache_hit_rate_basis_points",
+        "Postgres block cache hit rate for the current database in basis points.",
+        MetricKind::Gauge,
+        snapshot.block_cache_hit_rate_basis_points,
+    );
+    push(
+        "postgres_temp_files_total",
+        "Total temporary files created by Postgres for the current database.",
+        MetricKind::Counter,
+        snapshot.temp_files_total,
+    );
+    push(
+        "postgres_temp_bytes_total",
+        "Total temporary bytes written by Postgres for the current database.",
+        MetricKind::Counter,
+        snapshot.temp_bytes_total,
+    );
+    push(
+        "postgres_xact_commit_total",
+        "Total committed Postgres transactions for the current database.",
+        MetricKind::Counter,
+        snapshot.xact_commit_total,
+    );
+    push(
+        "postgres_xact_rollback_total",
+        "Total rolled back Postgres transactions for the current database.",
+        MetricKind::Counter,
+        snapshot.xact_rollback_total,
+    );
+    push(
+        "postgres_wal_observability_available",
+        "Whether Postgres WAL statistics are available for this scrape.",
+        MetricKind::Gauge,
+        snapshot.wal_observability_available,
+    );
+    push(
+        "postgres_wal_observability_unavailable",
+        "Whether Postgres WAL statistics could not be read for this scrape.",
+        MetricKind::Gauge,
+        snapshot.wal_observability_unavailable,
+    );
+    push(
+        "postgres_wal_records_total",
+        "Total WAL records reported by Postgres.",
+        MetricKind::Counter,
+        snapshot.wal_records_total,
+    );
+    push(
+        "postgres_wal_fpi_total",
+        "Total WAL full-page images reported by Postgres.",
+        MetricKind::Counter,
+        snapshot.wal_fpi_total,
+    );
+    push(
+        "postgres_wal_bytes_total",
+        "Total WAL bytes reported by Postgres.",
+        MetricKind::Counter,
+        snapshot.wal_bytes_total,
+    );
+    push(
+        "postgres_wal_buffers_full_total",
+        "Total times WAL buffers were full in Postgres.",
+        MetricKind::Counter,
+        snapshot.wal_buffers_full_total,
+    );
+    push(
+        "postgres_wal_write_total",
+        "Total WAL write operations reported by Postgres.",
+        MetricKind::Counter,
+        snapshot.wal_write_total,
+    );
+    push(
+        "postgres_wal_sync_total",
+        "Total WAL sync operations reported by Postgres.",
+        MetricKind::Counter,
+        snapshot.wal_sync_total,
+    );
+    push(
+        "postgres_wal_write_time_ms_total",
+        "Total Postgres WAL write time in milliseconds.",
+        MetricKind::Counter,
+        snapshot.wal_write_time_ms_total,
+    );
+    push(
+        "postgres_wal_sync_time_ms_total",
+        "Total Postgres WAL sync time in milliseconds.",
+        MetricKind::Counter,
+        snapshot.wal_sync_time_ms_total,
+    );
+    push(
+        "postgres_checkpoint_observability_available",
+        "Whether Postgres checkpoint statistics are available for this scrape.",
+        MetricKind::Gauge,
+        snapshot.checkpoint_observability_available,
+    );
+    push(
+        "postgres_checkpoint_observability_unavailable",
+        "Whether Postgres checkpoint statistics could not be read for this scrape.",
+        MetricKind::Gauge,
+        snapshot.checkpoint_observability_unavailable,
+    );
+    push(
+        "postgres_checkpoints_timed_total",
+        "Total timed Postgres checkpoints reported by the checkpointer.",
+        MetricKind::Counter,
+        snapshot.checkpoints_timed_total,
+    );
+    push(
+        "postgres_checkpoints_requested_total",
+        "Total requested Postgres checkpoints reported by the checkpointer.",
+        MetricKind::Counter,
+        snapshot.checkpoints_requested_total,
+    );
+    push(
+        "postgres_checkpoint_write_time_ms_total",
+        "Total Postgres checkpoint write time in milliseconds.",
+        MetricKind::Counter,
+        snapshot.checkpoint_write_time_ms_total,
+    );
+    push(
+        "postgres_checkpoint_sync_time_ms_total",
+        "Total Postgres checkpoint sync time in milliseconds.",
+        MetricKind::Counter,
+        snapshot.checkpoint_sync_time_ms_total,
+    );
+    push(
+        "postgres_buffers_checkpoint_total",
+        "Total buffers written during Postgres checkpoints.",
+        MetricKind::Counter,
+        snapshot.buffers_checkpoint_total,
+    );
+    push(
+        "postgres_buffers_backend_total",
+        "Total Postgres buffers written by backend processes.",
+        MetricKind::Counter,
+        snapshot.buffers_backend_total,
+    );
+    push(
+        "postgres_statement_observability_available",
+        "Whether pg_stat_statements aggregate statistics are available for this scrape.",
+        MetricKind::Gauge,
+        snapshot.statement_observability_available,
+    );
+    push(
+        "postgres_statement_observability_unavailable",
+        "Whether pg_stat_statements aggregate statistics could not be read for this scrape.",
+        MetricKind::Gauge,
+        snapshot.statement_observability_unavailable,
+    );
+    push(
+        "postgres_statement_top_calls_total",
+        "Total calls across the top Postgres statements by execution time.",
+        MetricKind::Counter,
+        snapshot.statement_top_calls_total,
+    );
+    push(
+        "postgres_statement_top_exec_time_ms_total",
+        "Total execution time across the top Postgres statements by execution time.",
+        MetricKind::Counter,
+        snapshot.statement_top_exec_time_ms_total,
+    );
+    push(
+        "postgres_statement_top_max_mean_exec_time_ms",
+        "Maximum mean execution time among the top Postgres statements.",
+        MetricKind::Gauge,
+        snapshot.statement_top_max_mean_exec_time_ms,
+    );
+    push(
+        "postgres_statement_top_max_exec_time_ms",
+        "Maximum execution time among the top Postgres statements.",
+        MetricKind::Gauge,
+        snapshot.statement_top_max_exec_time_ms,
+    );
+    push(
+        "postgres_statement_top_shared_blks_read_total",
+        "Total shared blocks read across the top Postgres statements.",
+        MetricKind::Counter,
+        snapshot.statement_top_shared_blks_read_total,
+    );
+    push(
+        "postgres_statement_top_shared_blks_hit_total",
+        "Total shared block hits across the top Postgres statements.",
+        MetricKind::Counter,
+        snapshot.statement_top_shared_blks_hit_total,
+    );
+    push(
+        "postgres_statement_top_temp_blks_total",
+        "Total temporary blocks across the top Postgres statements.",
+        MetricKind::Counter,
+        snapshot.statement_top_temp_blks_total,
+    );
+
+    samples
+}
+
+fn postgres_observability_unavailable_metric_samples() -> Vec<MetricSample> {
+    let labels = vec![MetricLabel::new("driver", "postgres")];
+    vec![
+        MetricSample::new(
+            "postgres_observability_available",
+            "Whether Postgres system catalog observability is configured and available.",
+            MetricKind::Gauge,
+            0,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "postgres_observability_unavailable",
+            "Whether Postgres system catalog observability could not be read for this scrape.",
+            MetricKind::Gauge,
+            1,
+        )
+        .with_labels(labels),
+    ]
+}
+
+fn postgres_activity_group_metric_samples(
+    groups: &[aether_data::DatabasePostgresActivityGroup],
+) -> Vec<MetricSample> {
+    let mut samples = vec![MetricSample::new(
+        "postgres_activity_groups_available",
+        "Whether grouped pg_stat_activity diagnostics are available for this scrape.",
+        MetricKind::Gauge,
+        1,
+    )
+    .with_labels(vec![MetricLabel::new("driver", "postgres")])];
+
+    for (index, group) in groups.iter().enumerate() {
+        let labels = vec![
+            MetricLabel::new("driver", "postgres"),
+            MetricLabel::new("rank", (index + 1).to_string()),
+            MetricLabel::new("state", group.state.clone()),
+            MetricLabel::new("wait_event_type", group.wait_event_type.clone()),
+            MetricLabel::new("wait_event", group.wait_event.clone()),
+            MetricLabel::new("query_prefix", group.query_prefix.clone()),
+        ];
+        samples.push(
+            MetricSample::new(
+                "postgres_activity_group_connections",
+                "Connections in a grouped pg_stat_activity bucket ranked by connection count.",
+                MetricKind::Gauge,
+                group.connections,
+            )
+            .with_labels(labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "postgres_activity_group_max_query_age_ms",
+                "Maximum query age in milliseconds for a grouped pg_stat_activity bucket.",
+                MetricKind::Gauge,
+                group.max_query_age_ms,
+            )
+            .with_labels(labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "postgres_activity_group_max_transaction_age_ms",
+                "Maximum transaction age in milliseconds for a grouped pg_stat_activity bucket.",
+                MetricKind::Gauge,
+                group.max_transaction_age_ms,
+            )
+            .with_labels(labels),
+        );
+    }
+
+    samples
+}
+
+fn postgres_activity_group_unavailable_metric_samples() -> Vec<MetricSample> {
+    vec![MetricSample::new(
+        "postgres_activity_groups_available",
+        "Whether grouped pg_stat_activity diagnostics are available for this scrape.",
+        MetricKind::Gauge,
+        0,
+    )
+    .with_labels(vec![MetricLabel::new("driver", "postgres")])]
+}
+
+fn redis_runtime_metric_samples(
+    snapshot: Option<&RedisRuntimeDiagnostics>,
+    unavailable: bool,
+) -> Vec<MetricSample> {
+    let labels = vec![MetricLabel::new("backend", "redis")];
+    let enabled = u64::from(snapshot.is_some() || unavailable);
+    let mut samples = vec![
+        MetricSample::new(
+            "redis_runtime_enabled",
+            "Whether the gateway runtime state backend is Redis.",
+            MetricKind::Gauge,
+            enabled,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_health_unavailable",
+            "Whether Redis runtime diagnostics could not be read for this scrape.",
+            MetricKind::Gauge,
+            u64::from(unavailable),
+        )
+        .with_labels(labels.clone()),
+    ];
+
+    let Some(snapshot) = snapshot else {
+        samples.extend(redis_runtime_zero_metric_samples(labels));
+        return samples;
+    };
+
+    let keyspace_total = snapshot
+        .keyspace_hits
+        .unwrap_or_default()
+        .saturating_add(snapshot.keyspace_misses.unwrap_or_default());
+    let hit_rate_basis_points = snapshot
+        .keyspace_hits
+        .unwrap_or_default()
+        .saturating_mul(10_000)
+        .checked_div(keyspace_total)
+        .unwrap_or_default();
+    let memory_usage_basis_points = snapshot
+        .maxmemory_bytes
+        .filter(|maxmemory| *maxmemory > 0)
+        .map(|maxmemory| {
+            snapshot
+                .used_memory_bytes
+                .unwrap_or_default()
+                .saturating_mul(10_000)
+                / maxmemory
+        })
+        .unwrap_or_default();
+
+    samples.extend([
+        MetricSample::new(
+            "redis_runtime_connected_clients",
+            "Number of clients currently connected to Redis.",
+            MetricKind::Gauge,
+            snapshot.connected_clients.unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_blocked_clients",
+            "Number of Redis clients currently blocked by blocking commands.",
+            MetricKind::Gauge,
+            snapshot.blocked_clients.unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_total_connections_received",
+            "Total number of Redis connections received by the server.",
+            MetricKind::Counter,
+            snapshot.total_connections_received.unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_rejected_connections_total",
+            "Total number of Redis connections rejected by maxclients.",
+            MetricKind::Counter,
+            snapshot.rejected_connections.unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_total_commands_processed",
+            "Total Redis commands processed by the server.",
+            MetricKind::Counter,
+            snapshot.total_commands_processed.unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_instantaneous_ops_per_sec",
+            "Redis instantaneous operations per second.",
+            MetricKind::Gauge,
+            snapshot.instantaneous_ops_per_sec.unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_total_error_replies",
+            "Total Redis error replies returned by the server.",
+            MetricKind::Counter,
+            snapshot.total_error_replies.unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_expired_keys_total",
+            "Total number of Redis keys expired by the server.",
+            MetricKind::Counter,
+            snapshot.expired_keys.unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_evicted_keys_total",
+            "Total number of Redis keys evicted by maxmemory policy.",
+            MetricKind::Counter,
+            snapshot.evicted_keys.unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_keyspace_hits_total",
+            "Total number of Redis keyspace hits.",
+            MetricKind::Counter,
+            snapshot.keyspace_hits.unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_keyspace_misses_total",
+            "Total number of Redis keyspace misses.",
+            MetricKind::Counter,
+            snapshot.keyspace_misses.unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_keyspace_hit_rate_basis_points",
+            "Redis keyspace hit rate in basis points, where 10000 means 100 percent.",
+            MetricKind::Gauge,
+            hit_rate_basis_points,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_used_memory_bytes",
+            "Redis used memory in bytes.",
+            MetricKind::Gauge,
+            snapshot.used_memory_bytes.unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_maxmemory_bytes",
+            "Redis configured maxmemory in bytes, or 0 when unlimited.",
+            MetricKind::Gauge,
+            snapshot.maxmemory_bytes.unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_memory_usage_basis_points",
+            "Redis memory usage relative to maxmemory in basis points, where 10000 means 100 percent; 0 when maxmemory is unlimited.",
+            MetricKind::Gauge,
+            memory_usage_basis_points,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_memory_fragmentation_ratio_basis_points",
+            "Redis memory fragmentation ratio scaled by 10000.",
+            MetricKind::Gauge,
+            snapshot
+                .memory_fragmentation_ratio_basis_points
+                .unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+    ]);
+
+    for lane in &snapshot.lanes {
+        let lane_labels = vec![
+            MetricLabel::new("backend", "redis"),
+            MetricLabel::new("lane", lane.lane),
+        ];
+        samples.push(
+            MetricSample::new(
+                "redis_runtime_lane_command_errors_total",
+                "Total Redis runtime command errors by connection lane.",
+                MetricKind::Counter,
+                lane.command_errors,
+            )
+            .with_labels(lane_labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "redis_runtime_lane_command_count_total",
+                "Total Redis runtime commands observed by connection lane.",
+                MetricKind::Counter,
+                lane.command_count,
+            )
+            .with_labels(lane_labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "redis_runtime_lane_command_latency_ms_sum",
+                "Cumulative Redis runtime command latency in milliseconds by connection lane.",
+                MetricKind::Counter,
+                lane.command_latency_total_ms,
+            )
+            .with_labels(lane_labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "redis_runtime_lane_command_latency_ms_count",
+                "Total Redis runtime command latency observations by connection lane.",
+                MetricKind::Counter,
+                lane.command_count,
+            )
+            .with_labels(lane_labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "redis_runtime_lane_command_latency_ms_max",
+                "Maximum Redis runtime command latency in milliseconds by connection lane since process start.",
+                MetricKind::Gauge,
+                lane.command_latency_max_ms,
+            )
+            .with_labels(lane_labels.clone()),
+        );
+        for bucket in &lane.command_latency_buckets {
+            let mut bucket_labels = lane_labels.clone();
+            bucket_labels.push(MetricLabel::new(
+                "le",
+                bucket
+                    .le_ms
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "+Inf".to_string()),
+            ));
+            samples.push(
+                MetricSample::new(
+                    "redis_runtime_lane_command_latency_ms_bucket",
+                    "Cumulative Redis runtime command latency histogram bucket by connection lane.",
+                    MetricKind::Counter,
+                    bucket.count,
+                )
+                .with_labels(bucket_labels),
+            );
+        }
+        samples.push(
+            MetricSample::new(
+                "redis_runtime_lane_command_timeouts_total",
+                "Total Redis runtime command timeouts by connection lane.",
+                MetricKind::Counter,
+                lane.command_timeouts,
+            )
+            .with_labels(lane_labels),
+        );
+    }
+
+    samples
+}
+
+fn redis_runtime_zero_metric_samples(labels: Vec<MetricLabel>) -> Vec<MetricSample> {
+    vec![
+        MetricSample::new(
+            "redis_runtime_connected_clients",
+            "Number of clients currently connected to Redis.",
+            MetricKind::Gauge,
+            0,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_blocked_clients",
+            "Number of Redis clients currently blocked by blocking commands.",
+            MetricKind::Gauge,
+            0,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_used_memory_bytes",
+            "Redis used memory in bytes.",
+            MetricKind::Gauge,
+            0,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "redis_runtime_memory_usage_basis_points",
+            "Redis memory usage relative to maxmemory in basis points, where 10000 means 100 percent; 0 when maxmemory is unlimited.",
+            MetricKind::Gauge,
+            0,
+        )
+        .with_labels(labels),
+    ]
+}
+
+fn usage_runtime_metric_samples(
+    snapshot: &usage::UsageRuntimeMetricsSnapshot,
+) -> Vec<MetricSample> {
+    vec![
+        MetricSample::new(
+            "usage_runtime_enabled",
+            "Whether the gateway usage runtime is enabled.",
+            MetricKind::Gauge,
+            u64::from(snapshot.enabled),
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_terminal_events_enabled",
+            "Whether terminal usage events are queued before settlement.",
+            MetricKind::Gauge,
+            u64::from(snapshot.queue_terminal_events),
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_lifecycle_events_enabled",
+            "Whether lifecycle usage events are queued.",
+            MetricKind::Gauge,
+            u64::from(snapshot.queue_lifecycle_events),
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_count",
+            "Minimum configured number of usage queue worker consumers.",
+            MetricKind::Gauge,
+            snapshot.worker_count as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_autoscale_enabled",
+            "Whether usage queue worker autoscaling is enabled.",
+            MetricKind::Gauge,
+            u64::from(snapshot.worker_autoscale_enabled),
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_max_count",
+            "Maximum configured number of elastic usage queue worker consumers.",
+            MetricKind::Gauge,
+            snapshot.worker_max_count as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_record_concurrency_limit",
+            "Maximum concurrent usage queue worker record writes; zero means unlimited.",
+            MetricKind::Gauge,
+            snapshot.worker_record_concurrency_limit.unwrap_or_default() as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_record_concurrency_in_flight",
+            "Current usage queue worker record writes in flight.",
+            MetricKind::Gauge,
+            snapshot.worker_record_concurrency_in_flight as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_record_concurrency_max_in_flight",
+            "Maximum observed usage queue worker record writes in flight.",
+            MetricKind::Gauge,
+            snapshot.worker_record_concurrency_max_in_flight as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_record_concurrency_wait_total",
+            "Total usage queue worker record writes that had to wait for the record concurrency gate.",
+            MetricKind::Counter,
+            snapshot.worker_record_concurrency_wait_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_record_deferred_total",
+            "Total usage queue worker record writes deferred briefly because the database pool was under foreground pressure.",
+            MetricKind::Counter,
+            snapshot.worker_record_deferred_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_active_count",
+            "Current active usage queue worker consumers managed by the supervisor.",
+            MetricKind::Gauge,
+            snapshot.worker_active_count as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_desired_count",
+            "Current desired usage queue worker consumers selected by autoscaling.",
+            MetricKind::Gauge,
+            snapshot.worker_desired_count as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_read_batches_total",
+            "Total successful usage queue read batches observed by supervised workers.",
+            MetricKind::Counter,
+            snapshot.worker_read_batches_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_read_entries_total",
+            "Total usage queue entries read by supervised workers.",
+            MetricKind::Counter,
+            snapshot.worker_read_entries_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_reclaimed_entries_total",
+            "Total stale usage queue entries reclaimed by supervised workers.",
+            MetricKind::Counter,
+            snapshot.worker_reclaimed_entries_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_acked_entries_total",
+            "Total usage queue entries acknowledged and deleted by supervised workers.",
+            MetricKind::Counter,
+            snapshot.worker_acked_entries_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_dead_lettered_entries_total",
+            "Total usage queue entries moved to dead letter by supervised workers.",
+            MetricKind::Counter,
+            snapshot.worker_dead_lettered_entries_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_process_failures_total",
+            "Total usage queue processing failures observed by supervised workers.",
+            MetricKind::Counter,
+            snapshot.worker_process_failures_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_read_failures_total",
+            "Total usage queue read failures observed by supervised workers.",
+            MetricKind::Counter,
+            snapshot.worker_read_failures_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_reclaim_failures_total",
+            "Total usage queue reclaim failures observed by supervised workers.",
+            MetricKind::Counter,
+            snapshot.worker_reclaim_failures_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_retry_deferred_lifecycle_events_enabled",
+            "Whether deferred lifecycle usage events are scheduled for local enqueue retry.",
+            MetricKind::Gauge,
+            u64::from(snapshot.retry_deferred_lifecycle_events),
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_in_flight",
+            "Current terminal usage enqueue operations in flight.",
+            MetricKind::Gauge,
+            snapshot.terminal_enqueue_in_flight,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_deferred_total",
+            "Total terminal usage enqueue operations deferred by circuit or in-flight limits.",
+            MetricKind::Counter,
+            snapshot.terminal_enqueue_deferred_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_deferred_retry_total",
+            "Total deferred terminal usage events scheduled for local retry.",
+            MetricKind::Counter,
+            snapshot.terminal_enqueue_deferred_retry_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_failed_total",
+            "Total terminal usage enqueue failures that opened the terminal enqueue circuit.",
+            MetricKind::Counter,
+            snapshot.terminal_enqueue_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_in_flight",
+            "Current lifecycle usage enqueue operations in flight.",
+            MetricKind::Gauge,
+            snapshot.lifecycle_enqueue_in_flight,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_deferred_total",
+            "Total lifecycle usage enqueue operations deferred by circuit or in-flight limits.",
+            MetricKind::Counter,
+            snapshot.lifecycle_enqueue_deferred_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_deferred_dropped_total",
+            "Total deferred lifecycle usage events dropped instead of retrying.",
+            MetricKind::Counter,
+            snapshot.lifecycle_enqueue_deferred_dropped_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_deferred_retry_total",
+            "Total deferred lifecycle usage events scheduled for local retry.",
+            MetricKind::Counter,
+            snapshot.lifecycle_enqueue_deferred_retry_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_failed_total",
+            "Total lifecycle usage enqueue failures that opened the lifecycle enqueue circuit.",
+            MetricKind::Counter,
+            snapshot.lifecycle_enqueue_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_enqueue_retry_scheduled_total",
+            "Total usage events scheduled into the local enqueue retry dispatcher.",
+            MetricKind::Counter,
+            snapshot.enqueue_retry_scheduled_total,
+        ),
+    ]
+}
+
+fn usage_queue_health_metric_samples(
+    snapshot: &usage::UsageQueueHealthSnapshot,
+) -> Vec<MetricSample> {
+    let labels = vec![
+        MetricLabel::new("stream", snapshot.stream_key.clone()),
+        MetricLabel::new("group", snapshot.consumer_group.clone()),
+    ];
+    let dlq_labels = vec![MetricLabel::new("stream", snapshot.dlq_stream_key.clone())];
+    vec![
+        MetricSample::new(
+            "usage_queue_health_unavailable",
+            "Whether usage runtime queue health could not be read for this scrape.",
+            MetricKind::Gauge,
+            0,
+        ),
+        MetricSample::new(
+            "usage_queue_enabled",
+            "Whether the usage runtime queue is enabled.",
+            MetricKind::Gauge,
+            u64::from(snapshot.enabled),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "usage_queue_configured",
+            "Whether a runtime queue backend is configured for usage workers.",
+            MetricKind::Gauge,
+            u64::from(snapshot.configured),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "usage_queue_stream_length",
+            "Current number of entries retained in the usage runtime stream.",
+            MetricKind::Gauge,
+            snapshot.stream_length,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "usage_queue_group_pending",
+            "Current number of usage runtime stream entries pending acknowledgement.",
+            MetricKind::Gauge,
+            snapshot.group_pending,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "usage_queue_group_lag",
+            "Current number of usage runtime stream entries not yet delivered to the consumer group.",
+            MetricKind::Gauge,
+            snapshot.group_lag.unwrap_or_default(),
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "usage_queue_oldest_pending_idle_ms",
+            "Idle milliseconds for the oldest pending usage runtime stream entry.",
+            MetricKind::Gauge,
+            snapshot.oldest_pending_idle_ms.unwrap_or_default(),
+        )
+        .with_labels(labels),
+        MetricSample::new(
+            "usage_queue_dlq_length",
+            "Current number of retained usage runtime dead-letter stream entries.",
+            MetricKind::Gauge,
+            snapshot.dlq_length,
+        )
+        .with_labels(dlq_labels),
+    ]
+}
+
+fn usage_counter_health_metric_samples(
+    snapshot: &UsageCounterHealthSnapshot,
+    now_unix_secs: u64,
+) -> Vec<MetricSample> {
+    let oldest_pending_age_secs = snapshot
+        .oldest_pending_created_at_unix_secs
+        .filter(|_| snapshot.pending_rows > 0)
+        .map(|created_at| now_unix_secs.saturating_sub(created_at))
+        .unwrap_or_default();
+    let mut samples = vec![
+        MetricSample::new(
+            "usage_counter_health_unavailable",
+            "Whether usage counter outbox health could not be read for this scrape.",
+            MetricKind::Gauge,
+            0,
+        ),
+        MetricSample::new(
+            "usage_counter_outbox_pending_rows",
+            "Number of usage counter outbox rows waiting to be flushed.",
+            MetricKind::Gauge,
+            snapshot.pending_rows,
+        ),
+        MetricSample::new(
+            "usage_counter_outbox_processed_rows",
+            "Number of usage counter outbox rows already processed.",
+            MetricKind::Gauge,
+            snapshot.processed_rows,
+        ),
+        MetricSample::new(
+            "usage_counter_outbox_oldest_pending_age_seconds",
+            "Age of the oldest pending usage counter outbox row in seconds.",
+            MetricKind::Gauge,
+            oldest_pending_age_secs,
+        ),
+        MetricSample::new(
+            "usage_counter_outbox_oldest_pending_created_at_unix_secs",
+            "Unix timestamp of the oldest pending usage counter outbox row.",
+            MetricKind::Gauge,
+            snapshot
+                .oldest_pending_created_at_unix_secs
+                .filter(|_| snapshot.pending_rows > 0)
+                .unwrap_or_default(),
+        ),
+        MetricSample::new(
+            "usage_counter_outbox_latest_processed_at_unix_secs",
+            "Unix timestamp of the latest processed usage counter outbox row.",
+            MetricKind::Gauge,
+            snapshot.latest_processed_at_unix_secs.unwrap_or_default(),
+        ),
+    ];
+    for (kind, pending_rows) in &snapshot.pending_by_kind {
+        samples.push(
+            MetricSample::new(
+                "usage_counter_outbox_pending_rows_by_kind",
+                "Number of pending usage counter outbox rows by counter kind.",
+                MetricKind::Gauge,
+                *pending_rows,
+            )
+            .with_labels(vec![MetricLabel::new("kind", kind.clone())]),
+        );
+    }
+    samples
 }
 
 fn should_preserve_runtime_miss_diagnostic(
@@ -1680,6 +2919,20 @@ mod tests {
                 .expect("system config read should reflect replaced data"),
             Some(json!("new"))
         );
+    }
+
+    #[tokio::test]
+    async fn metric_samples_include_auth_snapshot_load_gate() {
+        let state = AppState::new().expect("app state should build");
+        let samples = state.metric_samples().await;
+
+        assert!(samples.iter().any(|sample| {
+            sample.name == "concurrency_available_permits"
+                && sample
+                    .labels
+                    .iter()
+                    .any(|label| label.key == "gate" && label.value == "gateway_auth_snapshot_load")
+        }));
     }
 
     #[test]

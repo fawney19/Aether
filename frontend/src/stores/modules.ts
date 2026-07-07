@@ -9,25 +9,34 @@ export const useModuleStore = defineStore('modules', () => {
   const loaded = ref(false)
   const loading = ref(false)
   const error = ref<string | null>(null)
+  let fetchModulesPromise: Promise<Record<string, ModuleStatus>> | null = null
 
   /**
    * 获取所有模块状态
    */
   async function fetchModules() {
-    if (loading.value) return
+    if (fetchModulesPromise) return fetchModulesPromise
 
     loading.value = true
     error.value = null
 
-    try {
-      modules.value = await modulesApi.getAllStatus()
-      loaded.value = true
-    } catch (err: unknown) {
-      log.error('Failed to fetch modules status', err)
-      error.value = parseApiError(err, '获取模块状态失败')
-    } finally {
-      loading.value = false
-    }
+    fetchModulesPromise = (async () => {
+      try {
+        const nextModules = await modulesApi.getAllStatus()
+        modules.value = nextModules
+        loaded.value = true
+        return nextModules
+      } catch (err: unknown) {
+        log.error('Failed to fetch modules status', err)
+        error.value = parseApiError(err, '获取模块状态失败')
+        throw err
+      } finally {
+        loading.value = false
+        fetchModulesPromise = null
+      }
+    })()
+
+    return fetchModulesPromise
   }
 
   /**

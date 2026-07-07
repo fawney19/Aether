@@ -7,7 +7,7 @@
         class="h-8 w-32 text-xs border-border/60"
         :class="[presetTriggerClass]"
       >
-        <SelectValue placeholder="选择时间段" />
+        <SelectValue :placeholder="legacyT('选择时间段')" />
       </SelectTrigger>
       <SelectContent :searchable="false">
         <SelectItem
@@ -29,7 +29,7 @@
         type="date"
         class="h-8 w-36 text-xs border-border/60"
       />
-      <span class="text-xs text-muted-foreground">至</span>
+      <span class="text-xs text-muted-foreground">{{ legacyT('至') }}</span>
       <Input
         v-model="endDate"
         type="date"
@@ -42,23 +42,23 @@
       v-model="selectedGranularity"
     >
       <SelectTrigger class="h-8 w-24 text-xs border-border/60">
-        <SelectValue placeholder="粒度" />
+        <SelectValue :placeholder="legacyT('粒度')" />
       </SelectTrigger>
       <SelectContent>
         <SelectItem
           v-if="allowHourly && canUseHourly"
           value="hour"
         >
-          小时
+          {{ legacyT('小时') }}
         </SelectItem>
         <SelectItem value="day">
-          天
+          {{ legacyT('天') }}
         </SelectItem>
         <SelectItem value="week">
-          周
+          {{ legacyT('周') }}
         </SelectItem>
         <SelectItem value="month">
-          月
+          {{ legacyT('月') }}
         </SelectItem>
       </SelectContent>
     </Select>
@@ -76,6 +76,7 @@ import {
   Input
 } from '@/components/ui'
 import type { DateRangeParams } from '@/features/usage/types'
+import { useI18n } from '@/i18n'
 
 const props = withDefaults(defineProps<{
   modelValue: DateRangeParams
@@ -84,22 +85,24 @@ const props = withDefaults(defineProps<{
   presetOptions?: SelectablePreset[]
   presetTriggerClass?: string
 }>(), {
-  presetOptions: () => ['today', 'yesterday', 'last7days', 'last30days', 'last90days', 'custom']
+  presetOptions: () => ['today', 'yesterday', 'last7days', 'last30days', 'last90days', 'custom'],
+  presetTriggerClass: undefined,
 })
 const emit = defineEmits<{
   'update:modelValue': [value: DateRangeParams]
 }>()
+const { legacyT } = useI18n()
 const selectablePresets = ['today', 'yesterday', 'last7days', 'last30days', 'last90days', 'custom'] as const
 type SelectablePreset = typeof selectablePresets[number]
 
-const presetLabels: Record<SelectablePreset, string> = {
-  today: '今天',
-  yesterday: '昨天',
-  last7days: '最近7天',
-  last30days: '最近30天',
-  last90days: '最近90天',
-  custom: '自定义'
-}
+const presetLabels = computed<Record<SelectablePreset, string>>(() => ({
+  today: legacyT('今天'),
+  yesterday: legacyT('昨天'),
+  last7days: legacyT('最近7天'),
+  last30days: legacyT('最近30天'),
+  last90days: legacyT('最近90天'),
+  custom: legacyT('自定义')
+}))
 
 const activePresetOptions = computed<SelectablePreset[]>(() => {
   const unique = new Set(props.presetOptions)

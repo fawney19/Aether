@@ -1,3 +1,5 @@
+import { getI18nLocale } from '@/i18n'
+
 const COMPACT_NUMBER_UNITS = [
   { value: 1_000_000_000_000, suffix: 'T' },
   { value: 1_000_000_000, suffix: 'B' },
@@ -145,14 +147,14 @@ export function formatNumber(num: number | undefined | null): string {
   if (num === undefined || num === null) {
     return '0'
   }
-  return num.toLocaleString('zh-CN')
+  return num.toLocaleString(getI18nLocale())
 }
 
 // Date formatting
 export function formatDate(dateString: string | undefined | null): string {
-  if (!dateString) return '未知'
+  if (!dateString) return getI18nLocale() === 'en-US' ? 'Unknown' : '未知'
 
-  return new Date(dateString).toLocaleDateString('zh-CN', {
+  return new Date(dateString).toLocaleDateString(getI18nLocale(), {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -177,6 +179,15 @@ export function formatModelPrice(price: number | undefined | null): string {
 
 // Billing type formatting
 export function formatBillingType(type: string | undefined | null): string {
+  if (getI18nLocale() === 'en-US') {
+    const englishTypeMap: Record<string, string> = {
+      'pay_as_you_go': 'Pay as you go',
+      'monthly_quota': 'Monthly quota',
+      'free_tier': 'Free tier',
+    }
+    return englishTypeMap[type || ''] || type || 'Pay as you go'
+  }
+
   const typeMap: Record<string, string> = {
     'pay_as_you_go': '按量付费',
     'monthly_quota': '月卡配额',
@@ -198,13 +209,14 @@ export function formatUsageCount(count: number): string {
 
 // Format remaining time from unix timestamp
 export function formatRemainingTime(expireAt: number | undefined, currentTime: number): string {
-  if (!expireAt) return '未知'
+  const isEnglish = getI18nLocale() === 'en-US'
+  if (!expireAt) return isEnglish ? 'Unknown' : '未知'
   const remaining = expireAt - currentTime
-  if (remaining <= 0) return '已过期'
+  if (remaining <= 0) return isEnglish ? 'Expired' : '已过期'
 
   const minutes = Math.floor(remaining / 60)
   const seconds = Math.floor(remaining % 60)
-  return `${minutes}分${seconds}秒`
+  return isEnglish ? `${minutes}m ${seconds}s` : `${minutes}分${seconds}秒`
 }
 
 // Cache hit rate formatting
@@ -215,14 +227,14 @@ export function formatHitRate(rate: number | undefined): string {
 
 // Rate limit formatting (supports "inherit" semantics: null = inherit system default)
 export function formatRateLimitInheritable(rateLimit?: number | null): string {
-  if (rateLimit == null) return '跟随系统'
-  if (rateLimit === 0) return '不限速'
+  if (rateLimit == null) return getI18nLocale() === 'en-US' ? 'Use system default' : '跟随系统'
+  if (rateLimit === 0) return getI18nLocale() === 'en-US' ? 'No limit' : '不限速'
   return `${rateLimit}/min`
 }
 
 // Rate limit formatting (simple: null/0 both mean unlimited)
 export function formatRateLimitSimple(rateLimit?: number | null): string {
-  if (rateLimit == null || rateLimit === 0) return '不限速'
+  if (rateLimit == null || rateLimit === 0) return getI18nLocale() === 'en-US' ? 'No limit' : '不限速'
   return `${rateLimit}/min`
 }
 

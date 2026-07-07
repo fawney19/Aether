@@ -228,8 +228,39 @@ fn collect_email_sentinel(text: &str) -> String {
     text[start..end].to_string()
 }
 
-#[tokio::test]
-async fn ai_execute_stream_pii_redaction_round_trip() {
+const STREAM_PII_REDACTION_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_stream_pii_redaction_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(STREAM_PII_REDACTION_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("stream pii redaction test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+fn ai_execute_stream_pii_redaction_round_trip() {
+    run_stream_pii_redaction_test(
+        "ai_execute_stream_pii_redaction_round_trip",
+        ai_execute_stream_pii_redaction_round_trip_impl,
+    );
+}
+
+async fn ai_execute_stream_pii_redaction_round_trip_impl() {
     let seen_provider_request = Arc::new(Mutex::new(None::<SeenProviderStreamRequest>));
     let seen_provider_request_clone = Arc::clone(&seen_provider_request);
     let provider_app = Router::new().route(

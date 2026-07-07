@@ -740,6 +740,7 @@ where
         request_auth_channel,
         use_api_format_alias_match,
         key_mode,
+        sticky_session_token.is_none(),
         Some(trace_id),
     )
     .await;
@@ -2188,6 +2189,7 @@ mod tests {
             None,
             false,
             LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModel,
+            true,
             Some("trace-no-session-affinity"),
         )
         .await;
@@ -2241,6 +2243,7 @@ mod tests {
             None,
             false,
             LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModel,
+            true,
             Some("trace-session-affinity"),
         )
         .await;
@@ -2276,6 +2279,7 @@ mod tests {
             None,
             false,
             LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModel,
+            true,
             Some("trace-fixed-order"),
         )
         .await;

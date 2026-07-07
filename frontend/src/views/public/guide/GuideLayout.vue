@@ -35,7 +35,7 @@
         <nav class="w-full px-3">
           <div class="space-y-0.5">
             <template
-              v-for="item in guideNavItems"
+              v-for="item in resolvedGuideNavItems"
               :key="item.id"
             >
               <RouterLink
@@ -125,24 +125,8 @@
             </RouterLink>
 
             <div class="flex items-center gap-3">
-              <button
-                class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-                :title="themeMode === 'system' ? '跟随系统' : themeMode === 'dark' ? '深色模式' : '浅色模式'"
-                @click="toggleDarkMode"
-              >
-                <SunMoon
-                  v-if="themeMode === 'system'"
-                  class="h-4 w-4"
-                />
-                <Sun
-                  v-else-if="themeMode === 'light'"
-                  class="h-4 w-4"
-                />
-                <Moon
-                  v-else
-                  class="h-4 w-4"
-                />
-              </button>
+              <ThemeModeButton />
+              <LanguageSwitcher />
               <button
                 class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
                 @click="mobileMenuOpen = !mobileMenuOpen"
@@ -174,18 +158,18 @@
 
         <!-- Mobile Dropdown Menu -->
         <Transition
-          enter-active-class="transition-all duration-300 ease-out overflow-hidden"
-          enter-from-class="opacity-0 max-h-0"
-          enter-to-class="opacity-100 max-h-[500px]"
-          leave-active-class="transition-all duration-200 ease-in overflow-hidden"
-          leave-from-class="opacity-100 max-h-[500px]"
-          leave-to-class="opacity-0 max-h-0"
+          enter-active-class="transition-all duration-300 ease-out"
+          enter-from-class="opacity-0 -translate-y-2"
+          enter-to-class="opacity-100 translate-y-0"
+          leave-active-class="transition-all duration-200 ease-in"
+          leave-from-class="opacity-100 translate-y-0"
+          leave-to-class="opacity-0 -translate-y-2"
         >
           <div
             v-if="mobileMenuOpen"
-            class="border-t border-[var(--shell-border)] bg-[var(--shell-glass)] backdrop-blur-xl"
+            class="absolute inset-x-0 top-full max-h-[calc(100dvh-73px)] overflow-y-auto overscroll-contain border-t border-[var(--shell-border)] bg-background shadow-xl [-webkit-overflow-scrolling:touch] touch-pan-y"
           >
-            <div class="mx-auto max-w-7xl px-6 py-4">
+            <div class="mx-auto max-w-7xl px-6 py-4 pb-28">
               <div class="space-y-4">
                 <div
                   v-for="group in navigation"
@@ -230,7 +214,7 @@
               to="/guide"
               class="hover:text-foreground transition-colors"
             >
-              教程文档
+              {{ t('guide.title') }}
             </RouterLink>
             <template v-if="currentNavItem && currentNavItem.id !== 'overview'">
               <ChevronRight class="w-3 h-3 opacity-50" />
@@ -242,33 +226,17 @@
         </div>
 
         <div class="flex items-center gap-2">
-          <button
-            class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-            :title="themeMode === 'system' ? '跟随系统' : themeMode === 'dark' ? '深色模式' : '浅色模式'"
-            @click="toggleDarkMode"
-          >
-            <SunMoon
-              v-if="themeMode === 'system'"
-              class="h-4 w-4"
-            />
-            <Sun
-              v-else-if="themeMode === 'light'"
-              class="h-4 w-4"
-            />
-            <Moon
-              v-else
-              class="h-4 w-4"
-            />
-          </button>
+          <ThemeModeButton />
           <a
             href="https://github.com/fawney19/Aether"
             target="_blank"
             rel="noopener noreferrer"
             class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-            title="GitHub 仓库"
+            :title="t('common.githubRepository')"
           >
             <GithubIcon class="h-4 w-4" />
           </a>
+          <LanguageSwitcher />
         </div>
       </header>
     </template>
@@ -325,28 +293,36 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import {
   Menu,
-  Moon,
-  Sun,
-  SunMoon,
   ChevronRight,
   X
 } from 'lucide-vue-next'
 import GithubIcon from '@/components/icons/GithubIcon.vue'
 import HeaderLogo from '@/components/HeaderLogo.vue'
+import LanguageSwitcher from '@/components/common/LanguageSwitcher.vue'
+import ThemeModeButton from '@/components/common/ThemeModeButton.vue'
 import AppShell from '@/components/layout/AppShell.vue'
-import { useDarkMode } from '@/composables/useDarkMode'
 import { useSiteInfo } from '@/composables/useSiteInfo'
+import { useI18n } from '@/i18n'
 import { guideNavItems } from './guide-config'
 
 const route = useRoute()
-const { themeMode, toggleDarkMode } = useDarkMode()
 const { siteName, siteSubtitle } = useSiteInfo()
+const { t } = useI18n()
 
 const mobileMenuOpen = ref(false)
 const baseUrl = ref(typeof window !== 'undefined' ? window.location.origin : 'https://your-aether.com')
 const activeHash = ref('')
 const lightboxSrc = ref('')
 const lightboxAlt = ref('')
+const resolvedGuideNavItems = computed(() => guideNavItems.map(item => ({
+  ...item,
+  name: t(item.nameKey),
+  description: item.descriptionKey ? t(item.descriptionKey) : undefined,
+  subItems: item.subItems?.map(subItem => ({
+    ...subItem,
+    name: t(subItem.nameKey),
+  })),
+})))
 
 function onArticleClick(e: MouseEvent) {
   const target = e.target as HTMLElement
@@ -437,7 +413,7 @@ onUnmounted(() => {
 })
 
 const currentNavItem = computed(() => {
-  return guideNavItems.find(item => item.path === route.path)
+  return resolvedGuideNavItems.value.find(item => item.path === route.path)
 })
 
 function isNavActive(href: string) {
@@ -451,7 +427,7 @@ function isNavActive(href: string) {
 const navigation = computed(() => [
   {
     title: '',
-    items: guideNavItems.map(item => ({
+    items: resolvedGuideNavItems.value.map(item => ({
       name: item.name,
       href: item.path,
       icon: item.icon

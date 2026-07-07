@@ -1444,13 +1444,26 @@ ORDER BY delta.created_at ASC, delta.id ASC
 
 const READ_USAGE_COUNTER_HEALTH_SQL: &str = r#"
 SELECT
-  COUNT(*) FILTER (WHERE processed_at IS NULL)::BIGINT AS pending_rows,
-  COUNT(*) FILTER (WHERE processed_at IS NOT NULL)::BIGINT AS processed_rows,
-  CAST(EXTRACT(EPOCH FROM MIN(created_at) FILTER (WHERE processed_at IS NULL)) AS BIGINT)
-    AS oldest_pending_created_at_unix_secs,
-  CAST(EXTRACT(EPOCH FROM MAX(processed_at)) AS BIGINT)
-    AS latest_processed_at_unix_secs
-FROM usage_counter_deltas
+  (
+    SELECT COUNT(*)::BIGINT
+    FROM usage_counter_deltas
+    WHERE processed_at IS NULL
+  ) AS pending_rows,
+  (
+    SELECT COUNT(*)::BIGINT
+    FROM usage_counter_deltas
+    WHERE processed_at IS NOT NULL
+  ) AS processed_rows,
+  (
+    SELECT CAST(EXTRACT(EPOCH FROM MIN(created_at)) AS BIGINT)
+    FROM usage_counter_deltas
+    WHERE processed_at IS NULL
+  ) AS oldest_pending_created_at_unix_secs,
+  (
+    SELECT CAST(EXTRACT(EPOCH FROM MAX(processed_at)) AS BIGINT)
+    FROM usage_counter_deltas
+    WHERE processed_at IS NOT NULL
+  ) AS latest_processed_at_unix_secs
 "#;
 
 const READ_PENDING_USAGE_COUNTER_DELTAS_BY_KIND_SQL: &str = r#"
@@ -8016,8 +8029,26 @@ ORDER BY "usage".user_id ASC
     ) -> Result<StoredRequestUsageAudit, DataLayerError> {
         usage.validate()?;
         let usage = strip_deprecated_usage_display_fields(usage);
+        let prepared = prepare_usage_upsert_context(&usage)?;
         self.tx_runner
             .run_read_write(|tx| {
+                let PreparedUsageUpsert {
+                    request_headers_json,
+                    provider_request_headers_json,
+                    response_headers_json,
+                    client_response_headers_json,
+                    request_body_storage,
+                    provider_request_body_storage,
+                    response_body_storage,
+                    client_response_body_storage,
+                    http_audit_refs,
+                    http_audit_states,
+                    http_audit_capture_mode,
+                    routing_snapshot,
+                    settlement_pricing_snapshot,
+                    request_metadata_value,
+                    request_metadata_json,
+                } = prepared;
                 Box::pin(async move {
                     lock_usage_request_id_in_tx(tx, &usage.request_id).await?;
 
@@ -8039,102 +8070,6 @@ ORDER BY "usage".user_id ASC
 
                     let previous_usage =
                         find_usage_by_request_id_in_tx(tx, &usage.request_id).await?;
-
-                    let request_headers_json = json_bind_text(usage.request_headers.as_ref())?;
-                    let request_body_storage =
-                        prepare_usage_body_storage(usage.request_body.as_ref())?;
-                    let provider_request_headers_json =
-                        json_bind_text(usage.provider_request_headers.as_ref())?;
-                    let provider_request_body_storage =
-                        prepare_usage_body_storage(usage.provider_request_body.as_ref())?;
-                    let response_headers_json = json_bind_text(usage.response_headers.as_ref())?;
-                    let response_body_storage =
-                        prepare_usage_body_storage(usage.response_body.as_ref())?;
-                    let client_response_headers_json =
-                        json_bind_text(usage.client_response_headers.as_ref())?;
-                    let client_response_body_storage =
-                        prepare_usage_body_storage(usage.client_response_body.as_ref())?;
-                    let http_audit_refs = UsageHttpAuditRefs {
-                        request_body_ref: resolved_write_usage_body_ref(
-                            usage.request_body_ref.as_deref(),
-                            &usage.request_id,
-                            UsageBodyField::RequestBody,
-                            request_body_storage.has_detached_blob(),
-                            None,
-                        ),
-                        provider_request_body_ref: resolved_write_usage_body_ref(
-                            usage.provider_request_body_ref.as_deref(),
-                            &usage.request_id,
-                            UsageBodyField::ProviderRequestBody,
-                            provider_request_body_storage.has_detached_blob(),
-                            None,
-                        ),
-                        response_body_ref: resolved_write_usage_body_ref(
-                            usage.response_body_ref.as_deref(),
-                            &usage.request_id,
-                            UsageBodyField::ResponseBody,
-                            response_body_storage.has_detached_blob(),
-                            None,
-                        ),
-                        client_response_body_ref: resolved_write_usage_body_ref(
-                            usage.client_response_body_ref.as_deref(),
-                            &usage.request_id,
-                            UsageBodyField::ClientResponseBody,
-                            client_response_body_storage.has_detached_blob(),
-                            None,
-                        ),
-                    };
-                    let http_audit_states = UsageHttpAuditStates {
-                        request_body_state: usage.request_body_state,
-                        provider_request_body_state: usage.provider_request_body_state,
-                        response_body_state: usage.response_body_state,
-                        client_response_body_state: usage.client_response_body_state,
-                    };
-                    let request_metadata_value = prepare_request_metadata_for_body_storage(
-                        usage.request_metadata.clone(),
-                        [
-                            (
-                                UsageBodyField::RequestBody,
-                                &request_body_storage,
-                                usage.request_body.as_ref(),
-                                usage.request_body_ref.as_deref(),
-                            ),
-                            (
-                                UsageBodyField::ProviderRequestBody,
-                                &provider_request_body_storage,
-                                usage.provider_request_body.as_ref(),
-                                usage.provider_request_body_ref.as_deref(),
-                            ),
-                            (
-                                UsageBodyField::ResponseBody,
-                                &response_body_storage,
-                                usage.response_body.as_ref(),
-                                usage.response_body_ref.as_deref(),
-                            ),
-                            (
-                                UsageBodyField::ClientResponseBody,
-                                &client_response_body_storage,
-                                usage.client_response_body.as_ref(),
-                                usage.client_response_body_ref.as_deref(),
-                            ),
-                        ],
-                    );
-                    let http_audit_capture_mode = usage_http_audit_capture_mode(
-                        &http_audit_refs,
-                        [
-                            usage.request_body.as_ref(),
-                            usage.provider_request_body.as_ref(),
-                            usage.response_body.as_ref(),
-                            usage.client_response_body.as_ref(),
-                        ],
-                    );
-                    let routing_snapshot =
-                        usage_routing_snapshot_from_usage(&usage, request_metadata_value.as_ref());
-                    let settlement_pricing_snapshot = usage_settlement_pricing_snapshot_from_usage(
-                        &usage,
-                        request_metadata_value.as_ref(),
-                    )?;
-                    let request_metadata_json = json_bind_text(request_metadata_value.as_ref())?;
                     let _row = sqlx::query(UPSERT_SQL)
                         .bind(Uuid::new_v4().to_string())
                         .bind(&usage.request_id)
@@ -10473,6 +10408,25 @@ impl UsageSettlementPricingSnapshot {
     }
 }
 
+#[derive(Debug)]
+struct PreparedUsageUpsert {
+    request_headers_json: Option<String>,
+    provider_request_headers_json: Option<String>,
+    response_headers_json: Option<String>,
+    client_response_headers_json: Option<String>,
+    request_body_storage: UsageBodyStorage,
+    provider_request_body_storage: UsageBodyStorage,
+    response_body_storage: UsageBodyStorage,
+    client_response_body_storage: UsageBodyStorage,
+    http_audit_refs: UsageHttpAuditRefs,
+    http_audit_states: UsageHttpAuditStates,
+    http_audit_capture_mode: &'static str,
+    routing_snapshot: UsageRoutingSnapshot,
+    settlement_pricing_snapshot: UsageSettlementPricingSnapshot,
+    request_metadata_value: Option<Value>,
+    request_metadata_json: Option<String>,
+}
+
 fn prepare_usage_body_storage(value: Option<&Value>) -> Result<UsageBodyStorage, DataLayerError> {
     let Some(value) = value else {
         return Ok(UsageBodyStorage {
@@ -10515,6 +10469,118 @@ fn json_bind_text(value: Option<&Value>) -> Result<Option<String>, DataLayerErro
             })
         })
         .transpose()
+}
+
+fn prepare_usage_upsert_context(
+    usage: &UpsertUsageRecord,
+) -> Result<PreparedUsageUpsert, DataLayerError> {
+    let request_headers_json = json_bind_text(usage.request_headers.as_ref())?;
+    let request_body_storage = prepare_usage_body_storage(usage.request_body.as_ref())?;
+    let provider_request_headers_json = json_bind_text(usage.provider_request_headers.as_ref())?;
+    let provider_request_body_storage =
+        prepare_usage_body_storage(usage.provider_request_body.as_ref())?;
+    let response_headers_json = json_bind_text(usage.response_headers.as_ref())?;
+    let response_body_storage = prepare_usage_body_storage(usage.response_body.as_ref())?;
+    let client_response_headers_json = json_bind_text(usage.client_response_headers.as_ref())?;
+    let client_response_body_storage =
+        prepare_usage_body_storage(usage.client_response_body.as_ref())?;
+    let http_audit_refs = UsageHttpAuditRefs {
+        request_body_ref: resolved_write_usage_body_ref(
+            usage.request_body_ref.as_deref(),
+            &usage.request_id,
+            UsageBodyField::RequestBody,
+            request_body_storage.has_detached_blob(),
+            None,
+        ),
+        provider_request_body_ref: resolved_write_usage_body_ref(
+            usage.provider_request_body_ref.as_deref(),
+            &usage.request_id,
+            UsageBodyField::ProviderRequestBody,
+            provider_request_body_storage.has_detached_blob(),
+            None,
+        ),
+        response_body_ref: resolved_write_usage_body_ref(
+            usage.response_body_ref.as_deref(),
+            &usage.request_id,
+            UsageBodyField::ResponseBody,
+            response_body_storage.has_detached_blob(),
+            None,
+        ),
+        client_response_body_ref: resolved_write_usage_body_ref(
+            usage.client_response_body_ref.as_deref(),
+            &usage.request_id,
+            UsageBodyField::ClientResponseBody,
+            client_response_body_storage.has_detached_blob(),
+            None,
+        ),
+    };
+    let http_audit_states = UsageHttpAuditStates {
+        request_body_state: usage.request_body_state,
+        provider_request_body_state: usage.provider_request_body_state,
+        response_body_state: usage.response_body_state,
+        client_response_body_state: usage.client_response_body_state,
+    };
+    let request_metadata_value = prepare_request_metadata_for_body_storage(
+        usage.request_metadata.clone(),
+        [
+            (
+                UsageBodyField::RequestBody,
+                &request_body_storage,
+                usage.request_body.as_ref(),
+                usage.request_body_ref.as_deref(),
+            ),
+            (
+                UsageBodyField::ProviderRequestBody,
+                &provider_request_body_storage,
+                usage.provider_request_body.as_ref(),
+                usage.provider_request_body_ref.as_deref(),
+            ),
+            (
+                UsageBodyField::ResponseBody,
+                &response_body_storage,
+                usage.response_body.as_ref(),
+                usage.response_body_ref.as_deref(),
+            ),
+            (
+                UsageBodyField::ClientResponseBody,
+                &client_response_body_storage,
+                usage.client_response_body.as_ref(),
+                usage.client_response_body_ref.as_deref(),
+            ),
+        ],
+    );
+    let http_audit_capture_mode = usage_http_audit_capture_mode(
+        &http_audit_refs,
+        [
+            usage.request_body.as_ref(),
+            usage.provider_request_body.as_ref(),
+            usage.response_body.as_ref(),
+            usage.client_response_body.as_ref(),
+        ],
+    );
+    let routing_snapshot =
+        usage_routing_snapshot_from_usage(usage, request_metadata_value.as_ref());
+    let settlement_pricing_snapshot =
+        usage_settlement_pricing_snapshot_from_usage(usage, request_metadata_value.as_ref())?;
+    let request_metadata_json = json_bind_text(request_metadata_value.as_ref())?;
+
+    Ok(PreparedUsageUpsert {
+        request_headers_json,
+        provider_request_headers_json,
+        response_headers_json,
+        client_response_headers_json,
+        request_body_storage,
+        provider_request_body_storage,
+        response_body_storage,
+        client_response_body_storage,
+        http_audit_refs,
+        http_audit_states,
+        http_audit_capture_mode,
+        routing_snapshot,
+        settlement_pricing_snapshot,
+        request_metadata_value,
+        request_metadata_json,
+    })
 }
 
 fn usage_body_capture_state_bind_text(

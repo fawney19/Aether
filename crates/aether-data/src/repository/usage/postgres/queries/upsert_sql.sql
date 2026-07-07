@@ -190,6 +190,7 @@ DO UPDATE SET
   status_code = CASE WHEN "usage".billing_status = 'pending' THEN CASE
     WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND EXCLUDED.status IN ('pending', 'streaming') THEN "usage".status_code
     WHEN "usage".status = 'streaming' AND EXCLUDED.status = 'pending' THEN "usage".status_code
+    WHEN "usage".status = 'streaming' AND EXCLUDED.status = 'streaming' AND EXCLUDED.status_code IS NULL THEN "usage".status_code
     WHEN EXCLUDED.status IN ('pending', 'streaming', 'completed', 'cancelled') AND EXCLUDED.status_code IS NULL THEN NULL
     ELSE COALESCE(EXCLUDED.status_code, "usage".status_code)
   END ELSE "usage".status_code END,

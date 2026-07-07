@@ -22,6 +22,22 @@ pub(super) fn parse_codex_wham_usage_response(
     admin_provider_quota_pure::parse_codex_wham_usage_response(value, updated_at_unix_secs)
 }
 
+pub(super) fn parse_codex_wham_reset_credits_detail_response(
+    value: &serde_json::Value,
+    updated_at_unix_secs: u64,
+) -> Option<serde_json::Value> {
+    admin_provider_quota_pure::parse_codex_wham_reset_credits_detail_response(
+        value,
+        updated_at_unix_secs,
+    )
+}
+
+pub(super) fn normalize_codex_reset_credit_consume_outcome(
+    value: Option<&serde_json::Value>,
+) -> Option<String> {
+    admin_provider_quota_pure::normalize_codex_reset_credit_consume_outcome(value)
+}
+
 pub(super) fn parse_codex_usage_headers(
     headers: &BTreeMap<String, String>,
     updated_at_unix_secs: u64,

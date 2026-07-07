@@ -1,8 +1,8 @@
 <template>
   <Dialog
     :model-value="internalOpen"
-    :title="isEditMode ? '编辑提供商' : '添加提供商'"
-    :description="isEditMode ? '更新提供商配置。API 端点和密钥需在详情页面单独管理。' : '创建新的提供商配置。创建后可以为其添加 API 端点和密钥。'"
+    :title="legacyT(isEditMode ? '编辑提供商' : '添加提供商')"
+    :description="legacyT(isEditMode ? '更新提供商配置。API 端点和密钥需在详情页面单独管理。' : '创建新的提供商配置。创建后可以为其添加 API 端点和密钥。')"
     :icon="isEditMode ? SquarePen : Server"
     size="xl"
     @update:model-value="handleDialogUpdate"
@@ -14,33 +14,33 @@
       <!-- 基本信息 -->
       <div class="space-y-3">
         <h3 class="text-sm font-medium border-b pb-2">
-          基本信息
+          {{ legacyT('基本信息') }}
         </h3>
 
         <div class="space-y-1.5">
-          <Label for="name">名称 *</Label>
+          <Label for="name">{{ legacyT('名称 *') }}</Label>
           <Input
             id="name"
             v-model="form.name"
-            placeholder="例如: OpenAI 主账号"
+            :placeholder="legacyT('例如: OpenAI 主账号')"
           />
         </div>
 
         <div class="grid grid-cols-2 gap-4">
           <div class="space-y-1.5">
-            <Label>提供商类型</Label>
+            <Label>{{ legacyT('提供商类型') }}</Label>
             <Select
               v-model="form.provider_type"
               :disabled="isEditMode"
             >
               <SelectTrigger>
-                <SelectValue placeholder="请选择" />
+                <SelectValue :placeholder="legacyT('请选择')" />
               </SelectTrigger>
               <SelectContent>
                 <!-- 新建模式：允许自定义及各反代类型 -->
                 <template v-if="!isEditMode">
                   <SelectItem value="custom">
-                    自定义
+                    {{ legacyT('自定义') }}
                   </SelectItem>
                   <SelectItem value="vertex_ai">
                     Vertex AI
@@ -49,7 +49,7 @@
                     value="claude_code"
                     disabled
                   >
-                    ClaudeCode（暂不可用）
+                    {{ legacyT('ClaudeCode（暂不可用）') }}
                   </SelectItem>
                   <SelectItem value="codex">
                     Codex
@@ -79,7 +79,7 @@
                 <!-- 编辑模式：显示所有类型（兼容已有数据） -->
                 <template v-else>
                   <SelectItem value="custom">
-                    自定义
+                    {{ legacyT('自定义') }}
                   </SelectItem>
                   <SelectItem value="vertex_ai">
                     Vertex AI
@@ -118,15 +118,15 @@
               v-if="!isEditMode && form.provider_type !== 'custom'"
               class="text-xs text-muted-foreground"
             >
-              {{ form.provider_type === 'glm_coding_plan' ? 'GLM Coding Plan 使用固定格式端点，Base URL 可在端点管理中切换' : '反代使用固定端点且不可修改' }}
+              {{ form.provider_type === 'glm_coding_plan' ? legacyT('GLM Coding Plan 使用固定格式端点，Base URL 可在端点管理中切换') : legacyT('反代使用固定端点且不可修改') }}
             </p>
           </div>
           <div class="space-y-1.5">
-            <Label for="website">主站链接</Label>
+            <Label for="website">{{ legacyT('主站链接') }}</Label>
             <Input
               id="website"
               v-model="form.website"
-              placeholder="https://example.com（可选）"
+              :placeholder="legacyT('https://example.com（可选）')"
             />
           </div>
         </div>
@@ -136,15 +136,15 @@
       <div class="space-y-3">
         <div class="grid grid-cols-2 gap-4">
           <h3 class="text-sm font-medium border-b pb-2">
-            计费与限流
+            {{ legacyT('计费与限流') }}
           </h3>
           <h3 class="text-sm font-medium border-b pb-2">
-            请求配置
+            {{ legacyT('请求配置') }}
           </h3>
         </div>
         <div class="grid grid-cols-2 gap-4">
           <div class="space-y-1.5">
-            <Label>计费类型</Label>
+            <Label>{{ legacyT('计费类型') }}</Label>
             <Select
               v-model="form.billing_type"
             >
@@ -153,25 +153,25 @@
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="monthly_quota">
-                  月卡额度
+                  {{ legacyT('月卡额度') }}
                 </SelectItem>
                 <SelectItem value="pay_as_you_go">
-                  按量付费
+                  {{ legacyT('按量付费') }}
                 </SelectItem>
                 <SelectItem value="free_tier">
-                  免费套餐
+                  {{ legacyT('免费套餐') }}
                 </SelectItem>
               </SelectContent>
             </Select>
           </div>
           <div class="space-y-1.5">
-            <Label>最大重试次数</Label>
+            <Label>{{ legacyT('最大重试次数') }}</Label>
             <Input
               :model-value="form.max_retries ?? ''"
               type="number"
               min="0"
               max="999"
-              placeholder="默认 2"
+              :placeholder="legacyT('默认 2')"
               @update:model-value="(v) => form.max_retries = parseNumberInput(v)"
             />
           </div>
@@ -181,8 +181,8 @@
         <div class="grid grid-cols-2 gap-4">
           <div class="space-y-1.5">
             <Label>
-              流式首字节超时
-              <span class="text-xs text-muted-foreground">(秒)</span>
+              {{ legacyT('流式首字节超时') }}
+              <span class="text-xs text-muted-foreground">{{ legacyT('(秒)') }}</span>
             </Label>
             <Input
               :model-value="form.stream_first_byte_timeout ?? ''"
@@ -196,8 +196,8 @@
           </div>
           <div class="space-y-1.5">
             <Label>
-              非流式请求超时
-              <span class="text-xs text-muted-foreground">(秒)</span>
+              {{ legacyT('非流式请求超时') }}
+              <span class="text-xs text-muted-foreground">{{ legacyT('(秒)') }}</span>
             </Label>
             <Input
               :model-value="form.request_timeout ?? ''"
@@ -217,7 +217,7 @@
           class="grid grid-cols-2 gap-4 p-3 border rounded-lg bg-muted/50"
         >
           <div class="space-y-1.5">
-            <Label class="text-xs">周期额度 (USD)</Label>
+            <Label class="text-xs">{{ legacyT('周期额度 (USD)') }}</Label>
             <Input
               :model-value="form.monthly_quota_usd ?? ''"
               type="number"
@@ -227,7 +227,7 @@
             />
           </div>
           <div class="space-y-1.5">
-            <Label class="text-xs">重置周期 (天)</Label>
+            <Label class="text-xs">{{ legacyT('重置周期 (天)') }}</Label>
             <Input
               :model-value="form.quota_reset_day ?? ''"
               type="number"
@@ -238,7 +238,7 @@
           </div>
           <div class="space-y-1.5">
             <Label class="text-xs">
-              周期开始时间 <span class="text-red-500">*</span>
+              {{ legacyT('周期开始时间') }} <span class="text-red-500">*</span>
             </Label>
             <Input
               v-model="form.quota_last_reset_at"
@@ -246,7 +246,7 @@
             />
           </div>
           <div class="space-y-1.5">
-            <Label class="text-xs">过期时间</Label>
+            <Label class="text-xs">{{ legacyT('过期时间') }}</Label>
             <Input
               v-model="form.quota_expires_at"
               type="datetime-local"
@@ -258,14 +258,14 @@
       <!-- 功能开关 -->
       <div class="space-y-3">
         <h3 class="text-sm font-medium border-b pb-2">
-          功能开关
+          {{ legacyT('功能开关') }}
         </h3>
 
         <div class="flex items-center justify-between p-3 border rounded-lg bg-muted/50">
           <div class="space-y-0.5">
-            <span class="text-sm font-medium">格式转换保持优先级</span>
+            <span class="text-sm font-medium">{{ legacyT('格式转换保持优先级') }}</span>
             <p class="text-xs text-muted-foreground">
-              跨格式请求时保持原优先级排名，不降级到格式匹配的提供商之后
+              {{ legacyT('跨格式请求时保持原优先级排名，不降级到格式匹配的提供商之后') }}
             </p>
           </div>
           <Switch
@@ -276,9 +276,9 @@
 
         <div class="flex items-center justify-between p-3 border rounded-lg bg-muted/50">
           <div class="space-y-0.5">
-            <span class="text-sm font-medium">号池调度模式</span>
+            <span class="text-sm font-medium">{{ legacyT('号池调度模式') }}</span>
             <p class="text-xs text-muted-foreground">
-              启用后该提供商的密钥将由号池统一调度
+              {{ legacyT('启用后该提供商的密钥将由号池统一调度') }}
             </p>
           </div>
           <Switch
@@ -292,9 +292,9 @@
           class="flex items-center justify-between p-3 border rounded-lg bg-muted/50"
         >
           <div class="space-y-0.5">
-            <span class="text-sm font-medium">模拟缓存模式</span>
+            <span class="text-sm font-medium">{{ legacyT('模拟缓存模式') }}</span>
             <p class="text-xs text-muted-foreground leading-relaxed">
-              启用后仅对 Kiro 请求模拟 prompt cache 读写计量。
+              {{ legacyT('启用后仅对 Kiro 请求模拟 prompt cache 读写计量。') }}
             </p>
           </div>
           <Switch
@@ -305,9 +305,9 @@
 
         <div class="flex items-center justify-between gap-4 p-3 border rounded-lg bg-muted/50">
           <div class="space-y-0.5">
-            <span class="text-sm font-medium">敏感信息保护</span>
+            <span class="text-sm font-medium">{{ legacyT('敏感信息保护') }}</span>
             <p class="text-xs text-muted-foreground leading-relaxed">
-              请前往模块管理-敏感信息保护中配置详细规则。
+              {{ legacyT('请前往模块管理-敏感信息保护中配置详细规则。') }}
             </p>
           </div>
         </div>
@@ -321,13 +321,13 @@
         :disabled="loading"
         @click="handleCancel"
       >
-        取消
+        {{ legacyT('取消') }}
       </Button>
       <Button
         :disabled="loading || !form.name"
         @click="handleSubmit"
       >
-        {{ loading ? (isEditMode ? '保存中...' : '创建中...') : (isEditMode ? '保存' : '创建') }}
+        {{ submitLabel }}
       </Button>
     </template>
   </Dialog>
@@ -350,6 +350,7 @@ import {
 import { Server, SquarePen } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { useFormDialog } from '@/composables/useFormDialog'
+import { useI18n } from '@/i18n'
 import {
   createProvider,
   normalizePoolAdvancedConfig,
@@ -374,6 +375,7 @@ const emit = defineEmits<{
 }>()
 
 const { success, error: showError } = useToast()
+const { legacyT } = useI18n()
 const loading = ref(false)
 
 // 内部状态
@@ -385,6 +387,13 @@ const defaultPriority = computed(() => {
     return Math.min(props.maxPriority + 10, 10000)
   }
   return 100
+})
+
+const submitLabel = computed(() => {
+  if (loading.value) {
+    return legacyT(isEditMode.value ? '保存中...' : '创建中...')
+  }
+  return legacyT(isEditMode.value ? '保存' : '创建')
 })
 
 // 表单数据
@@ -500,24 +509,24 @@ watch(() => form.value.provider_type, () => {
 // 提交表单
 const handleSubmit = async () => {
   if (!isEditMode.value && form.value.provider_type === 'claude_code') {
-    showError('ClaudeCode 提供商类型暂时禁用', '验证失败')
+    showError(legacyT('ClaudeCode 提供商类型暂时禁用'), legacyT('验证失败'))
     return
   }
 
   // 月卡类型必须设置周期开始时间
   if (form.value.billing_type === 'monthly_quota' && !form.value.quota_last_reset_at) {
-    showError('月卡类型必须设置周期开始时间', '验证失败')
+    showError(legacyT('月卡类型必须设置周期开始时间'), legacyT('验证失败'))
     return
   }
 
   const quotaLastResetAt = dateTimeLocalToRfc3339(form.value.quota_last_reset_at)
   if (form.value.billing_type === 'monthly_quota' && !quotaLastResetAt) {
-    showError('周期开始时间必须是合法时间', '验证失败')
+    showError(legacyT('周期开始时间必须是合法时间'), legacyT('验证失败'))
     return
   }
   const quotaExpiresAt = dateTimeLocalToRfc3339(form.value.quota_expires_at)
   if (form.value.quota_expires_at && !quotaExpiresAt) {
-    showError('过期时间必须是合法时间', '验证失败')
+    showError(legacyT('过期时间必须是合法时间'), legacyT('验证失败'))
     return
   }
 
@@ -561,19 +570,19 @@ const handleSubmit = async () => {
         ...basePayload,
         provider_priority: form.value.provider_priority,
       })
-      success('提供商更新成功')
+      success(legacyT('提供商更新成功'))
       emit('providerUpdated', updated)
     } else {
       // 创建提供商（优先级由后端自动置顶）
       await createProvider(basePayload)
-      success('提供商已创建，请继续添加端点和密钥，或在优先级管理中调整顺序', '创建成功')
+      success(legacyT('提供商已创建，请继续添加端点和密钥，或在优先级管理中调整顺序'), legacyT('创建成功'))
       emit('providerCreated')
     }
 
     emit('update:modelValue', false)
   } catch (error: unknown) {
     const action = isEditMode.value ? '更新' : '创建'
-    showError(parseApiError(error, `${action}提供商失败`), `${action}失败`)
+    showError(parseApiError(error, legacyT(`${action}提供商失败`)), legacyT(`${action}失败`))
   } finally {
     loading.value = false
   }

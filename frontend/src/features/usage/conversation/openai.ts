@@ -674,16 +674,18 @@ export class OpenAIParser implements ApiFormatParser {
             : typeof chunk.delta === 'string'
               ? chunk.delta
               : null
-          if (key && toolCalls.has(key) && args != null) {
-            toolCalls.get(key)!.args = [args]
+          const toolCall = key ? toolCalls.get(key) : undefined
+          if (toolCall && args != null) {
+            toolCall.args = [args]
           }
           continue
         }
 
         if (eventType === 'response.custom_tool_call_input.done') {
           const key = resolveToolKey(chunk)
-          if (key && toolCalls.has(key) && typeof chunk.input === 'string') {
-            toolCalls.get(key)!.args = [chunk.input]
+          const toolCall = key ? toolCalls.get(key) : undefined
+          if (toolCall && typeof chunk.input === 'string') {
+            toolCall.args = [chunk.input]
           }
           continue
         }

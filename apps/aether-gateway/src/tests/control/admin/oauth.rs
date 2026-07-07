@@ -45,16 +45,16 @@ use crate::constants::{
 use crate::control::resolve_public_request_context;
 use crate::data::GatewayDataState;
 
-const MANUAL_KIRO_OAUTH_REFRESH_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+const ADMIN_OAUTH_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
 
-fn run_manual_kiro_oauth_refresh_test<F, Fut>(test_name: &'static str, make_future: F)
+fn run_admin_oauth_test<F, Fut>(test_name: &'static str, make_future: F)
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + 'static,
 {
     let handle = std::thread::Builder::new()
         .name(test_name.to_string())
-        .stack_size(MANUAL_KIRO_OAUTH_REFRESH_TEST_STACK_BYTES)
+        .stack_size(ADMIN_OAUTH_TEST_STACK_BYTES)
         .spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -62,7 +62,7 @@ where
                 .expect("test runtime should build");
             runtime.block_on(make_future());
         })
-        .expect("manual kiro oauth refresh test thread should spawn");
+        .expect("admin oauth test thread should spawn");
 
     if let Err(payload) = handle.join() {
         std::panic::resume_unwind(payload);
@@ -263,9 +263,16 @@ fn assert_single_provider_oauth_refresh_token_plan<'a>(
     token_plans[0]
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_oauth_supported_types_locally_with_trusted_admin_principal()
-{
+#[test]
+fn gateway_handles_admin_provider_oauth_supported_types_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_handles_admin_provider_oauth_supported_types_locally_with_trusted_admin_principal",
+        gateway_handles_admin_provider_oauth_supported_types_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_oauth_supported_types_locally_with_trusted_admin_principal_impl(
+) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -311,8 +318,15 @@ async fn gateway_handles_admin_provider_oauth_supported_types_locally_with_trust
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_oauth_device_authorize_for_windsurf_browser() {
+#[test]
+fn gateway_handles_admin_provider_oauth_device_authorize_for_windsurf_browser() {
+    run_admin_oauth_test(
+        "gateway_handles_admin_provider_oauth_device_authorize_for_windsurf_browser",
+        gateway_handles_admin_provider_oauth_device_authorize_for_windsurf_browser_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_oauth_device_authorize_for_windsurf_browser_impl() {
     let mut provider = sample_provider("provider-windsurf", "windsurf", 10);
     provider.provider_type = "windsurf".to_string();
     let endpoint = sample_endpoint(
@@ -395,8 +409,15 @@ async fn gateway_handles_admin_provider_oauth_device_authorize_for_windsurf_brow
     assert_eq!(stored["status"], "pending");
 }
 
-#[tokio::test]
-async fn gateway_rejects_generic_oauth_start_for_windsurf_provider() {
+#[test]
+fn gateway_rejects_generic_oauth_start_for_windsurf_provider() {
+    run_admin_oauth_test(
+        "gateway_rejects_generic_oauth_start_for_windsurf_provider",
+        gateway_rejects_generic_oauth_start_for_windsurf_provider_impl,
+    );
+}
+
+async fn gateway_rejects_generic_oauth_start_for_windsurf_provider_impl() {
     let mut provider = sample_provider("provider-windsurf", "windsurf", 10);
     provider.provider_type = "windsurf".to_string();
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
@@ -430,8 +451,15 @@ async fn gateway_rejects_generic_oauth_start_for_windsurf_provider() {
     );
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_oauth_device_poll_for_windsurf_one_time_token() {
+#[test]
+fn gateway_handles_admin_provider_oauth_device_poll_for_windsurf_one_time_token() {
+    run_admin_oauth_test(
+        "gateway_handles_admin_provider_oauth_device_poll_for_windsurf_one_time_token",
+        gateway_handles_admin_provider_oauth_device_poll_for_windsurf_one_time_token_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_oauth_device_poll_for_windsurf_one_time_token_impl() {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
     let execution_runtime = Router::new().route(
@@ -618,8 +646,15 @@ async fn gateway_handles_admin_provider_oauth_device_poll_for_windsurf_one_time_
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_rejects_windsurf_callback_state_mismatch_and_missing_token() {
+#[test]
+fn gateway_rejects_windsurf_callback_state_mismatch_and_missing_token() {
+    run_admin_oauth_test(
+        "gateway_rejects_windsurf_callback_state_mismatch_and_missing_token",
+        gateway_rejects_windsurf_callback_state_mismatch_and_missing_token_impl,
+    );
+}
+
+async fn gateway_rejects_windsurf_callback_state_mismatch_and_missing_token_impl() {
     let mut provider = sample_provider("provider-windsurf", "windsurf", 10);
     provider.provider_type = "windsurf".to_string();
     let endpoint = sample_endpoint(
@@ -704,8 +739,15 @@ async fn gateway_rejects_windsurf_callback_state_mismatch_and_missing_token() {
         .is_some_and(|error| error.contains("token")));
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_oauth_device_authorize_locally_with_trusted_admin_principal(
+#[test]
+fn gateway_handles_admin_provider_oauth_device_authorize_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_handles_admin_provider_oauth_device_authorize_locally_with_trusted_admin_principal",
+        gateway_handles_admin_provider_oauth_device_authorize_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_oauth_device_authorize_locally_with_trusted_admin_principal_impl(
 ) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
@@ -837,8 +879,15 @@ async fn gateway_handles_admin_provider_oauth_device_authorize_locally_with_trus
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_oauth_device_authorize_for_kiro_google_social() {
+#[test]
+fn gateway_handles_admin_provider_oauth_device_authorize_for_kiro_google_social() {
+    run_admin_oauth_test(
+        "gateway_handles_admin_provider_oauth_device_authorize_for_kiro_google_social",
+        gateway_handles_admin_provider_oauth_device_authorize_for_kiro_google_social_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_oauth_device_authorize_for_kiro_google_social_impl() {
     let mut provider = sample_provider("provider-kiro", "kiro", 10);
     provider.provider_type = "kiro".to_string();
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
@@ -928,8 +977,16 @@ async fn gateway_handles_admin_provider_oauth_device_authorize_for_kiro_google_s
     assert_eq!(stored["status"], "pending");
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_oauth_device_poll_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_handles_admin_provider_oauth_device_poll_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_handles_admin_provider_oauth_device_poll_locally_with_trusted_admin_principal",
+        gateway_handles_admin_provider_oauth_device_poll_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_oauth_device_poll_locally_with_trusted_admin_principal_impl(
+) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().fallback(any(move |_request: Request| {
@@ -1084,8 +1141,15 @@ async fn gateway_handles_admin_provider_oauth_device_poll_locally_with_trusted_a
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_oauth_device_poll_for_kiro_social_callback() {
+#[test]
+fn gateway_handles_admin_provider_oauth_device_poll_for_kiro_social_callback() {
+    run_admin_oauth_test(
+        "gateway_handles_admin_provider_oauth_device_poll_for_kiro_social_callback",
+        gateway_handles_admin_provider_oauth_device_poll_for_kiro_social_callback_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_oauth_device_poll_for_kiro_social_callback_impl() {
     let token_requests = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
     let token_requests_clone = Arc::clone(&token_requests);
     let access_token = sample_kiro_device_access_token("social@example.com");
@@ -1267,8 +1331,16 @@ async fn gateway_handles_admin_provider_oauth_device_poll_for_kiro_social_callba
     token_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_keeps_admin_provider_oauth_device_poll_pending_for_authorization_pending_error() {
+#[test]
+fn gateway_keeps_admin_provider_oauth_device_poll_pending_for_authorization_pending_error() {
+    run_admin_oauth_test(
+        "gateway_keeps_admin_provider_oauth_device_poll_pending_for_authorization_pending_error",
+        gateway_keeps_admin_provider_oauth_device_poll_pending_for_authorization_pending_error_impl,
+    );
+}
+
+async fn gateway_keeps_admin_provider_oauth_device_poll_pending_for_authorization_pending_error_impl(
+) {
     let token_server = Router::new().route(
         "/token",
         post(move |_request: Request| async move {
@@ -1347,8 +1419,15 @@ async fn gateway_keeps_admin_provider_oauth_device_poll_pending_for_authorizatio
     token_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_revalidates_kiro_device_poll_via_idc_refresh_and_backfills_email() {
+#[test]
+fn gateway_revalidates_kiro_device_poll_via_idc_refresh_and_backfills_email() {
+    run_admin_oauth_test(
+        "gateway_revalidates_kiro_device_poll_via_idc_refresh_and_backfills_email",
+        gateway_revalidates_kiro_device_poll_via_idc_refresh_and_backfills_email_impl,
+    );
+}
+
+async fn gateway_revalidates_kiro_device_poll_via_idc_refresh_and_backfills_email_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().fallback(any(move |_request: Request| {
@@ -1584,8 +1663,16 @@ async fn gateway_revalidates_kiro_device_poll_via_idc_refresh_and_backfills_emai
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn local_admin_provider_oauth_device_poll_attaches_audit_only_when_transition_reaches_terminal_state(
+#[test]
+fn local_admin_provider_oauth_device_poll_attaches_audit_only_when_transition_reaches_terminal_state(
+) {
+    run_admin_oauth_test(
+        "local_admin_provider_oauth_device_poll_attaches_audit_only_when_transition_reaches_terminal_state",
+        local_admin_provider_oauth_device_poll_attaches_audit_only_when_transition_reaches_terminal_state_impl,
+    );
+}
+
+async fn local_admin_provider_oauth_device_poll_attaches_audit_only_when_transition_reaches_terminal_state_impl(
 ) {
     let access_token = sample_kiro_device_access_token("kiro@example.com");
     let token_server = Router::new().route(
@@ -1708,8 +1795,16 @@ async fn local_admin_provider_oauth_device_poll_attaches_audit_only_when_transit
     token_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_oauth_device_authorize_via_execution_runtime_proxy_node() {
+#[test]
+fn gateway_handles_admin_provider_oauth_device_authorize_via_execution_runtime_proxy_node() {
+    run_admin_oauth_test(
+        "gateway_handles_admin_provider_oauth_device_authorize_via_execution_runtime_proxy_node",
+        gateway_handles_admin_provider_oauth_device_authorize_via_execution_runtime_proxy_node_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_oauth_device_authorize_via_execution_runtime_proxy_node_impl(
+) {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
     let execution_runtime = Router::new().route(
@@ -1854,8 +1949,16 @@ async fn gateway_handles_admin_provider_oauth_device_authorize_via_execution_run
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_oauth_start_key_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_handles_admin_provider_oauth_start_key_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_handles_admin_provider_oauth_start_key_locally_with_trusted_admin_principal",
+        gateway_handles_admin_provider_oauth_start_key_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_oauth_start_key_locally_with_trusted_admin_principal_impl()
+{
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -1924,9 +2027,16 @@ async fn gateway_handles_admin_provider_oauth_start_key_locally_with_trusted_adm
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_oauth_start_provider_locally_with_trusted_admin_principal()
-{
+#[test]
+fn gateway_handles_admin_provider_oauth_start_provider_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_handles_admin_provider_oauth_start_provider_locally_with_trusted_admin_principal",
+        gateway_handles_admin_provider_oauth_start_provider_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_oauth_start_provider_locally_with_trusted_admin_principal_impl(
+) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -1987,8 +2097,16 @@ async fn gateway_handles_admin_provider_oauth_start_provider_locally_with_truste
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_oauth_batch_import_task_status_locally_with_trusted_admin_principal(
+#[test]
+fn gateway_handles_admin_provider_oauth_batch_import_task_status_locally_with_trusted_admin_principal(
+) {
+    run_admin_oauth_test(
+        "gateway_handles_admin_provider_oauth_batch_import_task_status_locally_with_trusted_admin_principal",
+        gateway_handles_admin_provider_oauth_batch_import_task_status_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_oauth_batch_import_task_status_locally_with_trusted_admin_principal_impl(
 ) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
@@ -2070,8 +2188,16 @@ async fn gateway_handles_admin_provider_oauth_batch_import_task_status_locally_w
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn local_admin_provider_oauth_batch_task_status_attaches_audit_only_for_terminal_states() {
+#[test]
+fn local_admin_provider_oauth_batch_task_status_attaches_audit_only_for_terminal_states() {
+    run_admin_oauth_test(
+        "local_admin_provider_oauth_batch_task_status_attaches_audit_only_for_terminal_states",
+        local_admin_provider_oauth_batch_task_status_attaches_audit_only_for_terminal_states_impl,
+    );
+}
+
+async fn local_admin_provider_oauth_batch_task_status_attaches_audit_only_for_terminal_states_impl()
+{
     let completed_state = AppState::new()
         .expect("gateway should build")
         .with_provider_oauth_batch_task_entry_for_tests(
@@ -2158,8 +2284,15 @@ async fn local_admin_provider_oauth_batch_task_status_attaches_audit_only_for_te
     );
 }
 
-#[tokio::test]
-async fn gateway_batch_imports_admin_provider_oauth_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_batch_imports_admin_provider_oauth_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_batch_imports_admin_provider_oauth_locally_with_trusted_admin_principal",
+        gateway_batch_imports_admin_provider_oauth_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_batch_imports_admin_provider_oauth_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().fallback(any(move |_request: Request| {
@@ -2326,8 +2459,15 @@ async fn gateway_batch_imports_admin_provider_oauth_locally_with_trusted_admin_p
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_batch_imports_chatgpt_web_access_tokens_with_pool_hints() {
+#[test]
+fn gateway_batch_imports_chatgpt_web_access_tokens_with_pool_hints() {
+    run_admin_oauth_test(
+        "gateway_batch_imports_chatgpt_web_access_tokens_with_pool_hints",
+        gateway_batch_imports_chatgpt_web_access_tokens_with_pool_hints_impl,
+    );
+}
+
+async fn gateway_batch_imports_chatgpt_web_access_tokens_with_pool_hints_impl() {
     let token_hits = Arc::new(Mutex::new(0usize));
     let token_hits_clone = Arc::clone(&token_hits);
     let token_server = Router::new().route(
@@ -2467,8 +2607,15 @@ async fn gateway_batch_imports_chatgpt_web_access_tokens_with_pool_hints() {
     token_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_starts_admin_provider_oauth_batch_import_task_locally_with_trusted_admin_principal(
+#[test]
+fn gateway_starts_admin_provider_oauth_batch_import_task_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_starts_admin_provider_oauth_batch_import_task_locally_with_trusted_admin_principal",
+        gateway_starts_admin_provider_oauth_batch_import_task_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_starts_admin_provider_oauth_batch_import_task_locally_with_trusted_admin_principal_impl(
 ) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
@@ -2607,8 +2754,15 @@ async fn gateway_starts_admin_provider_oauth_batch_import_task_locally_with_trus
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_updates_admin_provider_oauth_batch_import_task_progress() {
+#[test]
+fn gateway_updates_admin_provider_oauth_batch_import_task_progress() {
+    run_admin_oauth_test(
+        "gateway_updates_admin_provider_oauth_batch_import_task_progress",
+        gateway_updates_admin_provider_oauth_batch_import_task_progress_impl,
+    );
+}
+
+async fn gateway_updates_admin_provider_oauth_batch_import_task_progress_impl() {
     let upstream = Router::new().fallback(any(|| async {
         (StatusCode::OK, Body::from("quota refresh body"))
     }));
@@ -2765,8 +2919,15 @@ async fn gateway_updates_admin_provider_oauth_batch_import_task_progress() {
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_principal",
+        gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_principal_impl() {
     #[derive(Debug, Clone)]
     struct SeenTokenRequest {
         content_type: String,
@@ -2940,8 +3101,16 @@ async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_p
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_completes_admin_provider_oauth_provider_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_completes_admin_provider_oauth_provider_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_completes_admin_provider_oauth_provider_locally_with_trusted_admin_principal",
+        gateway_completes_admin_provider_oauth_provider_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_completes_admin_provider_oauth_provider_locally_with_trusted_admin_principal_impl()
+{
     #[derive(Debug, Clone)]
     struct SeenTokenRequest {
         content_type: String,
@@ -3133,8 +3302,16 @@ async fn gateway_completes_admin_provider_oauth_provider_locally_with_trusted_ad
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_imports_admin_provider_oauth_refresh_token_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_imports_admin_provider_oauth_refresh_token_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_imports_admin_provider_oauth_refresh_token_locally_with_trusted_admin_principal",
+        gateway_imports_admin_provider_oauth_refresh_token_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_imports_admin_provider_oauth_refresh_token_locally_with_trusted_admin_principal_impl(
+) {
     #[derive(Debug, Clone)]
     struct SeenTokenRequest {
         content_type: String,
@@ -3309,8 +3486,15 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_locally_with_trusted
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_imports_codex_access_token_without_refresh_token_as_temporary_account() {
+#[test]
+fn gateway_imports_codex_access_token_without_refresh_token_as_temporary_account() {
+    run_admin_oauth_test(
+        "gateway_imports_codex_access_token_without_refresh_token_as_temporary_account",
+        gateway_imports_codex_access_token_without_refresh_token_as_temporary_account_impl,
+    );
+}
+
+async fn gateway_imports_codex_access_token_without_refresh_token_as_temporary_account_impl() {
     let token_hits = Arc::new(Mutex::new(0usize));
     let token_hits_clone = Arc::clone(&token_hits);
     let token_server = Router::new().route(
@@ -3417,8 +3601,16 @@ async fn gateway_imports_codex_access_token_without_refresh_token_as_temporary_a
     token_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_imports_codex_header_authorization_without_overwriting_payload_access_token() {
+#[test]
+fn gateway_imports_codex_header_authorization_without_overwriting_payload_access_token() {
+    run_admin_oauth_test(
+        "gateway_imports_codex_header_authorization_without_overwriting_payload_access_token",
+        gateway_imports_codex_header_authorization_without_overwriting_payload_access_token_impl,
+    );
+}
+
+async fn gateway_imports_codex_header_authorization_without_overwriting_payload_access_token_impl()
+{
     let mut provider = sample_provider("provider-codex", "codex", 10);
     provider.provider_type = "codex".to_string();
     let endpoint = sample_endpoint(
@@ -3506,8 +3698,16 @@ async fn gateway_imports_codex_header_authorization_without_overwriting_payload_
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_imports_chatgpt_web_access_token_without_refresh_token_as_temporary_account() {
+#[test]
+fn gateway_imports_chatgpt_web_access_token_without_refresh_token_as_temporary_account() {
+    run_admin_oauth_test(
+        "gateway_imports_chatgpt_web_access_token_without_refresh_token_as_temporary_account",
+        gateway_imports_chatgpt_web_access_token_without_refresh_token_as_temporary_account_impl,
+    );
+}
+
+async fn gateway_imports_chatgpt_web_access_token_without_refresh_token_as_temporary_account_impl()
+{
     let token_hits = Arc::new(Mutex::new(0usize));
     let token_hits_clone = Arc::clone(&token_hits);
     let token_server = Router::new().route(
@@ -3617,8 +3817,15 @@ async fn gateway_imports_chatgpt_web_access_token_without_refresh_token_as_tempo
     token_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_imports_codex_access_token_with_payload_expires_at_when_token_has_no_exp() {
+#[test]
+fn gateway_imports_codex_access_token_with_payload_expires_at_when_token_has_no_exp() {
+    run_admin_oauth_test(
+        "gateway_imports_codex_access_token_with_payload_expires_at_when_token_has_no_exp",
+        gateway_imports_codex_access_token_with_payload_expires_at_when_token_has_no_exp_impl,
+    );
+}
+
+async fn gateway_imports_codex_access_token_with_payload_expires_at_when_token_has_no_exp_impl() {
     let mut provider = sample_provider("provider-codex", "codex", 10);
     provider.provider_type = "codex".to_string();
     let endpoint = sample_endpoint(
@@ -3689,8 +3896,15 @@ async fn gateway_imports_codex_access_token_with_payload_expires_at_when_token_h
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_imports_admin_provider_oauth_refresh_token_over_active_expired_duplicate() {
+#[test]
+fn gateway_imports_admin_provider_oauth_refresh_token_over_active_expired_duplicate() {
+    run_admin_oauth_test(
+        "gateway_imports_admin_provider_oauth_refresh_token_over_active_expired_duplicate",
+        gateway_imports_admin_provider_oauth_refresh_token_over_active_expired_duplicate_impl,
+    );
+}
+
+async fn gateway_imports_admin_provider_oauth_refresh_token_over_active_expired_duplicate_impl() {
     #[derive(Debug, Clone)]
     struct SeenTokenRequest {
         content_type: String,
@@ -3874,8 +4088,15 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_over_active_expired_
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_import_invalidate_cached_oauth_entry_before_followup_resolution() {
+#[test]
+fn gateway_import_invalidate_cached_oauth_entry_before_followup_resolution() {
+    run_admin_oauth_test(
+        "gateway_import_invalidate_cached_oauth_entry_before_followup_resolution",
+        gateway_import_invalidate_cached_oauth_entry_before_followup_resolution_impl,
+    );
+}
+
+async fn gateway_import_invalidate_cached_oauth_entry_before_followup_resolution_impl() {
     let token_server = Router::new().route(
         "/oauth/token",
         post(move |body: Bytes| async move {
@@ -4046,8 +4267,15 @@ async fn gateway_import_invalidate_cached_oauth_entry_before_followup_resolution
     token_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_rejects_kiro_single_refresh_token_import_with_clear_error() {
+#[test]
+fn gateway_rejects_kiro_single_refresh_token_import_with_clear_error() {
+    run_admin_oauth_test(
+        "gateway_rejects_kiro_single_refresh_token_import_with_clear_error",
+        gateway_rejects_kiro_single_refresh_token_import_with_clear_error_impl,
+    );
+}
+
+async fn gateway_rejects_kiro_single_refresh_token_import_with_clear_error_impl() {
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![{
             let mut provider = sample_provider("provider-kiro", "kiro", 10);
@@ -4091,8 +4319,16 @@ async fn gateway_rejects_kiro_single_refresh_token_import_with_clear_error() {
     );
 }
 
-#[tokio::test]
-async fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_proxy_node() {
+#[test]
+fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_proxy_node() {
+    run_admin_oauth_test(
+        "gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_proxy_node",
+        gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_proxy_node_impl,
+    );
+}
+
+async fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_proxy_node_impl()
+{
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
     let execution_runtime = Router::new().route(
@@ -4222,8 +4458,16 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtim
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_provider_proxy_before_system_proxy(
+#[test]
+fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_provider_proxy_before_system_proxy(
+) {
+    run_admin_oauth_test(
+        "gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_provider_proxy_before_system_proxy",
+        gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_provider_proxy_before_system_proxy_impl,
+    );
+}
+
+async fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_provider_proxy_before_system_proxy_impl(
 ) {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
@@ -4343,8 +4587,16 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtim
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_system_proxy() {
+#[test]
+fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_system_proxy() {
+    run_admin_oauth_test(
+        "gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_system_proxy",
+        gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_system_proxy_impl,
+    );
+}
+
+async fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_system_proxy_impl(
+) {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
     let execution_runtime = Router::new().route(
@@ -4446,8 +4698,15 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtim
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_import_refresh_token_surfaces_execution_runtime_error_detail() {
+#[test]
+fn gateway_import_refresh_token_surfaces_execution_runtime_error_detail() {
+    run_admin_oauth_test(
+        "gateway_import_refresh_token_surfaces_execution_runtime_error_detail",
+        gateway_import_refresh_token_surfaces_execution_runtime_error_detail_impl,
+    );
+}
+
+async fn gateway_import_refresh_token_surfaces_execution_runtime_error_detail_impl() {
     let execution_runtime = Router::new().route(
         "/v1/execute/sync",
         any(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
@@ -4511,8 +4770,16 @@ async fn gateway_import_refresh_token_surfaces_execution_runtime_error_detail() 
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_batch_imports_admin_provider_oauth_kiro_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_batch_imports_admin_provider_oauth_kiro_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_batch_imports_admin_provider_oauth_kiro_locally_with_trusted_admin_principal",
+        gateway_batch_imports_admin_provider_oauth_kiro_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_batch_imports_admin_provider_oauth_kiro_locally_with_trusted_admin_principal_impl()
+{
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().fallback(any(move |_request: Request| {
@@ -4653,8 +4920,15 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_locally_with_trusted_ad
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_batch_imports_admin_provider_oauth_kiro_over_active_expired_duplicate() {
+#[test]
+fn gateway_batch_imports_admin_provider_oauth_kiro_over_active_expired_duplicate() {
+    run_admin_oauth_test(
+        "gateway_batch_imports_admin_provider_oauth_kiro_over_active_expired_duplicate",
+        gateway_batch_imports_admin_provider_oauth_kiro_over_active_expired_duplicate_impl,
+    );
+}
+
+async fn gateway_batch_imports_admin_provider_oauth_kiro_over_active_expired_duplicate_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().fallback(any(move |_request: Request| {
@@ -4802,8 +5076,15 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_over_active_expired_dup
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_batch_imports_admin_provider_oauth_kiro_via_execution_runtime_proxy_node() {
+#[test]
+fn gateway_batch_imports_admin_provider_oauth_kiro_via_execution_runtime_proxy_node() {
+    run_admin_oauth_test(
+        "gateway_batch_imports_admin_provider_oauth_kiro_via_execution_runtime_proxy_node",
+        gateway_batch_imports_admin_provider_oauth_kiro_via_execution_runtime_proxy_node_impl,
+    );
+}
+
+async fn gateway_batch_imports_admin_provider_oauth_kiro_via_execution_runtime_proxy_node_impl() {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
     let execution_runtime = Router::new().route(
@@ -4996,8 +5277,16 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_via_execution_runtime_p
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_starts_admin_provider_oauth_kiro_batch_import_task_locally_with_trusted_admin_principal(
+#[test]
+fn gateway_starts_admin_provider_oauth_kiro_batch_import_task_locally_with_trusted_admin_principal()
+{
+    run_admin_oauth_test(
+        "gateway_starts_admin_provider_oauth_kiro_batch_import_task_locally_with_trusted_admin_principal",
+        gateway_starts_admin_provider_oauth_kiro_batch_import_task_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_starts_admin_provider_oauth_kiro_batch_import_task_locally_with_trusted_admin_principal_impl(
 ) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
@@ -5128,8 +5417,15 @@ async fn gateway_starts_admin_provider_oauth_kiro_batch_import_task_locally_with
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_marks_lazy_codex_oauth_refresh_failures_as_invalid() {
+#[test]
+fn gateway_marks_lazy_codex_oauth_refresh_failures_as_invalid() {
+    run_admin_oauth_test(
+        "gateway_marks_lazy_codex_oauth_refresh_failures_as_invalid",
+        gateway_marks_lazy_codex_oauth_refresh_failures_as_invalid_impl,
+    );
+}
+
+async fn gateway_marks_lazy_codex_oauth_refresh_failures_as_invalid_impl() {
     let token_hits = Arc::new(Mutex::new(0usize));
     let token_hits_clone = Arc::clone(&token_hits);
     let token_server = Router::new().route(
@@ -5260,8 +5556,15 @@ async fn gateway_marks_lazy_codex_oauth_refresh_failures_as_invalid() {
     token_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_principal",
+        gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().fallback(any(move |_request: Request| {
@@ -5637,8 +5940,15 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_manual_codex_oauth_refresh_reconciles_missing_fixed_endpoint() {
+#[test]
+fn gateway_manual_codex_oauth_refresh_reconciles_missing_fixed_endpoint() {
+    run_admin_oauth_test(
+        "gateway_manual_codex_oauth_refresh_reconciles_missing_fixed_endpoint",
+        gateway_manual_codex_oauth_refresh_reconciles_missing_fixed_endpoint_impl,
+    );
+}
+
+async fn gateway_manual_codex_oauth_refresh_reconciles_missing_fixed_endpoint_impl() {
     let token_hits = Arc::new(Mutex::new(0usize));
     let token_hits_clone = Arc::clone(&token_hits);
     let token_server = Router::new().route(
@@ -5824,7 +6134,7 @@ async fn gateway_manual_codex_oauth_refresh_reconciles_missing_fixed_endpoint() 
 
 #[test]
 fn gateway_manual_kiro_oauth_refresh_reconciles_missing_fixed_endpoint() {
-    run_manual_kiro_oauth_refresh_test(
+    run_admin_oauth_test(
         "gateway_manual_kiro_oauth_refresh_reconciles_missing_fixed_endpoint",
         gateway_manual_kiro_oauth_refresh_reconciles_missing_fixed_endpoint_impl,
     );
@@ -5836,7 +6146,7 @@ async fn gateway_manual_kiro_oauth_refresh_reconciles_missing_fixed_endpoint_imp
 
 #[test]
 fn gateway_manual_kiro_oauth_refresh_uses_disabled_fixed_endpoint_for_maintenance() {
-    run_manual_kiro_oauth_refresh_test(
+    run_admin_oauth_test(
         "gateway_manual_kiro_oauth_refresh_uses_disabled_fixed_endpoint_for_maintenance",
         gateway_manual_kiro_oauth_refresh_uses_disabled_fixed_endpoint_for_maintenance_impl,
     );
@@ -6061,8 +6371,15 @@ async fn run_gateway_manual_kiro_oauth_refresh_maintenance_endpoint_test(
     token_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_marks_manual_oauth_refresh_failures_as_invalid_in_pool_payload() {
+#[test]
+fn gateway_marks_manual_oauth_refresh_failures_as_invalid_in_pool_payload() {
+    run_admin_oauth_test(
+        "gateway_marks_manual_oauth_refresh_failures_as_invalid_in_pool_payload",
+        gateway_marks_manual_oauth_refresh_failures_as_invalid_in_pool_payload_impl,
+    );
+}
+
+async fn gateway_marks_manual_oauth_refresh_failures_as_invalid_in_pool_payload_impl() {
     let token_hits = Arc::new(Mutex::new(0usize));
     let token_hits_clone = Arc::clone(&token_hits);
     let token_server = Router::new().route(
@@ -6258,8 +6575,15 @@ async fn gateway_marks_manual_oauth_refresh_failures_as_invalid_in_pool_payload(
     token_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_auto_removes_manual_oauth_refresh_failure_after_access_token_expiry() {
+#[test]
+fn gateway_auto_removes_manual_oauth_refresh_failure_after_access_token_expiry() {
+    run_admin_oauth_test(
+        "gateway_auto_removes_manual_oauth_refresh_failure_after_access_token_expiry",
+        gateway_auto_removes_manual_oauth_refresh_failure_after_access_token_expiry_impl,
+    );
+}
+
+async fn gateway_auto_removes_manual_oauth_refresh_failure_after_access_token_expiry_impl() {
     let token_hits = Arc::new(Mutex::new(0usize));
     let token_hits_clone = Arc::clone(&token_hits);
     let token_server = Router::new().route(
@@ -6379,8 +6703,16 @@ async fn gateway_auto_removes_manual_oauth_refresh_failure_after_access_token_ex
     token_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtime_provider_proxy_before_system_proxy(
+#[test]
+fn gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtime_provider_proxy_before_system_proxy(
+) {
+    run_admin_oauth_test(
+        "gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtime_provider_proxy_before_system_proxy",
+        gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtime_provider_proxy_before_system_proxy_impl,
+    );
+}
+
+async fn gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtime_provider_proxy_before_system_proxy_impl(
 ) {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
@@ -6540,8 +6872,16 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtim
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_refreshes_admin_provider_oauth_key_tunnel_proxy_with_direct_refresh_controls() {
+#[test]
+fn gateway_refreshes_admin_provider_oauth_key_tunnel_proxy_with_direct_refresh_controls() {
+    run_admin_oauth_test(
+        "gateway_refreshes_admin_provider_oauth_key_tunnel_proxy_with_direct_refresh_controls",
+        gateway_refreshes_admin_provider_oauth_key_tunnel_proxy_with_direct_refresh_controls_impl,
+    );
+}
+
+async fn gateway_refreshes_admin_provider_oauth_key_tunnel_proxy_with_direct_refresh_controls_impl()
+{
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
     let execution_runtime = Router::new().route(
@@ -6691,8 +7031,15 @@ async fn gateway_refreshes_admin_provider_oauth_key_tunnel_proxy_with_direct_ref
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_consecutive_manual_oauth_refresh_uses_rotated_refresh_token() {
+#[test]
+fn gateway_consecutive_manual_oauth_refresh_uses_rotated_refresh_token() {
+    run_admin_oauth_test(
+        "gateway_consecutive_manual_oauth_refresh_uses_rotated_refresh_token",
+        gateway_consecutive_manual_oauth_refresh_uses_rotated_refresh_token_impl,
+    );
+}
+
+async fn gateway_consecutive_manual_oauth_refresh_uses_rotated_refresh_token_impl() {
     let refresh_request_bodies = Arc::new(Mutex::new(Vec::<String>::new()));
     let refresh_request_bodies_clone = Arc::clone(&refresh_request_bodies);
     let execution_runtime = Router::new().route(
@@ -6889,8 +7236,15 @@ async fn gateway_consecutive_manual_oauth_refresh_uses_rotated_refresh_token() {
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_concurrent_manual_oauth_refresh_uses_rotated_refresh_token_after_lock_wait() {
+#[test]
+fn gateway_concurrent_manual_oauth_refresh_uses_rotated_refresh_token_after_lock_wait() {
+    run_admin_oauth_test(
+        "gateway_concurrent_manual_oauth_refresh_uses_rotated_refresh_token_after_lock_wait",
+        gateway_concurrent_manual_oauth_refresh_uses_rotated_refresh_token_after_lock_wait_impl,
+    );
+}
+
+async fn gateway_concurrent_manual_oauth_refresh_uses_rotated_refresh_token_after_lock_wait_impl() {
     let refresh_request_bodies = Arc::new(Mutex::new(Vec::<String>::new()));
     let refresh_request_bodies_clone = Arc::clone(&refresh_request_bodies);
     let execution_runtime = Router::new().route(
@@ -7121,8 +7475,15 @@ async fn gateway_concurrent_manual_oauth_refresh_uses_rotated_refresh_token_afte
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_manual_oauth_refresh_prefers_fresher_transport_auth_config_over_stale_runtime_cache(
+#[test]
+fn gateway_manual_oauth_refresh_prefers_fresher_transport_auth_config_over_stale_runtime_cache() {
+    run_admin_oauth_test(
+        "gateway_manual_oauth_refresh_prefers_fresher_transport_auth_config_over_stale_runtime_cache",
+        gateway_manual_oauth_refresh_prefers_fresher_transport_auth_config_over_stale_runtime_cache_impl,
+    );
+}
+
+async fn gateway_manual_oauth_refresh_prefers_fresher_transport_auth_config_over_stale_runtime_cache_impl(
 ) {
     let refresh_request_bodies = Arc::new(Mutex::new(Vec::<String>::new()));
     let refresh_request_bodies_clone = Arc::clone(&refresh_request_bodies);
@@ -7345,8 +7706,16 @@ async fn gateway_manual_oauth_refresh_prefers_fresher_transport_auth_config_over
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtime_key_proxy_before_system_proxy(
+#[test]
+fn gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtime_key_proxy_before_system_proxy(
+) {
+    run_admin_oauth_test(
+        "gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtime_key_proxy_before_system_proxy",
+        gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtime_key_proxy_before_system_proxy_impl,
+    );
+}
+
+async fn gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtime_key_proxy_before_system_proxy_impl(
 ) {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
@@ -7507,8 +7876,15 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtim
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_oauth_unavailable_routes_locally_with_trusted_admin_principal(
+#[test]
+fn gateway_handles_admin_provider_oauth_unavailable_routes_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_handles_admin_provider_oauth_unavailable_routes_locally_with_trusted_admin_principal",
+        gateway_handles_admin_provider_oauth_unavailable_routes_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_oauth_unavailable_routes_locally_with_trusted_admin_principal_impl(
 ) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
@@ -7613,8 +7989,15 @@ async fn gateway_handles_admin_provider_oauth_unavailable_routes_locally_with_tr
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_oauth_supported_types_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_handles_admin_oauth_supported_types_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_handles_admin_oauth_supported_types_locally_with_trusted_admin_principal",
+        gateway_handles_admin_oauth_supported_types_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_oauth_supported_types_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -7656,8 +8039,15 @@ async fn gateway_handles_admin_oauth_supported_types_locally_with_trusted_admin_
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_oauth_provider_list_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_handles_admin_oauth_provider_list_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_handles_admin_oauth_provider_list_locally_with_trusted_admin_principal",
+        gateway_handles_admin_oauth_provider_list_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_oauth_provider_list_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -7706,8 +8096,15 @@ async fn gateway_handles_admin_oauth_provider_list_locally_with_trusted_admin_pr
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_upserts_admin_oauth_provider_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_upserts_admin_oauth_provider_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_upserts_admin_oauth_provider_locally_with_trusted_admin_principal",
+        gateway_upserts_admin_oauth_provider_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_upserts_admin_oauth_provider_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -7774,8 +8171,15 @@ async fn gateway_upserts_admin_oauth_provider_locally_with_trusted_admin_princip
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_rejects_custom_oidc_without_allowed_domains() {
+#[test]
+fn gateway_rejects_custom_oidc_without_allowed_domains() {
+    run_admin_oauth_test(
+        "gateway_rejects_custom_oidc_without_allowed_domains",
+        gateway_rejects_custom_oidc_without_allowed_domains_impl,
+    );
+}
+
+async fn gateway_rejects_custom_oidc_without_allowed_domains_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -7837,8 +8241,15 @@ async fn gateway_rejects_custom_oidc_without_allowed_domains() {
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_upserts_custom_oidc_with_allowed_domains() {
+#[test]
+fn gateway_upserts_custom_oidc_with_allowed_domains() {
+    run_admin_oauth_test(
+        "gateway_upserts_custom_oidc_with_allowed_domains",
+        gateway_upserts_custom_oidc_with_allowed_domains_impl,
+    );
+}
+
+async fn gateway_upserts_custom_oidc_with_allowed_domains_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -7920,8 +8331,15 @@ async fn gateway_upserts_custom_oidc_with_allowed_domains() {
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_upserts_multiple_custom_oidc_configs() {
+#[test]
+fn gateway_upserts_multiple_custom_oidc_configs() {
+    run_admin_oauth_test(
+        "gateway_upserts_multiple_custom_oidc_configs",
+        gateway_upserts_multiple_custom_oidc_configs_impl,
+    );
+}
+
+async fn gateway_upserts_multiple_custom_oidc_configs_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().fallback(any(move |_request: Request| {
@@ -7999,8 +8417,15 @@ async fn gateway_upserts_multiple_custom_oidc_configs() {
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_tests_admin_oauth_linuxdo_endpoints_locally_with_configured_secret() {
+#[test]
+fn gateway_tests_admin_oauth_linuxdo_endpoints_locally_with_configured_secret() {
+    run_admin_oauth_test(
+        "gateway_tests_admin_oauth_linuxdo_endpoints_locally_with_configured_secret",
+        gateway_tests_admin_oauth_linuxdo_endpoints_locally_with_configured_secret_impl,
+    );
+}
+
+async fn gateway_tests_admin_oauth_linuxdo_endpoints_locally_with_configured_secret_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -8090,8 +8515,15 @@ async fn gateway_tests_admin_oauth_linuxdo_endpoints_locally_with_configured_sec
     let _ = upstream_url;
 }
 
-#[tokio::test]
-async fn gateway_tests_admin_oauth_linuxdo_reports_invalid_endpoint_urls() {
+#[test]
+fn gateway_tests_admin_oauth_linuxdo_reports_invalid_endpoint_urls() {
+    run_admin_oauth_test(
+        "gateway_tests_admin_oauth_linuxdo_reports_invalid_endpoint_urls",
+        gateway_tests_admin_oauth_linuxdo_reports_invalid_endpoint_urls_impl,
+    );
+}
+
+async fn gateway_tests_admin_oauth_linuxdo_reports_invalid_endpoint_urls_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -8146,8 +8578,15 @@ async fn gateway_tests_admin_oauth_linuxdo_reports_invalid_endpoint_urls() {
     let _ = upstream_url;
 }
 
-#[tokio::test]
-async fn gateway_deletes_admin_oauth_provider_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_deletes_admin_oauth_provider_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_deletes_admin_oauth_provider_locally_with_trusted_admin_principal",
+        gateway_deletes_admin_oauth_provider_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_deletes_admin_oauth_provider_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -8198,8 +8637,15 @@ async fn gateway_deletes_admin_oauth_provider_locally_with_trusted_admin_princip
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_management_token_detail_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_handles_admin_management_token_detail_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_handles_admin_management_token_detail_locally_with_trusted_admin_principal",
+        gateway_handles_admin_management_token_detail_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_management_token_detail_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -8250,8 +8696,16 @@ async fn gateway_handles_admin_management_token_detail_locally_with_trusted_admi
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_creates_updates_and_regenerates_admin_management_token_locally_with_permissions() {
+#[test]
+fn gateway_creates_updates_and_regenerates_admin_management_token_locally_with_permissions() {
+    run_admin_oauth_test(
+        "gateway_creates_updates_and_regenerates_admin_management_token_locally_with_permissions",
+        gateway_creates_updates_and_regenerates_admin_management_token_locally_with_permissions_impl,
+    );
+}
+
+async fn gateway_creates_updates_and_regenerates_admin_management_token_locally_with_permissions_impl(
+) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().fallback(any(move |_request: Request| {
@@ -8396,8 +8850,15 @@ async fn gateway_creates_updates_and_regenerates_admin_management_token_locally_
     drop(upstream_url);
 }
 
-#[tokio::test]
-async fn gateway_allows_management_token_with_pool_write_for_provider_oauth_batch_import() {
+#[test]
+fn gateway_allows_management_token_with_pool_write_for_provider_oauth_batch_import() {
+    run_admin_oauth_test(
+        "gateway_allows_management_token_with_pool_write_for_provider_oauth_batch_import",
+        gateway_allows_management_token_with_pool_write_for_provider_oauth_batch_import_impl,
+    );
+}
+
+async fn gateway_allows_management_token_with_pool_write_for_provider_oauth_batch_import_impl() {
     let raw_token = "ae-provider-oauth-batch-pool-write";
     let state = AppState::new().expect("gateway should build");
     let admin_user = state
@@ -8455,8 +8916,16 @@ async fn gateway_allows_management_token_with_pool_write_for_provider_oauth_batc
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_rejects_management_token_without_pool_write_for_provider_oauth_batch_import() {
+#[test]
+fn gateway_rejects_management_token_without_pool_write_for_provider_oauth_batch_import() {
+    run_admin_oauth_test(
+        "gateway_rejects_management_token_without_pool_write_for_provider_oauth_batch_import",
+        gateway_rejects_management_token_without_pool_write_for_provider_oauth_batch_import_impl,
+    );
+}
+
+async fn gateway_rejects_management_token_without_pool_write_for_provider_oauth_batch_import_impl()
+{
     let raw_token = "ae-provider-oauth-batch-pool-denied";
     let state = AppState::new().expect("gateway should build");
     let admin_user = state
@@ -8515,8 +8984,15 @@ async fn gateway_rejects_management_token_without_pool_write_for_provider_oauth_
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_deletes_admin_management_token_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_deletes_admin_management_token_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_deletes_admin_management_token_locally_with_trusted_admin_principal",
+        gateway_deletes_admin_management_token_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_deletes_admin_management_token_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -8572,8 +9048,15 @@ async fn gateway_deletes_admin_management_token_locally_with_trusted_admin_princ
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_toggles_admin_management_token_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_toggles_admin_management_token_locally_with_trusted_admin_principal() {
+    run_admin_oauth_test(
+        "gateway_toggles_admin_management_token_locally_with_trusted_admin_principal",
+        gateway_toggles_admin_management_token_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_toggles_admin_management_token_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -8633,8 +9116,15 @@ async fn gateway_toggles_admin_management_token_locally_with_trusted_admin_princ
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_rejects_partial_management_token_for_admin_management_token_routes() {
+#[test]
+fn gateway_rejects_partial_management_token_for_admin_management_token_routes() {
+    run_admin_oauth_test(
+        "gateway_rejects_partial_management_token_for_admin_management_token_routes",
+        gateway_rejects_partial_management_token_for_admin_management_token_routes_impl,
+    );
+}
+
+async fn gateway_rejects_partial_management_token_for_admin_management_token_routes_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(

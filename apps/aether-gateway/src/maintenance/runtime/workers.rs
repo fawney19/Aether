@@ -23,11 +23,9 @@ use super::{
     PROXY_NODE_METRICS_CLEANUP_HOUR, PROXY_NODE_METRICS_CLEANUP_MINUTE,
     PROXY_NODE_STALE_SWEEP_INTERVAL, PROXY_UPGRADE_ROLLOUT_INTERVAL,
     REQUEST_CANDIDATE_CLEANUP_INTERVAL, USAGE_CLEANUP_HOUR, USAGE_CLEANUP_MINUTE,
-    USAGE_COUNTER_DELTA_CLEANUP_BATCH_SIZE, USAGE_COUNTER_DELTA_CLEANUP_INTERVAL,
-    USAGE_COUNTER_DELTA_RETENTION_SECS, USAGE_COUNTER_FLUSH_BATCH_SIZE,
-    USAGE_COUNTER_FLUSH_CATCH_UP_BURST_LIMIT, USAGE_COUNTER_FLUSH_INTERVAL,
     WALLET_DAILY_USAGE_AGGREGATION_HOUR, WALLET_DAILY_USAGE_AGGREGATION_MINUTE,
 };
+use super::{UsageCounterFlushRuntimeMetrics, UsageCounterFlushWorkerConfig};
 
 const STATS_DAILY_CATCH_UP_BURST_LIMIT: usize = 14;
 const STATS_HOURLY_CATCH_UP_BURST_LIMIT: usize = 72;
@@ -249,13 +247,26 @@ pub(crate) fn spawn_usage_cleanup_worker(
 
 pub(crate) fn spawn_usage_counter_flush_worker(
     data: Arc<GatewayDataState>,
+    metrics: Arc<UsageCounterFlushRuntimeMetrics>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    spawn_usage_counter_flush_worker_with_config(
+        data,
+        metrics,
+        UsageCounterFlushWorkerConfig::from_env(),
+    )
+}
+
+pub(crate) fn spawn_usage_counter_flush_worker_with_config(
+    data: Arc<GatewayDataState>,
+    metrics: Arc<UsageCounterFlushRuntimeMetrics>,
+    config: UsageCounterFlushWorkerConfig,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if !data.has_usage_counter_flush_backend() {
         return None;
     }
 
     Some(tokio::spawn(async move {
-        let mut interval = tokio::time::interval(USAGE_COUNTER_FLUSH_INTERVAL);
+        let mut interval = tokio::time::interval(config.flush_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
         let mut last_delta_cleanup = tokio::time::Instant::now();
@@ -268,47 +279,66 @@ pub(crate) fn spawn_usage_counter_flush_worker(
                 "usage_counter_flush",
                 &mut usage_counter_flush_deferred_since,
             ) {
+                metrics.record_flush_deferred();
                 interval.tick().await;
                 continue;
             }
 
             let mut batches = 0_usize;
-            while batches < USAGE_COUNTER_FLUSH_CATCH_UP_BURST_LIMIT {
-                match run_usage_counter_flush_once(&data, USAGE_COUNTER_FLUSH_BATCH_SIZE).await {
-                    Ok(summary) if summary.rows_claimed > 0 => batches += 1,
-                    Ok(_) => break,
+            while batches < config.flush_catch_up_burst_limit {
+                match run_usage_counter_flush_once(&data, config.flush_batch_size).await {
+                    Ok(summary) if summary.rows_claimed > 0 => {
+                        metrics.record_flush_success(&summary);
+                        batches += 1;
+                    }
+                    Ok(summary) => {
+                        metrics.record_flush_success(&summary);
+                        break;
+                    }
                     Err(err) => {
+                        metrics.record_flush_failed();
                         log_maintenance_worker_failure("usage_counter_flush", "tick", &err);
                         break;
                     }
                 }
             }
 
-            if batches >= USAGE_COUNTER_FLUSH_CATCH_UP_BURST_LIMIT {
+            if batches >= config.flush_catch_up_burst_limit {
                 tokio::task::yield_now().await;
                 continue;
             }
 
-            if last_delta_cleanup.elapsed() >= USAGE_COUNTER_DELTA_CLEANUP_INTERVAL {
+            if last_delta_cleanup.elapsed() >= config.cleanup_interval {
                 if should_defer_for_database_pressure(
                     &data,
                     "usage_counter_delta_cleanup",
                     &mut usage_counter_delta_cleanup_deferred_since,
                 ) {
+                    metrics.record_cleanup_deferred();
                     debug!(
                         event_name = "maintenance_worker_deferred",
                         log_type = "ops",
                         worker = "usage_counter_delta_cleanup",
                         "gateway maintenance worker deferred cleanup under database pressure"
                     );
-                } else if let Err(err) = cleanup_processed_usage_counter_deltas_once(
-                    &data,
-                    USAGE_COUNTER_DELTA_RETENTION_SECS,
-                    USAGE_COUNTER_DELTA_CLEANUP_BATCH_SIZE,
-                )
-                .await
-                {
-                    log_maintenance_worker_failure("usage_counter_delta_cleanup", "tick", &err);
+                } else {
+                    match cleanup_processed_usage_counter_deltas_once(
+                        &data,
+                        config.delta_retention_secs,
+                        config.cleanup_batch_size,
+                    )
+                    .await
+                    {
+                        Ok(rows_deleted) => metrics.record_cleanup_success(rows_deleted),
+                        Err(err) => {
+                            metrics.record_cleanup_failed();
+                            log_maintenance_worker_failure(
+                                "usage_counter_delta_cleanup",
+                                "tick",
+                                &err,
+                            );
+                        }
+                    }
                 }
                 last_delta_cleanup = tokio::time::Instant::now();
             }

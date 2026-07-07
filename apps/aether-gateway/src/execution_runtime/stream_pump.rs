@@ -11,6 +11,7 @@ use async_stream::stream;
 use axum::body::Bytes;
 use base64::Engine as _;
 use futures_util::{Stream, StreamExt};
+use http_body_util::BodyExt;
 use serde_json::Value;
 use tracing::warn;
 
@@ -20,7 +21,8 @@ use crate::ai_serving::api::{
 };
 use crate::execution_runtime::ndjson::encode_stream_frame_ndjson;
 use crate::execution_runtime::transport::{
-    format_wreq_upstream_request_error, stream_first_byte_timeout_message, DirectUpstreamResponse,
+    format_hyper_error_chain, format_wreq_upstream_request_error,
+    stream_first_byte_timeout_message, DirectUpstreamResponse,
 };
 use crate::execution_runtime::DirectUpstreamStreamExecution;
 use crate::GatewayError;
@@ -253,6 +255,88 @@ pub(crate) fn build_direct_execution_frame_stream(
                         }
                         Err(err) => {
                             let message = format_error_chain(&err);
+                            warn!(
+                                event_name = "stream_pump_body_read_error",
+                                log_type = "ops",
+                                status_code,
+                                upstream_bytes,
+                                error = %message,
+                                "upstream body stream read error"
+                            );
+                            match encode_error_frame(status_code, message) {
+                                Ok(frame) => yield Ok(frame),
+                                Err(encode_err) => {
+                                    yield Err(encode_err);
+                                    return;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            DirectUpstreamResponse::HyperH2c(response) => {
+                let mut bytes_stream = response.into_body().into_data_stream();
+                loop {
+                    let item = if ttfb_ms.is_none() {
+                        match await_stream_first_byte(
+                            bytes_stream.next(),
+                            started_at,
+                            stream_first_byte_timeout,
+                        )
+                        .await
+                        {
+                            Ok(item) => item,
+                            Err(timeout) => {
+                                match encode_first_byte_timeout_frame(timeout) {
+                                    Ok(frame) => yield Ok(frame),
+                                    Err(err) => {
+                                        yield Err(err);
+                                        return;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    } else {
+                        bytes_stream.next().await
+                    };
+                    let Some(item) = item else {
+                        break;
+                    };
+                    match item {
+                        Ok(chunk) => {
+                            if ttfb_ms.is_none() {
+                                ttfb_ms = Some(started_at.elapsed().as_millis() as u64);
+                            }
+                            if !first_chunk_telemetry_emitted {
+                                match encode_telemetry_frame(ttfb_ms, ttfb_ms, upstream_bytes) {
+                                    Ok(frame) => yield Ok(frame),
+                                    Err(err) => {
+                                        yield Err(err);
+                                        return;
+                                    }
+                                }
+                                first_chunk_telemetry_emitted = true;
+                            }
+                            upstream_bytes += chunk.len() as u64;
+                            observe_stream_chunk(
+                                &mut stream_terminal_observer,
+                                &normalized_observer_context,
+                                private_stream_normalizer.as_mut(),
+                                &mut observer_buffered,
+                                chunk.as_ref(),
+                            );
+                            match encode_data_frame(&chunk) {
+                                Ok(frame) => yield Ok(frame),
+                                Err(err) => {
+                                    yield Err(err);
+                                    return;
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            let message = format_hyper_error_chain(&err);
                             warn!(
                                 event_name = "stream_pump_body_read_error",
                                 log_type = "ops",
@@ -645,6 +729,60 @@ async fn buffer_non_sse_upstream_body(
                     }
                     Err(err) => {
                         let message = format_error_chain(&err);
+                        warn!(
+                            event_name = "stream_pump_body_read_error",
+                            log_type = "ops",
+                            upstream_bytes,
+                            error = %message,
+                            "upstream body stream read error"
+                        );
+                        return Err(BufferedUpstreamBodyError {
+                            message,
+                            ttfb_ms,
+                            upstream_bytes,
+                            first_byte_timeout: None,
+                        });
+                    }
+                }
+            }
+        }
+        DirectUpstreamResponse::HyperH2c(response) => {
+            let mut bytes_stream = response.into_body().into_data_stream();
+            loop {
+                let item = if ttfb_ms.is_none() {
+                    match await_stream_first_byte(
+                        bytes_stream.next(),
+                        started_at,
+                        stream_first_byte_timeout,
+                    )
+                    .await
+                    {
+                        Ok(item) => item,
+                        Err(timeout) => {
+                            return Err(BufferedUpstreamBodyError {
+                                message: stream_first_byte_timeout_message(timeout),
+                                ttfb_ms,
+                                upstream_bytes,
+                                first_byte_timeout: Some(timeout),
+                            });
+                        }
+                    }
+                } else {
+                    bytes_stream.next().await
+                };
+                let Some(item) = item else {
+                    break;
+                };
+                match item {
+                    Ok(chunk) => {
+                        if ttfb_ms.is_none() {
+                            ttfb_ms = Some(started_at.elapsed().as_millis() as u64);
+                        }
+                        upstream_bytes += chunk.len() as u64;
+                        body_bytes.extend_from_slice(&chunk);
+                    }
+                    Err(err) => {
+                        let message = format_hyper_error_chain(&err);
                         warn!(
                             event_name = "stream_pump_body_read_error",
                             log_type = "ops",

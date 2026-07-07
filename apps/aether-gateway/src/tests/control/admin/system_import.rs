@@ -264,8 +264,39 @@ fn sample_import_admin_user(user_id: &str) -> StoredUserAuthRecord {
     .expect("admin user should build")
 }
 
-#[tokio::test]
-async fn gateway_imports_admin_system_config_locally_and_persists_data() {
+const ADMIN_SYSTEM_IMPORT_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_admin_system_import_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(ADMIN_SYSTEM_IMPORT_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("admin system import test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+fn gateway_imports_admin_system_config_locally_and_persists_data() {
+    run_admin_system_import_test(
+        "gateway_imports_admin_system_config_locally_and_persists_data",
+        gateway_imports_admin_system_config_locally_and_persists_data_impl,
+    );
+}
+
+async fn gateway_imports_admin_system_config_locally_and_persists_data_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().fallback(any(move |_request: Request| {
@@ -499,8 +530,15 @@ async fn gateway_imports_admin_system_config_locally_and_persists_data() {
     let _ = upstream_url;
 }
 
-#[tokio::test]
-async fn gateway_imports_admin_system_config_openai_image_aliases() {
+#[test]
+fn gateway_imports_admin_system_config_openai_image_aliases() {
+    run_admin_system_import_test(
+        "gateway_imports_admin_system_config_openai_image_aliases",
+        gateway_imports_admin_system_config_openai_image_aliases_impl,
+    );
+}
+
+async fn gateway_imports_admin_system_config_openai_image_aliases_impl() {
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         Vec::new(),
         Vec::new(),
@@ -566,8 +604,15 @@ async fn gateway_imports_admin_system_config_openai_image_aliases() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_returns_503_for_admin_system_config_import_when_local_data_is_unavailable() {
+#[test]
+fn gateway_returns_503_for_admin_system_config_import_when_local_data_is_unavailable() {
+    run_admin_system_import_test(
+        "gateway_returns_503_for_admin_system_config_import_when_local_data_is_unavailable",
+        gateway_returns_503_for_admin_system_config_import_when_local_data_is_unavailable_impl,
+    );
+}
+
+async fn gateway_returns_503_for_admin_system_config_import_when_local_data_is_unavailable_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().fallback(any(move |_request: Request| {
@@ -603,8 +648,15 @@ async fn gateway_returns_503_for_admin_system_config_import_when_local_data_is_u
     let _ = upstream_url;
 }
 
-#[tokio::test]
-async fn gateway_imports_legacy_admin_system_config_versions_and_model_test_succeeds() {
+#[test]
+fn gateway_imports_legacy_admin_system_config_versions_and_model_test_succeeds() {
+    run_admin_system_import_test(
+        "gateway_imports_legacy_admin_system_config_versions_and_model_test_succeeds",
+        gateway_imports_legacy_admin_system_config_versions_and_model_test_succeeds_impl,
+    );
+}
+
+async fn gateway_imports_legacy_admin_system_config_versions_and_model_test_succeeds_impl() {
     for (
         fixture_name,
         expected_provider_name,
@@ -828,8 +880,15 @@ async fn assert_legacy_admin_system_config_import_model_test_succeeds(
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_rejects_unknown_admin_system_config_import_versions() {
+#[test]
+fn gateway_rejects_unknown_admin_system_config_import_versions() {
+    run_admin_system_import_test(
+        "gateway_rejects_unknown_admin_system_config_import_versions",
+        gateway_rejects_unknown_admin_system_config_import_versions_impl,
+    );
+}
+
+async fn gateway_rejects_unknown_admin_system_config_import_versions_impl() {
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
@@ -867,8 +926,15 @@ async fn gateway_rejects_unknown_admin_system_config_import_versions() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_imports_admin_system_users_locally_and_persists_data() {
+#[test]
+fn gateway_imports_admin_system_users_locally_and_persists_data() {
+    run_admin_system_import_test(
+        "gateway_imports_admin_system_users_locally_and_persists_data",
+        gateway_imports_admin_system_users_locally_and_persists_data_impl,
+    );
+}
+
+async fn gateway_imports_admin_system_users_locally_and_persists_data_impl() {
     let user_wallet_updated_at = "2024-05-06T07:08:09Z";
     let standalone_wallet_updated_at = "2024-06-07T08:09:10Z";
     let upstream_hits = Arc::new(Mutex::new(0usize));
@@ -1142,8 +1208,15 @@ async fn gateway_imports_admin_system_users_locally_and_persists_data() {
     let _ = upstream_url;
 }
 
-#[tokio::test]
-async fn gateway_overwrites_existing_admin_system_user_key_usage_totals() {
+#[test]
+fn gateway_overwrites_existing_admin_system_user_key_usage_totals() {
+    run_admin_system_import_test(
+        "gateway_overwrites_existing_admin_system_user_key_usage_totals",
+        gateway_overwrites_existing_admin_system_user_key_usage_totals_impl,
+    );
+}
+
+async fn gateway_overwrites_existing_admin_system_user_key_usage_totals_impl() {
     let user_key_hash = hash_api_key("sk-existing-user-key");
     let standalone_key_hash = hash_api_key("sk-existing-standalone-key");
     let existing_user = StoredUserAuthRecord::new(
@@ -1347,8 +1420,15 @@ async fn gateway_overwrites_existing_admin_system_user_key_usage_totals() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_imports_admin_system_config_fixture_v22() {
+#[test]
+fn gateway_imports_admin_system_config_fixture_v22() {
+    run_admin_system_import_test(
+        "gateway_imports_admin_system_config_fixture_v22",
+        gateway_imports_admin_system_config_fixture_v22_impl,
+    );
+}
+
+async fn gateway_imports_admin_system_config_fixture_v22_impl() {
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
@@ -1374,8 +1454,15 @@ async fn gateway_imports_admin_system_config_fixture_v22() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_imports_admin_system_config_fixtures_from_legacy_exports() {
+#[test]
+fn gateway_imports_admin_system_config_fixtures_from_legacy_exports() {
+    run_admin_system_import_test(
+        "gateway_imports_admin_system_config_fixtures_from_legacy_exports",
+        gateway_imports_admin_system_config_fixtures_from_legacy_exports_impl,
+    );
+}
+
+async fn gateway_imports_admin_system_config_fixtures_from_legacy_exports_impl() {
     for fixture in ["v20", "v21"] {
         let gateway = build_router_with_state(
             AppState::new()
@@ -1409,8 +1496,15 @@ async fn gateway_imports_admin_system_config_fixtures_from_legacy_exports() {
     }
 }
 
-#[tokio::test]
-async fn gateway_imports_python_cli_alias_export_and_model_test_smoke() {
+#[test]
+fn gateway_imports_python_cli_alias_export_and_model_test_smoke() {
+    run_admin_system_import_test(
+        "gateway_imports_python_cli_alias_export_and_model_test_smoke",
+        gateway_imports_python_cli_alias_export_and_model_test_smoke_impl,
+    );
+}
+
+async fn gateway_imports_python_cli_alias_export_and_model_test_smoke_impl() {
     let seen_plan = Arc::new(Mutex::new(None::<ExecutionPlan>));
     let seen_plan_clone = Arc::clone(&seen_plan);
     let execution_runtime = Router::new().route(
@@ -1561,8 +1655,15 @@ async fn gateway_imports_python_cli_alias_export_and_model_test_smoke() {
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_rejects_legacy_user_import_string_bool_field() {
+#[test]
+fn gateway_rejects_legacy_user_import_string_bool_field() {
+    run_admin_system_import_test(
+        "gateway_rejects_legacy_user_import_string_bool_field",
+        gateway_rejects_legacy_user_import_string_bool_field_impl,
+    );
+}
+
+async fn gateway_rejects_legacy_user_import_string_bool_field_impl() {
     let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::default());
     let state = AppState::new()
         .expect("gateway should build")
@@ -1600,8 +1701,15 @@ async fn gateway_rejects_legacy_user_import_string_bool_field() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_reports_field_path_for_invalid_admin_system_config_import_shape() {
+#[test]
+fn gateway_reports_field_path_for_invalid_admin_system_config_import_shape() {
+    run_admin_system_import_test(
+        "gateway_reports_field_path_for_invalid_admin_system_config_import_shape",
+        gateway_reports_field_path_for_invalid_admin_system_config_import_shape_impl,
+    );
+}
+
+async fn gateway_reports_field_path_for_invalid_admin_system_config_import_shape_impl() {
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
@@ -1641,8 +1749,15 @@ async fn gateway_reports_field_path_for_invalid_admin_system_config_import_shape
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_imports_admin_system_config_with_numeric_string_prices() {
+#[test]
+fn gateway_imports_admin_system_config_with_numeric_string_prices() {
+    run_admin_system_import_test(
+        "gateway_imports_admin_system_config_with_numeric_string_prices",
+        gateway_imports_admin_system_config_with_numeric_string_prices_impl,
+    );
+}
+
+async fn gateway_imports_admin_system_config_with_numeric_string_prices_impl() {
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         Vec::new(),
         Vec::new(),
@@ -1714,8 +1829,15 @@ async fn gateway_imports_admin_system_config_with_numeric_string_prices() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_imports_oauth_provider_key_credentials_from_admin_system_config() {
+#[test]
+fn gateway_imports_oauth_provider_key_credentials_from_admin_system_config() {
+    run_admin_system_import_test(
+        "gateway_imports_oauth_provider_key_credentials_from_admin_system_config",
+        gateway_imports_oauth_provider_key_credentials_from_admin_system_config_impl,
+    );
+}
+
+async fn gateway_imports_oauth_provider_key_credentials_from_admin_system_config_impl() {
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         Vec::new(),
         Vec::new(),
@@ -1804,8 +1926,15 @@ async fn gateway_imports_oauth_provider_key_credentials_from_admin_system_config
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_import() {
+#[test]
+fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_import() {
+    run_admin_system_import_test(
+        "gateway_overwrites_oauth_provider_key_credentials_from_admin_system_import",
+        gateway_overwrites_oauth_provider_key_credentials_from_admin_system_import_impl,
+    );
+}
+
+async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_import_impl() {
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         Vec::new(),
         Vec::new(),
@@ -1898,8 +2027,12 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_import_without_refresh(
+#[test]
+fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_import_without_refresh() {
+    run_admin_system_import_test("gateway_overwrites_oauth_provider_key_credentials_from_admin_system_import_without_refresh", gateway_overwrites_oauth_provider_key_credentials_from_admin_system_import_without_refresh_impl);
+}
+
+async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_import_without_refresh_impl(
 ) {
     let seen_refresh = Arc::new(Mutex::new(false));
     let seen_refresh_clone = Arc::clone(&seen_refresh);
@@ -2058,8 +2191,15 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
     refresh_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_skips_proxy_nodes_during_admin_system_config_import() {
+#[test]
+fn gateway_skips_proxy_nodes_during_admin_system_config_import() {
+    run_admin_system_import_test(
+        "gateway_skips_proxy_nodes_during_admin_system_config_import",
+        gateway_skips_proxy_nodes_during_admin_system_config_import_impl,
+    );
+}
+
+async fn gateway_skips_proxy_nodes_during_admin_system_config_import_impl() {
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
@@ -2103,8 +2243,15 @@ async fn gateway_skips_proxy_nodes_during_admin_system_config_import() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_preserves_manual_proxy_configs_while_skipping_proxy_nodes_during_import() {
+#[test]
+fn gateway_preserves_manual_proxy_configs_while_skipping_proxy_nodes_during_import() {
+    run_admin_system_import_test(
+        "gateway_preserves_manual_proxy_configs_while_skipping_proxy_nodes_during_import",
+        gateway_preserves_manual_proxy_configs_while_skipping_proxy_nodes_during_import_impl,
+    );
+}
+
+async fn gateway_preserves_manual_proxy_configs_while_skipping_proxy_nodes_during_import_impl() {
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         Vec::new(),
         Vec::new(),

@@ -1,4 +1,6 @@
 import { ref } from 'vue'
+import { getI18nLocale } from '@/i18n'
+import { translateLegacyText } from '@/i18n/messages'
 
 export type ConfirmVariant = 'danger' | 'destructive' | 'warning' | 'info' | 'question'
 
@@ -25,6 +27,10 @@ const state = ref<ConfirmState>({
 })
 
 export function useConfirm() {
+  function localizeConfirmText(value: string): string {
+    return translateLegacyText(value, getI18nLocale())
+  }
+
   /**
    * 显示确认对话框
    * @param options 对话框选项
@@ -34,10 +40,10 @@ export function useConfirm() {
     return new Promise((resolve) => {
       state.value = {
         isOpen: true,
-        title: options.title || '确认操作',
-        message: options.message,
-        confirmText: options.confirmText || '确认',
-        cancelText: options.cancelText || '取消',
+        title: localizeConfirmText(options.title || '确认操作'),
+        message: localizeConfirmText(options.message),
+        confirmText: localizeConfirmText(options.confirmText || '确认'),
+        cancelText: localizeConfirmText(options.cancelText || '取消'),
         variant: options.variant || 'question',
         resolve
       }

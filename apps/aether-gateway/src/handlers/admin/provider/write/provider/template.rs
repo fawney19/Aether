@@ -14,9 +14,10 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 const FIXED_PROVIDER_TEMPLATE_METADATA_KEY: &str = "_aether_fixed_provider_template";
-const OVERRIDE_BASE_URL: &str = "base_url";
 const OVERRIDE_BODY_RULES: &str = "body_rules";
 const OVERRIDE_FORMAT_ACCEPTANCE_CONFIG: &str = "format_acceptance_config";
+const OVERRIDE_BASE_URL: &str = "base_url";
+const OVERRIDE_CUSTOM_PATH: &str = "custom_path";
 const OVERRIDE_HEADER_RULES: &str = "header_rules";
 const OVERRIDE_IS_ACTIVE: &str = "is_active";
 const OVERRIDE_MAX_RETRIES: &str = "max_retries";
@@ -168,6 +169,13 @@ pub(crate) fn apply_admin_fixed_provider_endpoint_template_overrides(
     );
     sync_override_if_changed(
         &mut overrides,
+        OVERRIDE_CUSTOM_PATH,
+        &existing_endpoint.custom_path,
+        &updated_endpoint.custom_path,
+        &defaults.custom_path,
+    );
+    sync_override_if_changed(
+        &mut overrides,
         OVERRIDE_HEADER_RULES,
         &existing_endpoint.header_rules,
         &updated_endpoint.header_rules,
@@ -257,11 +265,13 @@ fn reconcile_fixed_provider_endpoint(
     updated.api_format = defaults.api_format.clone();
     updated.api_family = Some(defaults.api_family.clone());
     updated.endpoint_kind = Some(defaults.endpoint_kind.clone());
+
     if !metadata.overrides.contains(OVERRIDE_BASE_URL) {
         updated.base_url = defaults.base_url;
     }
-    updated.custom_path = defaults.custom_path;
-
+    if !metadata.overrides.contains(OVERRIDE_CUSTOM_PATH) {
+        updated.custom_path = defaults.custom_path;
+    }
     if !metadata.overrides.contains(OVERRIDE_HEADER_RULES) {
         updated.header_rules = defaults.header_rules;
     }
@@ -543,4 +553,75 @@ fn sync_override_if_changed<T>(
         return;
     }
     sync_override(overrides, key, actual, desired);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        apply_admin_fixed_provider_endpoint_template_overrides, fixed_provider_endpoint_metadata,
+        reconcile_fixed_provider_endpoint,
+    };
+    use aether_data_contracts::repository::provider_catalog::{
+        StoredProviderCatalogEndpoint, StoredProviderCatalogProvider,
+    };
+    use aether_provider_transport::provider_types::fixed_provider_template;
+
+    fn sample_codex_provider() -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            "provider-codex".to_string(),
+            "Codex".to_string(),
+            None,
+            "codex".to_string(),
+        )
+        .expect("provider should build")
+    }
+
+    fn sample_codex_endpoint(base_url: &str) -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            "endpoint-codex-responses".to_string(),
+            "provider-codex".to_string(),
+            "openai:responses".to_string(),
+            Some("openai".to_string()),
+            Some("responses".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            base_url.to_string(),
+            None,
+            None,
+            Some(2),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")
+    }
+
+    #[test]
+    fn fixed_provider_endpoint_reconcile_preserves_base_url_override() {
+        let provider = sample_codex_provider();
+        let template = fixed_provider_template("codex").expect("codex template should exist");
+        let endpoint_template = template
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.api_format == "openai:responses")
+            .expect("responses endpoint template should exist");
+
+        let existing = sample_codex_endpoint("https://chatgpt.com/backend-api/codex");
+        let mut updated = existing.clone();
+        updated.base_url = "http://127.0.0.1:18181/v1".to_string();
+        apply_admin_fixed_provider_endpoint_template_overrides(&provider, &existing, &mut updated)
+            .expect("override metadata should apply");
+
+        let metadata = fixed_provider_endpoint_metadata(&updated)
+            .expect("fixed provider metadata should exist");
+        assert!(metadata.overrides.contains("base_url"));
+
+        let reconciled =
+            reconcile_fixed_provider_endpoint(&provider, &updated, template, endpoint_template)
+                .expect("endpoint should reconcile");
+        assert_eq!(reconciled.base_url, "http://127.0.0.1:18181/v1");
+    }
 }

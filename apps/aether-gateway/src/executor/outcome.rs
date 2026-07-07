@@ -342,10 +342,13 @@ pub(crate) async fn record_failed_usage_for_exhausted_request(
     );
     data.request_metadata = Some(Value::Object(request_metadata));
 
-    state.usage_runtime.submit_terminal_event(
-        state.data.as_ref(),
-        UsageEvent::new(UsageEventType::Failed, request_id, data),
-    );
+    state
+        .usage_runtime
+        .record_terminal_event_direct(
+            state.data.as_ref(),
+            UsageEvent::new(UsageEventType::Failed, request_id, data),
+        )
+        .await;
 }
 
 pub(crate) async fn record_failed_usage_for_runtime_miss_request(
@@ -478,10 +481,13 @@ pub(crate) async fn record_failed_usage_for_runtime_miss_request(
     data.request_metadata =
         (!request_metadata.is_empty()).then_some(Value::Object(request_metadata));
 
-    state.usage_runtime.submit_terminal_event(
-        state.data.as_ref(),
-        UsageEvent::new(UsageEventType::Failed, request_id, data),
-    );
+    state
+        .usage_runtime
+        .record_terminal_event_direct(
+            state.data.as_ref(),
+            UsageEvent::new(UsageEventType::Failed, request_id, data),
+        )
+        .await;
 }
 
 pub(crate) fn beautify_local_execution_client_error_message(message: &str) -> String {

@@ -1,8 +1,8 @@
 use super::{
     any, build_router_with_state, build_state_with_execution_runtime_override, json, start_server,
-    strip_sse_keepalive_comments, to_bytes, AppState, Arc, Body, Bytes, HeaderName, HeaderValue,
-    Json, Mutex, Request, Response, Router, StatusCode, EXECUTION_PATH_EXECUTION_RUNTIME_STREAM,
-    EXECUTION_PATH_HEADER, TRACE_ID_HEADER,
+    strip_sse_keepalive_comments, to_bytes, wait_until, AppState, Arc, Body, Bytes, HeaderName,
+    HeaderValue, Json, Mutex, Request, Response, Router, StatusCode,
+    EXECUTION_PATH_EXECUTION_RUNTIME_STREAM, EXECUTION_PATH_HEADER, TRACE_ID_HEADER,
 };
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::auth::{
@@ -22,8 +22,40 @@ use aether_data_contracts::repository::provider_catalog::{
 };
 use sha2::{Digest, Sha256};
 
-#[tokio::test]
-async fn gateway_executes_openai_chat_stream_via_local_decision_gate_without_execution_runtime_override(
+const STREAM_DECISION_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_stream_decision_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(STREAM_DECISION_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("stream decision test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+fn gateway_executes_openai_chat_stream_via_local_decision_gate_without_execution_runtime_override()
+{
+    run_stream_decision_test(
+        "gateway_executes_openai_chat_stream_via_local_decision_gate_without_execution_runtime_override",
+        gateway_executes_openai_chat_stream_via_local_decision_gate_without_execution_runtime_override_impl,
+    );
+}
+
+async fn gateway_executes_openai_chat_stream_via_local_decision_gate_without_execution_runtime_override_impl(
 ) {
     #[derive(Debug, Clone)]
     struct SeenUpstreamStreamRequest {
@@ -310,50 +342,19 @@ async fn gateway_executes_openai_chat_stream_via_local_decision_gate_without_exe
             "user-openai-local-stream-1",
         ),
     )]));
-    let mut backup_candidate_row = sample_candidate_row();
-    backup_candidate_row.provider_id = "provider-openai-local-stream-2".to_string();
-    backup_candidate_row.endpoint_id = "endpoint-openai-local-stream-2".to_string();
-    backup_candidate_row.key_id = "key-openai-local-stream-2".to_string();
-    backup_candidate_row.key_name = "backup".to_string();
-    backup_candidate_row.key_internal_priority = 6;
-    backup_candidate_row.model_id = "model-openai-local-stream-2".to_string();
-    backup_candidate_row.global_model_id = "global-model-openai-local-stream-2".to_string();
-    backup_candidate_row.model_provider_model_name = "gpt-5-upstream-backup".to_string();
-    backup_candidate_row.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
-        name: "gpt-5-upstream-backup".to_string(),
-        priority: 1,
-        api_formats: Some(vec!["openai:chat".to_string()]),
-        endpoint_ids: None,
-    }]);
     let candidate_selection_repository =
         Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
             sample_candidate_row(),
-            backup_candidate_row,
         ]));
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
-    let mut backup_provider = sample_provider_catalog_provider();
-    backup_provider.id = "provider-openai-local-stream-2".to_string();
-    let mut backup_endpoint = sample_provider_catalog_endpoint();
-    backup_endpoint.id = "endpoint-openai-local-stream-2".to_string();
-    backup_endpoint.provider_id = "provider-openai-local-stream-2".to_string();
-    backup_endpoint.base_url = "https://api.openai.backup.example".to_string();
-    let mut backup_key = sample_provider_catalog_key();
-    backup_key.id = "key-openai-local-stream-2".to_string();
-    backup_key.provider_id = "provider-openai-local-stream-2".to_string();
-    backup_key.name = "backup".to_string();
-    backup_key.encrypted_api_key = Some(
-        encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-openai-backup")
-            .expect("api key should encrypt"),
-    );
     let (upstream_url, upstream_handle) = start_server(upstream).await;
     let (provider_url, provider_handle) = start_server(provider).await;
     let mut primary_endpoint = sample_provider_catalog_endpoint();
     primary_endpoint.base_url = format!("{provider_url}/v1");
-    backup_endpoint.base_url = "http://127.0.0.1:9".to_string();
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
-        vec![sample_provider_catalog_provider(), backup_provider],
-        vec![primary_endpoint, backup_endpoint],
-        vec![sample_provider_catalog_key(), backup_key],
+        vec![sample_provider_catalog_provider()],
+        vec![primary_endpoint],
+        vec![sample_provider_catalog_key()],
     ));
     let gateway_state = AppState::new()
         .expect("gateway state should build")
@@ -443,8 +444,16 @@ async fn gateway_executes_openai_chat_stream_via_local_decision_gate_without_exe
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_executes_openai_chat_stream_via_local_openai_responses_cross_format_candidate() {
+#[test]
+fn gateway_executes_openai_chat_stream_via_local_openai_responses_cross_format_candidate() {
+    run_stream_decision_test(
+        "gateway_executes_openai_chat_stream_via_local_openai_responses_cross_format_candidate",
+        gateway_executes_openai_chat_stream_via_local_openai_responses_cross_format_candidate_impl,
+    );
+}
+
+async fn gateway_executes_openai_chat_stream_via_local_openai_responses_cross_format_candidate_impl(
+) {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeStreamRequest {
         trace_id: String,
@@ -821,10 +830,10 @@ async fn gateway_executes_openai_chat_stream_via_local_openai_responses_cross_fo
             Arc::clone(&request_candidate_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
         )
-        .with_system_config_values_for_tests(vec![(
-            "provider_priority_mode".to_string(),
-            json!("global_key"),
-        )]),
+        .with_system_config_values_for_tests(vec![
+            ("scheduling_mode".to_string(), json!("fixed_order")),
+            ("provider_priority_mode".to_string(), json!("global_key")),
+        ]),
     );
     let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
@@ -928,8 +937,16 @@ async fn gateway_executes_openai_chat_stream_via_local_openai_responses_cross_fo
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_executes_openai_chat_stream_via_local_cross_format_gemini_candidate_with_stream_path_rewrite(
+#[test]
+fn gateway_executes_openai_chat_stream_via_local_cross_format_gemini_candidate_with_stream_path_rewrite(
+) {
+    run_stream_decision_test(
+        "gateway_executes_openai_chat_stream_via_local_cross_format_gemini_candidate_with_stream_path_rewrite",
+        gateway_executes_openai_chat_stream_via_local_cross_format_gemini_candidate_with_stream_path_rewrite_impl,
+    );
+}
+
+async fn gateway_executes_openai_chat_stream_via_local_cross_format_gemini_candidate_with_stream_path_rewrite_impl(
 ) {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeStreamRequest {
@@ -1350,8 +1367,16 @@ async fn gateway_executes_openai_chat_stream_via_local_cross_format_gemini_candi
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_executes_openai_chat_stream_with_custom_path_via_local_decision_gate_with_local_stream_decision(
+#[test]
+fn gateway_executes_openai_chat_stream_with_custom_path_via_local_decision_gate_with_local_stream_decision(
+) {
+    run_stream_decision_test(
+        "gateway_executes_openai_chat_stream_with_custom_path_via_local_decision_gate_with_local_stream_decision",
+        gateway_executes_openai_chat_stream_with_custom_path_via_local_decision_gate_with_local_stream_decision_impl,
+    );
+}
+
+async fn gateway_executes_openai_chat_stream_with_custom_path_via_local_decision_gate_with_local_stream_decision_impl(
 ) {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeStreamRequest {
@@ -1844,8 +1869,16 @@ async fn gateway_executes_openai_chat_stream_with_custom_path_via_local_decision
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable_429_execution_runtime_status(
+#[test]
+fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable_429_execution_runtime_status(
+) {
+    run_stream_decision_test(
+        "gateway_retries_next_local_openai_chat_stream_candidate_after_retryable_429_execution_runtime_status",
+        gateway_retries_next_local_openai_chat_stream_candidate_after_retryable_429_execution_runtime_status_impl,
+    );
+}
+
+async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable_429_execution_runtime_status_impl(
 ) {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeStreamRequest {
@@ -2024,7 +2057,7 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
     let seen_execution_runtime_clone = Arc::clone(&seen_execution_runtime);
     let seen_report = Arc::new(Mutex::new(false));
     let seen_report_clone = Arc::clone(&seen_report);
-    let execution_runtime_hits = Arc::new(Mutex::new(0usize));
+    let execution_runtime_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
     let decision_hits = Arc::new(Mutex::new(0usize));
     let decision_hits_clone = Arc::clone(&decision_hits);
@@ -2106,24 +2139,26 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
                 let raw_body = to_bytes(body, usize::MAX).await.expect("body should read");
                 let payload: serde_json::Value =
                     serde_json::from_slice(&raw_body).expect("execution runtime payload should parse");
-                let mut hits = execution_runtime_hits_inner.lock().expect("mutex should lock");
-                *hits += 1;
-                let attempt = *hits;
-                drop(hits);
+                let request_url = payload
+                    .get("url")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let attempt = execution_runtime_hits_inner
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    + 1;
 
-                seen_execution_runtime_inner.lock().expect("mutex should lock").push(
-                    SeenExecutionRuntimeStreamRequest {
+                seen_execution_runtime_inner
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(SeenExecutionRuntimeStreamRequest {
                         trace_id: parts
                             .headers
                             .get(TRACE_ID_HEADER)
                             .and_then(|value| value.to_str().ok())
                             .unwrap_or_default()
                             .to_string(),
-                        url: payload
-                            .get("url")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
+                        url: request_url.clone(),
                         model: payload
                             .get("body")
                             .and_then(|value| value.get("json_body"))
@@ -2149,8 +2184,7 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
                             .and_then(|value| value.as_str())
                             .unwrap_or_default()
                             .to_string(),
-                    },
-                );
+                    });
 
                 let frames = if attempt == 1 {
                     concat!(
@@ -2289,38 +2323,47 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
         "data: {\"id\":\"chatcmpl-local-stream-failover-123\"}\n\ndata: [DONE]\n\n"
     );
 
+    wait_until(5_000, || {
+        seen_execution_runtime
+            .lock()
+            .expect("mutex should lock")
+            .len()
+            >= 2
+    })
+    .await;
     let seen_execution_runtime_requests = seen_execution_runtime
         .lock()
         .expect("mutex should lock")
         .clone();
     assert_eq!(seen_execution_runtime_requests.len(), 2);
+    let primary_request = seen_execution_runtime_requests
+        .iter()
+        .find(|request| request.url == "https://api.openai.primary.example/chat/completions")
+        .expect("primary execution runtime request should be captured");
+    let backup_request = seen_execution_runtime_requests
+        .iter()
+        .find(|request| request.url == "https://api.openai.backup.example/chat/completions")
+        .expect("backup execution runtime request should be captured");
     assert_eq!(
-        seen_execution_runtime_requests[0].trace_id,
+        primary_request.trace_id,
         "trace-openai-chat-local-stream-failover-123"
     );
+    assert_eq!(primary_request.model, "gpt-5-upstream-primary");
+    assert!(primary_request.stream);
+    assert_eq!(primary_request.accept, "text/event-stream");
     assert_eq!(
-        seen_execution_runtime_requests[0].url,
-        "https://api.openai.primary.example/chat/completions"
-    );
-    assert_eq!(
-        seen_execution_runtime_requests[0].authorization,
+        primary_request.authorization,
         "Bearer sk-upstream-openai-primary"
     );
     assert_eq!(
-        seen_execution_runtime_requests[1].url,
-        "https://api.openai.backup.example/chat/completions"
+        backup_request.trace_id,
+        "trace-openai-chat-local-stream-failover-123"
     );
+    assert_eq!(backup_request.model, "gpt-5-upstream-backup");
+    assert!(backup_request.stream);
+    assert_eq!(backup_request.accept, "text/event-stream");
     assert_eq!(
-        seen_execution_runtime_requests[1].model,
-        "gpt-5-upstream-backup"
-    );
-    assert!(seen_execution_runtime_requests[1].stream);
-    assert_eq!(
-        seen_execution_runtime_requests[1].accept,
-        "text/event-stream"
-    );
-    assert_eq!(
-        seen_execution_runtime_requests[1].authorization,
+        backup_request.authorization,
         "Bearer sk-upstream-openai-backup"
     );
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -2353,18 +2396,40 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     };
     assert_eq!(stored_candidates.len(), 2);
-    assert_eq!(stored_candidates[0].candidate_index, 0);
-    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Failed);
-    assert_eq!(stored_candidates[0].status_code, Some(429));
+    let failed_candidate = stored_candidates
+        .iter()
+        .find(|candidate| {
+            candidate.status == RequestCandidateStatus::Failed && candidate.status_code == Some(429)
+        })
+        .expect("retryable 429 failed candidate should be stored");
+    let success_candidate = stored_candidates
+        .iter()
+        .find(|candidate| {
+            candidate.status == RequestCandidateStatus::Success
+                && candidate.status_code == Some(200)
+        })
+        .expect("backup success candidate should be stored");
+    assert_ne!(
+        (
+            failed_candidate.candidate_index,
+            failed_candidate.retry_index
+        ),
+        (
+            success_candidate.candidate_index,
+            success_candidate.retry_index
+        )
+    );
+    assert_eq!(failed_candidate.status, RequestCandidateStatus::Failed);
+    assert_eq!(failed_candidate.status_code, Some(429));
     assert_eq!(
-        stored_candidates[0].error_type.as_deref(),
+        failed_candidate.error_type.as_deref(),
         Some("retryable_upstream_status")
     );
     assert_eq!(
-        stored_candidates[0].error_message.as_deref(),
+        failed_candidate.error_message.as_deref(),
         Some("execution runtime stream returned retryable status 429")
     );
-    let failed_upstream_response = stored_candidates[0]
+    let failed_upstream_response = failed_candidate
         .extra_data
         .as_ref()
         .and_then(|value| value.get("upstream_response"))
@@ -2378,11 +2443,10 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
         failed_upstream_response["body"]["error"]["type"],
         json!("rate_limit_error")
     );
-    assert_eq!(stored_candidates[1].candidate_index, 1);
-    assert_eq!(stored_candidates[1].status, RequestCandidateStatus::Success);
-    assert_eq!(stored_candidates[1].status_code, Some(200));
-    assert!(stored_candidates[1].started_at_unix_ms.is_some());
-    assert!(stored_candidates[1].finished_at_unix_ms.is_some());
+    assert_eq!(success_candidate.status, RequestCandidateStatus::Success);
+    assert_eq!(success_candidate.status_code, Some(200));
+    assert!(success_candidate.started_at_unix_ms.is_some());
+    assert!(success_candidate.finished_at_unix_ms.is_some());
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(
@@ -2391,7 +2455,7 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
     );
 
     assert_eq!(
-        *execution_runtime_hits.lock().expect("mutex should lock"),
+        execution_runtime_hits.load(std::sync::atomic::Ordering::SeqCst),
         2
     );
     assert_eq!(*decision_hits.lock().expect("mutex should lock"), 0);

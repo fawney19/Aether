@@ -215,6 +215,7 @@ import {
 import { EmptyState, LoadingState, StripePaymentDialog } from '@/components/common'
 import { CardSection, PageContainer, PageHeader } from '@/components/layout'
 import { useToast } from '@/composables/useToast'
+import { useI18n } from '@/i18n'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
 import {
@@ -224,6 +225,7 @@ import {
 } from '@/utils/paymentInstructions'
 
 const { success, error: showError } = useToast()
+const { legacyT } = useI18n()
 
 const loading = ref(true)
 const plans = ref<BillingPlan[]>([])
@@ -330,7 +332,7 @@ async function loadRechargeOptions() {
 
 async function checkoutPlan(plan: BillingPlan) {
   if (hasMatchingActivePlan(plan)) {
-    const confirmed = window.confirm('购买成功后，同类旧套餐会自动失效。确定继续购买吗？')
+    const confirmed = window.confirm(legacyT('购买成功后，同类旧套餐会自动失效。确定继续购买吗？'))
     if (!confirmed) return
   }
   const option = selectedCheckoutOption.value

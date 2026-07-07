@@ -1383,6 +1383,7 @@ import {
 import type { PaymentOrder } from '@/api/wallet'
 import { parseApiError } from '@/utils/errorParser'
 import { useToast } from '@/composables/useToast'
+import { useI18n } from '@/i18n'
 import { log } from '@/utils/logger'
 import {
   callbackStatusBadge,
@@ -1422,6 +1423,7 @@ const LEDGER_REASON_OPTIONS: LedgerReasonOption[] = [
 ]
 
 const { success, error: showError } = useToast()
+const { legacyT } = useI18n()
 const route = useRoute()
 
 const activeTab = ref<WalletManagementTab>('ledger')
@@ -1870,7 +1872,7 @@ async function deleteRedeemBatch(batch: RedeemCodeBatch) {
     showError('已有兑换记录的批次不能删除')
     return
   }
-  if (!window.confirm(`确认删除批次「${batch.name}」吗？删除后无法恢复。`)) {
+  if (!window.confirm(legacyT(`确认删除批次「${batch.name}」吗？删除后无法恢复。`))) {
     return
   }
 

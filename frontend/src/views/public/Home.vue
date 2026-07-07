@@ -6,7 +6,7 @@
     <!-- Fixed scroll indicator -->
     <nav class="scroll-indicator">
       <button
-        v-for="(section, index) in sections"
+        v-for="(section, index) in resolvedSections"
         :key="index"
         class="scroll-indicator-btn group"
         @click="scrollToSection(index)"
@@ -47,39 +47,23 @@
             :to="dashboardPath"
             class="min-w-[60px] text-center rounded-lg bg-[#191919] dark:bg-[#cc785c] px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:bg-[#262625] dark:hover:bg-[#b86d52] whitespace-nowrap"
           >
-            控制台
+            {{ t('site.home.enterDashboard') }}
           </RouterLink>
           <button
             v-else
             class="min-w-[60px] text-center rounded-lg bg-[#cc785c] px-3 py-1.5 text-xs font-medium text-white shadow-lg shadow-[#cc785c]/30 transition hover:bg-[#d4a27f] whitespace-nowrap"
             @click="showLoginDialog = true"
           >
-            登录
+            {{ t('site.home.login') }}
           </button>
-          <button
-            class="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-            :title="themeMode === 'system' ? '跟随系统' : themeMode === 'dark' ? '深色模式' : '浅色模式'"
-            @click="toggleDarkMode"
-          >
-            <SunMoon
-              v-if="themeMode === 'system'"
-              class="h-3.5 w-3.5"
-            />
-            <Sun
-              v-else-if="themeMode === 'light'"
-              class="h-3.5 w-3.5"
-            />
-            <Moon
-              v-else
-              class="h-3.5 w-3.5"
-            />
-          </button>
+          <ThemeModeButton size="sm" />
+          <LanguageSwitcher />
           <a
             href="https://github.com/fawney19/Aether"
             target="_blank"
             rel="noopener noreferrer"
             class="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-            title="GitHub 仓库"
+            :title="t('common.githubRepository')"
           >
             <GithubIcon class="h-3.5 w-3.5" />
           </a>
@@ -113,7 +97,7 @@
           <!-- Navigation -->
           <nav class="flex items-center gap-2 mx-8 lg:mx-16">
             <button
-              v-for="(section, index) in sections.slice(0, -1)"
+              v-for="(section, index) in resolvedSections.slice(0, -1)"
               :key="index"
               class="group relative px-3 py-2 text-sm font-medium transition whitespace-nowrap"
               :class="currentSection === index
@@ -131,7 +115,7 @@
               to="/guide"
               class="group relative px-3 py-2 text-sm font-medium transition whitespace-nowrap text-[#666663] dark:text-muted-foreground hover:text-[#191919] dark:hover:text-white"
             >
-              文档
+              {{ t('site.home.docLink') }}
             </RouterLink>
             <button
               class="group relative px-3 py-2 text-sm font-medium transition whitespace-nowrap"
@@ -140,7 +124,7 @@
                 : 'text-[#666663] dark:text-muted-foreground hover:text-[#191919] dark:hover:text-white'"
               @click="scrollToSection(SECTIONS.FEATURES)"
             >
-              {{ sections[SECTIONS.FEATURES].name }}
+              {{ resolvedSections[SECTIONS.FEATURES].name }}
               <div
                 class="absolute bottom-0 left-0 right-0 h-0.5 rounded-full transition-all duration-300"
                 :class="currentSection === SECTIONS.FEATURES ? 'bg-[#cc785c] dark:bg-[#d4a27f] scale-x-100' : 'bg-transparent scale-x-0'"
@@ -154,43 +138,27 @@
             :to="dashboardPath"
             class="min-w-[72px] text-center rounded-xl bg-[#191919] dark:bg-[#cc785c] px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-[#262625] dark:hover:bg-[#b86d52] whitespace-nowrap"
           >
-            控制台
+            {{ t('site.home.enterDashboard') }}
           </RouterLink>
           <button
             v-else
             class="min-w-[72px] text-center rounded-xl bg-[#cc785c] px-4 py-2 text-sm font-medium text-white shadow-lg shadow-[#cc785c]/30 transition hover:bg-[#d4a27f] whitespace-nowrap"
             @click="showLoginDialog = true"
           >
-            登录
+            {{ t('site.home.login') }}
           </button>
         </div>
 
         <!-- Right: Theme Toggle + GitHub Icons -->
         <div class="flex items-center gap-1 shrink-0">
-          <button
-            class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-            :title="themeMode === 'system' ? '跟随系统' : themeMode === 'dark' ? '深色模式' : '浅色模式'"
-            @click="toggleDarkMode"
-          >
-            <SunMoon
-              v-if="themeMode === 'system'"
-              class="h-4 w-4"
-            />
-            <Sun
-              v-else-if="themeMode === 'light'"
-              class="h-4 w-4"
-            />
-            <Moon
-              v-else
-              class="h-4 w-4"
-            />
-          </button>
+          <ThemeModeButton />
+          <LanguageSwitcher />
           <a
             href="https://github.com/fawney19/Aether"
             target="_blank"
             rel="noopener noreferrer"
             class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-            title="GitHub 仓库"
+            :title="t('common.githubRepository')"
           >
             <GithubIcon class="h-4 w-4" />
           </a>
@@ -266,7 +234,7 @@
             class="mb-6 text-3xl sm:text-5xl md:text-7xl font-bold text-[#191919] dark:text-white leading-tight transition-all duration-700"
             :style="getTitleStyle(SECTIONS.HOME)"
           >
-            欢迎使用 <span class="text-primary typewriter">{{ aetherText }}<span
+            {{ t('site.home.hero.titlePrefix') }} <span class="text-primary typewriter">{{ aetherText }}<span
               class="cursor"
               :class="{ 'cursor-hidden': !showCursor }"
             >_</span></span>
@@ -275,8 +243,8 @@
             class="mb-8 text-base sm:text-lg md:text-xl text-[#666663] dark:text-[#c9c3b4] max-w-2xl mx-auto transition-all duration-700"
             :style="getDescStyle(SECTIONS.HOME)"
           >
-            AI 开发工具统一接入平台<br>
-            整合 Claude Code、Codex CLI、Gemini CLI 等多个 AI 编程助手
+            {{ t('site.home.hero.subtitle') }}<br>
+            {{ t('site.home.hero.subtitleLine2') }}
           </p>
           <button
             class="mt-8 transition-all duration-700 cursor-pointer hover:scale-110"
@@ -292,10 +260,10 @@
       <CliSection
         ref="section1"
         v-model:platform-value="claudePlatform"
-        title="Claude Code"
-        description="直接在您的终端中释放Claude的原始力量。瞬间搜索百万行代码库。将数小时的流程转化为单一命令。您的工具。您的流程。您的代码库,以思维速度进化。"
+        :title="t('site.home.cli.claudeTitle')"
+        :description="t('site.home.cli.claudeDescription')"
         :badge-icon="Code2"
-        badge-text="IDE 集成"
+        :badge-text="t('site.home.cli.ideIntegration')"
         badge-class="bg-[#cc785c]/10 dark:bg-[#cc785c]/20 border border-[#cc785c]/20 dark:border-[#d4a27f]/30 text-[#cc785c] dark:text-[#d4a27f]"
         :platform-options="platformPresets.claude.options"
         :install-command="claudeInstallCommand"
@@ -312,10 +280,10 @@
       <CliSection
         ref="section2"
         v-model:platform-value="codexPlatform"
-        title="Codex CLI"
-        description="Codex CLI 是一款可在本地终端运行的编程助手工具，它能够读取、修改并执行用户指定目录中的代码。"
+        :title="t('site.home.cli.codexTitle')"
+        :description="t('site.home.cli.codexDescription')"
         :badge-icon="Terminal"
-        badge-text="命令行工具"
+        :badge-text="t('site.home.cli.commandLine')"
         badge-class="bg-[#cc785c]/10 dark:bg-[#cc785c]/20 border border-[#cc785c]/20 dark:border-[#d4a27f]/30 text-[#cc785c] dark:text-[#d4a27f]"
         :platform-options="platformPresets.codex.options"
         :install-command="codexInstallCommand"
@@ -335,10 +303,10 @@
       <CliSection
         ref="section3"
         v-model:platform-value="geminiPlatform"
-        title="Gemini CLI"
-        description="Gemini CLI 是一款开源人工智能代理，可将 Gemini 的强大功能直接带入你的终端。它提供了对 Gemini 的轻量级访问，为你提供了从提示符到我们模型的最直接路径。"
+        :title="t('site.home.cli.geminiTitle')"
+        :description="t('site.home.cli.geminiDescription')"
         :badge-icon="Sparkles"
-        badge-text="多模态 AI"
+        :badge-text="t('site.home.cli.multimodalAi')"
         badge-class="bg-[#cc785c]/10 dark:bg-[#cc785c]/20 border border-[#cc785c]/20 dark:border-[#d4a27f]/30 text-[#cc785c] dark:text-[#d4a27f]"
         :platform-options="platformPresets.gemini.options"
         :install-command="geminiInstallCommand"
@@ -365,26 +333,26 @@
             :style="getBadgeStyle(SECTIONS.FEATURES)"
           >
             <Sparkles class="h-3.5 w-3.5 md:h-4 md:w-4" />
-            项目进度
+            {{ t('site.home.projectProgress') }}
           </div>
 
           <h2
             class="text-2xl md:text-5xl font-bold text-[#191919] dark:text-white mb-3 md:mb-6 transition-all duration-700"
             :style="getTitleStyle(SECTIONS.FEATURES)"
           >
-            功能开发进度
+            {{ t('site.home.featureProgress') }}
           </h2>
 
           <p
             class="text-base md:text-lg text-[#666663] dark:text-[#c9c3b4] mb-6 md:mb-12 max-w-2xl mx-auto transition-all duration-700"
             :style="getDescStyle(SECTIONS.FEATURES)"
           >
-            核心 API 代理功能已完成，正在载入更多功能
+            {{ t('site.home.featureProgressDesc') }}
           </p>
 
           <div class="grid md:grid-cols-3 gap-3 md:gap-6">
             <div
-              v-for="(feature, idx) in featureCards"
+              v-for="(feature, idx) in resolvedFeatureCards"
               :key="idx"
               class="group bg-white/90 dark:bg-[#262624]/80 backdrop-blur-sm rounded-xl md:rounded-2xl p-4 md:p-6 border transition-all duration-700"
               :class="feature.status === 'completed'
@@ -418,7 +386,7 @@
                   ? 'bg-[#cc785c]/5 text-[#cc785c] dark:text-[#d4a27f] border-[#cc785c]/20 dark:border-[#d4a27f]/20'
                   : 'bg-transparent text-[#91918d] dark:text-[#808080] border-[#e5e4df] dark:border-[rgba(227,224,211,0.12)]'"
               >
-                {{ feature.status === 'completed' ? '已完成' : '开发中' }}
+                {{ feature.status === 'completed' ? t('site.home.status.completed') : t('site.home.status.inProgress') }}
               </div>
             </div>
           </div>
@@ -433,7 +401,7 @@
               class="inline-flex items-center justify-center gap-2 rounded-xl bg-transparent border-2 border-[#cc785c] px-6 py-3 text-base font-semibold text-[#cc785c] dark:text-[#d4a27f] dark:border-[#d4a27f] transition hover:bg-[#cc785c]/10 dark:hover:bg-[#d4a27f]/10 hover:scale-105 w-[160px]"
             >
               <Rocket class="h-5 w-5" />
-              立即开始
+              {{ t('site.home.enterDashboard') }}
             </RouterLink>
             <button
               v-else
@@ -441,7 +409,7 @@
               @click="showLoginDialog = true"
             >
               <Rocket class="h-5 w-5" />
-              立即开始
+              {{ t('site.home.startNow') }}
             </button>
           </div>
         </div>
@@ -458,11 +426,8 @@ import { RouterLink } from 'vue-router'
 import {
   ChevronDown,
   Code2,
-  Moon,
   Rocket,
   Sparkles,
-  Sun,
-  SunMoon,
   Terminal
 } from 'lucide-vue-next'
 import GithubIcon from '@/components/icons/GithubIcon.vue'
@@ -470,19 +435,20 @@ import { useAuthStore } from '@/stores/auth'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { useClipboard } from '@/composables/useClipboard'
 import { useSiteInfo } from '@/composables/useSiteInfo'
+import LanguageSwitcher from '@/components/common/LanguageSwitcher.vue'
+import ThemeModeButton from '@/components/common/ThemeModeButton.vue'
 import LoginDialog from '@/features/auth/components/LoginDialog.vue'
 import RippleLogo from '@/components/RippleLogo.vue'
 import HeaderLogo from '@/components/HeaderLogo.vue'
 import AetherLineByLineLogo from '@/components/AetherLineByLineLogo.vue'
 import GeminiStarCluster from '@/components/GeminiStarCluster.vue'
 import CliSection from './CliSection.vue'
+import { platformPresets, getInstallCommand } from '@/config/platform-presets'
 import {
   SECTIONS,
   sections,
   featureCards,
   useCliConfigs,
-  platformPresets,
-  getInstallCommand,
   getLogoType,
   getLogoClass
 } from './home-config'
@@ -491,16 +457,29 @@ import {
   useLogoPosition,
   useLogoTransition
 } from './useSectionAnimations'
+import { useI18n } from '@/i18n'
 
 const authStore = useAuthStore()
-const { isDark, themeMode, toggleDarkMode } = useDarkMode()
+const { isDark } = useDarkMode()
 const { copyToClipboard } = useClipboard()
 const { siteName, siteSubtitle } = useSiteInfo()
+const { t } = useI18n()
 
 const dashboardPath = computed(() =>
   authStore.canAccessAdmin ? '/admin/dashboard' : '/dashboard'
 )
 const baseUrl = computed(() => window.location.origin)
+
+const resolvedSections = computed(() => sections.map(section => ({
+  ...section,
+  name: t(section.nameKey)
+})))
+
+const resolvedFeatureCards = computed(() => featureCards.map(card => ({
+  ...card,
+  title: t(card.titleKey),
+  desc: t(card.descKey),
+})))
 
 // Scroll state
 const scrollContainer = ref<HTMLElement | null>(null)

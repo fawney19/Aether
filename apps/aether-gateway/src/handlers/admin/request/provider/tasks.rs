@@ -1,4 +1,8 @@
 use super::*;
+use crate::ai_serving::provider_key_pool_score_scope;
+use aether_data_contracts::repository::pool_scores::{
+    ListPoolMemberScoresQuery, PoolMemberHardState, POOL_KIND_PROVIDER_KEY_POOL,
+};
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
@@ -248,6 +252,100 @@ impl<'a> AdminAppState<'a> {
             .map(|key| key.id.clone())
             .collect::<Vec<_>>();
         for key in &banned_keys {
+            self.clear_admin_provider_pool_cooldown(&provider.id, &key.id)
+                .await;
+            self.reset_admin_provider_pool_cost(&provider.id, &key.id)
+                .await;
+        }
+
+        let mut affected = 0usize;
+        for key_id in &deleted_key_ids {
+            if self.delete_provider_catalog_key(key_id).await? {
+                affected += 1;
+            }
+        }
+        self.cleanup_deleted_provider_catalog_refs(&provider.id, false, &[], &deleted_key_ids)
+            .await?;
+
+        Ok(affected)
+    }
+
+    pub(crate) async fn cleanup_quota_exhausted_provider_catalog_keys(
+        &self,
+        provider: &StoredProviderCatalogProvider,
+        provider_type: &str,
+    ) -> Result<usize, GatewayError> {
+        use aether_admin::provider::pool as admin_provider_pool_pure;
+
+        let keys = self
+            .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
+            .await?;
+        if keys.is_empty() {
+            return Ok(0);
+        }
+
+        let known_key_ids = keys
+            .iter()
+            .map(|key| key.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut exhausted_key_ids = keys
+            .iter()
+            .filter(|key| {
+                admin_provider_pool_pure::admin_pool_key_account_quota_exhausted(key, provider_type)
+            })
+            .map(|key| key.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        if self.app().data.has_pool_score_reader() {
+            let scope = provider_key_pool_score_scope();
+            let page_size = 10_000usize;
+            let mut offset = 0usize;
+            loop {
+                let scores = self
+                    .app()
+                    .data
+                    .list_pool_member_scores(&ListPoolMemberScoresQuery {
+                        pool_kind: POOL_KIND_PROVIDER_KEY_POOL.to_string(),
+                        pool_id: provider.id.clone(),
+                        capability: Some(scope.capability.clone()),
+                        scope_kind: Some(scope.scope_kind.clone()),
+                        scope_id: scope.scope_id.clone(),
+                        hard_states: vec![PoolMemberHardState::QuotaExhausted],
+                        probe_statuses: None,
+                        offset,
+                        limit: page_size,
+                    })
+                    .await
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                if scores.is_empty() {
+                    break;
+                }
+                let page_len = scores.len();
+                for score in scores {
+                    if known_key_ids.contains(score.member_id.as_str()) {
+                        exhausted_key_ids.insert(score.member_id);
+                    }
+                }
+                if page_len < page_size {
+                    break;
+                }
+                offset = offset.saturating_add(page_size);
+            }
+        }
+
+        let exhausted_keys = keys
+            .iter()
+            .filter(|key| exhausted_key_ids.contains(&key.id))
+            .collect::<Vec<_>>();
+        if exhausted_keys.is_empty() {
+            return Ok(0);
+        }
+
+        let deleted_key_ids = exhausted_keys
+            .iter()
+            .map(|key| key.id.clone())
+            .collect::<Vec<_>>();
+        for key in exhausted_keys {
             self.clear_admin_provider_pool_cooldown(&provider.id, &key.id)
                 .await;
             self.reset_admin_provider_pool_cost(&provider.id, &key.id)

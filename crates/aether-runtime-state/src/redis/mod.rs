@@ -39,11 +39,13 @@ pub(crate) async fn run_lane_with_timeout<T, F>(
 where
     F: std::future::Future<Output = Result<T, crate::DataLayerError>>,
 {
+    let started = std::time::Instant::now();
     let result = if let Some(timeout_ms) = timeout_ms {
         match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), future).await {
             Ok(result) => result,
             Err(_) => {
                 connections.record_timeout(lane);
+                connections.record_latency(lane, started.elapsed());
                 return Err(crate::DataLayerError::TimedOut(format!(
                     "{operation} exceeded {timeout_ms}ms timeout"
                 )));
@@ -52,6 +54,7 @@ where
     } else {
         future.await
     };
+    connections.record_latency(lane, started.elapsed());
     if result.is_err() {
         connections.record_error(lane);
     }

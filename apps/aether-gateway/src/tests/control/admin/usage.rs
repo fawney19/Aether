@@ -1171,6 +1171,82 @@ async fn gateway_handles_admin_usage_active_ids_for_terminal_updates() {
 }
 
 #[tokio::test]
+async fn gateway_derives_admin_usage_records_and_detail_status_from_terminal_candidate() {
+    let (_records_upstream_url, records_upstream_hits, records_upstream_handle) =
+        start_usage_upstream("/api/admin/usage/records").await;
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![sample_usage_row(
+        "usage-stale-stream",
+        "req-stale-stream",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "streaming",
+        20,
+        5,
+        0.2,
+        0.24,
+        DAY_1_UNIX_SECS,
+    )]));
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::seed(vec![
+        sample_request_candidate(
+            "cand-stale-stream-success",
+            "req-stale-stream",
+            0,
+            0,
+            RequestCandidateStatus::Success,
+        ),
+    ]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                    request_candidate_repository,
+                    usage_repository,
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let records_response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/records?start_date=2024-03-21&end_date=2024-03-21&tz_offset_minutes=0&limit=10&offset=0"
+    )))
+    .send()
+    .await
+    .expect("records request should succeed");
+
+    assert_eq!(records_response.status(), StatusCode::OK);
+    let records_payload: serde_json::Value = records_response
+        .json()
+        .await
+        .expect("records json should parse");
+    assert_eq!(records_payload["records"][0]["id"], "usage-stale-stream");
+    assert_eq!(records_payload["records"][0]["status"], "completed");
+
+    let detail_response = admin_request(
+        reqwest::Client::new().get(format!("{gateway_url}/api/admin/usage/usage-stale-stream")),
+    )
+    .send()
+    .await
+    .expect("detail request should succeed");
+
+    assert_eq!(detail_response.status(), StatusCode::OK);
+    let detail_payload: serde_json::Value = detail_response
+        .json()
+        .await
+        .expect("detail json should parse");
+    assert_eq!(detail_payload["id"], "usage-stale-stream");
+    assert_eq!(detail_payload["status"], "completed");
+    assert_eq!(*records_upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    records_upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_usage_records_locally_with_trusted_admin_principal() {
     let (_upstream_url, upstream_hits, upstream_handle) =
         start_usage_upstream("/api/admin/usage/records").await;

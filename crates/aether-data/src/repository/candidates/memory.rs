@@ -4,9 +4,9 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use super::{
-    PublicHealthStatusCount, PublicHealthTimelineBucket, RequestCandidateReadRepository,
-    RequestCandidateStatus, RequestCandidateWriteRepository, StoredRequestCandidate,
-    UpsertRequestCandidateRecord,
+    request_candidate_lifecycle_would_regress, PublicHealthStatusCount, PublicHealthTimelineBucket,
+    RequestCandidateReadRepository, RequestCandidateStatus, RequestCandidateWriteRepository,
+    StoredRequestCandidate, UpsertRequestCandidateRecord,
 };
 use crate::DataLayerError;
 
@@ -311,6 +311,17 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
             })
             .cloned();
 
+        let preserve_existing_lifecycle = existing.as_ref().is_some_and(|row| {
+            request_candidate_lifecycle_would_regress(row.status, candidate.status)
+        });
+        let merged_status = if preserve_existing_lifecycle {
+            existing
+                .as_ref()
+                .map(|row| row.status)
+                .unwrap_or(candidate.status)
+        } else {
+            candidate.status
+        };
         let created_at_unix_ms = existing
             .as_ref()
             .map(|row| row.created_at_unix_ms)
@@ -348,25 +359,41 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
             key_id: candidate
                 .key_id
                 .or_else(|| existing.as_ref().and_then(|row| row.key_id.clone())),
-            status: candidate.status,
+            status: merged_status,
             skip_reason: candidate
                 .skip_reason
                 .or_else(|| existing.as_ref().and_then(|row| row.skip_reason.clone())),
             is_cached: candidate
                 .is_cached
                 .unwrap_or_else(|| existing.as_ref().map(|row| row.is_cached).unwrap_or(false)),
-            status_code: candidate
-                .status_code
-                .or_else(|| existing.as_ref().and_then(|row| row.status_code)),
-            error_type: candidate
-                .error_type
-                .or_else(|| existing.as_ref().and_then(|row| row.error_type.clone())),
-            error_message: candidate
-                .error_message
-                .or_else(|| existing.as_ref().and_then(|row| row.error_message.clone())),
-            latency_ms: candidate
-                .latency_ms
-                .or_else(|| existing.as_ref().and_then(|row| row.latency_ms)),
+            status_code: if preserve_existing_lifecycle {
+                existing.as_ref().and_then(|row| row.status_code)
+            } else {
+                candidate
+                    .status_code
+                    .or_else(|| existing.as_ref().and_then(|row| row.status_code))
+            },
+            error_type: if preserve_existing_lifecycle {
+                existing.as_ref().and_then(|row| row.error_type.clone())
+            } else {
+                candidate
+                    .error_type
+                    .or_else(|| existing.as_ref().and_then(|row| row.error_type.clone()))
+            },
+            error_message: if preserve_existing_lifecycle {
+                existing.as_ref().and_then(|row| row.error_message.clone())
+            } else {
+                candidate
+                    .error_message
+                    .or_else(|| existing.as_ref().and_then(|row| row.error_message.clone()))
+            },
+            latency_ms: if preserve_existing_lifecycle {
+                existing.as_ref().and_then(|row| row.latency_ms)
+            } else {
+                candidate
+                    .latency_ms
+                    .or_else(|| existing.as_ref().and_then(|row| row.latency_ms))
+            },
             concurrent_requests: candidate
                 .concurrent_requests
                 .or_else(|| existing.as_ref().and_then(|row| row.concurrent_requests)),
@@ -383,9 +410,13 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
             started_at_unix_ms: candidate
                 .started_at_unix_ms
                 .or_else(|| existing.as_ref().and_then(|row| row.started_at_unix_ms)),
-            finished_at_unix_ms: candidate
-                .finished_at_unix_ms
-                .or_else(|| existing.as_ref().and_then(|row| row.finished_at_unix_ms)),
+            finished_at_unix_ms: if preserve_existing_lifecycle {
+                existing.as_ref().and_then(|row| row.finished_at_unix_ms)
+            } else {
+                candidate
+                    .finished_at_unix_ms
+                    .or_else(|| existing.as_ref().and_then(|row| row.finished_at_unix_ms))
+            },
         };
 
         by_id.insert(stored.id.clone(), stored.clone());
@@ -631,6 +662,84 @@ mod tests {
             Some(&json!("updated"))
         );
         assert_eq!(updated.started_at_unix_ms, Some(101));
+    }
+
+    #[tokio::test]
+    async fn upsert_keeps_terminal_candidate_state_when_streaming_arrives_late() {
+        let existing = StoredRequestCandidate::new(
+            "cand-1".to_string(),
+            "req-1".to_string(),
+            Some("user-1".to_string()),
+            Some("api-key-1".to_string()),
+            Some("alice".to_string()),
+            Some("default".to_string()),
+            0,
+            0,
+            Some("provider-1".to_string()),
+            Some("endpoint-1".to_string()),
+            Some("key-1".to_string()),
+            RequestCandidateStatus::Failed,
+            None,
+            false,
+            Some(503),
+            Some("upstream_error".to_string()),
+            Some("retryable upstream failure".to_string()),
+            Some(45),
+            Some(1),
+            Some(json!({"terminal": true})),
+            None,
+            100,
+            Some(101),
+            Some(145),
+        )
+        .expect("candidate should build");
+        let repository = InMemoryRequestCandidateRepository::seed(vec![existing]);
+
+        let updated = repository
+            .upsert(UpsertRequestCandidateRecord {
+                id: "cand-1-late".to_string(),
+                request_id: "req-1".to_string(),
+                user_id: None,
+                api_key_id: None,
+                username: None,
+                api_key_name: None,
+                candidate_index: 0,
+                retry_index: 0,
+                provider_id: None,
+                endpoint_id: None,
+                key_id: None,
+                status: RequestCandidateStatus::Streaming,
+                skip_reason: None,
+                is_cached: None,
+                status_code: Some(200),
+                error_type: None,
+                error_message: None,
+                latency_ms: Some(9_999),
+                concurrent_requests: Some(2),
+                extra_data: Some(json!({"late": true})),
+                required_capabilities: None,
+                created_at_unix_ms: None,
+                started_at_unix_ms: Some(102),
+                finished_at_unix_ms: None,
+            })
+            .await
+            .expect("late update should succeed");
+
+        assert_eq!(updated.id, "cand-1");
+        assert_eq!(updated.status, RequestCandidateStatus::Failed);
+        assert_eq!(updated.status_code, Some(503));
+        assert_eq!(updated.error_type.as_deref(), Some("upstream_error"));
+        assert_eq!(
+            updated.error_message.as_deref(),
+            Some("retryable upstream failure")
+        );
+        assert_eq!(updated.latency_ms, Some(45));
+        assert_eq!(updated.concurrent_requests, Some(2));
+        assert_eq!(updated.finished_at_unix_ms, Some(145));
+        assert_eq!(
+            updated.extra_data,
+            Some(json!({"terminal": true, "late": true}))
+        );
     }
 
     #[tokio::test]

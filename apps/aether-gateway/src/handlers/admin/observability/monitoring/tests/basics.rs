@@ -257,6 +257,57 @@ async fn admin_monitoring_resilience_status_returns_local_payload() {
 }
 
 #[tokio::test]
+async fn admin_monitoring_resilience_status_limits_recent_error_rows() {
+    let now = chrono::Utc::now().timestamp();
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider()],
+        vec![],
+        vec![],
+    ));
+    let usage_rows = (0..12)
+        .map(|index| {
+            sample_usage(
+                &format!("request-recent-failed-{index}"),
+                "provider-1",
+                "OpenAI",
+                10,
+                0.10,
+                "failed",
+                Some(502),
+                now - i64::from(index),
+            )
+        })
+        .collect::<Vec<_>>();
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(usage_rows));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_provider_catalog_and_usage_reader_for_tests(
+                provider_catalog,
+                usage_repository,
+            ),
+        );
+    let context = request_context(http::Method::GET, "/api/admin/monitoring/resilience-status");
+
+    let response = local_monitoring_response(&state, &context)
+        .await
+        .expect("handler should not error")
+        .expect("route should be handled locally");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    assert_eq!(payload["error_statistics"]["total_errors"], json!(12));
+    assert_eq!(payload["recent_errors"].as_array().map(Vec::len), Some(10));
+    assert_eq!(
+        payload["recent_errors"][0]["error_id"],
+        json!("usage-request-recent-failed-0")
+    );
+}
+
+#[tokio::test]
 async fn admin_monitoring_cache_stats_count_runtime_scheduler_affinities() {
     let state = AppState::new().expect("state should build");
     let affinity_cache_key =

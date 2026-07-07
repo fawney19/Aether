@@ -1,6 +1,6 @@
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc,
+    Arc, OnceLock,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,11 +18,19 @@ const PROVIDER_POOL_IN_FLIGHT_TOKEN_TTL_MS: u64 = 120_000;
 const PROVIDER_POOL_IN_FLIGHT_RENEW_MS: u64 = 30_000;
 const PROVIDER_POOL_IN_FLIGHT_ACQUIRE_TIMEOUT_ENV: &str =
     "AETHER_GATEWAY_PROVIDER_POOL_IN_FLIGHT_ACQUIRE_TIMEOUT_MS";
+const PROVIDER_POOL_IN_FLIGHT_MODE_ENV: &str = "AETHER_GATEWAY_PROVIDER_POOL_IN_FLIGHT_MODE";
 const DEFAULT_PROVIDER_POOL_IN_FLIGHT_ACQUIRE_TIMEOUT_MS: u64 = 10;
 const PROVIDER_POOL_DEMAND_SNAPSHOT_TTL_SECONDS: u64 = 6 * 60 * 60;
 const PROVIDER_POOL_DEMAND_ALPHA: f64 = 0.2;
 const PROVIDER_POOL_DEMAND_HEADROOM: f64 = 1.2;
 const PROVIDER_POOL_DEMAND_FLOOR: usize = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderPoolInFlightMode {
+    Local,
+    Runtime,
+    Off,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ProviderPoolDemandSnapshot {
@@ -210,7 +218,7 @@ fn token_expiry_score(now_ms: u64) -> f64 {
 }
 
 fn provider_pool_in_flight_acquire_timeout() -> Duration {
-    static TIMEOUT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    static TIMEOUT: OnceLock<Duration> = OnceLock::new();
     *TIMEOUT.get_or_init(|| {
         let millis = std::env::var(PROVIDER_POOL_IN_FLIGHT_ACQUIRE_TIMEOUT_ENV)
             .ok()
@@ -218,6 +226,25 @@ fn provider_pool_in_flight_acquire_timeout() -> Duration {
             .unwrap_or(DEFAULT_PROVIDER_POOL_IN_FLIGHT_ACQUIRE_TIMEOUT_MS);
         Duration::from_millis(millis)
     })
+}
+
+fn provider_pool_in_flight_mode() -> ProviderPoolInFlightMode {
+    static MODE: OnceLock<ProviderPoolInFlightMode> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        parse_provider_pool_in_flight_mode(
+            std::env::var(PROVIDER_POOL_IN_FLIGHT_MODE_ENV)
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+fn parse_provider_pool_in_flight_mode(value: Option<&str>) -> ProviderPoolInFlightMode {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("runtime" | "redis" | "distributed") => ProviderPoolInFlightMode::Runtime,
+        Some("off" | "none" | "false" | "0" | "disabled") => ProviderPoolInFlightMode::Off,
+        _ => ProviderPoolInFlightMode::Local,
+    }
 }
 
 fn spawn_in_flight_renewal(
@@ -260,15 +287,29 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard(
         return None;
     }
 
-    if runtime.is_memory() {
-        let counter = increment_local_provider_in_flight(provider_id);
-        return Some(ProviderPoolInFlightGuard {
-            kind: ProviderPoolInFlightGuardKind::Local {
-                provider_id: provider_id.to_string(),
-                counter,
-            },
-            released: false,
-        });
+    match provider_pool_in_flight_mode() {
+        ProviderPoolInFlightMode::Off => return None,
+        ProviderPoolInFlightMode::Local => {
+            let counter = increment_local_provider_in_flight(provider_id);
+            return Some(ProviderPoolInFlightGuard {
+                kind: ProviderPoolInFlightGuardKind::Local {
+                    provider_id: provider_id.to_string(),
+                    counter,
+                },
+                released: false,
+            });
+        }
+        ProviderPoolInFlightMode::Runtime if runtime.is_memory() => {
+            let counter = increment_local_provider_in_flight(provider_id);
+            return Some(ProviderPoolInFlightGuard {
+                kind: ProviderPoolInFlightGuardKind::Local {
+                    provider_id: provider_id.to_string(),
+                    counter,
+                },
+                released: false,
+            });
+        }
+        ProviderPoolInFlightMode::Runtime => {}
     }
 
     let tokens_key = in_flight_tokens_key(provider_id);
@@ -326,8 +367,13 @@ pub(crate) async fn provider_pool_live_in_flight_count(
     if provider_id.is_empty() {
         return 0;
     }
-    if runtime.is_memory() {
-        return local_provider_live_in_flight_count(provider_id);
+    match provider_pool_in_flight_mode() {
+        ProviderPoolInFlightMode::Off => return 0,
+        ProviderPoolInFlightMode::Local => return local_provider_live_in_flight_count(provider_id),
+        ProviderPoolInFlightMode::Runtime if runtime.is_memory() => {
+            return local_provider_live_in_flight_count(provider_id);
+        }
+        ProviderPoolInFlightMode::Runtime => {}
     }
     let key = in_flight_tokens_key(provider_id);
     let now_ms = current_unix_ms() as f64;
@@ -476,6 +522,34 @@ pub(crate) async fn sample_provider_pool_demand(
 mod tests {
     use super::*;
     use aether_runtime_state::{MemoryRuntimeStateConfig, RuntimeState};
+
+    #[test]
+    fn provider_pool_in_flight_mode_defaults_local_and_allows_runtime_or_off() {
+        assert_eq!(
+            parse_provider_pool_in_flight_mode(None),
+            ProviderPoolInFlightMode::Local
+        );
+        assert_eq!(
+            parse_provider_pool_in_flight_mode(Some("")),
+            ProviderPoolInFlightMode::Local
+        );
+        assert_eq!(
+            parse_provider_pool_in_flight_mode(Some("runtime")),
+            ProviderPoolInFlightMode::Runtime
+        );
+        assert_eq!(
+            parse_provider_pool_in_flight_mode(Some("redis")),
+            ProviderPoolInFlightMode::Runtime
+        );
+        assert_eq!(
+            parse_provider_pool_in_flight_mode(Some("off")),
+            ProviderPoolInFlightMode::Off
+        );
+        assert_eq!(
+            parse_provider_pool_in_flight_mode(Some("0")),
+            ProviderPoolInFlightMode::Off
+        );
+    }
 
     #[tokio::test]
     async fn in_flight_guard_tracks_and_releases_provider_tokens() {

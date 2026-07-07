@@ -20,7 +20,7 @@
         <span
           v-if="invalidItems.length"
           class="text-destructive"
-        >({{ invalidItems.length }} 个已失效)</span>
+        >{{ invalidSummaryText }}</span>
       </span>
       <ChevronDown
         class="h-4 w-4 shrink-0 text-muted-foreground transition-transform"
@@ -47,7 +47,7 @@
           />
           <Input
             v-model="searchQuery"
-            :placeholder="searchPlaceholder"
+            :placeholder="localizedSearchPlaceholder"
             class="h-9 rounded-xl border-border/60 bg-background/80 pl-9 pr-3 text-sm"
             @keydown.stop
           />
@@ -64,12 +64,12 @@
             type="checkbox"
             :checked="isAllSelected"
             :indeterminate="isPartiallySelected"
-            aria-label="全选"
+            :aria-label="legacyT('全选')"
             class="h-4 w-4 shrink-0 cursor-pointer rounded border-border/60 bg-card/80 text-primary shadow-sm accent-primary focus:ring-2 focus:ring-primary/40 focus:ring-offset-1"
             @click.stop
             @change="toggleAll"
           >
-          <span class="min-w-0 truncate text-sm">全选</span>
+          <span class="min-w-0 truncate text-sm">{{ legacyT('全选') }}</span>
           <span class="ml-auto shrink-0 text-xs text-muted-foreground">
             {{ selectedOptionCount }}/{{ options.length }}
           </span>
@@ -89,7 +89,7 @@
             @change="remove(item)"
           >
           <span class="min-w-0 truncate text-sm text-destructive">{{ item }}</span>
-          <span class="shrink-0 text-xs text-destructive/70">(已失效)</span>
+          <span class="shrink-0 text-xs text-destructive/70">{{ legacyT('(已失效)') }}</span>
         </div>
 
         <div
@@ -111,7 +111,7 @@
           v-if="filteredOptions.length === 0 && filteredInvalidItems.length === 0"
           class="px-3 py-2 text-sm text-muted-foreground"
         >
-          {{ searchQuery.trim() ? noResultsText : emptyText }}
+          {{ searchQuery.trim() ? localizedNoResultsText : localizedEmptyText }}
         </div>
       </div>
     </div>
@@ -124,6 +124,7 @@ import { ChevronDown, Search } from 'lucide-vue-next'
 import { Input } from '@/components/ui'
 import { cn } from '@/lib/utils'
 import { matchesSearchQuery } from '@/utils/search'
+import { useI18n } from '@/i18n'
 
 export interface MultiSelectOption {
   value: string
@@ -160,6 +161,7 @@ const props = withDefaults(
 const emit = defineEmits<{
   'update:modelValue': [value: string[]]
 }>()
+const { legacyT, locale } = useI18n()
 
 const isOpen = ref(false)
 const searchQuery = ref('')
@@ -190,6 +192,15 @@ const showSearch = computed(
   () => props.searchable && totalCount.value >= props.searchThreshold,
 )
 
+const localizedPlaceholder = computed(() => legacyT(props.placeholder))
+const localizedEmptyText = computed(() => legacyT(props.emptyText))
+const localizedNoResultsText = computed(() => legacyT(props.noResultsText))
+const localizedSearchPlaceholder = computed(() => legacyT(props.searchPlaceholder))
+const invalidSummaryText = computed(() => {
+  const count = invalidItems.value.length
+  return locale.value === 'en-US' ? `(${count} invalid)` : `(${count} 个已失效)`
+})
+
 const filteredInvalidItems = computed(() => {
   if (!showSearch.value || !searchQuery.value.trim()) {
     return invalidItems.value
@@ -210,13 +221,15 @@ const filteredOptions = computed(() => {
 })
 
 const displayText = computed(() => {
-  if (props.modelValue.length === 0) return props.placeholder
+  if (props.modelValue.length === 0) return localizedPlaceholder.value
   if (props.modelValue.length <= 2) {
     return props.modelValue
       .map((v) => props.options.find((o) => o.value === v)?.label ?? v)
       .join(', ')
   }
-  return `已选择 ${props.modelValue.length} 项`
+  return locale.value === 'en-US'
+    ? `${props.modelValue.length} selected`
+    : `已选择 ${props.modelValue.length} 项`
 })
 
 watch(isOpen, (open) => {

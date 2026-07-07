@@ -67,6 +67,12 @@ pub(crate) fn provider_auto_remove_banned_keys(config: Option<&serde_json::Value
     admin_provider_quota_pure::provider_auto_remove_banned_keys(config)
 }
 
+pub(crate) fn provider_auto_remove_quota_exhausted_keys(
+    config: Option<&serde_json::Value>,
+) -> bool {
+    admin_provider_quota_pure::provider_auto_remove_quota_exhausted_keys(config)
+}
+
 pub(super) fn should_auto_remove_structured_reason(reason: Option<&str>) -> bool {
     admin_provider_quota_pure::should_auto_remove_structured_reason(reason)
 }

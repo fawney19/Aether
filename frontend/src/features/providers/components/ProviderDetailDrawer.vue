@@ -24,215 +24,41 @@
           </div>
 
           <template v-else-if="provider">
-            <!-- 头部:名称 + 快捷操作 -->
-            <div class="sticky top-0 z-10 bg-background border-b px-4 sm:px-6 pt-4 sm:pt-6 pb-3 sm:pb-3">
-              <div class="flex items-center justify-between gap-x-3 sm:gap-x-4 flex-wrap">
-                <div class="flex items-center gap-2 min-w-0">
-                  <h2 class="text-lg sm:text-xl font-bold truncate">
-                    {{ provider.name }}
-                  </h2>
-                  <Badge
-                    :variant="provider.is_active ? 'default' : 'secondary'"
-                    class="text-xs shrink-0"
-                  >
-                    {{ provider.is_active ? '活跃' : '停用' }}
-                  </Badge>
-                </div>
-                <div class="flex items-center gap-1 shrink-0">
-                  <span :title="systemFormatConversionEnabled ? '系统级格式转换已启用' : (provider.enable_format_conversion ? '已启用格式转换（点击关闭）' : '启用格式转换')">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      :class="(provider.enable_format_conversion || systemFormatConversionEnabled) ? 'text-primary' : ''"
-                      :disabled="systemFormatConversionEnabled"
-                      @click="toggleFormatConversion"
-                    >
-                      <Shuffle class="w-4 h-4" />
-                    </Button>
-                  </span>
-                  <span :title="hasFailoverRules ? '已配置故障转移规则（点击编辑）' : '配置故障转移规则'">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      :class="hasFailoverRules ? 'text-orange-500 dark:text-orange-400' : ''"
-                      @click="failoverRulesDialogOpen = true"
-                    >
-                      <GitBranch class="w-4 h-4" />
-                    </Button>
-                  </span>
-                  <Popover
-                    :open="providerProxyPopoverOpen"
-                    @update:open="handleProviderProxyPopoverToggle"
-                  >
-                    <PopoverTrigger as-child>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        :class="provider.proxy?.node_id ? 'text-blue-500' : ''"
-                        :disabled="savingProviderProxy"
-                        :title="provider.proxy?.node_id ? `代理: ${getProviderProxyNodeName()}` : '设置代理节点'"
-                      >
-                        <Globe class="w-4 h-4" />
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent
-                      class="w-72 p-3"
-                      side="bottom"
-                      align="end"
-                    >
-                      <div class="space-y-2">
-                        <div class="flex items-center justify-between">
-                          <span class="text-xs font-medium">代理节点</span>
-                          <Button
-                            v-if="provider.proxy?.node_id"
-                            variant="ghost"
-                            size="sm"
-                            class="h-6 px-2 text-[10px] text-muted-foreground"
-                            :disabled="savingProviderProxy"
-                            @click="clearProviderProxy"
-                          >
-                            清除
-                          </Button>
-                        </div>
-                        <ProxyNodeSelect
-                          :model-value="provider.proxy?.node_id || ''"
-                          trigger-class="h-8"
-                          @update:model-value="setProviderProxy"
-                        />
-                        <p class="text-[10px] text-muted-foreground">
-                          {{ provider.proxy?.node_id ? '当前使用独立代理' : '未设置代理节点' }}
-                        </p>
-                      </div>
-                    </PopoverContent>
-                  </Popover>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    title="编辑提供商"
-                    @click="$emit('edit', provider)"
-                  >
-                    <Edit class="w-4 h-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    :title="provider.is_active ? '点击停用' : '点击启用'"
-                    @click="$emit('toggleStatus', provider)"
-                  >
-                    <Power class="w-4 h-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    title="关闭"
-                    @click="handleClose"
-                  >
-                    <X class="w-4 h-4" />
-                  </Button>
-                </div>
-              </div>
-              <!-- 网站地址（独占整行，紧贴名称行下方） -->
-              <div
-                v-if="provider.website"
-                class="-mt-0.5"
-              >
-                <a
-                  :href="provider.website"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="text-xs text-muted-foreground hover:text-primary hover:underline transition-colors truncate block"
-                  :title="provider.website"
-                >{{ provider.website }}</a>
-              </div>
-              <!-- 端点 API 格式 -->
-              <div class="flex items-center gap-1.5 flex-wrap mt-3">
-                <template v-if="loadingProviderEndpoints && endpoints.length === 0">
-                  <span class="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Loader2 class="w-3.5 h-3.5 animate-spin" />
-                    加载端点中
-                  </span>
-                </template>
-                <template v-else>
-                  <template
-                    v-for="endpoint in endpoints"
-                    :key="endpoint.id"
-                  >
-                    <span
-                      class="text-xs px-2 py-0.5 rounded-md border border-border bg-background hover:bg-accent hover:border-accent-foreground/20 cursor-pointer transition-colors font-medium"
-                      :class="{ 'opacity-40': !endpoint.is_active }"
-                      :title="`编辑 ${formatApiFormat(endpoint.api_format)} 端点`"
-                      @click="handleEditEndpoint(endpoint)"
-                    >{{ formatApiFormat(endpoint.api_format) }}</span>
-                  </template>
-                  <span
-                    v-if="endpoints.length > 0"
-                    class="text-xs px-2 py-0.5 rounded-md border border-dashed border-border hover:bg-accent hover:border-accent-foreground/20 cursor-pointer transition-colors text-muted-foreground"
-                    title="编辑端点"
-                    @click="showAddEndpointDialog"
-                  >编辑</span>
-                  <Button
-                    v-else
-                    variant="outline"
-                    size="sm"
-                    class="h-7 text-xs"
-                    @click="showAddEndpointDialog"
-                  >
-                    <Plus class="w-3 h-3 mr-1" />
-                    添加 API 端点
-                  </Button>
-                </template>
-              </div>
-            </div>
+            <ProviderDetailHeader
+              v-model:provider-proxy-popover-open="providerProxyPopoverOpen"
+              :provider="provider"
+              :endpoints="endpoints"
+              :loading-provider-endpoints="loadingProviderEndpoints"
+              :system-format-conversion-enabled="systemFormatConversionEnabled"
+              :has-failover-rules="hasFailoverRules"
+              :provider-proxy-node-name="getProviderProxyNodeName()"
+              :saving-provider-proxy="savingProviderProxy"
+              @toggle-format-conversion="toggleFormatConversion"
+              @open-failover-rules="failoverRulesDialogOpen = true"
+              @set-provider-proxy="setProviderProxy"
+              @clear-provider-proxy="clearProviderProxy"
+              @edit="$emit('edit', $event)"
+              @toggle-status="$emit('toggleStatus', $event)"
+              @close="handleClose"
+              @edit-endpoint="handleEditEndpoint"
+              @add-endpoint="showAddEndpointDialog"
+            />
 
             <div class="space-y-6 p-4 sm:p-6">
               <!-- 配额使用情况 -->
-              <Card
+              <ProviderMonthlyQuotaCard
                 v-if="provider.billing_type === 'monthly_quota' && provider.monthly_quota_usd"
-                class="p-4"
-              >
-                <div class="space-y-3">
-                  <div class="flex items-center justify-between">
-                    <h3 class="text-sm font-semibold">
-                      订阅配额
-                    </h3>
-                    <Badge
-                      variant="secondary"
-                      class="text-xs"
-                    >
-                      {{ ((provider.monthly_used_usd || 0) / provider.monthly_quota_usd * 100).toFixed(1) }}%
-                    </Badge>
-                  </div>
-                  <div class="relative w-full h-2 bg-border rounded-full overflow-hidden">
-                    <div
-                      class="absolute left-0 top-0 h-full transition-all duration-300"
-                      :class="{
-                        'bg-green-500': (provider.monthly_used_usd || 0) / provider.monthly_quota_usd < 0.7,
-                        'bg-yellow-500': (provider.monthly_used_usd || 0) / provider.monthly_quota_usd >= 0.7 && (provider.monthly_used_usd || 0) / provider.monthly_quota_usd < 0.9,
-                        'bg-red-500': (provider.monthly_used_usd || 0) / provider.monthly_quota_usd >= 0.9
-                      }"
-                      :style="{ width: `${Math.min((provider.monthly_used_usd || 0) / provider.monthly_quota_usd * 100, 100)}%` }"
-                    />
-                  </div>
-                  <div class="flex items-center justify-between text-xs">
-                    <span class="font-semibold">
-                      ${{ (provider.monthly_used_usd || 0).toFixed(2) }} / ${{ provider.monthly_quota_usd.toFixed(2) }}
-                    </span>
-                    <span
-                      v-if="provider.quota_reset_day"
-                      class="text-muted-foreground"
-                    >
-                      每月 {{ provider.quota_reset_day }} 号重置
-                    </span>
-                  </div>
-                </div>
-              </Card>
+                :used="provider.monthly_used_usd"
+                :quota="provider.monthly_quota_usd"
+                :reset-day="provider.quota_reset_day"
+              />
 
               <!-- 密钥管理 -->
               <Card class="overflow-hidden">
                 <div class="p-4 border-b border-border/60">
                   <div class="flex items-center justify-between">
                     <h3 class="text-sm font-semibold">
-                      {{ isKeyManagedProviderType(provider.provider_type) ? '密钥管理' : '账号管理' }}
+                      {{ legacyT(isKeyManagedProviderType(provider.provider_type) ? '密钥管理' : '账号管理') }}
                     </h3>
                     <div class="flex items-center gap-2">
                       <Button
@@ -243,7 +69,7 @@
                         @click="handleAddKeyToFirstEndpoint"
                       >
                         <Plus class="w-3.5 h-3.5 mr-1.5" />
-                        {{ isKeyManagedProviderType(provider.provider_type) ? '添加密钥' : '添加账号' }}
+                        {{ legacyT(isKeyManagedProviderType(provider.provider_type) ? '添加密钥' : '添加账号') }}
                       </Button>
                     </div>
                   </div>
@@ -255,7 +81,7 @@
                   class="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground"
                 >
                   <Loader2 class="w-4 h-4 animate-spin" />
-                  正在加载{{ isKeyManagedProviderType(provider.provider_type) ? '密钥' : '账号' }}
+                  {{ legacyT('正在加载') }}{{ legacyT(isKeyManagedProviderType(provider.provider_type) ? '密钥' : '账号') }}
                 </div>
 
                 <div
@@ -286,371 +112,116 @@
                         <div class="cursor-grab active:cursor-grabbing text-muted-foreground/30 group-hover/item:text-muted-foreground transition-colors shrink-0">
                           <GripVertical class="w-4 h-4" />
                         </div>
-                        <div class="flex flex-col min-w-0">
-                          <div class="flex items-center gap-1.5">
-                            <span
-                              class="text-sm font-medium truncate"
-                              :class="key.name ? 'cursor-pointer hover:text-primary transition-colors' : ''"
-                              :title="key.name ? '点击复制' : ''"
-                              @click.stop="key.name && copyToClipboard(key.name)"
-                            >{{ key.name || '未命名密钥' }}</span>
-                            <!-- OAuth 订阅类型标签 (Codex) -->
-                            <Badge
-                              v-if="key.oauth_plan_type"
-                              variant="outline"
-                              class="text-[10px] px-1.5 py-0 shrink-0"
-                              :class="getOAuthPlanTypeClass(key.oauth_plan_type)"
-                            >
-                              {{ formatOAuthPlanType(key.oauth_plan_type) }}
-                            </Badge>
-                            <Badge
-                              v-if="getOAuthOrgBadge(key)"
-                              variant="secondary"
-                              class="text-[9px] px-1 py-0 h-4 shrink-0"
-                              :title="getOAuthOrgBadge(key)?.title"
-                            >
-                              {{ getOAuthOrgBadge(key)?.label }}
-                            </Badge>
-                            <!-- Kiro 订阅类型标签 -->
-                            <Badge
-                              v-if="shouldShowKiroSubscriptionBadge(key)"
-                              variant="outline"
-                              class="text-[10px] px-1.5 py-0 shrink-0"
-                              :class="getOAuthPlanTypeClass(getKiroSubscriptionBadgeLabel(key))"
-                            >
-                              {{ getKiroSubscriptionBadgeLabel(key) }}
-                            </Badge>
-                          </div>
-                          <div class="flex items-center gap-1">
-                            <span class="text-[11px] font-mono text-muted-foreground">
-                              {{ getProviderMaskedSecretLabel(key, provider.provider_type) }}
-                            </span>
-                            <Button
-                              v-if="canExportOAuthCredential(key)"
-                              variant="ghost"
-                              size="icon"
-                              class="h-4 w-4 shrink-0"
-                              title="下载 OAuth 授权文件"
-                              @click.stop="downloadRefreshToken(key)"
-                            >
-                              <Download class="w-2.5 h-2.5" />
-                            </Button>
-                            <Button
-                              v-else
-                              variant="ghost"
-                              size="icon"
-                              class="h-4 w-4 shrink-0"
-                              title="复制密钥"
-                              @click.stop="copyFullKey(key)"
-                            >
-                              <Copy class="w-2.5 h-2.5" />
-                            </Button>
-                            <!-- OAuth 状态（失效/过期/倒计时）和刷新按钮 -->
-                            <template v-if="shouldShowOAuthRefreshControl(key, provider.provider_type)">
-                              <!-- 账号级别异常：醒目提示 + 清除按钮 -->
-                              <template v-if="isAccountLevelBlock(key)">
-                                <Badge
-                                  variant="destructive"
-                                  class="text-[10px] px-1.5 py-0 shrink-0 gap-0.5"
-                                  :title="getOAuthStatusTitle(key)"
-                                >
-                                  <ShieldX class="w-2.5 h-2.5" />
-                                  账号异常
-                                </Badge>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  class="h-4 w-4 shrink-0 text-destructive hover:text-destructive"
-                                  :disabled="clearingOAuthInvalidKeyId === key.id"
-                                  title="清除异常标记（确认账号已完成验证后使用）"
-                                  @click.stop="handleClearOAuthInvalid(key)"
-                                >
-                                  <RefreshCw
-                                    class="w-2.5 h-2.5"
-                                    :class="{ 'animate-spin': clearingOAuthInvalidKeyId === key.id }"
-                                  />
-                                </Button>
-                              </template>
-                              <!-- 普通 OAuth 状态 -->
-                              <template v-else>
-                                <span
-                                  class="text-[10px]"
-                                  :class="{
-                                    'text-destructive': getKeyOAuthExpires(key)?.isInvalid || getKeyOAuthExpires(key)?.isExpired,
-                                    'text-warning': getKeyOAuthExpires(key)?.isExpiringSoon && !getKeyOAuthExpires(key)?.isExpired && !getKeyOAuthExpires(key)?.isInvalid,
-                                    'text-muted-foreground': !getKeyOAuthExpires(key)?.isExpired && !getKeyOAuthExpires(key)?.isExpiringSoon && !getKeyOAuthExpires(key)?.isInvalid
-                                  }"
-                                  :title="getOAuthStatusTitle(key)"
-                                >
-                                  {{ getKeyOAuthExpires(key)?.text }}
-                                </span>
-                                <Badge
-                                  v-if="key.oauth_temporary"
-                                  variant="outline"
-                                  class="text-[10px] px-1.5 py-0 shrink-0"
-                                  title="仅通过 Access Token 导入，无法自动刷新，到期后需要重新导入"
-                                >
-                                  临时
-                                </Badge>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  class="h-4 w-4 shrink-0"
-                                  :disabled="refreshingOAuthKeyId === key.id || !canRefreshOAuthCredential(key)"
-                                  :title="getOAuthRefreshButtonTitle(key)"
-                                  @click.stop="handleRefreshOAuth(key)"
-                                >
-                                  <RefreshCw
-                                    class="w-2.5 h-2.5"
-                                    :class="{ 'animate-spin': refreshingOAuthKeyId === key.id }"
-                                  />
-                                </Button>
-                              </template>
-                            </template>
-                            <!-- Antigravity 账号未激活提示 -->
-                            <span
-                              v-if="provider.provider_type === 'antigravity' && key.is_active && isOAuthManagedCredential(key) && !hasAntigravityQuotaDisplayData(key)"
-                              class="text-[10px] text-orange-500 dark:text-orange-400"
-                              title="该账号尚未完成 Gemini Code Assist 激活，无法获取配额和使用模型"
-                            >
-                              账号未激活
-                            </span>
-                          </div>
-                        </div>
+                        <ProviderKeyIdentityBlock
+                          :api-key="key"
+                          :masked-secret-label="getProviderMaskedSecretLabel(key, provider.provider_type)"
+                          :oauth-plan-label="key.oauth_plan_type ? formatOAuthPlanType(key.oauth_plan_type) : null"
+                          :oauth-plan-class="key.oauth_plan_type ? getOAuthPlanTypeClass(key.oauth_plan_type) : ''"
+                          :oauth-org-badge="getOAuthOrgBadge(key)"
+                          :kiro-subscription-label="shouldShowKiroSubscriptionBadge(key) ? getKiroSubscriptionBadgeLabel(key) : null"
+                          :kiro-subscription-class="shouldShowKiroSubscriptionBadge(key) ? getOAuthPlanTypeClass(getKiroSubscriptionBadgeLabel(key)) : ''"
+                          :can-export-credential="canExportOAuthCredential(key)"
+                          :show-o-auth-refresh-control="shouldShowOAuthRefreshControl(key, provider.provider_type)"
+                          :account-level-block="isAccountLevelBlock(key)"
+                          :oauth-status="getKeyOAuthExpires(key)"
+                          :oauth-status-title="getOAuthStatusTitle(key)"
+                          :oauth-refresh-button-title="getOAuthRefreshButtonTitle(key)"
+                          :can-refresh-credential="canRefreshOAuthCredential(key)"
+                          :clearing-o-auth-invalid="clearingOAuthInvalidKeyId === key.id"
+                          :refreshing-o-auth="refreshingOAuthKeyId === key.id"
+                          :antigravity-inactive="provider.provider_type === 'antigravity' && key.is_active && isOAuthManagedCredential(key) && !hasAntigravityQuotaDisplayData(key)"
+                          @copy-name="copyToClipboard"
+                          @download-credential="downloadRefreshToken(key)"
+                          @copy-full-key="copyFullKey(key)"
+                          @clear-o-auth-invalid="handleClearOAuthInvalid(key)"
+                          @refresh-o-auth="handleRefreshOAuth(key)"
+                        />
                       </div>
-                      <!-- 并发 + 健康度 + 操作按钮 -->
-                      <div class="flex items-center gap-1 shrink-0">
-                        <!-- 熔断徽章 -->
-                        <Badge
-                          v-if="key.circuit_breaker_open"
-                          variant="destructive"
-                          class="text-[10px] px-1.5 py-0 shrink-0"
-                          :title="getKeyCircuitBreakerTitle(key)"
-                        >
-                          熔断{{ getKeyCircuitProbeCountdown(key) }}
-                        </Badge>
-                        <!-- 健康度 -->
-                        <div
-                          v-if="key.health_score !== undefined"
-                          class="flex items-center gap-1 mr-1"
-                        >
-                          <div class="w-10 h-1.5 bg-border rounded-full overflow-hidden">
-                            <div
-                              class="h-full transition-all duration-300"
-                              :class="getHealthScoreBarColor(key.health_score || 0)"
-                              :style="{ width: `${(key.health_score || 0) * 100}%` }"
-                            />
-                          </div>
-                          <span
-                            class="text-[10px] font-medium tabular-nums"
-                            :class="getHealthScoreColor(key.health_score || 0)"
-                          >
-                            {{ ((key.health_score || 0) * 100).toFixed(0) }}%
-                          </span>
-                        </div>
-                        <Button
-                          v-if="isKeyRecoverable(key)"
-                          variant="ghost"
-                          size="icon"
-                          class="h-7 w-7 text-green-600"
-                          :title="getRecoverKeyTitle(key)"
-                          @click="handleRecoverKey(key)"
-                        >
-                          <RefreshCw class="w-3.5 h-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          class="h-7 w-7"
-                          title="模型权限"
-                          @click="handleKeyPermissions(key)"
-                        >
-                          <Shield class="w-3.5 h-3.5" />
-                        </Button>
-                        <!-- 代理节点配置 -->
-                        <Popover
-                          :open="proxyPopoverOpenKeyId === key.id"
-                          @update:open="(v: boolean) => handleProxyPopoverToggle(key.id, v)"
-                        >
-                          <PopoverTrigger as-child>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              class="h-7 w-7"
-                              :class="key.proxy?.node_id ? 'text-blue-500' : ''"
-                              :disabled="savingProxyKeyId === key.id"
-                              :title="key.proxy?.node_id ? `代理: ${getKeyProxyNodeName(key)}` : '设置代理节点'"
-                              @click.stop
-                            >
-                              <Globe class="w-3.5 h-3.5" />
-                            </Button>
-                          </PopoverTrigger>
-                          <PopoverContent
-                            class="w-72 p-3"
-                            side="bottom"
-                            align="end"
-                          >
-                            <div class="space-y-2">
-                              <div class="flex items-center justify-between">
-                                <span class="text-xs font-medium">代理节点</span>
-                                <Button
-                                  v-if="key.proxy?.node_id"
-                                  variant="ghost"
-                                  size="sm"
-                                  class="h-6 px-2 text-[10px] text-muted-foreground"
-                                  :disabled="savingProxyKeyId === key.id"
-                                  @click="clearKeyProxy(key)"
-                                >
-                                  清除
-                                </Button>
-                              </div>
-                              <ProxyNodeSelect
-                                :model-value="key.proxy?.node_id || ''"
-                                trigger-class="h-8"
-                                @update:model-value="(v: string) => setKeyProxy(key, v)"
-                              />
-                              <p class="text-[10px] text-muted-foreground">
-                                {{ key.proxy?.node_id ? '当前使用独立代理' : '未设置，使用提供商级别代理' }}
-                              </p>
-                            </div>
-                          </PopoverContent>
-                        </Popover>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          class="h-7 w-7"
-                          title="编辑密钥"
-                          @click="handleEditKey(endpoint, key)"
-                        >
-                          <Edit class="w-3.5 h-3.5" />
-                        </Button>
-                        <Button
-                          v-if="provider.provider_type === 'antigravity'"
-                          variant="ghost"
-                          size="icon"
-                          class="h-7 w-7"
-                          title="配额详情"
-                          @click="openAntigravityQuotaDialog(key)"
-                        >
-                          <BarChart3 class="w-3.5 h-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          class="h-7 w-7"
-                          :disabled="togglingKeyId === key.id"
-                          :title="key.is_active ? '点击停用' : '点击启用'"
-                          @click="toggleKeyActive(key)"
-                        >
-                          <Power class="w-3.5 h-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          class="h-7 w-7"
-                          title="删除密钥"
-                          @click="handleDeleteKey(key)"
-                        >
-                          <Trash2 class="w-3.5 h-3.5" />
-                        </Button>
-                      </div>
+                      <ProviderKeyActionCluster
+                        :api-key="key"
+                        :provider-type="provider.provider_type"
+                        :recoverable="isKeyRecoverable(key)"
+                        :recover-title="getRecoverKeyTitle(key)"
+                        :circuit-breaker-title="getKeyCircuitBreakerTitle(key)"
+                        :circuit-probe-countdown="getKeyCircuitProbeCountdown(key)"
+                        :health-score-bar-class="getHealthScoreBarColor(key.health_score || 0)"
+                        :health-score-text-class="getHealthScoreColor(key.health_score || 0)"
+                        :proxy-popover-open="proxyPopoverOpenKeyId === key.id"
+                        :proxy-node-name="getKeyProxyNodeName(key)"
+                        :saving-proxy="savingProxyKeyId === key.id"
+                        :toggling="togglingKeyId === key.id"
+                        @recover="handleRecoverKey(key)"
+                        @permissions="handleKeyPermissions(key)"
+                        @update:proxy-popover-open="(v: boolean) => handleProxyPopoverToggle(key.id, v)"
+                        @clear-proxy="clearKeyProxy(key)"
+                        @set-proxy="(v: string) => setKeyProxy(key, v)"
+                        @edit="handleEditKey(endpoint, key)"
+                        @open-antigravity-quota="openAntigravityQuotaDialog(key)"
+                        @toggle-active="toggleKeyActive(key)"
+                        @delete="handleDeleteKey(key)"
+                      />
                     </div>
                     <!-- Codex 上游额度信息（仅当有元数据时显示） -->
                     <div
                       v-if="hasCodexQuotaDisplayData(key)"
                       class="mt-2 p-2 bg-muted/30 rounded-md"
                     >
-                      <div class="flex items-center justify-between mb-1">
-                        <span class="text-[10px] text-muted-foreground">账号配额</span>
-                        <div class="flex items-center gap-1">
-                          <RefreshCw
-                            v-if="refreshingQuota"
-                            class="w-3 h-3 text-muted-foreground/70 animate-spin"
-                          />
-                          <span
-                            v-if="getCodexQuotaDisplay(key)?.updated_at"
-                            class="text-[9px] text-muted-foreground/70"
-                          >
-                            {{ formatCodexUpdatedAt(getCodexQuotaDisplay(key)?.updated_at || 0) }}
-                          </span>
-                        </div>
-                      </div>
+                      <ProviderQuotaSectionHeader
+                        :title="legacyT('账号配额')"
+                        :loading="refreshingQuota"
+                        :updated-text="getCodexQuotaDisplay(key)?.updated_at ? formatCodexUpdatedAt(getCodexQuotaDisplay(key)?.updated_at || 0) : null"
+                      />
                       <!-- 普通 Codex 限额并排显示：Team/Plus/Enterprise 账号 2列, Free 账号 1列 -->
                       <div
                         class="grid gap-3"
                         :class="isCodexTeamPlan(key) ? 'grid-cols-2' : 'grid-cols-1'"
                       >
                         <!-- 周限额 -->
-                        <div v-if="getCodexQuotaDisplay(key)?.primary_used_percent !== undefined">
-                          <div class="flex items-center justify-between text-[10px] mb-0.5">
-                            <span class="text-muted-foreground">周限额</span>
-                            <span :class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.primary_used_percent || 0)">
-                              {{ (100 - (getCodexQuotaDisplay(key)?.primary_used_percent || 0)).toFixed(1) }}%
-                            </span>
-                          </div>
-                          <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                            <div
-                              class="absolute left-0 top-0 h-full transition-all duration-300"
-                              :class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
-                              :style="{ width: `${Math.max(100 - (getCodexQuotaDisplay(key)?.primary_used_percent || 0), 0)}%` }"
-                            />
-                          </div>
-                          <div
-                            v-if="(getCodexQuotaDisplay(key)?.primary_reset_at || getCodexQuotaDisplay(key)?.primary_reset_seconds) && shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
-                            class="text-[9px] mt-0.5 tabular-nums"
-                            :class="getResetCountdownClass(
+                        <ProviderQuotaProgressRow
+                          v-if="getCodexQuotaDisplay(key)?.primary_used_percent !== undefined"
+                          :label="legacyT('周限额')"
+                          :used-percent="getCodexQuotaDisplay(key)?.primary_used_percent || 0"
+                          :remaining-percent="toCodexRemainingPercent(getCodexQuotaDisplay(key)?.primary_used_percent)"
+                          :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
+                          :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
+                          :reset-text="(getCodexQuotaDisplay(key)?.primary_reset_at || getCodexQuotaDisplay(key)?.primary_reset_seconds) && shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.primary_used_percent || 0)
+                            ? getResetCountdownText(
                               getCodexQuotaDisplay(key)?.primary_reset_at,
                               getCodexQuotaDisplay(key)?.primary_reset_seconds,
                               getCodexQuotaDisplay(key)?.updated_at,
                               getCodexQuotaDisplay(key)?.primary_used_percent
-                            )"
-                          >
-                            {{ getResetCountdownText(
-                              getCodexQuotaDisplay(key)?.primary_reset_at,
-                              getCodexQuotaDisplay(key)?.primary_reset_seconds,
-                              getCodexQuotaDisplay(key)?.updated_at,
-                              getCodexQuotaDisplay(key)?.primary_used_percent
-                            ) }}
-                          </div>
-                        </div>
+                            )
+                            : null"
+                          :footer-class="getResetCountdownClass(
+                            getCodexQuotaDisplay(key)?.primary_reset_at,
+                            getCodexQuotaDisplay(key)?.primary_reset_seconds,
+                            getCodexQuotaDisplay(key)?.updated_at,
+                            getCodexQuotaDisplay(key)?.primary_used_percent
+                          )"
+                        />
                         <!-- 5H限额（仅 Team/Plus/Enterprise 显示） -->
-                        <div v-if="isCodexTeamPlan(key) && getCodexQuotaDisplay(key)?.secondary_used_percent !== undefined">
-                          <div class="flex items-center justify-between text-[10px] mb-0.5">
-                            <span class="text-muted-foreground">5H限额</span>
-                            <span :class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)">
-                              {{ (100 - (getCodexQuotaDisplay(key)?.secondary_used_percent || 0)).toFixed(1) }}%
-                            </span>
-                          </div>
-                          <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                            <div
-                              class="absolute left-0 top-0 h-full transition-all duration-300"
-                              :class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)"
-                              :style="{ width: `${Math.max(100 - (getCodexQuotaDisplay(key)?.secondary_used_percent || 0), 0)}%` }"
-                            />
-                          </div>
-                          <div
-                            v-if="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)"
-                            class="text-[9px] mt-0.5 tabular-nums"
-                            :class="getResetCountdownClass(
+                        <ProviderQuotaProgressRow
+                          v-if="isCodexTeamPlan(key) && getCodexQuotaDisplay(key)?.secondary_used_percent !== undefined"
+                          :label="legacyT('5H限额')"
+                          :used-percent="getCodexQuotaDisplay(key)?.secondary_used_percent || 0"
+                          :remaining-percent="toCodexRemainingPercent(getCodexQuotaDisplay(key)?.secondary_used_percent)"
+                          :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)"
+                          :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)"
+                          :reset-text="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)
+                            ? getCodexQuotaResetText(
                               getCodexQuotaDisplay(key)?.secondary_reset_at,
                               getCodexQuotaDisplay(key)?.secondary_reset_seconds,
                               getCodexQuotaDisplay(key)?.updated_at,
                               getCodexQuotaDisplay(key)?.secondary_used_percent
-                            )"
-                          >
-                            <template v-if="getCodexQuotaDisplay(key)?.secondary_reset_at || getCodexQuotaDisplay(key)?.secondary_reset_seconds">
-                              {{ getResetCountdownText(
-                                getCodexQuotaDisplay(key)?.secondary_reset_at,
-                                getCodexQuotaDisplay(key)?.secondary_reset_seconds,
-                                getCodexQuotaDisplay(key)?.updated_at,
-                                getCodexQuotaDisplay(key)?.secondary_used_percent
-                              ) }}
-                            </template>
-                            <template v-else>
-                              已重置
-                            </template>
-                          </div>
-                        </div>
+                            )
+                            : null"
+                          :footer-class="getResetCountdownClass(
+                            getCodexQuotaDisplay(key)?.secondary_reset_at,
+                            getCodexQuotaDisplay(key)?.secondary_reset_seconds,
+                            getCodexQuotaDisplay(key)?.updated_at,
+                            getCodexQuotaDisplay(key)?.secondary_used_percent
+                          )"
+                        />
                       </div>
                       <!-- Spark 限额独立一行展示，避免与普通 Codex 周/5H 混淆 -->
                       <div
@@ -661,80 +232,92 @@
                           GPT-5.3 Codex Spark
                         </div>
                         <div class="grid gap-3 grid-cols-2">
-                          <div v-if="getCodexQuotaDisplay(key)?.spark_secondary_used_percent !== undefined">
-                            <div class="flex items-center justify-between text-[10px] mb-0.5">
-                              <span class="text-muted-foreground">Spark 周</span>
-                              <span :class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)">
-                                {{ (100 - (getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)).toFixed(1) }}%
-                              </span>
-                            </div>
-                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                              <div
-                                class="absolute left-0 top-0 h-full transition-all duration-300"
-                                :class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)"
-                                :style="{ width: `${Math.max(100 - (getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0), 0)}%` }"
-                              />
-                            </div>
-                            <div
-                              v-if="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)"
-                              class="text-[9px] mt-0.5 tabular-nums"
-                              :class="getResetCountdownClass(
+                          <ProviderQuotaProgressRow
+                            v-if="getCodexQuotaDisplay(key)?.spark_secondary_used_percent !== undefined"
+                            :label="legacyT('Spark 周')"
+                            :used-percent="getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0"
+                            :remaining-percent="toCodexRemainingPercent(getCodexQuotaDisplay(key)?.spark_secondary_used_percent)"
+                            :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)"
+                            :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)"
+                            :reset-text="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)
+                              ? getCodexQuotaResetText(
                                 getCodexQuotaDisplay(key)?.spark_secondary_reset_at,
                                 getCodexQuotaDisplay(key)?.spark_secondary_reset_seconds,
                                 getCodexQuotaDisplay(key)?.updated_at,
                                 getCodexQuotaDisplay(key)?.spark_secondary_used_percent
-                              )"
-                            >
-                              <template v-if="getCodexQuotaDisplay(key)?.spark_secondary_reset_at || getCodexQuotaDisplay(key)?.spark_secondary_reset_seconds">
-                                {{ getResetCountdownText(
-                                  getCodexQuotaDisplay(key)?.spark_secondary_reset_at,
-                                  getCodexQuotaDisplay(key)?.spark_secondary_reset_seconds,
-                                  getCodexQuotaDisplay(key)?.updated_at,
-                                  getCodexQuotaDisplay(key)?.spark_secondary_used_percent
-                                ) }}
-                              </template>
-                              <template v-else>
-                                已重置
-                              </template>
-                            </div>
-                          </div>
-                          <div v-if="getCodexQuotaDisplay(key)?.spark_primary_used_percent !== undefined">
-                            <div class="flex items-center justify-between text-[10px] mb-0.5">
-                              <span class="text-muted-foreground">Spark 5H</span>
-                              <span :class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)">
-                                {{ (100 - (getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)).toFixed(1) }}%
-                              </span>
-                            </div>
-                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                              <div
-                                class="absolute left-0 top-0 h-full transition-all duration-300"
-                                :class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)"
-                                :style="{ width: `${Math.max(100 - (getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0), 0)}%` }"
-                              />
-                            </div>
-                            <div
-                              v-if="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)"
-                              class="text-[9px] mt-0.5 tabular-nums"
-                              :class="getResetCountdownClass(
+                              )
+                              : null"
+                            :footer-class="getResetCountdownClass(
+                              getCodexQuotaDisplay(key)?.spark_secondary_reset_at,
+                              getCodexQuotaDisplay(key)?.spark_secondary_reset_seconds,
+                              getCodexQuotaDisplay(key)?.updated_at,
+                              getCodexQuotaDisplay(key)?.spark_secondary_used_percent
+                            )"
+                          />
+                          <ProviderQuotaProgressRow
+                            v-if="getCodexQuotaDisplay(key)?.spark_primary_used_percent !== undefined"
+                            :label="legacyT('Spark 5H')"
+                            :used-percent="getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0"
+                            :remaining-percent="toCodexRemainingPercent(getCodexQuotaDisplay(key)?.spark_primary_used_percent)"
+                            :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)"
+                            :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)"
+                            :reset-text="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)
+                              ? getCodexQuotaResetText(
                                 getCodexQuotaDisplay(key)?.spark_primary_reset_at,
                                 getCodexQuotaDisplay(key)?.spark_primary_reset_seconds,
                                 getCodexQuotaDisplay(key)?.updated_at,
                                 getCodexQuotaDisplay(key)?.spark_primary_used_percent
-                              )"
+                              )
+                              : null"
+                            :footer-class="getResetCountdownClass(
+                              getCodexQuotaDisplay(key)?.spark_primary_reset_at,
+                              getCodexQuotaDisplay(key)?.spark_primary_reset_seconds,
+                              getCodexQuotaDisplay(key)?.updated_at,
+                              getCodexQuotaDisplay(key)?.spark_primary_used_percent
+                            )"
+                          />
+                        </div>
+                      </div>
+                      <div
+                        v-if="getCodexResetCreditsDisplay(key)"
+                        class="mt-3 border-t border-border/60 pt-2"
+                      >
+                        <div class="flex flex-wrap items-center gap-x-1 gap-y-1 text-[10px] leading-4 text-muted-foreground">
+                          <button
+                            v-if="canConsumeCodexResetCredit(key)"
+                            type="button"
+                            class="font-medium text-primary underline-offset-2 transition-colors hover:text-primary/80 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:pointer-events-none disabled:opacity-60"
+                            :disabled="consumingCodexResetCreditKeyId === key.id"
+                            @click="handleConsumeCodexResetCredit(key)"
+                          >
+                            {{ consumingCodexResetCreditKeyId === key.id ? legacyT('重置中...') : legacyT('点击以进行重置') }}
+                          </button>
+                          <span
+                            v-else
+                            class="font-medium"
+                          >
+                            {{ legacyT('点击以进行重置') }}
+                          </span>
+                          <span>{{ formatCodexResetCreditCount(key) }}</span>
+                          <template v-if="getVisibleCodexResetCreditItems(key).length > 0">
+                            <span aria-hidden="true">|</span>
+                            <span>{{ legacyT('临近过期') }}</span>
+                            <template
+                              v-for="(item, itemIndex) in getVisibleCodexResetCreditItems(key)"
+                              :key="item.id || `${item.displayKey}-${item.expiresAt}`"
                             >
-                              <template v-if="getCodexQuotaDisplay(key)?.spark_primary_reset_at || getCodexQuotaDisplay(key)?.spark_primary_reset_seconds">
-                                {{ getResetCountdownText(
-                                  getCodexQuotaDisplay(key)?.spark_primary_reset_at,
-                                  getCodexQuotaDisplay(key)?.spark_primary_reset_seconds,
-                                  getCodexQuotaDisplay(key)?.updated_at,
-                                  getCodexQuotaDisplay(key)?.spark_primary_used_percent
-                                ) }}
-                              </template>
-                              <template v-else>
-                                已重置
-                              </template>
-                            </div>
-                          </div>
+                              <span
+                                :title="item.title"
+                                class="tabular-nums"
+                              >
+                                {{ item.displayKey }} {{ formatCodexResetCreditDays(item.remainingSeconds) }}
+                              </span>
+                              <span
+                                v-if="itemIndex < getVisibleCodexResetCreditItems(key).length - 1"
+                                aria-hidden="true"
+                              >·</span>
+                            </template>
+                          </template>
                         </div>
                       </div>
                     </div>
@@ -752,7 +335,7 @@
                         <ShieldX class="w-4 h-4 shrink-0" />
                         <div class="flex-1 min-w-0">
                           <div class="text-[11px] font-medium">
-                            账户访问被禁止
+                            {{ legacyT('账户访问被禁止') }}
                           </div>
                           <div
                             v-if="getAntigravityForbiddenReason(key)"
@@ -771,56 +354,38 @@
                       </div>
                       <!-- 正常配额显示 -->
                       <template v-else>
-                        <div class="flex items-center justify-between mb-1">
-                          <span class="text-[10px] text-muted-foreground">模型配额</span>
-                          <div class="flex items-center gap-1">
-                            <RefreshCw
-                              v-if="refreshingQuota"
-                              class="w-3 h-3 text-muted-foreground/70 animate-spin"
-                            />
-                            <span
-                              v-if="getAntigravityQuotaUpdatedAt(key)"
-                              class="text-[9px] text-muted-foreground/70"
-                            >
-                              {{ formatAntigravityUpdatedAt(getAntigravityQuotaUpdatedAt(key) || 0) }}
-                            </span>
-                          </div>
-                        </div>
+                        <ProviderQuotaSectionHeader
+                          :title="legacyT('模型配额')"
+                          :loading="refreshingQuota"
+                          :updated-text="getAntigravityQuotaUpdatedAt(key) ? formatAntigravityUpdatedAt(getAntigravityQuotaUpdatedAt(key) || 0) : null"
+                        />
                         <div class="grid grid-cols-2 gap-3">
-                          <div
+                          <ProviderQuotaProgressRow
                             v-for="group in getAntigravityQuotaSummaryForKey(key)"
                             :key="group.key"
+                            :label="group.label"
+                            :used-percent="group.usedPercent"
+                            :remaining-percent="group.remainingPercent"
+                            :meter-class="getQuotaRemainingClass(group.usedPercent)"
+                            :bar-class="getQuotaRemainingBarColor(group.usedPercent)"
                           >
-                            <div class="flex items-center justify-between text-[10px] mb-0.5">
-                              <span class="text-muted-foreground truncate mr-2 min-w-0 flex-1">
-                                {{ group.label }}
-                              </span>
-                              <span :class="getQuotaRemainingClass(group.usedPercent)">
-                                {{ group.remainingPercent.toFixed(1) }}%
-                              </span>
-                            </div>
-                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
+                            <template #footer>
                               <div
-                                class="absolute left-0 top-0 h-full transition-all duration-300"
-                                :class="getQuotaRemainingBarColor(group.usedPercent)"
-                                :style="{ width: `${Math.max(group.remainingPercent, 0)}%` }"
-                              />
-                            </div>
-                            <div
-                              v-if="group.resetSeconds !== null || group.usedPercent > 0"
-                              class="text-[9px] text-muted-foreground/70 mt-0.5"
-                            >
-                              <template v-if="group.resetSeconds !== null && group.resetSeconds > 0">
-                                {{ formatResetTime(group.resetSeconds) }}后重置
-                              </template>
-                              <template v-else-if="group.resetSeconds !== null && group.resetSeconds <= 0">
-                                已重置
-                              </template>
-                              <template v-else>
-                                重置时间未知
-                              </template>
-                            </div>
-                          </div>
+                                v-if="group.resetSeconds !== null || group.usedPercent > 0"
+                                class="text-[9px] text-muted-foreground/70 mt-0.5"
+                              >
+                                <template v-if="group.resetSeconds !== null && group.resetSeconds > 0">
+                                  {{ formatResetTime(group.resetSeconds) }}{{ legacyT('后重置') }}
+                                </template>
+                                <template v-else-if="group.resetSeconds !== null && group.resetSeconds <= 0">
+                                  {{ legacyT('已重置') }}
+                                </template>
+                                <template v-else>
+                                  {{ legacyT('重置时间未知') }}
+                                </template>
+                              </div>
+                            </template>
+                          </ProviderQuotaProgressRow>
                         </div>
                       </template>
                     </div>
@@ -829,21 +394,11 @@
                       v-if="provider.provider_type === 'gemini_cli' && hasGeminiCliQuotaDisplayData(key)"
                       class="mt-2 p-2 rounded-md bg-muted/30"
                     >
-                      <div class="flex items-center justify-between mb-1">
-                        <span class="text-[10px] text-muted-foreground">模型配额</span>
-                        <div class="flex items-center gap-1">
-                          <RefreshCw
-                            v-if="refreshingQuota"
-                            class="w-3 h-3 text-muted-foreground/70 animate-spin"
-                          />
-                          <span
-                            v-if="getGeminiCliQuotaUpdatedAt(key)"
-                            class="text-[9px] text-muted-foreground/70"
-                          >
-                            {{ formatUpdatedAt(getGeminiCliQuotaUpdatedAt(key) || 0) }}
-                          </span>
-                        </div>
-                      </div>
+                      <ProviderQuotaSectionHeader
+                        :title="legacyT('模型配额')"
+                        :loading="refreshingQuota"
+                        :updated-text="getGeminiCliQuotaUpdatedAt(key) ? formatUpdatedAt(getGeminiCliQuotaUpdatedAt(key) || 0) : null"
+                      />
                       <div
                         v-if="getGeminiCliAccountCreditsText(key, 'gemini_cli')"
                         class="mb-2 text-[10px] font-medium text-foreground/90"
@@ -854,40 +409,30 @@
                         v-if="getGeminiCliQuotaItems(key).length > 0"
                         class="grid grid-cols-2 gap-3"
                       >
-                        <div
+                        <ProviderQuotaProgressRow
                           v-for="item in getGeminiCliQuotaItems(key)"
                           :key="item.model"
+                          :label="item.label"
+                          :title="item.model"
+                          :used-percent="item.usedPercent"
+                          :remaining-percent="item.remainingPercent"
+                          :meter-class="getQuotaRemainingClass(item.usedPercent)"
+                          :bar-class="getQuotaRemainingBarColor(item.usedPercent)"
                         >
-                          <div class="flex items-center justify-between text-[10px] mb-0.5">
-                            <span
-                              class="text-muted-foreground truncate mr-2 min-w-0 flex-1"
-                              :title="item.model"
-                            >
-                              {{ item.label }}
-                            </span>
-                            <span :class="getQuotaRemainingClass(item.usedPercent)">
-                              {{ item.remainingPercent.toFixed(1) }}%
-                            </span>
-                          </div>
-                          <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
+                          <template #footer>
                             <div
-                              class="absolute left-0 top-0 h-full transition-all duration-300"
-                              :class="getQuotaRemainingBarColor(item.usedPercent)"
-                              :style="{ width: `${Math.max(item.remainingPercent, 0)}%` }"
-                            />
-                          </div>
-                          <div
-                            v-if="item.resetSeconds !== null && item.remainingPercent < 100"
-                            class="text-[9px] text-muted-foreground/70 mt-0.5"
-                          >
-                            <template v-if="item.resetSeconds > 0">
-                              {{ formatResetTime(item.resetSeconds) }}后重置
-                            </template>
-                            <template v-else>
-                              已重置
-                            </template>
-                          </div>
-                        </div>
+                              v-if="item.resetSeconds !== null && item.remainingPercent < 100"
+                              class="text-[9px] text-muted-foreground/70 mt-0.5"
+                            >
+                              <template v-if="item.resetSeconds > 0">
+                                {{ formatResetTime(item.resetSeconds) }}{{ legacyT('后重置') }}
+                              </template>
+                              <template v-else>
+                                {{ legacyT('已重置') }}
+                              </template>
+                            </div>
+                          </template>
+                        </ProviderQuotaProgressRow>
                       </div>
                     </div>
                     <!-- Kiro 上游额度信息（仅当有元数据时显示） -->
@@ -904,7 +449,7 @@
                         <ShieldX class="w-4 h-4 shrink-0" />
                         <div class="flex-1 min-w-0">
                           <div class="text-[11px] font-medium">
-                            账户已封禁
+                            {{ legacyT('账户已封禁') }}
                           </div>
                           <div
                             v-if="getKiroQuotaDisplay(key)?.ban_reason"
@@ -923,48 +468,32 @@
                       </div>
                       <!-- 正常配额显示 -->
                       <template v-else>
-                        <div class="flex items-center justify-between mb-1">
-                          <span class="text-[10px] text-muted-foreground">账号配额</span>
-                          <div class="flex items-center gap-1">
-                            <RefreshCw
-                              v-if="refreshingQuota"
-                              class="w-3 h-3 text-muted-foreground/70 animate-spin"
-                            />
-                            <span
-                              v-if="getKiroQuotaDisplay(key)?.updated_at"
-                              class="text-[9px] text-muted-foreground/70"
-                            >
-                              {{ formatKiroUpdatedAt(getKiroQuotaDisplay(key)?.updated_at || 0) }}
-                            </span>
-                          </div>
-                        </div>
+                        <ProviderQuotaSectionHeader
+                          :title="legacyT('账号配额')"
+                          :loading="refreshingQuota"
+                          :updated-text="getKiroQuotaDisplay(key)?.updated_at ? formatKiroUpdatedAt(getKiroQuotaDisplay(key)?.updated_at || 0) : null"
+                        />
                         <!-- Kiro 额度显示：使用进度 -->
                         <div>
                           <!-- 使用额度进度条 -->
-                          <div>
-                            <div class="flex items-center justify-between text-[10px] mb-0.5">
-                              <span class="text-muted-foreground">使用额度</span>
-                              <span :class="getQuotaRemainingClass(getKiroQuotaDisplay(key)?.usage_percentage || 0)">
-                                {{ (100 - (getKiroQuotaDisplay(key)?.usage_percentage || 0)).toFixed(1) }}%
-                              </span>
-                            </div>
-                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                              <div
-                                class="absolute left-0 top-0 h-full transition-all duration-300"
-                                :class="getQuotaRemainingBarColor(getKiroQuotaDisplay(key)?.usage_percentage || 0)"
-                                :style="{ width: `${Math.max(100 - (getKiroQuotaDisplay(key)?.usage_percentage || 0), 0)}%` }"
-                              />
-                            </div>
-                            <div class="flex items-center justify-between text-[9px] text-muted-foreground/70 mt-0.5">
-                              <span>
-                                {{ formatKiroUsage(getKiroQuotaDisplay(key)?.current_usage) }} /
-                                {{ formatKiroUsage(getKiroQuotaDisplay(key)?.usage_limit) }}
-                              </span>
-                              <span v-if="getKiroQuotaDisplay(key)?.next_reset_at">
-                                {{ formatKiroResetTime(getKiroQuotaDisplay(key)?.next_reset_at) }}重置
-                              </span>
-                            </div>
-                          </div>
+                          <ProviderQuotaProgressRow
+                            :label="legacyT('使用额度')"
+                            :used-percent="getKiroQuotaDisplay(key)?.usage_percentage || 0"
+                            :meter-class="getQuotaRemainingClass(getKiroQuotaDisplay(key)?.usage_percentage || 0)"
+                            :bar-class="getQuotaRemainingBarColor(getKiroQuotaDisplay(key)?.usage_percentage || 0)"
+                          >
+                            <template #footer>
+                              <div class="flex items-center justify-between text-[9px] text-muted-foreground/70 mt-0.5">
+                                <span>
+                                  {{ formatKiroUsage(getKiroQuotaDisplay(key)?.current_usage) }} /
+                                  {{ formatKiroUsage(getKiroQuotaDisplay(key)?.usage_limit) }}
+                                </span>
+                                <span v-if="getKiroQuotaDisplay(key)?.next_reset_at">
+                                  {{ formatKiroResetTime(getKiroQuotaDisplay(key)?.next_reset_at) }}{{ legacyT('重置') }}
+                                </span>
+                              </div>
+                            </template>
+                          </ProviderQuotaProgressRow>
                         </div>
                       </template>
                     </div>
@@ -981,7 +510,7 @@
                         <ShieldX class="w-4 h-4 shrink-0" />
                         <div class="flex-1 min-w-0">
                           <div class="text-[11px] font-medium">
-                            账号不可用
+                            {{ legacyT('账号不可用') }}
                           </div>
                           <div
                             v-if="getWindsurfQuotaDisplay(key)?.last_error"
@@ -1011,64 +540,34 @@
                             </div>
                           </div>
                         </div>
-                        <div class="flex items-center justify-between mb-1">
-                          <span class="text-[10px] text-muted-foreground">账号配额</span>
-                          <div class="flex items-center gap-1">
-                            <RefreshCw
-                              v-if="refreshingQuota"
-                              class="w-3 h-3 text-muted-foreground/70 animate-spin"
-                            />
-                            <span
-                              v-if="getWindsurfQuotaDisplay(key)?.updated_at"
-                              class="text-[9px] text-muted-foreground/70"
-                            >
-                              {{ formatKiroUpdatedAt(getWindsurfQuotaDisplay(key)?.updated_at || 0) }}
-                            </span>
-                          </div>
-                        </div>
+                        <ProviderQuotaSectionHeader
+                          :title="legacyT('账号配额')"
+                          :loading="refreshingQuota"
+                          :updated-text="getWindsurfQuotaDisplay(key)?.updated_at ? formatKiroUpdatedAt(getWindsurfQuotaDisplay(key)?.updated_at || 0) : null"
+                        />
                         <div class="grid grid-cols-2 gap-3">
-                          <div v-if="getWindsurfQuotaDisplay(key)?.daily_remaining_percent !== undefined">
-                            <div class="flex items-center justify-between text-[10px] mb-0.5">
-                              <span class="text-muted-foreground">日额度</span>
-                              <span :class="getQuotaRemainingClass(getWindsurfQuotaDisplay(key)?.daily_used_percent || 0)">
-                                {{ (getWindsurfQuotaDisplay(key)?.daily_remaining_percent || 0).toFixed(1) }}%
-                              </span>
-                            </div>
-                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                              <div
-                                class="absolute left-0 top-0 h-full transition-all duration-300"
-                                :class="getQuotaRemainingBarColor(getWindsurfQuotaDisplay(key)?.daily_used_percent || 0)"
-                                :style="{ width: `${Math.max(getWindsurfQuotaDisplay(key)?.daily_remaining_percent || 0, 0)}%` }"
-                              />
-                            </div>
-                            <div
-                              v-if="getWindsurfQuotaDisplay(key)?.daily_reset_at"
-                              class="text-[9px] text-muted-foreground/70 mt-0.5"
-                            >
-                              {{ formatKiroResetTime(getWindsurfQuotaDisplay(key)?.daily_reset_at || 0) }}重置
-                            </div>
-                          </div>
-                          <div v-if="getWindsurfQuotaDisplay(key)?.weekly_remaining_percent !== undefined">
-                            <div class="flex items-center justify-between text-[10px] mb-0.5">
-                              <span class="text-muted-foreground">周额度</span>
-                              <span :class="getQuotaRemainingClass(getWindsurfQuotaDisplay(key)?.weekly_used_percent || 0)">
-                                {{ (getWindsurfQuotaDisplay(key)?.weekly_remaining_percent || 0).toFixed(1) }}%
-                              </span>
-                            </div>
-                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                              <div
-                                class="absolute left-0 top-0 h-full transition-all duration-300"
-                                :class="getQuotaRemainingBarColor(getWindsurfQuotaDisplay(key)?.weekly_used_percent || 0)"
-                                :style="{ width: `${Math.max(getWindsurfQuotaDisplay(key)?.weekly_remaining_percent || 0, 0)}%` }"
-                              />
-                            </div>
-                            <div
-                              v-if="getWindsurfQuotaDisplay(key)?.weekly_reset_at"
-                              class="text-[9px] text-muted-foreground/70 mt-0.5"
-                            >
-                              {{ formatKiroResetTime(getWindsurfQuotaDisplay(key)?.weekly_reset_at || 0) }}重置
-                            </div>
-                          </div>
+                          <ProviderQuotaProgressRow
+                            v-if="getWindsurfQuotaDisplay(key)?.daily_remaining_percent !== undefined"
+                            :label="legacyT('日额度')"
+                            :used-percent="getWindsurfQuotaDisplay(key)?.daily_used_percent || 0"
+                            :remaining-percent="getWindsurfQuotaDisplay(key)?.daily_remaining_percent || 0"
+                            :meter-class="getQuotaRemainingClass(getWindsurfQuotaDisplay(key)?.daily_used_percent || 0)"
+                            :bar-class="getQuotaRemainingBarColor(getWindsurfQuotaDisplay(key)?.daily_used_percent || 0)"
+                            :reset-text="getWindsurfQuotaDisplay(key)?.daily_reset_at
+                              ? `${formatKiroResetTime(getWindsurfQuotaDisplay(key)?.daily_reset_at || 0)}${legacyT('重置')}`
+                              : null"
+                          />
+                          <ProviderQuotaProgressRow
+                            v-if="getWindsurfQuotaDisplay(key)?.weekly_remaining_percent !== undefined"
+                            :label="legacyT('周额度')"
+                            :used-percent="getWindsurfQuotaDisplay(key)?.weekly_used_percent || 0"
+                            :remaining-percent="getWindsurfQuotaDisplay(key)?.weekly_remaining_percent || 0"
+                            :meter-class="getQuotaRemainingClass(getWindsurfQuotaDisplay(key)?.weekly_used_percent || 0)"
+                            :bar-class="getQuotaRemainingBarColor(getWindsurfQuotaDisplay(key)?.weekly_used_percent || 0)"
+                            :reset-text="getWindsurfQuotaDisplay(key)?.weekly_reset_at
+                              ? `${formatKiroResetTime(getWindsurfQuotaDisplay(key)?.weekly_reset_at || 0)}${legacyT('重置')}`
+                              : null"
+                          />
                         </div>
                         <div
                           v-if="hasWindsurfPromptQuota(key) || hasWindsurfFlexQuota(key)"
@@ -1088,7 +587,7 @@
                           class="mt-2 flex items-center justify-between gap-2 text-[9px] text-muted-foreground/70"
                         >
                           <span>
-                            模型 {{ getWindsurfQuotaDisplay(key)?.allowed_models_count ?? getWindsurfQuotaDisplay(key)?.models?.length }} 个
+                            {{ legacyT('模型') }} {{ getWindsurfQuotaDisplay(key)?.allowed_models_count ?? getWindsurfQuotaDisplay(key)?.models?.length }} {{ legacyT('个') }}
                           </span>
                           <span
                             v-if="getWindsurfModelPreview(key)"
@@ -1105,44 +604,31 @@
                       v-if="provider.provider_type === 'chatgpt_web' && hasChatGPTWebQuotaDisplayData(key)"
                       class="mt-2 p-2 rounded-md bg-muted/30"
                     >
-                      <div class="flex items-center justify-between mb-1">
-                        <span class="text-[10px] text-muted-foreground">账号配额</span>
-                        <div class="flex items-center gap-1">
-                          <RefreshCw
-                            v-if="refreshingQuota"
-                            class="w-3 h-3 text-muted-foreground/70 animate-spin"
-                          />
-                          <span
-                            v-if="getChatGPTWebQuotaDisplay(key)?.updated_at"
-                            class="text-[9px] text-muted-foreground/70"
-                          >
-                            {{ formatKiroUpdatedAt(getChatGPTWebQuotaDisplay(key)?.updated_at || 0) }}
-                          </span>
-                        </div>
-                      </div>
+                      <ProviderQuotaSectionHeader
+                        :title="legacyT('账号配额')"
+                        :loading="refreshingQuota"
+                        :updated-text="getChatGPTWebQuotaDisplay(key)?.updated_at ? formatKiroUpdatedAt(getChatGPTWebQuotaDisplay(key)?.updated_at || 0) : null"
+                      />
                       <div>
-                        <div class="flex items-center justify-between text-[10px] mb-0.5">
-                          <span class="text-muted-foreground">剩余额度</span>
-                          <span :class="getQuotaRemainingClass(getChatGPTWebQuotaUsedPercent(key))">
-                            {{ getChatGPTWebQuotaRemainingPercent(key).toFixed(1) }}%
-                          </span>
-                        </div>
-                        <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                          <div
-                            class="absolute left-0 top-0 h-full transition-all duration-300"
-                            :class="getQuotaRemainingBarColor(getChatGPTWebQuotaUsedPercent(key))"
-                            :style="{ width: `${Math.max(getChatGPTWebQuotaRemainingPercent(key), 0)}%` }"
-                          />
-                        </div>
-                        <div class="flex items-center justify-between text-[9px] text-muted-foreground/70 mt-0.5">
-                          <span>
-                            {{ formatChatGPTWebUsage(getChatGPTWebQuotaDisplay(key)?.image_quota_remaining) }} /
-                            {{ formatChatGPTWebUsage(getChatGPTWebQuotaDisplay(key)?.image_quota_total) }}
-                          </span>
-                          <span v-if="getChatGPTWebQuotaDisplay(key)?.image_quota_reset_at">
-                            {{ formatKiroResetTime(getChatGPTWebQuotaDisplay(key)?.image_quota_reset_at) }}重置
-                          </span>
-                        </div>
+                        <ProviderQuotaProgressRow
+                          :label="legacyT('剩余额度')"
+                          :used-percent="getChatGPTWebQuotaUsedPercent(key)"
+                          :remaining-percent="getChatGPTWebQuotaRemainingPercent(key)"
+                          :meter-class="getQuotaRemainingClass(getChatGPTWebQuotaUsedPercent(key))"
+                          :bar-class="getQuotaRemainingBarColor(getChatGPTWebQuotaUsedPercent(key))"
+                        >
+                          <template #footer>
+                            <div class="flex items-center justify-between text-[9px] text-muted-foreground/70 mt-0.5">
+                              <span>
+                                {{ formatChatGPTWebUsage(getChatGPTWebQuotaDisplay(key)?.image_quota_remaining) }} /
+                                {{ formatChatGPTWebUsage(getChatGPTWebQuotaDisplay(key)?.image_quota_total) }}
+                              </span>
+                              <span v-if="getChatGPTWebQuotaDisplay(key)?.image_quota_reset_at">
+                                {{ formatKiroResetTime(getChatGPTWebQuotaDisplay(key)?.image_quota_reset_at) }}{{ legacyT('重置') }}
+                              </span>
+                            </div>
+                          </template>
+                        </ProviderQuotaProgressRow>
                       </div>
                     </div>
                     <!-- 第二行：优先级 + API 格式（展开显示） + 统计信息 -->
@@ -1150,7 +636,7 @@
                       <!-- 优先级放最前面，支持点击编辑 -->
                       <span
                         v-if="editingPriorityKey !== key.id"
-                        title="点击编辑优先级"
+                        :title="legacyT('点击编辑优先级')"
                         class="font-medium text-foreground/80 cursor-pointer hover:text-primary hover:underline"
                         @click="startEditPriority(key)"
                       >P{{ key.internal_priority }}</span>
@@ -1173,15 +659,15 @@
                           :class="key.last_models_fetch_error ? 'text-amber-600 dark:text-amber-400' : ''"
                           :title="getAutoFetchStatusTitle(key)"
                         >
-                          {{ key.last_models_fetch_error ? '同步失败' : '自动同步' }}
+                          {{ legacyT(key.last_models_fetch_error ? '同步失败' : '自动同步') }}
                         </span>
                       </template>
                       <!-- RPM 限制信息（第二位） -->
                       <template v-if="key.rpm_limit || key.is_adaptive">
                         <span class="text-muted-foreground/40">|</span>
                         <span v-if="key.is_adaptive">
-                          {{ key.learned_rpm_limit != null ? `${key.learned_rpm_limit}` : '探测中' }} RPM
-                          <span class="text-muted-foreground/60">(自适应)</span>
+                          {{ key.learned_rpm_limit != null ? `${key.learned_rpm_limit}` : legacyT('探测中') }} RPM
+                          <span class="text-muted-foreground/60">({{ legacyT('自适应') }})</span>
                         </span>
                         <span v-else>{{ key.rpm_limit }} RPM</span>
                       </template>
@@ -1200,7 +686,7 @@
                         </span>
                         <span
                           v-if="editingMultiplierKey !== key.id || editingMultiplierFormat !== format"
-                          title="点击编辑倍率"
+                          :title="legacyT('点击编辑倍率')"
                           class="cursor-pointer hover:text-primary hover:underline"
                           :class="{ 'text-destructive': isFormatCircuitOpen(key, format) }"
                           @click="startEditMultiplier(key, format)"
@@ -1228,7 +714,7 @@
                     v-if="shouldPaginateKeys"
                     class="px-4 py-2 flex items-center justify-between text-xs text-muted-foreground mt-auto"
                   >
-                    <span>共 {{ allKeys.length }} 个{{ isKeyManagedProviderType(provider.provider_type) ? '密钥' : '账号' }}</span>
+                    <span>{{ legacyT('共') }} {{ allKeys.length }} {{ legacyT('个') }}{{ legacyT(isKeyManagedProviderType(provider.provider_type) ? '密钥' : '账号') }}</span>
                     <div class="flex items-center gap-1.5">
                       <Button
                         variant="ghost"
@@ -1260,12 +746,12 @@
                 >
                   <Key class="w-12 h-12 mx-auto mb-3 opacity-50" />
                   <p class="text-sm">
-                    {{ isKeyManagedProviderType(provider.provider_type) ? '暂无密钥配置' : '暂无账号配置' }}
+                    {{ legacyT(isKeyManagedProviderType(provider.provider_type) ? '暂无密钥配置' : '暂无账号配置') }}
                   </p>
                   <p class="text-xs mt-1">
                     {{ endpoints.length > 0
-                      ? (isKeyManagedProviderType(provider.provider_type) ? '点击上方"添加密钥"按钮创建第一个密钥' : '点击上方"添加账号"按钮添加第一个账号')
-                      : '请先添加端点，然后再添加密钥' }}
+                      ? legacyT(isKeyManagedProviderType(provider.provider_type) ? '点击上方"添加密钥"按钮创建第一个密钥' : '点击上方"添加账号"按钮添加第一个账号')
+                      : legacyT('请先添加端点，然后再添加密钥') }}
                   </p>
                 </div>
               </Card>
@@ -1362,10 +848,10 @@
   <AlertDialog
     v-if="open"
     :model-value="deleteKeyConfirmOpen"
-    title="删除密钥"
-    :description="`确定要删除密钥 ${keyToDelete?.api_key_masked} 吗？`"
-    confirm-text="删除"
-    cancel-text="取消"
+    :title="legacyT('删除密钥')"
+    :description="formatDeleteKeyConfirmDescription()"
+    :confirm-text="legacyT('删除')"
+    :cancel-text="legacyT('取消')"
     type="danger"
     @update:model-value="deleteKeyConfirmOpen = $event"
     @confirm="confirmDeleteKey"
@@ -1399,7 +885,7 @@
     :open="antigravityQuotaDialogOpen"
     :metadata="antigravityQuotaDialogKey.upstream_metadata"
     :quota-snapshot="antigravityQuotaDialogKey.status_snapshot?.quota ?? null"
-    :key-name="antigravityQuotaDialogKey.name || '未命名密钥'"
+    :key-name="antigravityQuotaDialogKey.name || legacyT('未命名密钥')"
     :provider-id="providerId"
     :key-id="antigravityQuotaDialogKey.id"
     @update:open="antigravityQuotaDialogOpen = $event"
@@ -1420,27 +906,14 @@ import {
   Plus,
   Key,
   Loader2,
-  Edit,
-  Trash2,
-  RefreshCw,
-  X,
-  Power,
   GripVertical,
-  Copy,
-  Download,
-  Shield,
-  Shuffle,
-  BarChart3,
   ShieldX,
-  Globe,
-  GitBranch,
 } from 'lucide-vue-next'
 import { parseApiError } from '@/utils/errorParser'
 import { useEscapeKey } from '@/composables/useEscapeKey'
+import { useI18n } from '@/i18n'
 import Button from '@/components/ui/button.vue'
-import Badge from '@/components/ui/badge.vue'
 import Card from '@/components/ui/card.vue'
-import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
 import { useClipboard } from '@/composables/useClipboard'
@@ -1469,7 +942,12 @@ import ProviderModelFormDialog from '@/features/providers/components/ProviderMod
 import AlertDialog from '@/components/common/AlertDialog.vue'
 import AntigravityQuotaDialog from '@/features/providers/components/AntigravityQuotaDialog.vue'
 import FailoverRulesDialog from '@/features/providers/components/FailoverRulesDialog.vue'
-import ProxyNodeSelect from '@/features/providers/components/ProxyNodeSelect.vue'
+import ProviderDetailHeader from '@/features/providers/components/ProviderDetailHeader.vue'
+import ProviderKeyActionCluster from '@/features/providers/components/ProviderKeyActionCluster.vue'
+import ProviderKeyIdentityBlock from '@/features/providers/components/ProviderKeyIdentityBlock.vue'
+import ProviderMonthlyQuotaCard from '@/features/providers/components/ProviderMonthlyQuotaCard.vue'
+import ProviderQuotaProgressRow from '@/features/providers/components/ProviderQuotaProgressRow.vue'
+import ProviderQuotaSectionHeader from '@/features/providers/components/ProviderQuotaSectionHeader.vue'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import {
   deleteEndpointKey,
@@ -1480,6 +958,7 @@ import {
   exportKey,
   refreshProviderOAuth,
   refreshProviderQuota,
+  consumeCodexResetCredit,
   clearOAuthInvalid,
   type ProviderEndpoint,
   type EndpointAPIKey,
@@ -1495,10 +974,11 @@ import type {
   GrokUpstreamMetadata,
   KiroUpstreamMetadata,
   WindsurfUpstreamMetadata,
+  QuotaResetCreditsSnapshot,
   QuotaStatusSnapshot,
   QuotaWindowSnapshot,
 } from '@/api/endpoints/types'
-import { formatApiFormat, formatApiFormatShort } from '@/api/endpoints/types/api-format'
+import { formatApiFormatShort } from '@/api/endpoints/types/api-format'
 import { isOAuthAccountProviderType, isKeyManagedProviderType } from '../utils/providerTypeUtils'
 import {
   isProviderQuotaAutoRefreshCoolingDown,
@@ -1512,7 +992,6 @@ import {
   canExportOAuthCredential,
   canRefreshOAuthCredential,
   isOAuthManagedCredential,
-  isServiceAccountCredential,
   getProviderMaskedSecretLabel,
   shouldShowOAuthRefreshControl,
 } from '@/utils/providerKeyAuth'
@@ -1525,6 +1004,12 @@ import {
   getOAuthStatusTitle as resolveOAuthStatusTitle,
 } from '@/utils/providerKeyStatus'
 import { getGeminiCliAccountCreditsText } from '@/utils/providerKeyQuota'
+import {
+  formatCodexResetCreditCount as formatCodexResetCreditCountLabel,
+  formatCodexResetCreditDays,
+  getCodexResetCreditAvailableCount as getCodexResetCreditAvailableCountFromSnapshot,
+  getVisibleCodexResetCreditItems as getVisibleCodexResetCreditItemsFromSnapshot,
+} from './codex-reset-credit-display'
 
 // 扩展端点类型,包含密钥列表
 interface ProviderEndpointWithKeys extends ProviderEndpoint {
@@ -1550,6 +1035,11 @@ const { error: showError, success: showSuccess, warning: showWarning } = useToas
 const { confirm } = useConfirm()
 const { copyToClipboard } = useClipboard()
 const { tick: countdownTick, start: startCountdownTimer, stop: stopCountdownTimer } = useCountdownTimer()
+const { legacyT, locale } = useI18n()
+
+function localizedApiError(err: unknown, fallback: string): string {
+  return legacyT(parseApiError(err, fallback))
+}
 
 const loading = ref(false)
 const provider = ref<ProviderWithEndpointsSummary | null>(null)
@@ -1618,6 +1108,9 @@ const refreshingOAuthKeyId = ref<string | null>(null)
 
 // OAuth 失效清除状态
 const clearingOAuthInvalidKeyId = ref<string | null>(null)
+
+// Codex reset credit 消费状态
+const consumingCodexResetCreditKeyId = ref<string | null>(null)
 
 // 限额刷新状态（Codex / Antigravity）
 const refreshingQuota = ref(false)
@@ -1854,24 +1347,16 @@ async function toggleFormatConversion() {
   try {
     const updated = await updateProvider(provider.value.id, { enable_format_conversion: newValue })
     provider.value = updated
-    showSuccess(newValue ? '已启用格式转换' : '已禁用格式转换')
+    showSuccess(legacyT(newValue ? '已启用格式转换' : '已禁用格式转换'))
     emit('refresh')
   } catch {
-    showError('切换格式转换失败')
-  }
-}
-
-// Provider 级别代理配置
-function handleProviderProxyPopoverToggle(open: boolean) {
-  providerProxyPopoverOpen.value = open
-  if (open) {
-    proxyNodesStore.ensureLoaded()
+    showError(legacyT('切换格式转换失败'))
   }
 }
 
 function getProviderProxyNodeName(): string {
   const nodeId = provider.value?.proxy?.node_id
-  if (!nodeId) return '未知节点'
+  if (!nodeId) return legacyT('未知节点')
   const node = proxyNodesStore.nodes.find(n => n.id === nodeId)
   return node ? node.name : `${nodeId.slice(0, 8)}...`
 }
@@ -1885,10 +1370,10 @@ async function setProviderProxy(nodeId: string) {
     })
     provider.value = updated
     providerProxyPopoverOpen.value = false
-    showSuccess('代理节点已设置')
+    showSuccess(legacyT('代理节点已设置'))
     emit('refresh')
   } catch (err: unknown) {
-    showError(parseApiError(err, '设置代理失败'))
+    showError(localizedApiError(err, '设置代理失败'))
   } finally {
     savingProviderProxy.value = false
   }
@@ -1901,10 +1386,10 @@ async function clearProviderProxy() {
     const updated = await updateProvider(provider.value.id, { proxy: null })
     provider.value = updated
     providerProxyPopoverOpen.value = false
-    showSuccess('已清除提供商代理')
+    showSuccess(legacyT('已清除提供商代理'))
     emit('refresh')
   } catch (err: unknown) {
-    showError(parseApiError(err, '清除代理失败'))
+    showError(localizedApiError(err, '清除代理失败'))
   } finally {
     savingProviderProxy.value = false
   }
@@ -1988,7 +1473,7 @@ async function copyFullKey(key: EndpointAPIKey) {
     revealedKeys.value.set(key.id, textToCopy)
     copyToClipboard(textToCopy)
   } catch (err: unknown) {
-    showError(parseApiError(err, '获取密钥失败'), '错误')
+    showError(localizedApiError(err, '获取密钥失败'), legacyT('错误'))
   }
 }
 
@@ -2009,7 +1494,7 @@ async function downloadRefreshToken(key: EndpointAPIKey) {
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
   } catch (err: unknown) {
-    showError(parseApiError(err, '导出失败'), '错误')
+    showError(localizedApiError(err, '导出失败'), legacyT('错误'))
   }
 }
 
@@ -2017,6 +1502,13 @@ async function downloadRefreshToken(key: EndpointAPIKey) {
 function handleDeleteKey(key: EndpointAPIKey) {
   keyToDelete.value = key
   deleteKeyConfirmOpen.value = true
+}
+
+function formatDeleteKeyConfirmDescription(): string {
+  const keyName = keyToDelete.value?.api_key_masked || keyToDelete.value?.name || ''
+  return locale.value === 'en-US'
+    ? `Delete key ${keyName}?`
+    : `确定要删除密钥 ${keyName} 吗？`
 }
 
 async function confirmDeleteKey() {
@@ -2028,23 +1520,23 @@ async function confirmDeleteKey() {
 
   try {
     await deleteEndpointKey(keyId)
-    showSuccess('密钥已删除')
+    showSuccess(legacyT('密钥已删除'))
     // 刷新端点列表及模型数据（删除 Key 触发自动解除模型关联）
     await loadEndpoints()
     emit('refresh')
   } catch (err: unknown) {
-    showError(parseApiError(err, '删除密钥失败'), '错误')
+    showError(localizedApiError(err, '删除密钥失败'), legacyT('错误'))
   }
 }
 
 async function handleRecoverKey(key: EndpointAPIKey) {
   try {
     const result = await recoverKeyHealth(key.id)
-    showSuccess(result.message || 'Key已完全恢复')
+    showSuccess(legacyT(result.message || 'Key已完全恢复'))
     await loadEndpoints()
     emit('refresh')
   } catch (err: unknown) {
-    showError(parseApiError(err, 'Key恢复失败'), '错误')
+    showError(localizedApiError(err, 'Key恢复失败'), legacyT('错误'))
   }
 }
 
@@ -2089,15 +1581,15 @@ async function handleRefreshOAuth(key: EndpointAPIKey) {
       snapshot: refreshedKey,
     })
     if (feedback.tone === 'warning') {
-      showWarning(feedback.message)
+      showWarning(legacyT(feedback.message))
     } else {
-      showSuccess(feedback.message)
+      showSuccess(legacyT(feedback.message))
     }
     // Antigravity：token 刷新后可能完成了账号激活，触发配额获取
     // （不 emit('refresh')，避免触发全局 provider 余额刷新）
     void autoRefreshQuotaInBackground({ ignoreCooldown: true })
   } catch (err: unknown) {
-    showError(parseApiError(err, 'Token 刷新失败'), '错误')
+    showError(localizedApiError(err, 'Token 刷新失败'), legacyT('错误'))
   } finally {
     refreshingOAuthKeyId.value = null
   }
@@ -2110,14 +1602,21 @@ function isAccountLevelBlock(key: EndpointAPIKey): boolean {
   return account.blocked && !oauth?.isInvalid
 }
 
+function formatClearOAuthInvalidConfirmMessage(key: EndpointAPIKey): string {
+  const keyName = key.name || key.id.slice(0, 8)
+  return locale.value === 'en-US'
+    ? `Confirm account "${keyName}" has completed manual verification? After clearing, the system will re-evaluate this key using the current manual switch and scheduling state.`
+    : `确认账号 "${keyName}" 已手动完成验证？清除后系统会按当前手动开关和调度状态重新评估该 Key。`
+}
+
 // 清除 OAuth 失效标记
 async function handleClearOAuthInvalid(key: EndpointAPIKey) {
   if (clearingOAuthInvalidKeyId.value) return
 
   const confirmed = await confirm({
-    title: '清除账号异常标记',
-    message: `确认账号 "${key.name || key.id.slice(0, 8)}" 已手动完成验证？清除后系统会按当前手动开关和调度状态重新评估该 Key。`,
-    confirmText: '确认清除',
+    title: legacyT('清除账号异常标记'),
+    message: formatClearOAuthInvalidConfirmMessage(key),
+    confirmText: legacyT('确认清除'),
     variant: 'default',
   })
   if (!confirmed) return
@@ -2125,7 +1624,7 @@ async function handleClearOAuthInvalid(key: EndpointAPIKey) {
   clearingOAuthInvalidKeyId.value = key.id
   try {
     await clearOAuthInvalid(key.id)
-    showSuccess('已清除 OAuth 异常标记')
+    showSuccess(legacyT('已清除 OAuth 异常标记'))
     // 更新本地数据
     const keyInList = providerKeys.value.find(k => k.id === key.id)
     if (keyInList) {
@@ -2155,9 +1654,78 @@ async function handleClearOAuthInvalid(key: EndpointAPIKey) {
     }
     await loadEndpoints()
   } catch (err: unknown) {
-    showError(parseApiError(err, '清除失败'), '错误')
+    showError(localizedApiError(err, '清除失败'), legacyT('错误'))
   } finally {
     clearingOAuthInvalidKeyId.value = null
+  }
+}
+
+function createCodexResetCreditIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  throw new Error('浏览器不支持 crypto.randomUUID，无法生成安全幂等 ID')
+}
+
+function codexResetCreditOutcomeFeedback(
+  result: Awaited<ReturnType<typeof consumeCodexResetCredit>>,
+): { tone: 'success' | 'warning'; message: string } {
+  switch (result.outcome) {
+    case 'reset':
+      return { tone: 'success', message: '已使用 Codex 重置机会，并刷新账号配额' }
+    case 'already_redeemed':
+      return { tone: 'success', message: '本次重置请求已处理，账号配额已刷新' }
+    case 'nothing_to_reset':
+      return { tone: 'warning', message: '当前没有需要重置的 Codex 额度窗口' }
+    case 'no_credit':
+      return { tone: 'warning', message: '当前没有可用的 Codex 重置机会' }
+    default:
+      return { tone: 'warning', message: '重置请求已返回，但结果类型未知，请查看最新账号配额' }
+  }
+}
+
+async function handleConsumeCodexResetCredit(key: EndpointAPIKey) {
+  if (!canConsumeCodexResetCredit(key)) return
+
+  const earliest = getVisibleCodexResetCreditItems(key)[0]
+  const detailMessage = earliest
+    ? `\n当前最早过期项：${earliest.displayKey}，约 ${formatCodexResetCreditDays(earliest.remainingSeconds)} 后过期。`
+    : ''
+  const confirmed = await confirm({
+    title: legacyT('确认使用 Codex 重置机会'),
+    message: `${legacyT('将消耗 1 次 Codex 重置机会。操作完成后会重新刷新账号配额状态。')}${detailMessage}`,
+    confirmText: legacyT('确认重置'),
+    cancelText: legacyT('取消'),
+    variant: 'warning',
+  })
+  if (!confirmed) return
+
+  consumingCodexResetCreditKeyId.value = key.id
+  try {
+    const idempotencyKey = createCodexResetCreditIdempotencyKey()
+    const result = await consumeCodexResetCredit(key.id, {
+      idempotency_key: idempotencyKey,
+    })
+    applyQuotaResults([{
+      key_id: result.key_id,
+      status: result.refresh_status === 'success' ? 'success' : result.status,
+      metadata: result.metadata,
+      quota_snapshot: result.quota_snapshot,
+    }])
+
+    const feedback = codexResetCreditOutcomeFeedback(result)
+    if (feedback.tone === 'success') {
+      showSuccess(legacyT(feedback.message))
+    } else {
+      showWarning(legacyT(feedback.message))
+    }
+    if (result.refresh_status === 'failed') {
+      showWarning(legacyT(result.refresh_error || '重置请求已处理，但最新配额刷新失败'))
+    }
+  } catch (err: unknown) {
+    showError(localizedApiError(err, 'Codex 重置机会使用失败'), legacyT('错误'))
+  } finally {
+    consumingCodexResetCreditKeyId.value = null
   }
 }
 
@@ -2266,8 +1834,55 @@ function getQuotaWindowLiveResetSeconds(
   return null
 }
 
-function getCodexQuotaDisplay(key: EndpointAPIKey): CodexUpstreamMetadata | null {
-  const quota = getQuotaSnapshotForProvider(key, 'codex')
+function copyCodexNumberField(
+  target: CodexUpstreamMetadata,
+  source: CodexUpstreamMetadata,
+  field: keyof CodexUpstreamMetadata,
+) {
+  const value = source[field]
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    ;(target[field] as number | undefined) = value
+  }
+}
+
+function getCodexQuotaDisplayFromMetadata(metadata: CodexUpstreamMetadata | null | undefined): CodexUpstreamMetadata | null {
+  if (!metadata) return null
+
+  const display: CodexUpstreamMetadata = {}
+  if (metadata.plan_type) display.plan_type = metadata.plan_type
+
+  const numberFields: (keyof CodexUpstreamMetadata)[] = [
+    'updated_at',
+    'primary_used_percent',
+    'primary_reset_seconds',
+    'primary_reset_after_seconds',
+    'primary_reset_at',
+    'primary_window_minutes',
+    'secondary_used_percent',
+    'secondary_reset_seconds',
+    'secondary_reset_after_seconds',
+    'secondary_reset_at',
+    'secondary_window_minutes',
+    'spark_primary_used_percent',
+    'spark_primary_reset_seconds',
+    'spark_primary_reset_after_seconds',
+    'spark_primary_reset_at',
+    'spark_primary_window_minutes',
+    'spark_secondary_used_percent',
+    'spark_secondary_reset_seconds',
+    'spark_secondary_reset_after_seconds',
+    'spark_secondary_reset_at',
+    'spark_secondary_window_minutes',
+    'credits_balance',
+  ]
+  numberFields.forEach(field => copyCodexNumberField(display, metadata, field))
+  if (metadata.has_credits !== undefined) display.has_credits = metadata.has_credits
+  if (metadata.reset_credits) display.reset_credits = metadata.reset_credits
+
+  return Object.keys(display).length > 0 ? display : null
+}
+
+function getCodexQuotaDisplayFromSnapshot(quota: QuotaStatusSnapshot | null | undefined): CodexUpstreamMetadata | null {
   if (!quota) return null
 
   const display: CodexUpstreamMetadata = {}
@@ -2318,8 +1933,47 @@ function getCodexQuotaDisplay(key: EndpointAPIKey): CodexUpstreamMetadata | null
   if (typeof sparkSecondaryWindow?.window_minutes === 'number') {
     display.spark_secondary_window_minutes = sparkSecondaryWindow.window_minutes
   }
+  if (quota.reset_credits) display.reset_credits = quota.reset_credits
 
   return Object.keys(display).length > 0 ? display : null
+}
+
+function getCodexQuotaDisplayUpdatedAt(display: CodexUpstreamMetadata | null | undefined): number | null {
+  const updatedAt = Number(display?.updated_at)
+  return Number.isFinite(updatedAt) ? updatedAt : null
+}
+
+function codexDisplayHasUsage(display: CodexUpstreamMetadata | null | undefined): boolean {
+  return !!display && (
+    display.primary_used_percent !== undefined
+    || display.secondary_used_percent !== undefined
+    || display.spark_primary_used_percent !== undefined
+    || display.spark_secondary_used_percent !== undefined
+  )
+}
+
+function codexDisplayHasResetCredits(display: CodexUpstreamMetadata | null | undefined): boolean {
+  const count = display?.reset_credits?.available_count
+  return typeof count === 'number' && Number.isFinite(count)
+}
+
+function getCodexQuotaDisplay(key: EndpointAPIKey): CodexUpstreamMetadata | null {
+  const snapshotDisplay = getCodexQuotaDisplayFromSnapshot(getQuotaSnapshotForProvider(key, 'codex'))
+  const metadataDisplay = getCodexQuotaDisplayFromMetadata(key.upstream_metadata?.codex)
+
+  if (!snapshotDisplay) return metadataDisplay
+  if (!metadataDisplay) return snapshotDisplay
+  if (!codexDisplayHasUsage(snapshotDisplay) && codexDisplayHasUsage(metadataDisplay)) {
+    return metadataDisplay
+  }
+
+  const snapshotUpdatedAt = getCodexQuotaDisplayUpdatedAt(snapshotDisplay)
+  const metadataUpdatedAt = getCodexQuotaDisplayUpdatedAt(metadataDisplay)
+  if (metadataUpdatedAt !== null && (snapshotUpdatedAt === null || metadataUpdatedAt > snapshotUpdatedAt)) {
+    return metadataDisplay
+  }
+
+  return snapshotDisplay
 }
 
 function hasCodexQuotaDisplayData(key: EndpointAPIKey): boolean {
@@ -2329,6 +1983,7 @@ function hasCodexQuotaDisplayData(key: EndpointAPIKey): boolean {
     || codex.secondary_used_percent !== undefined
     || codex.spark_primary_used_percent !== undefined
     || codex.spark_secondary_used_percent !== undefined
+    || codexDisplayHasResetCredits(codex)
   )
 }
 
@@ -2338,6 +1993,29 @@ function hasCodexSparkQuotaDisplayData(key: EndpointAPIKey): boolean {
     codex.spark_primary_used_percent !== undefined
     || codex.spark_secondary_used_percent !== undefined
   )
+}
+
+function getCodexResetCreditsDisplay(key: EndpointAPIKey): QuotaResetCreditsSnapshot | null {
+  return getCodexQuotaDisplay(key)?.reset_credits ?? null
+}
+
+function getCodexResetCreditAvailableCount(key: EndpointAPIKey): number | null {
+  return getCodexResetCreditAvailableCountFromSnapshot(getCodexResetCreditsDisplay(key))
+}
+
+function formatCodexResetCreditCount(key: EndpointAPIKey): string {
+  return formatCodexResetCreditCountLabel(getCodexResetCreditAvailableCount(key))
+}
+
+function getVisibleCodexResetCreditItems(key: EndpointAPIKey) {
+  return getVisibleCodexResetCreditItemsFromSnapshot(getCodexResetCreditsDisplay(key))
+}
+
+function canConsumeCodexResetCredit(key: EndpointAPIKey): boolean {
+  return provider.value?.provider_type === 'codex'
+    && getCodexResetCreditAvailableCount(key) !== null
+    && (getCodexResetCreditAvailableCount(key) ?? 0) > 0
+    && !consumingCodexResetCreditKeyId.value
 }
 
 function getKiroQuotaDisplay(key: EndpointAPIKey): KiroUpstreamMetadata | null {
@@ -2559,8 +2237,8 @@ function getWindsurfQuotaStatusLabel(key: EndpointAPIKey): string {
   const label = quota?.label?.trim()
   if (label) return label
   const code = String(quota?.code || '').trim().toLowerCase()
-  if (code === 'cooldown') return '冷却中'
-  return code === 'rate_limited' || code === 'rate_limit' ? '速率受限' : '额度耗尽'
+  if (code === 'cooldown') return legacyT('冷却中')
+  return code === 'rate_limited' || code === 'rate_limit' ? legacyT('速率受限') : legacyT('额度耗尽')
 }
 
 function getWindsurfModelPreview(key: EndpointAPIKey): string | null {
@@ -2729,22 +2407,22 @@ function formatKiroResetTime(timestamp: number | undefined): string {
   const diff = ts - now
 
   if (diff <= 0) {
-    return '已重置'
+    return legacyT('已重置')
   }
 
   const days = Math.floor(diff / (1000 * 60 * 60 * 24))
   const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60))
 
   if (days > 0) {
-    return `${days}天${hours}小时后`
+    return locale.value === 'en-US' ? `${days}d ${hours}h later` : `${days}天${hours}小时后`
   }
 
   const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
   if (hours > 0) {
-    return `${hours}小时${minutes}分钟后`
+    return locale.value === 'en-US' ? `${hours}h ${minutes}m later` : `${hours}小时${minutes}分钟后`
   }
 
-  return `${minutes}分钟后`
+  return locale.value === 'en-US' ? `${minutes}m later` : `${minutes}分钟后`
 }
 
 // 格式化 Kiro 订阅类型显示
@@ -3074,11 +2752,11 @@ async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean 
     const result = await refreshProviderQuota(providerId)
     const applied = applyQuotaResults(result.results)
     if (result.success <= 0 && applied === 0 && !hadCachedQuota && providerType === 'antigravity') {
-      showError('没有获取到配额信息（请检查账号是否已授权、project_id 是否存在）', '提示')
+      showError(legacyT('没有获取到配额信息（请检查账号是否已授权、project_id 是否存在）'), legacyT('提示'))
     }
   } catch (err: unknown) {
     if (!hadCachedQuota && providerType === 'antigravity') {
-      showError(parseApiError(err, '后台刷新配额失败'), '错误')
+      showError(localizedApiError(err, '后台刷新配额失败'), legacyT('错误'))
     }
   } finally {
     refreshingQuota.value = false
@@ -3125,10 +2803,10 @@ async function toggleKeyActive(key: EndpointAPIKey) {
     const newStatus = !key.is_active
     await updateProviderKey(key.id, { is_active: newStatus })
     key.is_active = newStatus
-    showSuccess(newStatus ? '密钥已启用' : '密钥已停用')
+    showSuccess(legacyT(newStatus ? '密钥已启用' : '密钥已停用'))
     emit('refresh')
   } catch (err: unknown) {
-    showError(parseApiError(err, '操作失败'), '错误')
+    showError(localizedApiError(err, '操作失败'), legacyT('错误'))
   } finally {
     togglingKeyId.value = null
   }
@@ -3160,10 +2838,10 @@ async function setKeyProxy(key: EndpointAPIKey, nodeId: string) {
     })
     key.proxy = { node_id: nodeId, enabled: true }
     proxyPopoverOpenKeyId.value = null
-    showSuccess('代理节点已设置')
+    showSuccess(legacyT('代理节点已设置'))
     emit('refresh')
   } catch (err: unknown) {
-    showError(parseApiError(err, '设置代理失败'), '错误')
+    showError(localizedApiError(err, '设置代理失败'), legacyT('错误'))
   } finally {
     savingProxyKeyId.value = null
   }
@@ -3176,10 +2854,10 @@ async function clearKeyProxy(key: EndpointAPIKey) {
     await updateProviderKey(key.id, { proxy: null })
     key.proxy = null
     proxyPopoverOpenKeyId.value = null
-    showSuccess('已清除账号代理，将使用提供商级别代理')
+    showSuccess(legacyT('已清除账号代理，将使用提供商级别代理'))
     emit('refresh')
   } catch (err: unknown) {
-    showError(parseApiError(err, '清除代理失败'), '错误')
+    showError(localizedApiError(err, '清除代理失败'), legacyT('错误'))
   } finally {
     savingProxyKeyId.value = null
   }
@@ -3277,7 +2955,7 @@ async function savePriority(key: EndpointAPIKey) {
 
   try {
     await updateProviderKey(keyId, { internal_priority: newPriority })
-    showSuccess('优先级已更新')
+    showSuccess(legacyT('优先级已更新'))
     // 更新本地数据 - 更新 providerKeys 中的数据
     const keyToUpdate = providerKeys.value.find(k => k.id === keyId)
     if (keyToUpdate) {
@@ -3287,7 +2965,7 @@ async function savePriority(key: EndpointAPIKey) {
     providerKeys.value.sort((a, b) => (a.internal_priority ?? 0) - (b.internal_priority ?? 0))
     emit('refresh')
   } catch (err: unknown) {
-    showError(parseApiError(err, '更新优先级失败'), '错误')
+    showError(localizedApiError(err, '更新优先级失败'), legacyT('错误'))
   }
 }
 
@@ -3336,7 +3014,7 @@ async function saveMultiplier(key: EndpointAPIKey, format: string) {
 
   // 验证输入有效性
   if (!keyId || isNaN(newMultiplier)) {
-    showError('请输入有效的倍率值')
+    showError(legacyT('请输入有效的倍率值'))
     cancelEditMultiplier()
     multiplierSaving.value = false
     return
@@ -3344,7 +3022,7 @@ async function saveMultiplier(key: EndpointAPIKey, format: string) {
 
   // 验证合理范围
   if (newMultiplier <= 0 || newMultiplier > 100) {
-    showError('倍率必须在 0.01 到 100 之间')
+    showError(legacyT('倍率必须在 0.01 到 100 之间'))
     cancelEditMultiplier()
     multiplierSaving.value = false
     return
@@ -3366,7 +3044,7 @@ async function saveMultiplier(key: EndpointAPIKey, format: string) {
     rateMultipliers[format] = newMultiplier
 
     await updateProviderKey(keyId, { rate_multipliers: rateMultipliers })
-    showSuccess('倍率已更新')
+    showSuccess(legacyT('倍率已更新'))
 
     // 更新本地数据
     const keyToUpdate = providerKeys.value.find(k => k.id === keyId)
@@ -3375,7 +3053,7 @@ async function saveMultiplier(key: EndpointAPIKey, format: string) {
     }
     emit('refresh')
   } catch (err: unknown) {
-    showError(parseApiError(err, '更新倍率失败'), '错误')
+    showError(localizedApiError(err, '更新倍率失败'), legacyT('错误'))
   } finally {
     multiplierSaving.value = false
   }
@@ -3487,11 +3165,11 @@ async function handleKeyDrop(event: DragEvent, targetIndex: number) {
     })
 
     await Promise.all(updatePromises)
-    showSuccess('优先级已更新')
+    showSuccess(legacyT('优先级已更新'))
     await loadEndpoints()
     emit('refresh')
   } catch (err: unknown) {
-    showError(parseApiError(err, '更新优先级失败'), '错误')
+    showError(localizedApiError(err, '更新优先级失败'), legacyT('错误'))
     await loadEndpoints()
   }
 }
@@ -3649,13 +3327,13 @@ function formatUpdatedAt(updatedAt: number): string {
   if (!updatedAt || typeof updatedAt !== 'number') return ''
   const now = Math.floor(Date.now() / 1000)
   const diff = now - updatedAt
-  if (diff <= 60) return '刚刚更新'
+  if (diff <= 60) return legacyT('刚刚更新')
   const minutes = Math.floor(diff / 60)
-  if (minutes < 60) return `${minutes}分钟前更新`
+  if (minutes < 60) return locale.value === 'en-US' ? `${minutes}m ago` : `${minutes}分钟前更新`
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}小时前更新`
+  if (hours < 24) return locale.value === 'en-US' ? `${hours}h ago` : `${hours}小时前更新`
   const days = Math.floor(hours / 24)
-  return `${days}天前更新`
+  return locale.value === 'en-US' ? `${days}d ago` : `${days}天前更新`
 }
 
 // 兼容旧函数名
@@ -3882,7 +3560,19 @@ function getResetCountdownText(
     toCodexRemainingPercent(usedPercent)
   )
   if (!status) return ''
-  return status.isExpired ? status.text : `${status.text} 后重置`
+  return status.isExpired ? legacyT(status.text) : `${legacyT(status.text)} ${legacyT('后重置')}`
+}
+
+function getCodexQuotaResetText(
+  resetAt: number | null | undefined,
+  resetSecs: number | null | undefined,
+  updatedAt: number | null | undefined,
+  usedPercent: number | null | undefined
+): string {
+  if (resetAt || resetSecs) {
+    return getResetCountdownText(resetAt, resetSecs, updatedAt, usedPercent)
+  }
+  return legacyT('已重置')
 }
 
 function getResetCountdownClass(
@@ -3924,12 +3614,12 @@ function formatResetTime(seconds: number): string {
   const minutes = Math.floor((seconds % 3600) / 60)
 
   if (days > 0) {
-    return `${days}天 ${hours}小时`
+    return locale.value === 'en-US' ? `${days}d ${hours}h` : `${days}天 ${hours}小时`
   }
   if (hours > 0) {
-    return `${hours}小时 ${minutes}分钟`
+    return locale.value === 'en-US' ? `${hours}h ${minutes}m` : `${hours}小时 ${minutes}分钟`
   }
-  return `${minutes}分钟`
+  return locale.value === 'en-US' ? `${minutes}m` : `${minutes}分钟`
 }
 
 // OAuth 订阅类型样式
@@ -4013,45 +3703,45 @@ function getKeyCircuitProbeCountdown(key: EndpointAPIKey): string {
     return ''
   }
   const diffMs = nextProbe - Date.now()
-  return diffMs > 0 ? ` ${formatCountdown(diffMs)}` : ' 探测中'
+  return diffMs > 0 ? ` ${formatCountdown(diffMs)}` : ` ${legacyT('探测中')}`
 }
 
 function getKeyCircuitBreakerTitle(key: EndpointAPIKey): string {
   const entries = getOpenCircuitEntries(key)
-  if (entries.length === 0) return '熔断器已打开'
+  if (entries.length === 0) return legacyT('熔断器已打开')
   const parts = entries.map(([format, value]) => {
     const label = formatApiFormatShort(format)
-    const reason = value.reason ? `原因: ${value.reason}` : '原因: 连续失败'
+    const reason = value.reason ? `${legacyT('原因')}: ${value.reason}` : `${legacyT('原因')}: ${legacyT('连续失败')}`
     const interval = typeof value.probe_interval_minutes === 'number'
-      ? `探测间隔: ${value.probe_interval_minutes} 分钟`
+      ? `${legacyT('探测间隔')}: ${value.probe_interval_minutes} ${legacyT('分钟')}`
       : ''
     const countdown = getFormatProbeCountdown(key, format).trim()
-    return [label, reason, interval, countdown ? `状态: ${countdown}` : '']
+    return [label, reason, interval, countdown ? `${legacyT('状态')}: ${countdown}` : '']
       .filter(Boolean)
       .join(' / ')
   })
-  parts.push('点击恢复按钮可重置熔断器')
+  parts.push(legacyT('点击恢复按钮可重置熔断器'))
   return parts.join('\n')
 }
 
 function getRecoverKeyTitle(key: EndpointAPIKey): string {
   if (key.circuit_breaker_open) {
-    return '重置熔断器并恢复健康状态'
+    return legacyT('重置熔断器并恢复健康状态')
   }
-  return '刷新健康状态'
+  return legacyT('刷新健康状态')
 }
 
 // 获取自动获取模型状态的 title 提示
 function getAutoFetchStatusTitle(key: EndpointAPIKey): string {
-  const parts: string[] = ['自动获取模型已启用']
+  const parts: string[] = [legacyT('自动获取模型已启用')]
 
   if (key.last_models_fetch_at) {
     const date = new Date(key.last_models_fetch_at)
-    parts.push(`上次同步: ${date.toLocaleString()}`)
+    parts.push(`${legacyT('上次同步')}: ${date.toLocaleString(locale.value)}`)
   }
 
   if (key.last_models_fetch_error) {
-    parts.push(`错误: ${key.last_models_fetch_error}`)
+    parts.push(`${legacyT('错误')}: ${key.last_models_fetch_error}`)
   }
 
   return parts.join('\n')
@@ -4078,7 +3768,7 @@ function getFormatProbeCountdown(key: EndpointAPIKey, format: string): string {
     const halfOpenUntil = new Date(formatData.half_open_until)
     const now = new Date()
     if (halfOpenUntil > now) {
-      return ' 探测中'
+      return ` ${legacyT('探测中')}`
     }
   }
   // 等待探测
@@ -4090,7 +3780,7 @@ function getFormatProbeCountdown(key: EndpointAPIKey, format: string): string {
     if (diffMs > 0) {
       return ` ${formatCountdown(diffMs)}`
     } else {
-      return ' 探测中'
+      return ` ${legacyT('探测中')}`
     }
   }
   return ''
@@ -4125,11 +3815,11 @@ async function loadProvider() {
     keyPageSize.value = getProviderKeysPageSize(providerData.provider_type)
 
     if (!provider.value) {
-      throw new Error('Provider 不存在')
+      throw new Error(legacyT('Provider 不存在'))
     }
   } catch (err: unknown) {
     if (requestId !== providerLoadRequestId) return
-    showError(parseApiError(err, '加载失败'), '错误')
+    showError(localizedApiError(err, '加载失败'), legacyT('错误'))
   } finally {
     if (requestId === providerLoadRequestId && shouldShowSpinner) {
       loading.value = false
@@ -4166,7 +3856,7 @@ async function loadProviderKeysPage(page = currentKeyPage.value) {
     providerKeys.value = []
     providerKeysTotal.value = 0
     syncCurrentSelections(endpoints.value, [])
-    showError(parseApiError(err, '加载密钥失败'), '错误')
+    showError(localizedApiError(err, '加载密钥失败'), legacyT('错误'))
   } finally {
     if (requestId === keysLoadRequestId) {
       loadingProviderKeys.value = false
@@ -4205,7 +3895,7 @@ async function loadEndpoints() {
       if (requestId !== endpointsLoadRequestId) return
       endpoints.value = []
       syncCurrentSelections([], providerKeys.value)
-      showError(parseApiError(err, '加载端点失败'), '错误')
+      showError(localizedApiError(err, '加载端点失败'), legacyT('错误'))
     })
     .finally(() => {
       if (requestId === endpointsLoadRequestId) {

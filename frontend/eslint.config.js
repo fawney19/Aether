@@ -40,6 +40,9 @@ export default [
         FileReader: 'readonly',
         HTMLElement: 'readonly',
         HTMLInputElement: 'readonly',
+        HTMLDivElement: 'readonly',
+        HTMLFormElement: 'readonly',
+        HTMLScriptElement: 'readonly',
         HTMLSelectElement: 'readonly',
         HTMLImageElement: 'readonly',
         HTMLIFrameElement: 'readonly',
@@ -145,6 +148,8 @@ export default [
         SecurityPolicyViolationEvent: 'readonly',
         DeviceMotionEvent: 'readonly',
         DeviceOrientationEvent: 'readonly',
+        // Vite build-time constants
+        __APP_VERSION__: 'readonly',
       },
     },
   },
@@ -166,7 +171,12 @@ export default [
       'vue/no-v-html': 'warn', // 降级为警告，某些场景需要使用
       'vue/component-api-style': ['error', ['script-setup']],
       'vue/component-name-in-template-casing': ['error', 'PascalCase'],
-      'vue/custom-event-name-casing': ['warn', 'camelCase'], // 降级为警告，逐步迁移
+      'vue/custom-event-name-casing': ['warn', 'camelCase', {
+        ignores: [
+          '/^update:[A-Za-z][A-Za-z0-9-]*$/',
+          '/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/',
+        ],
+      }], // 组件公开事件同时兼容 v-model 与模板 kebab-case 约定
       'vue/define-macros-order': [
         'error',
         {
@@ -218,6 +228,16 @@ export default [
     files: ['**/main.ts', '**/logger.ts'],
     rules: {
       'no-console': 'off',
+    },
+  },
+
+  // 测试文件内的本地 stub 组件与断言写法服务于行为隔离，不作为生产组件 API 约束
+  {
+    files: ['**/__tests__/**/*.{ts,tsx,vue}', '**/*.{spec,test}.{ts,tsx,vue}'],
+    rules: {
+      'vue/one-component-per-file': 'off',
+      'vue/require-default-prop': 'off',
+      '@typescript-eslint/no-non-null-assertion': 'off',
     },
   },
 ]

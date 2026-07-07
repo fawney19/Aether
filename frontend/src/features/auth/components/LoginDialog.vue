@@ -13,7 +13,7 @@
           class="h-16 w-16 mb-4"
         >
         <h2 class="text-2xl font-semibold text-foreground">
-          登录到 {{ siteName }}
+          {{ t('auth.login.title', { siteName }) }}
         </h2>
       </div>
 
@@ -23,7 +23,7 @@
         class="rounded-lg border border-primary/20 bg-primary/5 p-3 mb-5"
       >
         <p class="text-xs font-medium text-foreground mb-2">
-          演示模式
+          {{ t('auth.login.demoMode') }}
         </p>
         <div class="space-y-1.5">
           <button
@@ -66,7 +66,7 @@
               v-html="getOAuthIcon(oauthProviders[0].provider_type, oauthProviders[0].icon_url)"
             />
             <!-- eslint-enable vue/no-v-html -->
-            <span>使用 {{ oauthProviders[0].display_name }} 登录</span>
+            <span>{{ t('auth.login.oauthWithProvider', { provider: oauthProviders[0].display_name }) }}</span>
           </button>
         </div>
 
@@ -75,7 +75,7 @@
           v-else
           class="flex flex-col items-center gap-3"
         >
-          <span class="text-xs text-muted-foreground">使用以下方式登录</span>
+          <span class="text-xs text-muted-foreground">{{ t('auth.login.oauthOptions') }}</span>
           <div class="flex items-center justify-center gap-3">
             <button
               v-for="p in oauthProviders"
@@ -102,7 +102,7 @@
         class="flex items-center gap-3 mb-5"
       >
         <div class="flex-1 h-px bg-border" />
-        <span class="text-xs text-muted-foreground px-2">或使用账号密码</span>
+        <span class="text-xs text-muted-foreground px-2">{{ t('auth.login.accountPassword') }}</span>
         <div class="flex-1 h-px bg-border" />
       </div>
 
@@ -117,7 +117,7 @@
           :class="[authType === 'local' && 'active']"
           @click="authType = 'local'"
         >
-          本地登录
+          {{ t('auth.login.local') }}
         </button>
         <button
           type="button"
@@ -125,7 +125,7 @@
           :class="[authType === 'ldap' && 'active']"
           @click="authType = 'ldap'"
         >
-          LDAP 登录
+          {{ t('auth.login.ldap') }}
         </button>
       </div>
 
@@ -154,7 +154,7 @@
               class="text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors"
               @click="authType = 'local'"
             >
-              管理员本地登录
+              {{ t('auth.login.adminLocal') }}
             </button>
             <button
               v-if="ldapExclusive && authType === 'local'"
@@ -162,7 +162,7 @@
               class="text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors"
               @click="authType = 'ldap'"
             >
-              返回 LDAP 登录
+              {{ t('auth.login.backToLdap') }}
             </button>
           </div>
           <Input
@@ -171,7 +171,7 @@
             type="text"
             name="username"
             required
-            placeholder="用户名或邮箱"
+            :placeholder="t('auth.login.usernamePlaceholder')"
             autocomplete="username"
             autocapitalize="none"
             spellcheck="false"
@@ -184,7 +184,7 @@
             for="password"
             class="text-sm"
           >
-            密码
+            {{ t('auth.login.password') }}
           </Label>
           <Input
             id="password"
@@ -192,7 +192,7 @@
             type="password"
             name="password"
             required
-            placeholder="输入密码"
+            :placeholder="t('auth.login.passwordPlaceholder')"
             autocomplete="current-password"
             :disable-autofill="false"
           />
@@ -204,7 +204,7 @@
           :disabled="authStore.loading"
           class="w-full h-12"
         >
-          {{ authStore.loading ? '登录中...' : '登录' }}
+          {{ authStore.loading ? t('auth.login.submitting') : t('auth.login.submit') }}
         </Button>
 
         <!-- 提示信息 -->
@@ -212,7 +212,7 @@
           v-if="!isDemo && !allowRegistration"
           class="text-xs text-muted-foreground text-center"
         >
-          如需开通账户，请联系管理员
+          {{ t('auth.login.contactAdmin') }}
         </p>
       </form>
 
@@ -221,13 +221,13 @@
         v-if="allowRegistration"
         class="mt-5 pt-5 border-t border-border text-center text-sm text-muted-foreground"
       >
-        还没有账户？
+        {{ t('auth.login.noAccount') }}
         <button
           type="button"
           class="text-primary hover:text-primary/80 font-medium transition-colors"
           @click="handleSwitchToRegister"
         >
-          立即注册
+          {{ t('auth.login.registerNow') }}
         </button>
       </div>
     </div>
@@ -266,6 +266,7 @@ import { getClientDeviceId } from '@/utils/deviceId'
 import { getApiUrl } from '@/utils/url'
 import { getOAuthIcon } from '@/utils/oauth-icons'
 import { navigateAfterLogin } from '@/features/auth/utils/loginRedirect'
+import { useI18n } from '@/i18n'
 
 const props = defineProps<{
   modelValue: boolean
@@ -280,6 +281,7 @@ const route = useRoute()
 const authStore = useAuthStore()
 const { success: showSuccess, warning: showWarning, error: showError } = useToast()
 const { siteName } = useSiteInfo()
+const { t } = useI18n()
 
 const isOpen = ref(props.modelValue)
 const isDemo = computed(() => isDemoMode())
@@ -321,7 +323,7 @@ const showAuthTypeTabs = computed(() => {
 })
 
 const emailLabel = computed(() => {
-  return '用户名/邮箱'
+  return t('auth.login.usernameEmail')
 })
 
 watch(() => props.modelValue, (val) => {
@@ -354,7 +356,7 @@ async function handleLogin(event?: Event) {
   const { email, password } = readCurrentLoginCredentials(event)
 
   if (!email || !password) {
-    showWarning('请输入邮箱和密码')
+    showWarning(t('auth.login.required'))
     return
   }
 
@@ -364,12 +366,12 @@ async function handleLogin(event?: Event) {
 
     await navigateAfterLogin(router, targetPath)
 
-    showSuccess('登录成功，正在跳转...')
+    showSuccess(t('auth.login.successRedirecting'))
 
     // 关闭对话框
     isOpen.value = false
   } else {
-    showError(authStore.error || '登录失败，请检查邮箱和密码')
+    showError(authStore.error || t('auth.login.failed'))
   }
 }
 
@@ -423,7 +425,7 @@ function handleSwitchToRegister() {
 
 function handleRegisterSuccess() {
   showRegisterDialog.value = false
-  showSuccess('注册成功！请登录')
+  showSuccess(t('auth.register.successLogin'))
   isOpen.value = true
 }
 

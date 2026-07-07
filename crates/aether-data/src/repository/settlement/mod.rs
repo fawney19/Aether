@@ -49,6 +49,10 @@ fn settlement_billing_status_for_usage_status(status: &str) -> &'static str {
     }
 }
 
+fn settlement_billable_cost_usd(input: &UsageSettlementInput) -> f64 {
+    input.actual_total_cost_usd.max(0.0)
+}
+
 #[allow(unused_imports)]
 pub(crate) use aether_data_contracts::repository::settlement::{
     SettlementRepository, SettlementWriteRepository, StoredUsageSettlement, UsageSettlementInput,

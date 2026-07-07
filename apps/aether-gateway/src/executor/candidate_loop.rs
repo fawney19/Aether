@@ -29,6 +29,12 @@ use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AppState, GatewayError};
 
 const DEFAULT_STREAM_FIRST_BYTE_WATCHDOG_TIMEOUT_MS: u64 = 30_000;
+const UPSTREAM_EXECUTION_GATE_NAME: &str = "gateway_upstream_execution";
+const UPSTREAM_TARGET_GATE_NAME: &str = "gateway_upstream_target";
+const UPSTREAM_EXECUTION_GATE_HOLD_STREAM_RESPONSE_ENV: &str =
+    "AETHER_GATEWAY_UPSTREAM_EXECUTION_GATE_HOLD_STREAM_RESPONSE";
+const UPSTREAM_EXECUTION_GATE_STREAM_HOLD_MODE_ENV: &str =
+    "AETHER_GATEWAY_UPSTREAM_EXECUTION_GATE_STREAM_HOLD_MODE";
 
 fn attach_redaction_execution_candidate(response: &mut Response<Body>, candidate_id: Option<&str>) {
     if let Some(candidate_id) = candidate_id
@@ -162,6 +168,7 @@ where
     async fn execute_attempt(&self, attempt: &T) -> Result<Option<Self::Response>, Self::Error> {
         prewarm_direct_reqwest_candidate_client(attempt.execution_plan());
         let _permit = acquire_upstream_execution_gate(self.state, self.trace_id).await?;
+        let upstream_execution_gate_held_started_at = std::time::Instant::now();
         let mut response = execute_execution_runtime_sync(
             self.state,
             self.parts.uri.path(),
@@ -173,6 +180,12 @@ where
             attempt.report_context(),
         )
         .await?;
+        observe_gateway_stage_ms(
+            "upstream_execution_gate_held",
+            upstream_execution_gate_held_started_at
+                .elapsed()
+                .as_millis() as u64,
+        );
         if let Some(response) = response.as_mut() {
             attach_redaction_execution_candidate(
                 response,
@@ -577,6 +590,104 @@ fn stream_candidate_watchdog_timeout_message() -> &'static str {
     "Stream first byte timeout"
 }
 
+fn admission_timeout_gate(error: &GatewayError) -> Option<&'static str> {
+    match error {
+        GatewayError::AdmissionTimeout { gate, .. } => Some(*gate),
+        _ => None,
+    }
+}
+
+fn admission_timeout_message(error: &GatewayError) -> String {
+    match error {
+        GatewayError::AdmissionTimeout {
+            gate,
+            queue_budget_ms,
+            ..
+        } => {
+            format!("gateway admission gate {gate} timed out after {queue_budget_ms}ms")
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+fn is_candidate_level_admission_timeout(error: &GatewayError) -> bool {
+    matches!(
+        admission_timeout_gate(error),
+        Some(UPSTREAM_EXECUTION_GATE_NAME | UPSTREAM_TARGET_GATE_NAME)
+    )
+}
+
+fn should_record_candidate_admission_timeout(error: &GatewayError) -> bool {
+    matches!(
+        admission_timeout_gate(error),
+        Some(UPSTREAM_EXECUTION_GATE_NAME)
+    )
+}
+
+async fn record_stream_candidate_admission_timeout(
+    state: &(impl RequestCandidateRuntimeWriter + ?Sized),
+    plan: &aether_contracts::ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+    candidate_started_unix_ms: u64,
+    error: &GatewayError,
+) {
+    let terminal_unix_ms = current_unix_ms();
+    record_local_request_candidate_status(
+        state,
+        plan,
+        report_context,
+        SchedulerRequestCandidateStatusUpdate {
+            status: RequestCandidateStatus::Failed,
+            status_code: Some(http::StatusCode::TOO_MANY_REQUESTS.as_u16()),
+            error_type: Some("gateway_admission_timeout".to_string()),
+            error_message: Some(admission_timeout_message(error)),
+            latency_ms: Some(terminal_unix_ms.saturating_sub(candidate_started_unix_ms)),
+            started_at_unix_ms: Some(candidate_started_unix_ms),
+            finished_at_unix_ms: Some(terminal_unix_ms),
+        },
+    )
+    .await;
+}
+
+fn log_stream_candidate_admission_timeout(
+    trace_id: &str,
+    plan_kind: &str,
+    plan: &aether_contracts::ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+    error: &GatewayError,
+) {
+    let provider_name = plan.provider_name.as_deref().unwrap_or("-");
+    let model_name = plan.model_name.as_deref().unwrap_or("-");
+    let candidate_index = parse_request_candidate_report_context(report_context)
+        .and_then(|context| context.candidate_index)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let (gate, queue_budget_ms) = match error {
+        GatewayError::AdmissionTimeout {
+            gate,
+            queue_budget_ms,
+            ..
+        } => (*gate, *queue_budget_ms),
+        _ => ("-", 0),
+    };
+    warn!(
+        event_name = "local_stream_candidate_admission_timeout",
+        log_type = "event",
+        trace_id = %trace_id,
+        plan_kind,
+        request_id = %short_request_id(plan.request_id.as_str()),
+        candidate_id = ?plan.candidate_id,
+        provider_name,
+        endpoint_id = %plan.endpoint_id,
+        key_id = %plan.key_id,
+        model_name,
+        candidate_index = candidate_index.as_str(),
+        gate,
+        queue_budget_ms,
+        "gateway local stream candidate admission timed out; retrying next candidate"
+    );
+}
+
 async fn execute_stream_candidate_with_watchdog<Fut>(
     state: &(impl RequestCandidateRuntimeWriter + UpstreamExecutionGateProvider + ?Sized),
     trace_id: &str,
@@ -586,22 +697,31 @@ async fn execute_stream_candidate_with_watchdog<Fut>(
     execute: impl FnOnce() -> Fut,
 ) -> Result<Option<Response<Body>>, GatewayError>
 where
-    Fut:
-        std::future::Future<Output = Result<Option<Response<Body>>, GatewayError>> + Send + 'static,
+    Fut: std::future::Future<Output = Result<Option<Response<Body>>, GatewayError>> + Send,
 {
     let timeout_duration = resolve_stream_candidate_watchdog_timeout(plan, report_context);
     let candidate_started_unix_ms = current_unix_ms();
-    let permit = acquire_upstream_execution_gate(state, trace_id).await?;
-    let mut join_handle = tokio::spawn(execute());
-    match timeout(timeout_duration, &mut join_handle).await {
-        Ok(Ok(result)) => {
-            result.map(|response| maybe_hold_upstream_execution_permit(response, permit))
+    let permit = match acquire_upstream_execution_gate(state, trace_id).await {
+        Ok(permit) => permit,
+        Err(err) if is_candidate_level_admission_timeout(&err) => {
+            record_stream_candidate_admission_timeout(
+                state,
+                plan,
+                report_context,
+                candidate_started_unix_ms,
+                &err,
+            )
+            .await;
+            log_stream_candidate_admission_timeout(trace_id, plan_kind, plan, report_context, &err);
+            return Ok(None);
         }
-        Ok(Err(join_error)) => Err(GatewayError::Internal(format!(
-            "local stream candidate task join failed: {join_error}"
-        ))),
+        Err(err) => return Err(err),
+    };
+    let permit_hold = permit.map(UpstreamExecutionPermitHold::new);
+    let watchdog_started_at = std::time::Instant::now();
+    let outcome = match timeout(timeout_duration, execute()).await {
+        Ok(result) => result,
         Err(_) => {
-            join_handle.abort();
             let finished_at_unix_ms = current_unix_ms();
             let request_id = short_request_id(plan.request_id.as_str());
             let provider_name = plan.provider_name.as_deref().unwrap_or("-");
@@ -643,28 +763,144 @@ where
             );
             Ok(None)
         }
+    };
+    observe_gateway_stage_ms(
+        "stream_candidate_watchdog_inline",
+        watchdog_started_at.elapsed().as_millis() as u64,
+    );
+    match outcome {
+        Ok(response) => Ok(maybe_hold_upstream_execution_permit(response, permit_hold)),
+        Err(err) if is_candidate_level_admission_timeout(&err) => {
+            drop(permit_hold);
+            if should_record_candidate_admission_timeout(&err) {
+                record_stream_candidate_admission_timeout(
+                    state,
+                    plan,
+                    report_context,
+                    candidate_started_unix_ms,
+                    &err,
+                )
+                .await;
+            }
+            log_stream_candidate_admission_timeout(trace_id, plan_kind, plan, report_context, &err);
+            Ok(None)
+        }
+        Err(err) => {
+            drop(permit_hold);
+            Err(err)
+        }
+    }
+}
+
+struct UpstreamExecutionPermitHold {
+    _permit: ConcurrencyPermit,
+    started_at: std::time::Instant,
+}
+
+impl UpstreamExecutionPermitHold {
+    fn new(permit: ConcurrencyPermit) -> Self {
+        Self {
+            _permit: permit,
+            started_at: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for UpstreamExecutionPermitHold {
+    fn drop(&mut self) {
+        observe_gateway_stage_ms(
+            "upstream_execution_gate_held",
+            self.started_at.elapsed().as_millis() as u64,
+        );
     }
 }
 
 fn maybe_hold_upstream_execution_permit(
     response: Option<Response<Body>>,
-    permit: Option<ConcurrencyPermit>,
+    permit_hold: Option<UpstreamExecutionPermitHold>,
 ) -> Option<Response<Body>> {
-    match (response, permit) {
-        (Some(response), Some(permit)) => {
-            Some(hold_response_upstream_execution_permit(response, permit))
+    match upstream_execution_gate_stream_hold_mode() {
+        UpstreamExecutionStreamHoldMode::Headers => {
+            drop(permit_hold);
+            response
         }
-        (response, _) => response,
+        UpstreamExecutionStreamHoldMode::FirstBody => match (response, permit_hold) {
+            (Some(response), Some(permit_hold)) => Some(
+                hold_response_upstream_execution_permit_until_first_body(response, permit_hold),
+            ),
+            (response, _permit_hold) => response,
+        },
+        UpstreamExecutionStreamHoldMode::Response => match (response, permit_hold) {
+            (Some(response), Some(permit_hold)) => Some(hold_response_upstream_execution_permit(
+                response,
+                permit_hold,
+            )),
+            (response, _permit_hold) => response,
+        },
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpstreamExecutionStreamHoldMode {
+    Headers,
+    FirstBody,
+    Response,
+}
+
+fn upstream_execution_gate_stream_hold_mode() -> UpstreamExecutionStreamHoldMode {
+    if std::env::var(UPSTREAM_EXECUTION_GATE_HOLD_STREAM_RESPONSE_ENV)
+        .ok()
+        .is_some_and(|value| parse_env_bool(value.as_str()))
+    {
+        return UpstreamExecutionStreamHoldMode::Response;
+    }
+    std::env::var(UPSTREAM_EXECUTION_GATE_STREAM_HOLD_MODE_ENV)
+        .ok()
+        .as_deref()
+        .map(parse_upstream_execution_stream_hold_mode)
+        .unwrap_or(UpstreamExecutionStreamHoldMode::FirstBody)
+}
+
+fn parse_upstream_execution_stream_hold_mode(value: &str) -> UpstreamExecutionStreamHoldMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "headers" | "header" | "off" | "none" | "disabled" | "disable" | "0" => {
+            UpstreamExecutionStreamHoldMode::Headers
+        }
+        "response" | "full" | "body" | "stream" | "1" => UpstreamExecutionStreamHoldMode::Response,
+        _ => UpstreamExecutionStreamHoldMode::FirstBody,
+    }
+}
+
+fn parse_env_bool(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn hold_response_upstream_execution_permit_until_first_body(
+    response: Response<Body>,
+    permit_hold: UpstreamExecutionPermitHold,
+) -> Response<Body> {
+    let (parts, body) = response.into_parts();
+    let stream = async_stream::stream! {
+        let mut permit_hold = Some(permit_hold);
+        let mut body_stream = body.into_data_stream();
+        while let Some(item) = body_stream.next().await {
+            drop(permit_hold.take());
+            yield item;
+        }
+    };
+    Response::from_parts(parts, Body::from_stream(stream))
 }
 
 fn hold_response_upstream_execution_permit(
     response: Response<Body>,
-    permit: ConcurrencyPermit,
+    permit_hold: UpstreamExecutionPermitHold,
 ) -> Response<Body> {
     let (parts, body) = response.into_parts();
     let stream = async_stream::stream! {
-        let _permit = permit;
+        let _permit_hold = permit_hold;
         let mut body_stream = body.into_data_stream();
         while let Some(item) = body_stream.next().await {
             yield item;
@@ -696,12 +932,19 @@ async fn acquire_upstream_execution_gate(
         return Ok(None);
     };
     let budget = state.upstream_execution_gate_queue_budget();
+    let gate_wait_started_at = std::time::Instant::now();
     match timeout(budget, gate.acquire()).await {
-        Ok(Ok(permit)) => Ok(Some(permit)),
+        Ok(Ok(permit)) => {
+            observe_gateway_stage_ms(
+                "upstream_execution_gate_wait",
+                gate_wait_started_at.elapsed().as_millis() as u64,
+            );
+            Ok(Some(permit))
+        }
         Ok(Err(err)) => Err(GatewayError::Internal(err.to_string())),
         Err(_) => Err(GatewayError::AdmissionTimeout {
             trace_id: trace_id.to_string(),
-            gate: "gateway_upstream_execution",
+            gate: UPSTREAM_EXECUTION_GATE_NAME,
             queue_budget_ms: budget.as_millis() as u64,
         }),
     }
@@ -753,9 +996,33 @@ mod tests {
 
     use super::*;
 
-    #[derive(Debug, Default)]
     struct TestRequestCandidateWriter {
         records: Mutex<Vec<UpsertRequestCandidateRecord>>,
+        upstream_gate: Option<aether_runtime::ConcurrencyGate>,
+        upstream_queue_budget: Duration,
+    }
+
+    impl Default for TestRequestCandidateWriter {
+        fn default() -> Self {
+            Self {
+                records: Mutex::new(Vec::new()),
+                upstream_gate: None,
+                upstream_queue_budget: Duration::from_millis(250),
+            }
+        }
+    }
+
+    impl TestRequestCandidateWriter {
+        fn with_upstream_gate(limit: usize, queue_budget: Duration) -> Self {
+            Self {
+                records: Mutex::new(Vec::new()),
+                upstream_gate: Some(aether_runtime::ConcurrencyGate::new(
+                    UPSTREAM_EXECUTION_GATE_NAME,
+                    limit,
+                )),
+                upstream_queue_budget: queue_budget,
+            }
+        }
     }
 
     #[async_trait]
@@ -778,11 +1045,11 @@ mod tests {
 
     impl UpstreamExecutionGateProvider for TestRequestCandidateWriter {
         fn upstream_execution_gate(&self) -> Option<&aether_runtime::ConcurrencyGate> {
-            None
+            self.upstream_gate.as_ref()
         }
 
         fn upstream_execution_gate_queue_budget(&self) -> Duration {
-            Duration::from_millis(250)
+            self.upstream_queue_budget
         }
     }
 
@@ -952,6 +1219,26 @@ mod tests {
     }
 
     #[test]
+    fn upstream_execution_stream_hold_mode_defaults_to_first_body() {
+        assert_eq!(
+            parse_upstream_execution_stream_hold_mode(""),
+            UpstreamExecutionStreamHoldMode::FirstBody
+        );
+        assert_eq!(
+            parse_upstream_execution_stream_hold_mode("first_body"),
+            UpstreamExecutionStreamHoldMode::FirstBody
+        );
+        assert_eq!(
+            parse_upstream_execution_stream_hold_mode("off"),
+            UpstreamExecutionStreamHoldMode::Headers
+        );
+        assert_eq!(
+            parse_upstream_execution_stream_hold_mode("response"),
+            UpstreamExecutionStreamHoldMode::Response
+        );
+    }
+
+    #[test]
     fn unused_persistence_skips_pool_internal_candidates() {
         assert!(should_skip_unused_persistence(Some(&json!({
             "candidate_group_id": "pool-group",
@@ -1012,5 +1299,78 @@ mod tests {
             .as_deref()
             .is_some_and(|message| message == "Stream first byte timeout"));
         assert_eq!(record.candidate_index, 2);
+    }
+
+    #[tokio::test]
+    async fn stream_candidate_upstream_execution_admission_timeout_marks_failed_and_continues() {
+        let writer = Arc::new(TestRequestCandidateWriter::with_upstream_gate(
+            1,
+            Duration::from_millis(1),
+        ));
+        let _held_permit = writer
+            .upstream_gate
+            .as_ref()
+            .expect("test gate should exist")
+            .try_acquire()
+            .expect("test gate permit should acquire");
+        let plan = test_plan(None);
+        let report_context = test_report_context();
+
+        let result = execute_stream_candidate_with_watchdog(
+            writer.as_ref(),
+            "trace_admission",
+            "claude_cli_stream",
+            &plan,
+            Some(&report_context),
+            || async {
+                panic!("execute future should not run while upstream execution gate is saturated")
+            },
+        )
+        .await;
+
+        assert!(matches!(result, Ok(None)));
+        let records = writer.records.lock().await;
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.status, RequestCandidateStatus::Failed);
+        assert_eq!(
+            record.status_code,
+            Some(http::StatusCode::TOO_MANY_REQUESTS.as_u16())
+        );
+        assert_eq!(
+            record.error_type.as_deref(),
+            Some("gateway_admission_timeout")
+        );
+        assert!(record
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains(UPSTREAM_EXECUTION_GATE_NAME)));
+        assert_eq!(record.candidate_index, 2);
+    }
+
+    #[tokio::test]
+    async fn stream_candidate_target_admission_timeout_continues_without_duplicate_record() {
+        let writer = Arc::new(TestRequestCandidateWriter::default());
+        let plan = test_plan(None);
+        let report_context = test_report_context();
+
+        let result = execute_stream_candidate_with_watchdog(
+            writer.as_ref(),
+            "trace_target_admission",
+            "claude_cli_stream",
+            &plan,
+            Some(&report_context),
+            || async {
+                Err(GatewayError::AdmissionTimeout {
+                    trace_id: "trace_target_admission".to_string(),
+                    gate: UPSTREAM_TARGET_GATE_NAME,
+                    queue_budget_ms: 5,
+                })
+            },
+        )
+        .await;
+
+        assert!(matches!(result, Ok(None)));
+        assert!(writer.records.lock().await.is_empty());
     }
 }

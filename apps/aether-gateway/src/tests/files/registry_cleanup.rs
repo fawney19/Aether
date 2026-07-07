@@ -3,8 +3,15 @@ use aether_data::repository::gemini_file_mappings::{
     GeminiFileMappingReadRepository, InMemoryGeminiFileMappingRepository, StoredGeminiFileMapping,
 };
 
-#[tokio::test]
-async fn gateway_background_gemini_file_mapping_cleanup_deletes_expired_entries() {
+#[test]
+fn gateway_background_gemini_file_mapping_cleanup_deletes_expired_entries() {
+    super::run_files_test(
+        "gateway_background_gemini_file_mapping_cleanup_deletes_expired_entries",
+        gateway_background_gemini_file_mapping_cleanup_deletes_expired_entries_impl,
+    );
+}
+
+async fn gateway_background_gemini_file_mapping_cleanup_deletes_expired_entries_impl() {
     fn sample_mapping(
         id: &str,
         file_name: &str,

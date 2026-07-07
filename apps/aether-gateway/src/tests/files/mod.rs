@@ -26,6 +26,30 @@ mod registry_cleanup;
 mod stream;
 mod sync;
 
+const FILES_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_files_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(FILES_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("files test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 fn hash_api_key(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
@@ -167,8 +191,13 @@ fn sample_files_provider_catalog_key() -> StoredProviderCatalogKey {
     .expect("key transport should build")
 }
 
-#[tokio::test]
-async fn gateway_locally_denies_gemini_files_download_control_sync_even_with_opt_in_headers_when_execution_runtime_missing(
+#[test]
+fn gateway_locally_denies_gemini_files_download_control_sync_even_with_opt_in_headers_when_execution_runtime_missing(
+) {
+    run_files_test("gateway_locally_denies_gemini_files_download_control_sync_even_with_opt_in_headers_when_execution_runtime_missing", gateway_locally_denies_gemini_files_download_control_sync_even_with_opt_in_headers_when_execution_runtime_missing_impl);
+}
+
+async fn gateway_locally_denies_gemini_files_download_control_sync_even_with_opt_in_headers_when_execution_runtime_missing_impl(
 ) {
     let execute_hits = Arc::new(Mutex::new(0usize));
     let execute_hits_clone = Arc::clone(&execute_hits);
@@ -237,8 +266,13 @@ async fn gateway_locally_denies_gemini_files_download_control_sync_even_with_opt
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_locally_denies_gemini_files_download_control_sync_without_opt_in_header_when_execution_runtime_missing(
+#[test]
+fn gateway_locally_denies_gemini_files_download_control_sync_without_opt_in_header_when_execution_runtime_missing(
+) {
+    run_files_test("gateway_locally_denies_gemini_files_download_control_sync_without_opt_in_header_when_execution_runtime_missing", gateway_locally_denies_gemini_files_download_control_sync_without_opt_in_header_when_execution_runtime_missing_impl);
+}
+
+async fn gateway_locally_denies_gemini_files_download_control_sync_without_opt_in_header_when_execution_runtime_missing_impl(
 ) {
     let execute_hits = Arc::new(Mutex::new(0usize));
     let execute_hits_clone = Arc::clone(&execute_hits);
@@ -324,8 +358,15 @@ async fn gateway_locally_denies_gemini_files_download_control_sync_without_opt_i
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_skips_gemini_files_download_control_sync_without_opt_in_header() {
+#[test]
+fn gateway_skips_gemini_files_download_control_sync_without_opt_in_header() {
+    run_files_test(
+        "gateway_skips_gemini_files_download_control_sync_without_opt_in_header",
+        gateway_skips_gemini_files_download_control_sync_without_opt_in_header_impl,
+    );
+}
+
+async fn gateway_skips_gemini_files_download_control_sync_without_opt_in_header_impl() {
     let execute_hits = Arc::new(Mutex::new(0usize));
     let execute_hits_clone = Arc::clone(&execute_hits);
     let public_hits = Arc::new(Mutex::new(0usize));
@@ -388,8 +429,15 @@ async fn gateway_skips_gemini_files_download_control_sync_without_opt_in_header(
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_executes_gemini_files_get_via_local_decision_gate_with_local_planning_only() {
+#[test]
+fn gateway_executes_gemini_files_get_via_local_decision_gate_with_local_planning_only() {
+    run_files_test(
+        "gateway_executes_gemini_files_get_via_local_decision_gate_with_local_planning_only",
+        gateway_executes_gemini_files_get_via_local_decision_gate_with_local_planning_only_impl,
+    );
+}
+
+async fn gateway_executes_gemini_files_get_via_local_decision_gate_with_local_planning_only_impl() {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeSyncRequest {
         method: String,
@@ -596,8 +644,15 @@ async fn gateway_executes_gemini_files_get_via_local_decision_gate_with_local_pl
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_rejects_non_post_gemini_upload_without_hitting_fallback_probe() {
+#[test]
+fn gateway_rejects_non_post_gemini_upload_without_hitting_fallback_probe() {
+    run_files_test(
+        "gateway_rejects_non_post_gemini_upload_without_hitting_fallback_probe",
+        gateway_rejects_non_post_gemini_upload_without_hitting_fallback_probe_impl,
+    );
+}
+
+async fn gateway_rejects_non_post_gemini_upload_without_hitting_fallback_probe_impl() {
     let public_hits = Arc::new(Mutex::new(0usize));
     let public_hits_clone = Arc::clone(&public_hits);
 

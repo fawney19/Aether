@@ -24,7 +24,8 @@ pub use config::DataLayerConfig;
 pub use database::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig, DEFAULT_SQLITE_DATABASE_URL};
 pub use error::DataLayerError;
 pub use maintenance::{
-    DatabaseMaintenanceSummary, DatabasePoolSummary, StatsDailyAggregationInput,
+    DatabaseMaintenanceSummary, DatabasePoolSummary, DatabasePostgresActivityGroup,
+    DatabasePostgresObservabilitySnapshot, StatsDailyAggregationInput,
     StatsDailyAggregationSummary, StatsHourlyAggregationInput, StatsHourlyAggregationSummary,
     WalletDailyUsageAggregationInput, WalletDailyUsageAggregationResult,
 };

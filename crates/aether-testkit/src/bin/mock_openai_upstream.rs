@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use axum::body::{Body, Bytes};
+use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::State;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -20,7 +21,10 @@ struct Config {
     chunk_delay: Duration,
     payload_bytes: usize,
     status: StatusCode,
+    assume_stream: bool,
 }
+
+const MAX_MOCK_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 
 impl Default for Config {
     fn default() -> Self {
@@ -33,6 +37,7 @@ impl Default for Config {
             chunk_delay: Duration::from_millis(20),
             payload_bytes: 32,
             status: StatusCode::OK,
+            assume_stream: false,
         }
     }
 }
@@ -43,41 +48,85 @@ struct Metrics {
     completed_total: AtomicU64,
     in_flight: AtomicU64,
     max_in_flight: AtomicU64,
+    request_body_read_sum_ms: AtomicU64,
+    request_body_read_max_ms: AtomicU64,
+    accepted_to_response_header_sum_ms: AtomicU64,
+    accepted_to_response_header_max_ms: AtomicU64,
+    first_chunk_yield_total: AtomicU64,
+    response_header_to_first_chunk_sum_ms: AtomicU64,
+    response_header_to_first_chunk_max_ms: AtomicU64,
+    binds: BTreeMap<String, Arc<BindMetrics>>,
+}
+
+#[derive(Debug, Default)]
+struct BindMetrics {
+    requests_total: AtomicU64,
+    completed_total: AtomicU64,
+    in_flight: AtomicU64,
+    max_in_flight: AtomicU64,
+    request_body_read_sum_ms: AtomicU64,
+    request_body_read_max_ms: AtomicU64,
+    accepted_to_response_header_sum_ms: AtomicU64,
+    accepted_to_response_header_max_ms: AtomicU64,
+    first_chunk_yield_total: AtomicU64,
+    response_header_to_first_chunk_sum_ms: AtomicU64,
+    response_header_to_first_chunk_max_ms: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
 struct App {
     config: Config,
     metrics: Arc<Metrics>,
+    bind_label: Arc<str>,
+}
+
+struct RequestCompletionGuard {
+    app: App,
+    completed: bool,
+}
+
+impl RequestCompletionGuard {
+    fn new(app: App) -> Self {
+        Self {
+            app,
+            completed: false,
+        }
+    }
+
+    fn complete(mut self) {
+        self.complete_once();
+    }
+
+    fn complete_once(&mut self) {
+        if self.completed {
+            return;
+        }
+        record_request_completed(&self.app);
+        self.completed = true;
+    }
+}
+
+impl Drop for RequestCompletionGuard {
+    fn drop(&mut self) {
+        self.complete_once();
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_args(std::env::args().skip(1).collect())?;
-    let app_state = App {
-        config: config.clone(),
-        metrics: Arc::new(Metrics::default()),
-    };
+    let metrics = Arc::new(Metrics::for_binds(&config.binds));
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/metrics", get(metrics))
-        .route("/v1/chat/completions", post(chat_completions))
-        .route("/chat/completions", post(chat_completions))
-        .route("/v1/responses", post(responses))
-        .route("/responses", post(responses))
-        .with_state(app_state);
-
-    serve_listeners(&config.binds, app).await?;
+    serve_listeners(&config, metrics).await?;
     Ok(())
 }
 
 async fn serve_listeners(
-    binds: &[SocketAddr],
-    app: Router,
+    config: &Config,
+    metrics: Arc<Metrics>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut listeners = Vec::with_capacity(binds.len());
-    for bind in binds {
+    let mut listeners = Vec::with_capacity(config.binds.len());
+    for bind in &config.binds {
         listeners.push((*bind, tokio::net::TcpListener::bind(bind).await?));
     }
     if listeners.len() == 1 {
@@ -85,6 +134,7 @@ async fn serve_listeners(
             .into_iter()
             .next()
             .ok_or_else(|| std::io::Error::other("mock upstream listener set is empty"))?;
+        let app = build_router(config.clone(), Arc::clone(&metrics), bind);
         eprintln!("mock OpenAI upstream listening on http://{bind}");
         axum::serve(listener, app).await?;
         return Ok(());
@@ -92,7 +142,7 @@ async fn serve_listeners(
 
     let mut servers = tokio::task::JoinSet::new();
     for (bind, listener) in listeners {
-        let app = app.clone();
+        let app = build_router(config.clone(), Arc::clone(&metrics), bind);
         eprintln!("mock OpenAI upstream listening on http://{bind}");
         servers.spawn(async move { axum::serve(listener, app).await });
     }
@@ -105,12 +155,43 @@ async fn serve_listeners(
     Ok(())
 }
 
+fn build_router(config: Config, shared_metrics: Arc<Metrics>, bind: SocketAddr) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/metrics", get(metrics))
+        .route("/v1/chat/completions", post(chat_completions))
+        .route("/chat/completions", post(chat_completions))
+        .route("/v1/responses", post(responses))
+        .route("/responses", post(responses))
+        .with_state(App {
+            config,
+            metrics: shared_metrics,
+            bind_label: Arc::from(bind.to_string()),
+        })
+}
+
+impl Metrics {
+    fn for_binds(binds: &[SocketAddr]) -> Self {
+        let mut metrics = Self::default();
+        for bind in binds {
+            metrics
+                .binds
+                .insert(bind.to_string(), Arc::new(BindMetrics::default()));
+        }
+        metrics
+    }
+
+    fn bind_metrics(&self, bind: &str) -> Option<Arc<BindMetrics>> {
+        self.binds.get(bind).cloned()
+    }
+}
+
 async fn health() -> impl IntoResponse {
     (StatusCode::OK, "ok\n")
 }
 
 async fn metrics(State(app): State<App>) -> Response {
-    let body = format!(
+    let mut body = format!(
         concat!(
             "# HELP mock_upstream_requests_total Total requests accepted by the mock upstream.\n",
             "# TYPE mock_upstream_requests_total counter\n",
@@ -123,24 +204,127 @@ async fn metrics(State(app): State<App>) -> Response {
             "mock_upstream_in_flight {}\n",
             "# HELP mock_upstream_max_in_flight Maximum in-flight requests/streams observed.\n",
             "# TYPE mock_upstream_max_in_flight gauge\n",
-            "mock_upstream_max_in_flight {}\n"
+            "mock_upstream_max_in_flight {}\n",
+            "# HELP mock_upstream_first_chunk_yield_total Total first stream chunks yielded by the mock upstream.\n",
+            "# TYPE mock_upstream_first_chunk_yield_total counter\n",
+            "mock_upstream_first_chunk_yield_total {}\n",
+            "# HELP mock_upstream_request_body_read_sum_ms Total milliseconds spent reading request bodies after handler entry.\n",
+            "# TYPE mock_upstream_request_body_read_sum_ms counter\n",
+            "mock_upstream_request_body_read_sum_ms {}\n",
+            "# HELP mock_upstream_request_body_read_max_ms Maximum milliseconds spent reading a request body after handler entry.\n",
+            "# TYPE mock_upstream_request_body_read_max_ms gauge\n",
+            "mock_upstream_request_body_read_max_ms {}\n",
+            "# HELP mock_upstream_accepted_to_response_header_sum_ms Total milliseconds from request acceptance to response construction.\n",
+            "# TYPE mock_upstream_accepted_to_response_header_sum_ms counter\n",
+            "mock_upstream_accepted_to_response_header_sum_ms {}\n",
+            "# HELP mock_upstream_accepted_to_response_header_max_ms Maximum milliseconds from request acceptance to response construction.\n",
+            "# TYPE mock_upstream_accepted_to_response_header_max_ms gauge\n",
+            "mock_upstream_accepted_to_response_header_max_ms {}\n",
+            "# HELP mock_upstream_response_header_to_first_chunk_sum_ms Total milliseconds from response construction to first stream chunk yield.\n",
+            "# TYPE mock_upstream_response_header_to_first_chunk_sum_ms counter\n",
+            "mock_upstream_response_header_to_first_chunk_sum_ms {}\n",
+            "# HELP mock_upstream_response_header_to_first_chunk_max_ms Maximum milliseconds from response construction to first stream chunk yield.\n",
+            "# TYPE mock_upstream_response_header_to_first_chunk_max_ms gauge\n",
+            "mock_upstream_response_header_to_first_chunk_max_ms {}\n"
         ),
         app.metrics.requests_total.load(Ordering::Acquire),
         app.metrics.completed_total.load(Ordering::Acquire),
         app.metrics.in_flight.load(Ordering::Acquire),
         app.metrics.max_in_flight.load(Ordering::Acquire),
+        app.metrics.first_chunk_yield_total.load(Ordering::Acquire),
+        app.metrics
+            .request_body_read_sum_ms
+            .load(Ordering::Acquire),
+        app.metrics
+            .request_body_read_max_ms
+            .load(Ordering::Acquire),
+        app.metrics
+            .accepted_to_response_header_sum_ms
+            .load(Ordering::Acquire),
+        app.metrics
+            .accepted_to_response_header_max_ms
+            .load(Ordering::Acquire),
+        app.metrics
+            .response_header_to_first_chunk_sum_ms
+            .load(Ordering::Acquire),
+        app.metrics
+            .response_header_to_first_chunk_max_ms
+            .load(Ordering::Acquire),
     );
+    for (bind, metrics) in &app.metrics.binds {
+        let bind = prometheus_label_value(bind);
+        body.push_str(&format!(
+            concat!(
+                "mock_upstream_requests_total{{bind=\"{}\"}} {}\n",
+                "mock_upstream_completed_total{{bind=\"{}\"}} {}\n",
+                "mock_upstream_in_flight{{bind=\"{}\"}} {}\n",
+                "mock_upstream_max_in_flight{{bind=\"{}\"}} {}\n",
+                "mock_upstream_first_chunk_yield_total{{bind=\"{}\"}} {}\n",
+                "mock_upstream_request_body_read_sum_ms{{bind=\"{}\"}} {}\n",
+                "mock_upstream_request_body_read_max_ms{{bind=\"{}\"}} {}\n",
+                "mock_upstream_accepted_to_response_header_sum_ms{{bind=\"{}\"}} {}\n",
+                "mock_upstream_accepted_to_response_header_max_ms{{bind=\"{}\"}} {}\n",
+                "mock_upstream_response_header_to_first_chunk_sum_ms{{bind=\"{}\"}} {}\n",
+                "mock_upstream_response_header_to_first_chunk_max_ms{{bind=\"{}\"}} {}\n"
+            ),
+            bind,
+            metrics.requests_total.load(Ordering::Acquire),
+            bind,
+            metrics.completed_total.load(Ordering::Acquire),
+            bind,
+            metrics.in_flight.load(Ordering::Acquire),
+            bind,
+            metrics.max_in_flight.load(Ordering::Acquire),
+            bind,
+            metrics.first_chunk_yield_total.load(Ordering::Acquire),
+            bind,
+            metrics.request_body_read_sum_ms.load(Ordering::Acquire),
+            bind,
+            metrics.request_body_read_max_ms.load(Ordering::Acquire),
+            bind,
+            metrics
+                .accepted_to_response_header_sum_ms
+                .load(Ordering::Acquire),
+            bind,
+            metrics
+                .accepted_to_response_header_max_ms
+                .load(Ordering::Acquire),
+            bind,
+            metrics
+                .response_header_to_first_chunk_sum_ms
+                .load(Ordering::Acquire),
+            bind,
+            metrics
+                .response_header_to_first_chunk_max_ms
+                .load(Ordering::Acquire),
+        ));
+    }
     (StatusCode::OK, body).into_response()
 }
 
-async fn chat_completions(State(app): State<App>, body: Bytes) -> Response {
-    let stream = request_wants_stream(&body);
-    record_request_started(&app.metrics);
+async fn chat_completions(State(app): State<App>, request: axum::extract::Request) -> Response {
+    let request_started_at = record_request_started(&app);
     if app.config.status != StatusCode::OK {
-        record_request_completed(&app.metrics);
+        record_response_header_created(&app, request_started_at.elapsed());
+        record_request_completed(&app);
         return (app.config.status, "mock upstream error\n").into_response();
     }
+    if app.config.assume_stream {
+        record_response_header_created(&app, request_started_at.elapsed());
+        return build_chat_sse_response(app);
+    }
+
+    let body = match read_request_body(&app, request).await {
+        Ok(body) => body,
+        Err(response) => {
+            record_response_header_created(&app, request_started_at.elapsed());
+            record_request_completed(&app);
+            return response;
+        }
+    };
+    let stream = request_wants_stream(&body);
     if stream {
+        record_response_header_created(&app, request_started_at.elapsed());
         return build_chat_sse_response(app);
     }
     let payload = json!({
@@ -162,18 +346,34 @@ async fn chat_completions(State(app): State<App>, body: Bytes) -> Response {
             "total_tokens": app.config.chunks.max(1) + 1
         }
     });
-    record_request_completed(&app.metrics);
+    record_response_header_created(&app, request_started_at.elapsed());
+    record_request_completed(&app);
     axum::Json(payload).into_response()
 }
 
-async fn responses(State(app): State<App>, body: Bytes) -> Response {
-    let stream = request_wants_stream(&body);
-    record_request_started(&app.metrics);
+async fn responses(State(app): State<App>, request: axum::extract::Request) -> Response {
+    let request_started_at = record_request_started(&app);
     if app.config.status != StatusCode::OK {
-        record_request_completed(&app.metrics);
+        record_response_header_created(&app, request_started_at.elapsed());
+        record_request_completed(&app);
         return (app.config.status, "mock upstream error\n").into_response();
     }
+    if app.config.assume_stream {
+        record_response_header_created(&app, request_started_at.elapsed());
+        return build_responses_sse_response(app);
+    }
+
+    let body = match read_request_body(&app, request).await {
+        Ok(body) => body,
+        Err(response) => {
+            record_response_header_created(&app, request_started_at.elapsed());
+            record_request_completed(&app);
+            return response;
+        }
+    };
+    let stream = request_wants_stream(&body);
     if stream {
+        record_response_header_created(&app, request_started_at.elapsed());
         return build_responses_sse_response(app);
     }
     let payload = json!({
@@ -196,13 +396,15 @@ async fn responses(State(app): State<App>, body: Bytes) -> Response {
             "total_tokens": app.config.chunks.max(1) + 1
         }
     });
-    record_request_completed(&app.metrics);
+    record_response_header_created(&app, request_started_at.elapsed());
+    record_request_completed(&app);
     axum::Json(payload).into_response()
 }
 
 fn build_chat_sse_response(app: App) -> Response {
-    let metrics = Arc::clone(&app.metrics);
+    let response_created_at = Instant::now();
     let config = app.config.clone();
+    let mut completion = Some(RequestCompletionGuard::new(app.clone()));
     let stream = async_stream::stream! {
         if !config.first_byte_delay.is_zero() {
             tokio::time::sleep(config.first_byte_delay).await;
@@ -224,24 +426,31 @@ fn build_chat_sse_response(app: App) -> Response {
                     "finish_reason": serde_json::Value::Null
                 }]
             });
+            if index == 0 {
+                record_first_chunk_yield(&app, response_created_at.elapsed());
+            }
             yield Ok::<Bytes, Infallible>(Bytes::from(format!("data: {payload}\n\n")));
         }
         yield Ok::<Bytes, Infallible>(Bytes::from(
             "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
         ));
         yield Ok::<Bytes, Infallible>(Bytes::from("data: [DONE]\n\n"));
-        record_request_completed(&metrics);
+        if let Some(completion) = completion.take() {
+            completion.complete();
+        }
     };
     sse_response(Body::from_stream(stream))
 }
 
 fn build_responses_sse_response(app: App) -> Response {
-    let metrics = Arc::clone(&app.metrics);
+    let response_created_at = Instant::now();
     let config = app.config.clone();
+    let mut completion = Some(RequestCompletionGuard::new(app.clone()));
     let stream = async_stream::stream! {
         if !config.first_byte_delay.is_zero() {
             tokio::time::sleep(config.first_byte_delay).await;
         }
+        record_first_chunk_yield(&app, response_created_at.elapsed());
         yield Ok::<Bytes, Infallible>(Bytes::from(
             "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_mock\",\"status\":\"in_progress\"}}\n\n",
         ));
@@ -262,7 +471,9 @@ fn build_responses_sse_response(app: App) -> Response {
             "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_mock\",\"status\":\"completed\"}}\n\n",
         ));
         yield Ok::<Bytes, Infallible>(Bytes::from("data: [DONE]\n\n"));
-        record_request_completed(&metrics);
+        if let Some(completion) = completion.take() {
+            completion.complete();
+        }
     };
     sse_response(Body::from_stream(stream))
 }
@@ -276,6 +487,21 @@ fn sse_response(body: Body) -> Response {
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     response
+}
+
+async fn read_request_body(app: &App, request: axum::extract::Request) -> Result<Bytes, Response> {
+    let body_started_at = Instant::now();
+    let body = to_bytes(request.into_body(), MAX_MOCK_REQUEST_BODY_BYTES)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("mock upstream failed to read request body: {err}\n"),
+            )
+                .into_response()
+        });
+    record_request_body_read(app, body_started_at.elapsed());
+    body
 }
 
 fn request_wants_stream(body: &[u8]) -> bool {
@@ -303,15 +529,86 @@ fn mock_payload(bytes: usize) -> String {
     "x".repeat(bytes)
 }
 
-fn record_request_started(metrics: &Metrics) {
-    metrics.requests_total.fetch_add(1, Ordering::AcqRel);
-    let in_flight = metrics.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
-    metrics.max_in_flight.fetch_max(in_flight, Ordering::AcqRel);
+fn record_request_started(app: &App) -> Instant {
+    app.metrics.requests_total.fetch_add(1, Ordering::AcqRel);
+    let in_flight = app.metrics.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+    app.metrics
+        .max_in_flight
+        .fetch_max(in_flight, Ordering::AcqRel);
+    if let Some(bind) = app.metrics.bind_metrics(app.bind_label.as_ref()) {
+        bind.requests_total.fetch_add(1, Ordering::AcqRel);
+        let in_flight = bind.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+        bind.max_in_flight.fetch_max(in_flight, Ordering::AcqRel);
+    }
+    Instant::now()
 }
 
-fn record_request_completed(metrics: &Metrics) {
-    metrics.completed_total.fetch_add(1, Ordering::AcqRel);
-    metrics.in_flight.fetch_sub(1, Ordering::AcqRel);
+fn record_request_completed(app: &App) {
+    app.metrics.completed_total.fetch_add(1, Ordering::AcqRel);
+    app.metrics.in_flight.fetch_sub(1, Ordering::AcqRel);
+    if let Some(bind) = app.metrics.bind_metrics(app.bind_label.as_ref()) {
+        bind.completed_total.fetch_add(1, Ordering::AcqRel);
+        bind.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn record_first_chunk_yield(app: &App, elapsed: Duration) {
+    let elapsed_ms = elapsed.as_millis() as u64;
+    app.metrics
+        .first_chunk_yield_total
+        .fetch_add(1, Ordering::AcqRel);
+    app.metrics
+        .response_header_to_first_chunk_sum_ms
+        .fetch_add(elapsed_ms, Ordering::AcqRel);
+    app.metrics
+        .response_header_to_first_chunk_max_ms
+        .fetch_max(elapsed_ms, Ordering::AcqRel);
+    if let Some(bind) = app.metrics.bind_metrics(app.bind_label.as_ref()) {
+        bind.first_chunk_yield_total.fetch_add(1, Ordering::AcqRel);
+        bind.response_header_to_first_chunk_sum_ms
+            .fetch_add(elapsed_ms, Ordering::AcqRel);
+        bind.response_header_to_first_chunk_max_ms
+            .fetch_max(elapsed_ms, Ordering::AcqRel);
+    }
+}
+
+fn record_request_body_read(app: &App, elapsed: Duration) {
+    let elapsed_ms = elapsed.as_millis() as u64;
+    app.metrics
+        .request_body_read_sum_ms
+        .fetch_add(elapsed_ms, Ordering::AcqRel);
+    app.metrics
+        .request_body_read_max_ms
+        .fetch_max(elapsed_ms, Ordering::AcqRel);
+    if let Some(bind) = app.metrics.bind_metrics(app.bind_label.as_ref()) {
+        bind.request_body_read_sum_ms
+            .fetch_add(elapsed_ms, Ordering::AcqRel);
+        bind.request_body_read_max_ms
+            .fetch_max(elapsed_ms, Ordering::AcqRel);
+    }
+}
+
+fn record_response_header_created(app: &App, elapsed: Duration) {
+    let elapsed_ms = elapsed.as_millis() as u64;
+    app.metrics
+        .accepted_to_response_header_sum_ms
+        .fetch_add(elapsed_ms, Ordering::AcqRel);
+    app.metrics
+        .accepted_to_response_header_max_ms
+        .fetch_max(elapsed_ms, Ordering::AcqRel);
+    if let Some(bind) = app.metrics.bind_metrics(app.bind_label.as_ref()) {
+        bind.accepted_to_response_header_sum_ms
+            .fetch_add(elapsed_ms, Ordering::AcqRel);
+        bind.accepted_to_response_header_max_ms
+            .fetch_max(elapsed_ms, Ordering::AcqRel);
+    }
+}
+
+fn prometheus_label_value(value: &str) -> String {
+    value
+        .replace('\\', r"\\")
+        .replace('\n', r"\n")
+        .replace('"', r#"\""#)
 }
 
 fn current_unix_secs() -> u64 {
@@ -349,6 +646,9 @@ fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn std::error::Error>> {
             "--status" => {
                 let status = next_value(&mut iter, "--status")?.parse::<u16>()?;
                 config.status = StatusCode::from_u16(status)?;
+            }
+            "--assume-stream" => {
+                config.assume_stream = true;
             }
             "--help" | "-h" => {
                 print_usage();
@@ -388,6 +688,6 @@ fn next_value(
 
 fn print_usage() {
     eprintln!(
-        "usage: cargo run -p aether-testkit --bin mock_openai_upstream -- [--bind 127.0.0.1:18181]... [--chunks 8] [--first-byte-delay-ms 0] [--chunk-delay-ms 20] [--payload-bytes 32] [--status 200]"
+        "usage: cargo run -p aether-testkit --bin mock_openai_upstream -- [--bind 127.0.0.1:18181]... [--chunks 8] [--first-byte-delay-ms 0] [--chunk-delay-ms 20] [--payload-bytes 32] [--status 200] [--assume-stream]"
     );
 }

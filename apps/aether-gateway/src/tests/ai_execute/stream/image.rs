@@ -18,8 +18,39 @@ use aether_data_contracts::repository::provider_catalog::{
 };
 use sha2::{Digest, Sha256};
 
-#[tokio::test]
-async fn gateway_executes_codex_image_stream_via_local_decision_gate_after_oauth_refresh() {
+const STREAM_IMAGE_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_stream_image_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(STREAM_IMAGE_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("stream image test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+fn gateway_executes_codex_image_stream_via_local_decision_gate_after_oauth_refresh() {
+    run_stream_image_test(
+        "gateway_executes_codex_image_stream_via_local_decision_gate_after_oauth_refresh",
+        gateway_executes_codex_image_stream_via_local_decision_gate_after_oauth_refresh_impl,
+    );
+}
+
+async fn gateway_executes_codex_image_stream_via_local_decision_gate_after_oauth_refresh_impl() {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeStreamRequest {
         trace_id: String,
@@ -438,8 +469,15 @@ async fn gateway_executes_codex_image_stream_via_local_decision_gate_after_oauth
     refresh_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_bridges_codex_image_sync_json_to_streaming_image_sse() {
+#[test]
+fn gateway_bridges_codex_image_sync_json_to_streaming_image_sse() {
+    run_stream_image_test(
+        "gateway_bridges_codex_image_sync_json_to_streaming_image_sse",
+        gateway_bridges_codex_image_sync_json_to_streaming_image_sse_impl,
+    );
+}
+
+async fn gateway_bridges_codex_image_sync_json_to_streaming_image_sse_impl() {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeStreamRequest {
         trace_id: String,
@@ -1057,8 +1095,16 @@ fn image_bridge_execution_runtime(
     )
 }
 
-#[tokio::test]
-async fn gateway_routes_openai_responses_stream_image_intent_to_openai_image_plan_without_streaming_support(
+#[test]
+fn gateway_routes_openai_responses_stream_image_intent_to_openai_image_plan_without_streaming_support(
+) {
+    run_stream_image_test(
+        "gateway_routes_openai_responses_stream_image_intent_to_openai_image_plan_without_streaming_support",
+        gateway_routes_openai_responses_stream_image_intent_to_openai_image_plan_without_streaming_support_impl,
+    );
+}
+
+async fn gateway_routes_openai_responses_stream_image_intent_to_openai_image_plan_without_streaming_support_impl(
 ) {
     let seen_execution_plan = Arc::new(Mutex::new(None::<SeenImageBridgeExecutionPlan>));
     let execution_runtime = image_bridge_execution_runtime(Arc::clone(&seen_execution_plan));

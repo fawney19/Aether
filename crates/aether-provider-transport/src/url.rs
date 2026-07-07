@@ -172,6 +172,8 @@ pub fn build_passthrough_path_url(
     let normalized_base_url =
         if trimmed_base_url.ends_with("/v1beta") && trimmed_path.starts_with("/v1beta") {
             trimmed_base_url.trim_end_matches("/v1beta")
+        } else if trimmed_base_url.ends_with("/v1") && trimmed_path.starts_with("/v1/") {
+            trimmed_base_url.trim_end_matches("/v1")
         } else {
             trimmed_base_url
         };
@@ -678,6 +680,20 @@ mod tests {
             Some(
                 "https://api.openai.example/v1/videos/generations?size=1024&tenant=demo&variant=video"
             )
+        );
+    }
+
+    #[test]
+    fn passthrough_path_does_not_duplicate_openai_v1_root() {
+        assert_eq!(
+            build_passthrough_path_url(
+                "https://api.openai.example/v1?tenant=demo",
+                "/v1/chat/completions?variant=chat",
+                Some("trace=1"),
+                &[]
+            )
+            .as_deref(),
+            Some("https://api.openai.example/v1/chat/completions?tenant=demo&trace=1&variant=chat")
         );
     }
 

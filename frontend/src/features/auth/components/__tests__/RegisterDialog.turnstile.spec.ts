@@ -186,6 +186,6 @@ describe('RegisterDialog Turnstile flow', () => {
     await settle()
 
     expect(registerMock).not.toHaveBeenCalled()
-    expect(toastErrorMock).toHaveBeenCalledWith('人机验证加载失败，请重试', '人机验证失败')
+    expect(toastErrorMock).toHaveBeenCalledWith('人机验证加载失败，请重试', '人机验证')
   })
 })

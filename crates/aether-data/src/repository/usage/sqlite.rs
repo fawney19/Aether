@@ -172,21 +172,58 @@ ON CONFLICT (request_id) DO UPDATE SET
   has_format_conversion = excluded.has_format_conversion,
   is_stream = excluded.is_stream,
   upstream_is_stream = excluded.upstream_is_stream,
-  input_tokens = excluded.input_tokens,
-  output_tokens = excluded.output_tokens,
-  total_tokens = excluded.total_tokens,
-  cache_creation_input_tokens = excluded.cache_creation_input_tokens,
-  cache_creation_ephemeral_5m_input_tokens = excluded.cache_creation_ephemeral_5m_input_tokens,
-  cache_creation_ephemeral_1h_input_tokens = excluded.cache_creation_ephemeral_1h_input_tokens,
-  cache_read_input_tokens = excluded.cache_read_input_tokens,
-  cache_creation_cost_usd = excluded.cache_creation_cost_usd,
-  cache_read_cost_usd = excluded.cache_read_cost_usd,
-  output_price_per_1m = excluded.output_price_per_1m,
-  total_cost_usd = excluded.total_cost_usd,
-  actual_total_cost_usd = excluded.actual_total_cost_usd,
+  input_tokens = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".input_tokens
+        ELSE excluded.input_tokens
+    END,
+  output_tokens = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".output_tokens
+        ELSE excluded.output_tokens
+    END,
+  total_tokens = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".total_tokens
+        ELSE excluded.total_tokens
+    END,
+  cache_creation_input_tokens = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".cache_creation_input_tokens
+        ELSE excluded.cache_creation_input_tokens
+    END,
+  cache_creation_ephemeral_5m_input_tokens = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".cache_creation_ephemeral_5m_input_tokens
+        ELSE excluded.cache_creation_ephemeral_5m_input_tokens
+    END,
+  cache_creation_ephemeral_1h_input_tokens = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".cache_creation_ephemeral_1h_input_tokens
+        ELSE excluded.cache_creation_ephemeral_1h_input_tokens
+    END,
+  cache_read_input_tokens = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".cache_read_input_tokens
+        ELSE excluded.cache_read_input_tokens
+    END,
+  cache_creation_cost_usd = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".cache_creation_cost_usd
+        ELSE excluded.cache_creation_cost_usd
+    END,
+  cache_read_cost_usd = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".cache_read_cost_usd
+        ELSE excluded.cache_read_cost_usd
+    END,
+  output_price_per_1m = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".output_price_per_1m
+        ELSE excluded.output_price_per_1m
+    END,
+  total_cost_usd = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".total_cost_usd
+        ELSE excluded.total_cost_usd
+    END,
+  actual_total_cost_usd = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".actual_total_cost_usd
+        ELSE excluded.actual_total_cost_usd
+    END,
     status_code = CASE
         WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".status_code
         WHEN "usage".status = 'streaming' AND excluded.status = 'pending' THEN "usage".status_code
+        WHEN "usage".status = 'streaming' AND excluded.status = 'streaming' AND excluded.status_code IS NULL THEN "usage".status_code
         ELSE excluded.status_code
     END,
     error_message = CASE
@@ -214,7 +251,10 @@ ON CONFLICT (request_id) DO UPDATE SET
         WHEN "usage".status = 'streaming' AND excluded.status = 'pending' THEN "usage".status
         ELSE excluded.status
     END,
-  billing_status = excluded.billing_status,
+  billing_status = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".billing_status
+        ELSE excluded.billing_status
+    END,
   request_metadata = excluded.request_metadata,
     candidate_id = COALESCE(excluded.candidate_id, "usage".candidate_id),
     candidate_index = COALESCE(excluded.candidate_index, "usage".candidate_index),
@@ -224,8 +264,14 @@ ON CONFLICT (request_id) DO UPDATE SET
   route_kind = excluded.route_kind,
   execution_path = excluded.execution_path,
   local_execution_runtime_miss_reason = excluded.local_execution_runtime_miss_reason,
-  finalized_at = excluded.finalized_at,
-  updated_at_unix_secs = excluded.updated_at_unix_secs
+  finalized_at = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".finalized_at
+        ELSE excluded.finalized_at
+    END,
+  updated_at_unix_secs = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".updated_at_unix_secs
+        ELSE excluded.updated_at_unix_secs
+    END
 "#;
 
 const SELECT_STALE_PENDING_USAGE_BATCH_SQL: &str = r#"
@@ -4518,6 +4564,92 @@ mod tests {
         assert_eq!(existing.status, "failed");
         assert_eq!(existing.billing_status, "void");
         assert_eq!(existing.updated_at_unix_secs, 1_000);
+    }
+
+    #[tokio::test]
+    async fn sqlite_usage_write_repository_does_not_regress_terminal_usage_from_late_streaming() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        run_sqlite_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+        seed_stats_targets(&pool).await;
+
+        let repository = SqliteUsageWriteRepository::new(pool);
+        repository
+            .upsert(sample_usage("request-1", "completed", "pending", 1_000))
+            .await
+            .expect("terminal usage should upsert");
+
+        let mut late_streaming = sample_usage("request-1", "streaming", "pending", 1_001);
+        late_streaming.input_tokens = Some(0);
+        late_streaming.output_tokens = Some(0);
+        late_streaming.total_tokens = Some(0);
+        late_streaming.cache_read_input_tokens = Some(0);
+        late_streaming.cache_read_cost_usd = Some(0.0);
+        late_streaming.total_cost_usd = Some(0.0);
+        late_streaming.actual_total_cost_usd = Some(0.0);
+        late_streaming.response_time_ms = Some(9_999);
+        late_streaming.first_byte_time_ms = Some(9_999);
+        late_streaming.finalized_at_unix_secs = None;
+
+        let current = repository
+            .upsert(late_streaming)
+            .await
+            .expect("late streaming usage should not regress terminal usage");
+
+        assert_eq!(current.status, "completed");
+        assert_eq!(current.billing_status, "pending");
+        assert_eq!(current.total_tokens, 7);
+        assert_eq!(current.cache_read_input_tokens, 2);
+        assert_eq!(current.total_cost_usd, 0.5);
+        assert_eq!(current.actual_total_cost_usd, 0.4);
+        assert_eq!(current.response_time_ms, Some(42));
+        assert_eq!(current.first_byte_time_ms, Some(12));
+        assert_eq!(current.finalized_at_unix_secs, Some(1_000));
+        assert_eq!(current.updated_at_unix_secs, 1_000);
+    }
+
+    #[tokio::test]
+    async fn sqlite_usage_write_repository_preserves_streaming_response_start_from_late_active() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        run_sqlite_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+        seed_stats_targets(&pool).await;
+
+        let repository = SqliteUsageWriteRepository::new(pool);
+        repository
+            .upsert(sample_usage(
+                "request-late-active",
+                "streaming",
+                "pending",
+                1_000,
+            ))
+            .await
+            .expect("response-start usage should upsert");
+
+        let mut late_active = sample_usage("request-late-active", "streaming", "pending", 1_001);
+        late_active.status_code = None;
+        late_active.response_time_ms = None;
+        late_active.first_byte_time_ms = None;
+
+        let current = repository
+            .upsert(late_active)
+            .await
+            .expect("late active usage should not clear response-start fields");
+
+        assert_eq!(current.status, "streaming");
+        assert_eq!(current.status_code, Some(200));
+        assert_eq!(current.response_time_ms, Some(42));
+        assert_eq!(current.first_byte_time_ms, Some(12));
     }
 
     #[tokio::test]

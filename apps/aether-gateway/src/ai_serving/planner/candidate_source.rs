@@ -12,18 +12,29 @@ use aether_scheduler_core::{
 };
 use async_trait::async_trait;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use crate::ai_serving::planner::candidate_affinity_cache::has_explicit_session_affinity;
 use crate::ai_serving::planner::candidate_resolution::SkippedLocalExecutionCandidate;
 use crate::ai_serving::{GatewayAuthApiKeySnapshot, PlannerAppState};
+use crate::cache::{
+    candidate_page_cache_stale_ttl, candidate_page_cache_ttl_from_env,
+    record_candidate_page_cache_follower_wait, record_candidate_page_cache_hit,
+    record_candidate_page_cache_load, record_candidate_page_cache_miss,
+    record_candidate_page_cache_none, record_candidate_row_page_cache_follower_wait,
+    record_candidate_row_page_cache_hit, record_candidate_row_page_cache_load,
+    record_candidate_row_page_cache_miss, record_candidate_row_page_cache_none, CacheLoadObserver,
+    CandidatePageCacheKey, CandidatePageSnapshot, CandidateRowPageCacheKey,
+};
 use crate::clock::request_distribution_seed;
 use crate::data::candidate_selection::{
     read_requested_model_rows_fast_path_page, requested_model_candidate_names,
-    MinimalCandidateSelectionRowSource, REQUESTED_MODEL_CANDIDATE_PAGE_SIZE,
-    REQUESTED_MODEL_MAX_SCANNED_ROWS,
+    MinimalCandidateSelectionRowSource, RequestedModelCandidateRowsPage,
+    REQUESTED_MODEL_CANDIDATE_PAGE_SIZE, REQUESTED_MODEL_MAX_SCANNED_ROWS,
 };
 use crate::scheduler::candidate::SchedulerSkippedCandidate;
 use crate::scheduler::config::{SchedulerOrderingConfig, SchedulerSchedulingMode};
+use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::GatewayError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,6 +269,7 @@ pub(crate) struct LocalCandidatePreselectionPageCursor<'a> {
     request_auth_channel: Option<String>,
     use_api_format_alias_match: bool,
     key_mode: LocalCandidatePreselectionKeyMode,
+    allow_priority_page_cache: bool,
     candidate_api_formats: Vec<String>,
     model_directive_enabled_api_formats: BTreeSet<String>,
     ordering_config: SchedulerOrderingConfig,
@@ -295,6 +307,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         request_auth_channel: Option<&str>,
         use_api_format_alias_match: bool,
         key_mode: LocalCandidatePreselectionKeyMode,
+        allow_priority_page_cache: bool,
         trace_id: Option<&str>,
     ) -> Self {
         let candidate_api_formats =
@@ -336,6 +349,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             request_auth_channel: request_auth_channel.map(str::to_string),
             use_api_format_alias_match,
             key_mode,
+            allow_priority_page_cache,
             candidate_api_formats,
             model_directive_enabled_api_formats,
             ordering_config,
@@ -429,6 +443,10 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         }
     }
 
+    fn should_cache_current_priority_page(&self) -> bool {
+        self.allow_priority_page_cache && self.should_cache_current_priority_resolved_page()
+    }
+
     #[cfg(test)]
     pub(crate) fn mark_priority_page_emitted_for_tests(&mut self) {
         self.priority_page_emitted = true;
@@ -443,9 +461,73 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         >,
         GatewayError,
     > {
-        let page = self.next_priority_page_with_planning_gate().await?;
+        let page = if self.should_cache_current_priority_page() {
+            self.cached_next_priority_page_snapshot().await?
+        } else {
+            self.next_priority_page_with_planning_gate().await?
+        };
         self.remember_seen_candidates_from_page(&page);
         Ok(page)
+    }
+
+    async fn cached_next_priority_page_snapshot(
+        &mut self,
+    ) -> Result<
+        AiCandidatePreselectionOutcome<
+            SchedulerMinimalCandidateSelectionCandidate,
+            SkippedLocalExecutionCandidate,
+        >,
+        GatewayError,
+    > {
+        let key = CandidatePageCacheKey::new(
+            &self.requested_model,
+            &self.client_api_format,
+            self.require_streaming,
+            &self.auth_snapshot,
+            self.required_capabilities.as_ref(),
+            self.routing_policy.as_ref(),
+            self.request_auth_channel.as_deref(),
+            self.state.app().scheduler_affinity_epoch(),
+            self.key_mode.cache_key_name(),
+            self.use_api_format_alias_match,
+            self.client_session_affinity.as_ref(),
+        );
+        let cache = self.state.app().candidate_page_cache.clone();
+        let ttl = candidate_page_cache_ttl_from_env();
+        let stale_ttl = candidate_page_cache_stale_ttl(ttl);
+        let cached = cache
+            .get_or_load_once_stale_while_refreshing(
+                key,
+                ttl,
+                stale_ttl,
+                || async {
+                    let page = self.next_priority_page_with_planning_gate().await?;
+                    Ok::<_, GatewayError>(Some(Arc::new(page) as Arc<CandidatePageSnapshot>))
+                },
+                CacheLoadObserver::new()
+                    .on_hit(record_candidate_page_cache_hit)
+                    .on_miss(record_candidate_page_cache_miss)
+                    .on_load(record_candidate_page_cache_load)
+                    .on_follower_wait(record_candidate_page_cache_follower_wait),
+            )
+            .await?;
+
+        match cached {
+            Some(snapshot) => {
+                let page = snapshot.as_ref().clone();
+                if page.candidates.is_empty() && page.skipped_candidates.is_empty() {
+                    record_candidate_page_cache_none();
+                }
+                Ok(page)
+            }
+            None => {
+                record_candidate_page_cache_none();
+                Ok(AiCandidatePreselectionOutcome {
+                    candidates: Vec::new(),
+                    skipped_candidates: Vec::new(),
+                })
+            }
+        }
     }
 
     fn remember_seen_candidates_from_page(
@@ -717,17 +799,15 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
                 return Ok(None);
             }
             let limit = REQUESTED_MODEL_CANDIDATE_PAGE_SIZE.min(remaining);
-            let page = read_requested_model_rows_fast_path_page(
-                self.state.app().data.as_ref(),
-                &normalized_api_format,
-                &self.requested_model,
-                requested_name,
-                offset,
-                limit,
-                enable_model_directives,
-            )
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+            let page = self
+                .read_requested_model_rows_fast_path_page_cached(
+                    &normalized_api_format,
+                    requested_name,
+                    offset,
+                    limit,
+                    enable_model_directives,
+                )
+                .await?;
             self.scanned_rows_by_format.insert(
                 normalized_api_format.clone(),
                 scanned.saturating_add(page.scanned_rows),
@@ -761,6 +841,70 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
                 .await?
             {
                 return Ok(Some(outcome));
+            }
+        }
+    }
+
+    async fn read_requested_model_rows_fast_path_page_cached(
+        &self,
+        normalized_api_format: &str,
+        requested_name: &str,
+        offset: u32,
+        limit: u32,
+        enable_model_directives: bool,
+    ) -> Result<RequestedModelCandidateRowsPage, GatewayError> {
+        let key = CandidateRowPageCacheKey::new(
+            normalized_api_format,
+            &self.requested_model,
+            requested_name,
+            offset,
+            limit,
+            enable_model_directives,
+        );
+        let cache = self.state.app().candidate_row_page_cache.clone();
+        let ttl = candidate_page_cache_ttl_from_env();
+        let stale_ttl = candidate_page_cache_stale_ttl(ttl);
+        let cached = cache
+            .get_or_load_once_stale_while_refreshing(
+                key,
+                ttl,
+                stale_ttl,
+                || async {
+                    let page = read_requested_model_rows_fast_path_page(
+                        self.state.app().data.as_ref(),
+                        normalized_api_format,
+                        &self.requested_model,
+                        requested_name,
+                        offset,
+                        limit,
+                        enable_model_directives,
+                    )
+                    .await
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                    Ok::<_, GatewayError>(Some(Arc::new(page)))
+                },
+                CacheLoadObserver::new()
+                    .on_hit(record_candidate_row_page_cache_hit)
+                    .on_miss(record_candidate_row_page_cache_miss)
+                    .on_load(record_candidate_row_page_cache_load)
+                    .on_follower_wait(record_candidate_row_page_cache_follower_wait),
+            )
+            .await?;
+
+        match cached {
+            Some(page) => {
+                if page.rows.is_empty() {
+                    record_candidate_row_page_cache_none();
+                }
+                Ok(page.as_ref().clone())
+            }
+            None => {
+                record_candidate_row_page_cache_none();
+                Ok(RequestedModelCandidateRowsPage {
+                    rows: Vec::new(),
+                    scanned_rows: 0,
+                    end_of_requested_name: true,
+                })
             }
         }
     }
@@ -1022,8 +1166,15 @@ async fn acquire_candidate_planning_gate(
         .app()
         .frontdoor_runtime_guards
         .internal_gate_queue_budget;
+    let gate_wait_started_at = std::time::Instant::now();
     match tokio::time::timeout(budget, gate.acquire()).await {
-        Ok(Ok(permit)) => Ok(Some(permit)),
+        Ok(Ok(permit)) => {
+            observe_gateway_stage_ms(
+                "candidate_planning_gate_wait",
+                gate_wait_started_at.elapsed().as_millis() as u64,
+            );
+            Ok(Some(permit))
+        }
         Ok(Err(err)) => Err(GatewayError::Internal(err.to_string())),
         Err(_) => Err(GatewayError::AdmissionTimeout {
             trace_id: trace_id.to_string(),
@@ -1138,6 +1289,50 @@ mod tests {
             api_key_ip_rules: None,
             currently_usable: true,
         }
+    }
+
+    #[tokio::test]
+    async fn priority_page_cache_requires_fixed_order_or_explicit_affinity() {
+        let repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(
+                Vec::<StoredMinimalCandidateSelectionRow>::new(),
+            ));
+        let data_state =
+            GatewayDataState::with_minimal_candidate_selection_reader_for_tests(repository);
+        let app = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(data_state);
+        let auth_snapshot = unrestricted_auth_snapshot();
+        let mut cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            "openai:chat",
+            "gpt-5",
+            true,
+            None,
+            &auth_snapshot,
+            None,
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            true,
+            None,
+        )
+        .await;
+        cursor.mark_priority_page_emitted_for_tests();
+
+        cursor.ordering_config.scheduling_mode = SchedulerSchedulingMode::CacheAffinity;
+        assert!(!cursor.should_cache_current_priority_resolved_page());
+
+        cursor.client_session_affinity =
+            Some(aether_scheduler_core::ClientSessionAffinity::from_session_key("session-1"));
+        assert!(cursor.should_cache_current_priority_resolved_page());
+
+        cursor.ordering_config.scheduling_mode = SchedulerSchedulingMode::FixedOrder;
+        assert!(cursor.should_cache_current_priority_resolved_page());
+
+        cursor.ordering_config.scheduling_mode = SchedulerSchedulingMode::LoadBalance;
+        assert!(!cursor.should_cache_current_priority_resolved_page());
     }
 
     fn openai_responses_mapping_row() -> StoredMinimalCandidateSelectionRow {
@@ -1362,6 +1557,7 @@ mod tests {
             None,
             true,
             LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            true,
             None,
         )
         .await;
@@ -1421,6 +1617,7 @@ mod tests {
             None,
             true,
             LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            true,
             None,
         )
         .await;
@@ -1495,6 +1692,7 @@ mod tests {
             None,
             true,
             LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            true,
             None,
         )
         .await;

@@ -113,7 +113,7 @@ pub use dto::{
 pub use execution_path::{
     run_ai_stream_execution_path, run_ai_sync_execution_path, AiPlanFallbackReason,
     AiServingExecutionOutcome, AiStreamExecutionPathPort, AiStreamExecutionStep,
-    AiSyncExecutionPathPort, AiSyncExecutionStep,
+    AiSyncExecutionPathPort, AiSyncExecutionStep, DEFAULT_STREAM_EXECUTION_STEPS,
 };
 pub use failure_diagnostic::{CandidateFailureDiagnostic, CandidateFailureDiagnosticKind};
 pub use plan_payload::{

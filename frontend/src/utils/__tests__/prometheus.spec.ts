@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  findMetricSamples,
   findMetricValueNumber,
   parsePrometheusSamples,
   sumMetricValues,
@@ -33,5 +34,16 @@ decision_remote_total{route_kind="responses",reason="remote_decision_miss"} 3
 `)
 
     expect(sumMetricValues(samples, 'decision_remote_total')).toBe(5)
+  })
+
+  it('finds all matching samples by full or suffix metric name', () => {
+    const samples = parsePrometheusSamples(`
+aether_gateway_upstream_target_selected_total{target="openai"} 4
+aether_gateway_upstream_target_selected_total{target="azure"} 6
+aether_gateway_upstream_target_saturated_total{target="openai"} 1
+`)
+
+    expect(findMetricSamples(samples, 'upstream_target_selected_total')).toHaveLength(2)
+    expect(sumMetricValues(samples, 'upstream_target_selected_total')).toBe(10)
   })
 })

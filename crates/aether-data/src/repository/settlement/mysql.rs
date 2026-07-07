@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sqlx::{mysql::MySqlRow, Row};
 
 use super::{
-    finite_wallet_available_usd, plan_finite_wallet_debit,
+    finite_wallet_available_usd, plan_finite_wallet_debit, settlement_billable_cost_usd,
     settlement_billing_status_for_usage_status, SettlementWriteRepository, StoredUsageSettlement,
     UsageSettlementInput, SETTLEMENT_EPSILON_USD,
 };
@@ -479,13 +479,14 @@ FOR UPDATE
                 settlement.wallet_gift_balance_after = Some(before_gift);
             }
 
+            let billable_cost_usd = settlement_billable_cost_usd(&input);
             let wallet_debit_cost_usd = if !api_key_is_standalone {
                 if let Some(user_id) = input.user_id.as_deref().filter(|value| !value.is_empty()) {
                     let quota = consume_daily_quota_mysql(
                         &mut tx,
                         user_id,
                         &input.request_id,
-                        input.total_cost_usd,
+                        billable_cost_usd,
                         wallet_available_usd,
                         wallet_can_overdraft,
                         updated_at,
@@ -496,13 +497,13 @@ FOR UPDATE
                         settlement.billing_status = final_billing_status.clone();
                         0.0
                     } else {
-                        (input.total_cost_usd - quota.debited_usd).max(0.0)
+                        (billable_cost_usd - quota.debited_usd).max(0.0)
                     }
                 } else {
-                    input.total_cost_usd
+                    billable_cost_usd
                 }
             } else {
-                input.total_cost_usd
+                billable_cost_usd
             };
             if final_billing_status != "settled" {
                 sqlx::query(UPSERT_USAGE_SETTLEMENT_SNAPSHOT_SQL)

@@ -514,4 +514,23 @@ impl AppState {
             .await
             .map_err(data_error)
     }
+
+    pub(crate) async fn find_user_daily_quota_availability_for_auth(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<UserDailyQuotaAvailabilityRecord>, GatewayError> {
+        let user_id = user_id.trim();
+        if user_id.is_empty() {
+            return Ok(None);
+        }
+        let ttl = self.frontdoor_runtime_guards.auth_capacity_cache_ttl;
+        if ttl.is_zero() {
+            return self.find_user_daily_quota_availability(user_id).await;
+        }
+        self.auth_daily_quota_availability_cache
+            .get_or_load(user_id.to_string(), ttl, || async move {
+                self.find_user_daily_quota_availability(user_id).await
+            })
+            .await
+    }
 }

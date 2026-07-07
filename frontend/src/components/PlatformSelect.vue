@@ -31,7 +31,7 @@
         class="platform-select__dropdown"
       >
         <li
-          v-for="option in resolvedOptions"
+          v-for="option in displayOptions"
           :key="option.value"
           class="platform-select__option"
           :class="{ 'platform-select__option--active': option.value === modelValue }"
@@ -59,65 +59,11 @@
   </div>
 </template>
 
-<script lang="ts">
-import { Apple, Box, Monitor, Terminal } from 'lucide-vue-next'
-import type { Component } from 'vue'
-
-export interface PlatformOption {
-  value: string
-  label: string
-  hint: string
-  icon: Component
-  command: string
-}
-
-// Default options for backward compatibility
-export const defaultPlatformOptions: PlatformOption[] = [
-  { value: 'mac', label: 'Mac / Linux', hint: 'Terminal', icon: Terminal, command: '' },
-  { value: 'windows', label: 'Windows', hint: 'PowerShell', icon: Monitor, command: '' }
-]
-
-// Preset configuration for each tool
-export const platformPresets = {
-  default: {
-    options: defaultPlatformOptions,
-    defaultValue: 'mac'
-  },
-  claude: {
-    options: [
-      { value: 'mac', label: 'Mac / Linux', hint: 'Terminal', icon: Terminal, command: 'curl -fsSL https://claude.ai/install.sh | bash' },
-      { value: 'windows', label: 'Windows', hint: 'PowerShell', icon: Monitor, command: 'irm https://claude.ai/install.ps1 | iex' },
-      { value: 'nodejs', label: 'Node.js', hint: 'npm', icon: Box, command: 'npm install -g @anthropic-ai/claude-code' },
-      { value: 'homebrew', label: 'Mac', hint: 'Homebrew', icon: Apple, command: 'brew install --cask claude-code' }
-    ] as PlatformOption[],
-    defaultValue: 'mac'
-  },
-  codex: {
-    options: [
-      { value: 'nodejs', label: 'Node.js', hint: 'npm', icon: Box, command: 'npm install -g @openai/codex' },
-      { value: 'homebrew', label: 'Mac', hint: 'Homebrew', icon: Apple, command: 'brew install --cask codex' }
-    ] as PlatformOption[],
-    defaultValue: 'nodejs'
-  },
-  gemini: {
-    options: [
-      { value: 'nodejs', label: 'Node.js', hint: 'npm', icon: Box, command: 'npm install -g @google/gemini-cli' },
-      { value: 'homebrew', label: 'Mac', hint: 'Homebrew', icon: Apple, command: 'brew install gemini-cli' }
-    ] as PlatformOption[],
-    defaultValue: 'nodejs'
-  }
-}
-
-// Helper to get command by platform value
-export function getCommand(preset: keyof typeof platformPresets, value: string): string {
-  const config = platformPresets[preset]
-  return config.options.find((opt: PlatformOption) => opt.value === value)?.command ?? ''
-}
-</script>
-
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Check, ChevronDown } from 'lucide-vue-next'
+import { defaultPlatformOptions, type PlatformOption } from '@/config/platform-presets'
+import { useI18n } from '@/i18n'
 
 const props = defineProps<{
   modelValue: string
@@ -129,13 +75,21 @@ const emit = defineEmits<{
   (event: 'update:modelValue', value: string): void
 }>()
 
+const { t } = useI18n()
 const rootEl = ref<HTMLElement | null>(null)
 const isOpen = ref(false)
 const sizeClass = computed(() => props.size ?? 'md')
 
 const resolvedOptions = computed(() => props.options ?? defaultPlatformOptions)
+const displayOptions = computed(() => resolvedOptions.value.map(option => ({
+  ...option,
+  label: t(option.labelKey),
+  hint: t(option.hintKey),
+})))
 
-const currentOption = computed(() => resolvedOptions.value.find((option: PlatformOption) => option.value === props.modelValue) ?? resolvedOptions.value[0])
+const currentOption = computed(() =>
+  displayOptions.value.find((option) => option.value === props.modelValue) ?? displayOptions.value[0]
+)
 
 function toggleDropdown() {
   isOpen.value = !isOpen.value

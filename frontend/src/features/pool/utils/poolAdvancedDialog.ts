@@ -2,6 +2,7 @@ export type PoolHealthToggleKey =
   | 'probing_enabled'
   | 'account_self_check_enabled'
   | 'auto_remove_banned_keys'
+  | 'auto_remove_quota_exhausted_keys'
   | 'skip_exhausted_accounts'
 
 export interface PoolHealthToggleCard {
@@ -31,6 +32,11 @@ export function buildPoolHealthToggleCards(): PoolHealthToggleCard[] {
       key: 'auto_remove_banned_keys',
       label: '异常自动清除',
       description: '检测到不可恢复账号异常，或 RT 与 AT 均失效时自动从号池移除。',
+    },
+    {
+      key: 'auto_remove_quota_exhausted_keys',
+      label: '自动清理额度耗尽',
+      description: '探测到黑色“额度耗尽”账号后自动从号池移除。',
     },
     {
       key: 'skip_exhausted_accounts',

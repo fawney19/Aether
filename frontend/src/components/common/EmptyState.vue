@@ -16,18 +16,18 @@
 
     <!-- 标题 -->
     <h3
-      v-if="title"
+      v-if="displayTitle"
       :class="titleClasses"
     >
-      {{ title }}
+      {{ displayTitle }}
     </h3>
 
     <!-- 描述 -->
     <p
-      v-if="description"
+      v-if="displayDescription"
       :class="descriptionClasses"
     >
-      {{ description }}
+      {{ displayDescription }}
     </p>
 
     <!-- 自定义内容插槽 -->
@@ -40,12 +40,12 @@
 
     <!-- 操作按钮 -->
     <div
-      v-if="$slots.actions || actionText"
+      v-if="$slots.actions || displayActionText"
       class="mt-6 flex flex-wrap items-center justify-center gap-3"
     >
       <slot name="actions">
         <Button
-          v-if="actionText"
+          v-if="displayActionText"
           :variant="actionVariant"
           :size="actionSize"
           @click="handleAction"
@@ -55,7 +55,7 @@
             v-if="actionIcon"
             class="mr-2 h-4 w-4"
           />
-          {{ actionText }}
+          {{ displayActionText }}
         </Button>
       </slot>
     </div>
@@ -82,6 +82,7 @@ import {
   Filter
 } from 'lucide-vue-next'
 import type { Component } from 'vue'
+import { useI18n } from '@/i18n'
 
 type EmptyStateType = 'default' | 'search' | 'filter' | 'error' | 'empty' | 'notFound'
 type ButtonVariant = 'default' | 'outline' | 'secondary' | 'ghost' | 'link' | 'destructive'
@@ -128,6 +129,7 @@ const props = withDefaults(defineProps<Props>(), {
 })
 
 const emit = defineEmits<Emits>()
+const { legacyT } = useI18n()
 
 // 根据类型获取默认配置
 const typeConfig = computed(() => {
@@ -169,6 +171,9 @@ const typeConfig = computed(() => {
 
 // 默认图标
 const defaultIcon = computed(() => typeConfig.value.icon)
+const displayTitle = computed(() => legacyT(props.title || typeConfig.value.title))
+const displayDescription = computed(() => legacyT(props.description || typeConfig.value.description))
+const displayActionText = computed(() => props.actionText ? legacyT(props.actionText) : '')
 
 // 容器样式
 const containerClasses = computed(() => {

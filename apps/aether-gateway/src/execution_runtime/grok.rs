@@ -15,6 +15,7 @@ use base64::Engine as _;
 use futures_util::stream::{self, BoxStream};
 use futures_util::StreamExt;
 use http::{HeaderMap, HeaderName, HeaderValue};
+use http_body_util::BodyExt;
 use regex::{Captures, Regex};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
@@ -29,10 +30,10 @@ use crate::clock::current_unix_secs;
 use crate::execution_runtime::ndjson::encode_stream_frame_ndjson;
 use crate::execution_runtime::transport::{
     build_browser_wreq_client, build_request_body, build_request_headers,
-    decode_response_body_bytes, format_upstream_request_error, format_wreq_upstream_request_error,
-    resolve_stream_first_byte_timeout, send_request, stream_first_byte_timeout_message,
-    with_non_stream_total_timeout, DirectHttpResponse, ExecutionRuntimeTransportError,
-    ExecutionTransportControls,
+    decode_response_body_bytes, format_hyper_error_chain, format_upstream_request_error,
+    format_wreq_upstream_request_error, resolve_stream_first_byte_timeout, send_request,
+    stream_first_byte_timeout_message, with_non_stream_total_timeout, DirectHttpResponse,
+    ExecutionRuntimeTransportError, ExecutionTransportControls,
 };
 
 const GROK_INTERNAL_HEADER: &str = "x-aether-grok-runtime";
@@ -503,6 +504,15 @@ async fn collect_grok_response_stream(
                 collect_grok_response_chunk(status_code, upstream_bytes, raw_body, adapter, &chunk);
             }
         }
+        DirectHttpResponse::HyperH2c(response) => {
+            let mut stream = response.into_body().into_data_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|err| {
+                    ExecutionRuntimeTransportError::UpstreamRequest(format_hyper_error_chain(&err))
+                })?;
+                collect_grok_response_chunk(status_code, upstream_bytes, raw_body, adapter, &chunk);
+            }
+        }
         DirectHttpResponse::BrowserWreq(response) => {
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
@@ -544,6 +554,16 @@ fn grok_response_body_stream(response: DirectHttpResponse) -> GrokUpstreamBodySt
                         &err,
                     ))
                     .to_string()
+                })
+            })
+            .boxed(),
+        DirectHttpResponse::HyperH2c(response) => response
+            .into_body()
+            .into_data_stream()
+            .map(|chunk| {
+                chunk.map_err(|err| {
+                    ExecutionRuntimeTransportError::UpstreamRequest(format_hyper_error_chain(&err))
+                        .to_string()
                 })
             })
             .boxed(),

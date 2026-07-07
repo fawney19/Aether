@@ -8,10 +8,10 @@
       <SelectTrigger :class="triggerClass">
         <SelectValue
           :placeholder="proxyNodesStore.loading
-            ? '加载节点列表中...'
+            ? legacyT('加载节点列表中...')
             : nodeOptions.length === 0
-              ? '暂无可用节点'
-              : '选择代理节点...'"
+              ? legacyT('暂无可用节点')
+              : legacyT('选择代理节点...')"
         />
       </SelectTrigger>
       <SelectContent>
@@ -37,6 +37,7 @@ import {
   SelectItem,
 } from '@/components/ui'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
+import { useI18n } from '@/i18n'
 import { formatRegion } from '@/utils/region'
 
 const props = defineProps<{
@@ -49,6 +50,7 @@ defineEmits<{
 }>()
 
 const proxyNodesStore = useProxyNodesStore()
+const { legacyT } = useI18n()
 
 /** 在线节点 + 保留当前已选节点（可能已离线） */
 const nodeOptions = computed(() => {

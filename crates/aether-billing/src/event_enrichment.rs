@@ -35,10 +35,7 @@ pub async fn enrich_usage_event_with_billing(
     data: &dyn BillingModelContextLookup,
     event: &mut UsageEvent,
 ) -> Result<(), DataLayerError> {
-    if !matches!(
-        event.event_type,
-        UsageEventType::Completed | UsageEventType::Cancelled
-    ) {
+    if !matches!(event.event_type, UsageEventType::Completed) {
         event.data.total_cost_usd = Some(0.0);
         event.data.actual_total_cost_usd = Some(0.0);
         return Ok(());
@@ -653,7 +650,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enriches_cancelled_usage_event_with_billing_snapshot() {
+    async fn cancelled_usage_event_remains_unbilled() {
         let lookup = TestLookup {
             name_context: Some(
                 StoredBillingModelContext::new(
@@ -700,8 +697,8 @@ mod tests {
             .await
             .expect("billing should succeed");
 
-        assert!(event.data.total_cost_usd.unwrap_or_default() > 0.0);
-        assert!(event.data.actual_total_cost_usd.unwrap_or_default() > 0.0);
+        assert_eq!(event.data.total_cost_usd, Some(0.0));
+        assert_eq!(event.data.actual_total_cost_usd, Some(0.0));
         assert_eq!(
             event
                 .data
@@ -710,17 +707,7 @@ mod tests {
                 .and_then(|value| value.get("billing_snapshot"))
                 .and_then(|value| value.get("status"))
                 .and_then(Value::as_str),
-            Some("complete")
-        );
-        assert_eq!(
-            event
-                .data
-                .request_metadata
-                .as_ref()
-                .and_then(|value| value.get("billing_dimensions"))
-                .and_then(|value| value.get("request_count"))
-                .and_then(Value::as_i64),
-            Some(0)
+            None
         );
         assert_eq!(
             event
@@ -730,7 +717,7 @@ mod tests {
                 .and_then(|value| value.get("billing_dimensions"))
                 .and_then(|value| value.get("input_tokens"))
                 .and_then(Value::as_i64),
-            Some(900)
+            None
         );
         assert_eq!(
             event
@@ -740,7 +727,7 @@ mod tests {
                 .and_then(|value| value.get("billing_dimensions"))
                 .and_then(|value| value.get("cache_read_tokens"))
                 .and_then(Value::as_i64),
-            Some(100)
+            None
         );
     }
 

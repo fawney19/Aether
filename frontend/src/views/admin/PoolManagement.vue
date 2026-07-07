@@ -4,356 +4,40 @@
       variant="default"
       class="overflow-hidden"
     >
-      <!-- Header -->
-      <div class="px-4 sm:px-6 py-3 sm:py-3.5 border-b border-border/60">
-        <!-- Mobile -->
-        <div class="flex flex-col gap-3 xl:hidden">
-          <div class="min-w-0">
-            <h3 class="text-base font-semibold">
-              号池管理
-            </h3>
-            <p
-              v-if="poolHeaderMetaText"
-              class="mt-1 text-xs text-muted-foreground"
-            >
-              {{ poolHeaderMetaText }}
-            </p>
-          </div>
-          <div
-            class="grid grid-cols-3 items-center gap-2"
-          >
-            <Select
-              v-model="selectedProviderIdProxy"
-              :disabled="providerSelectDisabled"
-            >
-              <SelectTrigger
-                class="h-9 text-xs border-border/60"
-                :disabled="providerSelectDisabled"
-              >
-                <SelectValue placeholder="选择 Provider" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem
-                  v-for="item in poolProviders"
-                  :key="item.provider_id"
-                  :value="item.provider_id"
-                >
-                  {{ item.provider_name }}
-                  <span class="text-muted-foreground ml-1">({{ item.total_keys }})</span>
-                  <span
-                    v-if="!item.pool_enabled"
-                    class="ml-1 text-[10px] text-amber-600"
-                  >未启用</span>
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <Select v-model="statusFilter">
-              <SelectTrigger class="h-9 w-full text-xs border-border/60">
-                <SelectValue placeholder="状态" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem
-                  v-for="item in poolKeyStatusFilterOptions"
-                  :key="`mobile-${item.value}`"
-                  :value="item.value"
-                >
-                  {{ item.label }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <div class="relative min-w-0">
-              <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground z-10 pointer-events-none" />
-              <Input
-                v-model="searchQuery"
-                type="text"
-                placeholder="搜索账号..."
-                class="w-full pl-8 pr-3 h-9 text-sm bg-background/50 border-border/60"
-              />
-            </div>
-          </div>
-          <div
-            v-if="selectedProviderId"
-            class="flex items-center gap-1"
-          >
-            <div class="min-w-0 flex-1 flex justify-center">
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8 shrink-0"
-                title="添加账号"
-                @click="showImportDialog = true"
-              >
-                <Upload class="w-3.5 h-3.5" />
-              </Button>
-            </div>
-            <div class="min-w-0 flex-1 flex justify-center">
-              <ProviderProxyPopover
-                :open="providerProxyMobilePopoverOpen"
-                :node-id="selectedProviderData?.proxy?.node_id"
-                :saving="savingProviderProxy"
-                :title="getProviderProxyButtonTitle()"
-                @update:open="(open: boolean) => handleProviderProxyPopoverToggle('mobile', open)"
-                @select="setProviderProxy"
-                @clear="clearProviderProxy"
-              />
-            </div>
-            <div class="min-w-0 flex-1 flex justify-center">
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8 shrink-0"
-                title="号池调度"
-                @click="openSchedulingDialog()"
-              >
-                <SlidersHorizontal class="w-3.5 h-3.5" />
-              </Button>
-            </div>
-            <div class="min-w-0 flex-1 flex justify-center">
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8 shrink-0"
-                title="账号批量操作"
-                @click="showAccountBatchDialog = true"
-              >
-                <Users class="w-3.5 h-3.5" />
-              </Button>
-            </div>
-            <div class="min-w-0 flex-1 flex justify-center">
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8 shrink-0"
-                title="编辑提供商"
-                @click="openProviderEditDialog"
-              >
-                <Edit class="w-3.5 h-3.5" />
-              </Button>
-            </div>
-            <div class="min-w-0 flex-1 flex justify-center">
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8 shrink-0"
-                title="编辑端点"
-                @click="openEndpointEditDialog"
-              >
-                <Plug class="w-3.5 h-3.5" />
-              </Button>
-            </div>
-            <div
-              v-if="showAdaptiveHotPoolMetricsButton"
-              class="min-w-0 flex-1 flex justify-center"
-            >
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8 shrink-0"
-                data-testid="pool-demand-metrics-button"
-                title="查看自适应热池指标"
-                @click="showDemandMetricsDialog = true"
-              >
-                <Activity class="w-3.5 h-3.5" />
-              </Button>
-            </div>
-            <div class="min-w-0 flex-1 flex justify-center">
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8 shrink-0"
-                title="高级设置"
-                @click="showAdvancedDialog = true"
-              >
-                <Settings2 class="w-3.5 h-3.5" />
-              </Button>
-            </div>
-            <div class="min-w-0 flex-1 flex justify-center">
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8 shrink-0"
-                :class="getProviderToggleButtonClass()"
-                :disabled="togglingProviderStatus"
-                :title="getProviderToggleButtonTitle()"
-                @click="toggleSelectedProviderStatus"
-              >
-                <Power class="w-3.5 h-3.5" />
-              </Button>
-            </div>
-            <div class="min-w-0 flex-1 flex justify-center">
-              <RefreshButton
-                :loading="refreshCurrentPageLoading"
-                :title="refreshButtonTitle"
-                @click="refreshCurrentPage"
-              />
-            </div>
-          </div>
-        </div>
-
-        <!-- Desktop -->
-        <div class="hidden xl:flex items-center justify-between gap-4">
-          <div class="flex items-center gap-2">
-            <h3 class="text-base font-semibold">
-              号池管理
-              <span
-                v-if="poolHeaderMetaText"
-                class="ml-2 text-xs font-normal text-muted-foreground"
-              >
-                | {{ poolHeaderMetaText }}
-              </span>
-            </h3>
-          </div>
-          <div
-            class="flex items-center gap-2"
-            data-testid="pool-header-actions"
-          >
-            <Select
-              v-model="selectedProviderIdProxy"
-              :disabled="providerSelectDisabled"
-            >
-              <SelectTrigger
-                class="w-36 h-8 text-xs border-border/60"
-                :disabled="providerSelectDisabled"
-              >
-                <SelectValue placeholder="选择 Provider" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem
-                  v-for="item in poolProviders"
-                  :key="item.provider_id"
-                  :value="item.provider_id"
-                >
-                  {{ item.provider_name }}
-                  <span class="text-muted-foreground ml-1">({{ item.total_keys }})</span>
-                  <span
-                    v-if="!item.pool_enabled"
-                    class="ml-1 text-[10px] text-amber-600"
-                  >未启用</span>
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <div class="h-4 w-px bg-border" />
-            <div
-              v-if="selectedProviderId"
-              class="relative"
-            >
-              <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground z-10 pointer-events-none" />
-              <Input
-                v-model="searchQuery"
-                type="text"
-                placeholder="搜索账号..."
-                class="w-40 pl-8 pr-2 h-8 text-xs bg-background/50 border-border/60"
-              />
-            </div>
-            <div
-              v-if="selectedProviderId"
-              class="h-4 w-px bg-border"
-            />
-            <button
-              v-if="selectedProviderId"
-              class="group inline-flex items-center gap-1.5 px-2.5 h-8 rounded-md border border-border/50 bg-muted/20 hover:bg-muted/40 hover:border-primary/40 transition-all duration-200 text-xs"
-              title="点击调整号池调度"
-              @click="openSchedulingDialog()"
-            >
-              <span class="text-muted-foreground/80 hidden lg:inline">调度:</span>
-              <span class="font-medium text-foreground/90">{{ poolSchedulingLabel }}</span>
-              <ChevronDown class="w-3 h-3 text-muted-foreground/70 group-hover:text-foreground transition-colors" />
-            </button>
-            <div
-              v-if="selectedProviderId"
-              class="h-4 w-px bg-border"
-            />
-            <Button
-              v-if="selectedProviderId"
-              variant="ghost"
-              size="icon"
-              class="h-8 w-8"
-              title="添加账号"
-              @click="showImportDialog = true"
-            >
-              <Upload class="w-3.5 h-3.5" />
-            </Button>
-            <ProviderProxyPopover
-              v-if="selectedProviderId"
-              :open="providerProxyDesktopPopoverOpen"
-              :node-id="selectedProviderData?.proxy?.node_id"
-              :saving="savingProviderProxy"
-              :title="getProviderProxyButtonTitle()"
-              @update:open="(open: boolean) => handleProviderProxyPopoverToggle('desktop', open)"
-              @select="setProviderProxy"
-              @clear="clearProviderProxy"
-            />
-            <Button
-              v-if="selectedProviderId"
-              variant="ghost"
-              size="icon"
-              class="h-8 w-8"
-              title="编辑提供商"
-              @click="openProviderEditDialog"
-            >
-              <Edit class="w-3.5 h-3.5" />
-            </Button>
-            <Button
-              v-if="selectedProviderId"
-              variant="ghost"
-              size="icon"
-              class="h-8 w-8"
-              title="编辑端点"
-              @click="openEndpointEditDialog"
-            >
-              <Plug class="w-3.5 h-3.5" />
-            </Button>
-            <Button
-              v-if="showAdaptiveHotPoolMetricsButton"
-              variant="ghost"
-              size="icon"
-              class="h-8 w-8"
-              data-testid="pool-demand-metrics-button"
-              title="查看自适应热池指标"
-              @click="showDemandMetricsDialog = true"
-            >
-              <Activity class="w-3.5 h-3.5" />
-            </Button>
-            <Button
-              v-if="selectedProviderId"
-              variant="ghost"
-              size="icon"
-              class="h-8 w-8"
-              title="高级设置"
-              @click="showAdvancedDialog = true"
-            >
-              <Settings2 class="w-3.5 h-3.5" />
-            </Button>
-            <Button
-              v-if="selectedProviderId"
-              variant="ghost"
-              size="icon"
-              class="h-8 w-8"
-              title="账号"
-              @click="showAccountBatchDialog = true"
-            >
-              <Users class="w-3.5 h-3.5" />
-            </Button>
-            <Button
-              v-if="selectedProviderId"
-              variant="ghost"
-              size="icon"
-              class="h-8 w-8"
-              :class="getProviderToggleButtonClass()"
-              :disabled="togglingProviderStatus"
-              :title="getProviderToggleButtonTitle()"
-              @click="toggleSelectedProviderStatus"
-            >
-              <Power class="w-3.5 h-3.5" />
-            </Button>
-            <RefreshButton
-              :loading="refreshCurrentPageLoading"
-              :title="refreshButtonTitle"
-              @click="refreshCurrentPage"
-            />
-          </div>
-        </div>
-      </div>
+      <PoolManagementHeader
+        v-model:provider-id="selectedProviderIdProxy"
+        v-model:status="statusFilter"
+        v-model:search="searchQuery"
+        :providers="poolProviders"
+        :provider-select-disabled="providerSelectDisabled"
+        :status-options="poolKeyStatusFilterOptions"
+        :meta-text="poolHeaderMetaText"
+        :provider-proxy-node-id="selectedProviderData?.proxy?.node_id"
+        :provider-proxy-mobile-open="providerProxyMobilePopoverOpen"
+        :provider-proxy-desktop-open="providerProxyDesktopPopoverOpen"
+        :provider-proxy-button-title="getProviderProxyButtonTitle()"
+        :saving-provider-proxy="savingProviderProxy"
+        :pool-scheduling-label="poolSchedulingLabel"
+        :show-adaptive-hot-pool-metrics-button="showAdaptiveHotPoolMetricsButton"
+        :provider-toggle-button-title="getProviderToggleButtonTitle()"
+        :provider-toggle-button-class="getProviderToggleButtonClass()"
+        :toggling-provider-status="togglingProviderStatus"
+        :refresh-loading="refreshCurrentPageLoading"
+        :refresh-title="refreshButtonTitle"
+        @import="showImportDialog = true"
+        @scheduling="openSchedulingDialog"
+        @account-batch="showAccountBatchDialog = true"
+        @edit-provider="openProviderEditDialog"
+        @edit-endpoint="openEndpointEditDialog"
+        @demand-metrics="showDemandMetricsDialog = true"
+        @advanced="showAdvancedDialog = true"
+        @toggle-provider="toggleSelectedProviderStatus"
+        @refresh="refreshCurrentPage"
+        @update:provider-proxy-mobile-open="handleProviderProxyPopoverToggle('mobile', $event)"
+        @update:provider-proxy-desktop-open="handleProviderProxyPopoverToggle('desktop', $event)"
+        @select-provider-proxy="setProviderProxy"
+        @clear-provider-proxy="clearProviderProxy"
+      />
 
       <!-- Loading (initial) -->
       <div
@@ -620,124 +304,21 @@
                   v-if="showAccountQuotaColumn"
                   class="py-3 align-middle"
                 >
-                  <div
-                    v-if="quotaProgressMap[key.key_id]?.length"
-                    class="max-w-[208px] space-y-2"
-                  >
-                    <div
-                      v-for="(item, idx) in quotaProgressMap[key.key_id]"
-                      :key="`${key.key_id}-quota-${idx}`"
-                      class="flex flex-col gap-1 min-w-[140px] max-w-[208px]"
-                    >
-                      <div class="flex items-center justify-between text-[10px] leading-none">
-                        <span class="text-muted-foreground font-medium shrink-0">{{ getQuotaProgressLabel(item.label) }}</span>
-                        <span
-                          v-if="getQuotaProgressResetDisplayText(item)"
-                          data-testid="pool-quota-reset-text"
-                          class="text-muted-foreground/80 tabular-nums truncate"
-                          :title="getQuotaProgressResetDisplayText(item)"
-                        >{{ getQuotaProgressResetDisplayText(item) }}</span>
-                      </div>
-                      <div class="flex items-center gap-1.5">
-                        <div class="relative flex-1 h-1.5 rounded-full bg-border overflow-hidden">
-                          <div
-                            class="absolute left-0 top-0 h-full rounded-full transition-all duration-300"
-                            :class="getQuotaRemainingBarColorByRemaining(item.remainingPercent)"
-                            :style="{ width: `${item.remainingPercent}%` }"
-                          />
-                        </div>
-                        <span
-                          data-testid="pool-quota-meter-text"
-                          class="shrink-0 text-[10px] font-medium tabular-nums leading-none"
-                          :class="getQuotaRemainingClassByRemaining(item.remainingPercent)"
-                        >{{ getQuotaProgressMeterDisplayText(item) }}</span>
-                      </div>
-                    </div>
-                    <div
-                      v-if="keyUiStateMap[key.key_id]?.accountQuotaText"
-                      class="text-[10px] leading-none text-muted-foreground tabular-nums"
-                    >
-                      {{ keyUiStateMap[key.key_id]?.accountQuotaText }}
-                    </div>
-                  </div>
-                  <span
-                    v-else-if="keyUiStateMap[key.key_id]?.accountQuotaText || keyUiStateMap[key.key_id]?.quotaFallbackText"
-                    :class="keyUiStateMap[key.key_id]?.quotaTextClass || ''"
-                  >
-                    {{ keyUiStateMap[key.key_id]?.accountQuotaText || keyUiStateMap[key.key_id]?.quotaFallbackText }}
-                  </span>
-                  <span
-                    v-else
-                    class="text-xs text-muted-foreground"
-                  >-</span>
+                  <PoolKeyQuotaPanel
+                    :items="quotaProgressDisplayMap[key.key_id] || []"
+                    :account-quota-text="keyUiStateMap[key.key_id]?.accountQuotaText"
+                    :fallback-text="keyUiStateMap[key.key_id]?.quotaFallbackText"
+                    :text-class="keyUiStateMap[key.key_id]?.quotaTextClass || ''"
+                  />
                 </TableCell>
                 <TableCell class="py-3 px-2 align-middle">
-                  <div
-                    v-if="isPoolKeyCycleStatsDisplay(key)"
-                    class="mx-auto w-[188px] text-[10px] leading-4"
-                    data-testid="pool-stats-cycle-groups"
-                  >
-                    <div
-                      class="grid min-h-16 w-[188px] grid-cols-[38px_64px_10px_64px] items-center gap-x-1"
-                      data-testid="pool-stats-cycle-grid"
-                    >
-                      <span aria-hidden="true" />
-                      <span
-                        class="text-center text-[9px] font-semibold text-muted-foreground/80"
-                        data-testid="pool-stats-cycle-group-5h"
-                      >{{ getPoolKeyCycleStatsGroupLabel(key, '5h') }}</span>
-                      <span class="text-center text-muted-foreground/50">|</span>
-                      <span
-                        class="text-center text-[9px] font-semibold text-muted-foreground/80"
-                        data-testid="pool-stats-cycle-group-weekly"
-                      >{{ getPoolKeyCycleStatsGroupLabel(key, 'weekly') }}</span>
-
-                      <template
-                        v-for="row in getPoolKeyCycleStatsRows(key)"
-                        :key="`${key.key_id}-${row.key}-desktop-cycle-row`"
-                      >
-                        <span class="text-muted-foreground truncate">{{ row.label }}</span>
-                        <span
-                          class="min-w-0 truncate text-center tabular-nums text-foreground/90"
-                          :class="row.fiveH.missing ? 'text-muted-foreground/80' : ''"
-                          :data-testid="`pool-stats-5h-${row.key}`"
-                          :title="row.fiveH.value"
-                        >{{ row.fiveH.value }}</span>
-                        <span class="text-center text-muted-foreground/50">|</span>
-                        <span
-                          class="min-w-0 truncate text-center tabular-nums text-foreground/90"
-                          :class="row.weekly.missing ? 'text-muted-foreground/80' : ''"
-                          :data-testid="`pool-stats-weekly-${row.key}`"
-                          :title="row.weekly.value"
-                        >{{ row.weekly.value }}</span>
-                      </template>
-                    </div>
-                  </div>
-                  <div
-                    v-else
-                    class="grid min-h-16 w-[188px] grid-rows-4 gap-0 mx-auto text-[10px] leading-4"
-                    data-testid="pool-stats-account-total"
-                  >
-                    <div
-                      class="invisible h-4"
-                      aria-hidden="true"
-                    >
-                      -
-                    </div>
-                    <div
-                      v-for="metric in getPoolKeyAccountStatsMetrics(key)"
-                      :key="`${key.key_id}-${metric.key}-account-total`"
-                      class="grid grid-cols-[64px_124px] items-center"
-                    >
-                      <span class="text-muted-foreground truncate">{{ metric.label }}</span>
-                      <span
-                        class="min-w-0 truncate text-center tabular-nums text-foreground/90"
-                        :title="metric.value"
-                      >
-                        {{ metric.value }}
-                      </span>
-                    </div>
-                  </div>
+                  <PoolKeyStatsPanel
+                    :cycle="isPoolKeyCycleStatsDisplay(key)"
+                    :cycle-rows="getPoolKeyCycleStatsRows(key)"
+                    :account-metrics="getPoolKeyAccountStatsMetrics(key)"
+                    :five-hour-group-label="getPoolKeyCycleStatsGroupLabel(key, '5h')"
+                    :weekly-group-label="getPoolKeyCycleStatsGroupLabel(key, 'weekly')"
+                  />
                 </TableCell>
                 <TableCell class="py-3 text-center">
                   <span class="text-[10px] text-muted-foreground whitespace-nowrap">
@@ -1011,60 +592,14 @@
 
               <div class="overflow-x-auto rounded-xl border border-border/50 bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
                 <div class="space-y-1 text-center">
-                  <template v-if="isPoolKeyCycleStatsDisplay(key)">
-                    <div
-                      class="grid min-h-16 w-[188px] grid-cols-[38px_64px_10px_64px] items-center gap-x-1 text-left"
-                      data-testid="pool-mobile-stats-cycle-grid"
-                    >
-                      <span aria-hidden="true" />
-                      <span
-                        class="text-center text-[10px] font-semibold text-foreground"
-                        data-testid="pool-mobile-stats-cycle-group-5h"
-                      >{{ getPoolKeyCycleStatsGroupLabel(key, '5h') }}</span>
-                      <span class="text-center text-muted-foreground/50">|</span>
-                      <span
-                        class="text-center text-[10px] font-semibold text-foreground"
-                        data-testid="pool-mobile-stats-cycle-group-weekly"
-                      >{{ getPoolKeyCycleStatsGroupLabel(key, 'weekly') }}</span>
-
-                      <template
-                        v-for="row in getPoolKeyCycleStatsRows(key)"
-                        :key="`${key.key_id}-${row.key}-mobile-cycle-row`"
-                      >
-                        <span class="text-muted-foreground truncate">{{ row.label }}</span>
-                        <span
-                          class="min-w-0 truncate text-center font-medium text-foreground/90 tabular-nums"
-                          :class="row.fiveH.missing ? 'text-muted-foreground/80' : ''"
-                          :title="row.fiveH.value"
-                        >{{ row.fiveH.value }}</span>
-                        <span class="text-center text-muted-foreground/50">|</span>
-                        <span
-                          class="min-w-0 truncate text-center font-medium text-foreground/90 tabular-nums"
-                          :class="row.weekly.missing ? 'text-muted-foreground/80' : ''"
-                          :title="row.weekly.value"
-                        >{{ row.weekly.value }}</span>
-                      </template>
-                    </div>
-                  </template>
-                  <template v-else>
-                    <div
-                      class="invisible h-4"
-                      aria-hidden="true"
-                    >
-                      -
-                    </div>
-                    <div
-                      v-for="metric in getPoolKeyAccountStatsMetrics(key)"
-                      :key="`${key.key_id}-${metric.key}-mobile-account-total`"
-                      class="grid h-4 w-[188px] grid-cols-[64px_124px] items-center text-left"
-                    >
-                      <span class="text-muted-foreground truncate">{{ metric.label }}</span>
-                      <span
-                        class="min-w-0 truncate text-center font-medium text-foreground/90"
-                        :title="metric.value"
-                      >{{ metric.value }}</span>
-                    </div>
-                  </template>
+                  <PoolKeyStatsPanel
+                    :cycle="isPoolKeyCycleStatsDisplay(key)"
+                    :cycle-rows="getPoolKeyCycleStatsRows(key)"
+                    :account-metrics="getPoolKeyAccountStatsMetrics(key)"
+                    :five-hour-group-label="getPoolKeyCycleStatsGroupLabel(key, '5h')"
+                    :weekly-group-label="getPoolKeyCycleStatsGroupLabel(key, 'weekly')"
+                    variant="mobile"
+                  />
                   <div class="flex items-center justify-between gap-2 border-t border-border/40 pt-1 mt-1">
                     <span class="text-muted-foreground">导入</span>
                     <span class="font-medium text-foreground/90">{{ keyUiStateMap[key.key_id]?.importedAtRelative || '-' }}</span>
@@ -1138,66 +673,14 @@
                 </div>
               </div>
 
-              <div
+              <PoolKeyQuotaPanel
                 v-if="showAccountQuotaColumn"
-                class="rounded-xl border border-border/50 bg-muted/30 px-3 py-2 text-xs"
-              >
-                <div class="text-muted-foreground mb-1">
-                  配额
-                </div>
-                <div
-                  v-if="quotaProgressMap[key.key_id]?.length"
-                  class="space-y-2"
-                >
-                  <div
-                    v-for="(item, idx) in quotaProgressMap[key.key_id]"
-                    :key="`${key.key_id}-quota-mobile-${idx}`"
-                    class="flex flex-col gap-1 min-w-0"
-                  >
-                    <div class="flex items-center justify-between text-[10px] leading-none">
-                      <span class="text-muted-foreground font-medium shrink-0">{{ getQuotaProgressLabel(item.label) }}</span>
-                      <span
-                        v-if="getQuotaProgressResetDisplayText(item)"
-                        data-testid="pool-quota-reset-text"
-                        class="text-muted-foreground/80 tabular-nums truncate"
-                        :title="getQuotaProgressResetDisplayText(item)"
-                      >{{ getQuotaProgressResetDisplayText(item) }}</span>
-                    </div>
-                    <div class="flex items-center gap-1.5">
-                      <div class="relative flex-1 h-1.5 rounded-full bg-border overflow-hidden">
-                        <div
-                          class="absolute left-0 top-0 h-full rounded-full transition-all duration-300"
-                          :class="getQuotaRemainingBarColorByRemaining(item.remainingPercent)"
-                          :style="{ width: `${item.remainingPercent}%` }"
-                        />
-                      </div>
-                      <span
-                        data-testid="pool-quota-meter-text"
-                        class="shrink-0 text-[10px] font-medium tabular-nums leading-none"
-                        :class="getQuotaRemainingClassByRemaining(item.remainingPercent)"
-                      >{{ getQuotaProgressMeterDisplayText(item) }}</span>
-                    </div>
-                  </div>
-                  <div
-                    v-if="keyUiStateMap[key.key_id]?.accountQuotaText"
-                    class="text-[10px] leading-none text-muted-foreground tabular-nums"
-                  >
-                    {{ keyUiStateMap[key.key_id]?.accountQuotaText }}
-                  </div>
-                </div>
-                <div
-                  v-else-if="keyUiStateMap[key.key_id]?.accountQuotaText || keyUiStateMap[key.key_id]?.quotaFallbackText"
-                  :class="keyUiStateMap[key.key_id]?.quotaTextClass || ''"
-                >
-                  {{ keyUiStateMap[key.key_id]?.accountQuotaText || keyUiStateMap[key.key_id]?.quotaFallbackText }}
-                </div>
-                <div
-                  v-else
-                  class="text-muted-foreground"
-                >
-                  -
-                </div>
-              </div>
+                :items="quotaProgressDisplayMap[key.key_id] || []"
+                :account-quota-text="keyUiStateMap[key.key_id]?.accountQuotaText"
+                :fallback-text="keyUiStateMap[key.key_id]?.quotaFallbackText"
+                :text-class="keyUiStateMap[key.key_id]?.quotaTextClass || ''"
+                variant="mobile"
+              />
 
               <div class="flex items-center gap-0.5">
                 <div
@@ -1489,11 +972,8 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import {
-  Search,
   Upload,
-  ChevronDown,
   RefreshCw,
-  Activity,
   Power,
   Database,
   KeyRound,
@@ -1505,24 +985,13 @@ import {
   RotateCcw,
   SquarePen,
   Trash2,
-  Users,
-  Settings2,
-  SlidersHorizontal,
   CircleHelp,
-  Edit,
-  Plug,
 } from 'lucide-vue-next'
 
 import {
   Card,
   Badge,
   Button,
-  Input,
-  Select,
-  SelectTrigger,
-  SelectValue,
-  SelectContent,
-  SelectItem,
   Table,
   TableHeader,
   TableBody,
@@ -1536,7 +1005,6 @@ import {
   PopoverTrigger,
   PopoverContent,
 } from '@/components/ui'
-import RefreshButton from '@/components/ui/refresh-button.vue'
 import { useToast } from '@/composables/useToast'
 import { useClipboard } from '@/composables/useClipboard'
 import { useCountdownTimer, getCodexResetCountdown } from '@/composables/useCountdownTimer'
@@ -1578,7 +1046,9 @@ import PoolSchedulingDialog from '@/features/pool/components/PoolSchedulingDialo
 import PoolAdvancedDialog from '@/features/pool/components/PoolAdvancedDialog.vue'
 import PoolDemandMetricsDialog from '@/features/pool/components/PoolDemandMetricsDialog.vue'
 import PoolAccountBatchDialog from '@/features/pool/components/PoolAccountBatchDialog.vue'
-import ProviderProxyPopover from '@/features/pool/components/ProviderProxyPopover.vue'
+import PoolManagementHeader from '@/features/pool/components/PoolManagementHeader.vue'
+import PoolKeyQuotaPanel from '@/features/pool/components/PoolKeyQuotaPanel.vue'
+import PoolKeyStatsPanel from '@/features/pool/components/PoolKeyStatsPanel.vue'
 import KeyAllowedModelsEditDialog from '@/features/providers/components/KeyAllowedModelsEditDialog.vue'
 import KeyFormDialog from '@/features/providers/components/KeyFormDialog.vue'
 import OAuthKeyEditDialog from '@/features/providers/components/OAuthKeyEditDialog.vue'
@@ -2354,6 +1824,15 @@ interface QuotaProgressItem {
   allowDynamicReset?: boolean
 }
 
+interface QuotaProgressDisplayItem {
+  label: string
+  remainingPercent: number
+  resetText: string
+  meterText: string
+  barClass: string
+  meterClass: string
+}
+
 interface PoolCodexCycleStatsRow {
   key: PoolStatsMetric['key']
   label: string
@@ -2395,6 +1874,21 @@ const quotaProgressMap = computed<Record<string, QuotaProgressItem[]>>(() => {
   const map: Record<string, QuotaProgressItem[]> = {}
   for (const key of keyPage.value.keys) {
     map[key.key_id] = parseQuotaProgressItems(key)
+  }
+  return map
+})
+
+const quotaProgressDisplayMap = computed<Record<string, QuotaProgressDisplayItem[]>>(() => {
+  const map: Record<string, QuotaProgressDisplayItem[]> = {}
+  for (const key of keyPage.value.keys) {
+    map[key.key_id] = (quotaProgressMap.value[key.key_id] || []).map(item => ({
+      label: getQuotaProgressLabel(item.label),
+      remainingPercent: item.remainingPercent,
+      resetText: getQuotaProgressResetDisplayText(item),
+      meterText: getQuotaProgressMeterDisplayText(item),
+      barClass: getQuotaRemainingBarColorByRemaining(item.remainingPercent),
+      meterClass: getQuotaRemainingClassByRemaining(item.remainingPercent),
+    }))
   }
   return map
 })
@@ -2547,12 +2041,14 @@ function refreshOverviewInBackground(): void {
 }
 
 function applyQuotaRefreshResultToCurrentPage(result: Awaited<ReturnType<typeof refreshProviderQuota>>): void {
-  const successfulResults = Array.isArray(result.results)
-    ? result.results.filter((item) => item.status === 'success' && item.quota_snapshot)
-    : []
-  if (successfulResults.length === 0) return
+  const quotaByKeyId = new Map<string, NonNullable<NonNullable<typeof result.results>[number]['quota_snapshot']>>()
+  for (const item of result.results) {
+    if (item.status === 'success' && item.quota_snapshot) {
+      quotaByKeyId.set(item.key_id, item.quota_snapshot)
+    }
+  }
+  if (quotaByKeyId.size === 0) return
 
-  const quotaByKeyId = new Map(successfulResults.map((item) => [item.key_id, item.quota_snapshot!]))
   keyPage.value.keys = keyPage.value.keys.map((key) => {
     const quotaSnapshot = quotaByKeyId.get(key.key_id)
     if (!quotaSnapshot) return key

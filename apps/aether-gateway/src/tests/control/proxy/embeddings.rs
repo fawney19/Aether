@@ -20,6 +20,30 @@ use crate::constants::{
 };
 use aether_data_contracts::repository::candidate_selection::StoredMinimalCandidateSelectionRow;
 
+const EMBEDDING_PROXY_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_embedding_proxy_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(EMBEDDING_PROXY_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("embedding proxy test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 fn embedding_success_state(execution_runtime_url: String) -> AppState {
     let mut snapshot =
         sample_currently_usable_auth_snapshot("key-embedding-success", "user-embedding-success");
@@ -746,8 +770,15 @@ fn aliyun_embedding_execution_result(plan: &ExecutionPlan) -> ExecutionResult {
     }
 }
 
-#[tokio::test]
-async fn embeddings_route_accepts_openai_payload() {
+#[test]
+fn embeddings_route_accepts_openai_payload() {
+    run_embedding_proxy_test(
+        "embeddings_route_accepts_openai_payload",
+        embeddings_route_accepts_openai_payload_impl,
+    );
+}
+
+async fn embeddings_route_accepts_openai_payload_impl() {
     let (execution_runtime_url, execution_runtime_handle) =
         start_server(embedding_execution_runtime()).await;
     let gateway = build_router_with_state(embedding_success_state(execution_runtime_url));
@@ -816,8 +847,15 @@ async fn embeddings_route_accepts_openai_payload() {
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn embeddings_route_converts_openai_payload_to_gemini_embedding_provider() {
+#[test]
+fn embeddings_route_converts_openai_payload_to_gemini_embedding_provider() {
+    run_embedding_proxy_test(
+        "embeddings_route_converts_openai_payload_to_gemini_embedding_provider",
+        embeddings_route_converts_openai_payload_to_gemini_embedding_provider_impl,
+    );
+}
+
+async fn embeddings_route_converts_openai_payload_to_gemini_embedding_provider_impl() {
     let (execution_runtime_url, execution_runtime_handle) =
         start_server(gemini_embedding_conversion_execution_runtime()).await;
     let gateway = build_router_with_state(gemini_embedding_success_state(
@@ -867,8 +905,15 @@ async fn embeddings_route_converts_openai_payload_to_gemini_embedding_provider()
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn embeddings_route_converts_openai_payload_to_vertex_gemini_embedding_provider() {
+#[test]
+fn embeddings_route_converts_openai_payload_to_vertex_gemini_embedding_provider() {
+    run_embedding_proxy_test(
+        "embeddings_route_converts_openai_payload_to_vertex_gemini_embedding_provider",
+        embeddings_route_converts_openai_payload_to_vertex_gemini_embedding_provider_impl,
+    );
+}
+
+async fn embeddings_route_converts_openai_payload_to_vertex_gemini_embedding_provider_impl() {
     let (execution_runtime_url, execution_runtime_handle) =
         start_server(vertex_gemini_embedding_conversion_execution_runtime()).await;
     let gateway =
@@ -911,8 +956,15 @@ async fn embeddings_route_converts_openai_payload_to_vertex_gemini_embedding_pro
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn embeddings_route_converts_openai_batch_payload_to_gemini_batch_endpoint() {
+#[test]
+fn embeddings_route_converts_openai_batch_payload_to_gemini_batch_endpoint() {
+    run_embedding_proxy_test(
+        "embeddings_route_converts_openai_batch_payload_to_gemini_batch_endpoint",
+        embeddings_route_converts_openai_batch_payload_to_gemini_batch_endpoint_impl,
+    );
+}
+
+async fn embeddings_route_converts_openai_batch_payload_to_gemini_batch_endpoint_impl() {
     let (execution_runtime_url, execution_runtime_handle) =
         start_server(gemini_embedding_batch_conversion_execution_runtime()).await;
     let gateway = build_router_with_state(gemini_embedding_success_state(
@@ -957,8 +1009,15 @@ async fn embeddings_route_converts_openai_batch_payload_to_gemini_batch_endpoint
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn embeddings_route_converts_text_payload_to_aliyun_embedding_provider() {
+#[test]
+fn embeddings_route_converts_text_payload_to_aliyun_embedding_provider() {
+    run_embedding_proxy_test(
+        "embeddings_route_converts_text_payload_to_aliyun_embedding_provider",
+        embeddings_route_converts_text_payload_to_aliyun_embedding_provider_impl,
+    );
+}
+
+async fn embeddings_route_converts_text_payload_to_aliyun_embedding_provider_impl() {
     let (execution_runtime_url, execution_runtime_handle) =
         start_server(aliyun_embedding_conversion_execution_runtime(
             json!([{ "text": "hello" }]),
@@ -1006,8 +1065,15 @@ async fn embeddings_route_converts_text_payload_to_aliyun_embedding_provider() {
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn embeddings_route_converts_multimodal_payload_to_aliyun_embedding_provider() {
+#[test]
+fn embeddings_route_converts_multimodal_payload_to_aliyun_embedding_provider() {
+    run_embedding_proxy_test(
+        "embeddings_route_converts_multimodal_payload_to_aliyun_embedding_provider",
+        embeddings_route_converts_multimodal_payload_to_aliyun_embedding_provider_impl,
+    );
+}
+
+async fn embeddings_route_converts_multimodal_payload_to_aliyun_embedding_provider_impl() {
     let expected_contents = json!([
         { "text": "white running shoes" },
         { "image": "https://example.com/shoe.png" },
@@ -1049,8 +1115,15 @@ async fn embeddings_route_converts_multimodal_payload_to_aliyun_embedding_provid
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn embeddings_route_skips_openai_candidate_for_multimodal_payload() {
+#[test]
+fn embeddings_route_skips_openai_candidate_for_multimodal_payload() {
+    run_embedding_proxy_test(
+        "embeddings_route_skips_openai_candidate_for_multimodal_payload",
+        embeddings_route_skips_openai_candidate_for_multimodal_payload_impl,
+    );
+}
+
+async fn embeddings_route_skips_openai_candidate_for_multimodal_payload_impl() {
     let expected_contents = json!([
         { "text": "white running shoes" },
         { "image": "https://example.com/shoe.png" }
@@ -1090,8 +1163,15 @@ async fn embeddings_route_skips_openai_candidate_for_multimodal_payload() {
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn embeddings_route_converts_fusion_payload_to_aliyun_embedding_provider() {
+#[test]
+fn embeddings_route_converts_fusion_payload_to_aliyun_embedding_provider() {
+    run_embedding_proxy_test(
+        "embeddings_route_converts_fusion_payload_to_aliyun_embedding_provider",
+        embeddings_route_converts_fusion_payload_to_aliyun_embedding_provider_impl,
+    );
+}
+
+async fn embeddings_route_converts_fusion_payload_to_aliyun_embedding_provider_impl() {
     let expected_contents = json!([
         {
             "text": "white running shoes",
@@ -1134,8 +1214,15 @@ async fn embeddings_route_converts_fusion_payload_to_aliyun_embedding_provider()
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gemini_embed_content_route_uses_native_gemini_embedding_provider() {
+#[test]
+fn gemini_embed_content_route_uses_native_gemini_embedding_provider() {
+    run_embedding_proxy_test(
+        "gemini_embed_content_route_uses_native_gemini_embedding_provider",
+        gemini_embed_content_route_uses_native_gemini_embedding_provider_impl,
+    );
+}
+
+async fn gemini_embed_content_route_uses_native_gemini_embedding_provider_impl() {
     let (execution_runtime_url, execution_runtime_handle) =
         start_server(gemini_embedding_native_execution_runtime()).await;
     let gateway = build_router_with_state(gemini_embedding_success_state(
@@ -1188,8 +1275,15 @@ async fn gemini_embed_content_route_uses_native_gemini_embedding_provider() {
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn embeddings_route_accepts_all_canonical_input_shapes() {
+#[test]
+fn embeddings_route_accepts_all_canonical_input_shapes() {
+    run_embedding_proxy_test(
+        "embeddings_route_accepts_all_canonical_input_shapes",
+        embeddings_route_accepts_all_canonical_input_shapes_impl,
+    );
+}
+
+async fn embeddings_route_accepts_all_canonical_input_shapes_impl() {
     let (execution_runtime_url, execution_runtime_handle) =
         start_server(embedding_execution_runtime()).await;
     let gateway = build_router_with_state(embedding_success_state(execution_runtime_url));
@@ -1229,8 +1323,15 @@ async fn embeddings_route_accepts_all_canonical_input_shapes() {
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn embeddings_route_rejects_invalid_local_payloads() {
+#[test]
+fn embeddings_route_rejects_invalid_local_payloads() {
+    run_embedding_proxy_test(
+        "embeddings_route_rejects_invalid_local_payloads",
+        embeddings_route_rejects_invalid_local_payloads_impl,
+    );
+}
+
+async fn embeddings_route_rejects_invalid_local_payloads_impl() {
     let gateway = build_router_with_state(AppState::new().expect("gateway should build"));
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();
@@ -1294,8 +1395,15 @@ async fn embeddings_route_rejects_invalid_local_payloads() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn embeddings_route_rejects_non_json_content_type() {
+#[test]
+fn embeddings_route_rejects_non_json_content_type() {
+    run_embedding_proxy_test(
+        "embeddings_route_rejects_non_json_content_type",
+        embeddings_route_rejects_non_json_content_type_impl,
+    );
+}
+
+async fn embeddings_route_rejects_non_json_content_type_impl() {
     let gateway = build_router_with_state(AppState::new().expect("gateway should build"));
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
@@ -1317,8 +1425,15 @@ async fn embeddings_route_rejects_non_json_content_type() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn embeddings_route_rejects_chat_only_model() {
+#[test]
+fn embeddings_route_rejects_chat_only_model() {
+    run_embedding_proxy_test(
+        "embeddings_route_rejects_chat_only_model",
+        embeddings_route_rejects_chat_only_model_impl,
+    );
+}
+
+async fn embeddings_route_rejects_chat_only_model_impl() {
     let mut snapshot = sample_currently_usable_auth_snapshot("key-embedding-1", "user-embedding-1");
     snapshot.user_allowed_api_formats = Some(vec!["openai:embedding".to_string()]);
     snapshot.api_key_allowed_api_formats = Some(vec!["openai:embedding".to_string()]);
@@ -1366,8 +1481,15 @@ async fn embeddings_route_rejects_chat_only_model() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn embeddings_route_rejects_chat_only_api_format() {
+#[test]
+fn embeddings_route_rejects_chat_only_api_format() {
+    run_embedding_proxy_test(
+        "embeddings_route_rejects_chat_only_api_format",
+        embeddings_route_rejects_chat_only_api_format_impl,
+    );
+}
+
+async fn embeddings_route_rejects_chat_only_api_format_impl() {
     let mut snapshot = sample_currently_usable_auth_snapshot("key-embedding-2", "user-embedding-2");
     snapshot.user_allowed_api_formats = Some(vec!["openai:chat".to_string()]);
     snapshot.api_key_allowed_api_formats = Some(vec!["openai:chat".to_string()]);

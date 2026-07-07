@@ -1,5 +1,6 @@
 import { ref, computed, watch } from 'vue'
 import type { ProviderSummaryQuery } from '@/api/endpoints'
+import { useI18n } from '@/i18n'
 
 export interface FilterOption {
   value: string
@@ -9,20 +10,21 @@ export interface FilterOption {
 export function useProviderFilters(
   globalModels: () => { id: string; name: string }[],
 ) {
+  const { legacyT } = useI18n()
   // 搜索与筛选
   const searchQuery = ref('')
   const filterStatus = ref('all')
   const filterApiFormat = ref('all')
   const filterModel = ref('all')
 
-  const statusFilters: FilterOption[] = [
-    { value: 'all', label: '全部状态' },
-    { value: 'active', label: '活跃' },
-    { value: 'inactive', label: '停用' },
-  ]
+  const statusFilters = computed<FilterOption[]>(() => [
+    { value: 'all', label: legacyT('全部状态') },
+    { value: 'active', label: legacyT('活跃') },
+    { value: 'inactive', label: legacyT('停用') },
+  ])
 
-  const apiFormatFilters: FilterOption[] = [
-    { value: 'all', label: '全部格式' },
+  const apiFormatFilters = computed<FilterOption[]>(() => [
+    { value: 'all', label: legacyT('全部格式') },
     { value: 'claude:messages', label: 'Claude Messages' },
     { value: 'openai:chat', label: 'OpenAI Chat' },
     { value: 'openai:responses', label: 'OpenAI Responses' },
@@ -35,13 +37,13 @@ export function useProviderFilters(
     { value: 'jina:rerank', label: 'Jina Rerank' },
     { value: 'doubao:embedding', label: 'Doubao Embedding' },
     { value: 'aliyun:multimodal_embedding', label: 'Aliyun Multimodal Embedding' },
-  ]
+  ])
 
   const modelFilters = computed<FilterOption[]>(() => {
     const items = globalModels()
       .map(m => ({ value: m.id, label: m.name }))
       .sort((a, b) => a.label.localeCompare(b.label))
-    return [{ value: 'all', label: '全部模型' }, ...items]
+    return [{ value: 'all', label: legacyT('全部模型') }, ...items]
   })
 
   const hasActiveFilters = computed(() => {

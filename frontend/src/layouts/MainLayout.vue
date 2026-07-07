@@ -5,17 +5,11 @@
     :sidebar-class="sidebarClasses"
     :content-class="contentClasses"
   >
-    <!-- GLOBAL TEXTURE (Paper Noise) -->
-    <div
-      class="absolute inset-0 pointer-events-none z-0 opacity-[0.03] mix-blend-multiply fixed"
-      :style="{ backgroundImage: `url(\&quot;data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E\&quot;)` }"
-    />
-
     <template #notice>
       <div class="flex w-full max-w-3xl items-center justify-between rounded-3xl bg-orange-500 px-6 py-3 text-white shadow-2xl ring-1 ring-white/30">
         <div class="flex items-center gap-3">
           <AlertTriangle class="h-5 w-5" />
-          <span>认证已过期，请重新登录</span>
+          <span>{{ t('auth.expired') }}</span>
         </div>
         <Button
           variant="outline"
@@ -23,7 +17,7 @@
           class="border-white/60 text-white hover:bg-white/10"
           @click="handleRelogin"
         >
-          重新登录
+          {{ t('auth.relogin') }}
         </Button>
       </div>
     </template>
@@ -74,13 +68,13 @@
             <RouterLink
               to="/dashboard/settings"
               class="p-1.5 hover:bg-muted/50 rounded-md text-muted-foreground hover:text-foreground transition-colors"
-              title="个人设置"
+              :title="t('common.settings')"
             >
               <Settings class="w-4 h-4" />
             </RouterLink>
             <button
               class="p-1.5 rounded-md text-muted-foreground hover:text-red-500 transition-colors"
-              title="退出登录"
+              :title="t('common.logout')"
               @click="handleLogout"
             >
               <LogOut class="w-4 h-4" />
@@ -131,24 +125,8 @@
                 @apply-update="handleApplySystemUpdate"
                 @rollback="handleRollback"
               />
-              <button
-                class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-                :title="themeMode === 'system' ? '跟随系统' : themeMode === 'dark' ? '深色模式' : '浅色模式'"
-                @click="toggleDarkMode"
-              >
-                <SunMoon
-                  v-if="themeMode === 'system'"
-                  class="h-4 w-4"
-                />
-                <SunMedium
-                  v-else-if="themeMode === 'light'"
-                  class="h-4 w-4"
-                />
-                <Moon
-                  v-else
-                  class="h-4 w-4"
-                />
-              </button>
+              <LanguageSwitcher />
+              <ThemeModeButton />
               <button
                 class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
                 @click="mobileMenuOpen = !mobileMenuOpen"
@@ -180,18 +158,18 @@
 
         <!-- Mobile Dropdown Menu -->
         <Transition
-          enter-active-class="transition-all duration-300 ease-out overflow-hidden"
-          enter-from-class="opacity-0 max-h-0"
-          enter-to-class="opacity-100 max-h-[500px]"
-          leave-active-class="transition-all duration-200 ease-in overflow-hidden"
-          leave-from-class="opacity-100 max-h-[500px]"
-          leave-to-class="opacity-0 max-h-0"
+          enter-active-class="transition-all duration-300 ease-out"
+          enter-from-class="opacity-0 -translate-y-2"
+          enter-to-class="opacity-100 translate-y-0"
+          leave-active-class="transition-all duration-200 ease-in"
+          leave-from-class="opacity-100 translate-y-0"
+          leave-to-class="opacity-0 -translate-y-2"
         >
           <div
             v-if="mobileMenuOpen"
-            class="border-t border-[var(--shell-border)] bg-[var(--shell-glass)] backdrop-blur-xl"
+            class="absolute inset-x-0 top-full max-h-[calc(100dvh-73px)] overflow-y-auto overscroll-contain border-t border-[var(--shell-border)] bg-background shadow-xl [-webkit-overflow-scrolling:touch] touch-pan-y"
           >
-            <div class="mx-auto max-w-7xl px-6 py-4">
+            <div class="mx-auto max-w-7xl px-6 py-4 pb-28">
               <!-- Navigation Groups -->
               <div class="space-y-4">
                 <div
@@ -213,8 +191,6 @@
                       :class="isNavActive(item.href)
                         ? 'bg-[#cc785c]/10 dark:bg-[#cc785c]/20 text-[#cc785c] dark:text-[#d4a27f]'
                         : 'text-[#666663] dark:text-muted-foreground hover:bg-black/5 dark:hover:bg-white/5 hover:text-[#191919] dark:hover:text-white'"
-                      @mouseenter="prefetchNavigationItem(item.href)"
-                      @focus="prefetchNavigationItem(item.href)"
                       @pointerdown="prefetchNavigationItem(item.href)"
                       @click="mobileMenuOpen = false"
                     >
@@ -244,12 +220,14 @@
                     <RouterLink
                       to="/dashboard/settings"
                       class="p-2 hover:bg-muted/50 rounded-lg text-muted-foreground hover:text-foreground transition-colors"
+                      :title="t('common.settings')"
                       @click="mobileMenuOpen = false"
                     >
                       <Settings class="w-4 h-4" />
                     </RouterLink>
                     <button
                       class="p-2 rounded-lg text-muted-foreground hover:text-red-500 transition-colors"
+                      :title="t('common.logout')"
                       @click="handleLogout"
                     >
                       <LogOut class="w-4 h-4" />
@@ -298,7 +276,7 @@
           class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 text-xs font-medium"
         >
           <AlertTriangle class="w-3.5 h-3.5" />
-          <span>演示模式</span>
+          <span>{{ t('demo.mode') }}</span>
         </div>
 
         <div class="flex items-center gap-2">
@@ -324,32 +302,16 @@
             @apply-update="handleApplySystemUpdate"
             @rollback="handleRollback"
           />
+          <LanguageSwitcher />
           <!-- Theme Toggle -->
-          <button
-            class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-            :title="themeMode === 'system' ? '跟随系统' : themeMode === 'dark' ? '深色模式' : '浅色模式'"
-            @click="toggleDarkMode"
-          >
-            <SunMoon
-              v-if="themeMode === 'system'"
-              class="h-4 w-4"
-            />
-            <SunMedium
-              v-else-if="themeMode === 'light'"
-              class="h-4 w-4"
-            />
-            <Moon
-              v-else
-              class="h-4 w-4"
-            />
-          </button>
+          <ThemeModeButton />
           <!-- GitHub Link -->
           <a
             href="https://github.com/fawney19/Aether"
             target="_blank"
             rel="noopener noreferrer"
             class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-            title="GitHub 仓库"
+            :title="t('common.githubRepository')"
           >
             <GithubIcon class="h-4 w-4" />
           </a>
@@ -363,8 +325,8 @@
       v-model="requiredAnnouncementOpen"
       persistent
       size="lg"
-      title="必读公告"
-      description="请确认后继续使用"
+      :title="t('announcement.requiredTitle')"
+      :description="t('announcement.requiredDescription')"
     >
       <div
         v-if="currentRequiredAnnouncement"
@@ -391,7 +353,7 @@
           :disabled="acknowledgingRequiredAnnouncement"
           @click="acknowledgeRequiredAnnouncement"
         >
-          {{ acknowledgingRequiredAnnouncement ? '确认中...' : '确认已读' }}
+          {{ acknowledgingRequiredAnnouncement ? t('common.confirming') : t('common.confirmRead') }}
         </Button>
       </template>
     </Dialog>
@@ -432,7 +394,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { marked } from 'marked'
 import { useAuthStore } from '@/stores/auth'
 import { useModuleStore } from '@/stores/modules'
-import { useDarkMode } from '@/composables/useDarkMode'
 import { useSiteInfo } from '@/composables/useSiteInfo'
 import { useToast } from '@/composables/useToast'
 import { isDemoMode } from '@/config/demo'
@@ -444,50 +405,25 @@ import { Dialog } from '@/components/ui'
 import AppShell from '@/components/layout/AppShell.vue'
 import SidebarNav from '@/components/layout/SidebarNav.vue'
 import HeaderLogo from '@/components/HeaderLogo.vue'
+import LanguageSwitcher from '@/components/common/LanguageSwitcher.vue'
+import ThemeModeButton from '@/components/common/ThemeModeButton.vue'
 import UpdateDialog from '@/components/common/UpdateDialog.vue'
 import VersionButton from '@/components/common/VersionButton.vue'
 import { buildUpdateErrorStatus } from '@/utils/updateStatus'
 import {
-  Home,
-  Users,
-  Key,
-  KeyRound,
-  BarChart3,
-  Cog,
   Settings,
-  Activity,
-  Shield,
   AlertTriangle,
-  SunMedium,
-  Moon,
-  Gauge,
-  Layers,
-  FolderTree,
-  Database,
-  Box,
   LogOut,
-  SunMoon,
   ChevronRight,
-  Megaphone,
-  Wallet,
-  CreditCard,
-  Package,
-  Gift,
   Menu,
   X,
-  Puzzle,
-  Zap,
-  FileUp,
-  Send,
-  Server,
-  SlidersHorizontal,
-  type LucideIcon,
 } from 'lucide-vue-next'
 
 import GithubIcon from '@/components/icons/GithubIcon.vue'
-import { BUILTIN_TOOL_BREADCRUMBS } from '@/config/builtin-tools'
 import { prefetchAdminNavigationTarget } from '@/utils/adminNavigationPrefetch'
 import { sanitizeMarkdown } from '@/utils/sanitize'
+import { useI18n, type MessageKey } from '@/i18n'
+import { buildBreadcrumbs, buildNavigation } from './main-layout/navigation'
 
 type SystemUpdatePhase = 'download' | 'restart' | 'reconnecting'
 
@@ -495,9 +431,9 @@ const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 const moduleStore = useModuleStore()
-const { themeMode, toggleDarkMode } = useDarkMode()
 const { siteName, siteSubtitle } = useSiteInfo()
 const { success, error: showError } = useToast()
+const { t, locale } = useI18n()
 const isDemo = computed(() => isDemoMode())
 const isAdmin = computed(() => authStore.user?.role === 'admin')
 
@@ -523,7 +459,7 @@ const updateSupported = ref(true)
 const updateStrategy = ref('manual')
 const updateCapabilityMessage = ref<string | null>(null)
 const dockerUpdateCommand = ref<string | null>(null)
-const reconnectMessage = ref('等待服务恢复...')
+const reconnectMessage = ref(t('update.reconnect.waiting'))
 const rollbackAvailable = ref(false)
 const rollingBack = ref(false)
 const updateTaskStatus = ref<UpdateTaskStatusResponse | null>(null)
@@ -532,30 +468,34 @@ const systemUpdatePhase = ref<SystemUpdatePhase>(readStoredSystemUpdatePhase())
 const preparedUpdateVersion = ref<string | null>(
   readSessionStorageItem('aether_prepared_update_version')
 )
-const SOURCE_BUILD_UPDATE_HINT = '当前为源码构建，请使用 git pull 后重新编译。'
-const SOURCE_BUILD_RELEASE_HINT = '当前为源码构建，请手动切换到对应标签后重新编译。'
-const MANUAL_UPDATE_HINT = '当前部署策略不支持在线自更新，请手动下载 Release 或使用安装脚本更新。'
+const SOURCE_BUILD_UPDATE_HINT: MessageKey = 'update.error.sourceBuildUpdateHint'
+const SOURCE_BUILD_RELEASE_HINT: MessageKey = 'update.error.sourceBuildReleaseHint'
+const MANUAL_UPDATE_HINT: MessageKey = 'update.error.manualHint'
+const VERSION_STATUS_CACHE_KEY = 'aether_version_status_cache'
+const VERSION_STATUS_CACHE_TTL_MS = 20 * 60 * 1000
+const VERSION_STATUS_ERROR_CACHE_TTL_MS = 5 * 60 * 1000
 let versionStatusLoadPromise: Promise<CheckUpdateResponse | null> | null = null
 let updateStatusPollTimer: number | null = null
+let updateCheckTimer: number | null = null
+let requiredAnnouncementsPromise: Promise<void> | null = null
 const updateProgressPercent = computed(() => updateTaskStatus.value?.progress_percent ?? null)
 const updateProgressText = computed(() => formatUpdateProgressText(updateTaskStatus.value))
 const updateDialogTitle = computed(() => {
   if (updateDialogMode.value === 'selected') {
-    return updateSupported.value ? '切换版本' : '版本详情'
+    return updateSupported.value ? t('update.title.selected') : t('update.title.selectedReadOnly')
   }
-  return '发现新版本'
+  return t('update.title.latest')
 })
 const updateDialogVersionLabel = computed(() => {
   if (updateDialogMode.value === 'selected') {
-    return updateSupported.value ? '目标版本' : '版本标签'
+    return updateSupported.value ? t('update.version.target') : t('update.version.tag')
   }
-  return '最新版本'
+  return t('update.version.latest')
 })
 const updateDialogReleaseLinkLabel = computed(() => {
-  if (updateDialogMode.value === 'selected') return '查看标签页'
-  return updateSupported.value ? '查看更新' : '查看发布'
+  if (updateDialogMode.value === 'selected') return t('update.link.tag')
+  return updateSupported.value ? t('update.link.update') : t('update.link.release')
 })
-
 watch(systemUpdatePhase, (val) => {
   setSessionStorageItem('aether_update_phase', val)
 })
@@ -597,9 +537,49 @@ function removeSessionStorageItem(key: string) {
   }
 }
 
+function readCachedVersionStatus(): CheckUpdateResponse | null {
+  const raw = readSessionStorageItem(VERSION_STATUS_CACHE_KEY)
+  if (!raw) return null
+
+  try {
+    const parsed = JSON.parse(raw) as { cachedAt?: unknown; status?: unknown }
+    const cachedAt = typeof parsed.cachedAt === 'number' ? parsed.cachedAt : 0
+    const status = parsed.status as CheckUpdateResponse | undefined
+    if (!status || typeof status !== 'object') return null
+
+    const ttl = status.error ? VERSION_STATUS_ERROR_CACHE_TTL_MS : VERSION_STATUS_CACHE_TTL_MS
+    if (Date.now() - cachedAt > ttl) {
+      removeSessionStorageItem(VERSION_STATUS_CACHE_KEY)
+      return null
+    }
+    return status
+  } catch {
+    removeSessionStorageItem(VERSION_STATUS_CACHE_KEY)
+    return null
+  }
+}
+
+function cacheVersionStatus(status: CheckUpdateResponse | null) {
+  if (!status) return
+  setSessionStorageItem(
+    VERSION_STATUS_CACHE_KEY,
+    JSON.stringify({ cachedAt: Date.now(), status })
+  )
+}
+
+function applyCachedVersionStatus(): boolean {
+  const cached = readCachedVersionStatus()
+  if (!cached) return false
+  versionStatus.value = cached
+  syncSystemUpdatePhase(cached)
+  return true
+}
+
 function formatUpdateProgressText(status: UpdateTaskStatusResponse | null): string {
-  if (!status) return '正在下载更新包...'
-  const label = status.progress_label ? `正在下载${status.progress_label}` : formatUpdateTaskPhase(status.phase)
+  if (!status) return t('update.progress.downloadPackage')
+  const label = status.progress_label
+    ? t('update.progress.downloadingLabel', { label: status.progress_label })
+    : formatUpdateTaskPhase(status.phase)
   const downloaded = status.downloaded_bytes
   const total = status.total_bytes
   if (typeof downloaded === 'number' && typeof total === 'number' && total > 0) {
@@ -614,17 +594,17 @@ function formatUpdateProgressText(status: UpdateTaskStatusResponse | null): stri
 function formatUpdateTaskPhase(phase: string): string {
   switch (phase) {
     case 'downloading':
-      return '正在下载更新包'
+      return t('update.progress.downloadingPackage')
     case 'downloading_checksum':
-      return '正在下载校验文件'
+      return t('update.progress.downloadingChecksum')
     case 'verifying':
-      return '正在校验更新包'
+      return t('update.progress.verifying')
     case 'extracting':
-      return '正在解压更新包'
+      return t('update.progress.extracting')
     case 'prepared':
-      return '更新包已准备完成'
+      return t('update.progress.prepared')
     default:
-      return '正在准备更新'
+      return t('update.progress.preparing')
   }
 }
 
@@ -650,10 +630,10 @@ async function waitForPreparedUpdate(): Promise<UpdateTaskStatusResponse> {
     const status = updateTaskStatus.value
     if (status?.phase === 'prepared') return status
     if (status?.phase === 'failed') {
-      throw new Error(status.error || '下载更新失败')
+      throw new Error(status.error || t('update.error.downloadFailed'))
     }
   }
-  throw new Error('下载更新超时')
+  throw new Error(t('update.error.downloadTimeout'))
 }
 
 function startUpdateStatusPolling() {
@@ -696,6 +676,9 @@ function shouldShowUpdatePrompt(latestVersion: string): boolean {
 
 async function loadVersionStatus(force = false) {
   if (!isAdmin.value) return null
+  if (!force && applyCachedVersionStatus()) {
+    return versionStatus.value
+  }
   if (versionStatusLoadPromise) return versionStatusLoadPromise
 
   loadingVersionStatus.value = true
@@ -716,9 +699,11 @@ async function loadVersionStatus(force = false) {
           }
         : status
       syncSystemUpdatePhase(versionStatus.value)
+      cacheVersionStatus(versionStatus.value)
       return versionStatus.value
     } catch (error) {
       versionStatus.value = buildUpdateErrorStatus(versionStatus.value, error)
+      cacheVersionStatus(versionStatus.value)
       return versionStatus.value
     } finally {
       loadingVersionStatus.value = false
@@ -737,8 +722,8 @@ function applyUpdateCapability(capability: SystemUpdateCapabilityResponse) {
   dockerUpdateCommand.value = capability.docker_update_command || null
 }
 
-function updateUnsupportedMessage(fallback = MANUAL_UPDATE_HINT): string {
-  return updateCapabilityMessage.value || fallback
+function updateUnsupportedMessage(fallback: MessageKey = MANUAL_UPDATE_HINT): string {
+  return updateCapabilityMessage.value || t(fallback)
 }
 
 function syncSystemUpdatePhase(status: CheckUpdateResponse | null) {
@@ -778,7 +763,7 @@ function buildUpdateInfoFromRelease(release: ReleaseEntry): CheckUpdateResponse 
     has_update: !release.is_current,
     updatable: canSelfUpdate && !release.is_current && release.updatable,
     update_blocker: release.is_current
-      ? '当前已是这个版本'
+      ? t('update.error.alreadyCurrent')
       : !canSelfUpdate
         ? updateUnsupportedMessage(SOURCE_BUILD_RELEASE_HINT)
       : release.update_blocker,
@@ -807,8 +792,8 @@ async function handleApplySystemUpdate() {
     applyUpdateCapability(capability)
     if (!capability.supported) {
       showError(
-        updateUnsupportedMessage('不支持在线自更新'),
-        '不支持在线更新'
+        updateUnsupportedMessage('update.error.unsupported'),
+        t('update.error.unsupportedTitle')
       )
       return
     }
@@ -817,8 +802,8 @@ async function handleApplySystemUpdate() {
       const targetStatus = updateInfo.value || versionStatus.value
       if (targetStatus?.has_update && targetStatus.updatable === false) {
         showError(
-          targetStatus.update_blocker || '当前版本暂不支持在线更新',
-          '无法在线更新'
+          targetStatus.update_blocker || t('update.error.notUpdatable'),
+          t('update.error.cannotUpdateOnline')
         )
         return
       }
@@ -830,7 +815,7 @@ async function handleApplySystemUpdate() {
         const finalStatus = await waitForPreparedUpdate()
         preparedUpdateVersion.value = targetVersion
         systemUpdatePhase.value = 'restart'
-        success(finalStatus.output || result.message || '更新包已下载完成，请点击“立即重启”完成安装')
+        success(finalStatus.output || result.message || t('update.success.prepared'))
       } finally {
         stopUpdateStatusPolling()
         void refreshUpdateTaskStatus()
@@ -839,14 +824,14 @@ async function handleApplySystemUpdate() {
     }
 
     const result = await adminApi.applySystemUpdate(preparedUpdateVersion.value)
-    success(result.message || '一键重启已启动')
+    success(result.message || t('update.success.restartStarted'))
     systemUpdatePhase.value = 'reconnecting'
-    reconnectMessage.value = '服务正在重启...'
+    reconnectMessage.value = t('update.reconnect.restarting')
     showUpdateDialog.value = true
     applyingSystemUpdate.value = false
     await pollHealthUntilReady()
   } catch (err) {
-    const fallback = systemUpdatePhase.value === 'download' ? '下载更新失败' : '启动重启失败'
+    const fallback = systemUpdatePhase.value === 'download' ? t('update.error.downloadFailed') : t('update.error.restartFailed')
     showError(parseApiError(err, fallback))
   } finally {
     applyingSystemUpdate.value = false
@@ -858,14 +843,14 @@ async function handleRollback() {
   rollingBack.value = true
   try {
     const result = await adminApi.rollbackSystemUpdate()
-    success(result.message || '回滚已启动')
+    success(result.message || t('update.success.rollbackStarted'))
     systemUpdatePhase.value = 'reconnecting'
-    reconnectMessage.value = '正在回滚到上一版本...'
+    reconnectMessage.value = t('update.reconnect.rollback')
     showUpdateDialog.value = true
     rollingBack.value = false
     await pollHealthUntilReady()
   } catch (err) {
-    showError(parseApiError(err, '回滚失败'))
+    showError(parseApiError(err, t('update.error.rollbackFailed')))
   } finally {
     rollingBack.value = false
   }
@@ -877,20 +862,22 @@ async function pollHealthUntilReady() {
 
   for (let i = 0; i < maxAttempts; i++) {
     if (i < 3) {
-      reconnectMessage.value = i === 0 ? '服务正在重启...' : `服务正在重启... (${i * 2}s)`
+      reconnectMessage.value = i === 0
+        ? t('update.reconnect.restarting')
+        : t('update.reconnect.restartingWithSeconds', { seconds: i * 2 })
       await new Promise(r => setTimeout(r, intervalMs))
       continue
     }
 
     const elapsed = i * 2
-    reconnectMessage.value = `等待服务恢复... (${elapsed}s)`
+    reconnectMessage.value = t('update.reconnect.waitingWithSeconds', { seconds: elapsed })
     try {
       const resp = await fetch('/_gateway/health', {
         method: 'GET',
         signal: AbortSignal.timeout(3000),
       })
       if (resp.ok) {
-        reconnectMessage.value = '服务已恢复，正在刷新...'
+        reconnectMessage.value = t('update.reconnect.ready')
         await new Promise(r => setTimeout(r, 500))
         window.location.replace(buildFreshReloadUrl())
         return
@@ -904,7 +891,7 @@ async function pollHealthUntilReady() {
       try {
         const status = await adminApi.getUpdateStatus()
         if (status.phase === 'failed' && status.error) {
-          reconnectMessage.value = `更新失败: ${status.error}`
+          reconnectMessage.value = t('update.error.updateFailedWithReason', { reason: status.error })
           systemUpdatePhase.value = 'download'
           return
         }
@@ -916,7 +903,7 @@ async function pollHealthUntilReady() {
     await new Promise(r => setTimeout(r, intervalMs))
   }
 
-  reconnectMessage.value = '等待超时，请手动刷新页面'
+  reconnectMessage.value = t('update.reconnect.timeout')
   systemUpdatePhase.value = 'download'
 }
 
@@ -981,7 +968,10 @@ async function checkForUpdate() {
 
   // 同一会话内只检查一次
   const sessionKey = 'aether_update_checked'
-  if (sessionStorage.getItem(sessionKey)) return
+  if (sessionStorage.getItem(sessionKey)) {
+    applyCachedVersionStatus()
+    return
+  }
   sessionStorage.setItem(sessionKey, '1')
 
   const result = versionStatus.value ?? await loadVersionStatus()
@@ -1026,12 +1016,20 @@ watch(
 
 async function loadRequiredAnnouncements() {
   if (!authStore.user || !authStore.token) return
-  try {
-    const response = await announcementApi.getRequiredUnreadAnnouncements()
-    requiredAnnouncements.value = response.items.filter(item => item.requires_ack && !item.is_read)
-  } catch {
-    requiredAnnouncements.value = []
-  }
+  if (requiredAnnouncementsPromise) return requiredAnnouncementsPromise
+
+  requiredAnnouncementsPromise = (async () => {
+    try {
+      const response = await announcementApi.getRequiredUnreadAnnouncements()
+      requiredAnnouncements.value = response.items.filter(item => item.requires_ack && !item.is_read)
+    } catch {
+      requiredAnnouncements.value = []
+    } finally {
+      requiredAnnouncementsPromise = null
+    }
+  })()
+
+  return requiredAnnouncementsPromise
 }
 
 function renderRequiredAnnouncement(content: string): string {
@@ -1039,7 +1037,7 @@ function renderRequiredAnnouncement(content: string): string {
 }
 
 function formatRequiredAnnouncementDate(value: string): string {
-  return new Date(value).toLocaleString('zh-CN')
+  return new Date(value).toLocaleString(locale.value)
 }
 
 async function acknowledgeRequiredAnnouncement() {
@@ -1058,16 +1056,19 @@ onMounted(() => {
   window.addEventListener('storage', handleStorageChange)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   syncAuthNotice()
+  applyCachedVersionStatus()
 
   // 管理员预加载模块状态（路由守卫会按需加载，这里提前加载以避免菜单闪烁）
   if (authStore.canAccessAdmin && !moduleStore.loaded && !moduleStore.loading) {
-    moduleStore.fetchModules()
+    void moduleStore.fetchModules().catch(() => {
+      // 路由守卫会在需要模块状态时按需处理失败场景。
+    })
   }
-  void loadVersionStatus()
   void loadRequiredAnnouncements()
 
-  // 延迟检查更新，避免影响页面加载
-  setTimeout(() => {
+  // 延迟检查更新，避免 GitHub Releases 检查和首屏业务数据争抢资源。
+  updateCheckTimer = window.setTimeout(() => {
+    updateCheckTimer = null
     void checkForUpdate()
   }, 2000)
 
@@ -1080,6 +1081,10 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('storage', handleStorageChange)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
+  if (updateCheckTimer !== null) {
+    window.clearTimeout(updateCheckTimer)
+    updateCheckTimer = null
+  }
   stopUpdateStatusPolling()
   if (import.meta.env.DEV && window.__aetherShowUpdateDialog === showDebugUpdateDialog) {
     delete window.__aetherShowUpdateDialog
@@ -1111,187 +1116,28 @@ function prefetchNavigationItem(href: string) {
   prefetchAdminNavigationTarget(href)
 }
 
-// Navigation Data
 const navigation = computed(() => {
-  const baseNavigation = [
-    {
-      title: '概览',
-      items: [
-        { name: '仪表盘', href: '/dashboard', icon: Home },
-        { name: '健康监控', href: '/dashboard/endpoint-status', icon: Activity },
-      ]
-    },
-    {
-      title: '资源',
-      items: [
-        { name: '模型目录', href: '/dashboard/models', icon: Box },
-        { name: 'API 密钥', href: '/dashboard/api-keys', icon: Key },
-      ]
-    },
-    {
-      title: '账户',
-      items: [
-         { name: '钱包中心', href: '/dashboard/wallet', icon: Wallet },
-         { name: '套餐中心', href: '/dashboard/billing', icon: Package },
-         ...(moduleStore.isActive('referral') ? [{ name: '我的邀请', href: '/dashboard/referral', icon: Gift }] : []),
-         { name: '使用统计', href: '/dashboard/usage', icon: BarChart3 },
-      ]
-    }
-  ]
-
-  // 系统菜单项（静态部分）
-  const systemItems: { name: string; href: string; icon: LucideIcon }[] = [
-    { name: '公告管理', href: '/admin/announcements', icon: Megaphone },
-    { name: '缓存监控', href: '/admin/cache-monitoring', icon: Gauge },
-  ]
-
-  // 动态添加已激活模块的菜单项
-  // 图标映射
-  const iconMap: Record<string, LucideIcon> = {
-    Key,
-    KeyRound,
-    FileUp,
-    Shield,
-    Puzzle,
-    Server,
-    Send,
-    SlidersHorizontal,
-    CreditCard,
-    Gift,
-  }
-
-  const activeModuleItems = (group: string) =>
-    Object.values(moduleStore.modules)
-      .filter(m => m.active && m.admin_route && m.admin_menu_group === group)
-      .sort((a, b) => a.admin_menu_order - b.admin_menu_order)
-      .map(m => ({
-        name: m.display_name,
-        href: m.admin_route ?? '',
-        icon: iconMap[m.admin_menu_icon || ''] || Puzzle
-      }))
-
-  systemItems.push(...activeModuleItems('system'))
-
-  // 模块管理和系统设置放在最后
-  systemItems.push({ name: '模块管理', href: '/admin/modules', icon: Puzzle })
-  systemItems.push({ name: '系统设置', href: '/admin/system', icon: Cog })
-
-  const adminNavigation = [
-     {
-      title: '概览',
-      items: [
-        { name: '仪表盘', href: '/admin/dashboard', icon: Home },
-        { name: '健康监控', href: '/admin/health-monitor', icon: Activity },
-        { name: '用户统计', href: '/admin/user-stats', icon: BarChart3 },
-        { name: '成本分析', href: '/admin/cost-analysis', icon: Gauge },
-        { name: '性能分析', href: '/admin/performance-analysis', icon: Activity },
-      ]
-    },
-    {
-      title: '管理',
-      items: [
-        { name: '用户管理', href: '/admin/users', icon: Users },
-        { name: '提供商', href: '/admin/providers', icon: FolderTree },
-        { name: '模型管理', href: '/admin/models', icon: Layers },
-        { name: '调度策略', href: '/admin/routing', icon: SlidersHorizontal },
-        { name: '号池管理', href: '/admin/pool', icon: Database },
-        { name: '独立密钥', href: '/admin/keys', icon: Key },
-        { name: '钱包管理', href: '/admin/wallets', icon: Wallet },
-        { name: '套餐管理', href: '/admin/billing-plans', icon: Package },
-        ...activeModuleItems('management'),
-        { name: '异步任务', href: '/admin/async-tasks', icon: Zap },
-        { name: '使用记录', href: '/admin/usage', icon: BarChart3 },
-      ]
-    },
-    {
-      title: '系统',
-      items: systemItems
-    }
-  ]
-
-  return authStore.canAccessAdmin ? adminNavigation : baseNavigation
+  return buildNavigation({
+    canAccessAdmin: authStore.canAccessAdmin,
+    modules: moduleStore.modules,
+    isModuleActive: moduleStore.isActive,
+    t,
+  })
 })
 
 const currentRoleLabel = computed(() => {
-  if (authStore.isAdmin) return '管理员'
-  if (authStore.isAuditAdmin) return '审计管理员'
-  return '用户'
+  if (authStore.isAdmin) return t('auth.role.admin')
+  if (authStore.isAuditAdmin) return t('auth.role.auditAdmin')
+  return t('auth.role.user')
 })
 
-// Breadcrumbs
-interface BreadcrumbItem {
-  label: string
-  href?: string
-}
-
-const breadcrumbs = computed((): BreadcrumbItem[] => {
-  // Special case: personal settings page accessed by admin
-  if (route.path === '/dashboard/settings') {
-    return [
-      { label: '账户' },
-      { label: '个人设置' }
-    ]
-  }
-
-  // Special case: module config pages (e.g., /admin/ldap)
-  if (route.meta?.module) {
-    const moduleName = route.meta.module as string
-    const moduleStatus = moduleStore.modules[moduleName]
-    const displayName = moduleStatus?.display_name || moduleName
-    return [
-      { label: '系统' },
-      { label: '模块管理', href: '/admin/modules' },
-      { label: displayName }
-    ]
-  }
-
-  // Special case: built-in tools under module management
-  if (BUILTIN_TOOL_BREADCRUMBS[route.path]) {
-    return [
-      { label: '系统' },
-      { label: '模块管理', href: '/admin/modules' },
-      { label: BUILTIN_TOOL_BREADCRUMBS[route.path] }
-    ]
-  }
-
-  // Special case: routing strategy detail pages
-  if (route.path.startsWith('/admin/routing/') && route.path !== '/admin/routing') {
-    return [
-      { label: '管理' },
-      { label: '调度策略', href: '/admin/routing' },
-      {
-        label: route.name === 'RoutingProfileCreate'
-          ? '新建调度策略'
-          : '调度策略配置'
-      }
-    ]
-  }
-
-  // Find section and page from navigation
-  for (const group of navigation.value) {
-    const activeItem = group.items.find(item => isNavActive(item.href))
-    if (activeItem) {
-      return [
-        { label: group.title || '' },
-        { label: activeItem.name }
-      ]
-    }
-  }
-
-  // Special case: module pages not in navigation (module not active)
-  // Check if current path matches a module's admin_route
-  const currentModule = Object.values(moduleStore.modules).find(
-    m => m.admin_route && route.path === m.admin_route
-  )
-  if (currentModule) {
-    return [
-      { label: '模块管理', href: '/admin/modules' },
-      { label: currentModule.display_name }
-    ]
-  }
-
-  return [{ label: '仪表盘' }]
-})
+const breadcrumbs = computed(() => buildBreadcrumbs({
+  route,
+  navigation: navigation.value,
+  modules: moduleStore.modules,
+  isNavActive,
+  t,
+}))
 
 // Styling Classes (Editorial)
 const sidebarClasses = computed(() => {

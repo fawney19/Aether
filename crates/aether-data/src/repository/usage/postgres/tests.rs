@@ -982,6 +982,9 @@ fn usage_sql_does_not_allow_streaming_to_regress_back_to_pending() {
             "WHEN \"usage\".status = 'streaming' AND EXCLUDED.status = 'pending' THEN \"usage\".status_code"
         ));
     assert!(super::UPSERT_SQL.contains(
+            "WHEN \"usage\".status = 'streaming' AND EXCLUDED.status = 'streaming' AND EXCLUDED.status_code IS NULL THEN \"usage\".status_code"
+        ));
+    assert!(super::UPSERT_SQL.contains(
             "WHEN \"usage\".status = 'streaming' AND EXCLUDED.status = 'pending' THEN \"usage\".error_message"
         ));
     assert!(super::UPSERT_SQL.contains(

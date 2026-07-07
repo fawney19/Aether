@@ -917,11 +917,6 @@ async function handleSubmit() {
   }
   form.value.supported_capabilities = caps.size > 0 ? [...caps] : []
 
-  // 清理空的 config
-  const cleanConfig = form.value.config && Object.keys(form.value.config).length > 0
-    ? form.value.config
-    : undefined
-
   submitting.value = true
   try {
     if (isEditMode.value && props.model) {

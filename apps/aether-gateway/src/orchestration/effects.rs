@@ -657,16 +657,10 @@ async fn record_health_failure_effect(
             .or(current_key.circuit_breaker_by_format.as_ref())
     };
 
-    if !provider_key_health_success_persist_gate_allows(
-        &context.plan.key_id,
-        api_format,
-        circuit_breaker_update_owned.is_some(),
-    ) {
-        return;
-    }
+    provider_key_health_success_persist_gate_reset(&context.plan.key_id, api_format);
 
     if let Err(err) = state
-        .update_provider_catalog_key_health_state(
+        .update_provider_catalog_key_success_health_state(
             &context.plan.key_id,
             current_key.is_active,
             Some(&health_by_format),
@@ -731,7 +725,13 @@ async fn record_health_success_effect(
             .or(current_key.circuit_breaker_by_format.as_ref())
     };
 
-    clear_provider_key_health_success_persist_gate(&context.plan.key_id, api_format);
+    if !provider_key_health_success_persist_gate_allows(
+        &context.plan.key_id,
+        api_format,
+        circuit_breaker_update_owned.is_some(),
+    ) {
+        return;
+    }
 
     if let Err(err) = state
         .update_provider_catalog_key_health_state(
@@ -770,7 +770,7 @@ fn provider_key_health_success_persist_gate_allows(
     )
 }
 
-fn clear_provider_key_health_success_persist_gate(key_id: &str, api_format: &str) {
+fn provider_key_health_success_persist_gate_reset(key_id: &str, api_format: &str) {
     let key = provider_key_health_success_persist_gate_key(key_id, api_format);
     HEALTH_SUCCESS_PERSIST_GATE.remove(&key);
 }

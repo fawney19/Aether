@@ -14,10 +14,10 @@
       <!-- Reconnecting State -->
       <template v-if="updatePhase === 'reconnecting'">
         <h2 class="text-xl font-semibold text-foreground mt-4 mb-2">
-          正在重启服务
+          {{ legacyT('正在重启服务') }}
         </h2>
         <p class="text-sm text-muted-foreground max-w-xs mt-2 mb-2">
-          服务正在切换版本并重启，请稍候...
+          {{ legacyT('服务正在切换版本并重启，请稍候...') }}
         </p>
         <div class="flex items-center gap-2 text-primary mt-2 mb-4">
           <svg
@@ -71,10 +71,10 @@
             v-if="publishedAt"
             class="mb-2 text-left text-xs text-muted-foreground"
           >
-            发布于 {{ formattedPublishedAt }}
+            {{ legacyT('发布于') }} {{ formattedPublishedAt }}
           </div>
           <div class="mb-2 text-left text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground/80">
-            更新内容
+            {{ legacyT('更新内容') }}
           </div>
           <!-- eslint-disable vue/no-v-html -->
           <div
@@ -96,7 +96,7 @@
           v-if="updatePhase === 'restart'"
           class="mt-1 text-xs text-primary"
         >
-          更新包已下载，点击"立即重启"完成安装
+          {{ legacyT('更新包已下载，点击"立即重启"完成安装') }}
         </p>
 
         <div
@@ -132,7 +132,7 @@
           class="mt-3 w-full max-w-sm rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-left"
         >
           <p class="text-xs text-muted-foreground">
-            在 docker-compose.yml 所在目录执行
+            {{ legacyT('在 docker-compose.yml 所在目录执行') }}
           </p>
           <code class="mt-1 block break-all rounded bg-background/70 px-2 py-1.5 font-mono text-xs text-foreground">
             {{ dockerUpdateCommand }}
@@ -152,7 +152,7 @@
           :disabled="updating || rollingBack"
           @click="handleLater"
         >
-          稍后提醒
+          {{ legacyT('稍后提醒') }}
         </Button>
         <Button
           v-if="rollbackAvailable"
@@ -161,7 +161,7 @@
           :disabled="updating || rollingBack"
           @click="handleRollback"
         >
-          {{ rollingBack ? '回滚中...' : '回滚上一版本' }}
+          {{ rollingBack ? legacyT('回滚中...') : legacyT('回滚上一版本') }}
         </Button>
         <Button
           v-else
@@ -194,6 +194,7 @@ import { formatDisplayVersion } from '@/utils/version'
 import { normalizeReleaseNotesForDisplay } from '@/utils/releaseNotes'
 import { sanitizeMarkdown } from '@/utils/sanitize'
 import { marked } from 'marked'
+import { useI18n } from '@/i18n'
 
 const props = defineProps<{
   modelValue: boolean
@@ -224,6 +225,7 @@ const emit = defineEmits<{
   applyUpdate: []
   rollback: []
 }>()
+const { legacyT, locale } = useI18n()
 
 const SOURCE_BUILD_UPDATE_HINT = '当前为源码构建，请使用 git pull 后重新编译。'
 
@@ -237,19 +239,19 @@ const updateStrategy = computed(() => props.updateStrategy ?? 'manual')
 const isDockerUpdate = computed(() => updateStrategy.value === 'docker' && !canApplyUpdate.value)
 const dockerUpdateCommand = computed(() => props.dockerUpdateCommand || '')
 const updateBlockerText = computed(() => {
-  if (!updateSupported.value) return props.updateBlocker || SOURCE_BUILD_UPDATE_HINT
-  return props.updateBlocker || '当前版本暂不支持在线更新'
+  if (!updateSupported.value) return legacyT(props.updateBlocker || SOURCE_BUILD_UPDATE_HINT)
+  return legacyT(props.updateBlocker || '当前版本暂不支持在线更新')
 })
-const reconnectMessage = computed(() => props.reconnectMessage ?? '等待服务恢复...')
+const reconnectMessage = computed(() => legacyT(props.reconnectMessage ?? '等待服务恢复...'))
 const rollbackAvailable = computed(() => props.rollbackAvailable ?? false)
 const rollingBack = computed(() => props.rollingBack ?? false)
-const downloadProgressText = computed(() => props.downloadProgressText || '正在下载更新包...')
-const dialogTitleText = computed(() => props.dialogTitle ?? '发现新版本')
-const versionLabelText = computed(() => props.versionLabel ?? '最新版本')
-const releaseLinkLabelText = computed(() => props.releaseLinkLabel ?? '查看发布')
+const downloadProgressText = computed(() => legacyT(props.downloadProgressText || '正在下载更新包...'))
+const dialogTitleText = computed(() => legacyT(props.dialogTitle ?? '发现新版本'))
+const versionLabelText = computed(() => legacyT(props.versionLabel ?? '最新版本'))
+const releaseLinkLabelText = computed(() => legacyT(props.releaseLinkLabel ?? '查看发布'))
 const fallbackDescriptionText = computed(() => {
   if (!canApplyUpdate.value) return updateBlockerText.value
-  return '新版本已发布，建议更新以获得最新功能和安全修复'
+  return legacyT('新版本已发布，建议更新以获得最新功能和安全修复')
 })
 const downloadProgressPercent = computed(() => {
   const value = props.downloadProgressPercent
@@ -262,9 +264,9 @@ const progressBarWidth = computed(() => {
 })
 const actionButtonLabel = computed(() => {
   if (updating.value) {
-    return updatePhase.value === 'restart' ? '重启中...' : '下载中...'
+    return legacyT(updatePhase.value === 'restart' ? '重启中...' : '下载中...')
   }
-  return updatePhase.value === 'restart' ? '立即重启' : '立即更新'
+  return legacyT(updatePhase.value === 'restart' ? '立即重启' : '立即更新')
 })
 
 watch(() => props.modelValue, (val) => {
@@ -279,7 +281,7 @@ const formattedPublishedAt = computed(() => {
   if (!props.publishedAt) return ''
   try {
     const date = new Date(props.publishedAt)
-    return date.toLocaleDateString('zh-CN', {
+    return date.toLocaleDateString(locale.value, {
       year: 'numeric',
       month: 'long',
       day: 'numeric'

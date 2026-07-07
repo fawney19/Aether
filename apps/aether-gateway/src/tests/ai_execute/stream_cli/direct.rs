@@ -1,7 +1,8 @@
 use super::{
-    any, build_router_with_state, build_state_with_execution_runtime_override, json, start_server,
-    strip_sse_keepalive_comments, to_bytes, Arc, Body, Bytes, HeaderName, HeaderValue, Infallible,
-    Json, Mutex, Request, Response, Router, StatusCode, UsageRuntimeConfig, TRACE_ID_HEADER,
+    any, build_router_with_state, build_state_with_execution_runtime_override, json,
+    run_stream_cli_test, start_server, strip_sse_keepalive_comments, to_bytes, Arc, Body, Bytes,
+    HeaderName, HeaderValue, Infallible, Json, Mutex, Request, Response, Router, StatusCode,
+    UsageRuntimeConfig, TRACE_ID_HEADER,
 };
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::auth::{
@@ -23,8 +24,15 @@ use aether_data_contracts::repository::provider_catalog::{
 use aether_data_contracts::repository::usage::UsageReadRepository;
 use sha2::{Digest, Sha256};
 
-#[tokio::test]
-async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_refresh() {
+#[test]
+fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_refresh() {
+    run_stream_cli_test(
+        "gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_refresh",
+        gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_refresh_impl,
+    );
+}
+
+async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_refresh_impl() {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeStreamRequest {
         trace_id: String,

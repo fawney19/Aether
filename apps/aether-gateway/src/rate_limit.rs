@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aether_cache::ExpiringMap;
 use aether_runtime_state::{RateLimitCheck, RateLimitInput, RateLimitScope};
@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::control::GatewayControlDecision;
+use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AppState, GatewayError};
 
 const SYSTEM_RPM_CONFIG_KEY: &str = "rate_limit_per_minute";
@@ -150,8 +151,12 @@ impl FrontdoorUserRpmLimiter {
         scope_key: &str,
         bucket: u64,
     ) -> Result<u32, GatewayError> {
-        match state.runtime_state.kv_get(scope_key).await {
-            Ok(raw) => return Ok(raw.and_then(|value| value.parse::<u32>().ok()).unwrap_or(0)),
+        match state
+            .runtime_state
+            .rate_limit_count(scope_key, bucket)
+            .await
+        {
+            Ok(count) => return Ok(count),
             Err(err) if !self.config.allow_local_fallback() => {
                 return Err(GatewayError::Internal(format!(
                     "frontdoor user rpm runtime read failed: {err}"
@@ -186,7 +191,12 @@ impl FrontdoorUserRpmLimiter {
             return Ok(FrontdoorUserRpmOutcome::NotApplicable);
         }
 
+        let system_default_started_at = Instant::now();
         let system_default_limit = self.resolve_system_default_limit(state).await?;
+        observe_gateway_stage_ms(
+            "frontdoor_rpm_system_default",
+            system_default_started_at.elapsed().as_millis() as u64,
+        );
         let Some(plan) = RpmPlan::from_decision(decision, &self.config, system_default_limit)
         else {
             return Ok(FrontdoorUserRpmOutcome::NotApplicable);
@@ -196,7 +206,13 @@ impl FrontdoorUserRpmLimiter {
             return Ok(FrontdoorUserRpmOutcome::Allowed);
         }
 
-        match self.check_and_consume_runtime(state, &plan).await {
+        let runtime_check_started_at = Instant::now();
+        let runtime_check = self.check_and_consume_runtime(state, &plan).await;
+        observe_gateway_stage_ms(
+            "frontdoor_rpm_runtime_check",
+            runtime_check_started_at.elapsed().as_millis() as u64,
+        );
+        match runtime_check {
             Ok(outcome) => return Ok(outcome),
             Err(err) => {
                 warn!(
@@ -226,7 +242,13 @@ impl FrontdoorUserRpmLimiter {
             ));
         }
 
-        Ok(self.check_and_consume_memory(&plan).await)
+        let memory_fallback_started_at = Instant::now();
+        let outcome = self.check_and_consume_memory(&plan).await;
+        observe_gateway_stage_ms(
+            "frontdoor_rpm_memory_fallback",
+            memory_fallback_started_at.elapsed().as_millis() as u64,
+        );
+        Ok(outcome)
     }
 
     async fn resolve_system_default_limit(&self, state: &AppState) -> Result<u32, GatewayError> {

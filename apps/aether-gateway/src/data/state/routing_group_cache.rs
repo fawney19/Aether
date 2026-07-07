@@ -9,14 +9,16 @@ use aether_data_contracts::repository::routing_profiles::{
     StoredRoutingGroupVersion,
 };
 use async_trait::async_trait;
+use dashmap::DashMap;
 
-const ROUTING_GROUP_CACHE_TTL: Duration = Duration::from_secs(5);
+const ROUTING_GROUP_CACHE_STALE_TTL: Duration = Duration::from_secs(60);
 const ROUTING_GROUP_CACHE_MAX_ENTRIES: usize = 4_096;
+const ROUTING_GROUP_CACHE_MAX_LOAD_GUARDS: usize = 4_096;
 
 pub(super) struct CachedRoutingGroupReadRepository {
     inner: Arc<dyn RoutingGroupReadRepository>,
     entries: ExpiringMap<RoutingGroupCacheKey, RoutingGroupCacheValue>,
-    load_guard: tokio::sync::Mutex<()>,
+    load_guards: DashMap<RoutingGroupCacheKey, Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl CachedRoutingGroupReadRepository {
@@ -24,8 +26,13 @@ impl CachedRoutingGroupReadRepository {
         Self {
             inner,
             entries: ExpiringMap::new(),
-            load_guard: tokio::sync::Mutex::new(()),
+            load_guards: DashMap::new(),
         }
+    }
+
+    fn clear(&self) {
+        self.entries.clear();
+        self.load_guards.clear();
     }
 
     async fn get_or_load(
@@ -33,21 +40,38 @@ impl CachedRoutingGroupReadRepository {
         key: RoutingGroupCacheKey,
         load: impl std::future::Future<Output = Result<RoutingGroupCacheValue, DataLayerError>>,
     ) -> Result<RoutingGroupCacheValue, DataLayerError> {
-        if let Some(value) = self.entries.get_fresh(&key, ROUTING_GROUP_CACHE_TTL) {
+        if let Some((value, _age)) = self
+            .entries
+            .get_with_age(&key, ROUTING_GROUP_CACHE_STALE_TTL)
+        {
             return Ok(value);
         }
-        let _guard = self.load_guard.lock().await;
-        if let Some(value) = self.entries.get_fresh(&key, ROUTING_GROUP_CACHE_TTL) {
+        let load_guard = self.load_guard_for(&key);
+        let _guard = load_guard.lock().await;
+        if let Some((value, _age)) = self
+            .entries
+            .get_with_age(&key, ROUTING_GROUP_CACHE_STALE_TTL)
+        {
             return Ok(value);
         }
         let value = load.await?;
         self.entries.insert(
             key,
             value.clone(),
-            ROUTING_GROUP_CACHE_TTL,
+            ROUTING_GROUP_CACHE_STALE_TTL,
             ROUTING_GROUP_CACHE_MAX_ENTRIES,
         );
         Ok(value)
+    }
+
+    fn load_guard_for(&self, key: &RoutingGroupCacheKey) -> Arc<tokio::sync::Mutex<()>> {
+        if self.load_guards.len() > ROUTING_GROUP_CACHE_MAX_LOAD_GUARDS {
+            self.load_guards.clear();
+        }
+        self.load_guards
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 }
 
@@ -92,6 +116,10 @@ fn subject_cache_key(subject: Option<RoutingGroupBindingSubject>) -> Option<&'st
 
 #[async_trait]
 impl RoutingGroupReadRepository for CachedRoutingGroupReadRepository {
+    fn clear_local_cache(&self) {
+        self.clear();
+    }
+
     async fn list_routing_groups(&self) -> Result<Vec<StoredRoutingGroup>, DataLayerError> {
         match self
             .get_or_load(RoutingGroupCacheKey::ListGroups, async {
@@ -166,5 +194,69 @@ impl RoutingGroupReadRepository for CachedRoutingGroupReadRepository {
             RoutingGroupCacheValue::Versions(versions) => Ok(versions),
             _ => Ok(Vec::new()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct CountingRoutingGroupReadRepository {
+        list_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl RoutingGroupReadRepository for CountingRoutingGroupReadRepository {
+        async fn list_routing_groups(&self) -> Result<Vec<StoredRoutingGroup>, DataLayerError> {
+            self.list_calls.fetch_add(1, Ordering::AcqRel);
+            Ok(Vec::new())
+        }
+
+        async fn find_routing_group(
+            &self,
+            _lookup: RoutingGroupLookupKey<'_>,
+        ) -> Result<Option<StoredRoutingGroup>, DataLayerError> {
+            Ok(None)
+        }
+
+        async fn list_routing_group_bindings(
+            &self,
+            _query: &RoutingGroupBindingQuery,
+        ) -> Result<Vec<StoredRoutingGroupBinding>, DataLayerError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_routing_group_versions(
+            &self,
+            _group_id: &str,
+        ) -> Result<Vec<StoredRoutingGroupVersion>, DataLayerError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_local_cache_forces_next_load() {
+        let inner = Arc::new(CountingRoutingGroupReadRepository::default());
+        let repository = CachedRoutingGroupReadRepository::new(inner.clone());
+
+        repository
+            .list_routing_groups()
+            .await
+            .expect("initial list should load");
+        repository
+            .list_routing_groups()
+            .await
+            .expect("cached list should load");
+        assert_eq!(inner.list_calls.load(Ordering::Acquire), 1);
+
+        repository.clear_local_cache();
+        repository
+            .list_routing_groups()
+            .await
+            .expect("cleared list should reload");
+        assert_eq!(inner.list_calls.load(Ordering::Acquire), 2);
     }
 }

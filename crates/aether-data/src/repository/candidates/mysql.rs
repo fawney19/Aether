@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use sqlx::{mysql::MySqlRow, MySql, QueryBuilder, Row};
 
 use super::{
-    PublicHealthStatusCount, PublicHealthTimelineBucket, RequestCandidateReadRepository,
-    RequestCandidateStatus, RequestCandidateWriteRepository, StoredRequestCandidate,
-    UpsertRequestCandidateRecord,
+    request_candidate_lifecycle_would_regress, PublicHealthStatusCount, PublicHealthTimelineBucket,
+    RequestCandidateReadRepository, RequestCandidateStatus, RequestCandidateWriteRepository,
+    StoredRequestCandidate, UpsertRequestCandidateRecord,
 };
 use crate::driver::mysql::MysqlPool;
 use crate::error::SqlResultExt;
@@ -374,6 +374,17 @@ fn merge_candidate(
     candidate: UpsertRequestCandidateRecord,
     existing: Option<StoredRequestCandidate>,
 ) -> Result<StoredRequestCandidate, DataLayerError> {
+    let preserve_existing_lifecycle = existing.as_ref().is_some_and(|value| {
+        request_candidate_lifecycle_would_regress(value.status, candidate.status)
+    });
+    let merged_status = if preserve_existing_lifecycle {
+        existing
+            .as_ref()
+            .map(|value| value.status)
+            .unwrap_or(candidate.status)
+    } else {
+        candidate.status
+    };
     let created_at_unix_ms = candidate
         .created_at_unix_ms
         .filter(|value| *value > 1000)
@@ -426,7 +437,7 @@ fn merge_candidate(
         candidate
             .key_id
             .or_else(|| existing.as_ref().and_then(|value| value.key_id.clone())),
-        candidate.status,
+        merged_status,
         candidate.skip_reason.or_else(|| {
             existing
                 .as_ref()
@@ -435,25 +446,48 @@ fn merge_candidate(
         candidate
             .is_cached
             .unwrap_or_else(|| existing.as_ref().is_some_and(|value| value.is_cached)),
-        candidate.status_code.map(i32::from).or_else(|| {
+        if preserve_existing_lifecycle {
             existing
                 .as_ref()
                 .and_then(|value| value.status_code.map(i32::from))
-        }),
-        candidate
-            .error_type
-            .or_else(|| existing.as_ref().and_then(|value| value.error_type.clone())),
-        candidate.error_message.or_else(|| {
+        } else {
+            candidate.status_code.map(i32::from).or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|value| value.status_code.map(i32::from))
+            })
+        },
+        if preserve_existing_lifecycle {
+            existing.as_ref().and_then(|value| value.error_type.clone())
+        } else {
+            candidate
+                .error_type
+                .or_else(|| existing.as_ref().and_then(|value| value.error_type.clone()))
+        },
+        if preserve_existing_lifecycle {
             existing
                 .as_ref()
                 .and_then(|value| value.error_message.clone())
-        }),
-        candidate.latency_ms.map(to_i32_u64).transpose()?.or(
+        } else {
+            candidate.error_message.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|value| value.error_message.clone())
+            })
+        },
+        if preserve_existing_lifecycle {
             match existing.as_ref().and_then(|value| value.latency_ms) {
                 Some(value) => Some(to_i32_u64(value)?),
                 None => None,
-            },
-        ),
+            }
+        } else {
+            candidate.latency_ms.map(to_i32_u64).transpose()?.or(
+                match existing.as_ref().and_then(|value| value.latency_ms) {
+                    Some(value) => Some(to_i32_u64(value)?),
+                    None => None,
+                },
+            )
+        },
         candidate.concurrent_requests.map(to_i32).transpose()?.or(
             match existing
                 .as_ref()
@@ -475,15 +509,19 @@ fn merge_candidate(
             .or_else(|| existing.as_ref().and_then(|value| value.started_at_unix_ms))
             .map(|value| u64_to_i64(value, "request candidate started_at"))
             .transpose()?,
-        candidate
-            .finished_at_unix_ms
-            .or_else(|| {
+        if preserve_existing_lifecycle {
+            existing
+                .as_ref()
+                .and_then(|value| value.finished_at_unix_ms)
+        } else {
+            candidate.finished_at_unix_ms.or_else(|| {
                 existing
                     .as_ref()
                     .and_then(|value| value.finished_at_unix_ms)
             })
-            .map(|value| u64_to_i64(value, "request candidate finished_at"))
-            .transpose()?,
+        }
+        .map(|value| u64_to_i64(value, "request candidate finished_at"))
+        .transpose()?,
     )
 }
 
@@ -681,6 +719,9 @@ fn optional_u64_to_i64(value: Option<u64>, name: &str) -> Result<Option<i64>, Da
 #[cfg(test)]
 mod tests {
     use super::MysqlRequestCandidateRepository;
+    use crate::repository::candidates::{
+        RequestCandidateStatus, StoredRequestCandidate, UpsertRequestCandidateRecord,
+    };
 
     #[tokio::test]
     async fn repository_builds_from_lazy_pool() {
@@ -691,5 +732,76 @@ mod tests {
         );
 
         let _repository = MysqlRequestCandidateRepository::new(pool);
+    }
+
+    #[test]
+    fn merge_candidate_keeps_terminal_status_when_streaming_arrives_late() {
+        let existing = StoredRequestCandidate::new(
+            "candidate-1".to_string(),
+            "request-1".to_string(),
+            Some("user-1".to_string()),
+            Some("key-1".to_string()),
+            None,
+            None,
+            0,
+            0,
+            Some("provider-1".to_string()),
+            Some("endpoint-1".to_string()),
+            Some("provider-key-1".to_string()),
+            RequestCandidateStatus::Success,
+            None,
+            false,
+            Some(200),
+            None,
+            None,
+            Some(123),
+            None,
+            Some(serde_json::json!({"terminal": true})),
+            None,
+            1_000,
+            Some(1_001),
+            Some(1_123),
+        )
+        .expect("existing candidate should build");
+
+        let merged = super::merge_candidate(
+            UpsertRequestCandidateRecord {
+                id: "candidate-late".to_string(),
+                request_id: "request-1".to_string(),
+                user_id: Some("user-1".to_string()),
+                api_key_id: Some("key-1".to_string()),
+                username: None,
+                api_key_name: None,
+                candidate_index: 0,
+                retry_index: 0,
+                provider_id: Some("provider-1".to_string()),
+                endpoint_id: Some("endpoint-1".to_string()),
+                key_id: Some("provider-key-1".to_string()),
+                status: RequestCandidateStatus::Streaming,
+                skip_reason: None,
+                is_cached: Some(false),
+                status_code: Some(200),
+                error_type: None,
+                error_message: None,
+                latency_ms: Some(9_999),
+                concurrent_requests: None,
+                extra_data: Some(serde_json::json!({"late": true})),
+                required_capabilities: None,
+                created_at_unix_ms: Some(1_050),
+                started_at_unix_ms: Some(1_051),
+                finished_at_unix_ms: None,
+            },
+            Some(existing),
+        )
+        .expect("candidate should merge");
+
+        assert_eq!(merged.id, "candidate-1");
+        assert_eq!(merged.status, RequestCandidateStatus::Success);
+        assert_eq!(merged.latency_ms, Some(123));
+        assert_eq!(merged.finished_at_unix_ms, Some(1_123));
+        assert_eq!(
+            merged.extra_data,
+            Some(serde_json::json!({"terminal": true, "late": true}))
+        );
     }
 }

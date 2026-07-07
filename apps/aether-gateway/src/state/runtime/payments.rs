@@ -196,7 +196,11 @@ impl AppState {
             order.credited_at_unix_secs = Some(now_unix_secs);
             order.refundable_amount_usd = order.amount_usd;
             order.gateway_response = Some(serde_json::Value::Object(gateway_response));
-            return Ok(AdminWalletMutationOutcome::Applied((order.clone(), true)));
+            let updated_order = order.clone();
+            drop(wallets);
+            drop(orders);
+            self.invalidate_auth_context_cache();
+            return Ok(AdminWalletMutationOutcome::Applied((updated_order, true)));
         }
 
         match self
@@ -344,10 +348,18 @@ impl AppState {
         input: aether_data::repository::wallet::RedeemWalletCodeInput,
     ) -> Result<Option<aether_data::repository::wallet::RedeemWalletCodeOutcome>, GatewayError>
     {
-        self.data
+        let outcome = self
+            .data
             .redeem_wallet_code(input)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if matches!(
+            outcome,
+            Some(aether_data::repository::wallet::RedeemWalletCodeOutcome::Redeemed { .. })
+        ) {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(outcome)
     }
 }
 

@@ -65,6 +65,21 @@ function buildUsageRecord(overrides: Partial<UsageRecord> = {}): UsageRecord {
   }
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+async function flushMicrotasks() {
+  await Promise.resolve()
+  await Promise.resolve()
+}
+
 describe('useUsageData', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -340,6 +355,45 @@ describe('useUsageData', () => {
       tz_offset_minutes: 0,
     }))
     expect(totalRecords.value).toBe(122101)
+  })
+
+  it('keeps the exact admin record total while a later page returns an estimate', async () => {
+    const isAdminPage = ref(true)
+    const { loadRecords, totalRecords } = useUsageData({ isAdminPage })
+    const dateRange = { preset: 'last7days', tz_offset_minutes: 0 }
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord()],
+      total: 21,
+      total_is_estimated: true,
+      limit: 20,
+      offset: 0,
+    })
+    getAllUsageRecordTotalMock.mockResolvedValueOnce(8650)
+
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+    await flushMicrotasks()
+
+    expect(totalRecords.value).toBe(8650)
+
+    const exactTotal = createDeferred<number>()
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({ id: 'usage-2' })],
+      total: 41,
+      total_is_estimated: true,
+      limit: 20,
+      offset: 20,
+    })
+    getAllUsageRecordTotalMock.mockReturnValueOnce(exactTotal.promise)
+
+    await loadRecords({ page: 2, pageSize: 20 }, undefined, dateRange)
+
+    expect(totalRecords.value).toBe(8650)
+
+    exactTotal.resolve(8651)
+    await flushMicrotasks()
+
+    expect(totalRecords.value).toBe(8651)
   })
 
   it('continues loading admin breakdowns when the summary request fails', async () => {

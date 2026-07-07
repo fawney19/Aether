@@ -23,6 +23,30 @@ use aether_runtime_state::{
 
 use crate::data::GatewayDataState;
 
+const CONCURRENCY_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_concurrency_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(CONCURRENCY_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("concurrency test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 fn memory_runtime_semaphore(gate: &'static str, limit: usize) -> RuntimeSemaphore {
     RuntimeState::memory(MemoryRuntimeStateConfig::default())
         .semaphore(gate, limit, RuntimeSemaphoreConfig::default())
@@ -80,8 +104,15 @@ fn build_local_openai_gateway_state(
         )
 }
 
-#[tokio::test]
-async fn gateway_rejects_second_in_flight_stream_request_with_distributed_overload() {
+#[test]
+fn gateway_rejects_second_in_flight_stream_request_with_distributed_overload() {
+    run_concurrency_test(
+        "gateway_rejects_second_in_flight_stream_request_with_distributed_overload",
+        gateway_rejects_second_in_flight_stream_request_with_distributed_overload_impl,
+    );
+}
+
+async fn gateway_rejects_second_in_flight_stream_request_with_distributed_overload_impl() {
     let execution_runtime_hits = Arc::new(AtomicUsize::new(0));
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
     let execution_runtime = Router::new().route(
@@ -175,8 +206,15 @@ async fn gateway_rejects_second_in_flight_stream_request_with_distributed_overlo
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_rejects_second_in_flight_stream_request_with_local_overload() {
+#[test]
+fn gateway_rejects_second_in_flight_stream_request_with_local_overload() {
+    run_concurrency_test(
+        "gateway_rejects_second_in_flight_stream_request_with_local_overload",
+        gateway_rejects_second_in_flight_stream_request_with_local_overload_impl,
+    );
+}
+
+async fn gateway_rejects_second_in_flight_stream_request_with_local_overload_impl() {
     let execution_runtime_hits = Arc::new(AtomicUsize::new(0));
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
     let execution_runtime = Router::new().route(
@@ -262,8 +300,15 @@ async fn gateway_rejects_second_in_flight_stream_request_with_local_overload() {
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_exposes_request_concurrency_metrics() {
+#[test]
+fn gateway_exposes_request_concurrency_metrics() {
+    run_concurrency_test(
+        "gateway_exposes_request_concurrency_metrics",
+        gateway_exposes_request_concurrency_metrics_impl,
+    );
+}
+
+async fn gateway_exposes_request_concurrency_metrics_impl() {
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway state should build")
@@ -298,12 +343,76 @@ async fn gateway_exposes_request_concurrency_metrics() {
     assert!(body.contains("tunnel_proxy_connections 0"));
     assert!(body.contains("tunnel_nodes 0"));
     assert!(body.contains("tunnel_active_streams 0"));
+    assert!(body.contains("gateway_process_cpu_usage_basis_points "));
+    assert!(body.contains("gateway_process_memory_bytes "));
+    assert!(body.contains("gateway_process_threads "));
+    assert!(body.contains("gateway_process_open_fds "));
+    assert!(body.contains("gateway_process_fd_limit "));
+    assert!(body.contains("gateway_process_socket_fds "));
+    assert!(body.contains("gateway_allocator_observability_available "));
+    assert!(body.contains("gateway_allocator_allocated_bytes "));
+    assert!(body.contains("gateway_allocator_active_bytes "));
+    assert!(body.contains("gateway_allocator_resident_bytes "));
+    assert!(body.contains("gateway_allocator_active_to_allocated_basis_points "));
+    assert!(body.contains("gateway_network_observability_available "));
+    assert!(body.contains("gateway_network_received_bytes_total "));
+    assert!(body.contains("gateway_tcp_state_observability_available "));
+    assert!(body.contains("gateway_host_tcp_established_connections "));
+    assert!(body.contains("gateway_process_tcp_established_connections "));
+    assert!(body.contains("postgres_observability_available{driver=\"postgres\"} 0"));
+    assert!(body.contains("postgres_observability_unavailable{driver=\"postgres\"} 0"));
+    assert!(body.contains("postgres_lock_waiting_connections{driver=\"postgres\"} 0"));
+    assert!(body.contains("postgres_oldest_active_query_age_ms{driver=\"postgres\"} 0"));
+    assert!(body.contains("postgres_oldest_transaction_age_ms{driver=\"postgres\"} 0"));
+    assert!(body.contains("redis_runtime_enabled{backend=\"redis\"} 0"));
+    assert!(body.contains("redis_runtime_health_unavailable{backend=\"redis\"} 0"));
+    assert!(body.contains("redis_runtime_connected_clients{backend=\"redis\"} 0"));
+    assert!(body.contains("redis_runtime_used_memory_bytes{backend=\"redis\"} 0"));
+    assert!(body.contains("usage_runtime_queue_worker_read_batches_total 0"));
+    assert!(body.contains("usage_runtime_queue_worker_read_entries_total 0"));
+    assert!(body.contains("usage_runtime_queue_worker_reclaimed_entries_total 0"));
+    assert!(body.contains("usage_runtime_queue_worker_acked_entries_total 0"));
+    assert!(body.contains("usage_runtime_queue_worker_dead_lettered_entries_total 0"));
+    assert!(body.contains("usage_runtime_queue_worker_process_failures_total 0"));
+    assert!(body.contains("usage_runtime_queue_worker_read_failures_total 0"));
+    assert!(body.contains("usage_runtime_queue_worker_reclaim_failures_total 0"));
+    assert!(body.contains("usage_queue_health_unavailable 0"));
+    assert!(
+        body.contains("usage_queue_enabled{stream=\"usage:events\",group=\"usage_consumers\"} 0")
+    );
+    assert!(body
+        .contains("usage_queue_configured{stream=\"usage:events\",group=\"usage_consumers\"} 0"));
+    assert!(body.contains("usage_queue_dlq_length{stream=\"usage:events:dlq\"} 0"));
+    assert!(body.contains("usage_counter_health_unavailable 0"));
+    assert!(body.contains("usage_counter_outbox_pending_rows 0"));
+    assert!(body.contains("usage_counter_outbox_oldest_pending_age_seconds 0"));
+    assert!(body.contains("usage_counter_outbox_flush_batches_total 0"));
+    assert!(body.contains("usage_counter_outbox_flush_rows_claimed_total 0"));
+    assert!(body.contains("usage_counter_outbox_flush_failed_batches_total 0"));
+    assert!(body.contains("usage_counter_outbox_cleanup_rows_total 0"));
+    assert!(body.contains("usage_counter_outbox_cleanup_failed_batches_total 0"));
+    assert!(body.contains("gateway_background_tasks_active 0"));
+    assert!(body.contains("gateway_background_tasks_supervised_total 0"));
+    assert!(body.contains("gateway_background_tasks_unexpected_exits_total 0"));
+    assert!(body.contains("gateway_background_tasks_panicked_total 0"));
+    assert!(body.contains("gateway_background_tasks_aborted_total 0"));
+    assert!(body.contains("gateway_tokio_runtime_observability_available 1"));
+    assert!(body.contains("gateway_tokio_runtime_workers "));
+    assert!(body.contains("gateway_tokio_runtime_alive_tasks "));
+    assert!(body.contains("gateway_tokio_runtime_global_queue_depth "));
 
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_exposes_fallback_metrics() {
+#[test]
+fn gateway_exposes_fallback_metrics() {
+    run_concurrency_test(
+        "gateway_exposes_fallback_metrics",
+        gateway_exposes_fallback_metrics_impl,
+    );
+}
+
+async fn gateway_exposes_fallback_metrics_impl() {
     let state = AppState::new().expect("gateway state should build");
     let decision = sample_decision();
     state.record_fallback_metric(

@@ -10,8 +10,16 @@ use super::{
     RequestCandidateStatus, Router, StatusCode, DEVELOPMENT_ENCRYPTION_KEY, TRACE_ID_HEADER,
 };
 
-#[tokio::test]
-async fn gateway_executes_gemini_files_upload_via_local_decision_gate_with_local_planning_only() {
+#[test]
+fn gateway_executes_gemini_files_upload_via_local_decision_gate_with_local_planning_only() {
+    super::run_files_test(
+        "gateway_executes_gemini_files_upload_via_local_decision_gate_with_local_planning_only",
+        gateway_executes_gemini_files_upload_via_local_decision_gate_with_local_planning_only_impl,
+    );
+}
+
+async fn gateway_executes_gemini_files_upload_via_local_decision_gate_with_local_planning_only_impl(
+) {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeSyncRequest {
         method: String,
@@ -300,8 +308,16 @@ async fn gateway_executes_gemini_files_upload_via_local_decision_gate_with_local
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_executes_gemini_files_list_via_local_decision_gate_with_local_planning_only() {
+#[test]
+fn gateway_executes_gemini_files_list_via_local_decision_gate_with_local_planning_only() {
+    super::run_files_test(
+        "gateway_executes_gemini_files_list_via_local_decision_gate_with_local_planning_only",
+        gateway_executes_gemini_files_list_via_local_decision_gate_with_local_planning_only_impl,
+    );
+}
+
+async fn gateway_executes_gemini_files_list_via_local_decision_gate_with_local_planning_only_impl()
+{
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeSyncRequest {
         method: String,
@@ -508,8 +524,16 @@ async fn gateway_executes_gemini_files_list_via_local_decision_gate_with_local_p
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_executes_gemini_files_delete_via_local_decision_gate_with_local_planning_only() {
+#[test]
+fn gateway_executes_gemini_files_delete_via_local_decision_gate_with_local_planning_only() {
+    super::run_files_test(
+        "gateway_executes_gemini_files_delete_via_local_decision_gate_with_local_planning_only",
+        gateway_executes_gemini_files_delete_via_local_decision_gate_with_local_planning_only_impl,
+    );
+}
+
+async fn gateway_executes_gemini_files_delete_via_local_decision_gate_with_local_planning_only_impl(
+) {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeSyncRequest {
         method: String,

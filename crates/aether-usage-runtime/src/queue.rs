@@ -3,7 +3,9 @@ use std::sync::Arc;
 use serde_json::json;
 
 use aether_data_contracts::DataLayerError;
-use aether_runtime_state::{RuntimeQueueEntry, RuntimeQueueReclaimConfig, RuntimeQueueStore};
+use aether_runtime_state::{
+    RuntimeQueueEntry, RuntimeQueueReclaimConfig, RuntimeQueueStats, RuntimeQueueStore,
+};
 
 use super::config::UsageRuntimeConfig;
 use super::event::UsageEvent;
@@ -102,6 +104,14 @@ impl UsageQueue {
         self.runner
             .append_fields_with_maxlen(&self.dlq_stream, &fields, None)
             .await
+    }
+
+    pub async fn stats(&self) -> Result<RuntimeQueueStats, DataLayerError> {
+        self.runner.stats(&self.stream, Some(&self.group)).await
+    }
+
+    pub async fn dlq_stats(&self) -> Result<RuntimeQueueStats, DataLayerError> {
+        self.runner.stats(&self.dlq_stream, None).await
     }
 }
 

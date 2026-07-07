@@ -148,7 +148,7 @@ fn lifecycle_status_and_billing(event_type: UsageEventType) -> (&'static str, &'
         UsageEventType::Streaming => ("streaming", "pending"),
         UsageEventType::Completed => ("completed", "pending"),
         UsageEventType::Failed => ("failed", "void"),
-        UsageEventType::Cancelled => ("cancelled", "pending"),
+        UsageEventType::Cancelled => ("cancelled", "void"),
     }
 }
 
@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_terminal_record_stays_pending_for_settlement() {
+    fn cancelled_terminal_record_is_void_for_billing() {
         let record = build_upsert_usage_record_from_event(&UsageEvent {
             event_type: UsageEventType::Cancelled,
             request_id: "req-cancelled".to_string(),
@@ -236,7 +236,7 @@ mod tests {
         .expect("record should build");
 
         assert_eq!(record.status, "cancelled");
-        assert_eq!(record.billing_status, "pending");
+        assert_eq!(record.billing_status, "void");
         assert_eq!(record.total_tokens, Some(30));
         assert_eq!(record.total_cost_usd, Some(0.03));
         assert_eq!(record.actual_total_cost_usd, Some(0.02));

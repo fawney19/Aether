@@ -14,7 +14,7 @@
           />
           <div class="flex-1 min-w-0">
             <h3 class="text-lg font-semibold text-foreground leading-tight">
-              {{ title }}
+              {{ displayTitle }}
             </h3>
           </div>
         </div>
@@ -24,12 +24,14 @@
     <template #default>
       <!-- 描述 -->
       <div class="space-y-3">
+        <!-- eslint-disable vue/no-v-html -->
         <p
           v-for="(line, index) in descriptionLines"
           :key="index"
           :class="getLineClass(index)"
           v-html="renderLine(line)"
         />
+        <!-- eslint-enable vue/no-v-html -->
       </div>
 
       <!-- 自定义内容插槽 -->
@@ -44,7 +46,7 @@
         class="h-10 px-5"
         @click="handleCancel"
       >
-        {{ cancelText }}
+        {{ displayCancelText }}
       </Button>
 
       <!-- 确认按钮 -->
@@ -58,7 +60,7 @@
           v-if="loading"
           class="animate-spin h-4 w-4 mr-2"
         />
-        {{ confirmText }}
+        {{ displayConfirmText }}
       </Button>
     </template>
   </Dialog>
@@ -69,6 +71,7 @@ import { computed } from 'vue'
 import { Dialog } from '@/components/ui'
 import Button from '@/components/ui/button.vue'
 import { AlertTriangle, AlertCircle, Info, Trash2, HelpCircle, Loader2 } from 'lucide-vue-next'
+import { useI18n } from '@/i18n'
 
 export type AlertType = 'danger' | 'destructive' | 'warning' | 'info' | 'question'
 
@@ -96,10 +99,15 @@ const props = withDefaults(defineProps<Props>(), {
 })
 
 const emit = defineEmits<Emits>()
+const { legacyT } = useI18n()
+
+const displayTitle = computed(() => legacyT(props.title))
+const displayConfirmText = computed(() => legacyT(props.confirmText))
+const displayCancelText = computed(() => legacyT(props.cancelText))
 
 // 解析描述文本为多行
 const descriptionLines = computed(() => {
-  return props.description.split('\n').filter(line => line.trim())
+  return legacyT(props.description).split('\n').filter(line => line.trim())
 })
 
 function escapeHtml(raw: string): string {

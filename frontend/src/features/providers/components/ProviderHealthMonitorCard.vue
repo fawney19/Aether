@@ -124,7 +124,7 @@ import {
   summarizeHealthMonitorItems
 } from './health-monitor-utils'
 
-const props = withDefaults(defineProps<{
+withDefaults(defineProps<{
   title?: string
 }>(), {
   title: '提供商健康监控'

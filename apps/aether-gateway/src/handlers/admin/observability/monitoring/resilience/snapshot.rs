@@ -3,7 +3,8 @@ use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{provider_key_health_summary_at, unix_secs_to_rfc3339};
 use crate::GatewayError;
 use aether_data_contracts::repository::{
-    provider_catalog::StoredProviderCatalogKey, usage::UsageMonitoringErrorListQuery,
+    provider_catalog::StoredProviderCatalogKey,
+    usage::{UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery},
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -152,11 +153,20 @@ pub(super) async fn build_admin_monitoring_resilience_snapshot(
         }
     }
 
+    let error_window_start = recent_error_from.timestamp().max(0) as u64;
+    let error_window_end = (now.timestamp().max(0) as u64).saturating_add(1);
+    let total_errors = state
+        .count_monitoring_usage_errors(&UsageMonitoringErrorCountQuery {
+            created_from_unix_secs: error_window_start,
+            created_until_unix_secs: error_window_end,
+        })
+        .await? as usize;
+
     let mut recent_usage_errors = state
         .list_monitoring_usage_errors(&UsageMonitoringErrorListQuery {
-            created_from_unix_secs: recent_error_from.timestamp().max(0) as u64,
-            created_until_unix_secs: (now.timestamp().max(0) as u64).saturating_add(1),
-            limit: None,
+            created_from_unix_secs: error_window_start,
+            created_until_unix_secs: error_window_end,
+            limit: Some(10),
         })
         .await?
         .into_iter()
@@ -164,7 +174,6 @@ pub(super) async fn build_admin_monitoring_resilience_snapshot(
         .collect::<Vec<_>>();
     recent_usage_errors.sort_by_key(|item| std::cmp::Reverse(item.created_at_unix_ms));
 
-    let total_errors = recent_usage_errors.len();
     let mut error_breakdown = BTreeMap::<String, usize>::new();
     for item in &recent_usage_errors {
         let error_type = item

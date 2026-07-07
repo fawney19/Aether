@@ -170,6 +170,25 @@ impl GatewayDataState {
             .and_then(|backends| backends.database_pool_summary())
     }
 
+    pub(crate) async fn postgres_observability_snapshot(
+        &self,
+    ) -> Result<Option<aether_data::DatabasePostgresObservabilitySnapshot>, DataLayerError> {
+        match &self.backends {
+            Some(backends) => backends.postgres_observability_snapshot().await,
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn postgres_activity_groups(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<aether_data::DatabasePostgresActivityGroup>, DataLayerError> {
+        match &self.backends {
+            Some(backends) => backends.postgres_activity_groups(limit).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub(crate) fn database_pool_under_maintenance_pressure(&self) -> bool {
         self.database_pool_summary()
             .as_ref()
@@ -180,6 +199,14 @@ impl GatewayDataState {
         summary: &aether_data::DatabasePoolSummary,
     ) -> bool {
         summary.checked_out > 0 && summary.idle <= Self::maintenance_pool_idle_reserve(summary)
+    }
+
+    pub(crate) fn database_pool_summary_under_usage_worker_pressure(
+        summary: &aether_data::DatabasePoolSummary,
+    ) -> bool {
+        summary.checked_out > 0
+            && (summary.checked_out >= summary.max_connections as usize
+                || summary.idle <= Self::usage_worker_pool_idle_reserve(summary))
     }
 
     pub(crate) fn maintenance_pool_idle_reserve(
@@ -199,6 +226,13 @@ impl GatewayDataState {
 
         let ten_percent_ceil = (max_connections + 9) / 10;
         ten_percent_ceil.clamp(2, 10).min(max_connections)
+    }
+
+    fn usage_worker_pool_idle_reserve(summary: &aether_data::DatabasePoolSummary) -> usize {
+        if summary.max_connections <= 1 {
+            return 0;
+        }
+        1
     }
 
     pub(crate) fn should_defer_maintenance_for_database_pool_pressure(

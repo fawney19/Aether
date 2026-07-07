@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, type App } from 'vue'
+import { createApp, defineComponent, h, nextTick, type App } from 'vue'
 import UsageRecordsTable from '../UsageRecordsTable.vue'
 import type { UsageRecord } from '../../types'
 
@@ -167,6 +167,7 @@ afterEach(() => {
     app.unmount()
     root.remove()
   }
+  vi.useRealTimers()
 })
 
 describe('UsageRecordsTable', () => {
@@ -312,6 +313,31 @@ describe('UsageRecordsTable', () => {
     root.querySelector<HTMLElement>('[data-usage-hide-unknown-toggle="desktop"]')?.click()
 
     expect(onUpdateHideUnknownRecords).toHaveBeenCalledWith(true)
+  })
+
+  it('debounces usage search updates', async () => {
+    vi.useFakeTimers()
+    const onUpdateFilterSearch = vi.fn()
+    const root = mountUsageRecordsTable([buildRecord()], {
+      'onUpdate:filterSearch': onUpdateFilterSearch,
+    })
+    const input = root.querySelector<HTMLInputElement>('#usage-records-search')
+    expect(input).not.toBeNull()
+
+    input!.value = 'a'
+    input!.dispatchEvent(new Event('input'))
+    input!.value = 'ab'
+    input!.dispatchEvent(new Event('input'))
+    input!.value = 'abc'
+    input!.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    await vi.advanceTimersByTimeAsync(299)
+    expect(onUpdateFilterSearch).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(onUpdateFilterSearch).toHaveBeenCalledTimes(1)
+    expect(onUpdateFilterSearch).toHaveBeenCalledWith('abc')
   })
 
   it('shows retry and fallback markers together when both flags are set', () => {

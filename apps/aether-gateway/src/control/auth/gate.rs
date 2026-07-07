@@ -116,7 +116,7 @@ async fn balance_capacity_rejection(
         return Ok(None);
     }
     let quota = state
-        .find_user_daily_quota_availability(&auth_context.user_id)
+        .find_user_daily_quota_availability_for_auth(&auth_context.user_id)
         .await?
         .filter(|quota| quota.has_active_daily_quota);
     let wallet = state
@@ -201,9 +201,48 @@ async fn estimate_request_cost_upper_bound_usd(
         return Ok(None);
     };
     let max_output_tokens = body_json.as_ref().and_then(max_output_tokens_from_request);
+    let cache_key = auth_request_cost_upper_bound_cache_key(
+        &api_format,
+        requested_model,
+        input_tokens,
+        max_output_tokens,
+    );
+    let ttl = state.frontdoor_runtime_guards.auth_capacity_cache_ttl;
+    if ttl.is_zero() {
+        return estimate_request_cost_upper_bound_for_tokens(
+            state,
+            &api_format,
+            requested_model,
+            input_tokens,
+            max_output_tokens,
+        )
+        .await;
+    }
+    state
+        .auth_request_cost_upper_bound_cache
+        .get_or_load(cache_key, ttl, || async {
+            estimate_request_cost_upper_bound_for_tokens(
+                state,
+                &api_format,
+                requested_model,
+                input_tokens,
+                max_output_tokens,
+            )
+            .await
+        })
+        .await
+}
+
+async fn estimate_request_cost_upper_bound_for_tokens(
+    state: &AppState,
+    api_format: &str,
+    requested_model: &str,
+    input_tokens: u64,
+    max_output_tokens: Option<u64>,
+) -> Result<Option<f64>, GatewayError> {
     let candidates = state
         .list_minimal_candidate_selection_rows_for_api_format_and_requested_model(
-            &api_format,
+            api_format,
             requested_model,
         )
         .await?;
@@ -223,7 +262,7 @@ async fn estimate_request_cost_upper_bound_usd(
         };
         let Some(estimate) = estimate_cost_from_billing_context(
             &context,
-            &api_format,
+            api_format,
             input_tokens,
             max_output_tokens,
         ) else {
@@ -232,6 +271,23 @@ async fn estimate_request_cost_upper_bound_usd(
         max_estimate = Some(max_estimate.map_or(estimate, |current| current.max(estimate)));
     }
     Ok(max_estimate.filter(|value| value.is_finite() && *value >= 0.0))
+}
+
+fn auth_request_cost_upper_bound_cache_key(
+    api_format: &str,
+    requested_model: &str,
+    input_tokens: u64,
+    max_output_tokens: Option<u64>,
+) -> String {
+    format!(
+        "{}\x1f{}\x1f{}\x1f{}",
+        api_format,
+        requested_model,
+        input_tokens,
+        max_output_tokens
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    )
 }
 
 fn estimate_cost_from_billing_context(
@@ -469,6 +525,7 @@ fn push_unique_api_format(api_formats: &mut Vec<String>, api_format: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
@@ -596,7 +653,7 @@ mod tests {
             Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
                 sample_row(),
             ]));
-        let billing_repository = Arc::new(FixedBillingReadRepository { quota, context });
+        let billing_repository = Arc::new(FixedBillingReadRepository::new(quota, context));
         let data = GatewayDataState::with_minimal_candidate_selection_and_billing_for_tests(
             candidate_repository,
             billing_repository,
@@ -684,6 +741,36 @@ mod tests {
     struct FixedBillingReadRepository {
         quota: UserDailyQuotaAvailabilityRecord,
         context: StoredBillingModelContext,
+        quota_calls: Arc<AtomicUsize>,
+        model_context_by_model_id_calls: Arc<AtomicUsize>,
+    }
+
+    impl FixedBillingReadRepository {
+        fn new(
+            quota: UserDailyQuotaAvailabilityRecord,
+            context: StoredBillingModelContext,
+        ) -> Self {
+            Self {
+                quota,
+                context,
+                quota_calls: Arc::new(AtomicUsize::new(0)),
+                model_context_by_model_id_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn with_counters(
+            quota: UserDailyQuotaAvailabilityRecord,
+            context: StoredBillingModelContext,
+            quota_calls: Arc<AtomicUsize>,
+            model_context_by_model_id_calls: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                quota,
+                context,
+                quota_calls,
+                model_context_by_model_id_calls,
+            }
+        }
     }
 
     #[async_trait]
@@ -703,6 +790,8 @@ mod tests {
             _provider_api_key_id: Option<&str>,
             _model_id: &str,
         ) -> Result<Option<StoredBillingModelContext>, DataLayerError> {
+            self.model_context_by_model_id_calls
+                .fetch_add(1, Ordering::AcqRel);
             Ok(Some(self.context.clone()))
         }
 
@@ -710,6 +799,7 @@ mod tests {
             &self,
             _user_id: &str,
         ) -> Result<Option<UserDailyQuotaAvailabilityRecord>, DataLayerError> {
+            self.quota_calls.fetch_add(1, Ordering::AcqRel);
             Ok(Some(self.quota.clone()))
         }
     }
@@ -824,6 +914,93 @@ mod tests {
 
             assert_eq!(rejection, None);
         }
+    }
+
+    #[tokio::test]
+    async fn auth_capacity_reuses_quota_wallet_and_cost_estimate_within_ttl() {
+        let context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 0.0,
+                    "output_price_per_1m": 60.0
+                }]
+            })),
+            None,
+            None,
+            None,
+        );
+        let quota_calls = Arc::new(AtomicUsize::new(0));
+        let model_context_calls = Arc::new(AtomicUsize::new(0));
+        let candidate_repository =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+                sample_row(),
+            ]));
+        let billing_repository = Arc::new(FixedBillingReadRepository::with_counters(
+            quota_availability(1.0, true),
+            context,
+            Arc::clone(&quota_calls),
+            Arc::clone(&model_context_calls),
+        ));
+        let data = GatewayDataState::with_minimal_candidate_selection_and_billing_for_tests(
+            candidate_repository,
+            billing_repository,
+        );
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data)
+            .with_auth_wallets_for_tests(vec![sample_wallet("user-1", 30.0)]);
+        let decision = decision_with_allowed_models(vec!["gpt-5".to_string()]);
+        let uri: Uri = "/v1/chat/completions".parse().expect("uri should parse");
+        let body = Bytes::from_static(
+            br#"{"model":"gpt-5","messages":[{"role":"user","content":"hi"}],"max_tokens":100000}"#,
+        );
+
+        let first =
+            request_model_local_rejection(&state, Some(&decision), &uri, &json_headers(), &body)
+                .await
+                .expect("first auth capacity check should resolve");
+
+        assert_eq!(first, None);
+        assert_eq!(quota_calls.load(Ordering::Acquire), 1);
+        assert_eq!(model_context_calls.load(Ordering::Acquire), 1);
+
+        let store = state
+            .auth_wallet_store
+            .as_ref()
+            .expect("test wallet store should exist");
+        {
+            let mut wallets = store.lock().expect("wallet store should lock");
+            let wallet = wallets
+                .get_mut("wallet-user-1")
+                .expect("test wallet should exist");
+            wallet.balance = 0.0;
+            wallet.gift_balance = 0.0;
+        }
+
+        let cached =
+            request_model_local_rejection(&state, Some(&decision), &uri, &json_headers(), &body)
+                .await
+                .expect("cached auth capacity check should resolve");
+
+        assert_eq!(cached, None);
+        assert_eq!(quota_calls.load(Ordering::Acquire), 1);
+        assert_eq!(model_context_calls.load(Ordering::Acquire), 1);
+
+        state.invalidate_auth_context_cache();
+
+        let refreshed =
+            request_model_local_rejection(&state, Some(&decision), &uri, &json_headers(), &body)
+                .await
+                .expect("refreshed auth capacity check should resolve");
+
+        assert_eq!(
+            refreshed,
+            Some(GatewayLocalAuthRejection::BalanceDenied {
+                remaining: Some(1.0),
+            })
+        );
+        assert_eq!(quota_calls.load(Ordering::Acquire), 2);
     }
 
     #[tokio::test]

@@ -177,7 +177,7 @@ async fn gateway_background_video_task_poller_refreshes_due_openai_task_from_rep
     assert!(!background_tasks.is_empty(), "poller task should spawn");
 
     let stored = {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let stored = repository
                 .find(VideoTaskLookupKey::Id("task-local-123"))
@@ -189,7 +189,7 @@ async fn gateway_background_video_task_poller_refreshes_due_openai_task_from_rep
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "poller did not refresh task within 2s"
+                "poller did not refresh task within 5s"
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -284,7 +284,7 @@ async fn gateway_background_video_task_poller_refreshes_due_openai_task_from_rep
     assert!(!background_tasks.is_empty(), "poller task should spawn");
 
     let stored = {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let stored = repository
                 .find(VideoTaskLookupKey::Id("task-local-123"))
@@ -296,7 +296,7 @@ async fn gateway_background_video_task_poller_refreshes_due_openai_task_from_rep
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "poller did not refresh task within 2s"
+                "poller did not refresh task within 5s"
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }

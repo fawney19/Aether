@@ -102,16 +102,28 @@
               </div>
               <div class="mt-4 grid grid-cols-3 gap-2 text-xs">
                 <div class="rounded-lg border border-border/40 bg-card/50 px-3 py-2">
-                  <p class="text-muted-foreground">总数</p>
-                  <p class="mt-1 font-semibold tabular-nums">{{ section.summary.total }}</p>
+                  <p class="text-muted-foreground">
+                    总数
+                  </p>
+                  <p class="mt-1 font-semibold tabular-nums">
+                    {{ section.summary.total }}
+                  </p>
                 </div>
                 <div class="rounded-lg border border-border/40 bg-card/50 px-3 py-2">
-                  <p class="text-muted-foreground">异常</p>
-                  <p class="mt-1 font-semibold tabular-nums text-red-600 dark:text-red-400">{{ section.summary.unhealthy }}</p>
+                  <p class="text-muted-foreground">
+                    异常
+                  </p>
+                  <p class="mt-1 font-semibold tabular-nums text-red-600 dark:text-red-400">
+                    {{ section.summary.unhealthy }}
+                  </p>
                 </div>
                 <div class="rounded-lg border border-border/40 bg-card/50 px-3 py-2">
-                  <p class="text-muted-foreground">波动</p>
-                  <p class="mt-1 font-semibold tabular-nums text-amber-600 dark:text-amber-400">{{ section.summary.warning }}</p>
+                  <p class="text-muted-foreground">
+                    波动
+                  </p>
+                  <p class="mt-1 font-semibold tabular-nums text-amber-600 dark:text-amber-400">
+                    {{ section.summary.warning }}
+                  </p>
                 </div>
               </div>
             </button>
@@ -217,7 +229,6 @@ const combinedSummary = computed(() => {
 })
 
 const overallLabel = computed(() => getStatusLabel(combinedSummary.value, allSectionsLoaded.value))
-const overallBadgeVariant = computed(() => getStatusBadgeVariant(combinedSummary.value, allSectionsLoaded.value))
 
 const overviewCards = computed(() => {
   const endpointSummary = getSummary('endpoint')

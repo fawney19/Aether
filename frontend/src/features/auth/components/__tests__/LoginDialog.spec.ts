@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App } from 'vue'
+import { createApp, defineComponent, nextTick, type App } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 import LoginDialog from '../LoginDialog.vue'

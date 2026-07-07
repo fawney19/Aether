@@ -62,7 +62,7 @@ COPY --from=gateway-planner /build/recipe.json ./recipe.json
 RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=aether-cargo-target-local,target=/build/target,sharing=locked \
-    cargo chef cook --release --locked --package aether-gateway --bin aether-gateway --recipe-path recipe.json
+    cargo chef cook --release --locked --package aether-gateway --bin aether-gateway --features jemalloc --recipe-path recipe.json
 
 COPY Cargo.toml Cargo.lock ./
 COPY apps/ ./apps/
@@ -71,7 +71,7 @@ RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry
     --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=aether-cargo-target-local,target=/build/target,sharing=locked \
     set -eux; \
-    cargo build --release --locked -p aether-gateway --bin aether-gateway; \
+    cargo build --release --locked -p aether-gateway --bin aether-gateway --features jemalloc; \
     cp target/release/aether-gateway /tmp/aether-gateway
 
 # ==================== 最小运行时打包 ====================

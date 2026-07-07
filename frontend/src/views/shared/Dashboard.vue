@@ -3,7 +3,10 @@
     <!-- 页面头部：统计卡片 + 公告 -->
     <div class="flex flex-col lg:flex-row gap-6 lg:items-start">
       <!-- 左侧统计区域 -->
-      <div ref="statsPanelRef" class="flex-1 min-w-0 flex flex-col">
+      <div
+        ref="statsPanelRef"
+        class="flex-1 min-w-0 flex flex-col"
+      >
         <div class="mb-4 flex items-center justify-between gap-3">
           <Badge
             :variant="authStore.isAdmin ? 'default' : 'secondary'"
@@ -60,7 +63,10 @@
                 class="absolute top-3 right-3 sm:top-5 sm:right-5 rounded-xl sm:rounded-2xl border border-border bg-card/50 p-2 sm:p-3 shadow-inner backdrop-blur-sm"
                 :class="getStatIconColor(index)"
               >
-                <component :is="stat.icon" class="h-4 w-4 sm:h-5 sm:w-5" />
+                <component
+                  :is="stat.icon"
+                  class="h-4 w-4 sm:h-5 sm:w-5"
+                />
               </div>
               <!-- 内容区域 -->
               <div>
@@ -145,9 +151,14 @@
         </div>
 
         <!-- 管理员：系统健康摘要 -->
-        <div v-if="isAdmin && systemHealth" class="mt-6">
+        <div
+          v-if="isAdmin && systemHealth"
+          class="mt-6"
+        >
           <div class="mb-3 flex items-center justify-between">
-            <h3 class="text-sm font-medium text-foreground">本月系统健康</h3>
+            <h3 class="text-sm font-medium text-foreground">
+              本月系统健康
+            </h3>
             <Badge
               variant="outline"
               class="uppercase tracking-[0.3em] text-[10px]"
@@ -246,12 +257,14 @@
         <div
           v-else-if="
             !isAdmin &&
-            (hasCacheData || (userMonthlyCost !== null && userMonthlyCost > 0))
+              (hasCacheData || (userMonthlyCost !== null && userMonthlyCost > 0))
           "
           class="mt-6"
         >
           <div class="mb-3 flex items-center justify-between">
-            <h3 class="text-sm font-medium text-foreground">本月统计</h3>
+            <h3 class="text-sm font-medium text-foreground">
+              本月统计
+            </h3>
             <Badge
               variant="outline"
               class="uppercase tracking-[0.3em] text-[10px]"
@@ -280,7 +293,10 @@
                 </p>
               </div>
             </Card>
-            <Card v-if="cacheStats" class="relative p-3 sm:p-4 border-kraft/30">
+            <Card
+              v-if="cacheStats"
+              class="relative p-3 sm:p-4 border-kraft/30"
+            >
               <Hash
                 class="absolute top-3 right-3 h-3.5 w-3.5 sm:h-4 sm:w-4 text-muted-foreground"
               />
@@ -348,7 +364,9 @@
         :style="announcementsContainerStyle"
       >
         <div class="mb-3 flex items-center justify-between flex-shrink-0">
-          <h3 class="text-sm font-medium text-foreground">系统公告</h3>
+          <h3 class="text-sm font-medium text-foreground">
+            系统公告
+          </h3>
           <Badge
             variant="outline"
             class="uppercase tracking-[0.3em] text-[10px]"
@@ -372,14 +390,19 @@
             class="flex-1 flex flex-col items-center justify-center"
           >
             <Bell class="h-8 w-8 text-muted-foreground/40" />
-            <p class="mt-2 text-xs text-muted-foreground">暂无公告</p>
+            <p class="mt-2 text-xs text-muted-foreground">
+              暂无公告
+            </p>
           </div>
 
           <div
             v-else
             class="-mx-4 px-4 flex-1 overflow-y-auto scrollbar-thin min-h-0 pb-2"
           >
-            <div ref="announcementsTimelineRef" class="relative pl-5">
+            <div
+              ref="announcementsTimelineRef"
+              class="relative pl-5"
+            >
               <div
                 v-if="announcements.length > 1"
                 class="absolute left-[7px] w-[2px] bg-slate-200 dark:bg-muted"
@@ -459,13 +482,19 @@
       >
         统计周期
       </h3>
-      <TimeRangePicker v-model="dailyTimeRange" :allow-hourly="true" />
+      <TimeRangePicker
+        v-model="dailyTimeRange"
+        :allow-hourly="true"
+      />
     </div>
 
     <!-- 趋势图表区域 -->
     <div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
       <!-- 每日使用趋势（折线图）- 普通用户可见 -->
-      <Card v-if="!isAdmin" class="p-5">
+      <Card
+        v-if="!isAdmin"
+        class="p-5"
+      >
         <h4
           class="mb-3 text-xs font-semibold text-foreground uppercase tracking-wider"
         >
@@ -477,11 +506,14 @@
         >
           <Skeleton class="h-full w-full" />
         </div>
-        <div v-else style="height: 280px">
+        <div
+          v-else
+          style="height: 280px"
+        >
           <LineChart
             v-if="
               dailyUsageTrendChartData.labels &&
-              dailyUsageTrendChartData.labels.length > 0
+                dailyUsageTrendChartData.labels.length > 0
             "
             :data="dailyUsageTrendChartData"
             :options="dailyUsageTrendChartOptions"
@@ -496,7 +528,10 @@
       </Card>
 
       <!-- 每日模型成本（堆叠柱状图）- 仅管理员可见 -->
-      <Card v-if="isAdmin" class="p-5">
+      <Card
+        v-if="isAdmin"
+        class="p-5"
+      >
         <h4
           class="mb-3 text-xs font-semibold text-foreground uppercase tracking-wider"
         >
@@ -508,11 +543,14 @@
         >
           <Skeleton class="h-full w-full" />
         </div>
-        <div v-else style="height: 280px">
+        <div
+          v-else
+          style="height: 280px"
+        >
           <BarChart
             v-if="
               dailyModelCostChartData.labels &&
-              dailyModelCostChartData.labels.length > 0
+                dailyModelCostChartData.labels.length > 0
             "
             :data="dailyModelCostChartData"
             :options="dailyModelCostChartOptions"
@@ -527,7 +565,10 @@
       </Card>
 
       <!-- 提供商成本分布（环形图）- 仅管理员可见 -->
-      <Card v-if="isAdmin" class="p-5">
+      <Card
+        v-if="isAdmin"
+        class="p-5"
+      >
         <h4
           class="mb-3 text-xs font-semibold text-foreground uppercase tracking-wider"
         >
@@ -539,11 +580,14 @@
         >
           <Skeleton class="h-full w-full" />
         </div>
-        <div v-else style="height: 280px">
+        <div
+          v-else
+          style="height: 280px"
+        >
           <DoughnutChart
             v-if="
               providerCostChartData.labels &&
-              providerCostChartData.labels.length > 0
+                providerCostChartData.labels.length > 0
             "
             :data="providerCostChartData"
             :options="providerCostChartOptions"
@@ -558,7 +602,10 @@
       </Card>
 
       <!-- 每日模型成本（堆叠柱状图）- 普通用户可见 -->
-      <Card v-if="!isAdmin" class="p-5">
+      <Card
+        v-if="!isAdmin"
+        class="p-5"
+      >
         <h4
           class="mb-3 text-xs font-semibold text-foreground uppercase tracking-wider"
         >
@@ -570,11 +617,14 @@
         >
           <Skeleton class="h-full w-full" />
         </div>
-        <div v-else style="height: 280px">
+        <div
+          v-else
+          style="height: 280px"
+        >
           <BarChart
             v-if="
               dailyModelCostChartData.labels &&
-              dailyModelCostChartData.labels.length > 0
+                dailyModelCostChartData.labels.length > 0
             "
             :data="dailyModelCostChartData"
             :options="dailyModelCostChartOptions"
@@ -594,9 +644,14 @@
       <!-- 移动端：卡片列表 -->
       <div class="sm:hidden">
         <div class="px-4 py-3 border-b border-border/60">
-          <h3 class="text-sm font-semibold">每日统计</h3>
+          <h3 class="text-sm font-semibold">
+            每日统计
+          </h3>
         </div>
-        <div v-if="loadingDaily" class="flex items-center justify-center py-8">
+        <div
+          v-if="loadingDaily"
+          class="flex items-center justify-center py-8"
+        >
           <Skeleton class="h-5 w-5 rounded-full" />
           <span class="ml-2 text-muted-foreground text-xs">加载中...</span>
         </div>
@@ -606,7 +661,10 @@
         >
           暂无数据
         </div>
-        <div v-else class="divide-y divide-border/60">
+        <div
+          v-else
+          class="divide-y divide-border/60"
+        >
           <div
             v-for="stat in dailyStats.slice().reverse()"
             :key="stat.date"
@@ -616,7 +674,10 @@
               <span class="font-medium text-sm">{{
                 formatDate(stat.date)
               }}</span>
-              <Badge variant="success" class="text-[10px]">
+              <Badge
+                variant="success"
+                class="text-[10px]"
+              >
                 ${{ stat.cost.toFixed(4) }}
               </Badge>
             </div>
@@ -646,20 +707,38 @@
       <Table class="hidden sm:table">
         <TableHeader>
           <TableRow>
-            <TableHead class="text-left"> 日期 </TableHead>
-            <TableHead class="text-center"> 请求次数 </TableHead>
-            <TableHead class="text-center"> Tokens </TableHead>
-            <TableHead class="text-center"> 费用 </TableHead>
-            <TableHead class="text-center"> 平均响应 </TableHead>
-            <TableHead class="text-center"> 使用模型 </TableHead>
-            <TableHead v-if="isAdmin" class="text-center">
+            <TableHead class="text-left">
+              日期
+            </TableHead>
+            <TableHead class="text-center">
+              请求次数
+            </TableHead>
+            <TableHead class="text-center">
+              Tokens
+            </TableHead>
+            <TableHead class="text-center">
+              费用
+            </TableHead>
+            <TableHead class="text-center">
+              平均响应
+            </TableHead>
+            <TableHead class="text-center">
+              使用模型
+            </TableHead>
+            <TableHead
+              v-if="isAdmin"
+              class="text-center"
+            >
               使用提供商
             </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           <TableRow v-if="loadingDaily">
-            <TableCell :colspan="isAdmin ? 7 : 6" class="text-center py-8">
+            <TableCell
+              :colspan="isAdmin ? 7 : 6"
+              class="text-center py-8"
+            >
               <div class="flex items-center justify-center gap-2">
                 <Skeleton class="h-5 w-5 rounded-full" />
                 <span class="text-muted-foreground text-xs">加载中...</span>
@@ -686,24 +765,36 @@
                 {{ stat.requests.toLocaleString() }}
               </TableCell>
               <TableCell class="text-center">
-                <Badge variant="secondary" class="text-[10px]">
+                <Badge
+                  variant="secondary"
+                  class="text-[10px]"
+                >
                   {{ formatTokens(stat.tokens) }}
                 </Badge>
               </TableCell>
               <TableCell class="text-center">
-                <Badge variant="success" class="text-[10px]">
+                <Badge
+                  variant="success"
+                  class="text-[10px]"
+                >
                   ${{ stat.cost.toFixed(4) }}
                 </Badge>
               </TableCell>
               <TableCell class="text-center">
-                <Badge variant="outline" class="text-[10px]">
+                <Badge
+                  variant="outline"
+                  class="text-[10px]"
+                >
                   {{ formatResponseTime(stat.avg_response_time) }}
                 </Badge>
               </TableCell>
               <TableCell class="text-center text-xs">
                 {{ stat.unique_models }}
               </TableCell>
-              <TableCell v-if="isAdmin" class="text-center text-xs">
+              <TableCell
+                v-if="isAdmin"
+                class="text-center text-xs"
+              >
                 {{ stat.unique_providers }}
               </TableCell>
             </TableRow>
@@ -718,25 +809,33 @@
       >
         <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <div class="text-center">
-            <div class="text-muted-foreground text-[10px]">总请求</div>
+            <div class="text-muted-foreground text-[10px]">
+              总请求
+            </div>
             <div class="font-semibold text-foreground">
               {{ totalStats.requests.toLocaleString() }}
             </div>
           </div>
           <div class="text-center">
-            <div class="text-muted-foreground text-[10px]">总Tokens</div>
+            <div class="text-muted-foreground text-[10px]">
+              总Tokens
+            </div>
             <div class="font-semibold text-book-cloth dark:text-kraft">
               {{ formatTokens(totalStats.tokens) }}
             </div>
           </div>
           <div class="text-center">
-            <div class="text-muted-foreground text-[10px]">总费用</div>
+            <div class="text-muted-foreground text-[10px]">
+              总费用
+            </div>
             <div class="font-semibold text-amber-600 dark:text-amber-400">
               ${{ totalStats.cost.toFixed(4) }}
             </div>
           </div>
           <div class="text-center">
-            <div class="text-muted-foreground text-[10px]">平均响应</div>
+            <div class="text-muted-foreground text-[10px]">
+              平均响应
+            </div>
             <div class="font-semibold text-book-cloth dark:text-kraft">
               {{ formatResponseTime(totalStats.avgResponseTime) }}
             </div>
@@ -747,7 +846,10 @@
   </div>
 
   <!-- 公告详情对话框 -->
-  <Dialog v-model="detailDialogOpen" size="lg">
+  <Dialog
+    v-model="detailDialogOpen"
+    size="lg"
+  >
     <template #header>
       <div class="border-b border-border px-6 py-4">
         <div class="flex items-center gap-3">
@@ -763,13 +865,18 @@
             >
               {{ selectedAnnouncement?.title || "公告详情" }}
             </h3>
-            <p class="text-xs text-muted-foreground">系统公告</p>
+            <p class="text-xs text-muted-foreground">
+              系统公告
+            </p>
           </div>
         </div>
       </div>
     </template>
 
-    <div v-if="selectedAnnouncement" class="space-y-4">
+    <div
+      v-if="selectedAnnouncement"
+      class="space-y-4"
+    >
       <div class="text-xs text-muted-foreground">
         {{ formatFullDate(selectedAnnouncement.created_at) }}
       </div>

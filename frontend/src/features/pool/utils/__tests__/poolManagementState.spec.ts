@@ -90,7 +90,7 @@ describe('poolManagementState', () => {
     expect(state).toEqual({
       providerId: 'provider-c',
       search: 'stored only',
-      status: 'active',
+      status: 'available',
       page: 2,
       pageSize: 50,
       sortBy: 'last_used_at',

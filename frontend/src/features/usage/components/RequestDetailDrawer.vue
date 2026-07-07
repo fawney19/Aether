@@ -876,7 +876,7 @@ import Skeleton from '@/components/ui/skeleton.vue'
 import Tabs from '@/components/ui/tabs.vue'
 import TabsContent from '@/components/ui/tabs-content.vue'
 import { AlertTriangle, Check, Columns2, RefreshCw, X, Monitor, Server, MessageSquareText, Code2, Terminal, Play } from 'lucide-vue-next'
-import { dashboardApi, type RequestDetail, type RequestErrorDomain } from '@/api/dashboard'
+import { dashboardApi, type RequestDetail } from '@/api/dashboard'
 import type { ImageProgress, RequestTrace } from '@/api/requestTrace'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import {
@@ -889,7 +889,6 @@ import { log } from '@/utils/logger'
 import { getEffectiveInputTokens } from '../token-normalization'
 import {
   formatDurationMs,
-  formatOutputRate,
   formatOutputRateValue,
   getDisplayOutputRate,
 } from '../performance'
@@ -1006,15 +1005,6 @@ type JsonRecord = Record<string, unknown>
 
 const METADATA_BYTE_FIELD_PATTERN = /(^bytes$|_bytes$|bytes$)/i
 
-type NormalizedErrorDomain = {
-  source?: string | null
-  status_code?: number | null
-  type?: string | null
-  message: string
-  code?: string | number | null
-  category?: string | null
-}
-
 function asRecord(value: unknown): JsonRecord | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   return value as JsonRecord
@@ -1041,28 +1031,6 @@ function formatMetadataDisplayValue(value: unknown, key = ''): unknown {
       }, {})
   }
   return value
-}
-
-function normalizeErrorDomain(domain: RequestErrorDomain | null | undefined): NormalizedErrorDomain | null {
-  if (!domain || typeof domain !== 'object') return null
-  const message = typeof domain.message === 'string' ? domain.message.trim() : ''
-  if (!message) return null
-  return {
-    source: domain.source ?? null,
-    status_code: domain.status_code ?? null,
-    type: domain.type ?? null,
-    message,
-    code: domain.code ?? null,
-    category: domain.category ?? null,
-  }
-}
-
-function formatErrorDomainMeta(domain: NormalizedErrorDomain): string {
-  const parts: string[] = []
-  if (domain.status_code != null) parts.push(`HTTP ${domain.status_code}`)
-  if (domain.type) parts.push(domain.type)
-  if (domain.source) parts.push(`source=${domain.source}`)
-  return parts.join(' · ')
 }
 
 function mapTraceFinalStatusToRequestStatus(
@@ -2432,9 +2400,12 @@ async function loadDetail(id: string, silent = false) {
       timelineRef.value?.refresh()
     }
 
-    // 已完成请求需要停止自动刷新；进行中的请求只在用户手动开启后才保持刷新
-    if (props.isOpen && isRequestCompleted()) {
-      stopAutoRefresh()
+    if (props.isOpen) {
+      if (isRequestCompleted()) {
+        stopAutoRefresh()
+      } else if (!silent) {
+        startAutoRefresh()
+      }
     }
   } catch (err) {
     if (requestId !== loadDetailRequestId) return

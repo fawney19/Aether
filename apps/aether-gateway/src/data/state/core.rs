@@ -368,6 +368,12 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) fn clear_routing_group_cache(&self) {
+        if let Some(repository) = &self.routing_group_reader {
+            repository.clear_local_cache();
+        }
+    }
+
     pub(crate) fn clear_provider_catalog_cache(&self) {
         if let Some(repository) = &self.provider_catalog_reader {
             repository.clear_local_cache();

@@ -160,14 +160,14 @@ async fn gateway_records_usage_for_execution_runtime_sync_when_runtime_enabled_i
 }
 
 #[test]
-fn gateway_records_pending_usage_before_execution_runtime_sync_result_arrives() {
+fn gateway_records_active_usage_before_execution_runtime_sync_result_arrives() {
     run_async_test_on_large_stack(
-        "gateway_records_pending_usage_before_execution_runtime_sync_result_arrives",
-        gateway_records_pending_usage_before_execution_runtime_sync_result_arrives_impl(),
+        "gateway_records_active_usage_before_execution_runtime_sync_result_arrives",
+        gateway_records_active_usage_before_execution_runtime_sync_result_arrives_impl(),
     );
 }
 
-async fn gateway_records_pending_usage_before_execution_runtime_sync_result_arrives_impl() {
+async fn gateway_records_active_usage_before_execution_runtime_sync_result_arrives_impl() {
     let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
     let execution_request_started = Arc::new(tokio::sync::Notify::new());
@@ -275,24 +275,26 @@ async fn gateway_records_pending_usage_before_execution_runtime_sync_result_arri
 
     execution_request_started.notified().await;
 
-    let mut pending = None;
+    let mut active = None;
     for _ in 0..50 {
-        pending = usage_repository
+        active = usage_repository
             .find_by_request_id("req-usage-sync-pending-123")
             .await
             .expect("usage lookup should succeed");
-        if pending
+        if active
             .as_ref()
-            .is_some_and(|stored| stored.status == "pending")
+            .is_some_and(|stored| stored.status == "streaming")
         {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let pending = pending.expect("pending usage should be recorded before sync result resolves");
-    assert_eq!(pending.status, "pending");
-    assert_eq!(pending.billing_status, "pending");
-    assert_eq!(pending.response_time_ms, None);
+    let active = active.expect("active usage should be recorded before sync result resolves");
+    assert_eq!(active.status, "streaming");
+    assert_eq!(active.billing_status, "pending");
+    assert_eq!(active.status_code, None);
+    assert_eq!(active.first_byte_time_ms, None);
+    assert_eq!(active.response_time_ms, None);
 
     allow_execution_response.notify_one();
 
@@ -320,14 +322,14 @@ async fn gateway_records_pending_usage_before_execution_runtime_sync_result_arri
 }
 
 #[test]
-fn gateway_keeps_pending_sync_usage_lightweight_for_large_request_body() {
+fn gateway_keeps_active_sync_usage_lightweight_for_large_request_body() {
     run_async_test_on_large_stack(
-        "gateway_keeps_pending_sync_usage_lightweight_for_large_request_body",
-        gateway_keeps_pending_sync_usage_lightweight_for_large_request_body_impl(),
+        "gateway_keeps_active_sync_usage_lightweight_for_large_request_body",
+        gateway_keeps_active_sync_usage_lightweight_for_large_request_body_impl(),
     );
 }
 
-async fn gateway_keeps_pending_sync_usage_lightweight_for_large_request_body_impl() {
+async fn gateway_keeps_active_sync_usage_lightweight_for_large_request_body_impl() {
     let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
     let execution_request_started = Arc::new(tokio::sync::Notify::new());
@@ -434,28 +436,28 @@ async fn gateway_keeps_pending_sync_usage_lightweight_for_large_request_body_imp
 
     execution_request_started.notified().await;
 
-    let mut pending = None;
+    let mut active = None;
     for _ in 0..50 {
-        pending = usage_repository
+        active = usage_repository
             .find_by_request_id("req-usage-sync-large-pending-123")
             .await
             .expect("usage lookup should succeed");
-        if pending
+        if active
             .as_ref()
-            .is_some_and(|stored| stored.status == "pending")
+            .is_some_and(|stored| stored.status == "streaming")
         {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let pending = pending.expect("pending usage should be recorded before sync result resolves");
-    assert_eq!(pending.status, "pending");
-    assert!(pending.request_headers.is_none());
-    assert!(pending.request_body.is_none());
-    assert!(pending.provider_request_headers.is_none());
-    assert!(pending.provider_request_body.is_none());
-    assert!(pending.response_headers.is_none());
-    assert!(pending.client_response_headers.is_none());
+    let active = active.expect("active usage should be recorded before sync result resolves");
+    assert_eq!(active.status, "streaming");
+    assert!(active.request_headers.is_none());
+    assert!(active.request_body.is_none());
+    assert!(active.provider_request_headers.is_none());
+    assert!(active.provider_request_body.is_none());
+    assert!(active.response_headers.is_none());
+    assert!(active.client_response_headers.is_none());
 
     allow_execution_response.notify_one();
 

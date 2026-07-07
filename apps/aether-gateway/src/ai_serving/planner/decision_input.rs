@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use aether_ai_serving::{run_ai_authenticated_decision_input, AiAuthenticatedDecisionInputPort};
 use aether_routing_core::{
@@ -18,10 +19,14 @@ use crate::client_session_affinity::client_session_affinity_from_request;
 use crate::clock::current_unix_secs;
 use crate::routing::{
     apply_routing_mutation_plan, build_routing_trace_seed, resolve_gateway_routing_policy,
-    select_gateway_routing_group, GatewayRoutingPolicyInput, GatewayRoutingSelectionError,
-    GatewayRoutingSelectionInput, ROUTING_GROUP_HEADER,
+    resolve_gateway_static_default_routing_policy, select_gateway_routing_group,
+    GatewayRoutingPolicyInput, GatewayRoutingSelectionError, GatewayRoutingSelectionInput,
+    GatewayStaticRoutingPolicyInput, ROUTING_GROUP_HEADER,
 };
+use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AiExecutionDecision, AppState, GatewayError};
+
+const ROUTING_GROUP_SELECTION_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedLocalDecisionAuthInput {
@@ -221,6 +226,7 @@ pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
     let explicit_group = routing_header_value_str(&parts.headers, ROUTING_GROUP_HEADER);
     let selected_group = match state.routing_group_read_repository() {
         Some(repository) => {
+            let user_groups_lookup_started_at = std::time::Instant::now();
             let user_group_ids = match state
                 .list_user_groups_for_user(&input.auth_context.user_id)
                 .await
@@ -235,17 +241,50 @@ pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
                     Vec::new()
                 }
             };
-            let selection = select_gateway_routing_group(
-                repository.as_ref(),
-                GatewayRoutingSelectionInput {
-                    explicit_group: explicit_group.as_deref(),
-                    user_id: Some(input.auth_context.user_id.as_str()),
-                    api_key_id: Some(input.auth_context.api_key_id.as_str()),
-                    user_group_ids: &user_group_ids,
-                },
-            )
-            .await
-            .map_err(routing_selection_error)?;
+            observe_gateway_stage_ms(
+                "routing_user_groups_lookup",
+                user_groups_lookup_started_at.elapsed().as_millis() as u64,
+            );
+            let selection_cache_key = routing_group_selection_cache_key(
+                explicit_group.as_deref(),
+                Some(input.auth_context.user_id.as_str()),
+                Some(input.auth_context.api_key_id.as_str()),
+                &user_group_ids,
+            );
+            let user_id = input.auth_context.user_id.clone();
+            let api_key_id = input.auth_context.api_key_id.clone();
+            let group_selection_started_at = std::time::Instant::now();
+            let selection = state
+                .routing_group_selection_cache
+                .get_or_load_once(
+                    selection_cache_key,
+                    ROUTING_GROUP_SELECTION_CACHE_TTL,
+                    || async move {
+                        let selection_load_started_at = std::time::Instant::now();
+                        let selection = select_gateway_routing_group(
+                            repository.as_ref(),
+                            GatewayRoutingSelectionInput {
+                                explicit_group: explicit_group.as_deref(),
+                                user_id: Some(user_id.as_str()),
+                                api_key_id: Some(api_key_id.as_str()),
+                                user_group_ids: &user_group_ids,
+                            },
+                        )
+                        .await
+                        .map_err(routing_selection_error)?;
+                        observe_gateway_stage_ms(
+                            "routing_group_selection_load",
+                            selection_load_started_at.elapsed().as_millis() as u64,
+                        );
+                        Ok::<_, GatewayError>(Some(selection))
+                    },
+                )
+                .await?
+                .unwrap_or_default();
+            observe_gateway_stage_ms(
+                "routing_group_selection",
+                group_selection_started_at.elapsed().as_millis() as u64,
+            );
             selection.group.map(|group| {
                 (
                     Some(group.id),
@@ -279,7 +318,21 @@ pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
         return Ok(());
     };
 
+    if try_attach_static_default_routing_policy_to_input(
+        input,
+        parts,
+        body_json,
+        client_api_format,
+        group_id.as_deref(),
+        group_version,
+        &group_config_json,
+        selection_source.as_str(),
+    )? {
+        return Ok(());
+    }
+
     let headers_json = headers_to_routing_value(&parts.headers);
+    let policy_resolve_started_at = std::time::Instant::now();
     let policy = resolve_gateway_routing_policy(GatewayRoutingPolicyInput {
         group_id: group_id.as_deref(),
         group_version,
@@ -294,13 +347,22 @@ pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
         body: body_json,
         phase: RoutingRulePhase::ClientRequest,
     })?;
+    observe_gateway_stage_ms(
+        "routing_policy_resolve",
+        policy_resolve_started_at.elapsed().as_millis() as u64,
+    );
     let mut effective_body_json = body_json.clone();
     let mut effective_headers = parts.headers.clone();
+    let mutation_apply_started_at = std::time::Instant::now();
     apply_routing_mutation_plan(
         &mut effective_body_json,
         &mut effective_headers,
         &policy.mutation_plan,
     )?;
+    observe_gateway_stage_ms(
+        "routing_mutation_apply",
+        mutation_apply_started_at.elapsed().as_millis() as u64,
+    );
 
     let mut requested_model_changed = false;
     if let Some(mut mutated_model) = extract_standard_requested_model(&effective_body_json) {
@@ -324,6 +386,7 @@ pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
     let effective_headers_json = headers_to_routing_value(&effective_headers);
     input.client_session_affinity =
         client_session_affinity_from_request(&effective_headers, Some(&effective_body_json));
+    let final_policy_resolve_started_at = std::time::Instant::now();
     let mut final_policy = resolve_gateway_routing_policy(GatewayRoutingPolicyInput {
         group_id: group_id.as_deref(),
         group_version,
@@ -338,6 +401,10 @@ pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
         body: &effective_body_json,
         phase: RoutingRulePhase::ClientRequest,
     })?;
+    observe_gateway_stage_ms(
+        "routing_policy_resolve",
+        final_policy_resolve_started_at.elapsed().as_millis() as u64,
+    );
     final_policy.mutation_plan = policy.mutation_plan.clone();
     input.routing_trace_seed = Some(build_routing_trace_seed(&final_policy, client_api_format));
     input.routing_policy = Some(final_policy);
@@ -351,6 +418,46 @@ pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
         effective_headers,
     });
     Ok(())
+}
+
+fn try_attach_static_default_routing_policy_to_input(
+    input: &mut LocalRequestedModelDecisionInput,
+    parts: &http::request::Parts,
+    body_json: &Value,
+    client_api_format: &str,
+    group_id: Option<&str>,
+    group_version: Option<i64>,
+    group_config_json: &Value,
+    selection_source: &str,
+) -> Result<bool, GatewayError> {
+    let static_policy_resolve_started_at = std::time::Instant::now();
+    let Some(policy) =
+        resolve_gateway_static_default_routing_policy(GatewayStaticRoutingPolicyInput {
+            group_id,
+            group_version,
+            group_config_json,
+            selection_source,
+            requested_model: input.requested_model.as_str(),
+            resolved_model: input.requested_model.as_str(),
+        })?
+    else {
+        observe_gateway_stage_ms(
+            "routing_static_policy_resolve",
+            static_policy_resolve_started_at.elapsed().as_millis() as u64,
+        );
+        return Ok(false);
+    };
+    observe_gateway_stage_ms(
+        "routing_static_policy_resolve",
+        static_policy_resolve_started_at.elapsed().as_millis() as u64,
+    );
+
+    input.client_session_affinity =
+        client_session_affinity_from_request(&parts.headers, Some(body_json));
+    input.routing_trace_seed = Some(build_routing_trace_seed(&policy, client_api_format));
+    input.routing_policy = Some(policy);
+    input.routing_context = None;
+    Ok(true)
 }
 
 pub(crate) fn build_local_authenticated_decision_input(
@@ -408,6 +515,33 @@ fn routing_header_value_str(headers: &http::HeaderMap, key: &str) -> Option<Stri
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn routing_group_selection_cache_key(
+    explicit_group: Option<&str>,
+    user_id: Option<&str>,
+    api_key_id: Option<&str>,
+    user_group_ids: &[String],
+) -> String {
+    let groups = user_group_ids
+        .iter()
+        .map(|value| escape_cache_key_part(value))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "v1|explicit={}|user={}|api_key={}|groups={}",
+        escape_cache_key_part(explicit_group.unwrap_or_default()),
+        escape_cache_key_part(user_id.unwrap_or_default()),
+        escape_cache_key_part(api_key_id.unwrap_or_default()),
+        groups
+    )
+}
+
+fn escape_cache_key_part(value: &str) -> String {
+    value
+        .replace('%', "%25")
+        .replace('|', "%7C")
+        .replace(',', "%2C")
 }
 
 fn btree_headers_to_header_map(
@@ -752,6 +886,119 @@ mod tests {
             .as_mut()
             .expect("sample input should include routing context")
             .group_config_json = config;
+    }
+
+    #[test]
+    fn static_default_routing_policy_attaches_without_request_context() {
+        let request = http::Request::builder()
+            .header("content-type", "application/json")
+            .body(())
+            .expect("request should build");
+        let (parts, _) = request.into_parts();
+        let mut input = LocalRequestedModelDecisionInput {
+            auth_context: sample_auth_context(),
+            requested_model: "mock-model".to_string(),
+            auth_snapshot: sample_auth_snapshot(),
+            required_capabilities: None,
+            request_auth_channel: None,
+            client_session_affinity: None,
+            routing_policy: None,
+            routing_trace_seed: None,
+            routing_context: Some(LocalRoutingRequestContext {
+                group_id: Some("stale".to_string()),
+                group_version: Some(1),
+                group_config_json: json!({}),
+                selection_source: "stale".to_string(),
+                client_api_format: "openai:chat".to_string(),
+                effective_body_json: json!({}),
+                effective_headers: HeaderMap::new(),
+            }),
+        };
+        let group_config_json = json!({
+            "default_policy": {
+                "priority_mode": "global_key",
+                "scheduling_mode": "load_balance",
+                "keep_priority_on_conversion": true
+            },
+            "allowed_models": [],
+            "model_policies": [],
+            "rules": []
+        });
+
+        let attached = try_attach_static_default_routing_policy_to_input(
+            &mut input,
+            &parts,
+            &json!({"model": "mock-model"}),
+            "openai:chat",
+            Some("group-1"),
+            Some(4),
+            &group_config_json,
+            "system_default",
+        )
+        .expect("static routing should attach");
+
+        assert!(attached);
+        assert!(input.routing_context.is_none());
+        let policy = input.routing_policy.as_ref().expect("policy should be set");
+        assert_eq!(policy.group_id.as_deref(), Some("group-1"));
+        assert_eq!(policy.group_version, Some(4));
+        assert_eq!(
+            policy.priority_mode,
+            aether_routing_core::RoutingSetPriorityMode::GlobalKey
+        );
+        assert_eq!(
+            policy.scheduling_mode,
+            aether_routing_core::RoutingSchedulingMode::LoadBalance
+        );
+        assert!(policy.keep_priority_on_conversion);
+        assert!(policy.mutation_plan.is_empty());
+        assert!(input.routing_trace_seed.is_some());
+    }
+
+    #[test]
+    fn dynamic_routing_policy_does_not_attach_static_fast_path() {
+        let request = http::Request::builder()
+            .body(())
+            .expect("request should build");
+        let (parts, _) = request.into_parts();
+        let mut input = LocalRequestedModelDecisionInput {
+            auth_context: sample_auth_context(),
+            requested_model: "mock-model".to_string(),
+            auth_snapshot: sample_auth_snapshot(),
+            required_capabilities: None,
+            request_auth_channel: None,
+            client_session_affinity: None,
+            routing_policy: None,
+            routing_trace_seed: None,
+            routing_context: None,
+        };
+        let group_config_json = json!({
+            "rules": [{
+                "id": "rule-1",
+                "conditions": {},
+                "actions": [{
+                    "type": "restrict_providers",
+                    "provider_ids": ["provider-1"]
+                }]
+            }]
+        });
+
+        let attached = try_attach_static_default_routing_policy_to_input(
+            &mut input,
+            &parts,
+            &json!({"model": "mock-model"}),
+            "openai:chat",
+            Some("group-1"),
+            Some(4),
+            &group_config_json,
+            "system_default",
+        )
+        .expect("dynamic config should not fail static detection");
+
+        assert!(!attached);
+        assert!(input.routing_policy.is_none());
+        assert!(input.routing_trace_seed.is_none());
+        assert!(input.routing_context.is_none());
     }
 
     #[test]

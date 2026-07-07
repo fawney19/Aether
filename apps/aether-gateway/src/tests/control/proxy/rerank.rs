@@ -20,6 +20,30 @@ use crate::constants::{
     EXECUTION_PATH_LOCAL_AUTH_DENIED,
 };
 
+const RERANK_PROXY_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_rerank_proxy_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(RERANK_PROXY_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("rerank proxy test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 fn rerank_success_state(execution_runtime_url: String) -> AppState {
     let mut snapshot =
         sample_currently_usable_auth_snapshot("key-rerank-success", "user-rerank-success");
@@ -142,8 +166,15 @@ fn rerank_execution_result(plan: &ExecutionPlan) -> ExecutionResult {
     }
 }
 
-#[tokio::test]
-async fn rerank_route_accepts_openai_payload() {
+#[test]
+fn rerank_route_accepts_openai_payload() {
+    run_rerank_proxy_test(
+        "rerank_route_accepts_openai_payload",
+        rerank_route_accepts_openai_payload_impl,
+    );
+}
+
+async fn rerank_route_accepts_openai_payload_impl() {
     let (execution_runtime_url, execution_runtime_handle) =
         start_server(rerank_execution_runtime()).await;
     let gateway = build_router_with_state(rerank_success_state(execution_runtime_url));
@@ -200,8 +231,15 @@ async fn rerank_route_accepts_openai_payload() {
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn rerank_route_rejects_invalid_local_payloads() {
+#[test]
+fn rerank_route_rejects_invalid_local_payloads() {
+    run_rerank_proxy_test(
+        "rerank_route_rejects_invalid_local_payloads",
+        rerank_route_rejects_invalid_local_payloads_impl,
+    );
+}
+
+async fn rerank_route_rejects_invalid_local_payloads_impl() {
     let gateway = build_router_with_state(AppState::new().expect("gateway should build"));
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();
@@ -257,8 +295,15 @@ async fn rerank_route_rejects_invalid_local_payloads() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn rerank_route_rejects_non_json_content_type() {
+#[test]
+fn rerank_route_rejects_non_json_content_type() {
+    run_rerank_proxy_test(
+        "rerank_route_rejects_non_json_content_type",
+        rerank_route_rejects_non_json_content_type_impl,
+    );
+}
+
+async fn rerank_route_rejects_non_json_content_type_impl() {
     let gateway = build_router_with_state(AppState::new().expect("gateway should build"));
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
@@ -280,8 +325,15 @@ async fn rerank_route_rejects_non_json_content_type() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn rerank_route_rejects_chat_only_api_format() {
+#[test]
+fn rerank_route_rejects_chat_only_api_format() {
+    run_rerank_proxy_test(
+        "rerank_route_rejects_chat_only_api_format",
+        rerank_route_rejects_chat_only_api_format_impl,
+    );
+}
+
+async fn rerank_route_rejects_chat_only_api_format_impl() {
     let mut snapshot = sample_currently_usable_auth_snapshot("key-rerank-2", "user-rerank-2");
     snapshot.user_allowed_api_formats = Some(vec!["openai:chat".to_string()]);
     snapshot.api_key_allowed_api_formats = Some(vec!["openai:chat".to_string()]);

@@ -1883,9 +1883,16 @@ fn admin_provider_oauth_quota_mod_stays_thin() {
         "apps/aether-gateway/src/handlers/admin/provider/oauth/quota/codex/plan.rs",
     );
     for pattern in [
-        "use aether_provider_pool::{build_codex_pool_quota_request, ProviderPoolQuotaRequestSpec};",
+        "use aether_provider_pool::{",
+        "build_codex_pool_quota_request",
+        "build_codex_pool_reset_credits_request",
+        "build_codex_pool_reset_credit_consume_request",
+        "ProviderPoolQuotaRequestSpec",
         "pub(super) fn build_codex_quota_request_spec(",
+        "pub(super) fn build_codex_reset_credits_request_spec(",
+        "pub(super) fn build_codex_reset_credit_consume_request_spec(",
         "pub(super) async fn execute_codex_quota_plan(",
+        "pub(super) async fn execute_codex_reset_credit_plan(",
     ] {
         assert!(
             quota_codex_plan.contains(pattern),

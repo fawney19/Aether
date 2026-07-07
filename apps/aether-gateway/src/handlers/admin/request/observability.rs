@@ -70,6 +70,13 @@ impl<'a> AdminAppState<'a> {
         self.app.list_monitoring_usage_errors(query).await
     }
 
+    pub(crate) async fn count_monitoring_usage_errors(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageMonitoringErrorCountQuery,
+    ) -> Result<u64, GatewayError> {
+        self.app.count_monitoring_usage_errors(query).await
+    }
+
     pub(crate) async fn aggregate_usage_audits(
         &self,
         query: &aether_data_contracts::repository::usage::UsageAuditAggregationQuery,

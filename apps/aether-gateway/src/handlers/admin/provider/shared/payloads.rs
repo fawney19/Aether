@@ -114,6 +114,11 @@ pub(crate) struct AdminProviderQuotaRefreshRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct AdminCodexResetCreditConsumeRequest {
+    pub(crate) idempotency_key: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct AdminProviderCreateRequest {
     pub(crate) name: String,
     #[serde(default)]

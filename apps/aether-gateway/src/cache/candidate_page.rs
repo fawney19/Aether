@@ -17,11 +17,16 @@ use sha2::Digest as _;
 use crate::ai_serving::{
     EligibleLocalExecutionCandidate, GatewayAuthApiKeySnapshot, SkippedLocalExecutionCandidate,
 };
+use crate::data::candidate_selection::RequestedModelCandidateRowsPage;
 
 const DEFAULT_CANDIDATE_PAGE_CACHE_TTL_MS: u64 = 250;
 const MIN_CANDIDATE_PAGE_CACHE_TTL_MS: u64 = 50;
 const MAX_CANDIDATE_PAGE_CACHE_TTL_MS: u64 = 1_000;
 const CANDIDATE_PAGE_CACHE_TTL_ENV: &str = "AETHER_GATEWAY_CANDIDATE_PAGE_CACHE_TTL_MS";
+const DEFAULT_CANDIDATE_PAGE_CACHE_STALE_TTL_MS: u64 = 300_000;
+const MIN_CANDIDATE_PAGE_CACHE_STALE_TTL_MS: u64 = 1_000;
+const MAX_CANDIDATE_PAGE_CACHE_STALE_TTL_MS: u64 = 300_000;
+const CANDIDATE_PAGE_CACHE_STALE_TTL_ENV: &str = "AETHER_GATEWAY_CANDIDATE_PAGE_CACHE_STALE_TTL_MS";
 
 pub(crate) type CandidatePageSnapshot = AiCandidatePreselectionOutcome<
     SchedulerMinimalCandidateSelectionCandidate,
@@ -30,6 +35,9 @@ pub(crate) type CandidatePageSnapshot = AiCandidatePreselectionOutcome<
 
 pub(crate) type CandidatePageCache =
     super::ValueCache<CandidatePageCacheKey, Arc<CandidatePageSnapshot>>;
+
+pub(crate) type CandidateRowPageCache =
+    super::ValueCache<CandidateRowPageCacheKey, Arc<RequestedModelCandidateRowsPage>>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CandidateResolvedPageSnapshot {
@@ -54,6 +62,21 @@ struct CandidatePageCacheMetrics {
     resolve_load_total: AtomicU64,
     resolve_follower_wait_total: AtomicU64,
     resolve_miss_total: AtomicU64,
+    row_hit_total: AtomicU64,
+    row_load_total: AtomicU64,
+    row_follower_wait_total: AtomicU64,
+    row_miss_total: AtomicU64,
+    row_none_total: AtomicU64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CandidateRowPageCacheKey {
+    api_format: String,
+    requested_model_name: String,
+    requested_name: String,
+    offset: u32,
+    limit: u32,
+    enable_model_directives: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -81,6 +104,26 @@ enum CandidatePageAuthIdentity {
 pub(crate) struct CandidateResolvedPageCacheKey {
     page_key: CandidatePageCacheKey,
     resolution_mode: &'static str,
+}
+
+impl CandidateRowPageCacheKey {
+    pub(crate) fn new(
+        api_format: &str,
+        requested_model_name: &str,
+        requested_name: &str,
+        offset: u32,
+        limit: u32,
+        enable_model_directives: bool,
+    ) -> Self {
+        Self {
+            api_format: normalize_api_format(api_format),
+            requested_model_name: normalize_text_key(requested_model_name),
+            requested_name: normalize_text_key(requested_name),
+            offset,
+            limit,
+            enable_model_directives,
+        }
+    }
 }
 
 impl CandidatePageCacheKey {
@@ -177,8 +220,16 @@ pub(crate) fn candidate_page_cache_ttl_from_env() -> Duration {
 }
 
 pub(crate) fn candidate_page_cache_stale_ttl(ttl: Duration) -> Duration {
-    let stale_ttl = ttl.saturating_mul(8);
-    stale_ttl.min(Duration::from_secs(2)).max(ttl)
+    let stale_ttl_ms = std::env::var(CANDIDATE_PAGE_CACHE_STALE_TTL_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_CANDIDATE_PAGE_CACHE_STALE_TTL_MS)
+        .clamp(
+            MIN_CANDIDATE_PAGE_CACHE_STALE_TTL_MS,
+            MAX_CANDIDATE_PAGE_CACHE_STALE_TTL_MS,
+        );
+    Duration::from_millis(stale_ttl_ms).max(ttl)
 }
 
 pub(crate) fn record_candidate_page_cache_hit() {
@@ -232,6 +283,36 @@ pub(crate) fn record_candidate_page_resolve_cache_load() {
 pub(crate) fn record_candidate_page_resolve_cache_follower_wait() {
     CANDIDATE_PAGE_CACHE_METRICS
         .resolve_follower_wait_total
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_candidate_row_page_cache_hit() {
+    CANDIDATE_PAGE_CACHE_METRICS
+        .row_hit_total
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_candidate_row_page_cache_miss() {
+    CANDIDATE_PAGE_CACHE_METRICS
+        .row_miss_total
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_candidate_row_page_cache_load() {
+    CANDIDATE_PAGE_CACHE_METRICS
+        .row_load_total
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_candidate_row_page_cache_follower_wait() {
+    CANDIDATE_PAGE_CACHE_METRICS
+        .row_follower_wait_total
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_candidate_row_page_cache_none() {
+    CANDIDATE_PAGE_CACHE_METRICS
+        .row_none_total
         .fetch_add(1, Ordering::Relaxed);
 }
 
@@ -309,6 +390,46 @@ pub(crate) fn candidate_page_cache_metric_samples() -> Vec<MetricSample> {
                 .resolve_follower_wait_total
                 .load(Ordering::Relaxed),
         ),
+        MetricSample::new(
+            "candidate_row_page_cache_hit_total",
+            "Total candidate DB row page cache hits.",
+            MetricKind::Counter,
+            CANDIDATE_PAGE_CACHE_METRICS
+                .row_hit_total
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "candidate_row_page_cache_miss_total",
+            "Total candidate DB row page cache misses before singleflight registration.",
+            MetricKind::Counter,
+            CANDIDATE_PAGE_CACHE_METRICS
+                .row_miss_total
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "candidate_row_page_cache_load_total",
+            "Total candidate DB row page cache loader executions.",
+            MetricKind::Counter,
+            CANDIDATE_PAGE_CACHE_METRICS
+                .row_load_total
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "candidate_row_page_cache_follower_wait_total",
+            "Total candidate DB row page cache requests that waited for another loader.",
+            MetricKind::Counter,
+            CANDIDATE_PAGE_CACHE_METRICS
+                .row_follower_wait_total
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "candidate_row_page_cache_none_total",
+            "Total candidate DB row page cache lookups that resolved to no rows.",
+            MetricKind::Counter,
+            CANDIDATE_PAGE_CACHE_METRICS
+                .row_none_total
+                .load(Ordering::Relaxed),
+        ),
     ]
 }
 
@@ -371,6 +492,9 @@ mod tests {
     use super::*;
     use aether_data::repository::auth::ResolvedAuthApiKeySnapshot;
     use serde_json::json;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn auth_snapshot(user_id: &str, api_key_id: &str) -> ResolvedAuthApiKeySnapshot {
         ResolvedAuthApiKeySnapshot {
@@ -399,6 +523,34 @@ mod tests {
             api_key_ip_rules: None,
             currently_usable: true,
         }
+    }
+
+    #[test]
+    fn candidate_page_cache_stale_ttl_defaults_longer_than_burst_gap() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::remove_var(CANDIDATE_PAGE_CACHE_STALE_TTL_ENV);
+
+        assert_eq!(
+            candidate_page_cache_stale_ttl(Duration::from_millis(250)),
+            Duration::from_millis(DEFAULT_CANDIDATE_PAGE_CACHE_STALE_TTL_MS)
+        );
+    }
+
+    #[test]
+    fn candidate_page_cache_stale_ttl_respects_env_and_never_under_fresh_ttl() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var(CANDIDATE_PAGE_CACHE_STALE_TTL_ENV, "100");
+        assert_eq!(
+            candidate_page_cache_stale_ttl(Duration::from_millis(2_500)),
+            Duration::from_millis(2_500)
+        );
+
+        std::env::set_var(CANDIDATE_PAGE_CACHE_STALE_TTL_ENV, "60000");
+        assert_eq!(
+            candidate_page_cache_stale_ttl(Duration::from_millis(250)),
+            Duration::from_secs(60)
+        );
+        std::env::remove_var(CANDIDATE_PAGE_CACHE_STALE_TTL_ENV);
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub(crate) struct RequestDiagnostics {
 
 #[derive(Debug, Default)]
 struct RequestDiagnosticsInner {
+    request_accepted_at: Option<Instant>,
     db_operations: BTreeMap<&'static str, DbOperationTiming>,
     db_pool: Option<DbPoolObservation>,
 }
@@ -38,6 +39,20 @@ struct DbPoolObservation {
 }
 
 impl RequestDiagnostics {
+    fn record_request_accepted_at(&self, accepted_at: Instant) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        inner.request_accepted_at = Some(accepted_at);
+    }
+
+    pub(crate) fn request_accepted_at(&self) -> Option<Instant> {
+        let Ok(inner) = self.inner.lock() else {
+            return None;
+        };
+        inner.request_accepted_at
+    }
+
     fn record_db_timing_ms(&self, operation: &'static str, elapsed_ms: u64) {
         let Ok(mut inner) = self.inner.lock() else {
             return;
@@ -143,6 +158,12 @@ where
 
 pub(crate) fn current_request_diagnostics() -> Option<Arc<RequestDiagnostics>> {
     REQUEST_DIAGNOSTICS.try_with(Arc::clone).ok()
+}
+
+pub(crate) fn record_request_accepted_at(accepted_at: Instant) {
+    if let Some(diagnostics) = current_request_diagnostics() {
+        diagnostics.record_request_accepted_at(accepted_at);
+    }
 }
 
 pub(crate) async fn observe_db_operation<F>(

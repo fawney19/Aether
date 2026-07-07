@@ -3,7 +3,7 @@
     <!-- 左侧：记录范围和每页数量 -->
     <div class="flex items-center justify-between sm:justify-start gap-3 text-sm text-muted-foreground">
       <span class="font-medium whitespace-nowrap">
-        显示 <span class="text-foreground font-semibold">{{ recordRange.start }}-{{ recordRange.end }}</span> 条，共 <span class="text-foreground font-semibold">{{ total }}</span> 条
+        {{ rangeSummary }}
       </span>
       <Select
         v-if="showPageSizeSelector"
@@ -21,7 +21,7 @@
             :key="size"
             :value="String(size)"
           >
-            {{ size }} 条/页
+            {{ pageSizeLabel(size) }}
           </SelectItem>
         </SelectContent>
       </Select>
@@ -55,7 +55,7 @@
         v-if="totalPages > 7"
         class="flex items-center gap-1.5 ml-2 text-sm text-muted-foreground"
       >
-        <span class="hidden sm:inline">跳至</span>
+        <span class="hidden sm:inline">{{ jumpToLabel }}</span>
         <input
           v-model="jumpPageInput"
           type="text"
@@ -66,7 +66,7 @@
           @blur="handleJumpPage"
           @input="filterNumericInput"
         >
-        <span class="hidden sm:inline">页</span>
+        <span class="hidden sm:inline">{{ pageLabel }}</span>
       </div>
     </div>
   </div>
@@ -75,6 +75,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
 import { Button, Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui'
+import { useI18n } from '@/i18n'
 
 interface Props {
   current: number
@@ -101,6 +102,7 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<Emits>()
 
 const jumpPageInput = ref('')
+const locale = useI18n().locale
 
 const totalPages = computed(() => Math.ceil(props.total / props.pageSize))
 
@@ -109,6 +111,20 @@ const recordRange = computed(() => {
   const end = Math.min(props.current * props.pageSize, props.total)
   return { start, end }
 })
+
+const rangeSummary = computed(() => {
+  if (locale.value === 'en-US') {
+    return `Showing ${recordRange.value.start}-${recordRange.value.end} of ${props.total} items`
+  }
+  return `显示 ${recordRange.value.start}-${recordRange.value.end} 条，共 ${props.total} 条`
+})
+
+const jumpToLabel = computed(() => locale.value === 'en-US' ? 'Go to' : '跳至')
+const pageLabel = computed(() => locale.value === 'en-US' ? 'page' : '页')
+
+function pageSizeLabel(size: number): string {
+  return locale.value === 'en-US' ? `${size} / page` : `${size} 条/页`
+}
 
 const pageNumbers = computed(() => {
   const pages: (number | string)[] = []

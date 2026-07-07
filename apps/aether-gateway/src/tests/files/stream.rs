@@ -14,8 +14,13 @@ use super::{
     TRACE_ID_HEADER,
 };
 
-#[tokio::test]
-async fn gateway_executes_gemini_files_download_via_local_decision_gate_with_local_planning_only() {
+#[test]
+fn gateway_executes_gemini_files_download_via_local_decision_gate_with_local_planning_only() {
+    super::run_files_test("gateway_executes_gemini_files_download_via_local_decision_gate_with_local_planning_only", gateway_executes_gemini_files_download_via_local_decision_gate_with_local_planning_only_impl);
+}
+
+async fn gateway_executes_gemini_files_download_via_local_decision_gate_with_local_planning_only_impl(
+) {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeStreamRequest {
         method: String,
@@ -280,8 +285,13 @@ async fn gateway_executes_gemini_files_download_via_local_decision_gate_with_loc
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_locally_denies_gemini_files_upload_control_sync_with_opt_in_headers_when_execution_runtime_missing(
+#[test]
+fn gateway_locally_denies_gemini_files_upload_control_sync_with_opt_in_headers_when_execution_runtime_missing(
+) {
+    super::run_files_test("gateway_locally_denies_gemini_files_upload_control_sync_with_opt_in_headers_when_execution_runtime_missing", gateway_locally_denies_gemini_files_upload_control_sync_with_opt_in_headers_when_execution_runtime_missing_impl);
+}
+
+async fn gateway_locally_denies_gemini_files_upload_control_sync_with_opt_in_headers_when_execution_runtime_missing_impl(
 ) {
     let execute_hits = Arc::new(Mutex::new(0usize));
     let execute_hits_clone = Arc::clone(&execute_hits);
@@ -351,8 +361,15 @@ async fn gateway_locally_denies_gemini_files_upload_control_sync_with_opt_in_hea
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_locally_denies_gemini_files_upload_control_sync_without_opt_in_header() {
+#[test]
+fn gateway_locally_denies_gemini_files_upload_control_sync_without_opt_in_header() {
+    super::run_files_test(
+        "gateway_locally_denies_gemini_files_upload_control_sync_without_opt_in_header",
+        gateway_locally_denies_gemini_files_upload_control_sync_without_opt_in_header_impl,
+    );
+}
+
+async fn gateway_locally_denies_gemini_files_upload_control_sync_without_opt_in_header_impl() {
     let execute_hits = Arc::new(Mutex::new(0usize));
     let execute_hits_clone = Arc::clone(&execute_hits);
     let public_hits = Arc::new(Mutex::new(0usize));

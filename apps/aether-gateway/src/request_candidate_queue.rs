@@ -17,9 +17,13 @@ const BATCH_SIZE_ENV: &str = "AETHER_GATEWAY_REQUEST_CANDIDATE_QUEUE_BATCH_SIZE"
 const FLUSH_INTERVAL_MS_ENV: &str = "AETHER_GATEWAY_REQUEST_CANDIDATE_QUEUE_FLUSH_INTERVAL_MS";
 const WORKERS_ENV: &str = "AETHER_GATEWAY_REQUEST_CANDIDATE_QUEUE_WORKERS";
 const QUEUE_FULL_ENV: &str = "AETHER_GATEWAY_REQUEST_CANDIDATE_QUEUE_FULL";
+const DB_WRITE_CONCURRENCY_LIMIT_ENV: &str =
+    "AETHER_GATEWAY_REQUEST_CANDIDATE_DB_WRITE_CONCURRENCY_LIMIT";
+const DB_BATCH_SIZE_ENV: &str = "AETHER_GATEWAY_REQUEST_CANDIDATE_DB_BATCH_SIZE";
 
 const DEFAULT_QUEUE_CAPACITY: usize = 65_536;
 const DEFAULT_BATCH_SIZE: usize = 512;
+const DEFAULT_DB_BATCH_SIZE: usize = 128;
 const DEFAULT_FLUSH_INTERVAL_MS: u64 = 50;
 const DEFAULT_WORKERS: usize = 2;
 const FAILED_FLUSH_RETRY_DELAY_MS: u64 = 25;
@@ -41,8 +45,10 @@ pub(crate) struct RequestCandidateQueueConfig {
     pub(crate) mode: RequestCandidateWriteMode,
     pub(crate) capacity: usize,
     pub(crate) batch_size: usize,
+    pub(crate) db_batch_size: usize,
     pub(crate) flush_interval: Duration,
     pub(crate) workers: usize,
+    pub(crate) db_write_concurrency_limit: Option<usize>,
     pub(crate) full_policy: RequestCandidateQueueFullPolicy,
 }
 
@@ -52,8 +58,10 @@ impl Default for RequestCandidateQueueConfig {
             mode: RequestCandidateWriteMode::Sync,
             capacity: DEFAULT_QUEUE_CAPACITY,
             batch_size: DEFAULT_BATCH_SIZE,
+            db_batch_size: DEFAULT_DB_BATCH_SIZE,
             flush_interval: Duration::from_millis(DEFAULT_FLUSH_INTERVAL_MS),
             workers: DEFAULT_WORKERS,
+            db_write_concurrency_limit: None,
             full_policy: RequestCandidateQueueFullPolicy::Sync,
         }
     }
@@ -69,9 +77,12 @@ impl RequestCandidateQueueConfig {
         };
         config.capacity = env_usize(QUEUE_CAPACITY_ENV, DEFAULT_QUEUE_CAPACITY).max(1);
         config.batch_size = env_usize(BATCH_SIZE_ENV, DEFAULT_BATCH_SIZE).max(1);
+        config.db_batch_size = env_usize(DB_BATCH_SIZE_ENV, DEFAULT_DB_BATCH_SIZE).max(1);
         config.flush_interval =
             Duration::from_millis(env_u64(FLUSH_INTERVAL_MS_ENV, DEFAULT_FLUSH_INTERVAL_MS).max(1));
         config.workers = env_usize(WORKERS_ENV, DEFAULT_WORKERS).clamp(1, 32);
+        config.db_write_concurrency_limit =
+            env_optional_usize(DB_WRITE_CONCURRENCY_LIMIT_ENV).map(|limit| limit.clamp(1, 32));
         config.full_policy = match env_string(QUEUE_FULL_ENV).as_deref() {
             Some("drop") | Some("best_effort") | Some("best-effort") => {
                 RequestCandidateQueueFullPolicy::Drop
@@ -100,6 +111,9 @@ struct RequestCandidateQueueMetrics {
     flush_batches_total: AtomicU64,
     flush_sql_ops_total: AtomicU64,
     flush_sql_records_total: AtomicU64,
+    db_write_in_flight: AtomicUsize,
+    db_write_max_in_flight: AtomicUsize,
+    db_write_wait_total: AtomicU64,
     compacted_total: AtomicU64,
     sync_fallback_total: AtomicU64,
 }
@@ -110,6 +124,7 @@ pub(crate) struct RequestCandidateQueueRuntime {
     repository: Arc<dyn RequestCandidateWriteRepository>,
     config: RequestCandidateQueueConfig,
     metrics: Arc<RequestCandidateQueueMetrics>,
+    db_write_gate: Option<Arc<RequestCandidateDbWriteGate>>,
 }
 
 impl std::fmt::Debug for RequestCandidateQueueRuntime {
@@ -138,11 +153,16 @@ impl RequestCandidateQueueRuntime {
             senders.push(sender);
             receivers.push(receiver);
         }
+        let db_write_gate = config
+            .db_write_concurrency_limit
+            .map(RequestCandidateDbWriteGate::new)
+            .map(Arc::new);
         let runtime = Arc::new(Self {
             senders,
             repository,
             config,
             metrics: Arc::new(RequestCandidateQueueMetrics::default()),
+            db_write_gate,
         });
         runtime.spawn_workers(receivers);
         runtime
@@ -265,6 +285,36 @@ impl RequestCandidateQueueRuntime {
                 self.metrics.flush_sql_records_total.load(Ordering::Acquire),
             ),
             MetricSample::new(
+                "request_candidate_queue_db_batch_size",
+                "Maximum request candidate records submitted in one async DB batch upsert after compaction.",
+                MetricKind::Gauge,
+                self.config.db_batch_size as u64,
+            ),
+            MetricSample::new(
+                "request_candidate_queue_db_write_concurrency_limit",
+                "Maximum concurrent request candidate async DB write batches; zero means unlimited.",
+                MetricKind::Gauge,
+                self.config.db_write_concurrency_limit.unwrap_or_default() as u64,
+            ),
+            MetricSample::new(
+                "request_candidate_queue_db_write_in_flight",
+                "Current request candidate async DB write batches in flight.",
+                MetricKind::Gauge,
+                self.metrics.db_write_in_flight.load(Ordering::Acquire) as u64,
+            ),
+            MetricSample::new(
+                "request_candidate_queue_db_write_max_in_flight",
+                "Maximum observed request candidate async DB write batches in flight.",
+                MetricKind::Gauge,
+                self.metrics.db_write_max_in_flight.load(Ordering::Acquire) as u64,
+            ),
+            MetricSample::new(
+                "request_candidate_queue_db_write_wait_total",
+                "Total request candidate async DB write batches that had to wait for the DB write gate.",
+                MetricKind::Counter,
+                self.metrics.db_write_wait_total.load(Ordering::Acquire),
+            ),
+            MetricSample::new(
                 "request_candidate_queue_compacted_total",
                 "Total request candidate records compacted before async persistence because a later queued record covered the same request candidate slot.",
                 MetricKind::Counter,
@@ -287,8 +337,17 @@ impl RequestCandidateQueueRuntime {
             let repository = Arc::clone(&self.repository);
             let config = self.config.clone();
             let metrics = Arc::clone(&self.metrics);
+            let db_write_gate = self.db_write_gate.clone();
             tokio::spawn(async move {
-                run_worker(repository, config, metrics, worker_index, receiver).await;
+                run_worker(
+                    repository,
+                    config,
+                    metrics,
+                    db_write_gate,
+                    worker_index,
+                    receiver,
+                )
+                .await;
             });
         }
     }
@@ -306,6 +365,7 @@ async fn run_worker(
     repository: Arc<dyn RequestCandidateWriteRepository>,
     config: RequestCandidateQueueConfig,
     metrics: Arc<RequestCandidateQueueMetrics>,
+    db_write_gate: Option<Arc<RequestCandidateDbWriteGate>>,
     worker_index: usize,
     mut receiver: mpsc::Receiver<UpsertRequestCandidateRecord>,
 ) {
@@ -317,7 +377,14 @@ async fn run_worker(
         tokio::select! {
             _ = ticker.tick() => {
                 if !batch.is_empty() {
-                    flush_batch(&repository, &metrics, worker_index, &mut batch).await;
+                    flush_batch(
+                        &repository,
+                        &config,
+                        &metrics,
+                        db_write_gate.as_ref(),
+                        worker_index,
+                        &mut batch,
+                    ).await;
                 }
             }
             received = receiver.recv() => {
@@ -326,12 +393,26 @@ async fn run_worker(
                         decrement_atomic_usize(&metrics.queued_current);
                         batch.push(record);
                         if batch.len() >= config.batch_size {
-                            flush_batch(&repository, &metrics, worker_index, &mut batch).await;
+                            flush_batch(
+                                &repository,
+                                &config,
+                                &metrics,
+                                db_write_gate.as_ref(),
+                                worker_index,
+                                &mut batch,
+                            ).await;
                         }
                     }
                     None => {
                         if !batch.is_empty() {
-                            flush_batch(&repository, &metrics, worker_index, &mut batch).await;
+                            flush_batch(
+                                &repository,
+                                &config,
+                                &metrics,
+                                db_write_gate.as_ref(),
+                                worker_index,
+                                &mut batch,
+                            ).await;
                         }
                         break;
                     }
@@ -343,7 +424,9 @@ async fn run_worker(
 
 async fn flush_batch(
     repository: &Arc<dyn RequestCandidateWriteRepository>,
+    config: &RequestCandidateQueueConfig,
     metrics: &RequestCandidateQueueMetrics,
+    db_write_gate: Option<&Arc<RequestCandidateDbWriteGate>>,
     worker_index: usize,
     batch: &mut Vec<UpsertRequestCandidateRecord>,
 ) {
@@ -360,42 +443,49 @@ async fn flush_batch(
             .fetch_add(compacted as u64, Ordering::AcqRel);
     }
     metrics.flush_batches_total.fetch_add(1, Ordering::AcqRel);
-    let source_count = records
-        .iter()
-        .map(|record| record.source_count)
-        .sum::<usize>();
-    let record_count = records.len();
-    let upsert_records = records
-        .into_iter()
-        .map(|record| record.record)
-        .collect::<Vec<_>>();
-    metrics.flush_sql_ops_total.fetch_add(1, Ordering::AcqRel);
-    metrics
-        .flush_sql_records_total
-        .fetch_add(record_count as u64, Ordering::AcqRel);
     let mut failed = 0_u64;
     let mut retry_records = Vec::new();
-    if let Err(err) = repository.upsert_many(upsert_records.clone()).await {
-        failed = source_count as u64;
-        decrement_atomic_usize_by(
-            &metrics.pending_current,
-            source_count.saturating_sub(record_count),
-        );
-        warn!(
-            event_name = "request_candidate_async_flush_failed",
-            log_type = "event",
-            worker_index,
-            record_count,
-            source_count,
-            error = ?err,
-            "gateway failed to asynchronously persist request candidate batch"
-        );
-        retry_records = upsert_records;
-    } else {
+
+    for chunk in records.chunks(config.db_batch_size) {
+        let source_count = chunk
+            .iter()
+            .map(|record| record.source_count)
+            .sum::<usize>();
+        let record_count = chunk.len();
+        let upsert_records = chunk
+            .iter()
+            .map(|record| record.record.clone())
+            .collect::<Vec<_>>();
+        metrics.flush_sql_ops_total.fetch_add(1, Ordering::AcqRel);
         metrics
-            .flushed_total
-            .fetch_add(source_count as u64, Ordering::AcqRel);
-        decrement_atomic_usize_by(&metrics.pending_current, source_count);
+            .flush_sql_records_total
+            .fetch_add(record_count as u64, Ordering::AcqRel);
+        let _db_write_permit = match db_write_gate {
+            Some(gate) => Some(gate.acquire(metrics).await),
+            None => None,
+        };
+        if let Err(err) = repository.upsert_many(upsert_records.clone()).await {
+            failed = failed.saturating_add(source_count as u64);
+            decrement_atomic_usize_by(
+                &metrics.pending_current,
+                source_count.saturating_sub(record_count),
+            );
+            warn!(
+                event_name = "request_candidate_async_flush_failed",
+                log_type = "event",
+                worker_index,
+                record_count,
+                source_count,
+                error = ?err,
+                "gateway failed to asynchronously persist request candidate DB batch"
+            );
+            retry_records.extend(upsert_records);
+        } else {
+            metrics
+                .flushed_total
+                .fetch_add(source_count as u64, Ordering::AcqRel);
+            decrement_atomic_usize_by(&metrics.pending_current, source_count);
+        }
     }
     if failed > 0 {
         metrics
@@ -474,6 +564,54 @@ fn worker_queue_capacity(total_capacity: usize, workers: usize, worker_index: us
     let base = total_capacity / workers;
     let remainder = total_capacity % workers;
     (base + usize::from(worker_index < remainder)).max(1)
+}
+
+#[derive(Debug)]
+struct RequestCandidateDbWriteGate {
+    semaphore: tokio::sync::Semaphore,
+}
+
+impl RequestCandidateDbWriteGate {
+    fn new(limit: usize) -> Self {
+        Self {
+            semaphore: tokio::sync::Semaphore::new(limit.max(1)),
+        }
+    }
+
+    async fn acquire<'a>(
+        &'a self,
+        metrics: &'a RequestCandidateQueueMetrics,
+    ) -> RequestCandidateDbWritePermit<'a> {
+        if self.semaphore.available_permits() == 0 {
+            metrics.db_write_wait_total.fetch_add(1, Ordering::AcqRel);
+        }
+        let permit = self
+            .semaphore
+            .acquire()
+            .await
+            .expect("request candidate DB write gate semaphore should not be closed");
+        let in_flight = metrics.db_write_in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+        metrics
+            .db_write_max_in_flight
+            .fetch_max(in_flight, Ordering::AcqRel);
+        RequestCandidateDbWritePermit {
+            metrics,
+            _permit: permit,
+        }
+    }
+}
+
+struct RequestCandidateDbWritePermit<'a> {
+    metrics: &'a RequestCandidateQueueMetrics,
+    _permit: tokio::sync::SemaphorePermit<'a>,
+}
+
+impl Drop for RequestCandidateDbWritePermit<'_> {
+    fn drop(&mut self) {
+        self.metrics
+            .db_write_in_flight
+            .fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 fn merge_request_candidate_record(
@@ -601,6 +739,13 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn env_optional_usize(key: &str) -> Option<usize> {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+}
+
 fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key)
         .ok()
@@ -666,6 +811,8 @@ mod tests {
         inner: InMemoryRequestCandidateRepository,
         upsert_calls: AtomicUsize,
         upsert_many_calls: AtomicUsize,
+        active_upsert_many: AtomicUsize,
+        max_active_upsert_many: AtomicUsize,
     }
 
     #[async_trait::async_trait]
@@ -683,10 +830,15 @@ mod tests {
             candidates: Vec<UpsertRequestCandidateRecord>,
         ) -> Result<usize, DataLayerError> {
             self.upsert_many_calls.fetch_add(1, Ordering::AcqRel);
+            let active = self.active_upsert_many.fetch_add(1, Ordering::AcqRel) + 1;
+            self.max_active_upsert_many
+                .fetch_max(active, Ordering::AcqRel);
+            tokio::time::sleep(Duration::from_millis(30)).await;
             let count = candidates.len();
             for candidate in candidates {
                 self.inner.upsert(candidate).await?;
             }
+            self.active_upsert_many.fetch_sub(1, Ordering::AcqRel);
             Ok(count)
         }
 
@@ -826,8 +978,10 @@ mod tests {
                 mode: super::RequestCandidateWriteMode::Async,
                 capacity: 16,
                 batch_size: 2,
+                db_batch_size: 128,
                 flush_interval: Duration::from_millis(10),
                 workers: 1,
+                db_write_concurrency_limit: None,
                 full_policy: super::RequestCandidateQueueFullPolicy::Drop,
             },
         );
@@ -858,8 +1012,10 @@ mod tests {
                 mode: super::RequestCandidateWriteMode::Async,
                 capacity: 16,
                 batch_size: 4,
+                db_batch_size: 128,
                 flush_interval: Duration::from_millis(100),
                 workers: 1,
+                db_write_concurrency_limit: None,
                 full_policy: super::RequestCandidateQueueFullPolicy::Drop,
             },
         );
@@ -900,6 +1056,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn async_queue_splits_compacted_flush_into_db_batches() {
+        let repository = Arc::new(CountingBatchRequestCandidateRepository::default());
+        let runtime = RequestCandidateQueueRuntime::spawn(
+            repository.clone(),
+            RequestCandidateQueueConfig {
+                mode: super::RequestCandidateWriteMode::Async,
+                capacity: 16,
+                batch_size: 5,
+                db_batch_size: 2,
+                flush_interval: Duration::from_millis(100),
+                workers: 1,
+                db_write_concurrency_limit: None,
+                full_policy: super::RequestCandidateQueueFullPolicy::Drop,
+            },
+        );
+
+        for index in 0..5 {
+            runtime
+                .enqueue_or_fallback(record(
+                    "req-db-batch",
+                    index,
+                    0,
+                    RequestCandidateStatus::Success,
+                ))
+                .await
+                .unwrap();
+        }
+
+        for _ in 0..50 {
+            if runtime.metrics.pending_current.load(Ordering::Acquire) == 0 {
+                assert_eq!(repository.upsert_many_calls.load(Ordering::Acquire), 3);
+                assert_eq!(
+                    runtime.metrics.flush_batches_total.load(Ordering::Acquire),
+                    1
+                );
+                assert_eq!(
+                    runtime.metrics.flush_sql_ops_total.load(Ordering::Acquire),
+                    3
+                );
+                assert_eq!(
+                    runtime
+                        .metrics
+                        .flush_sql_records_total
+                        .load(Ordering::Acquire),
+                    5
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("async request candidate queue did not split DB batches in time");
+    }
+
+    #[tokio::test]
+    async fn async_queue_db_write_gate_limits_concurrent_batch_writes() {
+        let repository = Arc::new(CountingBatchRequestCandidateRepository::default());
+        let runtime = RequestCandidateQueueRuntime::spawn(
+            repository.clone(),
+            RequestCandidateQueueConfig {
+                mode: super::RequestCandidateWriteMode::Async,
+                capacity: 64,
+                batch_size: 1,
+                db_batch_size: 128,
+                flush_interval: Duration::from_millis(100),
+                workers: 4,
+                db_write_concurrency_limit: Some(2),
+                full_policy: super::RequestCandidateQueueFullPolicy::Drop,
+            },
+        );
+
+        for index in 0..8 {
+            runtime
+                .enqueue_or_fallback(record(
+                    &format!("req-gate-{index}"),
+                    0,
+                    0,
+                    RequestCandidateStatus::Success,
+                ))
+                .await
+                .unwrap();
+        }
+
+        for _ in 0..100 {
+            if runtime.metrics.pending_current.load(Ordering::Acquire) == 0 {
+                assert_eq!(repository.max_active_upsert_many.load(Ordering::Acquire), 2);
+                assert_eq!(
+                    runtime
+                        .metrics
+                        .db_write_max_in_flight
+                        .load(Ordering::Acquire),
+                    2
+                );
+                assert!(runtime.metrics.db_write_wait_total.load(Ordering::Acquire) > 0);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("async request candidate queue did not finish gated writes in time");
+    }
+
+    #[tokio::test]
     async fn async_queue_preserves_same_slot_order_with_multiple_workers() {
         let repository = Arc::new(DelayedPendingRequestCandidateRepository::default());
         let runtime = RequestCandidateQueueRuntime::spawn(
@@ -908,8 +1167,10 @@ mod tests {
                 mode: super::RequestCandidateWriteMode::Async,
                 capacity: 16,
                 batch_size: 1,
+                db_batch_size: 128,
                 flush_interval: Duration::from_millis(100),
                 workers: 2,
+                db_write_concurrency_limit: None,
                 full_policy: super::RequestCandidateQueueFullPolicy::Drop,
             },
         );

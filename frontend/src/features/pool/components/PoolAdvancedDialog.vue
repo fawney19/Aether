@@ -588,6 +588,7 @@ const form = ref({
   account_self_check_interval_minutes: null as number | null | undefined,
   account_self_check_concurrency: null as number | null | undefined,
   auto_remove_banned_keys: false,
+  auto_remove_quota_exhausted_keys: false,
   skip_exhausted_accounts: false,
 })
 
@@ -625,6 +626,8 @@ function getHealthToggleValue(key: PoolHealthToggleKey): boolean {
       return form.value.account_self_check_enabled
     case 'auto_remove_banned_keys':
       return form.value.auto_remove_banned_keys
+    case 'auto_remove_quota_exhausted_keys':
+      return form.value.auto_remove_quota_exhausted_keys
     case 'skip_exhausted_accounts':
       return form.value.skip_exhausted_accounts
   }
@@ -640,6 +643,9 @@ function updateHealthToggleValue(key: PoolHealthToggleKey, value: boolean): void
       return
     case 'auto_remove_banned_keys':
       form.value.auto_remove_banned_keys = value
+      return
+    case 'auto_remove_quota_exhausted_keys':
+      form.value.auto_remove_quota_exhausted_keys = value
       return
     case 'skip_exhausted_accounts':
       form.value.skip_exhausted_accounts = value
@@ -675,6 +681,7 @@ watch(() => props.modelValue, (open) => {
     account_self_check_interval_minutes: cfg?.account_self_check_interval_minutes ?? null,
     account_self_check_concurrency: cfg?.account_self_check_concurrency ?? null,
     auto_remove_banned_keys: cfg?.auto_remove_banned_keys ?? false,
+    auto_remove_quota_exhausted_keys: cfg?.auto_remove_quota_exhausted_keys ?? false,
     skip_exhausted_accounts: cfg?.skip_exhausted_accounts ?? false,
   }
 
@@ -751,6 +758,7 @@ async function handleSave() {
         ? (form.value.account_self_check_concurrency ?? undefined)
         : undefined,
       auto_remove_banned_keys: form.value.auto_remove_banned_keys,
+      auto_remove_quota_exhausted_keys: form.value.auto_remove_quota_exhausted_keys,
       skip_exhausted_accounts: form.value.skip_exhausted_accounts,
     }
 

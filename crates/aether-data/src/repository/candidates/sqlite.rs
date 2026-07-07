@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use sqlx::{sqlite::SqliteRow, QueryBuilder, Row, Sqlite};
 
 use super::{
-    PublicHealthStatusCount, PublicHealthTimelineBucket, RequestCandidateReadRepository,
-    RequestCandidateStatus, RequestCandidateWriteRepository, StoredRequestCandidate,
-    UpsertRequestCandidateRecord,
+    request_candidate_lifecycle_would_regress, PublicHealthStatusCount, PublicHealthTimelineBucket,
+    RequestCandidateReadRepository, RequestCandidateStatus, RequestCandidateWriteRepository,
+    StoredRequestCandidate, UpsertRequestCandidateRecord,
 };
 use crate::driver::sqlite::SqlitePool;
 use crate::error::SqlResultExt;
@@ -361,6 +361,17 @@ fn merge_candidate(
     candidate: UpsertRequestCandidateRecord,
     existing: Option<StoredRequestCandidate>,
 ) -> Result<StoredRequestCandidate, DataLayerError> {
+    let preserve_existing_lifecycle = existing.as_ref().is_some_and(|value| {
+        request_candidate_lifecycle_would_regress(value.status, candidate.status)
+    });
+    let merged_status = if preserve_existing_lifecycle {
+        existing
+            .as_ref()
+            .map(|value| value.status)
+            .unwrap_or(candidate.status)
+    } else {
+        candidate.status
+    };
     let created_at_unix_ms = candidate
         .created_at_unix_ms
         .filter(|value| *value > 1000)
@@ -413,7 +424,7 @@ fn merge_candidate(
         candidate
             .key_id
             .or_else(|| existing.as_ref().and_then(|value| value.key_id.clone())),
-        candidate.status,
+        merged_status,
         candidate.skip_reason.or_else(|| {
             existing
                 .as_ref()
@@ -422,25 +433,48 @@ fn merge_candidate(
         candidate
             .is_cached
             .unwrap_or_else(|| existing.as_ref().is_some_and(|value| value.is_cached)),
-        candidate.status_code.map(i32::from).or_else(|| {
+        if preserve_existing_lifecycle {
             existing
                 .as_ref()
                 .and_then(|value| value.status_code.map(i32::from))
-        }),
-        candidate
-            .error_type
-            .or_else(|| existing.as_ref().and_then(|value| value.error_type.clone())),
-        candidate.error_message.or_else(|| {
+        } else {
+            candidate.status_code.map(i32::from).or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|value| value.status_code.map(i32::from))
+            })
+        },
+        if preserve_existing_lifecycle {
+            existing.as_ref().and_then(|value| value.error_type.clone())
+        } else {
+            candidate
+                .error_type
+                .or_else(|| existing.as_ref().and_then(|value| value.error_type.clone()))
+        },
+        if preserve_existing_lifecycle {
             existing
                 .as_ref()
                 .and_then(|value| value.error_message.clone())
-        }),
-        candidate.latency_ms.map(to_i32_u64).transpose()?.or(
+        } else {
+            candidate.error_message.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|value| value.error_message.clone())
+            })
+        },
+        if preserve_existing_lifecycle {
             match existing.as_ref().and_then(|value| value.latency_ms) {
                 Some(value) => Some(to_i32_u64(value)?),
                 None => None,
-            },
-        ),
+            }
+        } else {
+            candidate.latency_ms.map(to_i32_u64).transpose()?.or(
+                match existing.as_ref().and_then(|value| value.latency_ms) {
+                    Some(value) => Some(to_i32_u64(value)?),
+                    None => None,
+                },
+            )
+        },
         candidate.concurrent_requests.map(to_i32).transpose()?.or(
             match existing
                 .as_ref()
@@ -462,15 +496,19 @@ fn merge_candidate(
             .or_else(|| existing.as_ref().and_then(|value| value.started_at_unix_ms))
             .map(|value| u64_to_i64(value, "request candidate started_at"))
             .transpose()?,
-        candidate
-            .finished_at_unix_ms
-            .or_else(|| {
+        if preserve_existing_lifecycle {
+            existing
+                .as_ref()
+                .and_then(|value| value.finished_at_unix_ms)
+        } else {
+            candidate.finished_at_unix_ms.or_else(|| {
                 existing
                     .as_ref()
                     .and_then(|value| value.finished_at_unix_ms)
             })
-            .map(|value| u64_to_i64(value, "request candidate finished_at"))
-            .transpose()?,
+        }
+        .map(|value| u64_to_i64(value, "request candidate finished_at"))
+        .transpose()?,
     )
 }
 
@@ -709,6 +747,23 @@ mod tests {
             .expect("candidate should update");
         assert_eq!(updated.id, "candidate-1");
         assert_eq!(updated.extra_data, Some(json!({"a": 1, "b": 2})));
+
+        let late_streaming = repository
+            .upsert(sample_upsert(
+                "candidate-late-streaming",
+                RequestCandidateStatus::Streaming,
+                Some(json!({"late": true})),
+                1_000_250,
+            ))
+            .await
+            .expect("late streaming candidate should not regress terminal status");
+        assert_eq!(late_streaming.id, "candidate-1");
+        assert_eq!(late_streaming.status, RequestCandidateStatus::Success);
+        assert_eq!(late_streaming.finished_at_unix_ms, Some(1_000_502));
+        assert_eq!(
+            late_streaming.extra_data,
+            Some(json!({"a": 1, "b": 2, "late": true}))
+        );
 
         assert_eq!(
             repository

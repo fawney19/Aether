@@ -54,8 +54,12 @@
           <div class="flex items-start gap-2">
             <AlertTriangle class="mt-0.5 h-4 w-4 flex-shrink-0" />
             <div class="min-w-0">
-              <p class="font-medium">关联健康加载失败</p>
-              <p class="mt-1 text-xs">{{ errorMessage }}</p>
+              <p class="font-medium">
+                关联健康加载失败
+              </p>
+              <p class="mt-1 text-xs">
+                {{ errorMessage }}
+              </p>
             </div>
           </div>
           <Button

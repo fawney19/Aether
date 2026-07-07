@@ -22,6 +22,7 @@ use axum::body::{to_bytes, Body, Bytes};
 use axum::http::header::{CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderName, HeaderValue, Response, StatusCode};
 use futures_util::StreamExt;
+use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
@@ -55,9 +56,9 @@ use crate::execution_runtime::submission::{
 };
 use crate::execution_runtime::transport::{
     build_execution_response_body, build_request_body, collect_response_headers,
-    decode_response_body_bytes, format_upstream_request_error, format_wreq_upstream_request_error,
-    response_body_is_json, send_request, DirectHttpResponse, DirectSyncExecutionRuntime,
-    ExecutionRuntimeTransportError,
+    decode_response_body_bytes, format_hyper_error_chain, format_upstream_request_error,
+    format_wreq_upstream_request_error, response_body_is_json, send_request, DirectHttpResponse,
+    DirectSyncExecutionRuntime, ExecutionRuntimeTransportError,
 };
 use crate::execution_runtime::windsurf::maybe_execute_windsurf_sync;
 use crate::execution_runtime::{
@@ -77,7 +78,8 @@ use crate::orchestration::{
 use crate::provider_pool_demand::acquire_provider_pool_in_flight_guard;
 use crate::request_candidate_runtime::{
     ensure_execution_request_candidate_slot, record_local_request_candidate_extra_data,
-    record_local_request_candidate_status,
+    record_local_request_candidate_status, record_local_request_candidate_status_snapshot,
+    snapshot_local_request_candidate_status,
 };
 use crate::request_diagnostics::attach_current_request_diagnostics_to_report_context;
 use crate::usage::{spawn_sync_report, submit_sync_report};
@@ -289,6 +291,82 @@ impl SyncExecutionFailure {
 struct ImplicitSyncFinalizeOutcome {
     payload: GatewaySyncReportRequest,
     outcome: LocalCoreSyncFinalizeOutcome,
+}
+
+fn spawn_sync_candidate_status_update(
+    state: AppState,
+    snapshot: crate::request_candidate_runtime::LocalRequestCandidateStatusSnapshot,
+    status_update: SchedulerRequestCandidateStatusUpdate,
+) {
+    tokio::spawn(async move {
+        record_local_request_candidate_status_snapshot(&state, &snapshot, status_update).await;
+    });
+}
+
+fn record_sync_response_started(
+    state: &AppState,
+    lifecycle_seed: aether_usage_runtime::LifecycleUsageSeed,
+    request_candidate_status_snapshot: Option<
+        crate::request_candidate_runtime::LocalRequestCandidateStatusSnapshot,
+    >,
+    candidate_started_unix_ms: u64,
+    status_code: u16,
+    ttfb_ms: u64,
+) {
+    state.usage_runtime.record_stream_started_immediate_async(
+        state.data.as_ref(),
+        lifecycle_seed,
+        status_code,
+        Some(ExecutionTelemetry {
+            ttfb_ms: Some(ttfb_ms),
+            elapsed_ms: Some(ttfb_ms),
+            upstream_bytes: None,
+        }),
+    );
+
+    if let Some(snapshot) = request_candidate_status_snapshot {
+        spawn_sync_candidate_status_update(
+            state.clone(),
+            snapshot,
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Streaming,
+                status_code: Some(status_code),
+                error_type: None,
+                error_message: None,
+                latency_ms: Some(ttfb_ms),
+                started_at_unix_ms: Some(candidate_started_unix_ms),
+                finished_at_unix_ms: None,
+            },
+        );
+    }
+}
+
+fn record_sync_execution_active(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+    candidate_started_unix_ms: u64,
+) {
+    let lifecycle_seed = build_lifecycle_usage_seed(plan, report_context);
+    state
+        .usage_runtime
+        .record_sync_active_immediate_async(state.data.as_ref(), lifecycle_seed);
+
+    if let Some(snapshot) = snapshot_local_request_candidate_status(plan, report_context) {
+        spawn_sync_candidate_status_update(
+            state.clone(),
+            snapshot,
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Streaming,
+                status_code: None,
+                error_type: None,
+                error_message: None,
+                latency_ms: None,
+                started_at_unix_ms: Some(candidate_started_unix_ms),
+                finished_at_unix_ms: None,
+            },
+        );
+    }
 }
 
 fn record_sync_terminal_usage(
@@ -1018,6 +1096,7 @@ async fn execute_direct_sync_runtime_candidate(
     report_context: Option<&Value>,
     trace_id: &str,
     plan_kind: &str,
+    candidate_started_unix_ms: u64,
     request_id_for_log: &str,
     candidate_id: Option<&str>,
     provider_name: &str,
@@ -1034,8 +1113,21 @@ async fn execute_direct_sync_runtime_candidate(
         return Ok(result);
     }
     if !should_track_openai_image_sync_upstream_sse(plan_kind, plan, report_context) {
+        let state_for_response_started = state.clone();
+        let response_started_lifecycle_seed = build_lifecycle_usage_seed(plan, report_context);
+        let response_started_candidate_snapshot =
+            snapshot_local_request_candidate_status(plan, report_context);
         return DirectSyncExecutionRuntime::new()
-            .execute_sync(plan)
+            .execute_sync_with_response_started(plan, move |event| {
+                record_sync_response_started(
+                    &state_for_response_started,
+                    response_started_lifecycle_seed,
+                    response_started_candidate_snapshot,
+                    candidate_started_unix_ms,
+                    event.status_code,
+                    event.ttfb_ms,
+                )
+            })
             .await
             .map_err(SyncExecutionFailure::from_transport);
     }
@@ -1156,6 +1248,23 @@ async fn execute_openai_image_sync_upstream_sse_candidate(
                         ExecutionRuntimeTransportError::UpstreamRequest(
                             format_upstream_request_error(&err),
                         ),
+                    )
+                })?;
+                let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                progress
+                    .observe_chunk(&chunk, status_code, elapsed_ms)
+                    .await;
+                body_bytes.extend_from_slice(&chunk);
+            }
+        }
+        DirectHttpResponse::HyperH2c(response) => {
+            let mut upstream_stream = response.into_body().into_data_stream();
+            while let Some(chunk) = upstream_stream.next().await {
+                let chunk = chunk.map_err(|err| {
+                    SyncExecutionFailure::from_transport(
+                        ExecutionRuntimeTransportError::UpstreamRequest(format_hyper_error_chain(
+                            &err,
+                        )),
                     )
                 })?;
                 let elapsed_ms = started_at.elapsed().as_millis() as u64;
@@ -1520,9 +1629,11 @@ async fn execute_execution_runtime_sync_impl(
         .unwrap_or_else(|| "-".to_string());
     let candidate_started_unix_secs = current_request_candidate_unix_ms();
     let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
+    let usage_data = state.data.as_ref().clone();
     state
         .usage_runtime
-        .record_pending(state.data.as_ref(), lifecycle_seed);
+        .record_pending_direct(&usage_data, lifecycle_seed)
+        .await;
     record_local_request_candidate_status(
         state,
         &plan,
@@ -1553,6 +1664,12 @@ async fn execute_execution_runtime_sync_impl(
         key_id.as_str(),
     )
     .await;
+    record_sync_execution_active(
+        state,
+        &plan,
+        report_context.as_ref(),
+        candidate_started_unix_secs,
+    );
     #[cfg(not(test))]
     let mut result = {
         match maybe_execute_grok_sync(&plan, report_context.as_ref()).await {
@@ -1568,6 +1685,7 @@ async fn execute_execution_runtime_sync_impl(
                         report_context.as_ref(),
                         trace_id,
                         plan_kind,
+                        candidate_started_unix_secs,
                         plan_request_id_for_log.as_str(),
                         plan_candidate_id.as_deref(),
                         provider_name.as_str(),
@@ -1748,6 +1866,7 @@ async fn execute_execution_runtime_sync_impl(
                         report_context.as_ref(),
                         trace_id,
                         plan_kind,
+                        candidate_started_unix_secs,
                         plan_request_id_for_log.as_str(),
                         plan_candidate_id.as_deref(),
                         provider_name.as_str(),
@@ -2670,6 +2789,7 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn test_openai_image_plan(stream: bool) -> ExecutionPlan {
         ExecutionPlan {
@@ -2701,6 +2821,17 @@ mod tests {
         plan.provider_api_format = "gemini:generate_content".to_string();
         plan.model_name = Some("gemini-3-flash-preview".to_string());
         plan
+    }
+
+    fn test_decision() -> GatewayControlDecision {
+        GatewayControlDecision::synthetic(
+            "/v1/chat/completions",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+        )
+        .with_execution_runtime_candidate(true)
     }
 
     fn test_kiro_sync_plan() -> ExecutionPlan {
@@ -2877,7 +3008,7 @@ mod tests {
         }
         let stored_usage = stored_usage.expect("cancelled usage should be recorded");
         assert_eq!(stored_usage.status, "cancelled");
-        assert_eq!(stored_usage.billing_status, "pending");
+        assert_eq!(stored_usage.billing_status, "void");
         assert_eq!(stored_usage.status_code, Some(499));
         assert_eq!(stored_usage.error_category.as_deref(), Some("cancelled"));
 
@@ -2895,6 +3026,293 @@ mod tests {
             stored_candidates[0].error_type.as_deref(),
             Some("local_sync_attempt_cancelled")
         );
+    }
+
+    #[tokio::test]
+    async fn sync_direct_response_start_marks_usage_and_candidate_active_before_body_finishes() {
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                    Arc::clone(&request_candidate_repository),
+                    Arc::clone(&usage_repository),
+                ),
+            )
+            .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                enabled: true,
+                ..UsageRuntimeConfig::default()
+            });
+
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let (headers_tx, headers_rx) = tokio::sync::oneshot::channel();
+        let (body_tx, body_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("client should connect");
+            let mut request = [0_u8; 4096];
+            let _ = socket
+                .read(&mut request)
+                .await
+                .expect("request should read");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\r\n",
+                )
+                .await
+                .expect("headers should write");
+            socket.flush().await.expect("headers should flush");
+            let _ = headers_tx.send(());
+            let _ = body_rx.await;
+            socket
+                .write_all(br#"{"ok":true}"#)
+                .await
+                .expect("body should write");
+        });
+
+        let mut plan = test_gemini_chat_plan();
+        plan.request_id = "sync-response-start-active-request".to_string();
+        plan.candidate_id = Some("sync-response-start-active-candidate".to_string());
+        plan.url = format!("http://{addr}/chat");
+        plan.provider_api_format = "openai:chat".to_string();
+        plan.model_name = Some("gpt-5".to_string());
+        plan.body = aether_contracts::RequestBody::from_json(json!({
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "slow body"}],
+        }));
+        let report_context = Some(json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+            "user_id": "user-active",
+            "api_key_id": "api-key-active",
+            "client_api_format": "openai:chat",
+            "provider_api_format": "openai:chat",
+            "request_path": "/v1/chat/completions",
+            "request_path_and_query": "/v1/chat/completions",
+            "upstream_url": plan.url.clone(),
+            "mapped_model": "gpt-5",
+        }));
+        let started_at = current_request_candidate_unix_ms();
+        state
+            .usage_runtime
+            .record_pending_direct(
+                state.data.as_ref(),
+                build_lifecycle_usage_seed(&plan, report_context.as_ref()),
+            )
+            .await;
+        record_local_request_candidate_status(
+            &state,
+            &plan,
+            report_context.as_ref(),
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Pending,
+                status_code: None,
+                error_type: None,
+                error_message: None,
+                latency_ms: None,
+                started_at_unix_ms: Some(started_at),
+                finished_at_unix_ms: None,
+            },
+        )
+        .await;
+
+        let state_for_exec = state.clone();
+        let plan_for_exec = plan.clone();
+        let report_context_for_exec = report_context.clone();
+        let exec = tokio::spawn(async move {
+            execute_direct_sync_runtime_candidate(
+                &state_for_exec,
+                &plan_for_exec,
+                report_context_for_exec.as_ref(),
+                "trace-response-start-active",
+                "openai_chat_sync",
+                started_at,
+                "sync-response-start-active-request",
+                plan_for_exec.candidate_id.as_deref(),
+                "openai",
+                "endpoint-1",
+                "key-1",
+                "gpt-5",
+                "0",
+                None,
+            )
+            .await
+        });
+
+        headers_rx.await.expect("headers should be written");
+        let mut active_usage = None;
+        for _ in 0..50 {
+            if let Some(usage) = usage_repository
+                .find_by_request_id("sync-response-start-active-request")
+                .await
+                .expect("usage should read")
+            {
+                if usage.status == "streaming" {
+                    active_usage = Some(usage);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let active_usage = active_usage.expect("usage should become active before body finishes");
+        assert_eq!(active_usage.status_code, Some(200));
+        assert!(active_usage.first_byte_time_ms.is_some());
+        assert!(active_usage.response_time_ms.is_some());
+
+        let stored_candidates = request_candidate_repository
+            .list_by_request_id("sync-response-start-active-request")
+            .await
+            .expect("candidate should read");
+        let active_candidate = stored_candidates
+            .iter()
+            .find(|candidate| candidate.id == "sync-response-start-active-candidate")
+            .expect("candidate should exist");
+        assert_eq!(active_candidate.status, RequestCandidateStatus::Streaming);
+        assert_eq!(active_candidate.status_code, Some(200));
+
+        let _ = body_tx.send(());
+        let result = tokio::time::timeout(Duration::from_secs(2), exec)
+            .await
+            .expect("sync execution should finish")
+            .expect("sync execution task should not panic")
+            .expect("sync execution should succeed");
+        assert_eq!(result.status_code, 200);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn sync_execution_active_marks_usage_before_response_headers() {
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                    Arc::clone(&request_candidate_repository),
+                    Arc::clone(&usage_repository),
+                ),
+            )
+            .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                enabled: true,
+                ..UsageRuntimeConfig::default()
+            });
+
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("client should connect");
+            let mut request = [0_u8; 4096];
+            let _ = socket
+                .read(&mut request)
+                .await
+                .expect("request should read");
+            let _ = request_seen_tx.send(());
+            let _ = finish_rx.await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\r\n{\"ok\":true}",
+                )
+                .await
+                .expect("response should write");
+        });
+
+        let mut plan = test_gemini_chat_plan();
+        plan.request_id = "sync-active-before-headers-request".to_string();
+        plan.candidate_id = Some("sync-active-before-headers-candidate".to_string());
+        plan.url = format!("http://{addr}/chat");
+        plan.provider_name = Some("OpenAI".to_string());
+        plan.provider_api_format = "openai:chat".to_string();
+        plan.model_name = Some("gpt-5".to_string());
+        plan.body = aether_contracts::RequestBody::from_json(json!({
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "slow headers"}],
+        }));
+        let report_context = Some(json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+            "user_id": "user-active-before-headers",
+            "api_key_id": "api-key-active-before-headers",
+            "candidate_id": "sync-active-before-headers-candidate",
+            "provider_id": "provider-1",
+            "endpoint_id": "endpoint-1",
+            "key_id": "key-1",
+            "provider_name": "OpenAI",
+            "client_api_format": "openai:chat",
+            "provider_api_format": "openai:chat",
+            "request_path": "/v1/chat/completions",
+            "request_path_and_query": "/v1/chat/completions",
+            "upstream_url": plan.url.clone(),
+            "mapped_model": "gpt-5",
+        }));
+        let state_for_exec = state.clone();
+        let plan_for_exec = plan.clone();
+        let report_context_for_exec = report_context.clone();
+        let exec = tokio::spawn(async move {
+            execute_execution_runtime_sync(
+                &state_for_exec,
+                "/v1/chat/completions",
+                plan_for_exec,
+                "trace-active-before-headers",
+                &test_decision(),
+                "openai_chat_sync",
+                Some("openai_chat_sync".to_string()),
+                report_context_for_exec,
+            )
+            .await
+        });
+
+        request_seen_rx
+            .await
+            .expect("upstream request should be observed");
+        let mut active_usage = None;
+        for _ in 0..50 {
+            if let Some(usage) = usage_repository
+                .find_by_request_id("sync-active-before-headers-request")
+                .await
+                .expect("usage should read")
+            {
+                if usage.status == "streaming" {
+                    active_usage = Some(usage);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let active_usage =
+            active_usage.expect("usage should become active before upstream headers");
+        assert_eq!(active_usage.status_code, None);
+        assert_eq!(active_usage.first_byte_time_ms, None);
+        assert_eq!(active_usage.response_time_ms, None);
+
+        let stored_candidates = request_candidate_repository
+            .list_by_request_id("sync-active-before-headers-request")
+            .await
+            .expect("candidate should read");
+        let active_candidate = stored_candidates
+            .iter()
+            .find(|candidate| candidate.id == "sync-active-before-headers-candidate")
+            .expect("candidate should exist");
+        assert_eq!(active_candidate.status, RequestCandidateStatus::Streaming);
+        assert_eq!(active_candidate.status_code, None);
+        assert!(active_candidate.started_at_unix_ms.is_some());
+        assert!(active_candidate.finished_at_unix_ms.is_none());
+
+        let _ = finish_tx.send(());
+        let response = tokio::time::timeout(Duration::from_secs(2), exec)
+            .await
+            .expect("sync execution should finish")
+            .expect("sync execution task should not panic")
+            .expect("sync execution should succeed")
+            .expect("sync execution should produce a response");
+        assert_eq!(response.status(), StatusCode::OK);
+        server.abort();
     }
 
     #[test]

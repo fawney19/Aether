@@ -167,6 +167,8 @@ pub struct RoutingGroupBindingQuery {
 
 #[async_trait]
 pub trait RoutingGroupReadRepository: Send + Sync {
+    fn clear_local_cache(&self) {}
+
     async fn list_routing_groups(&self) -> Result<Vec<StoredRoutingGroup>, crate::DataLayerError>;
 
     async fn find_routing_group(

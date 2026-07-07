@@ -1,17 +1,25 @@
 use super::{
     any, build_router_with_state, build_state_with_execution_runtime_override,
-    encrypt_python_fernet_plaintext, json, start_server, strip_sse_keepalive_comments, to_bytes,
-    Arc, Body, Bytes, Digest, HeaderName, HeaderValue, InMemoryAuthApiKeySnapshotRepository,
-    InMemoryMinimalCandidateSelectionReadRepository, InMemoryProviderCatalogReadRepository,
-    InMemoryRequestCandidateRepository, Json, Mutex, Request, RequestCandidateReadRepository,
-    RequestCandidateStatus, Response, Router, Sha256, StatusCode, StoredAuthApiKeySnapshot,
-    StoredMinimalCandidateSelectionRow, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
-    StoredProviderCatalogProvider, StoredProviderModelMapping, DEVELOPMENT_ENCRYPTION_KEY,
-    TRACE_ID_HEADER,
+    encrypt_python_fernet_plaintext, json, run_stream_provider_gemini_test, start_server,
+    strip_sse_keepalive_comments, to_bytes, Arc, Body, Bytes, Digest, HeaderName, HeaderValue,
+    InMemoryAuthApiKeySnapshotRepository, InMemoryMinimalCandidateSelectionReadRepository,
+    InMemoryProviderCatalogReadRepository, InMemoryRequestCandidateRepository, Json, Mutex,
+    Request, RequestCandidateReadRepository, RequestCandidateStatus, Response, Router, Sha256,
+    StatusCode, StoredAuthApiKeySnapshot, StoredMinimalCandidateSelectionRow,
+    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    StoredProviderModelMapping, DEVELOPMENT_ENCRYPTION_KEY, TRACE_ID_HEADER,
 };
 
-#[tokio::test]
-async fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_stream_decision() {
+#[test]
+fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_stream_decision() {
+    run_stream_provider_gemini_test(
+        "gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_stream_decision",
+        gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_stream_decision_impl,
+    );
+}
+
+async fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_stream_decision_impl(
+) {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeStreamRequest {
         trace_id: String,

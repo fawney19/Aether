@@ -17,9 +17,6 @@ pub(super) fn build_scheduler_affinity_cache_key(
     global_model_name: &str,
     client_session_affinity: Option<&ClientSessionAffinity>,
 ) -> Option<String> {
-    if !has_explicit_session_affinity(client_session_affinity) {
-        return None;
-    }
     let api_key_id = auth_snapshot
         .map(|snapshot| snapshot.api_key_id.trim())
         .filter(|value| !value.is_empty())?;

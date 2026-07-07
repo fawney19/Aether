@@ -8,14 +8,20 @@ use self::invalid::{
     codex_structured_invalid_reason,
 };
 use self::parse::{
-    build_codex_quota_exhausted_fallback_metadata, parse_codex_usage_headers,
+    build_codex_quota_exhausted_fallback_metadata, normalize_codex_reset_credit_consume_outcome,
+    parse_codex_usage_headers, parse_codex_wham_reset_credits_detail_response,
     parse_codex_wham_usage_response,
 };
-use self::plan::{build_codex_quota_request_spec, execute_codex_quota_plan};
+use self::plan::{
+    build_codex_quota_request_spec, build_codex_reset_credit_consume_request_spec,
+    build_codex_reset_credits_request_spec, execute_codex_quota_plan,
+    execute_codex_reset_credit_plan,
+};
 use super::shared::{
     build_quota_snapshot_payload, extract_execution_error_message,
     oauth_refresh_auto_removed_result, persist_provider_quota_refresh_state,
-    provider_auto_remove_banned_keys, quota_key_auto_removed, quota_refresh_success_invalid_state,
+    provider_auto_remove_banned_keys, provider_auto_remove_quota_exhausted_keys,
+    quota_key_auto_removed, quota_refresh_success_invalid_state,
     should_auto_remove_structured_reason, ProviderQuotaExecutionOutcome,
 };
 use crate::handlers::admin::request::AdminAppState;
@@ -25,7 +31,8 @@ use aether_contracts::ProxySnapshot;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
-use serde_json::json;
+use axum::http::StatusCode;
+use serde_json::{json, Map, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn merge_codex_quota_metadata(
@@ -44,6 +51,139 @@ fn merge_codex_quota_metadata(
     serde_json::Value::Object(merged)
 }
 
+fn codex_reset_credits_available_count(metadata: &Map<String, Value>) -> Option<u64> {
+    metadata
+        .get("reset_credits")
+        .and_then(Value::as_object)
+        .and_then(|reset_credits| reset_credits.get("available_count"))
+        .and_then(aether_admin::provider::quota::coerce_json_u64)
+}
+
+fn truncate_codex_reset_credit_detail_error(message: impl Into<String>) -> String {
+    let message = message.into();
+    let mut sanitized = message.replace('\n', " ");
+    if sanitized.len() > 240 {
+        sanitized.truncate(240);
+        sanitized.push('…');
+    }
+    sanitized
+}
+
+fn merge_codex_reset_credit_detail_metadata(
+    codex_metadata: &mut Map<String, Value>,
+    detail_metadata: &Value,
+) {
+    let Some(detail_reset_credits) = detail_metadata
+        .get("reset_credits")
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+    let mut reset_credits = codex_metadata
+        .get("reset_credits")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    let has_usage_available_count = reset_credits.contains_key("available_count");
+    for (key, value) in detail_reset_credits {
+        if key == "available_count" && has_usage_available_count {
+            continue;
+        }
+        reset_credits.insert(key.clone(), value.clone());
+    }
+    codex_metadata.insert("reset_credits".to_string(), Value::Object(reset_credits));
+}
+
+fn mark_codex_reset_credit_detail_failed(
+    codex_metadata: &mut Map<String, Value>,
+    detail_error: impl Into<String>,
+) {
+    let mut reset_credits = codex_metadata
+        .get("reset_credits")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    reset_credits.insert("detail_source".to_string(), json!("wham_readonly"));
+    reset_credits.insert("detail_status".to_string(), json!("failed"));
+    reset_credits.insert(
+        "detail_error".to_string(),
+        json!(truncate_codex_reset_credit_detail_error(detail_error)),
+    );
+    reset_credits
+        .entry("credits".to_string())
+        .or_insert_with(|| json!([]));
+    codex_metadata.insert("reset_credits".to_string(), Value::Object(reset_credits));
+}
+
+async fn enrich_codex_reset_credit_details(
+    state: &AdminAppState<'_>,
+    transport: &crate::handlers::admin::request::AdminGatewayProviderTransportSnapshot,
+    resolved_oauth_auth: Option<(String, String)>,
+    proxy_override: Option<&ProxySnapshot>,
+    codex_metadata: &mut Map<String, Value>,
+    now_unix_secs: u64,
+) -> Result<(), GatewayError> {
+    let available_count = codex_reset_credits_available_count(codex_metadata).unwrap_or(0);
+    if available_count == 0 {
+        return Ok(());
+    }
+
+    let request_spec = match build_codex_reset_credits_request_spec(transport, resolved_oauth_auth)
+    {
+        Ok(request_spec) => request_spec,
+        Err(message) => {
+            mark_codex_reset_credit_detail_failed(codex_metadata, message);
+            return Ok(());
+        }
+    };
+
+    let result =
+        match execute_codex_reset_credit_plan(state, transport, request_spec, proxy_override)
+            .await?
+        {
+            ProviderQuotaExecutionOutcome::Response(result) => result,
+            ProviderQuotaExecutionOutcome::Failure(detail) => {
+                mark_codex_reset_credit_detail_failed(
+                    codex_metadata,
+                    format!("reset credit detail 请求执行失败: {detail}"),
+                );
+                return Ok(());
+            }
+        };
+
+    if result.status_code != 200 {
+        let detail = extract_execution_error_message(&result)
+            .unwrap_or_else(|| format!("HTTP {}", result.status_code));
+        mark_codex_reset_credit_detail_failed(
+            codex_metadata,
+            format!(
+                "reset credit detail 返回状态码 {}: {detail}",
+                result.status_code
+            ),
+        );
+        return Ok(());
+    }
+
+    let Some(body_json) = result
+        .body
+        .as_ref()
+        .and_then(|body| body.json_body.as_ref())
+    else {
+        mark_codex_reset_credit_detail_failed(codex_metadata, "无法解析 reset credit detail 响应");
+        return Ok(());
+    };
+    if let Some(detail_metadata) =
+        parse_codex_wham_reset_credits_detail_response(body_json, now_unix_secs)
+    {
+        merge_codex_reset_credit_detail_metadata(codex_metadata, &detail_metadata);
+    } else {
+        mark_codex_reset_credit_detail_failed(codex_metadata, "reset credit detail 响应为空");
+    }
+
+    Ok(())
+}
+
 fn codex_oauth_refresh_issue_reason(reason: Option<&str>) -> bool {
     reason.is_some_and(|reason| {
         reason
@@ -51,6 +191,210 @@ fn codex_oauth_refresh_issue_reason(reason: Option<&str>) -> bool {
             .map(str::trim)
             .any(|line| line.starts_with("[OAUTH_EXPIRED]") || line.starts_with("[REFRESH_FAILED]"))
     })
+}
+
+fn codex_consume_success_status(outcome: &str) -> &'static str {
+    match outcome {
+        "reset" | "already_redeemed" => "success",
+        "nothing_to_reset" | "no_credit" => "noop",
+        _ => "unknown",
+    }
+}
+
+fn codex_extract_refresh_result_fields(
+    refresh_payload: Option<&Value>,
+    key_id: &str,
+) -> (String, Option<String>, Option<Value>, Option<Value>) {
+    let Some(result) = refresh_payload
+        .and_then(|payload| payload.get("results"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .find(|item| item.get("key_id").and_then(Value::as_str) == Some(key_id))
+    else {
+        return (
+            "failed".to_string(),
+            Some("刷新结果中缺少当前 key".to_string()),
+            None,
+            None,
+        );
+    };
+
+    let status = result
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let refresh_status = if status.eq_ignore_ascii_case("success") {
+        "success"
+    } else {
+        "failed"
+    }
+    .to_string();
+    let refresh_error = if refresh_status == "success" {
+        None
+    } else {
+        result
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    };
+    (
+        refresh_status,
+        refresh_error,
+        result.get("metadata").cloned(),
+        result.get("quota_snapshot").cloned(),
+    )
+}
+
+pub(crate) async fn consume_codex_reset_credit_locally(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    endpoint: &StoredProviderCatalogEndpoint,
+    key: StoredProviderCatalogKey,
+    idempotency_key: &str,
+) -> Result<(StatusCode, Value), GatewayError> {
+    let transport = match state
+        .read_provider_transport_snapshot(&provider.id, &endpoint.id, &key.id)
+        .await?
+    {
+        Some(transport) => transport,
+        None => {
+            return Ok((
+                StatusCode::BAD_GATEWAY,
+                json!({
+                    "key_id": key.id,
+                    "status": "error",
+                    "outcome": "error",
+                    "message": "Provider transport snapshot unavailable",
+                }),
+            ));
+        }
+    };
+
+    let is_oauth_managed = provider_key_is_oauth_managed(&key, provider.provider_type.as_str());
+    let resolved_oauth_auth = if is_oauth_managed {
+        state.resolve_local_oauth_header_auth(&transport).await?
+    } else {
+        None
+    };
+    if is_oauth_managed && resolved_oauth_auth.is_none() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            json!({
+                "key_id": key.id,
+                "status": "error",
+                "outcome": "error",
+                "message": "缺少 Codex OAuth 认证信息，请先重新授权/刷新 Token",
+            }),
+        ));
+    }
+
+    let request_spec = match build_codex_reset_credit_consume_request_spec(
+        &transport,
+        resolved_oauth_auth,
+        idempotency_key,
+    ) {
+        Ok(request_spec) => request_spec,
+        Err(message) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                json!({
+                    "key_id": key.id,
+                    "status": "error",
+                    "outcome": "error",
+                    "message": message,
+                }),
+            ));
+        }
+    };
+
+    let result =
+        match execute_codex_reset_credit_plan(state, &transport, request_spec, None).await? {
+            ProviderQuotaExecutionOutcome::Response(result) => result,
+            ProviderQuotaExecutionOutcome::Failure(detail) => {
+                return Ok((
+                    StatusCode::BAD_GATEWAY,
+                    json!({
+                        "key_id": key.id,
+                        "status": "error",
+                        "outcome": "error",
+                        "message": format!("reset credit consume 请求执行失败: {detail}"),
+                    }),
+                ));
+            }
+        };
+
+    let body_json = result
+        .body
+        .as_ref()
+        .and_then(|body| body.json_body.as_ref());
+    let outcome = normalize_codex_reset_credit_consume_outcome(body_json)
+        .unwrap_or_else(|| "unknown".to_string());
+    let known_non_error_outcome = matches!(
+        outcome.as_str(),
+        "reset" | "already_redeemed" | "nothing_to_reset" | "no_credit"
+    );
+    if result.status_code >= 400 && !known_non_error_outcome {
+        let detail = extract_execution_error_message(&result)
+            .unwrap_or_else(|| format!("HTTP {}", result.status_code));
+        return Ok((
+            StatusCode::BAD_GATEWAY,
+            json!({
+                "key_id": key.id,
+                "status": "error",
+                "outcome": "error",
+                "idempotency_key": idempotency_key,
+                "message": format!("reset credit consume 返回状态码 {}: {detail}", result.status_code),
+                "status_code": result.status_code,
+            }),
+        ));
+    }
+
+    let (refresh_status, refresh_error, metadata, quota_snapshot) =
+        match refresh_codex_provider_quota_locally(
+            state,
+            provider,
+            endpoint,
+            vec![key.clone()],
+            None,
+        )
+        .await
+        {
+            Ok(refresh_payload) => {
+                codex_extract_refresh_result_fields(refresh_payload.as_ref(), &key.id)
+            }
+            Err(err) => (
+                "failed".to_string(),
+                Some(truncate_codex_reset_credit_detail_error(err.into_message())),
+                None,
+                None,
+            ),
+        };
+
+    let mut payload = Map::new();
+    payload.insert("key_id".to_string(), json!(key.id));
+    payload.insert(
+        "status".to_string(),
+        json!(codex_consume_success_status(&outcome)),
+    );
+    payload.insert("outcome".to_string(), json!(outcome));
+    payload.insert("idempotency_key".to_string(), json!(idempotency_key));
+    payload.insert("refresh_status".to_string(), json!(refresh_status));
+    if let Some(refresh_error) = refresh_error {
+        payload.insert("refresh_error".to_string(), json!(refresh_error));
+    }
+    if let Some(metadata) = metadata {
+        payload.insert("metadata".to_string(), metadata);
+    }
+    if let Some(quota_snapshot) = quota_snapshot {
+        payload.insert("quota_snapshot".to_string(), quota_snapshot);
+    }
+
+    Ok((StatusCode::OK, Value::Object(payload)))
 }
 
 pub(crate) async fn refresh_codex_provider_quota_locally(
@@ -61,6 +405,8 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
     proxy_override: Option<ProxySnapshot>,
 ) -> Result<Option<serde_json::Value>, GatewayError> {
     let auto_remove_abnormal_keys = provider_auto_remove_banned_keys(provider.config.as_ref());
+    let auto_remove_quota_exhausted_keys =
+        provider_auto_remove_quota_exhausted_keys(provider.config.as_ref());
     let mut results = Vec::new();
     let mut success_count = 0usize;
     let mut failed_count = 0usize;
@@ -111,19 +457,20 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
             continue;
         }
 
-        let request_spec = match build_codex_quota_request_spec(&transport, resolved_oauth_auth) {
-            Ok(request_spec) => request_spec,
-            Err(message) => {
-                failed_count += 1;
-                results.push(json!({
-                    "key_id": key.id,
-                    "key_name": key.name,
-                    "status": "error",
-                    "message": message,
-                }));
-                continue;
-            }
-        };
+        let request_spec =
+            match build_codex_quota_request_spec(&transport, resolved_oauth_auth.clone()) {
+                Ok(request_spec) => request_spec,
+                Err(message) => {
+                    failed_count += 1;
+                    results.push(json!({
+                        "key_id": key.id,
+                        "key_name": key.name,
+                        "status": "error",
+                        "message": message,
+                    }));
+                    continue;
+                }
+            };
 
         let result = match execute_codex_quota_plan(
             state,
@@ -168,8 +515,22 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
                 .and_then(|body| body.json_body.as_ref())
             {
                 if let Some(parsed) = parse_codex_wham_usage_response(body_json, now_unix_secs) {
+                    let mut codex_metadata =
+                        match merge_codex_quota_metadata(header_metadata.as_ref(), &parsed) {
+                            Value::Object(object) => object,
+                            _ => Map::new(),
+                        };
+                    enrich_codex_reset_credit_details(
+                        state,
+                        &transport,
+                        resolved_oauth_auth.clone(),
+                        proxy_override.as_ref(),
+                        &mut codex_metadata,
+                        now_unix_secs,
+                    )
+                    .await?;
                     metadata_update = Some(json!({
-                        "codex": merge_codex_quota_metadata(header_metadata.as_ref(), &parsed)
+                        "codex": codex_metadata
                     }));
                     (oauth_invalid_at_unix_secs, oauth_invalid_reason) =
                         quota_refresh_success_invalid_state(&key);
@@ -312,7 +673,7 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
             }));
             continue;
         }
-        let auto_removed = if auto_remove_candidate {
+        let auto_removed_hard_banned = if auto_remove_candidate {
             state
                 .cleanup_provider_catalog_key_if_current(provider, &key.id, |latest_key| {
                     should_auto_remove_structured_reason(latest_key.oauth_invalid_reason.as_deref())
@@ -321,10 +682,28 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
         } else {
             false
         };
-        if auto_removed {
+        if auto_removed_hard_banned {
             auto_removed_count += 1;
             auto_removed_hard_banned_count += 1;
         }
+        let auto_removed_quota_exhausted =
+            if !auto_removed_hard_banned && auto_remove_quota_exhausted_keys {
+                state
+                    .cleanup_provider_catalog_key_if_current(provider, &key.id, |latest_key| {
+                        aether_admin::provider::pool::admin_pool_key_account_quota_exhausted(
+                            latest_key,
+                            provider.provider_type.as_str(),
+                        )
+                    })
+                    .await?
+            } else {
+                false
+            };
+        if auto_removed_quota_exhausted {
+            auto_removed_count += 1;
+            status = "quota_exhausted".to_string();
+        }
+        let auto_removed = auto_removed_hard_banned || auto_removed_quota_exhausted;
         let refresh_fixed =
             status == "success" && had_oauth_refresh_issue && oauth_invalid_reason.is_none();
         if refresh_fixed {
@@ -370,7 +749,12 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
         }
         if auto_removed {
             payload.insert("auto_removed".to_string(), json!(true));
+        }
+        if auto_removed_hard_banned {
             payload.insert("auto_removed_hard_banned".to_string(), json!(true));
+        }
+        if auto_removed_quota_exhausted {
+            payload.insert("auto_removed_quota_exhausted".to_string(), json!(true));
         }
         if refresh_fixed {
             payload.insert("refresh_fixed".to_string(), json!(true));

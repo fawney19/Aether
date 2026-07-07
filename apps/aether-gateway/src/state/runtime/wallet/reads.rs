@@ -42,19 +42,70 @@ impl AppState {
         api_key_id: &str,
         api_key_is_standalone: bool,
     ) -> Result<Option<aether_data::repository::wallet::StoredWalletSnapshot>, GatewayError> {
+        let user_id = user_id.trim();
+        let api_key_id = api_key_id.trim();
         let lookup = if api_key_is_standalone {
-            if api_key_id.trim().is_empty() {
+            if api_key_id.is_empty() {
+                None
+            } else {
+                Some((
+                    format!("api_key:{api_key_id}"),
+                    aether_data::repository::wallet::WalletLookupKey::ApiKeyId(api_key_id),
+                ))
+            }
+        } else if !user_id.is_empty() {
+            Some((
+                format!("user:{user_id}"),
+                aether_data::repository::wallet::WalletLookupKey::UserId(user_id),
+            ))
+        } else if !api_key_id.is_empty() {
+            Some((
+                format!("api_key:{api_key_id}"),
+                aether_data::repository::wallet::WalletLookupKey::ApiKeyId(api_key_id),
+            ))
+        } else {
+            None
+        };
+
+        let Some((cache_key, lookup)) = lookup else {
+            return Ok(None);
+        };
+
+        let ttl = self.frontdoor_runtime_guards.auth_capacity_cache_ttl;
+        if ttl.is_zero() {
+            return self.find_wallet(lookup).await;
+        }
+
+        self.auth_wallet_snapshot_cache
+            .get_or_load(
+                cache_key,
+                ttl,
+                || async move { self.find_wallet(lookup).await },
+            )
+            .await
+    }
+
+    pub(crate) async fn read_wallet_snapshot_for_auth_uncached(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        api_key_is_standalone: bool,
+    ) -> Result<Option<aether_data::repository::wallet::StoredWalletSnapshot>, GatewayError> {
+        let user_id = user_id.trim();
+        let api_key_id = api_key_id.trim();
+        let lookup = if api_key_is_standalone {
+            if api_key_id.is_empty() {
                 None
             } else {
                 Some(aether_data::repository::wallet::WalletLookupKey::ApiKeyId(
                     api_key_id,
                 ))
             }
-        } else if !user_id.trim().is_empty() {
+        } else if !user_id.is_empty() {
             Some(aether_data::repository::wallet::WalletLookupKey::UserId(
                 user_id,
             ))
-        } else if !api_key_id.trim().is_empty() {
+        } else if !api_key_id.is_empty() {
             Some(aether_data::repository::wallet::WalletLookupKey::ApiKeyId(
                 api_key_id,
             ))

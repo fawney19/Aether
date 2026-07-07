@@ -133,7 +133,10 @@ export function buildPoolProxyDistributionPlan(
   }
 
   const assignments = nodeIds.map((nodeId) => {
-    const assignment = mutableAssignments.get(nodeId)!
+    const assignment = mutableAssignments.get(nodeId)
+    if (!assignment) {
+      throw new Error(`Missing proxy distribution assignment for node ${nodeId}`)
+    }
     const nodeKeys = [...assignment.retainedKeys, ...assignment.assignedKeys]
     const changedKeys = nodeKeys.filter(key => getKeyProxyNodeId(key) !== nodeId)
     return {

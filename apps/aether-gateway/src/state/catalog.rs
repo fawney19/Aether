@@ -672,7 +672,30 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.is_some() {
-            self.invalidate_provider_health_routing_caches();
+            self.invalidate_provider_runtime_state_caches();
+        }
+        Ok(updated)
+    }
+
+    pub(crate) async fn update_provider_catalog_key_success_health_state(
+        &self,
+        key_id: &str,
+        is_active: bool,
+        health_by_format: Option<&serde_json::Value>,
+        circuit_breaker_by_format: Option<&serde_json::Value>,
+    ) -> Result<bool, GatewayError> {
+        let updated = self
+            .data
+            .update_provider_catalog_key_health_state(
+                key_id,
+                is_active,
+                health_by_format,
+                circuit_breaker_by_format,
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if updated {
+            self.invalidate_provider_runtime_state_caches();
         }
         Ok(updated)
     }
@@ -920,7 +943,8 @@ mod tests {
     };
     use async_trait::async_trait;
 
-    use crate::cache::SchedulerAffinityTarget;
+    use crate::cache::{CandidatePageCacheKey, SchedulerAffinityTarget};
+    use crate::data::auth::GatewayAuthApiKeySnapshot;
     use crate::data::GatewayDataState;
     use crate::AppState;
 
@@ -967,6 +991,35 @@ mod tests {
             true,
         )
         .expect("key should build")
+    }
+
+    fn sample_auth_snapshot() -> GatewayAuthApiKeySnapshot {
+        GatewayAuthApiKeySnapshot {
+            user_id: "user-1".to_string(),
+            username: "alice".to_string(),
+            email: None,
+            user_role: "user".to_string(),
+            user_auth_source: "local".to_string(),
+            user_is_active: true,
+            user_is_deleted: false,
+            user_rate_limit: None,
+            user_allowed_providers: None,
+            user_allowed_api_formats: None,
+            user_allowed_models: None,
+            api_key_id: "api-key-1".to_string(),
+            api_key_name: Some("default".to_string()),
+            api_key_is_active: true,
+            api_key_is_locked: false,
+            api_key_is_standalone: false,
+            api_key_rate_limit: None,
+            api_key_concurrent_limit: None,
+            api_key_expires_at_unix_secs: None,
+            api_key_allowed_providers: None,
+            api_key_allowed_api_formats: None,
+            api_key_allowed_models: None,
+            api_key_ip_rules: None,
+            currently_usable: true,
+        }
     }
 
     fn sample_admin_global_model() -> StoredAdminGlobalModel {
@@ -1259,5 +1312,54 @@ mod tests {
             state.read_scheduler_affinity_target(cache_key, ttl),
             Some(target)
         );
+    }
+
+    #[tokio::test]
+    async fn provider_catalog_runtime_state_update_keeps_candidate_page_cache() {
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider()],
+            vec![sample_endpoint()],
+            vec![sample_key()],
+        ));
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(repository)
+                    .with_encryption_key_for_tests("test-encryption-key"),
+            );
+
+        let ttl = Duration::from_secs(300);
+        let cache_key = CandidatePageCacheKey::new(
+            "gpt-5",
+            "openai:chat",
+            true,
+            &sample_auth_snapshot(),
+            None,
+            None,
+            None,
+            state.scheduler_affinity_epoch(),
+            "fixed_order",
+            true,
+            None,
+        );
+        state.candidate_page_cache.insert(
+            cache_key.clone(),
+            Some(Arc::new(crate::cache::CandidatePageSnapshot {
+                candidates: Vec::new(),
+                skipped_candidates: Vec::new(),
+            })),
+            ttl,
+        );
+        assert!(state.candidate_page_cache.get(&cache_key, ttl).is_some());
+
+        let mut updated_key = sample_key();
+        updated_key.status_snapshot = Some(serde_json::json!({"source": "runtime"}));
+        let updated = state
+            .update_provider_catalog_key_runtime_state(&updated_key)
+            .await
+            .expect("runtime state update should succeed");
+
+        assert!(updated.is_some());
+        assert!(state.candidate_page_cache.get(&cache_key, ttl).is_some());
     }
 }

@@ -32,16 +32,16 @@ use crate::constants::{
 };
 use crate::data::{GatewayDataConfig, GatewayDataState};
 
-const SUB2API_PROVIDER_OPS_BALANCE_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+const PROVIDER_OPS_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
 
-fn run_sub2api_provider_ops_balance_test<F, Fut>(test_name: &'static str, make_future: F)
+fn run_provider_ops_test<F, Fut>(test_name: &'static str, make_future: F)
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + 'static,
 {
     let handle = std::thread::Builder::new()
         .name(test_name.to_string())
-        .stack_size(SUB2API_PROVIDER_OPS_BALANCE_TEST_STACK_BYTES)
+        .stack_size(PROVIDER_OPS_TEST_STACK_BYTES)
         .spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -49,7 +49,7 @@ where
                 .expect("test runtime should build");
             runtime.block_on(make_future());
         })
-        .expect("sub2api provider ops balance test thread should spawn");
+        .expect("provider ops test thread should spawn");
 
     if let Err(payload) = handle.join() {
         std::panic::resume_unwind(payload);
@@ -117,8 +117,16 @@ fn assert_provider_ops_architectures_payload(payload: &serde_json::Value) {
     assert_eq!(new_api["supported_auth_types"][0]["type"], "api_key");
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_architectures_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_handles_admin_provider_ops_architectures_locally_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_architectures_locally_with_trusted_admin_principal",
+        gateway_handles_admin_provider_ops_architectures_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_architectures_locally_with_trusted_admin_principal_impl(
+) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -157,8 +165,15 @@ async fn gateway_handles_admin_provider_ops_architectures_locally_with_trusted_a
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_architectures_locally_with_bearer_admin_session() {
+#[test]
+fn gateway_handles_admin_provider_ops_architectures_locally_with_bearer_admin_session() {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_architectures_locally_with_bearer_admin_session",
+        gateway_handles_admin_provider_ops_architectures_locally_with_bearer_admin_session_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_architectures_locally_with_bearer_admin_session_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -197,8 +212,15 @@ async fn gateway_handles_admin_provider_ops_architectures_locally_with_bearer_ad
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_architecture_detail_locally_with_trusted_admin_principal(
+#[test]
+fn gateway_handles_admin_provider_ops_architecture_detail_locally_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_architecture_detail_locally_with_trusted_admin_principal",
+        gateway_handles_admin_provider_ops_architecture_detail_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_architecture_detail_locally_with_trusted_admin_principal_impl(
 ) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
@@ -241,8 +263,15 @@ async fn gateway_handles_admin_provider_ops_architecture_detail_locally_with_tru
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_status_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_handles_admin_provider_ops_status_locally_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_status_locally_with_trusted_admin_principal",
+        gateway_handles_admin_provider_ops_status_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_status_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -328,8 +357,15 @@ async fn gateway_handles_admin_provider_ops_status_locally_with_trusted_admin_pr
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_config_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_handles_admin_provider_ops_config_locally_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_config_locally_with_trusted_admin_principal",
+        gateway_handles_admin_provider_ops_config_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_config_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -427,8 +463,15 @@ async fn gateway_handles_admin_provider_ops_config_locally_with_trusted_admin_pr
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_saves_admin_provider_ops_config_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_saves_admin_provider_ops_config_locally_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_saves_admin_provider_ops_config_locally_with_trusted_admin_principal",
+        gateway_saves_admin_provider_ops_config_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_saves_admin_provider_ops_config_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -592,8 +635,15 @@ async fn gateway_saves_admin_provider_ops_config_locally_with_trusted_admin_prin
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_deletes_admin_provider_ops_config_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_deletes_admin_provider_ops_config_locally_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_deletes_admin_provider_ops_config_locally_with_trusted_admin_principal",
+        gateway_deletes_admin_provider_ops_config_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_deletes_admin_provider_ops_config_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -688,8 +738,15 @@ async fn gateway_deletes_admin_provider_ops_config_locally_with_trusted_admin_pr
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_disconnects_admin_provider_ops_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_disconnects_admin_provider_ops_locally_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_disconnects_admin_provider_ops_locally_with_trusted_admin_principal",
+        gateway_disconnects_admin_provider_ops_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_disconnects_admin_provider_ops_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -729,9 +786,16 @@ async fn gateway_disconnects_admin_provider_ops_locally_with_trusted_admin_princ
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_verifies_admin_provider_ops_locally_for_generic_api_with_trusted_admin_principal()
-{
+#[test]
+fn gateway_verifies_admin_provider_ops_locally_for_generic_api_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_verifies_admin_provider_ops_locally_for_generic_api_with_trusted_admin_principal",
+        gateway_verifies_admin_provider_ops_locally_for_generic_api_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_verifies_admin_provider_ops_locally_for_generic_api_with_trusted_admin_principal_impl(
+) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -830,8 +894,16 @@ async fn gateway_verifies_admin_provider_ops_locally_for_generic_api_with_truste
     verify_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_with_trusted_admin_principal() {
+#[test]
+fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_verifies_admin_provider_ops_locally_for_anyrouter_with_trusted_admin_principal",
+        gateway_verifies_admin_provider_ops_locally_for_anyrouter_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_with_trusted_admin_principal_impl(
+) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -961,8 +1033,15 @@ async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_with_trusted_
     verify_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_with_cookie_auth_failure_message(
+#[test]
+fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_with_cookie_auth_failure_message() {
+    run_provider_ops_test(
+        "gateway_verifies_admin_provider_ops_locally_for_anyrouter_with_cookie_auth_failure_message",
+        gateway_verifies_admin_provider_ops_locally_for_anyrouter_with_cookie_auth_failure_message_impl,
+    );
+}
+
+async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_with_cookie_auth_failure_message_impl(
 ) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
@@ -1052,8 +1131,16 @@ async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_with_cookie_a
     verify_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_when_acw_redirect_body_contains_arg1(
+#[test]
+fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_when_acw_redirect_body_contains_arg1()
+{
+    run_provider_ops_test(
+        "gateway_verifies_admin_provider_ops_locally_for_anyrouter_when_acw_redirect_body_contains_arg1",
+        gateway_verifies_admin_provider_ops_locally_for_anyrouter_when_acw_redirect_body_contains_arg1_impl,
+    );
+}
+
+async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_when_acw_redirect_body_contains_arg1_impl(
 ) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
@@ -1177,8 +1264,15 @@ async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_when_acw_redi
     verify_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_proxy_mode() {
+#[test]
+fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_proxy_mode() {
+    run_provider_ops_test(
+        "gateway_verifies_admin_provider_ops_locally_for_anyrouter_proxy_mode",
+        gateway_verifies_admin_provider_ops_locally_for_anyrouter_proxy_mode_impl,
+    );
+}
+
+async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_proxy_mode_impl() {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
     let execution_runtime = Router::new().route(
@@ -1327,8 +1421,16 @@ async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_proxy_mode() 
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_verifies_admin_provider_ops_sub2api_proxy_mode_via_execution_runtime_http1_only() {
+#[test]
+fn gateway_verifies_admin_provider_ops_sub2api_proxy_mode_via_execution_runtime_http1_only() {
+    run_provider_ops_test(
+        "gateway_verifies_admin_provider_ops_sub2api_proxy_mode_via_execution_runtime_http1_only",
+        gateway_verifies_admin_provider_ops_sub2api_proxy_mode_via_execution_runtime_http1_only_impl,
+    );
+}
+
+async fn gateway_verifies_admin_provider_ops_sub2api_proxy_mode_via_execution_runtime_http1_only_impl(
+) {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
     let execution_runtime = Router::new().route(
@@ -1475,8 +1577,16 @@ async fn gateway_verifies_admin_provider_ops_sub2api_proxy_mode_via_execution_ru
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_verifies_admin_provider_ops_locally_for_new_api_with_trusted_admin_principal() {
+#[test]
+fn gateway_verifies_admin_provider_ops_locally_for_new_api_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_verifies_admin_provider_ops_locally_for_new_api_with_trusted_admin_principal",
+        gateway_verifies_admin_provider_ops_locally_for_new_api_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_verifies_admin_provider_ops_locally_for_new_api_with_trusted_admin_principal_impl()
+{
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -1616,8 +1726,15 @@ async fn gateway_verifies_admin_provider_ops_locally_for_new_api_with_trusted_ad
     verify_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_verifies_admin_provider_ops_locally_for_new_api_proxy_node_mode() {
+#[test]
+fn gateway_verifies_admin_provider_ops_locally_for_new_api_proxy_node_mode() {
+    run_provider_ops_test(
+        "gateway_verifies_admin_provider_ops_locally_for_new_api_proxy_node_mode",
+        gateway_verifies_admin_provider_ops_locally_for_new_api_proxy_node_mode_impl,
+    );
+}
+
+async fn gateway_verifies_admin_provider_ops_locally_for_new_api_proxy_node_mode_impl() {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
     let execution_runtime = Router::new().route(
@@ -1741,8 +1858,15 @@ async fn gateway_verifies_admin_provider_ops_locally_for_new_api_proxy_node_mode
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_verifies_admin_provider_ops_locally_for_new_api_without_proxy_via_execution_runtime(
+#[test]
+fn gateway_verifies_admin_provider_ops_locally_for_new_api_without_proxy_via_execution_runtime() {
+    run_provider_ops_test(
+        "gateway_verifies_admin_provider_ops_locally_for_new_api_without_proxy_via_execution_runtime",
+        gateway_verifies_admin_provider_ops_locally_for_new_api_without_proxy_via_execution_runtime_impl,
+    );
+}
+
+async fn gateway_verifies_admin_provider_ops_locally_for_new_api_without_proxy_via_execution_runtime_impl(
 ) {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
@@ -1844,8 +1968,16 @@ async fn gateway_verifies_admin_provider_ops_locally_for_new_api_without_proxy_v
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_verifies_admin_provider_ops_locally_for_sub2api_with_trusted_admin_principal() {
+#[test]
+fn gateway_verifies_admin_provider_ops_locally_for_sub2api_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_verifies_admin_provider_ops_locally_for_sub2api_with_trusted_admin_principal",
+        gateway_verifies_admin_provider_ops_locally_for_sub2api_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_verifies_admin_provider_ops_locally_for_sub2api_with_trusted_admin_principal_impl()
+{
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -1974,8 +2106,16 @@ async fn gateway_verifies_admin_provider_ops_locally_for_sub2api_with_trusted_ad
     verify_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_verifies_admin_provider_ops_sub2api_against_site_root_when_base_url_has_path() {
+#[test]
+fn gateway_verifies_admin_provider_ops_sub2api_against_site_root_when_base_url_has_path() {
+    run_provider_ops_test(
+        "gateway_verifies_admin_provider_ops_sub2api_against_site_root_when_base_url_has_path",
+        gateway_verifies_admin_provider_ops_sub2api_against_site_root_when_base_url_has_path_impl,
+    );
+}
+
+async fn gateway_verifies_admin_provider_ops_sub2api_against_site_root_when_base_url_has_path_impl()
+{
     let nested_refresh_hits = Arc::new(Mutex::new(0usize));
     let nested_refresh_hits_clone = Arc::clone(&nested_refresh_hits);
     let root_refresh_hits = Arc::new(Mutex::new(0usize));
@@ -2104,8 +2244,16 @@ async fn gateway_verifies_admin_provider_ops_sub2api_against_site_root_when_base
     verify_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_verifies_admin_provider_ops_sub2api_with_cached_access_token_without_refresh() {
+#[test]
+fn gateway_verifies_admin_provider_ops_sub2api_with_cached_access_token_without_refresh() {
+    run_provider_ops_test(
+        "gateway_verifies_admin_provider_ops_sub2api_with_cached_access_token_without_refresh",
+        gateway_verifies_admin_provider_ops_sub2api_with_cached_access_token_without_refresh_impl,
+    );
+}
+
+async fn gateway_verifies_admin_provider_ops_sub2api_with_cached_access_token_without_refresh_impl()
+{
     let refresh_hits = Arc::new(Mutex::new(0usize));
     let refresh_hits_clone = Arc::clone(&refresh_hits);
     let ops = Router::new()
@@ -2233,8 +2381,15 @@ async fn gateway_verifies_admin_provider_ops_sub2api_with_cached_access_token_wi
     ops_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_verifies_admin_provider_ops_sub2api_persists_rotated_runtime_credentials() {
+#[test]
+fn gateway_verifies_admin_provider_ops_sub2api_persists_rotated_runtime_credentials() {
+    run_provider_ops_test(
+        "gateway_verifies_admin_provider_ops_sub2api_persists_rotated_runtime_credentials",
+        gateway_verifies_admin_provider_ops_sub2api_persists_rotated_runtime_credentials_impl,
+    );
+}
+
+async fn gateway_verifies_admin_provider_ops_sub2api_persists_rotated_runtime_credentials_impl() {
     let ops = Router::new()
         .route(
             "/api/v1/auth/refresh",
@@ -2409,8 +2564,15 @@ async fn gateway_verifies_admin_provider_ops_sub2api_persists_rotated_runtime_cr
     ops_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_rejects_admin_provider_ops_connect_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_rejects_admin_provider_ops_connect_locally_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_rejects_admin_provider_ops_connect_locally_with_trusted_admin_principal",
+        gateway_rejects_admin_provider_ops_connect_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_rejects_admin_provider_ops_connect_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -2493,8 +2655,15 @@ async fn gateway_rejects_admin_provider_ops_connect_locally_with_trusted_admin_p
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_balance_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_handles_admin_provider_ops_balance_locally_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_balance_locally_with_trusted_admin_principal",
+        gateway_handles_admin_provider_ops_balance_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_balance_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -2624,8 +2793,15 @@ async fn gateway_handles_admin_provider_ops_balance_locally_with_trusted_admin_p
     ops_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_balance_locally_for_generic_api_proxy_node_mode() {
+#[test]
+fn gateway_handles_admin_provider_ops_balance_locally_for_generic_api_proxy_node_mode() {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_balance_locally_for_generic_api_proxy_node_mode",
+        gateway_handles_admin_provider_ops_balance_locally_for_generic_api_proxy_node_mode_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_balance_locally_for_generic_api_proxy_node_mode_impl() {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
     let execution_runtime = Router::new().route(
@@ -2774,8 +2950,16 @@ async fn gateway_handles_admin_provider_ops_balance_locally_for_generic_api_prox
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_balance_locally_without_proxy_via_execution_runtime() {
+#[test]
+fn gateway_handles_admin_provider_ops_balance_locally_without_proxy_via_execution_runtime() {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_balance_locally_without_proxy_via_execution_runtime",
+        gateway_handles_admin_provider_ops_balance_locally_without_proxy_via_execution_runtime_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_balance_locally_without_proxy_via_execution_runtime_impl(
+) {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
     let execution_runtime = Router::new().route(
@@ -2913,8 +3097,15 @@ async fn gateway_handles_admin_provider_ops_balance_locally_without_proxy_via_ex
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_checkin_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_handles_admin_provider_ops_checkin_locally_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_checkin_locally_with_trusted_admin_principal",
+        gateway_handles_admin_provider_ops_checkin_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_checkin_locally_with_trusted_admin_principal_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -3025,8 +3216,15 @@ async fn gateway_handles_admin_provider_ops_checkin_locally_with_trusted_admin_p
     ops_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_checkin_locally_for_generic_api_proxy_node_mode() {
+#[test]
+fn gateway_handles_admin_provider_ops_checkin_locally_for_generic_api_proxy_node_mode() {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_checkin_locally_for_generic_api_proxy_node_mode",
+        gateway_handles_admin_provider_ops_checkin_locally_for_generic_api_proxy_node_mode_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_checkin_locally_for_generic_api_proxy_node_mode_impl() {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);
     let execution_runtime = Router::new().route(
@@ -3150,8 +3348,16 @@ async fn gateway_handles_admin_provider_ops_checkin_locally_for_generic_api_prox
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_batch_balance_locally_with_trusted_admin_principal() {
+#[test]
+fn gateway_handles_admin_provider_ops_batch_balance_locally_with_trusted_admin_principal() {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_batch_balance_locally_with_trusted_admin_principal",
+        gateway_handles_admin_provider_ops_batch_balance_locally_with_trusted_admin_principal_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_batch_balance_locally_with_trusted_admin_principal_impl(
+) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
@@ -3387,8 +3593,15 @@ async fn gateway_handles_admin_provider_ops_batch_balance_locally_with_trusted_a
     ops_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_anyrouter_balance_with_auth_expired_cookie() {
+#[test]
+fn gateway_handles_admin_provider_ops_anyrouter_balance_with_auth_expired_cookie() {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_anyrouter_balance_with_auth_expired_cookie",
+        gateway_handles_admin_provider_ops_anyrouter_balance_with_auth_expired_cookie_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_anyrouter_balance_with_auth_expired_cookie_impl() {
     let ops = Router::new()
         .route(
             "/",
@@ -3519,8 +3732,15 @@ async fn gateway_handles_admin_provider_ops_anyrouter_balance_with_auth_expired_
     ops_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_balance_cache_refresh_modes_with_redis() {
+#[test]
+fn gateway_handles_admin_provider_ops_balance_cache_refresh_modes_with_redis() {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_balance_cache_refresh_modes_with_redis",
+        gateway_handles_admin_provider_ops_balance_cache_refresh_modes_with_redis_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_balance_cache_refresh_modes_with_redis_impl() {
     let Some(redis) = start_managed_redis_or_skip().await else {
         return;
     };
@@ -3672,8 +3892,16 @@ async fn gateway_handles_admin_provider_ops_balance_cache_refresh_modes_with_red
     ops_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_balance_cache_miss_without_refresh_returns_live_payload_once_with_redis(
+#[test]
+fn gateway_handles_admin_provider_ops_balance_cache_miss_without_refresh_returns_live_payload_once_with_redis(
+) {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_balance_cache_miss_without_refresh_returns_live_payload_once_with_redis",
+        gateway_handles_admin_provider_ops_balance_cache_miss_without_refresh_returns_live_payload_once_with_redis_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_balance_cache_miss_without_refresh_returns_live_payload_once_with_redis_impl(
 ) {
     let Some(redis) = start_managed_redis_or_skip().await else {
         return;
@@ -3801,8 +4029,15 @@ async fn gateway_handles_admin_provider_ops_balance_cache_miss_without_refresh_r
     ops_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_clears_admin_provider_ops_balance_cache_after_config_save_with_redis() {
+#[test]
+fn gateway_clears_admin_provider_ops_balance_cache_after_config_save_with_redis() {
+    run_provider_ops_test(
+        "gateway_clears_admin_provider_ops_balance_cache_after_config_save_with_redis",
+        gateway_clears_admin_provider_ops_balance_cache_after_config_save_with_redis_impl,
+    );
+}
+
+async fn gateway_clears_admin_provider_ops_balance_cache_after_config_save_with_redis_impl() {
     let Some(redis) = start_managed_redis_or_skip().await else {
         return;
     };
@@ -3989,8 +4224,15 @@ async fn gateway_clears_admin_provider_ops_balance_cache_after_config_save_with_
     ops_v2_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_verify_does_not_pollute_balance_cache_and_balance_uses_saved_action_config() {
+#[test]
+fn gateway_verify_does_not_pollute_balance_cache_and_balance_uses_saved_action_config() {
+    run_provider_ops_test(
+        "gateway_verify_does_not_pollute_balance_cache_and_balance_uses_saved_action_config",
+        gateway_verify_does_not_pollute_balance_cache_and_balance_uses_saved_action_config_impl,
+    );
+}
+
+async fn gateway_verify_does_not_pollute_balance_cache_and_balance_uses_saved_action_config_impl() {
     let Some(redis) = start_managed_redis_or_skip().await else {
         return;
     };
@@ -4222,8 +4464,15 @@ async fn gateway_verify_does_not_pollute_balance_cache_and_balance_uses_saved_ac
     verify_ops_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_admin_provider_ops_batch_balance_with_pending_cache_hits_and_redis() {
+#[test]
+fn gateway_handles_admin_provider_ops_batch_balance_with_pending_cache_hits_and_redis() {
+    run_provider_ops_test(
+        "gateway_handles_admin_provider_ops_batch_balance_with_pending_cache_hits_and_redis",
+        gateway_handles_admin_provider_ops_batch_balance_with_pending_cache_hits_and_redis_impl,
+    );
+}
+
+async fn gateway_handles_admin_provider_ops_batch_balance_with_pending_cache_hits_and_redis_impl() {
     let Some(redis) = start_managed_redis_or_skip().await else {
         return;
     };
@@ -4354,7 +4603,7 @@ async fn gateway_handles_admin_provider_ops_batch_balance_with_pending_cache_hit
 
 #[test]
 fn gateway_handles_admin_provider_ops_sub2api_balance_with_refresh_token_rotation() {
-    run_sub2api_provider_ops_balance_test(
+    run_provider_ops_test(
         "gateway_handles_admin_provider_ops_sub2api_balance_with_refresh_token_rotation",
         gateway_handles_admin_provider_ops_sub2api_balance_with_refresh_token_rotation_impl,
     );
@@ -4566,7 +4815,7 @@ async fn gateway_handles_admin_provider_ops_sub2api_balance_with_refresh_token_r
 
 #[test]
 fn gateway_handles_admin_provider_ops_sub2api_balance_against_site_root_when_base_url_has_path() {
-    run_sub2api_provider_ops_balance_test(
+    run_provider_ops_test(
         "gateway_handles_admin_provider_ops_sub2api_balance_against_site_root_when_base_url_has_path",
         gateway_handles_admin_provider_ops_sub2api_balance_against_site_root_when_base_url_has_path_impl,
     );
@@ -4782,7 +5031,7 @@ async fn gateway_handles_admin_provider_ops_sub2api_balance_against_site_root_wh
 
 #[test]
 fn gateway_handles_admin_provider_ops_sub2api_balance_with_session_login() {
-    run_sub2api_provider_ops_balance_test(
+    run_provider_ops_test(
         "gateway_handles_admin_provider_ops_sub2api_balance_with_session_login",
         gateway_handles_admin_provider_ops_sub2api_balance_with_session_login_impl,
     );

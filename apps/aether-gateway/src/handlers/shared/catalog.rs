@@ -870,6 +870,7 @@ fn build_codex_quota_status_snapshot(
     let credits_unlimited = metadata
         .get("credits_unlimited")
         .and_then(admin_provider_quota_pure::coerce_json_bool);
+    let reset_credits = build_codex_reset_credits_status_snapshot(metadata, observed_at_unix_secs);
 
     let windows = [
         codex_quota_window_snapshot(metadata, "primary", "weekly", "周", observed_at_unix_secs),
@@ -898,6 +899,7 @@ fn build_codex_quota_status_snapshot(
         && credits_has_credits.is_none()
         && credits_balance.is_none()
         && credits_unlimited.is_none()
+        && reset_credits.is_none()
         && observed_at_unix_secs.is_none()
     {
         return None;
@@ -973,6 +975,7 @@ fn build_codex_quota_status_snapshot(
         } else {
             Value::Object(credits)
         },
+        "reset_credits": reset_credits,
         "windows": windows,
     }))
 }
@@ -2016,6 +2019,119 @@ fn build_gemini_cli_quota_status_snapshot(
     }))
 }
 
+fn build_codex_reset_credits_status_snapshot(
+    metadata: &Map<String, Value>,
+    observed_at_unix_secs: Option<u64>,
+) -> Option<Value> {
+    let reset_credits = metadata.get("reset_credits").and_then(Value::as_object)?;
+    let available_count = reset_credits
+        .get("available_count")
+        .and_then(admin_provider_quota_pure::coerce_json_u64);
+    let updated_at = reset_credits
+        .get("updated_at")
+        .and_then(admin_provider_quota_pure::coerce_json_u64)
+        .or(observed_at_unix_secs);
+    let detail_source = reset_credits
+        .get("detail_source")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let detail_status = reset_credits
+        .get("detail_status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let detail_error = reset_credits
+        .get("detail_error")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let mut credits = reset_credits
+        .get("credits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let object = item.as_object()?;
+            let expires_at = object
+                .get("expires_at")
+                .and_then(admin_provider_quota_pure::coerce_json_u64)?;
+            let display_key = object
+                .get("display_key")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            let mut out = Map::new();
+            if let Some(id) = object
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                out.insert("id".to_string(), json!(id));
+            }
+            out.insert("display_key".to_string(), json!(display_key));
+            if let Some(status) = object
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                out.insert("status".to_string(), json!(status));
+            }
+            if let Some(granted_at) = object
+                .get("granted_at")
+                .and_then(admin_provider_quota_pure::coerce_json_u64)
+            {
+                out.insert("granted_at".to_string(), json!(granted_at));
+            }
+            out.insert("expires_at".to_string(), json!(expires_at));
+            if let Some(observed_at) = observed_at_unix_secs {
+                out.insert(
+                    "remaining_seconds".to_string(),
+                    json!(expires_at.saturating_sub(observed_at)),
+                );
+            }
+            Some(Value::Object(out))
+        })
+        .collect::<Vec<_>>();
+    credits.sort_by_key(|item| {
+        item.get("expires_at")
+            .and_then(admin_provider_quota_pure::coerce_json_u64)
+            .unwrap_or(u64::MAX)
+    });
+
+    if available_count.is_none()
+        && updated_at.is_none()
+        && detail_source.is_none()
+        && detail_status.is_none()
+        && detail_error.is_none()
+        && credits.is_empty()
+    {
+        return None;
+    }
+
+    let mut out = Map::new();
+    if let Some(value) = available_count {
+        out.insert("available_count".to_string(), json!(value));
+    }
+    if let Some(value) = updated_at {
+        out.insert("updated_at".to_string(), json!(value));
+    }
+    if let Some(value) = detail_source {
+        out.insert("detail_source".to_string(), json!(value));
+    }
+    if let Some(value) = detail_status {
+        out.insert("detail_status".to_string(), json!(value));
+    }
+    if let Some(value) = detail_error {
+        out.insert("detail_error".to_string(), json!(value));
+    }
+    out.insert("credits".to_string(), Value::Array(credits));
+    Some(Value::Object(out))
+}
+
 pub(crate) fn sync_provider_key_quota_status_snapshot(
     status_snapshot: Option<&Value>,
     provider_type: &str,
@@ -2081,6 +2197,12 @@ fn quota_snapshot_has_materialized_data(
     if quota_snapshot
         .get("credits")
         .is_some_and(|credits| !credits.is_null())
+    {
+        return true;
+    }
+    if quota_snapshot
+        .get("reset_credits")
+        .is_some_and(|reset_credits| !reset_credits.is_null())
     {
         return true;
     }
@@ -2843,6 +2965,68 @@ mod tests {
         assert_eq!(
             quota.get("windows").and_then(Value::as_array).map(Vec::len),
             Some(2usize)
+        );
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_backfills_codex_reset_credits() {
+        let mut key = sample_catalog_key();
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "updated_at": 1_775_553_285u64,
+                "plan_type": "plus",
+                "primary_used_percent": 55.0,
+                "primary_reset_at": 1_900_000_000u64,
+                "has_credits": true,
+                "credits_balance": 42.0,
+                "reset_credits": {
+                    "available_count": 2,
+                    "updated_at": 1_775_553_285u64,
+                    "detail_source": "wham_readonly",
+                    "detail_status": "available",
+                    "credits": [
+                        {
+                            "id": "bbbbbbbb-1111-2222-3333-444444444444",
+                            "display_key": "bbbbbbbb",
+                            "status": "available",
+                            "expires_at": 1_775_900_000u64
+                        },
+                        {
+                            "id": "aaaaaaaa-1111-2222-3333-444444444444",
+                            "display_key": "aaaaaaaa",
+                            "status": "available",
+                            "expires_at": 1_775_700_000u64
+                        }
+                    ]
+                }
+            }
+        }));
+
+        let payload = provider_key_status_snapshot_payload(&key, "codex");
+        let quota = payload
+            .get("quota")
+            .and_then(Value::as_object)
+            .expect("quota snapshot should be object");
+
+        assert_eq!(quota.get("exhausted"), Some(&json!(false)));
+        assert_eq!(
+            payload.pointer("/quota/reset_credits/available_count"),
+            Some(&json!(2u64))
+        );
+        assert_eq!(
+            payload.pointer("/quota/reset_credits/credits/0/display_key"),
+            Some(&json!("aaaaaaaa"))
+        );
+        assert_eq!(
+            payload.pointer("/quota/reset_credits/credits/0/remaining_seconds"),
+            Some(&json!(146_715u64))
+        );
+        assert_eq!(
+            quota
+                .get("credits")
+                .and_then(Value::as_object)
+                .and_then(|credits| credits.get("balance")),
+            Some(&json!(42.0))
         );
     }
 
