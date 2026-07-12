@@ -90,6 +90,17 @@ impl KiroOAuthRefreshAdapter {
             .can_refresh_access_token()
             .then_some(auth_config)
     }
+
+    fn resolved_auth_if_complete(
+        auth: super::auth::KiroRequestAuth,
+    ) -> Option<LocalResolvedOAuthRequestAuth> {
+        if auth.auth_config.profile_arn_for_payload().is_none()
+            && auth.auth_config.can_refresh_access_token()
+        {
+            return None;
+        }
+        Some(LocalResolvedOAuthRequestAuth::Kiro(auth))
+    }
 }
 
 #[async_trait]
@@ -105,14 +116,14 @@ impl LocalOAuthRefreshAdapter for KiroOAuthRefreshAdapter {
     ) -> Option<LocalResolvedOAuthRequestAuth> {
         let auth_config = Self::auth_config_from_entry(entry)?;
         let request_auth = build_kiro_request_auth_from_config(auth_config, None)?;
-        Some(LocalResolvedOAuthRequestAuth::Kiro(request_auth))
+        Self::resolved_auth_if_complete(request_auth)
     }
 
     fn resolve_without_refresh(
         &self,
         transport: &GatewayProviderTransportSnapshot,
     ) -> Option<LocalResolvedOAuthRequestAuth> {
-        resolve_local_kiro_request_auth(transport).map(LocalResolvedOAuthRequestAuth::Kiro)
+        resolve_local_kiro_request_auth(transport).and_then(Self::resolved_auth_if_complete)
     }
 
     fn should_refresh(
@@ -435,7 +446,10 @@ mod tests {
         match resolved {
             LocalResolvedOAuthRequestAuth::Kiro(auth) => {
                 assert_eq!(auth.value, "Bearer cached-idc-access-token");
-                assert!(auth.auth_config.profile_arn_for_payload().is_none());
+                assert_eq!(
+                    auth.auth_config.profile_arn_for_payload(),
+                    Some("arn:aws:bedrock:demo")
+                );
                 assert!(auth.auth_config.expires_at.is_some());
             }
             other => panic!("unexpected resolved auth: {other:?}"),

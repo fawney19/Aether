@@ -17,6 +17,7 @@ pub const DEFAULT_NODE_VERSION: &str = "22.21.1";
 pub const DEFAULT_SYSTEM_VERSION: &str = "other#unknown";
 const IDC_AMZ_USER_AGENT: &str =
     "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE";
+const KIRO_PROFILE_DISCOVERY_SDK_VERSION: &str = "1.0.0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KiroAuthConfig {
@@ -179,9 +180,6 @@ impl KiroAuthConfig {
     }
 
     pub fn profile_arn_for_payload(&self) -> Option<&str> {
-        if self.is_idc_auth() {
-            return None;
-        }
         self.profile_arn
             .as_deref()
             .map(str::trim)
@@ -245,11 +243,28 @@ impl KiroProviderOAuthAdapter {
         ctx: &ProviderOAuthTransportContext,
         auth_config: &KiroAuthConfig,
     ) -> Result<KiroAuthConfig, OAuthError> {
-        if auth_config.is_idc_auth() {
+        let refreshed = if auth_config.is_idc_auth() {
             self.refresh_idc_token(executor, ctx, auth_config).await
         } else {
             self.refresh_social_token(executor, ctx, auth_config).await
+        }?;
+        self.with_discovered_profile_arn(executor, ctx, refreshed)
+            .await
+    }
+
+    async fn with_discovered_profile_arn(
+        &self,
+        executor: &dyn OAuthHttpExecutor,
+        ctx: &ProviderOAuthTransportContext,
+        mut auth_config: KiroAuthConfig,
+    ) -> Result<KiroAuthConfig, OAuthError> {
+        if auth_config.profile_arn_for_payload().is_some() {
+            return Ok(auth_config);
         }
+        if let Some(profile_arn) = discover_kiro_profile_arn(executor, ctx, &auth_config).await? {
+            auth_config.profile_arn = Some(profile_arn);
+        }
+        Ok(auth_config)
     }
 
     async fn refresh_social_token(
@@ -505,6 +520,180 @@ impl ProviderOAuthAdapter for KiroProviderOAuthAdapter {
     }
 }
 
+async fn discover_kiro_profile_arn(
+    executor: &dyn OAuthHttpExecutor,
+    ctx: &ProviderOAuthTransportContext,
+    auth_config: &KiroAuthConfig,
+) -> Result<Option<String>, OAuthError> {
+    let token = auth_config
+        .cached_access_token()
+        .ok_or_else(|| OAuthError::invalid_response("kiro profile discovery missing access_token"))?
+        .to_string();
+    let machine_id = generate_kiro_machine_id(auth_config, Some(token.as_str()))
+        .ok_or_else(|| OAuthError::invalid_request("missing machine_id seed"))?;
+
+    for region in profile_discovery_regions(auth_config) {
+        if let Some(profile_arn) = discover_kiro_profile_arn_in_region(
+            executor,
+            ctx,
+            auth_config,
+            token.as_str(),
+            machine_id.as_str(),
+            region.as_str(),
+        )
+        .await?
+        {
+            return Ok(Some(profile_arn));
+        }
+    }
+    Ok(None)
+}
+
+async fn discover_kiro_profile_arn_in_region(
+    executor: &dyn OAuthHttpExecutor,
+    ctx: &ProviderOAuthTransportContext,
+    auth_config: &KiroAuthConfig,
+    access_token: &str,
+    machine_id: &str,
+    region: &str,
+) -> Result<Option<String>, OAuthError> {
+    let mut next_token = None::<String>;
+    for _ in 0..4 {
+        let mut body = serde_json::Map::new();
+        if let Some(token) = next_token.as_deref() {
+            body.insert("nextToken".to_string(), Value::String(token.to_string()));
+        }
+        let response = executor
+            .execute(OAuthHttpRequest {
+                request_id: "provider-oauth:kiro-profile-discovery".to_string(),
+                method: reqwest::Method::POST,
+                url: format!(
+                    "https://{}/ListAvailableProfiles",
+                    kiro_runtime_host(region)
+                ),
+                headers: build_kiro_profile_discovery_headers(
+                    auth_config,
+                    access_token,
+                    machine_id,
+                    region,
+                ),
+                content_type: Some("application/json".to_string()),
+                json_body: Some(Value::Object(body)),
+                body_bytes: None,
+                network: ctx.network.clone(),
+            })
+            .await?;
+        if !(200..300).contains(&response.status_code) {
+            return Ok(None);
+        }
+        let payload = response
+            .json_body
+            .or_else(|| serde_json::from_str::<Value>(&response.body_text).ok())
+            .ok_or_else(|| {
+                OAuthError::invalid_response("kiro ListAvailableProfiles response is not json")
+            })?;
+        if let Some(profile_arn) = first_kiro_profile_arn(&payload) {
+            return Ok(Some(profile_arn));
+        }
+        next_token = payload
+            .get("nextToken")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        if next_token.is_none() {
+            return Ok(None);
+        }
+    }
+    Ok(None)
+}
+
+fn build_kiro_profile_discovery_headers(
+    auth_config: &KiroAuthConfig,
+    access_token: &str,
+    machine_id: &str,
+    region: &str,
+) -> BTreeMap<String, String> {
+    let kiro_version = auth_config.effective_kiro_version();
+    let system_version = auth_config.effective_system_version();
+    let node_version = auth_config.effective_node_version();
+    let ide_tag = build_kiro_ide_tag(kiro_version, machine_id);
+    BTreeMap::from([
+        ("accept".to_string(), "application/json".to_string()),
+        ("amz-sdk-invocation-id".to_string(), uuid::Uuid::new_v4().to_string()),
+        ("amz-sdk-request".to_string(), "attempt=1; max=1".to_string()),
+        ("authorization".to_string(), format!("Bearer {}", access_token.trim())),
+        ("connection".to_string(), "close".to_string()),
+        ("content-type".to_string(), "application/json".to_string()),
+        ("host".to_string(), kiro_runtime_host(region)),
+        (
+            "user-agent".to_string(),
+            format!(
+                "aws-sdk-js/{KIRO_PROFILE_DISCOVERY_SDK_VERSION} ua/2.1 os/{system_version} lang/js md/nodejs#{node_version} api/codewhispererruntime#1.0.0 m/N,E {ide_tag}"
+            ),
+        ),
+        (
+            "x-amz-user-agent".to_string(),
+            format!("aws-sdk-js/{KIRO_PROFILE_DISCOVERY_SDK_VERSION} {ide_tag}"),
+        ),
+    ])
+}
+
+fn build_kiro_ide_tag(kiro_version: &str, machine_id: &str) -> String {
+    if machine_id.trim().is_empty() {
+        format!("KiroIDE-{kiro_version}")
+    } else {
+        format!("KiroIDE-{kiro_version}-{machine_id}")
+    }
+}
+
+fn profile_discovery_regions(auth_config: &KiroAuthConfig) -> Vec<String> {
+    let mut regions = Vec::new();
+    push_unique_region(&mut regions, auth_config.effective_api_region());
+    push_unique_region(&mut regions, auth_config.effective_auth_region());
+    if auth_config.is_idc_auth() {
+        push_unique_region(&mut regions, DEFAULT_REGION);
+        push_unique_region(&mut regions, "eu-central-1");
+    }
+    regions
+}
+
+fn push_unique_region(regions: &mut Vec<String>, region: &str) {
+    let region = region.trim();
+    if region.is_empty() || regions.iter().any(|value| value == region) {
+        return;
+    }
+    regions.push(region.to_string());
+}
+
+fn kiro_runtime_host(region: &str) -> String {
+    match region {
+        "us-gov-east-1" | "us-gov-west-1" => format!("q-fips.{region}.amazonaws.com"),
+        "us-iso-east-1" => "q.us-iso-east-1.c2s.ic.gov".to_string(),
+        "us-isob-east-1" => "q.us-isob-east-1.sc2s.sgov.gov".to_string(),
+        "us-isof-south-1" => "q.us-isof-south-1.csp.hci.ic.gov".to_string(),
+        "us-isof-east-1" => "q.us-isof-east-1.csp.hci.ic.gov".to_string(),
+        _ => format!("q.{region}.amazonaws.com"),
+    }
+}
+
+fn first_kiro_profile_arn(payload: &Value) -> Option<String> {
+    payload
+        .get("profiles")
+        .or_else(|| payload.get("data"))?
+        .as_array()?
+        .iter()
+        .find_map(|profile| {
+            profile
+                .get("arn")
+                .or_else(|| profile.get("profileArn"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+}
+
 pub fn generate_kiro_machine_id(
     auth_config: &KiroAuthConfig,
     fallback_secret: Option<&str>,
@@ -674,6 +863,44 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone)]
+    struct RoutingExecutor {
+        seen_requests: Arc<Mutex<Vec<OAuthHttpRequest>>>,
+    }
+
+    #[async_trait]
+    impl OAuthHttpExecutor for RoutingExecutor {
+        async fn execute(
+            &self,
+            request: OAuthHttpRequest,
+        ) -> Result<OAuthHttpResponse, crate::core::OAuthError> {
+            let request_id = request.request_id.clone();
+            self.seen_requests
+                .lock()
+                .expect("mutex should lock")
+                .push(request);
+            let response = match request_id.as_str() {
+                "provider-oauth:kiro-idc-refresh" => json!({
+                    "accessToken": "new-idc-access-token",
+                    "refreshToken": "i".repeat(120),
+                    "expiresIn": 1800
+                }),
+                "provider-oauth:kiro-profile-discovery" => json!({
+                    "profiles": [{
+                        "arn": "arn:aws:codewhisperer:us-east-1:123456789012:profile/demo",
+                        "name": "demo"
+                    }]
+                }),
+                other => panic!("unexpected request id: {other}"),
+            };
+            Ok(OAuthHttpResponse {
+                status_code: 200,
+                body_text: response.to_string(),
+                json_body: Some(response),
+            })
+        }
+    }
+
     fn test_ctx() -> ProviderOAuthTransportContext {
         ProviderOAuthTransportContext {
             provider_id: "provider-1".to_string(),
@@ -831,6 +1058,10 @@ mod tests {
             refreshed.refresh_token.as_deref(),
             Some(expected_rotated_refresh_token.as_str())
         );
+        assert_eq!(
+            refreshed.profile_arn.as_deref(),
+            Some("arn:aws:bedrock:demo")
+        );
         assert!(refreshed.machine_id.is_some());
         assert!(refreshed.expires_at.is_some());
 
@@ -858,6 +1089,69 @@ mod tests {
         assert_eq!(
             body.get("refreshToken").and_then(serde_json::Value::as_str),
             Some(expected_refresh_token.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_discovers_missing_idc_profile_arn() {
+        let seen_requests = Arc::new(Mutex::new(Vec::new()));
+        let executor = RoutingExecutor {
+            seen_requests: Arc::clone(&seen_requests),
+        };
+        let adapter = KiroProviderOAuthAdapter::default()
+            .with_refresh_base_urls(None, Some("https://idc.example.test".to_string()));
+        let auth_config = KiroAuthConfig {
+            auth_method: Some("identity_center".to_string()),
+            refresh_token: Some("r".repeat(120)),
+            expires_at: Some(1),
+            profile_arn: None,
+            region: None,
+            auth_region: None,
+            api_region: Some("us-east-1".to_string()),
+            client_id: Some("client-id".to_string()),
+            client_secret: Some("client-secret".to_string()),
+            machine_id: Some("123e4567-e89b-12d3-a456-426614174000".to_string()),
+            kiro_version: Some("0.3.210".to_string()),
+            system_version: None,
+            node_version: None,
+            access_token: None,
+        };
+
+        let refreshed = adapter
+            .refresh_auth_config(&executor, &test_ctx(), &auth_config)
+            .await
+            .expect("idc refresh should discover profile arn");
+
+        assert_eq!(
+            refreshed.profile_arn.as_deref(),
+            Some("arn:aws:codewhisperer:us-east-1:123456789012:profile/demo")
+        );
+        let seen_requests = seen_requests.lock().expect("mutex should lock").clone();
+        assert_eq!(seen_requests.len(), 2);
+        let discovery = seen_requests
+            .iter()
+            .find(|request| request.request_id == "provider-oauth:kiro-profile-discovery")
+            .expect("profile discovery request should be sent");
+        assert_eq!(discovery.method, reqwest::Method::POST);
+        assert_eq!(
+            discovery.url,
+            "https://q.us-east-1.amazonaws.com/ListAvailableProfiles"
+        );
+        assert_eq!(
+            discovery.headers.get("authorization").map(String::as_str),
+            Some("Bearer new-idc-access-token")
+        );
+        assert_eq!(
+            discovery.headers.get("host").map(String::as_str),
+            Some("q.us-east-1.amazonaws.com")
+        );
+        assert_eq!(
+            discovery
+                .json_body
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .map(|body| body.is_empty()),
+            Some(true)
         );
     }
 }

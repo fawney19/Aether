@@ -78,7 +78,10 @@ mod tests {
         assert_eq!(auth_config.effective_node_version(), "22.21.1");
         assert_eq!(auth_config.access_token.as_deref(), Some("cached-token"));
         assert!(auth_config.is_idc_auth());
-        assert!(auth_config.profile_arn_for_payload().is_none());
+        assert_eq!(
+            auth_config.profile_arn_for_payload(),
+            Some("arn:aws:bedrock:demo")
+        );
         assert_eq!(auth_config.effective_auth_region(), "us-east-1");
         assert!(auth_config.can_refresh_access_token());
         assert_eq!(DEFAULT_REGION, "us-east-1");
@@ -100,7 +103,10 @@ mod tests {
         assert_eq!(auth_config.auth_method.as_deref(), Some("external_idp"));
         assert!(auth_config.is_idc_auth());
         assert!(auth_config.uses_external_idp_token_type());
-        assert!(auth_config.profile_arn_for_payload().is_none());
+        assert_eq!(
+            auth_config.profile_arn_for_payload(),
+            Some("arn:aws:bedrock:demo")
+        );
         assert_eq!(
             auth_config.profile_arn_for_mcp(),
             Some("arn:aws:bedrock:demo")
@@ -121,7 +127,10 @@ mod tests {
 
         assert!(auth_config.is_idc_auth());
         assert!(!auth_config.uses_external_idp_token_type());
-        assert!(auth_config.profile_arn_for_payload().is_none());
+        assert_eq!(
+            auth_config.profile_arn_for_payload(),
+            Some("arn:aws:bedrock:demo")
+        );
         assert_eq!(
             auth_config.profile_arn_for_mcp(),
             Some("arn:aws:bedrock:demo")

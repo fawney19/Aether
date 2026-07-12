@@ -37,7 +37,24 @@ pub fn convert_claude_messages_to_conversation_state(
     let thinking_prefix = generate_thinking_prefix(request_body);
 
     let mut history = Vec::new();
-    let system_text = system_to_text(request_body.get("system"));
+    let mut system_text = system_to_text(request_body.get("system"));
+    for message in messages {
+        let Some(message) = message.as_object() else {
+            continue;
+        };
+        if matches!(
+            message.get("role").and_then(Value::as_str),
+            Some("system" | "developer")
+        ) {
+            let text = system_to_text(message.get("content"));
+            if !text.is_empty() {
+                if !system_text.is_empty() {
+                    system_text.push('\n');
+                }
+                system_text.push_str(&text);
+            }
+        }
+    }
     if !system_text.is_empty() {
         history.push(json!({
             "userInputMessage": {
@@ -53,16 +70,22 @@ pub fn convert_claude_messages_to_conversation_state(
         }));
     }
 
-    let last_is_assistant = messages
-        .last()
-        .and_then(Value::as_object)
-        .and_then(|message| message.get("role"))
-        .and_then(Value::as_str)
-        .is_some_and(|role| role == "assistant");
+    let Some((last_message_index, last_message_role)) = messages.iter().enumerate().rev().find_map(
+        |(index, message)| {
+            let role = message
+                .as_object()
+                .and_then(|message| message.get("role"))
+                .and_then(Value::as_str)?;
+            matches!(role, "user" | "assistant").then_some((index, role))
+        },
+    ) else {
+        return None;
+    };
+    let last_is_assistant = last_message_role == "assistant";
     let history_end_index = if last_is_assistant {
         messages.len()
     } else {
-        messages.len().saturating_sub(1)
+        last_message_index
     };
 
     let mut user_buffer = Vec::new();
@@ -106,7 +129,7 @@ pub fn convert_claude_messages_to_conversation_state(
     let (mut text_content, images, tool_results) = if last_is_assistant {
         ("Continue.".to_string(), Vec::new(), Vec::new())
     } else {
-        let last = messages.last()?.as_object()?;
+        let last = messages.get(last_message_index)?.as_object()?;
         if last.get("role").and_then(Value::as_str) != Some("user") {
             return None;
         }
@@ -670,7 +693,7 @@ fn convert_assistant_message(message: &Map<String, Value>) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::convert_claude_messages_to_conversation_state;
 
@@ -706,9 +729,42 @@ mod tests {
                 .and_then(|value| value.get("userInputMessage"))
                 .and_then(|value| value.get("userInputMessageContext"))
                 .and_then(|value| value.get("tools"))
-                .and_then(|value| value.as_array())
-                .map(Vec::len),
+            .and_then(|value| value.as_array())
+            .map(Vec::len),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn folds_inline_system_messages_into_instructions_and_keeps_last_user_as_current_message() {
+        let conversation_state = convert_claude_messages_to_conversation_state(
+            &json!({
+                "messages": [
+                    {"role":"user","content":"hi"},
+                    {"role":"system","content":"Use the Kiro envelope."}
+                ]
+            }),
+            "claude-sonnet-4-upstream",
+        )
+        .expect("conversation state should build");
+
+        assert_eq!(
+            conversation_state
+                .get("currentMessage")
+                .and_then(|value| value.get("userInputMessage"))
+                .and_then(|value| value.get("content"))
+                .and_then(|value| value.as_str()),
+            Some("hi")
+        );
+        assert!(
+            conversation_state
+                .get("history")
+                .and_then(Value::as_array)
+                .and_then(|history| history.first())
+                .and_then(|value| value.get("userInputMessage"))
+                .and_then(|value| value.get("content"))
+                .and_then(Value::as_str)
+                .is_some_and(|content| content.contains("Use the Kiro envelope."))
         );
     }
 }

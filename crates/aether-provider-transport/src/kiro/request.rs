@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn omits_profile_arn_for_idc_auth() {
+    fn includes_profile_arn_for_idc_auth() {
         let auth_config = KiroAuthConfig {
             auth_method: Some("identity_center".to_string()),
             refresh_token: Some("r".repeat(128)),
@@ -304,6 +304,9 @@ mod tests {
         )
         .expect("payload should build");
 
-        assert!(payload.get("profileArn").is_none());
+        assert_eq!(
+            payload.get("profileArn"),
+            Some(&json!("arn:aws:bedrock:demo"))
+        );
     }
 }
