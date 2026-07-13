@@ -49,6 +49,7 @@ async fn gateway_handles_internal_tunnel_heartbeat_locally_with_loopback() {
         .post(format!("{gateway_url}/api/internal/tunnel/heartbeat"))
         .json(&json!({
             "node_id": "node-123",
+            "heartbeat_session_id": "process-123",
             "heartbeat_id": 77,
             "heartbeat_interval": 45,
             "active_connections": 5,
@@ -84,6 +85,24 @@ async fn gateway_handles_internal_tunnel_heartbeat_locally_with_loopback() {
     assert_eq!(node.failed_requests, 1);
     assert_eq!(node.dns_failures, 2);
     assert_eq!(node.stream_errors, 3);
+    assert_eq!(
+        node.proxy_metadata
+            .as_ref()
+            .and_then(|value| value.get("arch")),
+        Some(&json!("arm64"))
+    );
+    assert_eq!(
+        node.proxy_metadata
+            .as_ref()
+            .and_then(|value| value.get("heartbeat_session_id")),
+        Some(&json!("process-123"))
+    );
+    assert_eq!(
+        node.proxy_metadata
+            .as_ref()
+            .and_then(|value| value.get("heartbeat_id")),
+        Some(&json!(77))
+    );
 
     gateway_handle.abort();
     upstream_handle.abort();
@@ -116,6 +135,39 @@ async fn gateway_rejects_internal_tunnel_heartbeat_without_heartbeat_id() {
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_rejects_invalid_internal_tunnel_heartbeat_session_id() {
+    let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![sample_proxy_node(
+        "node-123",
+    )]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_proxy_node_repository_for_tests(
+                repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    for heartbeat_session_id in ["   ".to_string(), "x".repeat(129)] {
+        let response = client
+            .post(format!("{gateway_url}/api/internal/tunnel/heartbeat"))
+            .json(&json!({
+                "node_id": "node-123",
+                "heartbeat_session_id": heartbeat_session_id,
+                "heartbeat_id": 1
+            }))
+            .send()
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 
     gateway_handle.abort();
 }

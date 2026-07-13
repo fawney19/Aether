@@ -361,6 +361,12 @@ pub struct TunnelMetricsSample {
     pub recent_error_events: Vec<TunnelErrorEventRecord>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeartbeatCursor<'a> {
+    session_id: &'a str,
+    heartbeat_id: u64,
+}
+
 pub fn bucket_start_unix_secs(timestamp_unix_secs: u64, step: ProxyNodeMetricsStep) -> u64 {
     let size = step.bucket_size_secs();
     timestamp_unix_secs / size * size
@@ -375,21 +381,38 @@ pub fn build_tunnel_metrics_sample(
     let current = extract_tunnel_metrics_counters(current_proxy_metadata)?;
     let previous = extract_tunnel_metrics_counters(previous_proxy_metadata);
     let current_recent_errors = extract_recent_tunnel_errors(current_proxy_metadata);
+    let previous_cursor = extract_heartbeat_cursor(previous_proxy_metadata);
+    let current_cursor = extract_heartbeat_cursor(current_proxy_metadata);
+    // Cursorless samples come from older tunnels; keep their existing delta behavior only
+    // while both sides are legacy metadata.
+    let counters_are_comparable = match (previous_cursor, current_cursor) {
+        (None, None) => true,
+        (Some(previous), Some(current)) => {
+            previous.session_id == current.session_id
+                && current.heartbeat_id > previous.heartbeat_id
+        }
+        _ => false,
+    };
 
+    let counter_delta = |previous: Option<u64>, current: u64| {
+        if counters_are_comparable {
+            counter_delta_u64(previous, current)
+        } else {
+            0
+        }
+    };
     let connect_errors_delta =
-        counter_delta_u64(previous.map(|v| v.connect_errors), current.connect_errors);
-    let disconnects_delta = counter_delta_u64(previous.map(|v| v.disconnects), current.disconnects);
-    let error_events_delta = counter_delta_u64(
+        counter_delta(previous.map(|v| v.connect_errors), current.connect_errors);
+    let disconnects_delta = counter_delta(previous.map(|v| v.disconnects), current.disconnects);
+    let error_events_delta = counter_delta(
         previous.map(|v| v.error_events_total),
         current.error_events_total,
     );
-    let ws_in_bytes_delta = counter_delta_u64(previous.map(|v| v.ws_in_bytes), current.ws_in_bytes);
-    let ws_out_bytes_delta =
-        counter_delta_u64(previous.map(|v| v.ws_out_bytes), current.ws_out_bytes);
-    let ws_in_frames_delta =
-        counter_delta_u64(previous.map(|v| v.ws_in_frames), current.ws_in_frames);
+    let ws_in_bytes_delta = counter_delta(previous.map(|v| v.ws_in_bytes), current.ws_in_bytes);
+    let ws_out_bytes_delta = counter_delta(previous.map(|v| v.ws_out_bytes), current.ws_out_bytes);
+    let ws_in_frames_delta = counter_delta(previous.map(|v| v.ws_in_frames), current.ws_in_frames);
     let ws_out_frames_delta =
-        counter_delta_u64(previous.map(|v| v.ws_out_frames), current.ws_out_frames);
+        counter_delta(previous.map(|v| v.ws_out_frames), current.ws_out_frames);
 
     let take_recent = usize::try_from(error_events_delta).unwrap_or(usize::MAX);
     let recent_error_events = if take_recent == 0 {
@@ -530,6 +553,18 @@ fn extract_tunnel_metrics_counters(
         ws_in_frames: json_u64(tunnel_metrics.get("ws_in_frames")).unwrap_or(0),
         ws_out_frames: json_u64(tunnel_metrics.get("ws_out_frames")).unwrap_or(0),
         heartbeat_rtt_last_ms: json_u64(tunnel_metrics.get("heartbeat_rtt_last_ms")).unwrap_or(0),
+    })
+}
+
+fn extract_heartbeat_cursor(proxy_metadata: Option<&Value>) -> Option<HeartbeatCursor<'_>> {
+    let metadata = proxy_metadata.and_then(Value::as_object)?;
+    let session_id = metadata
+        .get("heartbeat_session_id")
+        .and_then(Value::as_str)?;
+    let heartbeat_id = json_u64(metadata.get("heartbeat_id"))?;
+    Some(HeartbeatCursor {
+        session_id,
+        heartbeat_id,
     })
 }
 
@@ -893,6 +928,8 @@ mod tests {
     #[test]
     fn builds_tunnel_metrics_sample_with_reset_safe_counter_deltas() {
         let previous = json!({
+            "heartbeat_session_id": "process-a",
+            "heartbeat_id": 40,
             "tunnel_metrics": {
                 "connect_errors": 10,
                 "disconnects": 5,
@@ -905,6 +942,8 @@ mod tests {
             }
         });
         let current = json!({
+            "heartbeat_session_id": "process-a",
+            "heartbeat_id": 41,
             "tunnel_metrics": {
                 "connect_errors": 12,
                 "disconnects": 2,
@@ -961,6 +1000,144 @@ mod tests {
             build_tunnel_error_event_detail(&sample.recent_error_events[1]),
             "[newer] WebSocket write failed because the peer closed or reset the connection"
         );
+    }
+
+    #[test]
+    fn builds_tunnel_metrics_sample_treats_changed_or_non_advancing_cursors_as_baselines() {
+        let previous = json!({
+            "heartbeat_session_id": "process-a",
+            "heartbeat_id": 40,
+            "tunnel_metrics": {
+                "connect_errors": 10,
+                "disconnects": 5,
+                "error_events_total": 7,
+                "ws_in_bytes": 1_000,
+                "ws_out_bytes": 2_000,
+                "ws_in_frames": 10,
+                "ws_out_frames": 20,
+                "heartbeat_rtt_last_ms": 30
+            }
+        });
+
+        for (session_id, heartbeat_id) in [("process-b", 1), ("process-a", 40), ("process-a", 39)] {
+            let current = json!({
+                "heartbeat_session_id": session_id,
+                "heartbeat_id": heartbeat_id,
+                "tunnel_metrics": {
+                    "connect_errors": 12,
+                    "disconnects": 8,
+                    "error_events_total": 9,
+                    "ws_in_bytes": 1_500,
+                    "ws_out_bytes": 2_500,
+                    "ws_in_frames": 15,
+                    "ws_out_frames": 25,
+                    "heartbeat_rtt_last_ms": 44
+                },
+                "recent_tunnel_errors": [
+                    {"timestamp_unix_secs": 101, "category": "newer", "message": "new"}
+                ]
+            });
+
+            let sample = build_tunnel_metrics_sample(Some(&previous), Some(&current), 4, true)
+                .expect("sample should build");
+            assert_eq!(sample.samples, 1);
+            assert_eq!(sample.heartbeat_rtt_ms_sum, 44);
+            assert_eq!(sample.connect_errors_delta, 0);
+            assert_eq!(sample.disconnects_delta, 0);
+            assert_eq!(sample.error_events_delta, 0);
+            assert_eq!(sample.ws_in_bytes_delta, 0);
+            assert_eq!(sample.ws_out_bytes_delta, 0);
+            assert_eq!(sample.ws_in_frames_delta, 0);
+            assert_eq!(sample.ws_out_frames_delta, 0);
+            assert!(sample.recent_error_events.is_empty());
+        }
+    }
+
+    #[test]
+    fn builds_tunnel_metrics_sample_treats_cursor_adoption_as_a_baseline() {
+        let previous = json!({
+            "tunnel_metrics": {
+                "connect_errors": 10,
+                "disconnects": 5,
+                "error_events_total": 7,
+                "ws_in_bytes": 1_000,
+                "ws_out_bytes": 2_000,
+                "ws_in_frames": 10,
+                "ws_out_frames": 20,
+                "heartbeat_rtt_last_ms": 30
+            }
+        });
+        let current = json!({
+            "heartbeat_session_id": "process-a",
+            "heartbeat_id": 1,
+            "tunnel_metrics": {
+                "connect_errors": 12,
+                "disconnects": 8,
+                "error_events_total": 9,
+                "ws_in_bytes": 1_500,
+                "ws_out_bytes": 2_500,
+                "ws_in_frames": 15,
+                "ws_out_frames": 25,
+                "heartbeat_rtt_last_ms": 44
+            },
+            "recent_tunnel_errors": [
+                {"timestamp_unix_secs": 101, "category": "newer", "message": "new"}
+            ]
+        });
+
+        let sample = build_tunnel_metrics_sample(Some(&previous), Some(&current), 4, true)
+            .expect("sample should build");
+        assert_eq!(sample.connect_errors_delta, 0);
+        assert_eq!(sample.disconnects_delta, 0);
+        assert_eq!(sample.error_events_delta, 0);
+        assert_eq!(sample.ws_in_bytes_delta, 0);
+        assert_eq!(sample.ws_out_bytes_delta, 0);
+        assert_eq!(sample.ws_in_frames_delta, 0);
+        assert_eq!(sample.ws_out_frames_delta, 0);
+        assert!(sample.recent_error_events.is_empty());
+    }
+
+    #[test]
+    fn builds_tunnel_metrics_sample_preserves_legacy_counter_behavior_without_cursors() {
+        let previous = json!({
+            "tunnel_metrics": {
+                "connect_errors": 10,
+                "disconnects": 5,
+                "error_events_total": 7,
+                "ws_in_bytes": 1_000,
+                "ws_out_bytes": 2_000,
+                "ws_in_frames": 10,
+                "ws_out_frames": 20,
+                "heartbeat_rtt_last_ms": 30
+            }
+        });
+        let current = json!({
+            "tunnel_metrics": {
+                "connect_errors": 12,
+                "disconnects": 2,
+                "error_events_total": 9,
+                "ws_in_bytes": 1_500,
+                "ws_out_bytes": 100,
+                "ws_in_frames": 11,
+                "ws_out_frames": 3,
+                "heartbeat_rtt_last_ms": 44
+            },
+            "recent_tunnel_errors": [
+                {"timestamp_unix_secs": 100, "category": "older", "message": "old"},
+                {"timestamp_unix_secs": 101, "category": "newer", "message": "new"}
+            ]
+        });
+
+        let sample = build_tunnel_metrics_sample(Some(&previous), Some(&current), 4, true)
+            .expect("sample should build");
+        assert_eq!(sample.connect_errors_delta, 2);
+        assert_eq!(sample.disconnects_delta, 2);
+        assert_eq!(sample.error_events_delta, 2);
+        assert_eq!(sample.ws_in_bytes_delta, 500);
+        assert_eq!(sample.ws_out_bytes_delta, 100);
+        assert_eq!(sample.ws_in_frames_delta, 1);
+        assert_eq!(sample.ws_out_frames_delta, 3);
+        assert_eq!(sample.recent_error_events.len(), 2);
     }
 
     #[test]

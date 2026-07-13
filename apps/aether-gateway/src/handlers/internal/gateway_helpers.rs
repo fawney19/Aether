@@ -391,7 +391,17 @@ pub(crate) fn parse_internal_tunnel_heartbeat_request(
         })?;
 
     let node_id = payload.node_id.trim();
-    if node_id.is_empty() || node_id.len() > 36 || payload.heartbeat_id == 0 {
+    let heartbeat_session_id = payload
+        .heartbeat_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if node_id.is_empty()
+        || node_id.len() > 36
+        || payload.heartbeat_id == 0
+        || payload.heartbeat_session_id.is_some() && heartbeat_session_id.is_none()
+        || heartbeat_session_id.is_some_and(|value| value.len() > 128)
+    {
         return Err(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "invalid heartbeat payload",
