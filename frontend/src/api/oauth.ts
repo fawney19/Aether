@@ -13,6 +13,7 @@ export interface OAuthProvidersResponse {
 export interface OAuthLinkInfo {
   provider_type: string
   display_name: string
+  icon_url?: string | null
   provider_username?: string | null
   provider_email?: string | null
   linked_at?: string | null

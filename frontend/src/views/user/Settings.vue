@@ -374,7 +374,7 @@
                   <!-- eslint-disable vue/no-v-html -->
                   <div
                     class="oauth-icon shrink-0"
-                    v-html="getOAuthIcon(link.provider_type)"
+                    v-html="getOAuthIcon(link.provider_type, link.icon_url)"
                   />
                   <!-- eslint-enable vue/no-v-html -->
                   <div class="min-w-0">

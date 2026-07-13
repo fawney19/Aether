@@ -11,8 +11,8 @@ export const OAUTH_ICONS: Record<string, string> = {
 const DEFAULT_ICON = OAUTH_ICONS.github
 
 export function getOAuthIcon(providerType: string, iconUrl?: string | null): string {
+  if (iconUrl) return `<img src="${iconUrl}" alt="" style="width:100%;height:100%;object-fit:contain;" />`
   const builtin = OAUTH_ICONS[providerType.toLowerCase()]
   if (builtin) return builtin
-  if (iconUrl) return `<img src="${iconUrl}" alt="" style="width:100%;height:100%;object-fit:contain;" />`
   return DEFAULT_ICON
 }

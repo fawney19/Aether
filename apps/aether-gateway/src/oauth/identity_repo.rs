@@ -27,6 +27,8 @@ pub(crate) struct IdentityOAuthProviderSummary {
 pub(crate) struct IdentityOAuthLinkSummary {
     pub(crate) provider_type: String,
     pub(crate) display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) icon_url: Option<String>,
     pub(crate) provider_username: Option<String>,
     pub(crate) provider_email: Option<String>,
     pub(crate) linked_at: Option<String>,
@@ -373,6 +375,7 @@ fn map_link_summary(
     Ok(IdentityOAuthLinkSummary {
         provider_type: row.provider_type,
         display_name: row.display_name,
+        icon_url: row.icon_url,
         provider_username: row.provider_username,
         provider_email: row.provider_email,
         linked_at: row.linked_at.map(|value| value.to_rfc3339()),

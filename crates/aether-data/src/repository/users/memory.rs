@@ -968,6 +968,7 @@ impl UserReadRepository for InMemoryUserReadRepository {
                 StoredUserOAuthLinkSummary::new(
                     link.provider_type.clone(),
                     link.provider_type.clone(),
+                    None,
                     link.provider_username.clone(),
                     link.provider_email.clone(),
                     Some(link.linked_at),

@@ -95,6 +95,7 @@ const USER_OAUTH_LINK_SUMMARY_COLUMNS: &str = r#"
 SELECT
   user_oauth_links.provider_type,
   oauth_providers.display_name,
+  oauth_providers.icon_url,
   user_oauth_links.provider_username,
   user_oauth_links.provider_email,
   user_oauth_links.linked_at,
@@ -2072,6 +2073,7 @@ fn map_oauth_link_summary_row(
     StoredUserOAuthLinkSummary::new(
         row.try_get("provider_type").map_sql_err()?,
         row.try_get("display_name").map_sql_err()?,
+        row.try_get("icon_url").map_sql_err()?,
         row.try_get("provider_username").map_sql_err()?,
         row.try_get("provider_email").map_sql_err()?,
         optional_datetime_from_unix_secs(row.try_get("linked_at").map_sql_err()?),

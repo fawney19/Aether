@@ -178,6 +178,7 @@ pub struct LdapAuthUserProvisioningOutcome {
 pub struct StoredUserOAuthLinkSummary {
     pub provider_type: String,
     pub display_name: String,
+    pub icon_url: Option<String>,
     pub provider_username: Option<String>,
     pub provider_email: Option<String>,
     pub linked_at: Option<DateTime<Utc>>,
@@ -190,6 +191,7 @@ impl StoredUserOAuthLinkSummary {
     pub fn new(
         provider_type: String,
         display_name: String,
+        icon_url: Option<String>,
         provider_username: Option<String>,
         provider_email: Option<String>,
         linked_at: Option<DateTime<Utc>>,
@@ -209,6 +211,7 @@ impl StoredUserOAuthLinkSummary {
         Ok(Self {
             provider_type,
             display_name,
+            icon_url,
             provider_username,
             provider_email,
             linked_at,
