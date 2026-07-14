@@ -806,6 +806,11 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 Err(response) => return Ok(Some(response)),
             };
             let node_id = payload.node_id.trim().to_string();
+            let proxy_metadata = attach_heartbeat_cursor(
+                payload.proxy_metadata,
+                payload.heartbeat_session_id.as_deref(),
+                payload.heartbeat_id,
+            );
             let mutation = ProxyNodeHeartbeatMutation {
                 node_id: node_id.clone(),
                 heartbeat_interval: payload.heartbeat_interval,
@@ -815,7 +820,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 failed_requests_delta: payload.window_failed_requests.or(payload.failed_requests),
                 dns_failures_delta: payload.window_dns_failures.or(payload.dns_failures),
                 stream_errors_delta: payload.window_stream_errors.or(payload.stream_errors),
-                proxy_metadata: payload.proxy_metadata,
+                proxy_metadata,
                 proxy_version: payload.proxy_version,
             };
 
@@ -870,4 +875,23 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
     }
 
     Ok(None)
+}
+
+fn attach_heartbeat_cursor(
+    proxy_metadata: Option<serde_json::Value>,
+    heartbeat_session_id: Option<&str>,
+    heartbeat_id: u64,
+) -> Option<serde_json::Value> {
+    let Some(heartbeat_session_id) = heartbeat_session_id.map(str::trim) else {
+        return proxy_metadata;
+    };
+    let mut metadata = proxy_metadata
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    metadata.insert(
+        "heartbeat_session_id".to_string(),
+        serde_json::Value::String(heartbeat_session_id.to_string()),
+    );
+    metadata.insert("heartbeat_id".to_string(), heartbeat_id.into());
+    Some(serde_json::Value::Object(metadata))
 }
