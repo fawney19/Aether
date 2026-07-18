@@ -1649,8 +1649,13 @@ async fn gateway_handles_admin_stats_leaderboard_api_keys_locally_without_auth_s
 }
 
 #[tokio::test]
-async fn gateway_handles_admin_stats_leaderboard_api_keys_with_auth_snapshot_single_lookup_fallback(
+async fn gateway_handles_admin_stats_leaderboard_api_keys_with_auth_snapshot_bulk_list_as_authoritative(
 ) {
+    // Leaderboard treats bulk snapshot list results as authoritative and does not fall back to
+    // per-id single lookups. Historical aggregates can contain many deleted key IDs; retrying
+    // every missing ID would turn one leaderboard request into an unbounded N+1 query pattern.
+    // PartialListAuthApiKeyRepository returns no rows from list while still answering find, so
+    // this exercises the no-fallback path: missing bulk rows are treated as absent snapshots.
     let (_upstream_url, upstream_hits, upstream_handle) =
         start_stats_upstream("/api/admin/stats/leaderboard/api-keys").await;
 
@@ -1684,6 +1689,7 @@ async fn gateway_handles_admin_stats_leaderboard_api_keys_with_auth_snapshot_sin
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
+    // Default filters hide keys without a bulk snapshot (may be deleted / inactive).
     let response = admin_request(
         reqwest::Client::new().get(format!(
             "{gateway_url}/api/admin/stats/leaderboard/api-keys?start_date=2024-03-21&end_date=2024-03-21&metric=cost&order=desc&tz_offset_minutes=0"
@@ -1695,10 +1701,27 @@ async fn gateway_handles_admin_stats_leaderboard_api_keys_with_auth_snapshot_sin
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["total"], 1);
-    assert_eq!(payload["items"][0]["id"], "key-1");
-    assert_eq!(payload["items"][0]["name"], "fresh-key");
-    assert_eq!(payload["items"][0]["value"], 0.3);
+    assert_eq!(payload["total"], 0);
+    assert_eq!(payload["items"], serde_json::Value::Array(vec![]));
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    // Explicit historical view surfaces the legacy usage identity without N+1 single lookups.
+    let historical = admin_request(
+        reqwest::Client::new().get(format!(
+            "{gateway_url}/api/admin/stats/leaderboard/api-keys?start_date=2024-03-21&end_date=2024-03-21&metric=cost&order=desc&include_inactive=true&tz_offset_minutes=0"
+        )),
+    )
+    .send()
+    .await
+    .expect("historical request should succeed");
+
+    assert_eq!(historical.status(), StatusCode::OK);
+    let historical_payload: serde_json::Value =
+        historical.json().await.expect("json body should parse");
+    assert_eq!(historical_payload["total"], 1);
+    assert_eq!(historical_payload["items"][0]["id"], "key-1");
+    assert_eq!(historical_payload["items"][0]["name"], "legacy-key");
+    assert_eq!(historical_payload["items"][0]["value"], 0.3);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
