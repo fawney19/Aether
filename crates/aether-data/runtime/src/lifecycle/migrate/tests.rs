@@ -31,10 +31,32 @@ struct ManagedPostgresServer {
     child: Option<Child>,
     workdir: PathBuf,
     database_url: String,
+    /// Admin URL used to CREATE/DROP an isolated database when sharing an external server.
+    admin_database_url: Option<String>,
+    /// Database name created for this fixture; dropped on cleanup when set.
+    owned_database_name: Option<String>,
 }
 
 impl ManagedPostgresServer {
     async fn try_start() -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        // Prefer a shared external Postgres (e.g. CI service container) when provided.
+        // Each fixture still gets an isolated database so sequential tests cannot clobber each other.
+        if let Some(base_url) = external_postgres_url() {
+            return match Self::start_from_external_url(&base_url).await {
+                Ok(server) => Ok(Some(server)),
+                Err(err) => {
+                    let required = local_postgres_tests_required();
+                    if !required {
+                        eprintln!(
+                            "skipping postgres integration test because external postgres is unavailable: {err}"
+                        );
+                        return Ok(None);
+                    }
+                    Err(err)
+                }
+            };
+        }
+
         let required = local_postgres_tests_required();
         let initdb_bin = std::env::var("AETHER_INITDB_BIN")
             .ok()
@@ -68,6 +90,34 @@ impl ManagedPostgresServer {
             }
             Err(err) => Err(err),
         }
+    }
+
+    async fn start_from_external_url(base_url: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        wait_for_postgres(base_url).await?;
+
+        let owned_database_name = format!(
+            "aether_migrate_{}_{}",
+            std::process::id(),
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        );
+        validate_postgres_identifier(&owned_database_name)?;
+
+        let mut admin = PgConnection::connect(base_url).await?;
+        // CREATE DATABASE cannot take a bound parameter for the identifier.
+        let create_sql = format!("CREATE DATABASE \"{owned_database_name}\"");
+        query(&create_sql).execute(&mut admin).await?;
+        admin.close().await?;
+
+        let database_url = rewrite_postgres_url_database(base_url, &owned_database_name)?;
+        wait_for_postgres(&database_url).await?;
+
+        Ok(Self {
+            child: None,
+            workdir: PathBuf::new(),
+            database_url,
+            admin_database_url: Some(base_url.to_string()),
+            owned_database_name: Some(owned_database_name),
+        })
     }
 
     async fn start(
@@ -140,6 +190,8 @@ impl ManagedPostgresServer {
             child: Some(child),
             workdir,
             database_url,
+            admin_database_url: None,
+            owned_database_name: None,
         })
     }
 
@@ -153,6 +205,47 @@ impl ManagedPostgresServer {
             let _ = child.wait();
         }
     }
+
+    fn drop_owned_database(&mut self) {
+        let (Some(admin_url), Some(database_name)) = (
+            self.admin_database_url.take(),
+            self.owned_database_name.take(),
+        ) else {
+            return;
+        };
+
+        // Drop runs from a synchronous destructor; spin a short-lived runtime off the test
+        // executor so we can issue CREATE/DROP DATABASE cleanup over sqlx.
+        let join = std::thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    eprintln!(
+                        "failed to build runtime for postgres fixture cleanup ({database_name}): {err}"
+                    );
+                    return;
+                }
+            };
+            if let Err(err) =
+                runtime.block_on(drop_isolated_postgres_database(&admin_url, &database_name))
+            {
+                eprintln!(
+                    "failed to drop isolated postgres fixture database {database_name}: {err}"
+                );
+            }
+        });
+        let _ = join.join();
+    }
+}
+
+fn external_postgres_url() -> Option<String> {
+    std::env::var("AETHER_TEST_POSTGRES_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn local_postgres_tests_required() -> bool {
@@ -167,10 +260,59 @@ fn local_postgres_tests_required() -> bool {
         })
 }
 
+fn validate_postgres_identifier(name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid postgres identifier for test database: {name}"),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn rewrite_postgres_url_database(
+    base_url: &str,
+    database_name: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut url = url::Url::parse(base_url)?;
+    url.set_path(&format!("/{database_name}"));
+    Ok(url.into())
+}
+
+async fn drop_isolated_postgres_database(
+    admin_url: &str,
+    database_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_postgres_identifier(database_name)?;
+    let mut admin = PgConnection::connect(admin_url).await?;
+    // Terminate leftover connections so DROP DATABASE is not blocked.
+    let terminate_sql = format!(
+        r#"
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE datname = '{database_name}'
+  AND pid <> pg_backend_pid()
+"#
+    );
+    let _ = query(&terminate_sql).execute(&mut admin).await;
+    let drop_sql = format!("DROP DATABASE IF EXISTS \"{database_name}\"");
+    query(&drop_sql).execute(&mut admin).await?;
+    admin.close().await?;
+    Ok(())
+}
+
 impl Drop for ManagedPostgresServer {
     fn drop(&mut self) {
         self.stop();
-        let _ = std::fs::remove_dir_all(&self.workdir);
+        self.drop_owned_database();
+        if !self.workdir.as_os_str().is_empty() {
+            let _ = std::fs::remove_dir_all(&self.workdir);
+        }
     }
 }
 
@@ -211,7 +353,7 @@ fn postgres_local_startup_unavailable(message: &str) -> bool {
 }
 
 async fn wait_for_postgres(database_url: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match PgConnection::connect(database_url).await {
             Ok(connection) => {
