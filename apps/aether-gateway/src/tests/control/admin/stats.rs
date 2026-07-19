@@ -162,6 +162,21 @@ fn recent_unix_secs(minutes_ago: u64) -> i64 {
     now.saturating_sub((minutes_ago * 60) as i64)
 }
 
+/// Timestamp guaranteed to fall inside the default admin stats calendar-day window (today UTC).
+///
+/// `recent_unix_secs(N)` can land on yesterday when CI runs just after UTC midnight, which
+/// empties the default 1-day window and flakes leaderboard/error-distribution default tests.
+fn recent_within_default_window_unix_secs() -> i64 {
+    let now = chrono::Utc::now();
+    let start_of_today = now
+        .date_naive()
+        .and_hms_opt(0, 0, 1)
+        .expect("start of day should be valid")
+        .and_utc()
+        .timestamp();
+    now.timestamp().saturating_sub(5).max(start_of_today)
+}
+
 #[derive(Debug)]
 struct PartialListAuthApiKeyRepository {
     lookup: InMemoryAuthApiKeySnapshotRepository,
@@ -706,7 +721,7 @@ async fn gateway_defaults_admin_stats_error_distribution_to_bounded_recent_windo
         10,
         0.02,
         0.02,
-        recent_unix_secs(5),
+        recent_within_default_window_unix_secs(),
     );
     recent_error.status_code = Some(429);
     recent_error.error_category = Some("rate_limit".to_string());
@@ -1454,7 +1469,7 @@ async fn gateway_defaults_admin_stats_leaderboard_models_to_bounded_recent_windo
         50,
         0.4,
         0.4,
-        recent_unix_secs(10),
+        recent_within_default_window_unix_secs(),
     );
     let stale_row = sample_usage_row(
         "usage-model-stale",
