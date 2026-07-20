@@ -317,6 +317,17 @@ describe('UsageRecordsTable', () => {
       .toBe('max')
   })
 
+  it('shows the provider default reasoning effort when the request omitted it', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      model: 'grok-4.5',
+      requested_reasoning_effort: null,
+      reasoning_effort: 'high',
+    })])
+
+    expect(root.querySelector('[data-usage-model-badge="reasoning"]')?.textContent?.trim())
+      .toBe('high')
+  })
+
   it('marks Responses compaction while the record is pending', () => {
     const root = mountUsageRecordsTable([buildRecord({
       status: 'pending',

@@ -14,10 +14,18 @@ provider 不同：
 - 管理后台浏览器 OAuth 绑定；
 - refresh token 单个导入、批量导入与自动刷新；
 - OpenAI Responses 文本与流式请求；
-- 通过 Aether 格式转换层兼容 Chat 请求。
+- 通过 Aether 格式转换层兼容 Chat 请求；
+- 读取 xAI CLI weekly/monthly Billing 额度，并写入结构化额度快照；
+- `grok-4.5` 支持 `low`、`medium`、`high` 思考程度；请求未指定时使用上游模型默认值
+  `high`，并在使用记录中保存最终实际值。
 
 上游固定使用 Responses，不会为 `grok_oauth` 直连创建 Chat Completions 端点。图片、
-视频、账单/额度探针、SSO Cookie 转换和媒体资格检查不在此 provider 的支持范围内。
+视频、SSO Cookie 转换和媒体资格检查不在此 provider 的支持范围内。
+
+Grok OAuth 默认每 30 分钟以并发 1 执行一次账号自检，从 `/v1/billing?format=credits`
+和 `/v1/billing` 更新额度。管理员可以在号池高级设置中调整间隔与并发，或显式关闭账号
+自检。管理页会显示额度快照的绝对更新时间；超过 60 分钟未更新时标记为“额度数据已
+过期”，该时间与 OAuth Token 续期倒计时无关。
 
 ## 使用要求
 

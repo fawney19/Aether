@@ -329,6 +329,8 @@
                     :account-quota-text="keyUiStateMap[key.key_id]?.accountQuotaText"
                     :fallback-text="keyUiStateMap[key.key_id]?.quotaFallbackText"
                     :text-class="keyUiStateMap[key.key_id]?.quotaTextClass || ''"
+                    :freshness-text="keyUiStateMap[key.key_id]?.quotaFreshnessText"
+                    :freshness-stale="keyUiStateMap[key.key_id]?.quotaFreshnessStale"
                   />
                 </TableCell>
                 <TableCell class="py-3 px-2 align-middle">
@@ -705,6 +707,8 @@
                 :account-quota-text="keyUiStateMap[key.key_id]?.accountQuotaText"
                 :fallback-text="keyUiStateMap[key.key_id]?.quotaFallbackText"
                 :text-class="keyUiStateMap[key.key_id]?.quotaTextClass || ''"
+                :freshness-text="keyUiStateMap[key.key_id]?.quotaFreshnessText"
+                :freshness-stale="keyUiStateMap[key.key_id]?.quotaFreshnessStale"
                 variant="mobile"
               />
 
@@ -1147,6 +1151,7 @@ import {
 } from '@/utils/providerKeyStatus'
 import {
   getGeminiCliAccountCreditsText,
+  getGrokOAuthQuotaFreshness,
   getLegacyAccountQuotaText,
   getQuotaDisplayText,
 } from '@/utils/providerKeyQuota'
@@ -1949,6 +1954,8 @@ type PoolKeyUiState = {
   accountQuotaText: string | null
   quotaFallbackText: string | null
   quotaTextClass: string
+  quotaFreshnessText: string | null
+  quotaFreshnessStale: boolean
   importedAtRelative: string
   lastUsedRelative: string
   statsDisplay: PoolStatsDisplay
@@ -1987,6 +1994,7 @@ const keyUiStateMap = computed<Record<string, PoolKeyUiState>>(() => {
     const oauthOrgBadge = getOAuthOrgBadge(key)
     const accountQuotaText = getAccountQuotaText(key)
     const quotaFallbackText = getQuotaFallbackText(key)
+    const quotaFreshness = getGrokOAuthQuotaFreshness(key, selectedProviderType.value)
     const planType = resolvePoolKeyPlanType(key)
     const canRefreshToken = canRefreshOAuthCredential(key)
     const showOAuthRefreshControl = shouldShowOAuthRefreshControl(key, selectedProviderType.value)
@@ -2009,6 +2017,10 @@ const keyUiStateMap = computed<Record<string, PoolKeyUiState>>(() => {
       quotaTextClass: accountQuotaText || quotaFallbackText
         ? getQuotaTextClass(accountQuotaText || quotaFallbackText || '')
         : '',
+      quotaFreshnessText: quotaFreshness
+        ? `${quotaFreshness.isStale ? '额度数据已过期 · 更新' : '额度更新'} ${formatUnixSeconds(quotaFreshness.updatedAtSeconds)}`
+        : null,
+      quotaFreshnessStale: quotaFreshness?.isStale ?? false,
       importedAtRelative: formatPoolKeyImportedAt(key),
       lastUsedRelative: key.last_used_at ? formatRelativeTime(key.last_used_at) : '-',
       statsDisplay: buildPoolStatsDisplay(key, selectedProviderType.value, 'current_cycle'),

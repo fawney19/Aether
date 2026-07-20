@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   getGeminiCliAccountCreditsText,
+  getGrokOAuthQuotaFreshness,
   getQuotaDisplayText,
 } from '../providerKeyQuota'
 
@@ -167,6 +168,48 @@ describe('providerKeyQuota', () => {
         },
       },
     }, 'grok_oauth')).toBe('周剩余 75.0% | 月剩余 70.0% ($105/$150)')
+  })
+
+  it('marks Grok OAuth quota snapshots stale after one hour', () => {
+    const input = {
+      status_snapshot: {
+        quota: {
+          provider_type: 'grok_oauth',
+          code: 'ok',
+          exhausted: false,
+          freshness: 'fresh',
+          updated_at: 1_700_000_000,
+        },
+      },
+    }
+
+    expect(getGrokOAuthQuotaFreshness(input, 'grok_oauth', 1_700_003_599)).toEqual({
+      updatedAtSeconds: 1_700_000_000,
+      isStale: false,
+    })
+    expect(getGrokOAuthQuotaFreshness(input, 'grok_oauth', 1_700_003_600)).toEqual({
+      updatedAtSeconds: 1_700_000_000,
+      isStale: true,
+    })
+    input.status_snapshot.quota.freshness = 'stale'
+    expect(getGrokOAuthQuotaFreshness(input, 'grok_oauth', 1_700_000_001)).toEqual({
+      updatedAtSeconds: 1_700_000_000,
+      isStale: true,
+    })
+    expect(getGrokOAuthQuotaFreshness(input, 'codex', 1_700_003_600)).toEqual({
+      updatedAtSeconds: 1_700_000_000,
+      isStale: true,
+    })
+    expect(getGrokOAuthQuotaFreshness({
+      status_snapshot: {
+        quota: {
+          provider_type: 'codex',
+          code: 'ok',
+          exhausted: false,
+          updated_at: 1_700_000_000,
+        },
+      },
+    }, 'grok_oauth', 1_700_003_600)).toBeNull()
   })
 
   it('formats Gemini CLI AI credits from status snapshot and upstream metadata', () => {

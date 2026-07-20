@@ -82,7 +82,7 @@
                 type="number"
                 min="1"
                 max="1440"
-                placeholder="60"
+                :placeholder="isGrokOAuth ? '30' : '60'"
                 @update:model-value="(v) => form.account_self_check_interval_minutes = parseNum(v)"
               />
             </div>
@@ -95,7 +95,7 @@
                 type="number"
                 min="1"
                 max="64"
-                placeholder="4"
+                :placeholder="isGrokOAuth ? '1' : '4'"
                 @update:model-value="(v) => form.account_self_check_concurrency = parseNum(v)"
               />
             </div>
@@ -534,6 +534,7 @@ import { updateProvider } from '@/api/endpoints'
 import {
   buildPoolCooldownFieldLayout,
   buildPoolHealthToggleCards,
+  resolvePoolAccountSelfCheckDefaults,
   type PoolHealthToggleKey,
 } from '@/features/pool/utils/poolAdvancedDialog'
 import type {
@@ -560,6 +561,10 @@ const loading = ref(false)
 
 const isClaudeCode = computed(() => {
   return (props.providerType || '').trim().toLowerCase() === 'claude_code'
+})
+
+const isGrokOAuth = computed(() => {
+  return (props.providerType || '').trim().toLowerCase() === 'grok_oauth'
 })
 
 const healthToggleCards = buildPoolHealthToggleCards()
@@ -656,6 +661,7 @@ watch(() => props.modelValue, (open) => {
   if (!open) return
 
   const cfg = props.currentConfig
+  const selfCheckDefaults = resolvePoolAccountSelfCheckDefaults(props.providerType, cfg)
   const scoreRules = cfg?.score_rules
   const scoreWeights = scoreRules?.weights
   form.value = {
@@ -677,9 +683,9 @@ watch(() => props.modelValue, (open) => {
     request_failure_penalty: scoreRules?.request_failure_penalty ?? null,
     probe_failure_cooldown_threshold: scoreRules?.probe_failure_cooldown_threshold ?? null,
     probing_enabled: cfg?.probing_enabled ?? false,
-    account_self_check_enabled: cfg?.account_self_check_enabled ?? false,
-    account_self_check_interval_minutes: cfg?.account_self_check_interval_minutes ?? null,
-    account_self_check_concurrency: cfg?.account_self_check_concurrency ?? null,
+    account_self_check_enabled: selfCheckDefaults.enabled,
+    account_self_check_interval_minutes: selfCheckDefaults.intervalMinutes,
+    account_self_check_concurrency: selfCheckDefaults.concurrency,
     auto_remove_banned_keys: cfg?.auto_remove_banned_keys ?? false,
     auto_remove_quota_exhausted_keys: cfg?.auto_remove_quota_exhausted_keys ?? false,
     skip_exhausted_accounts: cfg?.skip_exhausted_accounts ?? false,

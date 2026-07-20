@@ -33,6 +33,14 @@
     >
       -
     </div>
+    <div
+      v-if="freshnessText"
+      data-testid="pool-quota-freshness"
+      class="mt-2 text-[10px] leading-none tabular-nums"
+      :class="freshnessStale ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground'"
+    >
+      {{ freshnessText }}
+    </div>
   </div>
 
   <template v-else>
@@ -47,13 +55,34 @@
       >
         {{ accountQuotaText }}
       </div>
+      <div
+        v-if="freshnessText"
+        data-testid="pool-quota-freshness"
+        class="text-[10px] leading-none tabular-nums"
+        :class="freshnessStale ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground'"
+      >
+        {{ freshnessText }}
+      </div>
     </div>
-    <span
-      v-else-if="accountQuotaText || fallbackText"
-      :class="textClass"
+    <div
+      v-else-if="accountQuotaText || fallbackText || freshnessText"
+      class="space-y-1"
     >
-      {{ accountQuotaText || fallbackText }}
-    </span>
+      <span
+        v-if="accountQuotaText || fallbackText"
+        :class="textClass"
+      >
+        {{ accountQuotaText || fallbackText }}
+      </span>
+      <div
+        v-if="freshnessText"
+        data-testid="pool-quota-freshness"
+        class="text-[10px] leading-none tabular-nums"
+        :class="freshnessStale ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground'"
+      >
+        {{ freshnessText }}
+      </div>
+    </div>
     <span
       v-else
       class="text-xs text-muted-foreground"
@@ -80,11 +109,15 @@ withDefaults(defineProps<{
   fallbackText?: string | null
   textClass?: string
   variant?: 'desktop' | 'mobile'
+  freshnessText?: string | null
+  freshnessStale?: boolean
 }>(), {
   accountQuotaText: null,
   fallbackText: null,
   textClass: '',
   variant: 'desktop',
+  freshnessText: null,
+  freshnessStale: false,
 })
 
 const { legacyT } = useI18n()

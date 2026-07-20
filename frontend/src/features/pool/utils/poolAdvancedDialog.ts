@@ -1,3 +1,5 @@
+import type { PoolAdvancedConfig } from '@/api/endpoints/types/provider'
+
 export type PoolHealthToggleKey =
   | 'probing_enabled'
   | 'account_self_check_enabled'
@@ -14,6 +16,24 @@ export interface PoolHealthToggleCard {
 export interface PoolCooldownFieldLayout {
   fields: string[]
   desktopColumnsClass: string
+}
+
+export interface PoolAccountSelfCheckDefaults {
+  enabled: boolean
+  intervalMinutes: number | null
+  concurrency: number | null
+}
+
+export function resolvePoolAccountSelfCheckDefaults(
+  providerType: string | null | undefined,
+  config: PoolAdvancedConfig | null | undefined,
+): PoolAccountSelfCheckDefaults {
+  const isGrokOAuth = (providerType || '').trim().toLowerCase() === 'grok_oauth'
+  return {
+    enabled: config?.account_self_check_enabled ?? config?.self_check_enabled ?? isGrokOAuth,
+    intervalMinutes: config?.account_self_check_interval_minutes ?? config?.self_check_interval_minutes ?? (isGrokOAuth ? 30 : null),
+    concurrency: config?.account_self_check_concurrency ?? config?.self_check_concurrency ?? (isGrokOAuth ? 1 : null),
+  }
 }
 
 export function buildPoolHealthToggleCards(): PoolHealthToggleCard[] {

@@ -25,6 +25,14 @@ const ACCOUNT_SELF_CHECK_DEFAULT_SCAN_INTERVAL_SECONDS: u64 = 60;
 const ACCOUNT_SELF_CHECK_MIN_SCAN_INTERVAL_SECONDS: u64 = 15;
 const ACCOUNT_SELF_CHECK_DEFAULT_MAX_KEYS_PER_PROVIDER: usize = 200;
 const ACCOUNT_SELF_CHECK_DEFAULT_GLOBAL_CONCURRENCY: usize = 16;
+const GROK_OAUTH_DEFAULT_SELF_CHECK_INTERVAL_MINUTES: u64 = 30;
+const GROK_OAUTH_DEFAULT_SELF_CHECK_CONCURRENCY: u64 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AccountSelfCheckProviderSettings {
+    interval_minutes: u64,
+    concurrency: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct AccountSelfCheckRunSummary {
@@ -162,6 +170,85 @@ fn now_unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
+}
+
+fn positive_json_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
+        .filter(|value| *value > 0)
+}
+
+fn account_self_check_provider_settings(
+    provider: &StoredProviderCatalogProvider,
+) -> Option<AccountSelfCheckProviderSettings> {
+    let provider_type = provider.provider_type.trim();
+    let is_grok_oauth = provider_type.eq_ignore_ascii_case("grok_oauth");
+    let configured = admin_provider_pool_config(provider);
+    let pool_advanced = provider
+        .config
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("pool_advanced"))
+        .and_then(Value::as_object);
+    let explicit_enabled = pool_advanced
+        .and_then(|config| {
+            config
+                .get("account_self_check_enabled")
+                .or_else(|| config.get("self_check_enabled"))
+        })
+        .and_then(Value::as_bool);
+    let enabled = explicit_enabled.unwrap_or_else(|| {
+        is_grok_oauth
+            || configured
+                .as_ref()
+                .is_some_and(|config| config.account_self_check_enabled)
+    });
+    if !enabled {
+        return None;
+    }
+
+    let interval_minutes = pool_advanced
+        .and_then(|config| {
+            config
+                .get("account_self_check_interval_minutes")
+                .or_else(|| config.get("self_check_interval_minutes"))
+        })
+        .and_then(positive_json_u64)
+        .map(|value| value.min(1440))
+        .unwrap_or_else(|| {
+            if is_grok_oauth {
+                GROK_OAUTH_DEFAULT_SELF_CHECK_INTERVAL_MINUTES
+            } else {
+                configured
+                    .as_ref()
+                    .map(|config| config.account_self_check_interval_minutes)
+                    .unwrap_or(60)
+            }
+        });
+    let concurrency = pool_advanced
+        .and_then(|config| {
+            config
+                .get("account_self_check_concurrency")
+                .or_else(|| config.get("self_check_concurrency"))
+        })
+        .and_then(positive_json_u64)
+        .map(|value| value.min(64))
+        .unwrap_or_else(|| {
+            if is_grok_oauth {
+                GROK_OAUTH_DEFAULT_SELF_CHECK_CONCURRENCY
+            } else {
+                configured
+                    .as_ref()
+                    .map(|config| config.account_self_check_concurrency)
+                    .unwrap_or(4)
+            }
+        });
+
+    Some(AccountSelfCheckProviderSettings {
+        interval_minutes,
+        concurrency,
+    })
 }
 
 fn parse_check_stamp(raw_value: Option<&str>) -> Option<u64> {
@@ -620,12 +707,8 @@ pub(crate) async fn perform_account_self_check_once_with_config(
         .into_iter()
         .filter_map(|provider| {
             let provider_type = provider.provider_type.trim().to_ascii_lowercase();
-            let pool_config = admin_provider_pool_config(&provider)?;
-            if pool_config.account_self_check_enabled {
-                Some((provider, provider_type, pool_config))
-            } else {
-                None
-            }
+            let settings = account_self_check_provider_settings(&provider)?;
+            Some((provider, provider_type, settings))
         })
         .collect::<Vec<_>>();
 
@@ -655,7 +738,7 @@ pub(crate) async fn perform_account_self_check_once_with_config(
         ..AccountSelfCheckRunSummary::empty()
     };
 
-    for (provider, provider_type, pool_config) in providers {
+    for (provider, provider_type, settings) in providers {
         let provider_endpoints = endpoints_by_provider
             .get(&provider.id)
             .map(Vec::as_slice)
@@ -669,10 +752,7 @@ pub(crate) async fn perform_account_self_check_once_with_config(
             continue;
         }
 
-        let interval_seconds = pool_config
-            .account_self_check_interval_minutes
-            .clamp(1, 1440)
-            .saturating_mul(60);
+        let interval_seconds = settings.interval_minutes.clamp(1, 1440).saturating_mul(60);
         let provider_limit = config.max_keys_per_provider;
         let keys = select_keys_for_provider(
             state,
@@ -696,7 +776,7 @@ pub(crate) async fn perform_account_self_check_once_with_config(
         }
 
         let provider_short_id = provider.id.chars().take(8).collect::<String>();
-        let concurrency = (pool_config.account_self_check_concurrency as usize)
+        let concurrency = (settings.concurrency as usize)
             .clamp(1, 64)
             .min(config.global_concurrency)
             .max(1);
@@ -797,8 +877,24 @@ pub(crate) fn spawn_account_self_check_worker(
 
 #[cfg(test)]
 mod tests {
-    use super::select_account_self_check_key_ids;
+    use super::{account_self_check_provider_settings, select_account_self_check_key_ids};
+    use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider;
+    use serde_json::json;
     use std::collections::BTreeMap;
+
+    fn sample_provider(
+        provider_type: &str,
+        config: Option<serde_json::Value>,
+    ) -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            format!("provider-{provider_type}"),
+            provider_type.to_string(),
+            Some("https://example.com".to_string()),
+            provider_type.to_string(),
+        )
+        .expect("provider should build")
+        .with_transport_fields(true, false, false, None, None, None, None, None, config)
+    }
 
     #[test]
     fn selects_never_and_stale_self_check_keys_first() {
@@ -812,5 +908,51 @@ mod tests {
         let selected = select_account_self_check_key_ids(&key_ids, 2_000, 600, &stamps, 2);
 
         assert_eq!(selected, vec!["never".to_string(), "stale".to_string()]);
+    }
+
+    #[test]
+    fn grok_oauth_defaults_to_periodic_single_account_self_check() {
+        let provider = sample_provider("grok_oauth", None);
+
+        let settings = account_self_check_provider_settings(&provider)
+            .expect("Grok OAuth should refresh quota without pool_advanced");
+
+        assert_eq!(settings.interval_minutes, 30);
+        assert_eq!(settings.concurrency, 1);
+    }
+
+    #[test]
+    fn grok_oauth_honors_explicit_self_check_settings_and_opt_out() {
+        let configured = sample_provider(
+            "grok_oauth",
+            Some(json!({
+                "pool_advanced": {
+                    "account_self_check_enabled": true,
+                    "account_self_check_interval_minutes": 15,
+                    "account_self_check_concurrency": 2
+                }
+            })),
+        );
+        let settings = account_self_check_provider_settings(&configured)
+            .expect("explicit Grok OAuth self-check should remain enabled");
+        assert_eq!(settings.interval_minutes, 15);
+        assert_eq!(settings.concurrency, 2);
+
+        let disabled = sample_provider(
+            "grok_oauth",
+            Some(json!({
+                "pool_advanced": {
+                    "account_self_check_enabled": false
+                }
+            })),
+        );
+        assert_eq!(account_self_check_provider_settings(&disabled), None);
+    }
+
+    #[test]
+    fn other_providers_still_require_explicit_account_self_check() {
+        let provider = sample_provider("codex", None);
+
+        assert_eq!(account_self_check_provider_settings(&provider), None);
     }
 }
