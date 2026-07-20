@@ -29,6 +29,7 @@ mod fallback;
 mod finalize_local;
 mod finalize_local_cli;
 mod finalize_local_provider;
+mod grok_oauth;
 mod lifecycle;
 mod stream;
 mod stream_cli;

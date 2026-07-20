@@ -52,6 +52,7 @@ dependencies = [
  "aether-contracts",
  "aether-data",
  "aether-data-contracts",
+ "aether-oauth",
  "aether-provider-pool",
  "aether-provider-transport",
  "axum",

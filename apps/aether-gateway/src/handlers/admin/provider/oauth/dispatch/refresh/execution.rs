@@ -12,6 +12,7 @@ use crate::handlers::admin::provider::shared::payloads::{
     OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminLocalOAuthRefreshError};
+use crate::provider_transport::provider_types::provider_type_retains_oauth_forbidden;
 use crate::GatewayError;
 use axum::http;
 
@@ -61,7 +62,17 @@ pub(super) async fn execute_admin_provider_oauth_refresh(
                 reason = %error_reason,
                 "gateway manual provider oauth refresh failed"
             );
-            if matches!(status_code, 400 | 401 | 403) {
+            if manual_oauth_refresh_failure_must_be_retained(&provider_type, status_code) {
+                tracing::warn!(
+                    trace_id = %trace_id,
+                    key_id = %key_id,
+                    provider_id = %provider.id,
+                    provider_type = %provider_type,
+                    status_code,
+                    event_name = "manual_grok_oauth_refresh_forbidden_retained",
+                    "gateway retained grok oauth key after manual refresh forbidden response"
+                );
+            } else if matches!(status_code, 400 | 401 | 403) {
                 let failure_reason = format!(
                     "{OAUTH_REFRESH_FAILED_PREFIX}Token 续期失败 ({status_code}): {error_reason}"
                 );
@@ -222,4 +233,26 @@ pub(super) async fn execute_admin_provider_oauth_refresh(
         account_state_recheck_attempted,
         account_state_recheck_error,
     }))
+}
+
+fn manual_oauth_refresh_failure_must_be_retained(provider_type: &str, status_code: u16) -> bool {
+    status_code == 403 && provider_type_retains_oauth_forbidden(provider_type)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::manual_oauth_refresh_failure_must_be_retained;
+
+    #[test]
+    fn manual_grok_oauth_403_is_retained_without_changing_401() {
+        assert!(manual_oauth_refresh_failure_must_be_retained(
+            "grok_oauth",
+            403
+        ));
+        assert!(!manual_oauth_refresh_failure_must_be_retained(
+            "grok_oauth",
+            401
+        ));
+        assert!(!manual_oauth_refresh_failure_must_be_retained("codex", 403));
+    }
 }

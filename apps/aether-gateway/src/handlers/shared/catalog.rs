@@ -1682,6 +1682,160 @@ fn build_grok_quota_status_snapshot(
     }))
 }
 
+fn grok_oauth_billing_window_snapshot(
+    metadata: &Map<String, Value>,
+    prefix: &str,
+    code: &str,
+    label: &str,
+    observed_at_unix_secs: Option<u64>,
+) -> Option<Value> {
+    let used_percent = metadata
+        .get(&format!("{prefix}_used_percent"))
+        .and_then(admin_provider_quota_pure::coerce_json_f64);
+    let reset_at = provider_quota_timestamp_unix_secs(
+        metadata
+            .get(&format!("{prefix}_reset_at"))
+            .or_else(|| metadata.get(&format!("{prefix}_period_end"))),
+    );
+    let period_start =
+        provider_quota_timestamp_unix_secs(metadata.get(&format!("{prefix}_period_start")));
+    let window_observed_at =
+        provider_quota_timestamp_unix_secs(metadata.get(&format!("{prefix}_updated_at")))
+            .or(observed_at_unix_secs);
+    let used_ratio = used_percent.map(|value| (value / 100.0).clamp(0.0, 1.0));
+    let remaining_ratio = used_ratio.map(|value| (1.0 - value).max(0.0));
+    let reset_seconds = quota_window_reset_seconds(window_observed_at, reset_at);
+
+    let (used_value, remaining_value, limit_value, unit) = if prefix == "monthly" {
+        let limit_cents = metadata
+            .get("monthly_limit_cents")
+            .and_then(admin_provider_quota_pure::coerce_json_f64);
+        let used_cents = metadata
+            .get("monthly_included_used_cents")
+            .or_else(|| metadata.get("monthly_used_cents"))
+            .and_then(admin_provider_quota_pure::coerce_json_f64);
+        let remaining_cents = limit_cents
+            .zip(used_cents)
+            .map(|(limit, used)| (limit - used).max(0.0));
+        (
+            used_cents.map(|value| value / 100.0),
+            remaining_cents.map(|value| value / 100.0),
+            limit_cents.map(|value| value / 100.0),
+            "usd",
+        )
+    } else {
+        (None, None, None, "percent")
+    };
+
+    if used_ratio.is_none()
+        && reset_at.is_none()
+        && period_start.is_none()
+        && used_value.is_none()
+        && limit_value.is_none()
+    {
+        return None;
+    }
+
+    let mut window = Map::new();
+    window.insert("code".to_string(), json!(code));
+    window.insert("label".to_string(), json!(label));
+    window.insert("scope".to_string(), json!("account"));
+    window.insert("unit".to_string(), json!(unit));
+    window.insert("used_ratio".to_string(), json!(used_ratio));
+    window.insert("remaining_ratio".to_string(), json!(remaining_ratio));
+    window.insert("used_value".to_string(), json!(used_value));
+    window.insert("remaining_value".to_string(), json!(remaining_value));
+    window.insert("limit_value".to_string(), json!(limit_value));
+    window.insert("period_start".to_string(), json!(period_start));
+    window.insert("reset_at".to_string(), json!(reset_at));
+    window.insert("reset_seconds".to_string(), json!(reset_seconds));
+    window.insert("observed_at".to_string(), json!(window_observed_at));
+    window.insert(
+        "is_exhausted".to_string(),
+        json!(used_ratio.map(|value| value >= 1.0 - 1e-6)),
+    );
+    if prefix == "weekly" {
+        if let Some(product_usage) = metadata.get("weekly_product_usage") {
+            window.insert("product_usage".to_string(), product_usage.clone());
+        }
+    }
+    Some(Value::Object(window))
+}
+
+fn build_grok_oauth_quota_status_snapshot(
+    upstream_metadata: Option<&Value>,
+    source: &str,
+) -> Option<Value> {
+    let metadata = provider_quota_metadata_bucket(upstream_metadata, "grok_oauth")?;
+    let observed_at_unix_secs = provider_quota_timestamp_unix_secs(metadata.get("updated_at"));
+    let plan_type = provider_quota_metadata_string(metadata, &["plan_type", "plan"]);
+    let windows = [
+        grok_oauth_billing_window_snapshot(
+            metadata,
+            "weekly",
+            "weekly",
+            "周",
+            observed_at_unix_secs,
+        ),
+        grok_oauth_billing_window_snapshot(
+            metadata,
+            "monthly",
+            "monthly",
+            "月",
+            observed_at_unix_secs,
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+
+    if windows.is_empty() && observed_at_unix_secs.is_none() && plan_type.is_none() {
+        return None;
+    }
+
+    let usage_ratio = quota_windows_usage_ratio(&windows);
+    let reset_seconds = quota_windows_min_reset_seconds(&windows);
+    let reset_at = quota_windows_min_reset_at(&windows);
+    let exhausted = windows.iter().filter_map(Value::as_object).any(|window| {
+        window
+            .get("is_exhausted")
+            .and_then(admin_provider_quota_pure::coerce_json_bool)
+            == Some(true)
+    });
+    let partial = metadata
+        .get("partial")
+        .and_then(admin_provider_quota_pure::coerce_json_bool)
+        .unwrap_or(false);
+    let failed_windows = metadata
+        .get("failed_windows")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+
+    Some(json!({
+        "version": 2,
+        "provider_type": "grok_oauth",
+        "code": if exhausted { "exhausted" } else { "ok" },
+        "label": if exhausted { Some("额度耗尽") } else { None::<&str> },
+        "reason": if exhausted {
+            Some("Grok 订阅额度窗口已耗尽")
+        } else {
+            None::<&str>
+        },
+        "freshness": if partial { "stale" } else { "fresh" },
+        "source": source,
+        "observed_at": observed_at_unix_secs,
+        "exhausted": exhausted,
+        "usage_ratio": usage_ratio,
+        "updated_at": observed_at_unix_secs,
+        "reset_at": reset_at,
+        "reset_seconds": reset_seconds,
+        "plan_type": plan_type,
+        "partial": partial,
+        "failed_windows": failed_windows,
+        "windows": windows,
+    }))
+}
+
 fn gemini_cli_plan_type(metadata: &Map<String, Value>) -> Option<String> {
     provider_quota_metadata_string(metadata, &["plan_type", "tier", "plan"]).or_else(|| {
         provider_quota_metadata_string_by_paths(
@@ -2036,6 +2190,7 @@ pub(crate) fn sync_provider_key_quota_status_snapshot(
         "windsurf" => build_windsurf_quota_status_snapshot(upstream_metadata, source),
         "antigravity" => build_antigravity_quota_status_snapshot(upstream_metadata, source),
         "grok" => build_grok_quota_status_snapshot(upstream_metadata, source),
+        "grok_oauth" => build_grok_oauth_quota_status_snapshot(upstream_metadata, source),
         "gemini_cli" => build_gemini_cli_quota_status_snapshot(upstream_metadata, source),
         _ => None,
     }?;
@@ -3008,6 +3163,49 @@ mod tests {
         assert_eq!(spark_5h.get("remaining_ratio"), Some(&json!(0.6)));
         assert_eq!(spark_weekly.get("label"), Some(&json!("Spark 周")));
         assert_eq!(spark_weekly.get("remaining_ratio"), Some(&json!(0.95)));
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_builds_grok_oauth_billing_windows() {
+        let mut key = sample_catalog_key();
+        key.upstream_metadata = Some(json!({
+            "grok_oauth": {
+                "updated_at": 1_800_000_000u64,
+                "weekly_updated_at": 1_800_000_000u64,
+                "weekly_used_percent": 25.0,
+                "weekly_reset_at": 1_900_000_000u64,
+                "monthly_updated_at": 1_800_000_000u64,
+                "monthly_limit_cents": 15_000.0,
+                "monthly_included_used_cents": 4_500.0,
+                "monthly_used_percent": 30.0,
+                "monthly_reset_at": 1_910_000_000u64,
+                "plan_type": "super",
+                "partial": false
+            }
+        }));
+
+        let payload = provider_key_status_snapshot_payload(&key, "grok_oauth");
+        let quota = payload
+            .get("quota")
+            .and_then(Value::as_object)
+            .expect("quota snapshot should be object");
+        let windows = quota
+            .get("windows")
+            .and_then(Value::as_array)
+            .expect("billing windows should exist");
+
+        assert_eq!(quota.get("provider_type"), Some(&json!("grok_oauth")));
+        assert_eq!(quota.get("plan_type"), Some(&json!("super")));
+        assert_eq!(quota.get("usage_ratio"), Some(&json!(0.3)));
+        assert_eq!(quota.get("exhausted"), Some(&json!(false)));
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0]["code"], json!("weekly"));
+        assert_eq!(windows[0]["remaining_ratio"], json!(0.75));
+        assert_eq!(windows[1]["code"], json!("monthly"));
+        assert_eq!(windows[1]["unit"], json!("usd"));
+        assert_eq!(windows[1]["used_value"], json!(45.0));
+        assert_eq!(windows[1]["remaining_value"], json!(105.0));
+        assert_eq!(windows[1]["limit_value"], json!(150.0));
     }
 
     #[test]

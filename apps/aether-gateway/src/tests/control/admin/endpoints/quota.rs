@@ -2037,3 +2037,244 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_tru
     execution_runtime_handle.abort();
     upstream_handle.abort();
 }
+
+#[test]
+fn gateway_refreshes_grok_oauth_weekly_and_monthly_billing_quota() {
+    run_provider_quota_test(
+        "gateway_refreshes_grok_oauth_weekly_and_monthly_billing_quota",
+        gateway_refreshes_grok_oauth_weekly_and_monthly_billing_quota_inner,
+    );
+}
+
+async fn gateway_refreshes_grok_oauth_weekly_and_monthly_billing_quota_inner() {
+    #[derive(Debug, Clone)]
+    struct SeenExecutionRuntimeRequest {
+        url: String,
+        headers: BTreeMap<String, String>,
+        provider_api_format: String,
+    }
+
+    let seen_execution_runtime = Arc::new(Mutex::new(Vec::<SeenExecutionRuntimeRequest>::new()));
+    let seen_execution_runtime_clone = Arc::clone(&seen_execution_runtime);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |request: Request| {
+            let seen_execution_runtime_inner = Arc::clone(&seen_execution_runtime_clone);
+            async move {
+                let plan: aether_contracts::ExecutionPlan = serde_json::from_slice(
+                    &to_bytes(request.into_body(), usize::MAX)
+                        .await
+                        .expect("body should read"),
+                )
+                .expect("plan should parse");
+                seen_execution_runtime_inner
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(SeenExecutionRuntimeRequest {
+                        url: plan.url.clone(),
+                        headers: plan.headers.clone(),
+                        provider_api_format: plan.provider_api_format.clone(),
+                    });
+                let body = if plan.url.contains("format=credits") {
+                    json!({
+                        "config": {
+                            "creditUsagePercent": 25.0,
+                            "currentPeriod": {
+                                "type": "weekly",
+                                "start": "2030-01-01T00:00:00Z",
+                                "end": "2030-01-08T00:00:00Z"
+                            },
+                            "productUsage": [
+                                { "product": "grok", "usagePercent": 25.0 }
+                            ]
+                        }
+                    })
+                } else {
+                    json!({
+                        "config": {
+                            "monthlyLimit": { "val": 15000 },
+                            "used": { "val": 4500 },
+                            "billingPeriodStart": "2030-01-01T00:00:00Z",
+                            "billingPeriodEnd": "2030-02-01T00:00:00Z"
+                        }
+                    })
+                };
+                let result = aether_contracts::ExecutionResult {
+                    request_id: plan.request_id,
+                    candidate_id: None,
+                    status_code: 200,
+                    headers: BTreeMap::new(),
+                    body: Some(aether_contracts::ResponseBody {
+                        json_body: Some(body),
+                        body_bytes_b64: None,
+                    }),
+                    telemetry: None,
+                    error: None,
+                };
+                (StatusCode::OK, Json(result))
+            }
+        }),
+    );
+
+    let encrypted_auth_config = encrypt_python_fernet_plaintext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        r#"{
+            "provider_type":"grok_oauth",
+            "expires_at":4102444800,
+            "headers":{
+                "X-XAI-Token-Auth":"xai-grok-cli",
+                "x-grok-client-version":"0.2.93",
+                "User-Agent":"xai-grok-workspace/0.2.93"
+            }
+        }"#,
+    )
+    .expect("auth config ciphertext should build");
+    let key = StoredProviderCatalogKey::new(
+        "key-grok-oauth-a".to_string(),
+        "provider-grok-oauth".to_string(),
+        "account-a".to_string(),
+        "oauth".to_string(),
+        None,
+        true,
+    )
+    .expect("key should build")
+    .with_transport_fields(
+        Some(json!(["openai:responses"])),
+        encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "grok-access-token")
+            .expect("api key ciphertext should build"),
+        Some(encrypted_auth_config),
+        None,
+        None,
+        None,
+        Some(4_102_444_800),
+        None,
+        None,
+    )
+    .expect("key transport should build");
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![StoredProviderCatalogProvider::new(
+            "provider-grok-oauth".to_string(),
+            "grok oauth".to_string(),
+            Some("https://example.com".to_string()),
+            "grok_oauth".to_string(),
+        )
+        .expect("provider should build")],
+        vec![sample_endpoint(
+            "endpoint-grok-oauth-responses",
+            "provider-grok-oauth",
+            "openai:responses",
+            "https://cli-chat-proxy.grok.com/v1",
+        )],
+        vec![key],
+    ));
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url.clone())
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/endpoints/providers/provider-grok-oauth/refresh-quota"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(1));
+    assert_eq!(payload["failed"], json!(0));
+    assert_eq!(payload["results"][0]["status"], json!("success"));
+    assert_eq!(
+        payload["results"][0]["quota_snapshot"]["provider_type"],
+        json!("grok_oauth")
+    );
+    assert_eq!(
+        payload["results"][0]["quota_snapshot"]["plan_type"],
+        json!("super")
+    );
+    assert_eq!(
+        payload["results"][0]["quota_snapshot"]["windows"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        payload["results"][0]["quota_snapshot"]["windows"][1]["limit_value"],
+        json!(150.0)
+    );
+
+    let mut seen_requests = seen_execution_runtime
+        .lock()
+        .expect("mutex should lock")
+        .clone();
+    seen_requests.sort_by(|left, right| left.url.cmp(&right.url));
+    assert_eq!(seen_requests.len(), 2);
+    assert_eq!(
+        seen_requests[0].url,
+        "https://cli-chat-proxy.grok.com/v1/billing"
+    );
+    assert_eq!(
+        seen_requests[1].url,
+        "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+    );
+    for request in seen_requests {
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer grok-access-token")
+        );
+        assert_eq!(
+            request.headers.get("x-xai-token-auth").map(String::as_str),
+            Some("xai-grok-cli")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("x-grok-client-version")
+                .map(String::as_str),
+            Some("0.2.93")
+        );
+        assert_eq!(
+            request.headers.get("user-agent").map(String::as_str),
+            Some("grok-pager/0.2.93 grok-shell/0.2.93 (macos; aarch64)")
+        );
+        assert_eq!(request.provider_api_format, "grok_oauth:billing");
+    }
+
+    let reloaded = provider_catalog_repository
+        .list_keys_by_ids(&["key-grok-oauth-a".to_string()])
+        .await
+        .expect("keys should read");
+    assert_eq!(reloaded.len(), 1);
+    assert_eq!(reloaded[0].oauth_invalid_reason, None);
+    assert_eq!(
+        reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(|value| value.pointer("/grok_oauth/weekly_used_percent")),
+        Some(&json!(25.0))
+    );
+    assert_eq!(
+        reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(|value| value.pointer("/grok_oauth/monthly_used_percent")),
+        Some(&json!(30.0))
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}

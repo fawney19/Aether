@@ -12,7 +12,7 @@ const FIXED_PROVIDER_RECONCILIATION_LOCK_KEY: &str =
     "task_runtime:lock:maintenance.provider.fixed_template.reconcile";
 const FIXED_PROVIDER_RECONCILIATION_LOCK_TTL: Duration = Duration::from_secs(10 * 60);
 const FIXED_PROVIDER_RECONCILIATION_RETRY_DELAY: Duration = Duration::from_secs(2);
-const RECONCILED_PROVIDER_TYPE: &str = "codex";
+const RECONCILED_PROVIDER_TYPES: &[&str] = &["codex", "grok_oauth"];
 
 pub(crate) async fn perform_fixed_provider_reconciliation_once(
     state: &AppState,
@@ -51,13 +51,14 @@ async fn reconcile_fixed_provider_templates(state: &AppState) -> Result<(), Gate
     let admin_state = AdminAppState::new(state);
     let mut failures = Vec::new();
     for provider in &providers {
-        if !provider
-            .provider_type
-            .trim()
-            .eq_ignore_ascii_case(RECONCILED_PROVIDER_TYPE)
-            || admin_state
-                .fixed_provider_template(&provider.provider_type)
-                .is_none()
+        if !RECONCILED_PROVIDER_TYPES.iter().any(|provider_type| {
+            provider
+                .provider_type
+                .trim()
+                .eq_ignore_ascii_case(provider_type)
+        }) || admin_state
+            .fixed_provider_template(&provider.provider_type)
+            .is_none()
         {
             continue;
         }
@@ -297,5 +298,121 @@ mod tests {
             .await
             .expect("endpoints should list again");
         assert_eq!(second_endpoints, first_endpoints);
+    }
+
+    #[tokio::test]
+    async fn fixed_provider_reconciliation_retires_managed_legacy_grok_oauth_chat_endpoint() {
+        let provider = StoredProviderCatalogProvider::new(
+            "provider-grok-oauth".to_string(),
+            "Grok OAuth".to_string(),
+            None,
+            "grok_oauth".to_string(),
+        )
+        .expect("provider should build");
+        let managed_endpoint = |id: &str, api_format: &str| {
+            let mut endpoint = StoredProviderCatalogEndpoint::new(
+                id.to_string(),
+                provider.id.clone(),
+                api_format.to_string(),
+                Some("openai".to_string()),
+                None,
+                true,
+            )
+            .expect("endpoint should build")
+            .with_transport_fields(
+                "https://cli-chat-proxy.grok.com/v1".to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("endpoint transport should build");
+            endpoint.config = Some(json!({
+                "_aether_fixed_provider_template": {
+                    "managed": true,
+                    "provider_type": "grok_oauth",
+                    "item_key": api_format,
+                    "version": 1,
+                    "retired": false,
+                    "overrides": [],
+                    "config_keys": []
+                }
+            }));
+            endpoint
+        };
+        let responses = managed_endpoint("endpoint-grok-oauth-responses", "openai:responses");
+        let legacy_chat = managed_endpoint("endpoint-grok-oauth-chat", "openai:chat");
+        let custom_chat = StoredProviderCatalogEndpoint::new(
+            "endpoint-grok-oauth-custom-chat".to_string(),
+            provider.id.clone(),
+            "openai:chat".to_string(),
+            Some("openai".to_string()),
+            None,
+            true,
+        )
+        .expect("custom endpoint should build")
+        .with_transport_fields(
+            "http://custom-grok.example/v1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("custom endpoint transport should build");
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider],
+            vec![responses, legacy_chat, custom_chat],
+            vec![],
+        ));
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(repository.clone()),
+            );
+
+        assert!(perform_fixed_provider_reconciliation_once(&state)
+            .await
+            .expect("reconciliation should run"));
+        let first = repository
+            .list_endpoints_by_provider_ids(&["provider-grok-oauth".to_string()])
+            .await
+            .expect("endpoints should list");
+        let legacy_chat = first
+            .iter()
+            .find(|endpoint| endpoint.id == "endpoint-grok-oauth-chat")
+            .expect("legacy managed Chat endpoint should remain as retired history");
+        assert!(!legacy_chat.is_active);
+        assert_eq!(
+            legacy_chat
+                .config
+                .as_ref()
+                .and_then(|config| config.get("_aether_fixed_provider_template"))
+                .and_then(|metadata| metadata.get("retired")),
+            Some(&json!(true))
+        );
+        assert!(
+            first
+                .iter()
+                .find(|endpoint| endpoint.id == "endpoint-grok-oauth-custom-chat")
+                .expect("custom Chat endpoint should remain")
+                .is_active
+        );
+
+        assert!(perform_fixed_provider_reconciliation_once(&state)
+            .await
+            .expect("second reconciliation should run"));
+        assert_eq!(
+            repository
+                .list_endpoints_by_provider_ids(&["provider-grok-oauth".to_string()])
+                .await
+                .expect("endpoints should list again"),
+            first
+        );
     }
 }

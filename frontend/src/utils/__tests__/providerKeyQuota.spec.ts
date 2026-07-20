@@ -136,6 +136,39 @@ describe('providerKeyQuota', () => {
     }, 'grok')).toBe('Auto剩余 40.0% (60/150) | Heavy剩余 0.0% (0/20)')
   })
 
+  it('formats Grok OAuth weekly and monthly billing windows', () => {
+    expect(getQuotaDisplayText({
+      status_snapshot: {
+        oauth: {
+          code: 'valid',
+        },
+        account: {
+          code: 'ok',
+          blocked: false,
+        },
+        quota: {
+          provider_type: 'grok_oauth',
+          code: 'ok',
+          exhausted: false,
+          plan_type: 'super',
+          windows: [
+            {
+              code: 'weekly',
+              remaining_ratio: 0.75,
+            },
+            {
+              code: 'monthly',
+              unit: 'usd',
+              remaining_ratio: 0.7,
+              remaining_value: 105,
+              limit_value: 150,
+            },
+          ],
+        },
+      },
+    }, 'grok_oauth')).toBe('周剩余 75.0% | 月剩余 70.0% ($105/$150)')
+  })
+
   it('formats Gemini CLI AI credits from status snapshot and upstream metadata', () => {
     expect(getQuotaDisplayText({
       status_snapshot: {

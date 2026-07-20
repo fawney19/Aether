@@ -861,4 +861,19 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn grok_oauth_chat_requests_select_the_responses_transport_for_conversion() {
+        let transport = transport_snapshot("grok_oauth", "openai:responses", "oauth", true, None);
+
+        assert_eq!(
+            candidate_transport_pair_skip_reason(&transport, "openai:chat"),
+            None
+        );
+        assert!(request_pair_allowed_for_transport(
+            &transport,
+            "openai:chat",
+            "openai:responses"
+        ));
+    }
 }

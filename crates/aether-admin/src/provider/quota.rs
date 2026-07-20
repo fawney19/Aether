@@ -270,6 +270,178 @@ pub fn parse_antigravity_usage_response(
     }))
 }
 
+fn parse_grok_oauth_billing_number(value: Option<&serde_json::Value>) -> Option<f64> {
+    let value = value?;
+    let value = value
+        .as_object()
+        .and_then(|object| object.get("val"))
+        .unwrap_or(value);
+    coerce_json_f64(value).filter(|value| value.is_finite())
+}
+
+fn parse_grok_oauth_billing_timestamp(value: Option<&serde_json::Value>) -> Option<u64> {
+    let value = value?;
+    if let Some(timestamp) = coerce_json_u64(value) {
+        return Some(if timestamp > 1_000_000_000_000 {
+            timestamp / 1000
+        } else {
+            timestamp
+        });
+    }
+    let raw = value.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .and_then(|timestamp| u64::try_from(timestamp.timestamp()).ok())
+}
+
+/// Normalizes the authoritative weekly credits window returned by
+/// `GET /v1/billing?format=credits` for Grok CLI OAuth accounts.
+pub fn parse_grok_oauth_weekly_billing_response(
+    value: &serde_json::Value,
+    updated_at_unix_secs: u64,
+) -> Option<serde_json::Value> {
+    let config = value.get("config")?.as_object()?;
+    let used_percent = parse_grok_oauth_billing_number(config.get("creditUsagePercent"));
+    let current_period = config
+        .get("currentPeriod")
+        .and_then(serde_json::Value::as_object);
+    let period_type = current_period
+        .and_then(|period| period.get("type"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let period_start = current_period
+        .and_then(|period| parse_grok_oauth_billing_timestamp(period.get("start")))
+        .or_else(|| parse_grok_oauth_billing_timestamp(config.get("billingPeriodStart")));
+    let period_end = current_period
+        .and_then(|period| parse_grok_oauth_billing_timestamp(period.get("end")))
+        .or_else(|| parse_grok_oauth_billing_timestamp(config.get("billingPeriodEnd")));
+    let product_usage = config
+        .get("productUsage")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let item = item.as_object()?;
+                    let product = item
+                        .get("product")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?;
+                    Some(json!({
+                        "product": product,
+                        "used_percent": parse_grok_oauth_billing_number(item.get("usagePercent")),
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if used_percent.is_none()
+        && period_type.is_none()
+        && period_start.is_none()
+        && period_end.is_none()
+        && product_usage.is_empty()
+    {
+        return None;
+    }
+
+    let mut metadata = serde_json::Map::new();
+    if let Some(value) = used_percent {
+        metadata.insert("weekly_used_percent".to_string(), json!(value));
+    }
+    if let Some(value) = period_type {
+        metadata.insert("weekly_period_type".to_string(), json!(value));
+    }
+    if let Some(value) = period_start {
+        metadata.insert("weekly_period_start".to_string(), json!(value));
+    }
+    if let Some(value) = period_end {
+        metadata.insert("weekly_period_end".to_string(), json!(value));
+        metadata.insert("weekly_reset_at".to_string(), json!(value));
+    }
+    if !product_usage.is_empty() {
+        metadata.insert("weekly_product_usage".to_string(), json!(product_usage));
+    }
+    metadata.insert("weekly_updated_at".to_string(), json!(updated_at_unix_secs));
+    Some(serde_json::Value::Object(metadata))
+}
+
+fn grok_oauth_plan_type_from_monthly_limit(
+    monthly_limit_cents: Option<f64>,
+) -> Option<&'static str> {
+    match monthly_limit_cents?.round() as i64 {
+        15_000 => Some("super"),
+        150_000 => Some("heavy"),
+        _ => None,
+    }
+}
+
+/// Normalizes the authoritative monthly included-usage window returned by
+/// `GET /v1/billing` for Grok CLI OAuth accounts.
+pub fn parse_grok_oauth_monthly_billing_response(
+    value: &serde_json::Value,
+    updated_at_unix_secs: u64,
+) -> Option<serde_json::Value> {
+    let config = value.get("config")?.as_object()?;
+    let limit_cents = parse_grok_oauth_billing_number(config.get("monthlyLimit"));
+    let used_cents = parse_grok_oauth_billing_number(config.get("used"));
+    let included_used_cents = used_cents.map(|used| match limit_cents {
+        Some(limit) if limit > 0.0 => used.min(limit),
+        _ => used,
+    });
+    let used_percent = included_used_cents
+        .zip(limit_cents)
+        .and_then(|(used, limit)| {
+            (limit > 0.0).then_some((used / limit * 100.0).clamp(0.0, 100.0))
+        });
+    let period_start = parse_grok_oauth_billing_timestamp(config.get("billingPeriodStart"));
+    let period_end = parse_grok_oauth_billing_timestamp(config.get("billingPeriodEnd"));
+    let plan_type = grok_oauth_plan_type_from_monthly_limit(limit_cents);
+
+    if limit_cents.is_none()
+        && used_cents.is_none()
+        && period_start.is_none()
+        && period_end.is_none()
+    {
+        return None;
+    }
+
+    let mut metadata = serde_json::Map::new();
+    if let Some(value) = limit_cents {
+        metadata.insert("monthly_limit_cents".to_string(), json!(value));
+    }
+    if let Some(value) = used_cents {
+        metadata.insert("monthly_used_cents".to_string(), json!(value));
+    }
+    if let Some(value) = included_used_cents {
+        metadata.insert("monthly_included_used_cents".to_string(), json!(value));
+    }
+    if let Some(value) = used_percent {
+        metadata.insert("monthly_used_percent".to_string(), json!(value));
+    }
+    if let Some(value) = period_start {
+        metadata.insert("monthly_period_start".to_string(), json!(value));
+    }
+    if let Some(value) = period_end {
+        metadata.insert("monthly_period_end".to_string(), json!(value));
+        metadata.insert("monthly_reset_at".to_string(), json!(value));
+    }
+    if let Some(value) = plan_type {
+        metadata.insert("plan_type".to_string(), json!(value));
+    }
+    metadata.insert(
+        "monthly_updated_at".to_string(),
+        json!(updated_at_unix_secs),
+    );
+    Some(serde_json::Value::Object(metadata))
+}
+
 pub fn parse_gemini_cli_retrieve_user_quota_response(
     value: &serde_json::Value,
     updated_at_unix_secs: u64,
@@ -2114,7 +2286,8 @@ mod tests {
         parse_chatgpt_web_conversation_init_response, parse_codex_backend_me_response,
         parse_codex_usage_headers, parse_codex_wham_reset_credits_detail_response,
         parse_codex_wham_usage_response, parse_gemini_cli_retrieve_user_quota_response,
-        parse_gemini_cli_v1internal_credits_response, parse_windsurf_model_configs_response,
+        parse_gemini_cli_v1internal_credits_response, parse_grok_oauth_monthly_billing_response,
+        parse_grok_oauth_weekly_billing_response, parse_windsurf_model_configs_response,
         parse_windsurf_rate_limit_response, parse_windsurf_user_status_response,
         provider_auto_remove_quota_exhausted_keys, quota_refresh_success_invalid_state,
         should_auto_remove_structured_reason, OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX,
@@ -2139,6 +2312,61 @@ mod tests {
                 "auto_remove_quota_exhausted_keys": true
             }
         }))));
+    }
+
+    #[test]
+    fn parses_grok_oauth_weekly_billing_credits() {
+        let parsed = parse_grok_oauth_weekly_billing_response(
+            &json!({
+                "config": {
+                    "creditUsagePercent": 37.5,
+                    "currentPeriod": {
+                        "type": "weekly",
+                        "start": "2026-07-13T00:00:00Z",
+                        "end": "2026-07-20T00:00:00Z"
+                    },
+                    "productUsage": [
+                        { "product": "grok", "usagePercent": 25.0 },
+                        { "product": "", "usagePercent": 99.0 }
+                    ]
+                }
+            }),
+            1_768_000_000,
+        )
+        .expect("weekly billing should parse");
+
+        assert_eq!(parsed["weekly_used_percent"], json!(37.5));
+        assert_eq!(parsed["weekly_period_type"], json!("weekly"));
+        assert_eq!(parsed["weekly_period_start"], json!(1_783_900_800u64));
+        assert_eq!(parsed["weekly_reset_at"], json!(1_784_505_600u64));
+        assert_eq!(
+            parsed["weekly_product_usage"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(parsed["weekly_updated_at"], json!(1_768_000_000u64));
+    }
+
+    #[test]
+    fn parses_grok_oauth_monthly_billing_and_infers_plan() {
+        let parsed = parse_grok_oauth_monthly_billing_response(
+            &json!({
+                "config": {
+                    "monthlyLimit": { "val": "15000" },
+                    "used": { "val": 3750 },
+                    "billingPeriodStart": "2026-07-01T00:00:00Z",
+                    "billingPeriodEnd": "2026-08-01T00:00:00Z"
+                }
+            }),
+            1_768_000_000,
+        )
+        .expect("monthly billing should parse");
+
+        assert_eq!(parsed["monthly_limit_cents"], json!(15_000.0));
+        assert_eq!(parsed["monthly_used_cents"], json!(3_750.0));
+        assert_eq!(parsed["monthly_included_used_cents"], json!(3_750.0));
+        assert_eq!(parsed["monthly_used_percent"], json!(25.0));
+        assert_eq!(parsed["monthly_reset_at"], json!(1_785_542_400u64));
+        assert_eq!(parsed["plan_type"], json!("super"));
     }
 
     #[test]

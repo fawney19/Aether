@@ -27,7 +27,7 @@ impl ProviderOAuthService {
             .with_adapter(Arc::new(CodexProviderOAuthAdapter::default()))
             .with_adapter(Arc::new(AntigravityProviderOAuthAdapter::default()))
             .with_adapter(Arc::new(WindsurfProviderOAuthAdapter));
-        for provider_type in ["claude_code", "chatgpt_web", "gemini_cli"] {
+        for provider_type in ["claude_code", "chatgpt_web", "gemini_cli", "grok_oauth"] {
             if let Some(adapter) = GenericProviderOAuthAdapter::for_provider_type(provider_type) {
                 service = service.with_adapter(Arc::new(adapter));
             }
@@ -127,6 +127,7 @@ mod tests {
             "codex",
             "chatgpt_web",
             "gemini_cli",
+            "grok_oauth",
             "antigravity",
             "kiro",
             "windsurf",

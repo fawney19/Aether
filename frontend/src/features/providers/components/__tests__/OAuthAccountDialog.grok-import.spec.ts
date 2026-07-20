@@ -318,6 +318,73 @@ describe('OAuthAccountDialog Grok import', () => {
     expect(getButton(root, '导入账号')).toBeTruthy()
   })
 
+  it('submits the xAI authorization code with the active Grok OAuth state', async () => {
+    endpointMocks.startProviderLevelOAuth.mockResolvedValue({
+      authorization_url: 'https://auth.x.ai/oauth2/authorize?client_id=client-1&state=state-123',
+      redirect_uri: 'http://127.0.0.1:56121/callback',
+      provider_type: 'grok_oauth',
+      instructions: '',
+    })
+    endpointMocks.completeProviderLevelOAuth.mockResolvedValue({
+      provider_type: 'grok_oauth',
+      has_refresh_token: true,
+    })
+
+    const root = mountDialog('grok_oauth')
+    await settle()
+    getExactButton(root, '导入授权')?.click()
+    await settle()
+    getExactButton(root, '获取授权')?.click()
+    await settle()
+
+    const textarea = getImportTextarea(root)
+    textarea.value = 'xai-code_123'
+    textarea.dispatchEvent(new Event('input'))
+    await settle()
+    getExactButton(root, '验证')?.click()
+    await settle()
+
+    expect(endpointMocks.completeProviderLevelOAuth).toHaveBeenCalledTimes(1)
+    const callbackUrl = new URL(endpointMocks.completeProviderLevelOAuth.mock.calls[0][1].callback_url)
+    expect(callbackUrl.origin).toBe('http://127.0.0.1:56121')
+    expect(callbackUrl.pathname).toBe('/callback')
+    expect(callbackUrl.searchParams.get('code')).toBe('xai-code_123')
+    expect(callbackUrl.searchParams.get('state')).toBe('state-123')
+  })
+
+  it('keeps a complete Grok OAuth callback URL unchanged', async () => {
+    endpointMocks.startProviderLevelOAuth.mockResolvedValue({
+      authorization_url: 'https://auth.x.ai/oauth2/authorize?state=state-123',
+      redirect_uri: 'http://127.0.0.1:56121/callback',
+      provider_type: 'grok_oauth',
+      instructions: '',
+    })
+    endpointMocks.completeProviderLevelOAuth.mockResolvedValue({
+      provider_type: 'grok_oauth',
+      has_refresh_token: true,
+    })
+
+    const root = mountDialog('grok_oauth')
+    await settle()
+    getExactButton(root, '导入授权')?.click()
+    await settle()
+    getExactButton(root, '获取授权')?.click()
+    await settle()
+
+    const callbackUrl = 'http://127.0.0.1:56121/callback?code=xai-code_456&state=state-456'
+    const textarea = getImportTextarea(root)
+    textarea.value = callbackUrl
+    textarea.dispatchEvent(new Event('input'))
+    await settle()
+    getExactButton(root, '验证')?.click()
+    await settle()
+
+    expect(endpointMocks.completeProviderLevelOAuth).toHaveBeenCalledWith('provider-1', {
+      callback_url: callbackUrl,
+      proxy_node_id: undefined,
+    })
+  })
+
   it('maps a single Grok JSON token into account metadata import payload', async () => {
     const root = mountDialog('grok')
     await settle()

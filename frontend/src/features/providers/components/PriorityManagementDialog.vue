@@ -859,6 +859,7 @@ const PROVIDER_TYPE_LABELS: Record<string, string> = {
   antigravity: 'Antigravity',
   kiro: 'Kiro',
   grok: 'Grok',
+  grok_oauth: 'Grok OAuth',
 }
 
 function formatProviderType(type?: string): string {

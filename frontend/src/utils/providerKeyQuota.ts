@@ -306,6 +306,29 @@ function getGrokQuotaText(quota: QuotaStatusSnapshot): string | null {
   return normalizeText(quota.label)
 }
 
+function getGrokOAuthQuotaText(quota: QuotaStatusSnapshot): string | null {
+  const code = normalizeText(quota.code)?.toLowerCase()
+  const parts: string[] = []
+  const weeklyRemaining = getQuotaWindowRemainingPercent(getQuotaWindow(quota, 'weekly'))
+  if (weeklyRemaining != null) {
+    parts.push(`周剩余 ${formatPercent(weeklyRemaining)}`)
+  }
+
+  const monthly = getQuotaWindow(quota, 'monthly')
+  const monthlyRemaining = getQuotaWindowRemainingPercent(monthly)
+  if (monthlyRemaining != null) {
+    const valueText = getQuotaWindowValueText(monthly)
+    const dollarText = valueText
+      ? valueText.split('/').map(value => `$${value}`).join('/')
+      : null
+    parts.push(`月剩余 ${formatPercent(monthlyRemaining)}${dollarText ? ` (${dollarText})` : ''}`)
+  }
+
+  if (parts.length > 0) return parts.join(' | ')
+  if (code === 'exhausted') return normalizeText(quota.label) || '额度已耗尽'
+  return normalizeText(quota.label)
+}
+
 function getWindsurfQuotaText(quota: QuotaStatusSnapshot): string | null {
   const code = normalizeText(quota.code)?.toLowerCase()
   if (code === 'banned' || code === 'forbidden' || code === 'quarantined') {
@@ -454,6 +477,8 @@ export function getQuotaSnapshotFallbackText(
       return getKiroQuotaText(quota)
     case 'grok':
       return getGrokQuotaText(quota)
+    case 'grok_oauth':
+      return getGrokOAuthQuotaText(quota)
     case 'windsurf':
       return getWindsurfQuotaText(quota)
     case 'antigravity':

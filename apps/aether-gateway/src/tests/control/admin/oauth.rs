@@ -263,6 +263,97 @@ fn assert_single_provider_oauth_refresh_token_plan<'a>(
     token_plans[0]
 }
 
+fn assert_persisted_grok_oauth_auth_config(
+    encrypted_auth_config: Option<&str>,
+    expected_email: &str,
+    expected_sub: &str,
+    expected_team_id: &str,
+) {
+    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        encrypted_auth_config.expect("auth config should be stored"),
+    )
+    .expect("auth config should decrypt");
+    let auth_config: serde_json::Value =
+        serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
+
+    assert_eq!(auth_config["provider_type"], "grok_oauth");
+    assert_eq!(auth_config["email"], expected_email);
+    assert_eq!(auth_config["sub"], expected_sub);
+    assert_eq!(auth_config["team_id"], expected_team_id);
+    assert_eq!(auth_config["headers"]["X-XAI-Token-Auth"], "xai-grok-cli");
+    assert_eq!(auth_config["headers"]["x-grok-client-version"], "0.2.93");
+    assert_eq!(
+        auth_config["headers"]["User-Agent"],
+        "xai-grok-workspace/0.2.93"
+    );
+}
+
+fn sample_grok_oauth_id_token(email: &str, sub: &str, team_id: &str) -> String {
+    use base64::Engine as _;
+
+    let header =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"none","typ":"JWT"}"#);
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        json!({
+            "email": email,
+            "sub": sub,
+            "team_id": team_id,
+        })
+        .to_string(),
+    );
+    format!("{header}.{payload}.sig")
+}
+
+fn grok_oauth_token_payload(
+    access_token: &str,
+    refresh_token: &str,
+    email: &str,
+    sub: &str,
+    team_id: &str,
+) -> serde_json::Value {
+    json!({
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "id_token": sample_grok_oauth_id_token(email, sub, team_id),
+        "token_type": "Bearer",
+        "expires_in": 1800,
+        "scope": "openid profile email offline_access grok-cli:access",
+    })
+}
+
+fn grok_oauth_test_catalog_repository() -> Arc<InMemoryProviderCatalogReadRepository> {
+    let mut provider = sample_provider("provider-grok-oauth", "grok_oauth", 10);
+    provider.provider_type = "grok_oauth".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-grok-oauth-responses",
+        "provider-grok-oauth",
+        "openai:responses",
+        "https://cli-chat-proxy.grok.com/v1",
+    );
+
+    Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![],
+    ))
+}
+
+fn grok_oauth_test_state(
+    provider_catalog_repository: Arc<InMemoryProviderCatalogReadRepository>,
+    token_url: &str,
+) -> AppState {
+    AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog_repository,
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        )
+        .with_provider_oauth_token_url_for_tests("grok_oauth", format!("{token_url}/oauth/token"))
+}
+
 #[test]
 fn gateway_handles_admin_provider_oauth_supported_types_locally_with_trusted_admin_principal() {
     run_admin_oauth_test(
@@ -305,13 +396,14 @@ async fn gateway_handles_admin_provider_oauth_supported_types_locally_with_trust
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     let items = payload.as_array().expect("items should be array");
-    assert_eq!(items.len(), 6);
+    assert_eq!(items.len(), 7);
     assert_eq!(items[0]["provider_type"], "claude_code");
     assert_eq!(items[1]["provider_type"], "codex");
     assert_eq!(items[2]["provider_type"], "chatgpt_web");
     assert_eq!(items[3]["provider_type"], "gemini_cli");
     assert_eq!(items[4]["provider_type"], "antigravity");
     assert_eq!(items[5]["provider_type"], "windsurf");
+    assert_eq!(items[6]["provider_type"], "grok_oauth");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -9200,4 +9292,205 @@ async fn gateway_rejects_partial_management_token_for_admin_management_token_rou
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[test]
+fn gateway_persists_grok_oauth_cli_headers_after_provider_callback() {
+    run_admin_oauth_test(
+        "gateway_persists_grok_oauth_cli_headers_after_provider_callback",
+        gateway_persists_grok_oauth_cli_headers_after_provider_callback_impl,
+    );
+}
+
+async fn gateway_persists_grok_oauth_cli_headers_after_provider_callback_impl() {
+    let token_server = Router::new().route(
+        "/oauth/token",
+        post(|| async {
+            Json(grok_oauth_token_payload(
+                "grok-oauth-callback-access-token",
+                "grok-oauth-callback-refresh-token",
+                "callback@grok.example",
+                "grok-callback-subject",
+                "grok-callback-team",
+            ))
+        }),
+    );
+    let provider_catalog_repository = grok_oauth_test_catalog_repository();
+    let (token_url, token_handle) = start_server(token_server).await;
+    let state = grok_oauth_test_state(provider_catalog_repository.clone(), &token_url)
+        .with_provider_oauth_state_entry_for_tests(
+            "nonce-grok-oauth-callback",
+            json!({
+                "nonce": "nonce-grok-oauth-callback",
+                "key_id": "",
+                "provider_id": "provider-grok-oauth",
+                "provider_type": "grok_oauth",
+                "pkce_verifier": "verifier-grok-oauth-callback",
+            }),
+        );
+    let (gateway_url, gateway_handle) = start_server(build_router_with_state(state)).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/providers/provider-grok-oauth/complete"
+        ))
+        .headers(trusted_admin_headers())
+        .json(&json!({
+            "callback_url": "http://localhost:1455/auth/callback?code=grok-oauth-callback-code&state=nonce-grok-oauth-callback"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={payload}");
+    let key_id = payload["key_id"]
+        .as_str()
+        .expect("callback should persist a key")
+        .to_string();
+    let persisted = provider_catalog_repository
+        .list_keys_by_ids(&[key_id])
+        .await
+        .expect("keys should load")
+        .into_iter()
+        .next()
+        .expect("persisted key should exist");
+    assert_persisted_grok_oauth_auth_config(
+        persisted.encrypted_auth_config.as_deref(),
+        "callback@grok.example",
+        "grok-callback-subject",
+        "grok-callback-team",
+    );
+
+    gateway_handle.abort();
+    token_handle.abort();
+}
+
+#[test]
+fn gateway_persists_grok_oauth_cli_headers_after_refresh_token_import() {
+    run_admin_oauth_test(
+        "gateway_persists_grok_oauth_cli_headers_after_refresh_token_import",
+        gateway_persists_grok_oauth_cli_headers_after_refresh_token_import_impl,
+    );
+}
+
+async fn gateway_persists_grok_oauth_cli_headers_after_refresh_token_import_impl() {
+    let token_server = Router::new().route(
+        "/oauth/token",
+        post(|| async {
+            Json(grok_oauth_token_payload(
+                "grok-oauth-import-access-token",
+                "grok-oauth-import-refresh-token",
+                "import@grok.example",
+                "grok-import-subject",
+                "grok-import-team",
+            ))
+        }),
+    );
+    let provider_catalog_repository = grok_oauth_test_catalog_repository();
+    let (token_url, token_handle) = start_server(token_server).await;
+    let (gateway_url, gateway_handle) = start_server(build_router_with_state(
+        grok_oauth_test_state(provider_catalog_repository.clone(), &token_url),
+    ))
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/providers/provider-grok-oauth/import-refresh-token"
+        ))
+        .headers(trusted_admin_headers())
+        .json(&json!({ "refresh_token": "grok-oauth-import-input-refresh-token" }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={payload}");
+    let key_id = payload["key_id"]
+        .as_str()
+        .expect("import should persist a key")
+        .to_string();
+    let persisted = provider_catalog_repository
+        .list_keys_by_ids(&[key_id])
+        .await
+        .expect("keys should load")
+        .into_iter()
+        .next()
+        .expect("persisted key should exist");
+    assert_persisted_grok_oauth_auth_config(
+        persisted.encrypted_auth_config.as_deref(),
+        "import@grok.example",
+        "grok-import-subject",
+        "grok-import-team",
+    );
+
+    gateway_handle.abort();
+    token_handle.abort();
+}
+
+#[test]
+fn gateway_persists_grok_oauth_cli_headers_after_batch_refresh_token_import() {
+    run_admin_oauth_test(
+        "gateway_persists_grok_oauth_cli_headers_after_batch_refresh_token_import",
+        gateway_persists_grok_oauth_cli_headers_after_batch_refresh_token_import_impl,
+    );
+}
+
+async fn gateway_persists_grok_oauth_cli_headers_after_batch_refresh_token_import_impl() {
+    let token_server = Router::new().route(
+        "/oauth/token",
+        post(|| async {
+            Json(grok_oauth_token_payload(
+                "grok-oauth-batch-access-token",
+                "grok-oauth-batch-refresh-token",
+                "batch@grok.example",
+                "grok-batch-subject",
+                "grok-batch-team",
+            ))
+        }),
+    );
+    let provider_catalog_repository = grok_oauth_test_catalog_repository();
+    let (token_url, token_handle) = start_server(token_server).await;
+    let (gateway_url, gateway_handle) = start_server(build_router_with_state(
+        grok_oauth_test_state(provider_catalog_repository.clone(), &token_url),
+    ))
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/providers/provider-grok-oauth/batch-import"
+        ))
+        .headers(trusted_admin_headers())
+        .json(&json!({ "credentials": "grok-oauth-batch-input-refresh-token" }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={payload}");
+    assert_eq!(payload["total"], 1);
+    assert_eq!(payload["success"], 1, "payload={payload}");
+    let key_id = payload["results"][0]["key_id"]
+        .as_str()
+        .expect("batch import should persist a key")
+        .to_string();
+    let persisted = provider_catalog_repository
+        .list_keys_by_ids(&[key_id])
+        .await
+        .expect("keys should load")
+        .into_iter()
+        .next()
+        .expect("persisted key should exist");
+    assert_persisted_grok_oauth_auth_config(
+        persisted.encrypted_auth_config.as_deref(),
+        "batch@grok.example",
+        "grok-batch-subject",
+        "grok-batch-team",
+    );
+
+    gateway_handle.abort();
+    token_handle.abort();
 }
