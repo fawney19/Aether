@@ -81,6 +81,12 @@ pub fn finalize_openai_provider_request_with_codex_model_capabilities(
         finalization.provider_type,
         finalization.provider_api_format,
     );
+    super::responses::grok_oauth::apply_grok_oauth_responses_reasoning_default(
+        body,
+        finalization.provider_type,
+        finalization.provider_api_format,
+        finalization.provider_model,
+    );
     super::responses::codex::apply_openai_responses_compact_special_body_edits(
         body,
         finalization.provider_api_format,
@@ -321,6 +327,34 @@ mod tests {
             assert_eq!(body["reasoning"]["effort"], "low");
             assert!(body["reasoning"].get("summary").is_none());
         }
+    }
+
+    #[test]
+    fn grok_oauth_grok_4_5_finalization_records_the_effective_reasoning_effort() {
+        let finalization = OpenAiProviderRequestFinalization {
+            source_api_format: "openai:responses",
+            provider_api_format: "openai:responses",
+            provider_type: "grok_oauth",
+            provider_model: "grok-4.5",
+            source_model: "grok-4.5",
+            body_rules: None,
+            upstream_is_stream: true,
+            require_body_stream_field: true,
+        };
+
+        let mut default_body = json!({"model": "grok-4.5", "input": "hello"});
+        finalize_openai_provider_request(&mut default_body, finalization)
+            .expect("Grok 4.5 default reasoning effort should satisfy the provider contract");
+        assert_eq!(default_body["reasoning"]["effort"], "high");
+
+        let mut explicit_body = json!({
+            "model": "grok-4.5",
+            "input": "hello",
+            "reasoning": {"effort": "medium"}
+        });
+        finalize_openai_provider_request(&mut explicit_body, finalization)
+            .expect("explicit Grok 4.5 reasoning effort should remain valid");
+        assert_eq!(explicit_body["reasoning"]["effort"], "medium");
     }
 
     #[test]

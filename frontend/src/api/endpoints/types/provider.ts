@@ -437,6 +437,27 @@ export interface GrokUpstreamMetadata {
   account_user_id?: string | null
 }
 
+export interface GrokOAuthUpstreamMetadata {
+  updated_at?: number | null
+  source?: string | null
+  plan_type?: string | null
+  weekly_used_percent?: number | null
+  weekly_period_start?: number | null
+  weekly_period_end?: number | null
+  weekly_reset_at?: number | null
+  weekly_updated_at?: number | null
+  monthly_limit_cents?: number | null
+  monthly_used_cents?: number | null
+  monthly_included_used_cents?: number | null
+  monthly_used_percent?: number | null
+  monthly_period_start?: number | null
+  monthly_period_end?: number | null
+  monthly_reset_at?: number | null
+  monthly_updated_at?: number | null
+  partial?: boolean | null
+  failed_windows?: string[] | null
+}
+
 export interface GeminiCliTierMetadata {
   id?: string | null
   tierType?: string | null
@@ -494,6 +515,7 @@ export interface UpstreamMetadata {
   windsurf?: WindsurfUpstreamMetadata
   chatgpt_web?: ChatGPTWebUpstreamMetadata
   grok?: GrokUpstreamMetadata
+  grok_oauth?: GrokOAuthUpstreamMetadata
   gemini_cli?: GeminiCliUpstreamMetadata
 }
 
@@ -733,7 +755,7 @@ export interface HealthRelatedMonitorResponse {
   related_providers: HealthRelatedMonitor[]
 }
 
-export type ProviderType = 'custom' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro' | 'grok' | 'windsurf' | 'vertex_ai'
+export type ProviderType = 'custom' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro' | 'grok' | 'grok_oauth' | 'windsurf' | 'vertex_ai'
 
 export interface ClaudeCodeAdvancedConfig {
   // 会话数量控制：null/undefined 表示不限制
@@ -815,6 +837,10 @@ export interface PoolAdvancedConfig {
   account_self_check_enabled?: boolean
   account_self_check_interval_minutes?: number | null
   account_self_check_concurrency?: number | null
+  // deprecated: retained for backward-compatible reads
+  self_check_enabled?: boolean
+  self_check_interval_minutes?: number | null
+  self_check_concurrency?: number | null
   auto_remove_banned_keys?: boolean
   auto_remove_quota_exhausted_keys?: boolean
 }

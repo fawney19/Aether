@@ -4,6 +4,7 @@ use super::{
     PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL,
 };
 use crate::handlers::shared::default_provider_key_status_snapshot;
+use crate::provider_transport::provider_types::provider_type_retains_oauth_forbidden;
 use crate::provider_transport::LocalOAuthHttpExecutor;
 
 use super::super::provider_transport;
@@ -1263,6 +1264,22 @@ impl AppState {
         body_excerpt: &str,
         access_token_invalid_proven: bool,
     ) -> Result<bool, GatewayError> {
+        if local_oauth_refresh_failure_must_be_retained(
+            transport.provider.provider_type.as_str(),
+            status_code,
+        ) {
+            tracing::warn!(
+                event_name = "local_oauth_refresh_grok_oauth_forbidden_retained",
+                log_type = "ops",
+                key_id = %transport.key.id,
+                provider_id = %transport.provider.id,
+                provider_type = %transport.provider.provider_type,
+                status_code,
+                "gateway retained grok oauth key after forbidden refresh response"
+            );
+            return Ok(false);
+        }
+
         let key_id = transport.key.id.trim();
         if key_id.is_empty() {
             return Ok(false);
@@ -1561,6 +1578,10 @@ impl AppState {
     }
 }
 
+fn local_oauth_refresh_failure_must_be_retained(provider_type: &str, status_code: u16) -> bool {
+    status_code == 403 && provider_type_retains_oauth_forbidden(provider_type)
+}
+
 fn merge_runtime_oauth_invalid_state(
     provider_type: &str,
     key: &StoredProviderCatalogKey,
@@ -1817,6 +1838,21 @@ mod tests {
                     .to_string()
             ),
         );
+    }
+
+    #[test]
+    fn grok_oauth_403_refresh_failure_is_non_terminal() {
+        assert!(super::local_oauth_refresh_failure_must_be_retained(
+            "grok_oauth",
+            403
+        ));
+        assert!(!super::local_oauth_refresh_failure_must_be_retained(
+            "grok_oauth",
+            401
+        ));
+        assert!(!super::local_oauth_refresh_failure_must_be_retained(
+            "codex", 403
+        ));
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPoolCooldownFieldLayout,
   buildPoolHealthToggleCards,
+  resolvePoolAccountSelfCheckDefaults,
 } from '@/features/pool/utils/poolAdvancedDialog'
 
 describe('poolAdvancedDialog', () => {
@@ -53,6 +54,35 @@ describe('poolAdvancedDialog', () => {
         'overload_cooldown_seconds',
       ],
       desktopColumnsClass: 'xl:grid-cols-2',
+    })
+  })
+
+  it('enables conservative Grok OAuth quota self-check defaults without overriding opt-out', () => {
+    expect(resolvePoolAccountSelfCheckDefaults('grok_oauth', null)).toEqual({
+      enabled: true,
+      intervalMinutes: 30,
+      concurrency: 1,
+    })
+    expect(resolvePoolAccountSelfCheckDefaults('grok_oauth', {
+      account_self_check_enabled: false,
+    })).toEqual({
+      enabled: false,
+      intervalMinutes: 30,
+      concurrency: 1,
+    })
+    expect(resolvePoolAccountSelfCheckDefaults('grok_oauth', {
+      self_check_enabled: false,
+      self_check_interval_minutes: 15,
+      self_check_concurrency: 2,
+    })).toEqual({
+      enabled: false,
+      intervalMinutes: 15,
+      concurrency: 2,
+    })
+    expect(resolvePoolAccountSelfCheckDefaults('codex', null)).toEqual({
+      enabled: false,
+      intervalMinutes: null,
+      concurrency: null,
     })
   })
 })

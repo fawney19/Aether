@@ -265,6 +265,16 @@ const GROK_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     ..STANDARD_RUNTIME_POLICY
 };
 
+const GROK_OAUTH_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    fixed_provider: true,
+    api_format_inheritance: ProviderApiFormatInheritance::OAuth,
+    enable_format_conversion_by_default: true,
+    oauth_is_bearer_like: true,
+    supports_model_fetch: false,
+    supports_local_openai_chat_transport: false,
+    ..STANDARD_RUNTIME_POLICY
+};
+
 const WINDSURF_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     fixed_provider: true,
     api_format_inheritance: ProviderApiFormatInheritance::OAuthOrBearer,
@@ -434,6 +444,19 @@ const GROK_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplat
     runtime_policy: GROK_RUNTIME_POLICY,
 };
 
+const GROK_OAUTH_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
+    provider_type: "grok_oauth",
+    version: 1,
+    base_url: "https://cli-chat-proxy.grok.com/v1",
+    endpoints: &[FixedProviderEndpointTemplate {
+        item_key: "openai:responses",
+        api_format: "openai:responses",
+        custom_path: None,
+        config_defaults: FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS,
+    }],
+    runtime_policy: GROK_OAUTH_RUNTIME_POLICY,
+};
+
 const WINDSURF_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
     provider_type: "windsurf",
     version: 1,
@@ -449,6 +472,10 @@ const WINDSURF_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTem
 
 pub fn provider_type_is_fixed(provider_type: &str) -> bool {
     provider_runtime_policy(provider_type).fixed_provider
+}
+
+pub fn provider_type_retains_oauth_forbidden(provider_type: &str) -> bool {
+    provider_type.trim().eq_ignore_ascii_case("grok_oauth")
 }
 
 pub fn fixed_provider_key_inherits_api_formats(
@@ -495,6 +522,7 @@ pub fn fixed_provider_template(provider_type: &str) -> Option<&'static FixedProv
         "chatgpt_web" => Some(&CHATGPT_WEB_FIXED_PROVIDER_TEMPLATE),
         "kiro" => Some(&KIRO_FIXED_PROVIDER_TEMPLATE),
         "grok" => Some(&GROK_FIXED_PROVIDER_TEMPLATE),
+        "grok_oauth" => Some(&GROK_OAUTH_FIXED_PROVIDER_TEMPLATE),
         "gemini_cli" => Some(&GEMINI_CLI_FIXED_PROVIDER_TEMPLATE),
         "vertex_ai" => Some(&VERTEX_AI_FIXED_PROVIDER_TEMPLATE),
         "antigravity" => Some(&ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE),
@@ -620,6 +648,24 @@ pub fn provider_type_admin_oauth_template(provider_type: &str) -> Option<Provide
             redirect_uri: "show-auth-token",
             use_pkce: false,
         }),
+        "grok_oauth" => Some(ProviderOAuthTemplate {
+            provider_type: "grok_oauth",
+            display_name: "Grok OAuth",
+            authorize_url: "https://auth.x.ai/oauth2/authorize",
+            token_url: "https://auth.x.ai/oauth2/token",
+            client_id: "b1a00492-073a-47ea-816f-4c329264a828",
+            client_secret: "",
+            scopes: &[
+                "openid",
+                "profile",
+                "email",
+                "offline_access",
+                "grok-cli:access",
+                "api:access",
+            ],
+            redirect_uri: "http://127.0.0.1:56121/callback",
+            use_pkce: true,
+        }),
         _ => None,
     }
 }
@@ -631,6 +677,7 @@ pub const ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES: &[&str] = &[
     "gemini_cli",
     "antigravity",
     "windsurf",
+    "grok_oauth",
 ];
 
 #[cfg(test)]
@@ -639,7 +686,7 @@ mod tests {
         fixed_provider_endpoint_template_by_api_format, fixed_provider_key_inherits_api_formats,
         fixed_provider_template, provider_runtime_policy, provider_type_admin_oauth_template,
         provider_type_allows_auth_channel_mismatch_by_default, provider_type_oauth_is_bearer_like,
-        provider_type_supports_local_embedding_transport,
+        provider_type_retains_oauth_forbidden, provider_type_supports_local_embedding_transport,
         provider_type_supports_local_same_format_transport, FixedProviderEndpointConfigValue,
         ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES,
     };
@@ -726,6 +773,48 @@ mod tests {
         assert!(!template.runtime_policy.supports_model_fetch);
         assert!(!template.runtime_policy.supports_local_openai_chat_transport);
         assert!(!template.runtime_policy.supports_local_same_format_transport);
+    }
+
+    #[test]
+    fn grok_oauth_fixed_provider_template_targets_cli_chat_proxy() {
+        let template =
+            fixed_provider_template("grok_oauth").expect("grok_oauth template should exist");
+        assert_eq!(template.provider_type, "grok_oauth");
+        assert_eq!(template.base_url, "https://cli-chat-proxy.grok.com/v1");
+        assert_eq!(template.version, 1);
+        assert_eq!(
+            template
+                .endpoints
+                .iter()
+                .map(|item| item.api_format)
+                .collect::<Vec<_>>(),
+            vec!["openai:responses"]
+        );
+        assert!(template.runtime_policy.fixed_provider);
+        assert!(template.runtime_policy.oauth_is_bearer_like);
+        assert!(template.runtime_policy.enable_format_conversion_by_default);
+        assert!(!template.runtime_policy.supports_model_fetch);
+        assert!(!template.runtime_policy.supports_local_openai_chat_transport);
+    }
+
+    #[test]
+    fn grok_oauth_forbidden_is_a_non_terminal_oauth_status() {
+        assert!(provider_type_retains_oauth_forbidden("grok_oauth"));
+        assert!(provider_type_retains_oauth_forbidden("GROK_OAUTH"));
+        assert!(!provider_type_retains_oauth_forbidden("grok"));
+        assert!(!provider_type_retains_oauth_forbidden("codex"));
+    }
+
+    #[test]
+    fn grok_oauth_admin_oauth_template_uses_xai_pkce_flow() {
+        let template =
+            provider_type_admin_oauth_template("grok_oauth").expect("grok_oauth oauth template");
+        assert_eq!(template.provider_type, "grok_oauth");
+        assert_eq!(template.authorize_url, "https://auth.x.ai/oauth2/authorize");
+        assert_eq!(template.token_url, "https://auth.x.ai/oauth2/token");
+        assert!(template.use_pkce);
+        assert!(template.client_secret.is_empty());
+        assert!(ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES.contains(&"grok_oauth"));
     }
 
     #[test]

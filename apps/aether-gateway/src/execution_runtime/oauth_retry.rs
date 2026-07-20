@@ -1,7 +1,12 @@
 use aether_contracts::ExecutionPlan;
 use tracing::warn;
 
-use crate::{provider_transport::LocalOAuthRefreshError, AppState};
+use crate::{
+    provider_transport::{
+        provider_types::provider_type_retains_oauth_forbidden, LocalOAuthRefreshError,
+    },
+    AppState,
+};
 
 pub(crate) async fn refresh_oauth_plan_auth_for_retry(
     state: &AppState,
@@ -59,6 +64,23 @@ pub(crate) async fn refresh_oauth_plan_auth_for_retry(
             body_excerpt,
             ..
         }) if matches!(refresh_status_code, 400 | 401 | 403) => {
+            if oauth_retry_failure_must_be_retained(
+                transport.provider.provider_type.as_str(),
+                refresh_status_code,
+            ) {
+                warn!(
+                    event_name = "local_oauth_retry_grok_oauth_forbidden_retained",
+                    log_type = "ops",
+                    trace_id = %trace_id,
+                    provider_id = %plan.provider_id,
+                    endpoint_id = %plan.endpoint_id,
+                    key_id = %plan.key_id,
+                    status_code,
+                    refresh_status_code,
+                    "gateway retained grok oauth key after forbidden response during refresh retry"
+                );
+                return false;
+            }
             if let Err(err) = state
                 .persist_local_oauth_refresh_failure_state(
                     &transport,
@@ -111,6 +133,10 @@ pub(crate) async fn refresh_oauth_plan_auth_for_retry(
     }
 }
 
+fn oauth_retry_failure_must_be_retained(provider_type: &str, refresh_status_code: u16) -> bool {
+    provider_type_retains_oauth_forbidden(provider_type) && refresh_status_code == 403
+}
+
 fn status_may_be_oauth_invalid(status_code: u16, response_text: Option<&str>) -> bool {
     if status_code == 401 {
         return true;
@@ -160,8 +186,8 @@ fn status_proves_access_token_invalid(status_code: u16, response_text: Option<&s
 #[cfg(test)]
 mod tests {
     use super::{
-        refresh_oauth_plan_auth_for_retry, status_may_be_oauth_invalid,
-        status_proves_access_token_invalid,
+        oauth_retry_failure_must_be_retained, refresh_oauth_plan_auth_for_retry,
+        status_may_be_oauth_invalid, status_proves_access_token_invalid,
     };
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -213,6 +239,16 @@ mod tests {
             429,
             Some("token bucket")
         ));
+    }
+
+    #[test]
+    fn grok_oauth_refresh_status_takes_precedence_over_upstream_status() {
+        // A preceding upstream 403 must not promote terminal refresh 400/401 responses.
+        assert!(!oauth_retry_failure_must_be_retained("grok_oauth", 401));
+        assert!(!oauth_retry_failure_must_be_retained("grok_oauth", 400));
+        // Conversely, refresh 403 stays non-terminal even when the upstream response was 401.
+        assert!(oauth_retry_failure_must_be_retained("grok_oauth", 403));
+        assert!(!oauth_retry_failure_must_be_retained("codex", 403));
     }
 
     #[tokio::test]
@@ -372,6 +408,172 @@ mod tests {
             .await
             .expect("keys should read");
         assert!(keys.is_empty());
+
+        token_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn grok_oauth_403_retry_keeps_key_even_when_body_reports_invalid_token() {
+        let token_hits = Arc::new(Mutex::new(0usize));
+        let token_hits_clone = Arc::clone(&token_hits);
+        let token_server = Router::new().route(
+            "/oauth/token",
+            post(move |_request: Request| {
+                let token_hits_inner = Arc::clone(&token_hits_clone);
+                async move {
+                    *token_hits_inner.lock().expect("mutex should lock") += 1;
+                    (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({
+                            "error": {
+                                "code": "invalid_token",
+                                "message": "access token expired"
+                            }
+                        })),
+                    )
+                }
+            }),
+        );
+
+        let mut provider = StoredProviderCatalogProvider::new(
+            "provider-grok-oauth".to_string(),
+            "grok_oauth".to_string(),
+            Some("https://cli-chat-proxy.grok.com/v1".to_string()),
+            "grok_oauth".to_string(),
+        )
+        .expect("provider should build")
+        .with_routing_fields(10);
+        provider.config = Some(json!({
+            "pool_advanced": {
+                "auto_remove_banned_keys": true
+            }
+        }));
+
+        let endpoint = StoredProviderCatalogEndpoint::new(
+            "endpoint-grok-oauth-responses".to_string(),
+            "provider-grok-oauth".to_string(),
+            "openai:responses".to_string(),
+            None,
+            None,
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://cli-chat-proxy.grok.com/v1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build");
+
+        let encrypted_api_key =
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "stale-grok-token")
+                .expect("api key ciphertext should build");
+        let mut key = StoredProviderCatalogKey::new(
+            "key-grok-oauth-retry".to_string(),
+            "provider-grok-oauth".to_string(),
+            "default".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(json!(["openai:responses"])),
+            encrypted_api_key,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build");
+        key.expires_at_unix_secs = Some(4_102_444_800);
+        key.encrypted_auth_config = Some(
+            encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                r#"{"provider_type":"grok_oauth","refresh_token":"grok-refresh-token","email":"alice@example.com","expires_at":4102444800}"#,
+            )
+            .expect("auth config ciphertext should build"),
+        );
+
+        let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider],
+            vec![endpoint],
+            vec![key],
+        ));
+        let (token_url, token_handle) = start_test_server(token_server).await;
+        let oauth_refresh =
+            crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
+                Arc::new(
+                    crate::provider_transport::oauth_refresh::GenericOAuthRefreshAdapter::default()
+                        .with_token_url_for_tests("grok_oauth", format!("{token_url}/oauth/token")),
+                ),
+            ]);
+        let state = crate::AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
+
+        let mut plan = ExecutionPlan {
+            request_id: "req-grok-oauth-retry".to_string(),
+            candidate_id: None,
+            provider_name: Some("grok_oauth".to_string()),
+            provider_id: "provider-grok-oauth".to_string(),
+            endpoint_id: "endpoint-grok-oauth-responses".to_string(),
+            key_id: "key-grok-oauth-retry".to_string(),
+            method: "POST".to_string(),
+            url: "https://cli-chat-proxy.grok.com/v1/responses".to_string(),
+            headers: BTreeMap::from([(
+                "authorization".to_string(),
+                "Bearer stale-grok-token".to_string(),
+            )]),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "grok-4"})),
+            stream: false,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("grok-4".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+
+        let retried = refresh_oauth_plan_auth_for_retry(
+            &state,
+            &mut plan,
+            403,
+            Some(r#"{"error":"invalid_token","message":"access token expired"}"#),
+            "trace-grok-oauth-retry",
+        )
+        .await;
+
+        assert!(!retried);
+        assert_eq!(
+            *token_hits.lock().expect("mutex should lock"),
+            1,
+            "a single request must not loop oauth refreshes"
+        );
+        let keys = provider_catalog_repository
+            .list_keys_by_ids(&["key-grok-oauth-retry".to_string()])
+            .await
+            .expect("keys should read");
+        assert_eq!(keys.len(), 1, "grok oauth key must not be auto-removed");
+        assert!(keys[0].is_active, "grok oauth key must remain active");
+        assert!(keys[0].oauth_invalid_at_unix_secs.is_none());
+        assert!(keys[0].oauth_invalid_reason.is_none());
 
         token_handle.abort();
     }

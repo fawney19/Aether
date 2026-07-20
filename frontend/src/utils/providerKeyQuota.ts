@@ -12,6 +12,13 @@ export interface ProviderKeyQuotaCarrier {
   upstream_metadata?: UpstreamMetadata | null
 }
 
+export interface GrokOAuthQuotaFreshness {
+  updatedAtSeconds: number
+  isStale: boolean
+}
+
+export const GROK_OAUTH_QUOTA_STALE_AFTER_SECONDS = 60 * 60
+
 function normalizeText(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const text = value.trim()
@@ -42,6 +49,28 @@ function getQuotaProviderType(
   const snapshotProviderType = normalizeText(quota?.provider_type)?.toLowerCase()
   if (snapshotProviderType) return snapshotProviderType
   return normalizeText(fallbackProviderType)?.toLowerCase() || ''
+}
+
+function normalizeUnixSeconds(value: unknown): number | null {
+  const parsed = finiteNumber(value)
+  if (parsed == null || parsed <= 0) return null
+  return Math.floor(parsed > 1_000_000_000_000 ? parsed / 1000 : parsed)
+}
+
+export function getGrokOAuthQuotaFreshness(
+  input: ProviderKeyQuotaCarrier,
+  fallbackProviderType?: string | null,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): GrokOAuthQuotaFreshness | null {
+  const quota = getQuotaSnapshot(input)
+  if (!quota || getQuotaProviderType(quota, fallbackProviderType) !== 'grok_oauth') return null
+  const updatedAtSeconds = normalizeUnixSeconds(quota.updated_at ?? quota.observed_at)
+  if (updatedAtSeconds == null) return null
+  return {
+    updatedAtSeconds,
+    isStale: quota.freshness === 'stale'
+      || nowSeconds - updatedAtSeconds >= GROK_OAUTH_QUOTA_STALE_AFTER_SECONDS,
+  }
 }
 
 function getQuotaWindows(
@@ -306,6 +335,29 @@ function getGrokQuotaText(quota: QuotaStatusSnapshot): string | null {
   return normalizeText(quota.label)
 }
 
+function getGrokOAuthQuotaText(quota: QuotaStatusSnapshot): string | null {
+  const code = normalizeText(quota.code)?.toLowerCase()
+  const parts: string[] = []
+  const weeklyRemaining = getQuotaWindowRemainingPercent(getQuotaWindow(quota, 'weekly'))
+  if (weeklyRemaining != null) {
+    parts.push(`周剩余 ${formatPercent(weeklyRemaining)}`)
+  }
+
+  const monthly = getQuotaWindow(quota, 'monthly')
+  const monthlyRemaining = getQuotaWindowRemainingPercent(monthly)
+  if (monthlyRemaining != null) {
+    const valueText = getQuotaWindowValueText(monthly)
+    const dollarText = valueText
+      ? valueText.split('/').map(value => `$${value}`).join('/')
+      : null
+    parts.push(`月剩余 ${formatPercent(monthlyRemaining)}${dollarText ? ` (${dollarText})` : ''}`)
+  }
+
+  if (parts.length > 0) return parts.join(' | ')
+  if (code === 'exhausted') return normalizeText(quota.label) || '额度已耗尽'
+  return normalizeText(quota.label)
+}
+
 function getWindsurfQuotaText(quota: QuotaStatusSnapshot): string | null {
   const code = normalizeText(quota.code)?.toLowerCase()
   if (code === 'banned' || code === 'forbidden' || code === 'quarantined') {
@@ -454,6 +506,8 @@ export function getQuotaSnapshotFallbackText(
       return getKiroQuotaText(quota)
     case 'grok':
       return getGrokQuotaText(quota)
+    case 'grok_oauth':
+      return getGrokOAuthQuotaText(quota)
     case 'windsurf':
       return getWindsurfQuotaText(quota)
     case 'antigravity':

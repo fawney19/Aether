@@ -7,6 +7,7 @@ use crate::provider::{
     ProviderOAuthTokenSet, ProviderOAuthTransportContext,
 };
 use async_trait::async_trait;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -592,7 +593,6 @@ fn value_to_string(value: &Value) -> Option<String> {
 }
 
 fn decode_jwt_claims(token: &str) -> Option<serde_json::Map<String, Value>> {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     let payload = token.split('.').nth(1)?;
     let bytes = URL_SAFE_NO_PAD.decode(payload.as_bytes()).ok()?;
     serde_json::from_slice::<Value>(&bytes)

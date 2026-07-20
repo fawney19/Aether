@@ -64,6 +64,8 @@ describe('pool key display panels', () => {
               barClass: 'bg-amber-500',
               meterClass: 'text-amber-600',
             }],
+            freshnessText: '额度数据已过期 · 更新 07-19 12:00',
+            freshnessStale: true,
           }),
           h(PoolKeyQuotaPanel, {
             items: [],
@@ -84,6 +86,9 @@ describe('pool key display panels', () => {
 
     expect(root.querySelector('[data-testid="pool-quota-reset-text"]')?.textContent).toBe('1h 后重置')
     expect(root.querySelector('[data-testid="pool-quota-meter-text"]')?.textContent).toBe('42.0%')
+    expect(root.querySelector('[data-testid="pool-quota-freshness"]')?.textContent)
+      .toBe('额度数据已过期 · 更新 07-19 12:00')
+    expect(root.querySelector('[data-testid="pool-quota-freshness"]')?.className).toContain('text-amber-600')
     expect(root.textContent).toContain('额度未知')
 
     app.unmount()

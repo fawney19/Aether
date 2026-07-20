@@ -419,8 +419,22 @@ fn mapping_scope_matches(
 }
 
 fn key_auth_channel_matches(row: &CandidateSelectionRow, api_format: &str) -> bool {
-    let provider_type = row.row.provider_type.trim().to_ascii_lowercase();
-    let auth_type = row.row.key_auth_type.trim().to_ascii_lowercase();
+    provider_auth_channel_matches(
+        &row.row.provider_type,
+        &row.row.key_auth_type,
+        api_format,
+        row.key_auth_config.as_deref(),
+    )
+}
+
+fn provider_auth_channel_matches(
+    provider_type: &str,
+    auth_type: &str,
+    api_format: &str,
+    key_auth_config: Option<&str>,
+) -> bool {
+    let provider_type = provider_type.trim().to_ascii_lowercase();
+    let auth_type = auth_type.trim().to_ascii_lowercase();
     let api_format = normalize_api_format(api_format);
     match provider_type.as_str() {
         "codex" => {
@@ -441,14 +455,12 @@ fn key_auth_channel_matches(row: &CandidateSelectionRow, api_format: &str) -> bo
             api_format == "claude:messages"
                 && (auth_type == "oauth"
                     || (auth_type == "bearer"
-                        && row
-                            .key_auth_config
-                            .as_deref()
-                            .is_some_and(|value| !value.trim().is_empty())))
+                        && key_auth_config.is_some_and(|value| !value.trim().is_empty())))
         }
         "gemini_cli" | "antigravity" => {
             auth_type == "oauth" && api_format == "gemini:generate_content"
         }
+        "grok_oauth" => auth_type == "oauth" && api_format == "openai:responses",
         "grok" => {
             auth_type == "oauth"
                 && matches!(
@@ -797,7 +809,7 @@ fn sql_match_aliases(api_formats: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::MysqlMinimalCandidateSelectionReadRepository;
+    use super::{provider_auth_channel_matches, MysqlMinimalCandidateSelectionReadRepository};
 
     #[tokio::test]
     async fn repository_builds_from_lazy_pool() {
@@ -808,5 +820,33 @@ mod tests {
         );
 
         let _repository = MysqlMinimalCandidateSelectionReadRepository::new(pool);
+    }
+
+    #[test]
+    fn grok_oauth_routes_only_oauth_credentials_to_responses() {
+        assert!(provider_auth_channel_matches(
+            "grok_oauth",
+            "oauth",
+            "openai:responses",
+            None
+        ));
+        assert!(!provider_auth_channel_matches(
+            "grok_oauth",
+            "oauth",
+            "openai:chat",
+            None
+        ));
+        assert!(!provider_auth_channel_matches(
+            "grok_oauth",
+            "api_key",
+            "openai:responses",
+            None
+        ));
+        assert!(provider_auth_channel_matches(
+            "grok",
+            "oauth",
+            "openai:chat",
+            None
+        ));
     }
 }

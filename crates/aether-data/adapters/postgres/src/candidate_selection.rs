@@ -98,6 +98,11 @@ INNER JOIN LATERAL (
         )
       )
       OR (
+        LOWER(BTRIM(p.provider_type)) = 'grok_oauth'
+        AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+        AND LOWER($3) = 'openai:responses'
+      )
+      OR (
         LOWER(BTRIM(p.provider_type)) = 'grok'
         AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
         AND LOWER($3) IN ('openai:chat', 'openai:responses', 'claude:messages', 'openai:image')
@@ -132,6 +137,7 @@ INNER JOIN LATERAL (
           'codex',
           'gemini_cli',
           'grok',
+          'grok_oauth',
           'vertex_ai',
           'antigravity',
           'kiro',
@@ -191,6 +197,11 @@ WHERE p.is_active = TRUE
       )
     )
     OR (
+      LOWER(BTRIM(p.provider_type)) = 'grok_oauth'
+      AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+      AND LOWER($3) = 'openai:responses'
+    )
+    OR (
       LOWER(BTRIM(p.provider_type)) = 'grok'
       AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
       AND LOWER($3) IN ('openai:chat', 'openai:responses', 'claude:messages', 'openai:image')
@@ -225,6 +236,7 @@ WHERE p.is_active = TRUE
         'codex',
         'gemini_cli',
         'grok',
+        'grok_oauth',
         'vertex_ai',
         'antigravity',
         'kiro',
@@ -377,6 +389,11 @@ INNER JOIN LATERAL (
         )
       )
       OR (
+        LOWER(BTRIM(p.provider_type)) = 'grok_oauth'
+        AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+        AND LOWER($4) = 'openai:responses'
+      )
+      OR (
         LOWER(BTRIM(p.provider_type)) = 'grok'
         AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
         AND LOWER($4) IN ('openai:chat', 'openai:responses', 'claude:messages', 'openai:image')
@@ -411,6 +428,7 @@ INNER JOIN LATERAL (
           'codex',
           'gemini_cli',
           'grok',
+          'grok_oauth',
           'vertex_ai',
           'antigravity',
           'kiro',
@@ -471,6 +489,11 @@ WHERE p.is_active = TRUE
       )
     )
     OR (
+      LOWER(BTRIM(p.provider_type)) = 'grok_oauth'
+      AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+      AND LOWER($4) = 'openai:responses'
+    )
+    OR (
       LOWER(BTRIM(p.provider_type)) = 'grok'
       AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
       AND LOWER($4) IN ('openai:chat', 'openai:responses', 'claude:messages', 'openai:image')
@@ -505,6 +528,7 @@ WHERE p.is_active = TRUE
         'codex',
         'gemini_cli',
         'grok',
+        'grok_oauth',
         'vertex_ai',
         'antigravity',
         'kiro',
@@ -665,6 +689,11 @@ WHERE p.is_active = TRUE
       )
     )
     OR (
+      LOWER(BTRIM(p.provider_type)) = 'grok_oauth'
+      AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+      AND LOWER($6) = 'openai:responses'
+    )
+    OR (
       LOWER(BTRIM(p.provider_type)) = 'grok'
       AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
       AND LOWER($6) IN ('openai:chat', 'openai:responses', 'claude:messages', 'openai:image')
@@ -699,6 +728,7 @@ WHERE p.is_active = TRUE
         'codex',
         'gemini_cli',
         'grok',
+        'grok_oauth',
         'vertex_ai',
         'antigravity',
         'kiro',
@@ -1542,7 +1572,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_selection_sql_allows_grok_oauth_chat_auth() {
+    fn candidate_selection_sql_routes_grok_oauth_to_responses_only() {
         let requested_model_sql = requested_model_selection_sql();
         for sql in [
             LIST_FOR_EXACT_API_FORMAT_SQL,
@@ -1550,8 +1580,13 @@ mod tests {
             LIST_POOL_KEYS_FOR_GROUP_SQL,
             requested_model_sql.as_str(),
         ] {
+            assert!(sql.contains("LOWER(BTRIM(p.provider_type)) = 'grok_oauth'"));
+            assert!(sql.contains("AND LOWER(BTRIM(pak.auth_type)) = 'oauth'"));
+            assert!(sql.contains("= 'openai:responses'"));
+            assert!(sql.contains("'grok_oauth',"));
+
+            // The legacy Grok browser-session provider keeps its wider protocol set.
             assert!(sql.contains("LOWER(BTRIM(p.provider_type)) = 'grok'"));
-            assert!(sql.contains("LOWER(BTRIM(pak.auth_type)) = 'oauth'"));
             assert!(sql
                 .contains("'openai:chat', 'openai:responses', 'claude:messages', 'openai:image'"));
             assert!(sql.contains("'grok',"));

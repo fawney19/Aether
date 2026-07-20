@@ -54,7 +54,7 @@ fn select_provider_oauth_runtime_endpoint(
 ) -> Option<StoredProviderCatalogEndpoint> {
     let provider_type = provider_type.trim().to_ascii_lowercase();
     match provider_type.as_str() {
-        "codex" => matching_endpoint(endpoints, include_inactive, |endpoint| {
+        "codex" | "grok_oauth" => matching_endpoint(endpoints, include_inactive, |endpoint| {
             crate::ai_serving::is_openai_responses_format(&endpoint.api_format)
         }),
         "chatgpt_web" => matching_endpoint(endpoints, include_inactive, |endpoint| {
@@ -254,4 +254,48 @@ pub(crate) fn spawn_provider_oauth_account_state_refresh_after_update(
         )
         .await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_oauth_runtime_endpoint_for_provider;
+    use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogEndpoint;
+
+    fn endpoint(id: &str, api_format: &str) -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            id.to_string(),
+            "provider-grok-oauth".to_string(),
+            api_format.to_string(),
+            Some("openai".to_string()),
+            None,
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://cli-chat-proxy.grok.com/v1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")
+    }
+
+    #[test]
+    fn grok_oauth_runtime_uses_responses_endpoint_even_if_legacy_chat_is_first() {
+        let endpoints = vec![
+            endpoint("legacy-chat", "openai:chat"),
+            endpoint("responses", "openai:responses"),
+        ];
+
+        assert_eq!(
+            provider_oauth_runtime_endpoint_for_provider("grok_oauth", &endpoints)
+                .expect("Responses endpoint should be selected")
+                .id,
+            "responses"
+        );
+    }
 }

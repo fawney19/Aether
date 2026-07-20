@@ -12,6 +12,7 @@ aether-billing.workspace = true
 aether-contracts.workspace = true
 aether-data.workspace = true
 aether-data-contracts.workspace = true
+aether-oauth.workspace = true
 aether-provider-pool.workspace = true
 aether-provider-transport.workspace = true
 axum.workspace = true

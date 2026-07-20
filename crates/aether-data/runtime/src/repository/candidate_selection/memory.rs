@@ -323,6 +323,7 @@ fn key_auth_channel_matches(row: &StoredMinimalCandidateSelectionRow, api_format
         "gemini_cli" | "antigravity" => {
             auth_type == "oauth" && api_format == "gemini:generate_content"
         }
+        "grok_oauth" => auth_type == "oauth" && api_format == "openai:responses",
         "grok" => {
             auth_type == "oauth"
                 && matches!(
@@ -485,32 +486,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn includes_grok_oauth_rows_for_chat_models() {
-        let mut row = sample_row(
-            "provider-grok",
-            "openai:chat",
-            "grok-4.20-0309-non-reasoning",
-            10,
-        );
-        row.provider_type = "grok".to_string();
-        row.provider_name = "grok".to_string();
-        row.key_auth_type = "oauth".to_string();
-        row.key_api_formats = Some(vec![
-            "openai:chat".to_string(),
-            "openai:responses".to_string(),
-            "claude:messages".to_string(),
-            "openai:image".to_string(),
-        ]);
-        let repository = InMemoryMinimalCandidateSelectionReadRepository::seed(vec![row]);
+    async fn grok_oauth_routes_only_oauth_credentials_to_responses() {
+        let mut responses = sample_row("grok-oauth-responses", "openai:responses", "grok-4", 10);
+        responses.provider_type = "grok_oauth".to_string();
+        responses.key_auth_type = "oauth".to_string();
 
-        let rows = repository
+        let mut api_key = responses.clone();
+        api_key.provider_id = "grok-oauth-api-key".to_string();
+        api_key.key_id = "key-grok-oauth-api-key".to_string();
+        api_key.key_auth_type = "api_key".to_string();
+
+        let mut chat = sample_row("grok-oauth-chat", "openai:chat", "grok-4", 20);
+        chat.provider_type = "grok_oauth".to_string();
+        chat.key_auth_type = "oauth".to_string();
+
+        let mut legacy_chat = sample_row("grok-browser-chat", "openai:chat", "grok-4", 30);
+        legacy_chat.provider_type = "grok".to_string();
+        legacy_chat.key_auth_type = "oauth".to_string();
+
+        let repository = InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            responses,
+            api_key,
+            chat,
+            legacy_chat,
+        ]);
+
+        let responses = repository
+            .list_for_exact_api_format("openai:responses")
+            .await
+            .expect("Responses candidates should load");
+        assert_eq!(
+            responses
+                .iter()
+                .map(|row| row.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["grok-oauth-responses"]
+        );
+
+        let chat = repository
             .list_for_exact_api_format("openai:chat")
             .await
-            .expect("list should succeed");
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].provider_type, "grok");
-        assert_eq!(rows[0].global_model_name, "grok-4.20-0309-non-reasoning");
+            .expect("Chat candidates should load");
+        assert_eq!(
+            chat.iter()
+                .map(|row| row.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["grok-browser-chat"]
+        );
     }
 
     #[tokio::test]

@@ -329,6 +329,8 @@
                     :account-quota-text="keyUiStateMap[key.key_id]?.accountQuotaText"
                     :fallback-text="keyUiStateMap[key.key_id]?.quotaFallbackText"
                     :text-class="keyUiStateMap[key.key_id]?.quotaTextClass || ''"
+                    :freshness-text="keyUiStateMap[key.key_id]?.quotaFreshnessText"
+                    :freshness-stale="keyUiStateMap[key.key_id]?.quotaFreshnessStale"
                   />
                 </TableCell>
                 <TableCell class="py-3 px-2 align-middle">
@@ -705,6 +707,8 @@
                 :account-quota-text="keyUiStateMap[key.key_id]?.accountQuotaText"
                 :fallback-text="keyUiStateMap[key.key_id]?.quotaFallbackText"
                 :text-class="keyUiStateMap[key.key_id]?.quotaTextClass || ''"
+                :freshness-text="keyUiStateMap[key.key_id]?.quotaFreshnessText"
+                :freshness-stale="keyUiStateMap[key.key_id]?.quotaFreshnessStale"
                 variant="mobile"
               />
 
@@ -1147,6 +1151,7 @@ import {
 } from '@/utils/providerKeyStatus'
 import {
   getGeminiCliAccountCreditsText,
+  getGrokOAuthQuotaFreshness,
   getLegacyAccountQuotaText,
   getQuotaDisplayText,
 } from '@/utils/providerKeyQuota'
@@ -1620,6 +1625,7 @@ const showAccountQuotaColumn = computed(() => {
     || selectedProviderType.value === 'windsurf'
     || selectedProviderType.value === 'antigravity'
     || selectedProviderType.value === 'grok'
+    || selectedProviderType.value === 'grok_oauth'
     || selectedProviderType.value === 'chatgpt_web'
 })
 
@@ -1948,6 +1954,8 @@ type PoolKeyUiState = {
   accountQuotaText: string | null
   quotaFallbackText: string | null
   quotaTextClass: string
+  quotaFreshnessText: string | null
+  quotaFreshnessStale: boolean
   importedAtRelative: string
   lastUsedRelative: string
   statsDisplay: PoolStatsDisplay
@@ -1986,6 +1994,7 @@ const keyUiStateMap = computed<Record<string, PoolKeyUiState>>(() => {
     const oauthOrgBadge = getOAuthOrgBadge(key)
     const accountQuotaText = getAccountQuotaText(key)
     const quotaFallbackText = getQuotaFallbackText(key)
+    const quotaFreshness = getGrokOAuthQuotaFreshness(key, selectedProviderType.value)
     const planType = resolvePoolKeyPlanType(key)
     const canRefreshToken = canRefreshOAuthCredential(key)
     const showOAuthRefreshControl = shouldShowOAuthRefreshControl(key, selectedProviderType.value)
@@ -2008,6 +2017,10 @@ const keyUiStateMap = computed<Record<string, PoolKeyUiState>>(() => {
       quotaTextClass: accountQuotaText || quotaFallbackText
         ? getQuotaTextClass(accountQuotaText || quotaFallbackText || '')
         : '',
+      quotaFreshnessText: quotaFreshness
+        ? `${quotaFreshness.isStale ? '额度数据已过期 · 更新' : '额度更新'} ${formatUnixSeconds(quotaFreshness.updatedAtSeconds)}`
+        : null,
+      quotaFreshnessStale: quotaFreshness?.isStale ?? false,
       importedAtRelative: formatPoolKeyImportedAt(key),
       lastUsedRelative: key.last_used_at ? formatRelativeTime(key.last_used_at) : '-',
       statsDisplay: buildPoolStatsDisplay(key, selectedProviderType.value, 'current_cycle'),
@@ -2053,6 +2066,7 @@ const quotaRefreshSupported = computed(() => {
     || selectedProviderType.value === 'windsurf'
     || selectedProviderType.value === 'antigravity'
     || selectedProviderType.value === 'grok'
+    || selectedProviderType.value === 'grok_oauth'
     || selectedProviderType.value === 'chatgpt_web'
 })
 
@@ -3475,6 +3489,33 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
       resetSeconds: normalizeRemainingSeconds(window?.reset_seconds ?? quotaResetSeconds ?? null),
       updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
     }]
+  }
+
+  if (providerType === 'grok_oauth') {
+    const quotaResetAtSeconds = getQuotaSnapshotResetAtSeconds(quota)
+    const quotaResetSeconds = getQuotaSnapshotResetSeconds(quota)
+    return ([
+      ['周', 'weekly'],
+      ['月', 'monthly'],
+    ] as const)
+      .map(([label, code]): QuotaProgressItem | null => {
+        const window = getQuotaSnapshotWindow(quota, code)
+        const remainingPercent = getQuotaWindowRemainingPercent(window)
+        if (remainingPercent == null) return null
+        const rawValueText = code === 'monthly' ? getQuotaWindowValueText(window) : undefined
+        const detail = rawValueText
+          ? rawValueText.split('/').map(value => `$${value}`).join('/')
+          : undefined
+        return {
+          label,
+          remainingPercent,
+          detail,
+          resetAtSeconds: normalizeUnixSeconds(window?.reset_at ?? quotaResetAtSeconds ?? null),
+          resetSeconds: normalizeRemainingSeconds(window?.reset_seconds ?? quotaResetSeconds ?? null),
+          updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
+        }
+      })
+      .filter((item): item is QuotaProgressItem => item != null)
   }
 
   if (providerType === 'grok') {

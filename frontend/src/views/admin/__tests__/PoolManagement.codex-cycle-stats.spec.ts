@@ -767,6 +767,67 @@ describe('PoolManagement Codex cycle stats mode', () => {
     expect(root.querySelector('[data-testid="pool-stats-cycle-single-marker"]')).toBeNull()
   })
 
+  it('renders Grok OAuth billing quota and enables quota refresh', async () => {
+    const grokOAuthKey = createPoolKey('grok_oauth', {
+      auth_type: 'oauth',
+      api_formats: ['openai:responses'],
+      quota_updated_at: null,
+      status_snapshot: {
+        oauth: { code: 'valid' },
+        account: { code: 'ok', blocked: false },
+        quota: {
+          code: 'ok',
+          exhausted: false,
+          provider_type: 'grok_oauth',
+          plan_type: 'super',
+          windows: [
+            {
+              code: 'weekly',
+              label: '周',
+              scope: 'account',
+              remaining_ratio: 0.75,
+            },
+            {
+              code: 'monthly',
+              label: '月',
+              scope: 'account',
+              unit: 'usd',
+              remaining_ratio: 0.7,
+              remaining_value: 105,
+              limit_value: 150,
+            },
+          ],
+        },
+      },
+    })
+    endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('grok_oauth')] })
+    endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(grokOAuthKey))
+    endpointMocks.getProvider.mockResolvedValue(createProvider('grok_oauth', {
+      api_formats: ['openai:responses'],
+    }))
+    endpointMocks.refreshProviderQuota.mockResolvedValue({
+      success: 1,
+      failed: 0,
+      total: 1,
+      results: [],
+    })
+
+    const root = mountPoolManagement()
+    await settle()
+
+    expect(root.textContent).toContain('周')
+    expect(root.textContent).toContain('月')
+    expect(root.textContent).toContain('$105/$150')
+    const refreshButton = root.querySelector('button[title="刷新数据和额度"]') as HTMLButtonElement | null
+    expect(refreshButton).not.toBeNull()
+    refreshButton?.click()
+    await settle()
+    expect(endpointMocks.refreshProviderQuota).toHaveBeenCalledWith(
+      'grok_oauth-provider',
+      ['grok_oauth-key-1'],
+    )
+  })
+
   it('opens only one score popover across desktop and mobile layouts', async () => {
     const scoredKey = createPoolKey('codex', {
       pool_score: {
