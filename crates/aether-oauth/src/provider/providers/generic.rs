@@ -8,34 +8,10 @@ use crate::provider::{
 };
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use url::form_urlencoded;
-
-const GROK_OAUTH_CLI_VERSION: &str = "0.2.93";
-const GROK_OAUTH_NONCE_DOMAIN: &[u8] = b"aether:grok-oauth:nonce:v1:";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GenericProviderOAuthAuthorizeParam {
-    Static {
-        name: &'static str,
-        value: &'static str,
-    },
-    StateDerivedNonce,
-}
-
-const GROK_OAUTH_AUTHORIZE_PARAMS: &[GenericProviderOAuthAuthorizeParam] = &[
-    GenericProviderOAuthAuthorizeParam::StateDerivedNonce,
-    GenericProviderOAuthAuthorizeParam::Static {
-        name: "plan",
-        value: "generic",
-    },
-    GenericProviderOAuthAuthorizeParam::Static {
-        name: "referrer",
-        value: "sub2api",
-    },
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GenericProviderOAuthTemplate {
@@ -49,7 +25,6 @@ pub struct GenericProviderOAuthTemplate {
     pub redirect_uri: &'static str,
     pub use_pkce: bool,
     pub uses_json_payload: bool,
-    pub authorize_params: &'static [GenericProviderOAuthAuthorizeParam],
 }
 
 pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
@@ -64,7 +39,6 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         redirect_uri: "http://localhost:54545/callback",
         use_pkce: true,
         uses_json_payload: true,
-        authorize_params: &[],
     },
     GenericProviderOAuthTemplate {
         provider_type: "codex",
@@ -77,7 +51,6 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         redirect_uri: "http://localhost:1455/auth/callback",
         use_pkce: true,
         uses_json_payload: false,
-        authorize_params: &[],
     },
     GenericProviderOAuthTemplate {
         provider_type: "chatgpt_web",
@@ -90,7 +63,6 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         redirect_uri: "http://localhost:1455/auth/callback",
         use_pkce: true,
         uses_json_payload: false,
-        authorize_params: &[],
     },
     GenericProviderOAuthTemplate {
         provider_type: "gemini_cli",
@@ -107,7 +79,6 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         redirect_uri: "http://localhost:8085/oauth2callback",
         use_pkce: false,
         uses_json_payload: false,
-        authorize_params: &[],
     },
     GenericProviderOAuthTemplate {
         provider_type: "antigravity",
@@ -126,27 +97,6 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         redirect_uri: "http://localhost:51121/oauth2callback",
         use_pkce: true,
         uses_json_payload: false,
-        authorize_params: &[],
-    },
-    GenericProviderOAuthTemplate {
-        provider_type: "grok_oauth",
-        display_name: "Grok OAuth",
-        authorize_url: "https://auth.x.ai/oauth2/authorize",
-        token_url: "https://auth.x.ai/oauth2/token",
-        client_id: "b1a00492-073a-47ea-816f-4c329264a828",
-        client_secret: "",
-        scopes: &[
-            "openid",
-            "profile",
-            "email",
-            "offline_access",
-            "grok-cli:access",
-            "api:access",
-        ],
-        redirect_uri: "http://127.0.0.1:56121/callback",
-        use_pkce: true,
-        uses_json_payload: false,
-        authorize_params: GROK_OAUTH_AUTHORIZE_PARAMS,
     },
 ];
 
@@ -359,17 +309,6 @@ impl ProviderOAuthAdapter for GenericProviderOAuthAdapter {
                 query.append_pair("code_challenge", challenge);
                 query.append_pair("code_challenge_method", "S256");
             }
-            for param in self.template.authorize_params {
-                match param {
-                    GenericProviderOAuthAuthorizeParam::Static { name, value } => {
-                        query.append_pair(name, value);
-                    }
-                    GenericProviderOAuthAuthorizeParam::StateDerivedNonce => {
-                        let nonce = grok_oauth_nonce_from_state(state);
-                        query.append_pair("nonce", &nonce);
-                    }
-                }
-            }
         }
         Ok(OAuthAuthorizeResponse {
             authorize_url: url.to_string(),
@@ -515,10 +454,6 @@ fn enrich_generic_identity(
     auth_config: &mut serde_json::Map<String, Value>,
     token_payload: &Value,
 ) {
-    let is_grok_oauth = provider_type.trim().eq_ignore_ascii_case("grok_oauth");
-    if is_grok_oauth {
-        enrich_grok_oauth_auth_config(auth_config, token_payload);
-    }
     if let Some(object) = token_payload.as_object() {
         for field in [
             "email",
@@ -529,18 +464,12 @@ fn enrich_generic_identity(
             "account_name",
             "is_fedramp",
         ] {
-            if is_grok_oauth && field == "email" {
-                continue;
-            }
             if !auth_config.contains_key(field) {
                 if let Some(value) = object.get(field).cloned() {
                     auth_config.insert(field.to_string(), value);
                 }
             }
         }
-    }
-    if is_grok_oauth {
-        return;
     }
     if !matches!(
         provider_type.trim().to_ascii_lowercase().as_str(),
@@ -672,100 +601,15 @@ fn decode_jwt_claims(token: &str) -> Option<serde_json::Map<String, Value>> {
         .cloned()
 }
 
-fn grok_oauth_token_claims(
-    token_payload: &Value,
-    token_fields: &[&str],
-) -> Option<Map<String, Value>> {
-    token_fields.iter().find_map(|token_field| {
-        token_payload
-            .get(*token_field)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-            .and_then(decode_jwt_claims)
-    })
-}
-
-fn grok_oauth_identity_field(source: Option<&Map<String, Value>>, field: &str) -> Option<Value> {
-    source?
-        .get(field)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| Value::String(value.to_string()))
-}
-
-/// Applies Grok CLI request identity and merges stable account identity fields.
-///
-/// ID token claims take precedence over direct token-response fields and access
-/// token claims. This keeps opaque access tokens usable while avoiding stale or
-/// empty response fields masking the OIDC identity.
-pub fn enrich_grok_oauth_auth_config(auth_config: &mut Map<String, Value>, token_payload: &Value) {
-    apply_grok_oauth_auth_config_defaults(auth_config);
-
-    let direct_fields = token_payload.as_object();
-    let id_token_claims = grok_oauth_token_claims(token_payload, &["id_token", "idToken"]);
-    let access_token_claims =
-        grok_oauth_token_claims(token_payload, &["access_token", "accessToken"]);
-    for field in ["email", "sub", "team_id"] {
-        let value = grok_oauth_identity_field(id_token_claims.as_ref(), field)
-            .or_else(|| grok_oauth_identity_field(direct_fields, field))
-            .or_else(|| grok_oauth_identity_field(access_token_claims.as_ref(), field));
-        if let Some(value) = value {
-            auth_config.insert(field.to_string(), value);
-        }
-    }
-}
-
-/// Applies the fixed Grok CLI upstream identity to an OAuth account config.
-///
-/// The protocol headers intentionally replace stale values from prior Aether
-/// releases, while unrelated caller-provided headers remain intact. This is
-/// limited to request headers so callers can compose it with their own token
-/// and identity persistence logic.
-pub fn apply_grok_oauth_auth_config_defaults(auth_config: &mut Map<String, Value>) {
-    let headers = auth_config
-        .entry("headers".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !headers.is_object() {
-        *headers = Value::Object(Map::new());
-    }
-    let headers = headers
-        .as_object_mut()
-        .expect("headers was normalized to an object");
-    for required_header in ["X-XAI-Token-Auth", "x-grok-client-version", "User-Agent"] {
-        headers.retain(|name, _| !name.eq_ignore_ascii_case(required_header));
-    }
-    headers.insert("X-XAI-Token-Auth".to_string(), json!("xai-grok-cli"));
-    headers.insert(
-        "x-grok-client-version".to_string(),
-        json!(GROK_OAUTH_CLI_VERSION),
-    );
-    headers.insert(
-        "User-Agent".to_string(),
-        json!(format!("xai-grok-workspace/{GROK_OAUTH_CLI_VERSION}")),
-    );
-}
-
-fn grok_oauth_nonce_from_state(state: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(GROK_OAUTH_NONCE_DOMAIN);
-    hasher.update(state.as_bytes());
-    URL_SAFE_NO_PAD.encode(hasher.finalize())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        apply_grok_oauth_auth_config_defaults, enrich_generic_identity,
-        grok_oauth_nonce_from_state, template_for_provider_type, GenericProviderOAuthAdapter,
-    };
+    use super::{enrich_generic_identity, template_for_provider_type, GenericProviderOAuthAdapter};
     use crate::network::{OAuthHttpExecutor, OAuthHttpRequest, OAuthHttpResponse};
     use crate::provider::ProviderOAuthAdapter;
     use crate::provider::{ProviderOAuthAccount, ProviderOAuthTransportContext};
     use async_trait::async_trait;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-    use serde_json::{json, Value};
+    use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
@@ -773,239 +617,7 @@ mod tests {
     fn resolves_generic_provider_templates() {
         assert!(template_for_provider_type("codex").is_some());
         assert!(template_for_provider_type("claude_code").is_some());
-        assert!(template_for_provider_type("grok_oauth").is_some());
         assert!(template_for_provider_type("kiro").is_none());
-    }
-
-    #[test]
-    fn grok_oauth_template_uses_xai_pkce_flow() {
-        let template =
-            template_for_provider_type("grok_oauth").expect("grok_oauth template should exist");
-        assert_eq!(template.provider_type, "grok_oauth");
-        assert_eq!(template.authorize_url, "https://auth.x.ai/oauth2/authorize");
-        assert_eq!(template.token_url, "https://auth.x.ai/oauth2/token");
-        assert!(template.use_pkce);
-        assert!(template.client_secret.is_empty());
-        assert!(template.scopes.contains(&"grok-cli:access"));
-    }
-
-    #[test]
-    fn grok_oauth_authorize_url_includes_xai_cli_parameters() {
-        let adapter = GenericProviderOAuthAdapter::for_provider_type("grok_oauth")
-            .expect("grok_oauth adapter should exist");
-        let ctx = ProviderOAuthTransportContext {
-            provider_id: "provider-1".to_string(),
-            provider_type: "grok_oauth".to_string(),
-            endpoint_id: None,
-            key_id: None,
-            auth_type: Some("oauth".to_string()),
-            decrypted_api_key: None,
-            decrypted_auth_config: None,
-            provider_config: None,
-            endpoint_config: None,
-            key_config: None,
-            network: crate::network::OAuthNetworkContext::provider_operation(None),
-        };
-        let state = "state-secret-for-test";
-        let authorization = adapter
-            .build_authorize_url(&ctx, state, Some("challenge-123"))
-            .expect("authorization URL should build");
-        let url = url::Url::parse(&authorization.authorize_url)
-            .expect("authorization URL should be valid");
-        let query_value = |key: &str| {
-            url.query_pairs()
-                .find(|(name, _)| name == key)
-                .map(|(_, value)| value.into_owned())
-        };
-
-        assert_eq!(query_value("state").as_deref(), Some(state));
-        assert_eq!(
-            query_value("code_challenge").as_deref(),
-            Some("challenge-123")
-        );
-        assert_eq!(
-            query_value("code_challenge_method").as_deref(),
-            Some("S256")
-        );
-        assert_eq!(query_value("plan").as_deref(), Some("generic"));
-        assert_eq!(query_value("referrer").as_deref(), Some("sub2api"));
-
-        let nonce = query_value("nonce").expect("nonce should be present");
-        assert_eq!(nonce, grok_oauth_nonce_from_state(state));
-        assert_ne!(nonce, state);
-        assert!(!nonce.contains(state));
-    }
-
-    #[test]
-    fn grok_oauth_header_defaults_replace_stale_cli_values_and_preserve_other_headers() {
-        let mut auth_config = serde_json::Map::new();
-        auth_config.insert(
-            "headers".to_string(),
-            json!({
-                "User-Agent": "aether-grok-oauth/1.0",
-                "X-XAI-Token-Auth": "wrong-token-auth",
-                "X-Grok-Client-Version": "0.0.0",
-                "X-Custom-Header": "keep-me"
-            }),
-        );
-
-        apply_grok_oauth_auth_config_defaults(&mut auth_config);
-
-        let headers = auth_config["headers"]
-            .as_object()
-            .expect("headers should be an object");
-        assert_eq!(
-            headers
-                .get("X-XAI-Token-Auth")
-                .and_then(|value| value.as_str()),
-            Some("xai-grok-cli")
-        );
-        assert_eq!(
-            headers
-                .get("x-grok-client-version")
-                .and_then(|value| value.as_str()),
-            Some("0.2.93")
-        );
-        assert_eq!(
-            headers.get("User-Agent").and_then(|value| value.as_str()),
-            Some("xai-grok-workspace/0.2.93")
-        );
-        assert_eq!(
-            headers
-                .get("X-Custom-Header")
-                .and_then(|value| value.as_str()),
-            Some("keep-me")
-        );
-        for required_header in ["X-XAI-Token-Auth", "x-grok-client-version", "User-Agent"] {
-            assert_eq!(
-                headers
-                    .keys()
-                    .filter(|name| name.eq_ignore_ascii_case(required_header))
-                    .count(),
-                1,
-                "{required_header} should have one canonical value"
-            );
-        }
-    }
-
-    #[test]
-    fn grok_oauth_identity_injects_cli_headers_and_jwt_claims() {
-        let claims = json!({
-            "email": "user@x.ai",
-            "sub": "subject-123",
-            "team_id": "team-456"
-        });
-        let token = format!(
-            "header.{}.signature",
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims should encode"))
-        );
-        let mut auth_config = serde_json::Map::new();
-
-        enrich_generic_identity(
-            "grok_oauth",
-            &mut auth_config,
-            &json!({ "access_token": token }),
-        );
-
-        let headers = auth_config
-            .get("headers")
-            .and_then(|value| value.as_object())
-            .expect("headers should be injected");
-        assert_eq!(
-            headers.get("User-Agent").and_then(|v| v.as_str()),
-            Some("xai-grok-workspace/0.2.93")
-        );
-        assert_eq!(
-            headers
-                .get("x-grok-client-version")
-                .and_then(|v| v.as_str()),
-            Some("0.2.93")
-        );
-        assert_eq!(
-            headers.get("X-XAI-Token-Auth").and_then(|v| v.as_str()),
-            Some("xai-grok-cli")
-        );
-        assert_eq!(
-            auth_config.get("email").and_then(|v| v.as_str()),
-            Some("user@x.ai")
-        );
-        assert_eq!(
-            auth_config.get("sub").and_then(|v| v.as_str()),
-            Some("subject-123")
-        );
-        assert_eq!(
-            auth_config.get("team_id").and_then(|v| v.as_str()),
-            Some("team-456")
-        );
-    }
-
-    #[test]
-    fn grok_oauth_identity_uses_id_token_when_access_token_is_opaque() {
-        let claims = json!({
-            "email": "user@x.ai",
-            "sub": "subject-123",
-            "team_id": "team-456"
-        });
-        let id_token = format!(
-            "header.{}.signature",
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims should encode"))
-        );
-        let mut auth_config = serde_json::Map::new();
-
-        enrich_generic_identity(
-            "grok_oauth",
-            &mut auth_config,
-            &json!({
-                "access_token": "opaque-access-token",
-                "id_token": id_token
-            }),
-        );
-
-        assert_eq!(auth_config.get("email"), Some(&json!("user@x.ai")));
-        assert_eq!(auth_config.get("sub"), Some(&json!("subject-123")));
-        assert_eq!(auth_config.get("team_id"), Some(&json!("team-456")));
-    }
-
-    #[test]
-    fn grok_oauth_identity_prefers_id_token_and_fills_missing_access_token_claims() {
-        let id_claims = json!({
-            "email": "id-token@x.ai",
-            "sub": "id-token-subject"
-        });
-        let access_claims = json!({
-            "email": "access-token@x.ai",
-            "sub": "access-token-subject",
-            "team_id": "access-token-team"
-        });
-        let jwt = |claims: &Value| {
-            format!(
-                "header.{}.signature",
-                URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("claims should encode"))
-            )
-        };
-        let mut auth_config = serde_json::Map::new();
-
-        enrich_generic_identity(
-            "grok_oauth",
-            &mut auth_config,
-            &json!({
-                "email": "top-level@x.ai",
-                "account_name": "Grok subscription",
-                "id_token": jwt(&id_claims),
-                "access_token": jwt(&access_claims)
-            }),
-        );
-
-        assert_eq!(auth_config.get("email"), Some(&json!("id-token@x.ai")));
-        assert_eq!(auth_config.get("sub"), Some(&json!("id-token-subject")));
-        assert_eq!(
-            auth_config.get("team_id"),
-            Some(&json!("access-token-team"))
-        );
-        assert_eq!(
-            auth_config.get("account_name"),
-            Some(&json!("Grok subscription"))
-        );
     }
 
     #[test]
@@ -1119,65 +731,5 @@ mod tests {
             .expect("form body should be utf8");
         assert!(form.contains("grant_type=refresh_token"));
         assert!(form.contains("refresh_token=old-refresh-token"));
-    }
-
-    #[tokio::test]
-    async fn grok_oauth_refresh_rebuilds_cli_identity_headers() {
-        let executor = StaticExecutor {
-            seen_request: Arc::new(Mutex::new(None)),
-        };
-        let adapter = GenericProviderOAuthAdapter::for_provider_type("grok_oauth")
-            .expect("grok_oauth adapter should exist")
-            .with_token_url_override("https://auth.example.test/token");
-        let ctx = ProviderOAuthTransportContext {
-            provider_id: "provider-grok-oauth".to_string(),
-            provider_type: "grok_oauth".to_string(),
-            endpoint_id: None,
-            key_id: Some("key-grok-oauth".to_string()),
-            auth_type: Some("oauth".to_string()),
-            decrypted_api_key: None,
-            decrypted_auth_config: None,
-            provider_config: None,
-            endpoint_config: None,
-            key_config: None,
-            network: crate::network::OAuthNetworkContext::provider_operation(None),
-        };
-        let account = ProviderOAuthAccount {
-            provider_type: "grok_oauth".to_string(),
-            access_token: "old-access-token".to_string(),
-            auth_config: json!({
-                "provider_type": "grok_oauth",
-                "refresh_token": "old-refresh-token",
-                "headers": {
-                    "X-XAI-Token-Auth": "stale",
-                    "X-Grok-Client-Version": "0.0.0",
-                    "User-Agent": "aether-grok-oauth/1.0"
-                }
-            }),
-            expires_at_unix_secs: Some(1),
-            identity: BTreeMap::new(),
-        };
-
-        let refreshed = adapter
-            .refresh(&executor, &ctx, &account)
-            .await
-            .expect("refresh should succeed");
-
-        assert_eq!(
-            refreshed.auth_config["headers"]["X-XAI-Token-Auth"],
-            "xai-grok-cli"
-        );
-        assert_eq!(
-            refreshed.auth_config["headers"]["x-grok-client-version"],
-            "0.2.93"
-        );
-        assert_eq!(
-            refreshed.auth_config["headers"]["User-Agent"],
-            "xai-grok-workspace/0.2.93"
-        );
-        assert_eq!(
-            refreshed.token_set.refresh_token.as_deref(),
-            Some("old-refresh-token")
-        );
     }
 }
