@@ -705,7 +705,12 @@ fn resolve_same_format_standard_direct_auth(
     transport: &GatewayProviderTransportSnapshot,
     provider_api_format: &str,
 ) -> Option<(String, String)> {
-    if aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:embedding")
+    if transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("glm_coding_plan")
+        || aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:embedding")
         || aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:search")
     {
         resolve_local_openai_bearer_auth(transport)
@@ -1028,6 +1033,40 @@ mod tests {
             ),
             Some(("x-api-key".to_string(), "secret".to_string()))
         );
+    }
+
+    #[test]
+    fn glm_coding_plan_api_key_uses_bearer_for_same_format_standard_requests() {
+        // Given a GLM key stored with the UI's default authentication type.
+        let mut transport = sample_transport("glm_coding_plan");
+        transport.key.auth_type = "api_key".to_string();
+
+        for api_format in ["openai:chat", "claude:messages"] {
+            transport.endpoint.api_format = api_format.to_string();
+            let behavior = classify_same_format_provider_request_behavior(
+                &transport,
+                SameFormatProviderRequestBehaviorParams {
+                    require_streaming: false,
+                    provider_api_format: api_format,
+                    report_kind: "glm_coding_plan_auth_test",
+                },
+            );
+
+            // When direct authentication is resolved for a same-format request.
+            let resolved = resolve_same_format_provider_direct_auth(
+                &behavior,
+                &transport,
+                SameFormatProviderFamily::Standard,
+                api_format,
+            );
+
+            // Then both supported GLM formats use the upstream Bearer contract.
+            assert_eq!(
+                resolved,
+                Some(("authorization".to_string(), "Bearer secret".to_string())),
+                "unexpected GLM auth for {api_format}"
+            );
+        }
     }
 
     #[test]
