@@ -141,9 +141,9 @@
             <!-- 卡片内容 -->
             <div class="p-4 space-y-4">
               <!-- URL 配置区 -->
-              <div class="flex items-end gap-3">
-                <div class="flex-1 min-w-0 grid grid-cols-3 gap-3">
-                  <div class="col-span-2 space-y-1.5">
+              <div class="space-y-3">
+                <div class="grid grid-cols-1 gap-3">
+                  <div class="space-y-1.5">
                     <div class="flex items-center justify-between gap-2">
                       <Label class="text-xs text-muted-foreground">Base URL</Label>
                       <div
@@ -176,7 +176,7 @@
                     <Input
                       :model-value="getDisplayedPath(endpoint)"
                       :placeholder="getEndpointDefaultPath(endpoint) || '留空使用默认'"
-                      :disabled="isFixedProvider"
+                      :disabled="isEndpointConfigReadOnly"
                       @update:model-value="(v) => updateEndpointField(endpoint.id, 'path', v)"
                     />
                     <p
@@ -191,7 +191,7 @@
                 <!-- 保存/撤销按钮（URL/路径有修改时显示） -->
                 <div
                   v-if="!isEndpointConfigReadOnly && hasUrlChanges(endpoint)"
-                  class="flex items-center gap-1 shrink-0"
+                  class="flex items-center justify-end gap-1"
                 >
                   <Button
                     variant="ghost"
@@ -220,7 +220,7 @@
                 v-if="!isEndpointConfigReadOnly"
                 v-model:open="endpointRulesExpanded[endpoint.id]"
               >
-                <div class="flex items-center gap-2">
+                <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
                   <!-- 有规则时显示可折叠的触发器 -->
                   <CollapsibleTrigger
                     v-if="getTotalRulesCount(endpoint) > 0"
@@ -246,12 +246,12 @@
                   <!-- 没有规则时只显示标题 -->
                   <span
                     v-else
-                    class="text-sm text-muted-foreground py-1.5"
+                    class="shrink-0 whitespace-nowrap text-sm text-muted-foreground py-1.5"
                   >
                     请求/响应规则
                   </span>
-                  <div class="flex-1" />
-                  <div class="flex items-center gap-1 shrink-0">
+                  <div class="hidden flex-1 sm:block" />
+                  <div class="flex flex-wrap items-center gap-1 sm:shrink-0">
                     <Button
                       v-if="hasRulePanelChanges(endpoint)"
                       variant="ghost"
@@ -1071,7 +1071,11 @@ import { useI18n } from '@/i18n'
 import AlertDialog from '@/components/common/AlertDialog.vue'
 import EndpointConditionEditor from './EndpointConditionEditor.vue'
 import ProxyNodeSelect from './ProxyNodeSelect.vue'
-import { getDefaultEndpointBaseUrl, getDefaultEndpointPath } from './endpoint-default-paths'
+import {
+  getDefaultEndpointBaseUrl,
+  getDefaultEndpointPath,
+  normalizeEndpointApiFormat,
+} from './endpoint-default-paths'
 import { fixedEndpointUpstreamStreamPolicy } from './endpoint-protocol-policy'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import {
@@ -3381,13 +3385,12 @@ async function saveEndpoint(endpoint: ProviderEndpoint) {
 
   savingEndpointId.value = endpoint.id
   try {
-    // 仅提交变更字段；固定 provider 默认锁定端点路径，GLM Coding Plan 只允许覆盖 base_url。
     const payload: Record<string, unknown> = {}
 
     if (!isEndpointBaseUrlLocked.value) {
       if (state.url !== endpoint.base_url) payload.base_url = state.url
     }
-    if (!isFixedProvider.value && state.path !== (endpoint.custom_path || '')) payload.custom_path = state.path || null
+    if (state.path !== (endpoint.custom_path || '')) payload.custom_path = state.path || null
 
     if (hasRulesChanges(endpoint)) payload.header_rules = rulesToHeaderRules(state.rules)
     if (hasResponseHeaderRulesChanges(endpoint)) {
