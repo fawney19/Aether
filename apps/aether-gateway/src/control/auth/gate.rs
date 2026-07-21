@@ -763,7 +763,6 @@ mod tests {
             user_rate_limit: None,
             api_key_rate_limit: None,
             api_key_is_standalone: false,
-            admin_bypass_limits: false,
             local_rejection: None,
             allowed_models: Some(allowed_models),
             ip_rules: None,
@@ -1502,7 +1501,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_bypass_limits_does_not_skip_unbounded_zero_balance_capacity() {
+    async fn unbounded_paid_plan_rejects_zero_balance_capacity() {
         let context = billing_context_with_pricing(
             Some(json!({
                 "tiers": [{
@@ -1516,10 +1515,7 @@ mod tests {
             None,
         );
         let state = state_with_quota_and_wallet(quota_availability(0.0, false), context);
-        let mut decision = decision_with_allowed_models(vec!["gpt-5".to_string()]);
-        if let Some(auth_context) = decision.auth_context.as_mut() {
-            auth_context.admin_bypass_limits = true;
-        }
+        let decision = decision_with_allowed_models(vec!["gpt-5".to_string()]);
         let plan = execution_plan(
             json!({
                 "model": "gpt-5",
