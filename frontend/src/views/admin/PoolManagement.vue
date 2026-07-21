@@ -1119,6 +1119,7 @@ import {
 } from '@/features/pool/utils/poolManagementState'
 import type { PoolBatchActionValue } from '@/features/pool/utils/poolBatchActions'
 import {
+  buildAccountTotalStatsDisplay,
   buildPoolStatsDisplay,
   type PoolCodexCycleStatsGroup,
   type PoolStatsDisplay,
@@ -1615,6 +1616,7 @@ watch(showAdaptiveHotPoolMetricsButton, (enabled) => {
 
 const showAccountQuotaColumn = computed(() => {
   return selectedProviderType.value === 'codex'
+    || selectedProviderType.value === 'glm_coding_plan'
     || selectedProviderType.value === 'gemini_cli'
     || selectedProviderType.value === 'kiro'
     || selectedProviderType.value === 'windsurf'
@@ -2043,11 +2045,12 @@ function getPoolKeyAccountStatsMetrics(key: PoolKeyDetail): PoolStatsMetric[] {
   const display = getPoolKeyStatsDisplay(key)
   return display.kind === 'account_total'
     ? display.metrics
-    : buildPoolStatsDisplay(key, selectedProviderType.value, 'account_total').metrics
+    : buildAccountTotalStatsDisplay(key).metrics
 }
 
 const quotaRefreshSupported = computed(() => {
   return selectedProviderType.value === 'codex'
+    || selectedProviderType.value === 'glm_coding_plan'
     || selectedProviderType.value === 'kiro'
     || selectedProviderType.value === 'gemini_cli'
     || selectedProviderType.value === 'windsurf'
@@ -3174,6 +3177,7 @@ function normalizeQuotaLabel(label: string): string {
   if (!normalized) return '额度'
   if (/spark\s*5h/i.test(normalized) || normalized.includes('Spark5H')) return 'Spark5H'
   if (/spark/i.test(normalized) && normalized.includes('周')) return 'Spark周'
+  if (normalized === '5h') return '5h'
   if (normalized.includes('5H')) return '5H'
   if (normalized.includes('周')) return '周'
   if (normalized.includes('最低剩余')) return '最低'
@@ -3183,6 +3187,7 @@ function normalizeQuotaLabel(label: string): string {
 
 function getQuotaProgressLabel(label: string): string {
   if (label === '日') return '日'
+  if (label === '5h') return '5h'
   if (label === '5H') return '5H'
   if (label === '周') return '周'
   if (label === '月') return '月'
@@ -3194,7 +3199,7 @@ function getQuotaProgressLabel(label: string): string {
 }
 
 function getQuotaProgressCountdown(item: QuotaProgressItem) {
-  const staticResetLabels = ['日', '5H', '周', '月', 'Spark5H', 'Spark周', 'Spark月', 'Auto', 'Fast', 'Expert', 'Heavy', 'Grok 4.3', '生图']
+  const staticResetLabels = ['日', '5h', '5H', '周', '月', 'Spark5H', 'Spark周', 'Spark月', 'Auto', 'Fast', 'Expert', 'Heavy', 'Grok 4.3', '生图']
   if (!item.allowDynamicReset && !staticResetLabels.includes(item.label)) return null
   if (item.resetAtSeconds == null && item.resetSeconds == null) return null
   return getCodexResetCountdown(
@@ -3254,7 +3259,7 @@ function getQuotaLabelOrder(label: string): number {
   if (label === 'Heavy') return 3
   if (label === 'Grok 4.3') return 4
   if (label === '日') return 5
-  if (label === '5H') return 6
+  if (label === '5h' || label === '5H') return 6
   if (label === '周') return 7
   if (label === '月') return 8
   if (label === 'Spark5H') return 9
@@ -3452,6 +3457,26 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
         }
       })
       .filter((item): item is QuotaProgressItem => item != null)
+  }
+
+  if (providerType === 'glm_coding_plan') {
+    const items: QuotaProgressItem[] = []
+    for (const [label, code] of [
+      ['5h', 'tokens_5h'],
+      ['周', 'tokens_weekly'],
+    ] as const) {
+      const window = getQuotaSnapshotWindow(quota, code)
+      const remainingPercent = getQuotaWindowRemainingPercent(window)
+      if (remainingPercent == null) continue
+      items.push({
+        label,
+        remainingPercent,
+        resetAtSeconds: normalizeUnixSeconds(window?.reset_at ?? null),
+        resetSeconds: normalizeRemainingSeconds(window?.reset_seconds ?? null),
+        updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
+      })
+    }
+    return items
   }
 
   if (providerType === 'kiro') {

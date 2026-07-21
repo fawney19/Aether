@@ -1787,7 +1787,7 @@ impl GatewayDataState {
                 now_unix_secs,
             )));
         };
-        let Some(_) = crate::request_diagnostics::observe_db_operation(
+        let Some(user) = crate::request_diagnostics::observe_db_operation(
             "auth_user_policy",
             self.database_pool_summary(),
             repository.find_user_auth_by_id(&snapshot.user_id),
@@ -1799,6 +1799,7 @@ impl GatewayDataState {
                 now_unix_secs,
             )));
         };
+        snapshot.user_role = user.role;
         let groups = self
             .effective_user_groups_for_user(&snapshot.user_id)
             .await?;
@@ -2455,7 +2456,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_non_standalone_snapshot_bypasses_group_and_key_policies() {
+    async fn admin_non_standalone_snapshot_applies_group_and_key_policies() {
         let mut snapshot = sample_snapshot_with_role("key-admin", "admin-1", "admin")
             .with_user_rate_limit(Some(120));
         snapshot.api_key_allowed_providers = Some(vec!["anthropic".to_string()]);
@@ -2501,16 +2502,16 @@ mod tests {
             .expect("snapshot should resolve")
             .expect("snapshot should exist");
 
-        assert_eq!(resolved.effective_allowed_providers(), None);
-        assert_eq!(resolved.effective_allowed_api_formats(), None);
-        assert_eq!(resolved.effective_allowed_models(), None);
-        assert_eq!(resolved.user_rate_limit, None);
-        assert_eq!(resolved.api_key_rate_limit, None);
-        assert_eq!(resolved.api_key_concurrent_limit, None);
+        assert_eq!(resolved.effective_allowed_providers(), Some(&[][..]));
+        assert_eq!(resolved.effective_allowed_api_formats(), Some(&[][..]));
+        assert_eq!(resolved.effective_allowed_models(), Some(&[][..]));
+        assert_eq!(resolved.user_rate_limit, Some(1));
+        assert_eq!(resolved.api_key_rate_limit, Some(5));
+        assert_eq!(resolved.api_key_concurrent_limit, Some(1));
     }
 
     #[tokio::test]
-    async fn current_admin_role_bypasses_stored_user_and_key_policies() {
+    async fn current_admin_role_is_refreshed_and_preserves_stored_key_policies() {
         let mut snapshot = sample_snapshot("key-admin", "admin-1");
         snapshot.api_key_allowed_providers = Some(vec!["anthropic".to_string()]);
         snapshot.api_key_allowed_api_formats = Some(vec!["anthropic:messages".to_string()]);
@@ -2533,12 +2534,21 @@ mod tests {
             .expect("snapshot should exist");
 
         assert_eq!(resolved.user_role, "admin");
-        assert_eq!(resolved.effective_allowed_providers(), None);
-        assert_eq!(resolved.effective_allowed_api_formats(), None);
-        assert_eq!(resolved.effective_allowed_models(), None);
+        assert_eq!(
+            resolved.effective_allowed_providers(),
+            Some(&["anthropic".to_string()][..])
+        );
+        assert_eq!(
+            resolved.effective_allowed_api_formats(),
+            Some(&["anthropic:messages".to_string()][..])
+        );
+        assert_eq!(
+            resolved.effective_allowed_models(),
+            Some(&["claude-sonnet-4-5".to_string()][..])
+        );
         assert_eq!(resolved.user_rate_limit, None);
-        assert_eq!(resolved.api_key_rate_limit, None);
-        assert_eq!(resolved.api_key_concurrent_limit, None);
+        assert_eq!(resolved.api_key_rate_limit, Some(60));
+        assert_eq!(resolved.api_key_concurrent_limit, Some(5));
     }
 
     #[tokio::test]

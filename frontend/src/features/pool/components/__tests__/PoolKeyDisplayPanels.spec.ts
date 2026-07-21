@@ -15,12 +15,20 @@ describe('pool key display panels', () => {
         {
           code: '5h',
           label: '5H',
-          metrics: [{ key: 'request_count', label: '请求', value: '12', missing: false, numericValue: 12 }],
+          metrics: [
+            { key: 'request_count', label: '请求', value: '12', missing: false, numericValue: 12 },
+            { key: 'total_tokens', label: 'Token', value: '1.2K', missing: false, numericValue: 1200 },
+            { key: 'total_cost_usd', label: '费用', value: '$0.012', missing: false, numericValue: 0.012 },
+          ],
         },
         {
           code: 'weekly',
           label: '周',
-          metrics: [{ key: 'request_count', label: '请求', value: '88', missing: false, numericValue: 88 }],
+          metrics: [
+            { key: 'request_count', label: '请求', value: '88', missing: false, numericValue: 88 },
+            { key: 'total_tokens', label: 'Token', value: '8.8K', missing: false, numericValue: 8800 },
+            { key: 'total_cost_usd', label: '费用', value: '$0.088', missing: false, numericValue: 0.088 },
+          ],
         },
       ],
       accountMetrics: [],

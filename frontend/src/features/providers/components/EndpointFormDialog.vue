@@ -141,14 +141,33 @@
             <!-- 卡片内容 -->
             <div class="p-4 space-y-4">
               <!-- URL 配置区 -->
-              <div class="flex items-end gap-3">
-                <div class="flex-1 min-w-0 grid grid-cols-3 gap-3">
-                  <div class="col-span-2 space-y-1.5">
-                    <Label class="text-xs text-muted-foreground">Base URL</Label>
+              <div class="space-y-3">
+                <div class="grid grid-cols-1 gap-3">
+                  <div class="space-y-1.5">
+                    <div class="flex items-center justify-between gap-2">
+                      <Label class="text-xs text-muted-foreground">Base URL</Label>
+                      <div
+                        v-if="getGlmCodingPlanBaseUrlPresets(endpoint.api_format).length > 0"
+                        class="flex items-center gap-1"
+                      >
+                        <Button
+                          v-for="preset in getGlmCodingPlanBaseUrlPresets(endpoint.api_format)"
+                          :key="`${endpoint.id}-${preset.label}`"
+                          variant="ghost"
+                          size="sm"
+                          class="h-6 px-2 text-[10px]"
+                          :title="preset.url"
+                          :disabled="savingEndpointId === endpoint.id || isEndpointConfigReadOnly"
+                          @click="applyGlmCodingPlanBaseUrlPreset(endpoint, preset.url)"
+                        >
+                          {{ preset.label }}
+                        </Button>
+                      </div>
+                    </div>
                     <Input
                       :model-value="getEndpointEditState(endpoint.id)?.url ?? endpoint.base_url"
                       :placeholder="getEndpointBaseUrlPlaceholder(endpoint.api_format)"
-                      :disabled="isFixedProvider"
+                      :disabled="isEndpointBaseUrlLocked"
                       @update:model-value="(v) => updateEndpointField(endpoint.id, 'url', v)"
                     />
                   </div>
@@ -157,6 +176,7 @@
                     <Input
                       :model-value="getDisplayedPath(endpoint)"
                       :placeholder="getEndpointDefaultPath(endpoint) || '留空使用默认'"
+                      :disabled="isEndpointConfigReadOnly"
                       @update:model-value="(v) => updateEndpointField(endpoint.id, 'path', v)"
                     />
                     <p
@@ -171,7 +191,7 @@
                 <!-- 保存/撤销按钮（URL/路径有修改时显示） -->
                 <div
                   v-if="!isEndpointConfigReadOnly && hasUrlChanges(endpoint)"
-                  class="flex items-center gap-1 shrink-0"
+                  class="flex items-center justify-end gap-1"
                 >
                   <Button
                     variant="ghost"
@@ -200,7 +220,7 @@
                 v-if="!isEndpointConfigReadOnly"
                 v-model:open="endpointRulesExpanded[endpoint.id]"
               >
-                <div class="flex items-center gap-2">
+                <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
                   <!-- 有规则时显示可折叠的触发器 -->
                   <CollapsibleTrigger
                     v-if="getTotalRulesCount(endpoint) > 0"
@@ -226,12 +246,12 @@
                   <!-- 没有规则时只显示标题 -->
                   <span
                     v-else
-                    class="text-sm text-muted-foreground py-1.5"
+                    class="shrink-0 whitespace-nowrap text-sm text-muted-foreground py-1.5"
                   >
                     请求/响应规则
                   </span>
-                  <div class="flex-1" />
-                  <div class="flex items-center gap-1 shrink-0">
+                  <div class="hidden flex-1 sm:block" />
+                  <div class="flex flex-wrap items-center gap-1 sm:shrink-0">
                     <Button
                       v-if="hasRulePanelChanges(endpoint)"
                       variant="ghost"
@@ -1051,7 +1071,11 @@ import { useI18n } from '@/i18n'
 import AlertDialog from '@/components/common/AlertDialog.vue'
 import EndpointConditionEditor from './EndpointConditionEditor.vue'
 import ProxyNodeSelect from './ProxyNodeSelect.vue'
-import { getDefaultEndpointBaseUrl, getDefaultEndpointPath } from './endpoint-default-paths'
+import {
+  getDefaultEndpointBaseUrl,
+  getDefaultEndpointPath,
+  normalizeEndpointApiFormat,
+} from './endpoint-default-paths'
 import { fixedEndpointUpstreamStreamPolicy } from './endpoint-protocol-policy'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import {
@@ -1868,6 +1892,14 @@ const isFixedProvider = computed(() => {
   return !!t && t !== 'custom'
 })
 
+const isGlmCodingPlanProvider = computed(() => {
+  return (props.provider?.provider_type || '').trim().toLowerCase() === 'glm_coding_plan'
+})
+
+const isEndpointBaseUrlLocked = computed(() => {
+  return isFixedProvider.value && !isGlmCodingPlanProvider.value
+})
+
 const isEndpointConfigReadOnly = computed(() => {
   return (props.provider?.provider_type || '').trim().toLowerCase() === 'gemini_cli'
 })
@@ -1883,6 +1915,22 @@ const newEndpoint = ref({
 const apiFormats = ref<Array<{ value: string; label: string; default_path: string }>>([])
 
 const fallbackEndpointBaseUrl = 'https://api.example.com'
+
+interface GlmCodingPlanBaseUrlPreset {
+  readonly label: string
+  readonly url: string
+}
+
+const GLM_CODING_PLAN_BASE_URL_PRESETS: Record<string, readonly GlmCodingPlanBaseUrlPreset[]> = {
+  'claude:messages': [
+    { label: 'Zhipu', url: 'https://open.bigmodel.cn/api/anthropic' },
+    { label: 'Z.AI', url: 'https://api.z.ai/api/anthropic' },
+  ],
+  'openai:chat': [
+    { label: 'Zhipu', url: 'https://open.bigmodel.cn/api/coding/paas/v4' },
+    { label: 'Z.AI', url: 'https://api.z.ai/api/coding/paas/v4' },
+  ],
+}
 
 // 本地端点列表
 const localEndpoints = ref<ProviderEndpoint[]>([])
@@ -1984,6 +2032,16 @@ const newEndpointBaseUrlPlaceholder = computed(() => {
 
 function getDisplayedPath(endpoint: ProviderEndpoint): string {
   return getEndpointEditState(endpoint.id)?.path ?? (endpoint.custom_path || '')
+}
+
+function getGlmCodingPlanBaseUrlPresets(apiFormat: string): readonly GlmCodingPlanBaseUrlPreset[] {
+  if (!isGlmCodingPlanProvider.value || isEndpointConfigReadOnly.value) return []
+  const normalizedApiFormat = normalizeEndpointApiFormat(apiFormat)
+  return GLM_CODING_PLAN_BASE_URL_PRESETS[normalizedApiFormat] ?? []
+}
+
+function applyGlmCodingPlanBaseUrlPreset(endpoint: ProviderEndpoint, baseUrl: string): void {
+  updateEndpointField(endpoint.id, 'url', baseUrl)
 }
 
 // 读取端点的上游流式策略（endpoint.config.upstream_stream_policy）
@@ -3327,10 +3385,9 @@ async function saveEndpoint(endpoint: ProviderEndpoint) {
 
   savingEndpointId.value = endpoint.id
   try {
-    // 仅提交变更字段；fixed provider 锁定 base_url，但允许覆盖 custom_path。
     const payload: Record<string, unknown> = {}
 
-    if (!isFixedProvider.value) {
+    if (!isEndpointBaseUrlLocked.value) {
       if (state.url !== endpoint.base_url) payload.base_url = state.url
     }
     if (state.path !== (endpoint.custom_path || '')) payload.custom_path = state.path || null

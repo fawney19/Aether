@@ -379,6 +379,29 @@ function getAntigravityQuotaText(quota: QuotaStatusSnapshot): string | null {
   return `最低剩余 ${formatPercent(minimumRemaining)} (${remainingList.length} 模型)`
 }
 
+function getGlmCodingPlanQuotaText(quota: QuotaStatusSnapshot): string | null {
+  const parts: string[] = []
+  for (const [label, code] of [
+    ['5h', 'tokens_5h'],
+    ['周', 'tokens_weekly'],
+  ] as const) {
+    const window = getQuotaWindow(quota, code)
+    if (!window) continue
+    const remainingPercent = getQuotaWindowRemainingPercent(window)
+    const valueText = getQuotaWindowValueText(window)
+    if (remainingPercent != null) {
+      parts.push(`${label}剩余 ${formatPercent(remainingPercent)}${valueText ? ` (${valueText})` : ''}`)
+      continue
+    }
+    if (valueText) {
+      parts.push(`${label}剩余 ${valueText}`)
+    }
+  }
+
+  if (parts.length > 0) return parts.join(' | ')
+  return normalizeText(quota.label)
+}
+
 function getGeminiCliQuotaText(quota: QuotaStatusSnapshot): string | null {
   const creditsText = getGeminiCliCreditsTextFromQuota(quota)
   const modelWindows = getQuotaWindowsByScope(quota, 'model')
@@ -458,6 +481,8 @@ export function getQuotaSnapshotFallbackText(
       return getWindsurfQuotaText(quota)
     case 'antigravity':
       return getAntigravityQuotaText(quota)
+    case 'glm_coding_plan':
+      return getGlmCodingPlanQuotaText(quota)
     case 'gemini_cli':
       return getGeminiCliQuotaText(quota)
     case 'chatgpt_web':

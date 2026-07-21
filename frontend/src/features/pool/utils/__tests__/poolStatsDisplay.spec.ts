@@ -153,6 +153,92 @@ describe('poolStatsDisplay', () => {
     })
   })
 
+  it('builds GLM Coding Plan stats from official usage windows regardless of mode', () => {
+    const display = buildPoolStatsDisplay(
+      {
+        request_count: 9999,
+        total_tokens: 999999999,
+        total_cost_usd: '999.99',
+        status_snapshot: {
+          quota: {
+            windows: [
+              {
+                code: 'tokens_5h',
+                usage: {
+                  request_count: 90,
+                  total_tokens: 3718682,
+                },
+              },
+              {
+                code: 'tokens_weekly',
+                usage: {
+                  request_count: 7357,
+                  total_tokens: 490408764,
+                },
+              },
+            ],
+          },
+        },
+      },
+      'glm_coding_plan',
+      'account_total',
+    )
+
+    expect(display.kind).toBe('codex_cycle')
+    if (display.kind !== 'codex_cycle') throw new Error('expected GLM official quota display')
+
+    expect(display.groups.map(group => group.label)).toEqual(['5h', '周'])
+    expect(metricValues(display.groups[0].metrics)).toEqual({
+      request_count: '90',
+      total_tokens: '3.7M',
+    })
+    expect(metricValues(display.groups[1].metrics)).toEqual({
+      request_count: '7,357',
+      total_tokens: '490.4M',
+    })
+  })
+
+  it('leaves missing GLM weekly official usage blank instead of using account totals', () => {
+    const display = buildPoolStatsDisplay(
+      {
+        request_count: 9999,
+        total_tokens: 999999999,
+        total_cost_usd: '999.99',
+        status_snapshot: {
+          quota: {
+            windows: [
+              {
+                code: 'tokens_5h',
+                usage: {
+                  request_count: 90,
+                  total_tokens: 3718682,
+                },
+              },
+              {
+                code: 'tokens_weekly',
+                usage: null,
+              },
+            ],
+          },
+        },
+      },
+      'glm_coding_plan',
+      'account_total',
+    )
+
+    expect(display.kind).toBe('codex_cycle')
+    if (display.kind !== 'codex_cycle') throw new Error('expected GLM official usage display')
+
+    expect(metricValues(display.groups[0].metrics)).toEqual({
+      request_count: '90',
+      total_tokens: '3.7M',
+    })
+    expect(metricValues(display.groups[1].metrics)).toEqual({
+      request_count: '—',
+      total_tokens: '—',
+    })
+  })
+
   it('promotes large token totals above M', () => {
     const display = buildPoolStatsDisplay(
       createCodexKey({ total_tokens: 1_500_000_000 }),

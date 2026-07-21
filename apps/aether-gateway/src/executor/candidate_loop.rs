@@ -474,7 +474,7 @@ where
             self.state,
             self.trace_id,
             self.decision,
-            &plan,
+            plan,
             report_context.as_ref(),
         )
         .await?

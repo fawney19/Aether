@@ -889,7 +889,7 @@ async fn sync_codex_quota_from_response_headers(
     let current_codex = expected_namespace_value
         .clone()
         .and_then(|value| value.as_object().cloned())
-        .unwrap_or_else(serde_json::Map::new);
+        .unwrap_or_default();
     let current_codex = Value::Object(current_codex);
     let Some(current_fingerprint) = fingerprint_codex_payload(&current_codex) else {
         set_cached_codex_quota_fingerprint(&key_id, incoming_fingerprint.clone(), now);
@@ -925,7 +925,7 @@ async fn sync_codex_quota_from_response_headers(
     // Response headers describe an authoritative quota snapshot.  A CAS
     // conflict means a newer snapshot/delta won, so avoid replaying stale
     // data over it.
-    return Ok(false);
+    Ok(false)
 }
 
 #[cfg(test)]

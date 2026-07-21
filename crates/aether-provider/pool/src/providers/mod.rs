@@ -3,6 +3,7 @@ pub mod chatgpt_web;
 pub mod codex;
 pub mod default;
 pub mod gemini_cli;
+pub mod glm_coding_plan;
 pub mod grok;
 pub mod kiro;
 pub mod unsupported;
@@ -28,6 +29,13 @@ pub use default::DefaultProviderPoolAdapter;
 pub use gemini_cli::GeminiCliProviderPoolAdapter;
 pub use gemini_cli::{
     build_gemini_cli_pool_quota_request, GEMINI_CLI_RETRIEVE_USER_QUOTA_PATH, GEMINI_CLI_USER_AGENT,
+};
+pub use glm_coding_plan::{
+    build_glm_coding_plan_pool_quota_request_with_base_url, GlmCodingPlanProviderPoolAdapter,
+    GLM_CODING_PLAN_DEFAULT_ZAI_ANTHROPIC_BASE_URL, GLM_CODING_PLAN_DEFAULT_ZAI_OPENAI_BASE_URL,
+    GLM_CODING_PLAN_DEFAULT_ZHIPU_ANTHROPIC_BASE_URL,
+    GLM_CODING_PLAN_DEFAULT_ZHIPU_OPENAI_BASE_URL, GLM_CODING_PLAN_MODEL_USAGE_PATH,
+    GLM_CODING_PLAN_QUOTA_LIMIT_PATH,
 };
 pub use grok::{
     grok_mode_id_for_model, grok_pool_tier_from_quota_bucket, grok_quota_window_key_for_model,

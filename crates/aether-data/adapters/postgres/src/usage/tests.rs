@@ -3746,7 +3746,7 @@ fn first_byte_provider_counter_batch_prepares_all_columns_before_query_building(
     assert_eq!(prepared.candidate_last_used_at_unix_secs, Some(10));
     assert_eq!(prepared.removed_last_used_at_unix_secs, Some(11));
     assert_eq!(prepared.usage_created_at_unix_secs, Some(12));
-    assert!(super::USAGE_COUNTER_DELTA_INSERT_BATCH_SIZE >= 1_024);
+    const { assert!(super::USAGE_COUNTER_DELTA_INSERT_BATCH_SIZE >= 1_024) };
     assert!(
         super::USAGE_COUNTER_DELTA_INSERT_BATCH_SIZE
             * super::USAGE_COUNTER_DELTA_INSERT_BINDS_PER_ROW
@@ -3816,7 +3816,7 @@ fn first_byte_batch_writes_provider_counter_transitions_in_bulk() {
     assert!(implementation.contains("prepare_first_byte_provider_contribution_transitions"));
     assert!(implementation.contains("insert_usage_counter_deltas_batch_in_tx"));
     assert!(!implementation.contains("enqueue_first_byte_provider_contribution_transition_in_tx"));
-    assert!(super::USAGE_COUNTER_DELTA_INSERT_BATCH_SIZE > 512 * 2);
+    const { assert!(super::USAGE_COUNTER_DELTA_INSERT_BATCH_SIZE > 512 * 2) };
 }
 
 #[test]

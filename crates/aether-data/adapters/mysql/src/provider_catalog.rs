@@ -2326,7 +2326,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn ordinary_key_update_does_not_own_adaptive_runtime_fields() {
+    fn ordinary_key_update_does_not_own_runtime_observation_fields() {
         let sql = super::key_update_sql().to_ascii_lowercase();
         for runtime_assignment in [
             "learned_rpm_limit =",
@@ -2337,8 +2337,17 @@ mod tests {
             "utilization_samples =",
             "last_probe_increase_at =",
             "last_rpm_peak =",
+            "upstream_metadata =",
+            "oauth_invalid_at =",
+            "oauth_invalid_reason =",
+            "status_snapshot =",
+            "health_by_format =",
+            "circuit_breaker_by_format =",
         ] {
-            assert!(!sql.contains(runtime_assignment));
+            assert!(
+                !sql.contains(runtime_assignment),
+                "ordinary key update unexpectedly owns {runtime_assignment}"
+            );
         }
     }
     use sqlx::Execute;

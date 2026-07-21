@@ -1106,7 +1106,8 @@ fn admin_provider_write_uses_specific_local_owners() {
     for pattern in [
         "pub(crate) fn build_admin_fixed_provider_endpoint_record(",
         "admin_endpoint_signature_parts(",
-        "normalize_admin_base_url(template.base_url)?",
+        "normalize_admin_base_url(",
+        "endpoint_template.base_url.unwrap_or(template.base_url),",
     ] {
         assert!(
             write_provider_endpoint.contains(pattern),

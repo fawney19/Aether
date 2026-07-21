@@ -437,6 +437,30 @@ export interface GrokUpstreamMetadata {
   account_user_id?: string | null
 }
 
+export interface GlmCodingPlanUpstreamMetadata {
+  updated_at?: number
+  plan_type?: string | null
+  pool_tier?: string | null
+  token_used_percent?: number | null
+  token_current_usage?: number | null
+  token_usage_limit?: number | null
+  token_5h_used_percent?: number | null
+  token_5h_current_usage?: number | null
+  token_5h_usage_limit?: number | null
+  token_5h_reset_at?: number | null
+  token_weekly_used_percent?: number | null
+  token_weekly_current_usage?: number | null
+  token_weekly_usage_limit?: number | null
+  token_weekly_reset_at?: number | null
+  model_usage?: unknown
+  tool_usage?: unknown
+  quota_limit?: unknown
+  probe_warnings?: Array<{
+    probe?: string | null
+    message?: string | null
+  }> | null
+}
+
 export interface GeminiCliTierMetadata {
   id?: string | null
   tierType?: string | null
@@ -494,6 +518,7 @@ export interface UpstreamMetadata {
   windsurf?: WindsurfUpstreamMetadata
   chatgpt_web?: ChatGPTWebUpstreamMetadata
   grok?: GrokUpstreamMetadata
+  glm_coding_plan?: GlmCodingPlanUpstreamMetadata
   gemini_cli?: GeminiCliUpstreamMetadata
 }
 
@@ -733,7 +758,7 @@ export interface HealthRelatedMonitorResponse {
   related_providers: HealthRelatedMonitor[]
 }
 
-export type ProviderType = 'custom' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro' | 'grok' | 'windsurf' | 'vertex_ai'
+export type ProviderType = 'custom' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro' | 'grok' | 'glm_coding_plan' | 'windsurf' | 'vertex_ai'
 
 export interface ClaudeCodeAdvancedConfig {
   // 会话数量控制：null/undefined 表示不限制

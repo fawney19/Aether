@@ -82,7 +82,7 @@ const props = withDefaults(defineProps<{
   variant: 'desktop',
 })
 
-const CYCLE_METRIC_KEYS: PoolStatsMetricKey[] = ['request_count', 'total_tokens', 'total_cost_usd']
+const DEFAULT_CYCLE_METRIC_KEYS: PoolStatsMetricKey[] = ['request_count', 'total_tokens', 'total_cost_usd']
 const CYCLE_METRIC_LABELS: Record<PoolStatsMetricKey, string> = {
   request_count: '请求',
   total_tokens: 'Token',
@@ -106,12 +106,22 @@ function metricForGroup(
   return group?.metrics.find(metric => metric.key === key) ?? missingMetric(key)
 }
 
+const cycleMetricKeys = computed(() => {
+  const keys: PoolStatsMetricKey[] = []
+  for (const group of props.cycleGroups) {
+    for (const metric of group.metrics) {
+      if (!keys.includes(metric.key)) keys.push(metric.key)
+    }
+  }
+  return keys.length > 0 ? keys : DEFAULT_CYCLE_METRIC_KEYS
+})
+
 const cycleMetricRows = computed(() => {
   const smallGroup = props.cycleGroups.length > 1 ? props.cycleGroups[0] : undefined
   const largeGroup = props.cycleGroups.at(-1)
   if (!largeGroup) return []
 
-  return CYCLE_METRIC_KEYS.map((key) => {
+  return cycleMetricKeys.value.map((key) => {
     const smallMetric = metricForGroup(smallGroup, key)
     const largeMetric = metricForGroup(largeGroup, key)
     const hasComparison = Boolean(smallGroup)

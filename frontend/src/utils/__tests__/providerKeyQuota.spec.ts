@@ -192,6 +192,38 @@ describe('providerKeyQuota', () => {
     }, 'chatgpt_web')).toBe('生图剩余 24/25')
   })
 
+  it('formats GLM Coding Plan token quota windows without MCP rows', () => {
+    expect(getQuotaDisplayText({
+      status_snapshot: {
+        quota: {
+          provider_type: 'glm_coding_plan',
+          code: 'ok',
+          exhausted: false,
+          windows: [
+            {
+              code: 'tokens_5h',
+              scope: 'account',
+              unit: 'tokens',
+              remaining_ratio: 0.75,
+              used_value: 2500,
+              remaining_value: 7500,
+              limit_value: 10000,
+            },
+            {
+              code: 'mcp_monthly',
+              scope: 'account',
+              unit: 'count',
+              remaining_ratio: 0.5,
+              used_value: 5,
+              remaining_value: 5,
+              limit_value: 10,
+            },
+          ],
+        },
+      },
+    }, 'glm_coding_plan')).toBe('5h剩余 75.0% (7500/10000)')
+  })
+
   it('surfaces Windsurf hard account states', () => {
     expect(getQuotaDisplayText({
       status_snapshot: {

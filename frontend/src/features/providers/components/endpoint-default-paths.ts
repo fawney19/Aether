@@ -47,9 +47,10 @@ function baseUrlHasVersionedApiRoot(baseUrl?: string | null): boolean {
   return /\/v\d+(?:beta\d*)?(?:\/|$)/i.test(path)
 }
 
-function isBigModelCodingApiRoot(baseUrl?: string | null): boolean {
+function isGlmCodingApiRoot(baseUrl?: string | null): boolean {
   const parts = parseBaseUrlParts(baseUrl)
-  return parts?.host === 'open.bigmodel.cn' && parts.path === '/api/coding/paas/v4'
+  return (parts?.host === 'open.bigmodel.cn' || parts?.host === 'api.z.ai')
+    && parts.path === '/api/coding/paas/v4'
 }
 
 function isDeepSeekApiRoot(baseUrl?: string | null): boolean {
@@ -73,7 +74,7 @@ function isVertexOpenAiCompatApiRoot(baseUrl?: string | null): boolean {
 function openAiCompatibleBaseIncludesApiRoot(baseUrl?: string | null): boolean {
   return baseUrlEndsWithV1Root(baseUrl)
     || baseUrlHasPathApiRoot(baseUrl)
-    || isBigModelCodingApiRoot(baseUrl)
+    || isGlmCodingApiRoot(baseUrl)
     || isGoogleOpenAiCompatApiRoot(baseUrl)
     || isVertexOpenAiCompatApiRoot(baseUrl)
 }
@@ -131,7 +132,7 @@ function skipsVersionedApiRootDefault(apiFormat: string, baseUrl: string): boole
   }
   return isDeepSeekApiRoot(baseUrl)
     || isCodexUrl(baseUrl)
-    || isBigModelCodingApiRoot(baseUrl)
+    || isGlmCodingApiRoot(baseUrl)
     || isGoogleOpenAiCompatApiRoot(baseUrl)
     || isVertexOpenAiCompatApiRoot(baseUrl)
 }

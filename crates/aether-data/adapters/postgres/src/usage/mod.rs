@@ -2221,9 +2221,11 @@ impl PreparedFirstByteUsage {
     }
 }
 
+type FirstByteUsagePartitions = (Vec<PreparedFirstByteUsage>, Vec<(usize, UpsertUsageRecord)>);
+
 fn partition_first_byte_usages(
     usages: Vec<UpsertUsageRecord>,
-) -> Result<(Vec<PreparedFirstByteUsage>, Vec<(usize, UpsertUsageRecord)>), DataLayerError> {
+) -> Result<FirstByteUsagePartitions, DataLayerError> {
     let mut request_id_counts = BTreeMap::<String, usize>::new();
     for usage in &usages {
         *request_id_counts

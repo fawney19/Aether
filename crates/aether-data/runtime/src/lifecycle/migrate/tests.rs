@@ -109,6 +109,8 @@ impl ManagedPostgresServer {
             .arg(&data_dir)
             .arg("-h")
             .arg("127.0.0.1")
+            .arg("-k")
+            .arg(&workdir)
             .arg("-p")
             .arg(port.to_string())
             .arg("-F")
@@ -133,7 +135,17 @@ impl ManagedPostgresServer {
         if let Err(err) = wait_for_postgres(&database_url).await {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(err);
+            let postgres_log = std::fs::read_to_string(&log_path).unwrap_or_else(|log_err| {
+                format!(
+                    "failed to read postgres log at {}: {log_err}",
+                    log_path.display()
+                )
+            });
+            return Err(std::io::Error::other(format!(
+                "{err}\npostgres log at {}:\n{postgres_log}",
+                log_path.display()
+            ))
+            .into());
         }
 
         Ok(Self {

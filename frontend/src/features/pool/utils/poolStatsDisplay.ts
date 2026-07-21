@@ -7,19 +7,22 @@ export type PoolStatsMetricKey = 'request_count' | 'total_tokens' | 'total_cost_
 export type PoolStatsDisplayKind = 'account_total' | 'codex_cycle'
 export type PoolCodexCycleWindowCode = string
 
+interface PoolStatsQuotaWindowInput {
+  code?: string | null
+  label?: string | null
+  scope?: string | null
+  window_minutes?: number | null
+  unit?: string | null
+  usage?: QuotaWindowUsageSnapshot | null
+}
+
 export interface PoolStatsKeyInput {
   request_count?: number | null
   total_tokens?: number | null
   total_cost_usd?: number | string | null
   status_snapshot?: {
     quota?: {
-      windows?: Array<{
-        code?: string | null
-        label?: string | null
-        scope?: string | null
-        window_minutes?: number | null
-        usage?: QuotaWindowUsageSnapshot | null
-      } | null> | null
+      windows?: Array<PoolStatsQuotaWindowInput | null> | null
     } | null
   } | null
 }
@@ -54,6 +57,10 @@ const MISSING_STAT_VALUE = '—'
 
 export function isCodexProviderType(providerType: string | null | undefined): boolean {
   return String(providerType || '').trim().toLowerCase() === 'codex'
+}
+
+export function isGlmCodingPlanProviderType(providerType: string | null | undefined): boolean {
+  return String(providerType || '').trim().toLowerCase() === 'glm_coding_plan'
 }
 
 export function formatPoolStatInteger(value: number | null | undefined): string {
@@ -117,6 +124,17 @@ function createMetric(
 
 function normalizeWindowCode(value: unknown): string {
   return String(value || '').trim().toLowerCase()
+}
+
+function getQuotaWindowByCodes(
+  key: PoolStatsKeyInput,
+  codes: readonly string[],
+): PoolStatsQuotaWindowInput | null {
+  const windows = key.status_snapshot?.quota?.windows
+  if (!Array.isArray(windows)) return null
+
+  const normalizedCodes = new Set(codes.map(normalizeWindowCode))
+  return windows.find(item => normalizedCodes.has(normalizeWindowCode(item?.code))) ?? null
 }
 
 function getCodexCycleStatsGroups(key: PoolStatsKeyInput): PoolCodexCycleStatsGroup[] {
@@ -187,6 +205,13 @@ function buildCycleMetrics(usage: QuotaWindowUsageSnapshot | null): PoolStatsMet
   ]
 }
 
+function buildOfficialUsageMetrics(usage: QuotaWindowUsageSnapshot | null): PoolStatsMetric[] {
+  return [
+    createMetric('request_count', '请求', formatCycleInteger(usage?.request_count)),
+    createMetric('total_tokens', 'Token', formatCycleTokenCount(usage?.total_tokens)),
+  ]
+}
+
 export function buildAccountTotalStatsDisplay(
   key: PoolStatsKeyInput,
 ): PoolAccountTotalStatsDisplay {
@@ -205,11 +230,38 @@ export function buildCodexCycleStatsDisplay(
   }
 }
 
+export function buildGlmCodingPlanStatsDisplay(
+  key: PoolStatsKeyInput,
+): PoolCodexCycleStatsDisplay {
+  const fiveHWindow = getQuotaWindowByCodes(key, ['tokens_5h', '5h'])
+  const weeklyWindow = getQuotaWindowByCodes(key, ['tokens_weekly', 'weekly'])
+
+  return {
+    kind: 'codex_cycle',
+    groups: [
+      {
+        code: '5h',
+        label: '5h',
+        metrics: buildOfficialUsageMetrics(fiveHWindow?.usage ?? null),
+      },
+      {
+        code: 'weekly',
+        label: '周',
+        metrics: buildOfficialUsageMetrics(weeklyWindow?.usage ?? null),
+      },
+    ],
+  }
+}
+
 export function buildPoolStatsDisplay(
   key: PoolStatsKeyInput,
   providerType: string | null | undefined,
   mode: PoolManagementStatsMode,
 ): PoolStatsDisplay {
+  if (isGlmCodingPlanProviderType(providerType)) {
+    return buildGlmCodingPlanStatsDisplay(key)
+  }
+
   if (isCodexProviderType(providerType) && mode === 'current_cycle') {
     return buildCodexCycleStatsDisplay(key)
   }

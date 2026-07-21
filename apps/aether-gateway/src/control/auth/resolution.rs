@@ -86,8 +86,6 @@ pub(crate) struct GatewayControlAuthContext {
     #[serde(skip)]
     pub(crate) api_key_is_standalone: bool,
     #[serde(skip)]
-    pub(crate) admin_bypass_limits: bool,
-    #[serde(skip)]
     pub(crate) local_rejection: Option<GatewayLocalAuthRejection>,
     #[serde(skip)]
     pub(crate) allowed_models: Option<Vec<String>>,
@@ -923,7 +921,6 @@ pub(super) async fn resolve_data_backed_auth_context(
                     user_rate_limit: None,
                     api_key_rate_limit: None,
                     api_key_is_standalone: false,
-                    admin_bypass_limits: false,
                     local_rejection: Some(GatewayLocalAuthRejection::InvalidApiKey),
                     allowed_models: None,
                     ip_rules: None,
@@ -1036,7 +1033,6 @@ async fn resolve_antigravity_bearer_bridge_auth_context(
             user_rate_limit: None,
             api_key_rate_limit: None,
             api_key_is_standalone: false,
-            admin_bypass_limits: false,
             local_rejection: Some(GatewayLocalAuthRejection::InvalidApiKey),
             allowed_models: None,
             ip_rules: None,
@@ -1095,7 +1091,6 @@ async fn resolve_trusted_auth_context(
             user_rate_limit: None,
             api_key_rate_limit: None,
             api_key_is_standalone: false,
-            admin_bypass_limits: false,
             local_rejection: Some(GatewayLocalAuthRejection::InvalidApiKey),
             allowed_models: None,
             ip_rules: None,
@@ -1192,8 +1187,6 @@ async fn build_data_backed_auth_context(
         user_rate_limit: snapshot.user_rate_limit,
         api_key_rate_limit: snapshot.api_key_rate_limit,
         api_key_is_standalone: snapshot.api_key_is_standalone,
-        admin_bypass_limits: snapshot.user_role.eq_ignore_ascii_case("admin")
-            && !snapshot.api_key_is_standalone,
         local_rejection,
         allowed_models,
         ip_rules: snapshot.api_key_ip_rules,
@@ -1420,6 +1413,9 @@ mod tests {
     use crate::control::auth::credentials::{build_auth_context_cache_key, hash_api_key};
     use crate::control::GatewayControlDecision;
     use crate::data::{GatewayDataConfig, GatewayDataState};
+    use crate::rate_limit::{
+        FrontdoorUserRpmConfig, FrontdoorUserRpmLimiter, FrontdoorUserRpmOutcome,
+    };
     use crate::AppState;
 
     fn sample_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
@@ -1739,6 +1735,69 @@ mod tests {
         .expect("auth context should exist");
         assert_eq!(second.api_key_id, "key-1");
         assert_eq!(repository.touch_count("key-1"), 1);
+    }
+
+    #[tokio::test]
+    async fn data_backed_admin_user_key_applies_frontdoor_rate_limits() {
+        let api_key = "sk-admin-rate-limited";
+        let mut snapshot = sample_snapshot("key-admin-rate-limited", "admin-rate-limited")
+            .with_user_rate_limit(Some(1));
+        snapshot.user_role = "admin".to_string();
+        snapshot.api_key_rate_limit = Some(10);
+        let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some(hash_api_key(api_key)),
+            snapshot,
+        )]));
+        let data = GatewayDataState::with_auth_api_key_repository_for_tests(repository);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            format!("Bearer {api_key}").parse().unwrap(),
+        );
+
+        let auth_context = resolve_data_backed_auth_context(
+            &state,
+            &headers,
+            &uri("/v1/chat/completions"),
+            Some("openai:chat"),
+        )
+        .await
+        .expect("auth resolution should succeed")
+        .expect("auth context should exist");
+        assert_eq!(auth_context.user_rate_limit, Some(1));
+        assert_eq!(auth_context.api_key_rate_limit, Some(10));
+
+        let mut decision = GatewayControlDecision::synthetic(
+            "/v1/chat/completions",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+        );
+        decision.auth_context = Some(auth_context);
+        let limiter = FrontdoorUserRpmLimiter::new(FrontdoorUserRpmConfig::new(60, 120, false));
+
+        assert_eq!(
+            limiter
+                .check_and_consume(&state, Some(&decision))
+                .await
+                .expect("first rate-limit check should succeed"),
+            FrontdoorUserRpmOutcome::Allowed
+        );
+        match limiter
+            .check_and_consume(&state, Some(&decision))
+            .await
+            .expect("second rate-limit check should succeed")
+        {
+            FrontdoorUserRpmOutcome::Rejected(rejection) => {
+                assert_eq!(rejection.scope, "user");
+                assert_eq!(rejection.limit, 1);
+            }
+            other => panic!("expected user rate-limit rejection, got {other:?}"),
+        }
     }
 
     #[tokio::test]

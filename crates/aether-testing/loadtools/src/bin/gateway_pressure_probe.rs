@@ -2349,8 +2349,9 @@ fn missing_required_settle_drain_metrics(samples: &[PrometheusSample]) -> Vec<St
     REQUIRED_SETTLE_DRAIN_METRICS
         .iter()
         .filter(|metric_name| {
-            !(**metric_name == "upstream_target_gate_in_flight" && inactive_gate_omits_in_flight)
-                && !metric_is_available(samples, metric_name)
+            !(metric_is_available(samples, metric_name)
+                || (**metric_name == "upstream_target_gate_in_flight"
+                    && inactive_gate_omits_in_flight))
         })
         .map(|metric_name| (*metric_name).to_string())
         .collect()

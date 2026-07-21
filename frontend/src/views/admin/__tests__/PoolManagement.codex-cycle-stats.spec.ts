@@ -647,6 +647,78 @@ describe('PoolManagement Codex cycle stats mode', () => {
     expect(root.textContent).not.toContain('总计')
   })
 
+  it('renders GLM Coding Plan quota and official token usage without MCP or cost rows', async () => {
+    const glmKey = createPoolKey('glm_coding_plan', {
+      request_count: 9999,
+      total_tokens: 999999999,
+      total_cost_usd: '999.99',
+      status_snapshot: {
+        oauth: { code: 'none' },
+        account: { code: 'ok', blocked: false },
+        quota: {
+          code: 'ok',
+          exhausted: false,
+          provider_type: 'glm_coding_plan',
+          updated_at: 1_700_000_000,
+          windows: [
+            {
+              code: 'tokens_5h',
+              label: '5h',
+              scope: 'account',
+              unit: 'tokens',
+              remaining_ratio: 0.36,
+              remaining_value: 3600,
+              limit_value: 10000,
+              reset_seconds: 3600,
+              usage: {
+                request_count: 90,
+                total_tokens: 3718682,
+              },
+            },
+            {
+              code: 'tokens_weekly',
+              label: '周',
+              scope: 'account',
+              unit: 'tokens',
+              remaining_ratio: 0.64,
+              remaining_value: 640000,
+              limit_value: 1000000,
+              usage: {
+                request_count: 7357,
+                total_tokens: 490408764,
+              },
+            },
+            {
+              code: 'mcp_monthly',
+              label: 'MCP',
+              scope: 'account',
+              unit: 'count',
+              remaining_ratio: 0.5,
+              remaining_value: 5,
+              limit_value: 10,
+            },
+          ],
+        },
+      },
+    })
+    endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('glm_coding_plan')] })
+    endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(glmKey))
+    endpointMocks.getProvider.mockResolvedValue(createProvider('glm_coding_plan'))
+
+    const root = mountPoolManagement()
+    await settle()
+
+    expect(root.querySelector('[data-testid="pool-stats-mode-control"]')).toBeNull()
+    expect(root.querySelector('[data-testid="pool-stats-cycle-request_count"]')?.textContent?.trim()).toBe('90/7,357')
+    expect(root.querySelector('[data-testid="pool-stats-cycle-total_tokens"]')?.textContent?.trim()).toBe('3.7M/490.4M')
+    expect(root.querySelector('[data-testid="pool-stats-cycle-total_cost_usd"]')).toBeNull()
+    expect(root.textContent).toContain('5h')
+    expect(root.textContent).toContain('周')
+    expect(root.textContent).toContain('36.0%')
+    expect(root.textContent).not.toContain('MCP')
+    expect(root.textContent).not.toContain('$999.99')
+  })
+
   it('renders unified pool score in the key list with a calculation entry point', async () => {
     const scoredKey = createPoolKey('codex', {
       pool_score: {

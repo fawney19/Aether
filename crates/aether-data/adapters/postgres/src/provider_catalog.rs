@@ -3235,6 +3235,8 @@ mod tests {
             "last_probe_increase_at =",
             "last_rpm_peak =",
             "upstream_metadata =",
+            "oauth_invalid_at =",
+            "oauth_invalid_reason =",
             "status_snapshot =",
             "health_by_format =",
             "circuit_breaker_by_format =",

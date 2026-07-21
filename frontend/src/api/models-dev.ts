@@ -89,7 +89,7 @@ export interface ModelsDevModelItem {
   supportsEmbedding?: boolean
   openWeights?: boolean
   deprecated?: boolean
-  official?: boolean // 是否来自官方提供商
+  official?: boolean
   // 用于 display_metadata 的额外字段
   knowledgeCutoff?: string
   releaseDate?: string
