@@ -450,12 +450,20 @@ fn evaluate_acceptance(
     metrics: &TunnelMetricsSnapshot,
 ) -> AcceptanceReport {
     let min_success_rate_bps = if config.require_acceptance { 9_950 } else { 1 };
-    let successful_requests = result
+    let successful_statuses = result
         .status_counts
         .iter()
         .filter(|(status, _)| (200u16..300u16).contains(status))
         .map(|(_, count)| *count)
         .sum::<usize>();
+    let responses_received = result.status_counts.values().sum::<usize>();
+    let failures_without_response = result.total_requests.saturating_sub(responses_received);
+    let failures_after_response = result
+        .failed_requests
+        .saturating_sub(failures_without_response);
+    // Body failures now retain their HTTP status in the load report. Use a conservative lower
+    // bound so a truncated 2xx response cannot make tunnel acceptance pass as a success.
+    let successful_requests = successful_statuses.saturating_sub(failures_after_response);
     let success_rate_bps = if result.total_requests == 0 {
         0
     } else {

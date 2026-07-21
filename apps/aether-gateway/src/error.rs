@@ -9,7 +9,7 @@ use crate::ai_serving::AiSurfaceFinalizeError;
 use crate::constants::*;
 use crate::insert_header_if_missing;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum GatewayError {
     UpstreamUnavailable {
         trace_id: String,

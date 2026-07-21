@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method};
-use tokio::sync::Mutex;
 
 use crate::runtime::{BenchmarkRuntimeSampler, BenchmarkRuntimeSnapshot};
 
@@ -22,6 +22,15 @@ const FIRST_BODY_AUTO_CLIENT_SHARDS_MAX_ENV: &str =
 const DEFAULT_FIRST_BODY_BACKGROUND_DRAIN_CHUNKS: usize = 64;
 const DEFAULT_FIRST_BODY_BACKGROUND_DRAIN_MS: u64 = 100;
 const DEFAULT_FIRST_BODY_AUTO_CLIENT_SHARDS_MAX: usize = 512;
+const MAX_SSE_CONTROL_LINE_BYTES: usize = 4 * 1024;
+const SSE_COMPLETION_EVENT_NAMES: &[&str] = &[
+    "response.completed",
+    "response.done",
+    "response.incomplete",
+    "message.completed",
+    "message_stop",
+];
+const SSE_ERROR_EVENT_NAMES: &[&str] = &["error", "response.failed"];
 
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, PartialEq, Eq)]
 pub enum HttpLoadProbeResponseMode {
@@ -29,6 +38,16 @@ pub enum HttpLoadProbeResponseMode {
     HeadersOnly,
     FirstBodyByte,
     FullBody,
+}
+
+/// Optional checks applied while consuming a probe response body.
+///
+/// The default load-probe API keeps its historical behavior. Callers that
+/// exercise an SSE endpoint can opt into protocol-level completion checking
+/// without changing the request configuration shared by existing probes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HttpLoadProbeOptions {
+    pub require_sse_done: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +60,9 @@ pub struct HttpLoadProbeConfig {
     pub body: Option<Vec<u8>>,
     pub total_requests: usize,
     pub concurrency: usize,
+    /// Number of successful warmup requests. For HTTP/2, one request per
+    /// client shard is enough to establish that shard's multiplexed socket;
+    /// this value is intentionally not a promise about TCP connection count.
     pub warmup_connections: usize,
     pub timeout: Duration,
     pub connect_timeout: Option<Duration>,
@@ -138,8 +160,18 @@ pub struct HttpLoadProbeResult {
     pub url: String,
     pub method: String,
     pub response_mode: HttpLoadProbeResponseMode,
+    pub require_sse_done: bool,
     pub total_requests: usize,
     pub concurrency: usize,
+    /// Highest number of requests concurrently owned by the load probe.
+    ///
+    /// This is a client-side measurement. It proves how many request tasks
+    /// remained in flight (including response-body draining), but it does not
+    /// by itself prove that the gateway admitted the same number.
+    pub max_in_flight_requests: usize,
+    /// Number of successful warmup requests. For HTTP/2, one request per
+    /// client shard is enough to establish that shard's multiplexed socket;
+    /// this value is intentionally not a promise about TCP connection count.
     pub warmup_connections: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warmup_url: Option<String>,
@@ -189,8 +221,15 @@ pub struct MultiUrlHttpLoadProbeResult {
     pub target_request_counts: BTreeMap<String, usize>,
     pub method: String,
     pub response_mode: HttpLoadProbeResponseMode,
+    pub require_sse_done: bool,
     pub total_requests: usize,
     pub concurrency: usize,
+    /// Highest number of requests concurrently owned by the load probe.
+    ///
+    /// This is a client-side measurement. It proves how many request tasks
+    /// remained in flight (including response-body draining), but it does not
+    /// by itself prove that the gateway admitted the same number.
+    pub max_in_flight_requests: usize,
     pub warmup_connections: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warmup_url: Option<String>,
@@ -234,11 +273,33 @@ pub struct MultiUrlHttpLoadProbeResult {
     pub non_success_status_samples: Vec<HttpLoadProbeStatusSample>,
 }
 
+#[derive(Debug, Default)]
+struct ProbeWorkerStats {
+    latencies_ms: Vec<u64>,
+    header_latencies_ms: Vec<u64>,
+    first_body_latencies_ms: Vec<u64>,
+    status_counts: BTreeMap<u16, usize>,
+    error_counts: BTreeMap<String, usize>,
+    error_samples: Vec<HttpLoadProbeErrorSample>,
+    non_success_status_samples: Vec<HttpLoadProbeStatusSample>,
+    target_request_counts: BTreeMap<String, usize>,
+    failed_requests: usize,
+    completed_requests: usize,
+}
+
 pub async fn run_http_load_probe(
     config: &HttpLoadProbeConfig,
 ) -> Result<HttpLoadProbeResult, String> {
+    run_http_load_probe_with_options(config, HttpLoadProbeOptions::default()).await
+}
+
+pub async fn run_http_load_probe_with_options(
+    config: &HttpLoadProbeConfig,
+    options: HttpLoadProbeOptions,
+) -> Result<HttpLoadProbeResult, String> {
     config.validate()?;
-    run_http_load_probe_against_urls(config, std::slice::from_ref(&config.url))
+    validate_probe_options(config, options)?;
+    run_http_load_probe_against_urls(config, std::slice::from_ref(&config.url), options)
         .await
         .map(|result| HttpLoadProbeResult {
             url: result
@@ -248,8 +309,10 @@ pub async fn run_http_load_probe(
                 .unwrap_or_else(|| config.url.clone()),
             method: result.method,
             response_mode: result.response_mode,
+            require_sse_done: result.require_sse_done,
             total_requests: result.total_requests,
             concurrency: result.concurrency,
+            max_in_flight_requests: result.max_in_flight_requests,
             warmup_connections: result.warmup_connections,
             warmup_url: result.warmup_url,
             client_shards: result.client_shards,
@@ -287,23 +350,48 @@ pub async fn run_multi_url_http_load_probe(
     config: &HttpLoadProbeConfig,
     urls: &[String],
 ) -> Result<MultiUrlHttpLoadProbeResult, String> {
+    run_multi_url_http_load_probe_with_options(config, urls, HttpLoadProbeOptions::default()).await
+}
+
+pub async fn run_multi_url_http_load_probe_with_options(
+    config: &HttpLoadProbeConfig,
+    urls: &[String],
+    options: HttpLoadProbeOptions,
+) -> Result<MultiUrlHttpLoadProbeResult, String> {
     config.validate()?;
+    validate_probe_options(config, options)?;
     if urls.is_empty() {
         return Err("multi-url load probe requires at least one target url".to_string());
     }
-    run_http_load_probe_against_urls(config, urls).await
+    run_http_load_probe_against_urls(config, urls, options).await
+}
+
+fn validate_probe_options(
+    config: &HttpLoadProbeConfig,
+    options: HttpLoadProbeOptions,
+) -> Result<(), String> {
+    if options.require_sse_done && config.response_mode != HttpLoadProbeResponseMode::FullBody {
+        return Err(
+            "load probe --require-sse-done requires --response-mode full so the body can be consumed"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 async fn run_http_load_probe_against_urls(
     config: &HttpLoadProbeConfig,
     urls: &[String],
+    options: HttpLoadProbeOptions,
 ) -> Result<MultiUrlHttpLoadProbeResult, String> {
     let effective_client_shards = effective_probe_client_shards(config);
     let clients = Arc::new(build_probe_clients(config, effective_client_shards)?);
+    let target_urls = Arc::new(urls.to_vec());
     let total_requests = config.total_requests;
     let request_headers = build_request_header_sets(config)?;
-    let request_body = config.body.clone().map(Arc::new);
+    let request_body = config.body.clone().map(Bytes::from);
     let response_mode = config.response_mode;
+    let require_sse_done = options.require_sse_done;
     let first_body_hold = config.first_body_hold;
     let start_ramp = config.start_ramp;
     warmup_probe_connections(config, Arc::clone(&clients)).await?;
@@ -311,38 +399,23 @@ async fn run_http_load_probe_against_urls(
     let started_at = Instant::now();
 
     let next_request = Arc::new(AtomicUsize::new(0));
-    let latencies_ms = Arc::new(Mutex::new(Vec::with_capacity(config.total_requests)));
-    let header_latencies_ms = Arc::new(Mutex::new(Vec::with_capacity(config.total_requests)));
-    let first_body_latencies_ms = Arc::new(Mutex::new(Vec::with_capacity(config.total_requests)));
-    let status_counts = Arc::new(Mutex::new(BTreeMap::<u16, usize>::new()));
-    let error_counts = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
-    let error_samples = Arc::new(Mutex::new(Vec::<HttpLoadProbeErrorSample>::new()));
-    let non_success_status_samples = Arc::new(Mutex::new(Vec::<HttpLoadProbeStatusSample>::new()));
-    let target_request_counts = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
-    let failed_requests = Arc::new(AtomicUsize::new(0));
-    let completed_requests = Arc::new(AtomicUsize::new(0));
+    let in_flight_requests = Arc::new(AtomicUsize::new(0));
+    let max_in_flight_requests = Arc::new(AtomicUsize::new(0));
 
     let mut workers = tokio::task::JoinSet::new();
     for worker_index in 0..config.concurrency {
         let client = clients[worker_index % clients.len()].clone();
         let next_request = Arc::clone(&next_request);
-        let latencies_ms = Arc::clone(&latencies_ms);
-        let header_latencies_ms = Arc::clone(&header_latencies_ms);
-        let first_body_latencies_ms = Arc::clone(&first_body_latencies_ms);
-        let status_counts = Arc::clone(&status_counts);
-        let error_counts = Arc::clone(&error_counts);
-        let error_samples = Arc::clone(&error_samples);
-        let non_success_status_samples = Arc::clone(&non_success_status_samples);
-        let target_request_counts = Arc::clone(&target_request_counts);
-        let failed_requests = Arc::clone(&failed_requests);
-        let completed_requests = Arc::clone(&completed_requests);
+        let in_flight_requests = Arc::clone(&in_flight_requests);
+        let max_in_flight_requests = Arc::clone(&max_in_flight_requests);
         let method = config.method.clone();
-        let urls = urls.to_vec();
+        let urls = Arc::clone(&target_urls);
         let request_headers = Arc::clone(&request_headers);
         let request_body = request_body.clone();
         let start_delay = worker_start_delay(start_ramp, worker_index, config.concurrency);
 
         workers.spawn(async move {
+            let mut stats = ProbeWorkerStats::default();
             if !start_delay.is_zero() {
                 tokio::time::sleep(start_delay).await;
             }
@@ -352,6 +425,8 @@ async fn run_http_load_probe_against_urls(
                     break;
                 }
 
+                let current_in_flight = in_flight_requests.fetch_add(1, Ordering::AcqRel) + 1;
+                max_in_flight_requests.fetch_max(current_in_flight, Ordering::AcqRel);
                 let started_at = Instant::now();
                 let url = urls[current % urls.len()].clone();
                 let mut request = client.request(method.clone(), &url);
@@ -360,96 +435,99 @@ async fn run_http_load_probe_against_urls(
                     request = request.header(name, value);
                 }
                 if let Some(body) = request_body.as_ref() {
-                    request = request.body(body.as_ref().clone());
+                    request = request.body(body.clone());
                 }
                 match request.send().await {
                     Ok(response) => {
                         let headers_latency_ms = started_at.elapsed().as_millis() as u64;
                         let status = response.status().as_u16();
+                        // Count the HTTP response before consuming its body. A stream can
+                        // terminate at the protocol layer while still having a valid 2xx status.
+                        *stats.status_counts.entry(status).or_insert(0) += 1;
                         let body_result = observe_response_body(
                             response,
                             response_mode,
                             started_at,
                             first_body_hold,
+                            require_sse_done && (200..300).contains(&status),
                         )
                         .await;
                         match body_result {
                             Err(error) => {
-                                failed_requests.fetch_add(1, Ordering::AcqRel);
+                                stats.failed_requests += 1;
                                 record_load_error(
-                                    &error_counts,
-                                    &error_samples,
+                                    &mut stats.error_counts,
+                                    &mut stats.error_samples,
                                     current,
                                     &url,
                                     started_at.elapsed().as_millis() as u64,
                                     error,
-                                )
-                                .await;
+                                );
                             }
                             Ok(observation) => {
                                 if !(200..300).contains(&status) {
                                     record_non_success_status_sample(
-                                        &non_success_status_samples,
+                                        &mut stats.non_success_status_samples,
                                         current,
                                         &url,
                                         status,
                                         started_at.elapsed().as_millis() as u64,
                                         observation.body_sample.as_deref().unwrap_or_default(),
-                                    )
-                                    .await;
+                                    );
                                 }
-                                let mut counts = status_counts.lock().await;
-                                *counts.entry(status).or_insert(0) += 1;
-                                drop(counts);
-                                let mut target_counts = target_request_counts.lock().await;
-                                *target_counts.entry(url).or_insert(0) += 1;
+                                *stats.target_request_counts.entry(url).or_insert(0) += 1;
                                 if let Some(first_body_latency_ms) =
                                     observation.first_body_latency_ms
                                 {
-                                    first_body_latencies_ms
-                                        .lock()
-                                        .await
-                                        .push(first_body_latency_ms);
+                                    stats.first_body_latencies_ms.push(first_body_latency_ms);
                                 }
                             }
                         }
                         let latency_ms = started_at.elapsed().as_millis() as u64;
-                        latencies_ms.lock().await.push(latency_ms);
-                        header_latencies_ms.lock().await.push(headers_latency_ms);
-                        completed_requests.fetch_add(1, Ordering::AcqRel);
+                        stats.latencies_ms.push(latency_ms);
+                        stats.header_latencies_ms.push(headers_latency_ms);
+                        stats.completed_requests += 1;
                     }
                     Err(err) => {
                         let latency_ms = started_at.elapsed().as_millis() as u64;
-                        latencies_ms.lock().await.push(latency_ms);
-                        failed_requests.fetch_add(1, Ordering::AcqRel);
+                        stats.latencies_ms.push(latency_ms);
+                        stats.failed_requests += 1;
                         record_load_error(
-                            &error_counts,
-                            &error_samples,
+                            &mut stats.error_counts,
+                            &mut stats.error_samples,
                             current,
                             &url,
                             latency_ms,
                             classify_reqwest_error("send", &err),
-                        )
-                        .await;
-                        completed_requests.fetch_add(1, Ordering::AcqRel);
+                        );
+                        stats.completed_requests += 1;
                     }
                 }
+                in_flight_requests.fetch_sub(1, Ordering::AcqRel);
             }
+            stats
         });
     }
 
+    let mut aggregate = ProbeWorkerStats::default();
     while let Some(result) = workers.join_next().await {
-        result.map_err(|err| format!("load probe worker task failed: {err}"))?;
+        let worker = result.map_err(|err| format!("load probe worker task failed: {err}"))?;
+        merge_probe_worker_stats(&mut aggregate, worker);
     }
 
-    let status_counts = status_counts.lock().await.clone();
-    let error_counts = error_counts.lock().await.clone();
-    let error_samples = error_samples.lock().await.clone();
-    let non_success_status_samples = non_success_status_samples.lock().await.clone();
-    let target_request_counts = target_request_counts.lock().await.clone();
-    let mut latencies = latencies_ms.lock().await.clone();
-    let mut header_latencies = header_latencies_ms.lock().await.clone();
-    let mut first_body_latencies = first_body_latencies_ms.lock().await.clone();
+    let ProbeWorkerStats {
+        mut latencies_ms,
+        header_latencies_ms: mut header_latencies,
+        first_body_latencies_ms: mut first_body_latencies,
+        status_counts,
+        error_counts,
+        error_samples,
+        non_success_status_samples,
+        target_request_counts,
+        failed_requests,
+        completed_requests,
+    } = aggregate;
+    let mut latencies = std::mem::take(&mut latencies_ms);
     latencies.sort_unstable();
     header_latencies.sort_unstable();
     first_body_latencies.sort_unstable();
@@ -460,9 +538,9 @@ async fn run_http_load_probe_against_urls(
         summarize_latencies(&first_body_latencies);
     let duration_ms = started_at.elapsed().as_millis() as u64;
     let throughput_rps = if duration_ms == 0 {
-        completed_requests.load(Ordering::Acquire) as u64
+        completed_requests as u64
     } else {
-        ((completed_requests.load(Ordering::Acquire) as u64) * 1_000) / duration_ms.max(1)
+        ((completed_requests as u64) * 1_000) / duration_ms.max(1)
     };
 
     Ok(MultiUrlHttpLoadProbeResult {
@@ -470,8 +548,10 @@ async fn run_http_load_probe_against_urls(
         target_request_counts,
         method: config.method.as_str().to_string(),
         response_mode: config.response_mode,
+        require_sse_done,
         total_requests: config.total_requests,
         concurrency: config.concurrency,
+        max_in_flight_requests: max_in_flight_requests.load(Ordering::Acquire),
         warmup_connections: config.warmup_connections,
         warmup_url: config.warmup_url.clone(),
         client_shards: effective_client_shards,
@@ -487,8 +567,8 @@ async fn run_http_load_probe_against_urls(
         duration_ms,
         throughput_rps,
         p99_ms,
-        completed_requests: completed_requests.load(Ordering::Acquire),
-        failed_requests: failed_requests.load(Ordering::Acquire),
+        completed_requests,
+        failed_requests,
         p50_ms,
         p95_ms,
         max_ms,
@@ -572,20 +652,17 @@ async fn warmup_probe_connections(
         return Ok(());
     }
     let warmup_url = config.warmup_url.as_deref().unwrap_or(config.url.as_str());
-    let next_request = Arc::new(AtomicUsize::new(0));
     let mut workers = tokio::task::JoinSet::new();
-    let concurrency = config.concurrency.min(config.warmup_connections).max(1);
-    for worker_index in 0..concurrency {
-        let client = clients[worker_index % clients.len()].clone();
-        let next_request = Arc::clone(&next_request);
+    let used_client_count = clients.len().min(config.concurrency);
+    for (client_index, requests) in
+        warmup_request_distribution(used_client_count, config.warmup_connections)
+            .into_iter()
+            .enumerate()
+    {
+        let client = clients[client_index].clone();
         let warmup_url = warmup_url.to_string();
-        let total = config.warmup_connections;
         workers.spawn(async move {
-            loop {
-                let current = next_request.fetch_add(1, Ordering::AcqRel);
-                if current >= total {
-                    break;
-                }
+            for _ in 0..requests {
                 let response = client
                     .get(&warmup_url)
                     .send()
@@ -610,6 +687,18 @@ async fn warmup_probe_connections(
     Ok(())
 }
 
+fn warmup_request_distribution(client_count: usize, total_requests: usize) -> Vec<usize> {
+    if client_count == 0 || total_requests == 0 {
+        return Vec::new();
+    }
+    let shard_count = client_count.min(total_requests);
+    let requests_per_shard = total_requests / shard_count;
+    let shards_with_extra_request = total_requests % shard_count;
+    (0..shard_count)
+        .map(|index| requests_per_shard + usize::from(index < shards_with_extra_request))
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClassifiedLoadError {
     key: String,
@@ -631,21 +720,62 @@ impl ClassifiedLoadError {
     }
 }
 
-async fn record_load_error(
-    error_counts: &Arc<Mutex<BTreeMap<String, usize>>>,
-    error_samples: &Arc<Mutex<Vec<HttpLoadProbeErrorSample>>>,
+fn merge_probe_worker_stats(target: &mut ProbeWorkerStats, mut source: ProbeWorkerStats) {
+    target.latencies_ms.append(&mut source.latencies_ms);
+    target
+        .header_latencies_ms
+        .append(&mut source.header_latencies_ms);
+    target
+        .first_body_latencies_ms
+        .append(&mut source.first_body_latencies_ms);
+    merge_counts(&mut target.status_counts, source.status_counts);
+    merge_counts(&mut target.error_counts, source.error_counts);
+    merge_counts(
+        &mut target.target_request_counts,
+        source.target_request_counts,
+    );
+    append_bounded(
+        &mut target.error_samples,
+        source.error_samples,
+        MAX_ERROR_SAMPLES,
+    );
+    append_bounded(
+        &mut target.non_success_status_samples,
+        source.non_success_status_samples,
+        MAX_STATUS_SAMPLES,
+    );
+    target.failed_requests = target
+        .failed_requests
+        .saturating_add(source.failed_requests);
+    target.completed_requests = target
+        .completed_requests
+        .saturating_add(source.completed_requests);
+}
+
+fn merge_counts<K: Ord>(target: &mut BTreeMap<K, usize>, source: BTreeMap<K, usize>) {
+    for (key, count) in source {
+        let current = target.entry(key).or_insert(0);
+        *current = current.saturating_add(count);
+    }
+}
+
+fn append_bounded<T>(target: &mut Vec<T>, source: Vec<T>, limit: usize) {
+    let remaining = limit.saturating_sub(target.len());
+    target.extend(source.into_iter().take(remaining));
+}
+
+fn record_load_error(
+    error_counts: &mut BTreeMap<String, usize>,
+    error_samples: &mut Vec<HttpLoadProbeErrorSample>,
     request_index: usize,
     url: &str,
     elapsed_ms: u64,
     error: ClassifiedLoadError,
 ) {
-    let mut counts = error_counts.lock().await;
-    *counts.entry(error.key).or_insert(0) += 1;
-    drop(counts);
+    *error_counts.entry(error.key).or_insert(0) += 1;
 
-    let mut samples = error_samples.lock().await;
-    if samples.len() < MAX_ERROR_SAMPLES {
-        samples.push(HttpLoadProbeErrorSample {
+    if error_samples.len() < MAX_ERROR_SAMPLES {
+        error_samples.push(HttpLoadProbeErrorSample {
             request_index,
             url: url.to_string(),
             phase: error.phase,
@@ -657,17 +787,16 @@ async fn record_load_error(
     }
 }
 
-async fn record_non_success_status_sample(
-    non_success_status_samples: &Arc<Mutex<Vec<HttpLoadProbeStatusSample>>>,
+fn record_non_success_status_sample(
+    non_success_status_samples: &mut Vec<HttpLoadProbeStatusSample>,
     request_index: usize,
     url: &str,
     status: u16,
     elapsed_ms: u64,
     body: &str,
 ) {
-    let mut samples = non_success_status_samples.lock().await;
-    if samples.len() < MAX_STATUS_SAMPLES {
-        samples.push(HttpLoadProbeStatusSample {
+    if non_success_status_samples.len() < MAX_STATUS_SAMPLES {
+        non_success_status_samples.push(HttpLoadProbeStatusSample {
             request_index,
             url: url.to_string(),
             status,
@@ -707,6 +836,26 @@ fn classify_reqwest_error(phase: &str, err: &reqwest::Error) -> ClassifiedLoadEr
     }
 }
 
+fn classify_incomplete_sse(body_error: Option<&reqwest::Error>) -> ClassifiedLoadError {
+    let mut incomplete = ClassifiedLoadError::static_body(
+        "sse_incomplete",
+        "SSE response body ended without [DONE] or a recognized completion event",
+    );
+    if let Some(body_error) = body_error {
+        let body_error = classify_reqwest_error("body", body_error);
+        incomplete.message = format!("{}: {}", incomplete.message, body_error.message);
+        incomplete.source = body_error.source;
+    }
+    incomplete
+}
+
+fn classify_sse_error() -> ClassifiedLoadError {
+    ClassifiedLoadError::static_body(
+        "sse_error",
+        "SSE response body contained an in-band error event",
+    )
+}
+
 fn error_source_chain(err: &(dyn StdError + 'static), max_chars: usize) -> Option<String> {
     let mut sources = Vec::new();
     let mut next = err.source();
@@ -738,6 +887,7 @@ async fn observe_response_body(
     response_mode: HttpLoadProbeResponseMode,
     started_at: Instant,
     first_body_hold: Duration,
+    require_sse_done: bool,
 ) -> Result<BodyObservation, ClassifiedLoadError> {
     match response_mode {
         HttpLoadProbeResponseMode::HeadersOnly => Ok(BodyObservation::default()),
@@ -766,21 +916,45 @@ async fn observe_response_body(
         HttpLoadProbeResponseMode::FullBody => {
             let mut first_body_latency_ms = None;
             let mut body_sample = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|err| classify_reqwest_error("body", &err))?
-            {
+            let mut sse_completion = SseCompletionDetector::default();
+            loop {
+                let chunk = match response.chunk().await {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(err) => {
+                        if require_sse_done {
+                            if sse_completion.has_error() {
+                                return Err(classify_sse_error());
+                            }
+                            if first_body_latency_ms.is_some() && !sse_completion.is_complete() {
+                                return Err(classify_incomplete_sse(Some(&err)));
+                            }
+                        }
+                        return Err(classify_reqwest_error("body", &err));
+                    }
+                };
                 if first_body_latency_ms.is_none() {
                     first_body_latency_ms = Some(started_at.elapsed().as_millis() as u64);
                 }
+                if require_sse_done {
+                    sse_completion.observe(&chunk);
+                }
                 append_body_sample(&mut body_sample, &chunk, MAX_STATUS_SAMPLE_BODY_CHARS);
             }
+            sse_completion.finish();
             if first_body_latency_ms.is_none() {
                 return Err(ClassifiedLoadError::static_body(
                     "empty_body",
                     "response body ended before the first chunk",
                 ));
+            }
+            if require_sse_done {
+                if sse_completion.has_error() {
+                    return Err(classify_sse_error());
+                }
+                if !sse_completion.is_complete() {
+                    return Err(classify_incomplete_sse(None));
+                }
             }
             Ok(BodyObservation {
                 first_body_latency_ms,
@@ -788,6 +962,173 @@ async fn observe_response_body(
             })
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct SseCompletionDetector {
+    complete: bool,
+    error: bool,
+    pending_complete: bool,
+    pending_error: bool,
+    line: Vec<u8>,
+    line_overflowed: bool,
+}
+
+impl SseCompletionDetector {
+    fn observe(&mut self, chunk: &[u8]) {
+        if self.error {
+            return;
+        }
+
+        for &byte in chunk {
+            if byte == b'\n' {
+                if !self.line_overflowed {
+                    if trim_ascii_whitespace(&self.line).is_empty() {
+                        self.commit_event();
+                    } else {
+                        self.pending_error |= sse_line_is_error(&self.line);
+                        self.pending_complete |= sse_line_is_completion(&self.line);
+                    }
+                }
+                self.line.clear();
+                self.line_overflowed = false;
+                if self.error {
+                    return;
+                }
+            } else if !self.line_overflowed {
+                if self.line.len() < MAX_SSE_CONTROL_LINE_BYTES {
+                    self.line.push(byte);
+                } else {
+                    self.line.clear();
+                    self.line_overflowed = true;
+                }
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        // An SSE event is dispatched only after its terminating blank line. Do not commit a
+        // partial final line or an event that was truncated between its last field and separator.
+        self.line.clear();
+        self.line_overflowed = false;
+        self.pending_complete = false;
+        self.pending_error = false;
+    }
+
+    fn commit_event(&mut self) {
+        if self.pending_error {
+            self.error = true;
+        } else if self.pending_complete {
+            self.complete = true;
+        }
+        self.pending_complete = false;
+        self.pending_error = false;
+    }
+
+    fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    fn has_error(&self) -> bool {
+        self.error
+    }
+}
+
+fn sse_line_is_error(line: &[u8]) -> bool {
+    let line = trim_ascii_whitespace(line);
+    let Some(separator) = line.iter().position(|byte| *byte == b':') else {
+        return false;
+    };
+    let field = trim_ascii_whitespace(&line[..separator]);
+    let value = trim_ascii_whitespace(&line[separator + 1..]);
+
+    if field == b"event" {
+        return std::str::from_utf8(value)
+            .ok()
+            .is_some_and(is_sse_error_event_name);
+    }
+    if field != b"data"
+        || (!contains_bytes(value, b"\"error\"")
+            && !SSE_ERROR_EVENT_NAMES
+                .iter()
+                .any(|name| contains_bytes(value, name.as_bytes())))
+    {
+        return false;
+    }
+
+    serde_json::from_slice::<serde_json::Value>(value)
+        .ok()
+        .is_some_and(|payload| {
+            payload.as_object().is_some_and(|payload| {
+                payload.get("error").is_some_and(|error| !error.is_null())
+                    || payload
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(is_sse_error_event_name)
+            })
+        })
+}
+
+fn is_sse_error_event_name(name: &str) -> bool {
+    SSE_ERROR_EVENT_NAMES.contains(&name)
+}
+
+fn sse_line_is_completion(line: &[u8]) -> bool {
+    let line = trim_ascii_whitespace(line);
+    let Some(separator) = line.iter().position(|byte| *byte == b':') else {
+        return false;
+    };
+    let field = trim_ascii_whitespace(&line[..separator]);
+    let value = trim_ascii_whitespace(&line[separator + 1..]);
+
+    if field == b"event" {
+        return std::str::from_utf8(value)
+            .ok()
+            .is_some_and(is_sse_completion_event_name);
+    }
+    if field != b"data" {
+        return false;
+    }
+    if value == b"[DONE]" {
+        return true;
+    }
+    if !SSE_COMPLETION_EVENT_NAMES
+        .iter()
+        .any(|name| contains_bytes(value, name.as_bytes()))
+    {
+        return false;
+    }
+
+    serde_json::from_slice::<serde_json::Value>(value)
+        .ok()
+        .and_then(|payload| {
+            payload
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(is_sse_completion_event_name)
+        })
+        .unwrap_or(false)
+}
+
+fn is_sse_completion_event_name(name: &str) -> bool {
+    SSE_COMPLETION_EVENT_NAMES.contains(&name)
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+fn trim_ascii_whitespace(mut value: &[u8]) -> &[u8] {
+    while value.first().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[1..];
+    }
+    while value.last().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[..value.len() - 1];
+    }
+    value
 }
 
 fn compact_bytes_sample(bytes: &[u8], max_chars: usize) -> String {
@@ -911,8 +1252,10 @@ fn percentile(latencies: &[u64], percentile: u8) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_headers, build_request_header_sets, run_http_load_probe, summarize_latencies,
-        worker_start_delay, HttpLoadProbeConfig, HttpLoadProbeResponseMode,
+        build_headers, build_request_header_sets, run_http_load_probe,
+        run_http_load_probe_with_options, summarize_latencies, validate_probe_options,
+        warmup_request_distribution, worker_start_delay, HttpLoadProbeConfig, HttpLoadProbeOptions,
+        HttpLoadProbeResponseMode, SseCompletionDetector,
     };
     use reqwest::Method;
     use std::collections::BTreeMap;
@@ -997,6 +1340,201 @@ mod tests {
         assert!(!config.http1_only);
         assert!(!config.http2_prior_knowledge);
         assert_eq!(config.first_body_hold, Duration::ZERO);
+    }
+
+    #[test]
+    fn sse_completion_check_requires_full_body_mode() {
+        let options = HttpLoadProbeOptions {
+            require_sse_done: true,
+        };
+        assert!(validate_probe_options(&HttpLoadProbeConfig::default(), options).is_err());
+
+        let config = HttpLoadProbeConfig {
+            response_mode: HttpLoadProbeResponseMode::FullBody,
+            ..HttpLoadProbeConfig::default()
+        };
+        assert!(validate_probe_options(&config, options).is_ok());
+    }
+
+    #[test]
+    fn detects_sse_completion_markers_across_chunks() {
+        let mut done = SseCompletionDetector::default();
+        done.observe(b"data: [DO");
+        assert!(!done.is_complete());
+        done.observe(b"NE]\n\n");
+        assert!(done.is_complete());
+
+        let mut explicit_event = SseCompletionDetector::default();
+        explicit_event.observe(b"event: response.comp");
+        assert!(!explicit_event.is_complete());
+        explicit_event.observe(b"leted\ndata: {}\n\n");
+        assert!(explicit_event.is_complete());
+
+        let mut explicit_data_type = SseCompletionDetector::default();
+        explicit_data_type.observe(b"data: {\"type\":\"message_stop\"}\n\n");
+        assert!(explicit_data_type.is_complete());
+
+        let mut incomplete_response = SseCompletionDetector::default();
+        incomplete_response.observe(b"event: response.incomplete\ndata: {}\n\n");
+        assert!(incomplete_response.is_complete());
+        assert!(!incomplete_response.has_error());
+
+        let mut truncated_event = SseCompletionDetector::default();
+        truncated_event.observe(b"event: response.completed\n");
+        assert!(!truncated_event.is_complete());
+        truncated_event.observe(b"\n");
+        assert!(truncated_event.is_complete());
+
+        let mut content_only = SseCompletionDetector::default();
+        content_only.observe(b"data: {\"delta\":{\"content\":\"[DONE] response.completed\"}}\n\n");
+        assert!(!content_only.is_complete());
+    }
+
+    #[test]
+    fn detects_in_band_sse_errors_across_chunks() {
+        let mut data_error = SseCompletionDetector::default();
+        data_error.observe(b"data: {\"err");
+        assert!(!data_error.has_error());
+        data_error.observe(
+            b"or\":{\"type\":\"execution_runtime_stream_read_error\"}}\n\ndata: [DONE]\n\n",
+        );
+        assert!(data_error.has_error());
+
+        let mut event_error = SseCompletionDetector::default();
+        event_error.observe(b"event:err");
+        assert!(!event_error.has_error());
+        event_error.observe(b"or\ndata: {\"message\":\"upstream failed\"}\n\ndata: [DONE]\n\n");
+        assert!(event_error.has_error());
+
+        let mut response_failed = SseCompletionDetector::default();
+        response_failed
+            .observe(b"data: [DONE]\n\ndata: {\"type\":\"response.failed\",\"response\":{}}\n\n");
+        assert!(response_failed.has_error());
+
+        let mut null_error = SseCompletionDetector::default();
+        null_error.observe(b"data: {\"error\":null}\n\ndata: [DONE]\n\n");
+        assert!(!null_error.has_error());
+        assert!(null_error.is_complete());
+
+        let mut nested_error = SseCompletionDetector::default();
+        nested_error
+            .observe(b"data: {\"delta\":{\"error\":\"quoted output\"}}\n\ndata: [DONE]\n\n");
+        assert!(!nested_error.has_error());
+        assert!(nested_error.is_complete());
+    }
+
+    #[tokio::test]
+    async fn missing_sse_completion_is_failed_without_losing_http_status() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("test connection should arrive");
+            let mut request = [0_u8; 1024];
+            let _ = stream
+                .read(&mut request)
+                .await
+                .expect("test request should read");
+            let body = "data: {\"partial\":true}\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("test response should write");
+        });
+        let config = HttpLoadProbeConfig {
+            url: format!("http://{address}/stream"),
+            total_requests: 1,
+            concurrency: 1,
+            response_mode: HttpLoadProbeResponseMode::FullBody,
+            ..HttpLoadProbeConfig::default()
+        };
+
+        let result = run_http_load_probe_with_options(
+            &config,
+            HttpLoadProbeOptions {
+                require_sse_done: true,
+            },
+        )
+        .await
+        .expect("load probe should complete");
+        server.await.expect("test server should stop");
+
+        assert!(result.require_sse_done);
+        assert_eq!(result.completed_requests, 1);
+        assert_eq!(result.max_in_flight_requests, 1);
+        assert_eq!(result.failed_requests, 1);
+        assert_eq!(result.status_counts.get(&200), Some(&1));
+        assert_eq!(result.error_counts.get("body:sse_incomplete"), Some(&1));
+        assert_eq!(result.error_samples[0].phase, "body");
+        assert_eq!(result.error_samples[0].kind, "sse_incomplete");
+    }
+
+    #[tokio::test]
+    async fn in_band_sse_error_is_failed_even_when_done_follows() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("test connection should arrive");
+            let mut request = [0_u8; 1024];
+            let _ = stream
+                .read(&mut request)
+                .await
+                .expect("test request should read");
+            let body = concat!(
+                "data: {\"error\":{\"type\":\"execution_runtime_stream_read_error\",",
+                "\"code\":502}}\n\n",
+                "data: [DONE]\n\n",
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("test response should write");
+        });
+        let config = HttpLoadProbeConfig {
+            url: format!("http://{address}/stream"),
+            total_requests: 1,
+            concurrency: 1,
+            response_mode: HttpLoadProbeResponseMode::FullBody,
+            ..HttpLoadProbeConfig::default()
+        };
+
+        let result = run_http_load_probe_with_options(
+            &config,
+            HttpLoadProbeOptions {
+                require_sse_done: true,
+            },
+        )
+        .await
+        .expect("load probe should complete");
+        server.await.expect("test server should stop");
+
+        assert_eq!(result.completed_requests, 1);
+        assert_eq!(result.failed_requests, 1);
+        assert_eq!(result.status_counts.get(&200), Some(&1));
+        assert_eq!(result.error_counts.get("body:sse_error"), Some(&1));
+        assert_eq!(result.error_samples[0].phase, "body");
+        assert_eq!(result.error_samples[0].kind, "sse_error");
     }
 
     #[tokio::test]
@@ -1103,5 +1641,15 @@ mod tests {
             worker_start_delay(Duration::from_millis(900), 3, 1),
             Duration::ZERO
         );
+    }
+
+    #[test]
+    fn distributes_warmup_requests_across_each_used_client_shard() {
+        assert_eq!(warmup_request_distribution(0, 10), Vec::<usize>::new());
+        assert_eq!(warmup_request_distribution(4, 0), Vec::<usize>::new());
+        assert_eq!(warmup_request_distribution(4, 4), vec![1, 1, 1, 1]);
+        assert_eq!(warmup_request_distribution(4, 6), vec![2, 2, 1, 1]);
+        assert_eq!(warmup_request_distribution(4, 10), vec![3, 3, 2, 2]);
+        assert_eq!(warmup_request_distribution(8, 3), vec![1, 1, 1]);
     }
 }

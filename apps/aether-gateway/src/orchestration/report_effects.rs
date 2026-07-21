@@ -3,6 +3,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use aether_admin::provider::quota as admin_provider_quota_pure;
+use aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyRuntimeMetadataUpdate;
 use aether_provider_pool::grok_quota_window_key_for_model;
 use aether_usage_runtime::{
     extract_gemini_file_mapping_entries, gemini_file_mapping_cache_key, normalize_gemini_file_name,
@@ -22,12 +23,23 @@ use crate::{AppState, GatewayError};
 
 const CODEX_QUOTA_CACHE_TTL_SECONDS: u64 = 30;
 const CODEX_QUOTA_CACHE_MAX_ENTRIES: usize = 4096;
+const RUNTIME_METADATA_CAS_MAX_ATTEMPTS: usize = 16;
 
 type HeaderFingerprintCache = Mutex<HashMap<String, (String, Instant)>>;
 
 static CODEX_QUOTA_HEADER_FINGERPRINT_CACHE: OnceLock<HeaderFingerprintCache> = OnceLock::new();
 static GROK_CHINESE_WAIT_DURATION_RE: OnceLock<Regex> = OnceLock::new();
 static GROK_ENGLISH_WAIT_DURATION_RE: OnceLock<Regex> = OnceLock::new();
+
+fn upstream_metadata_namespace_value(
+    upstream_metadata: Option<&Value>,
+    namespace: &str,
+) -> Option<Value> {
+    upstream_metadata
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get(namespace))
+        .cloned()
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum LocalReportEffect<'a> {
@@ -170,6 +182,18 @@ fn merge_metadata_object(
         .unwrap_or_default();
     merged.insert(section_key.to_string(), section_value);
     Some(Value::Object(merged))
+}
+
+fn quota_status_snapshot_patch(status_snapshot: Option<&Value>) -> Value {
+    let mut patch = serde_json::Map::new();
+    if let Some(quota) = status_snapshot
+        .and_then(Value::as_object)
+        .and_then(|snapshot| snapshot.get("quota"))
+        .cloned()
+    {
+        patch.insert("quota".to_string(), quota);
+    }
+    Value::Object(patch)
 }
 
 fn grok_report_context_model(report_context: Option<&Value>) -> Option<String> {
@@ -321,6 +345,7 @@ async fn sync_gemini_cli_credits_from_report(
         Some(value) => value,
         None => return Ok(false),
     };
+    let now_unix_secs = current_unix_secs();
     let Some(key) = state
         .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
         .await?
@@ -345,22 +370,21 @@ async fn sync_gemini_cli_credits_from_report(
         return Ok(false);
     }
 
-    let now_unix_secs = current_unix_secs();
-    let mut gemini_cli_bucket = key
-        .upstream_metadata
+    let expected_namespace_value =
+        upstream_metadata_namespace_value(key.upstream_metadata.as_ref(), "gemini_cli");
+    let mut gemini_cli_bucket = expected_namespace_value
         .as_ref()
-        .and_then(Value::as_object)
-        .and_then(|metadata| metadata.get("gemini_cli"))
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_else(serde_json::Map::new);
-    gemini_cli_bucket.insert("credits".to_string(), credits);
+    gemini_cli_bucket.insert("credits".to_string(), credits.clone());
     gemini_cli_bucket.insert("updated_at".to_string(), json!(now_unix_secs));
 
+    let namespace_value = Value::Object(gemini_cli_bucket);
     let updated_upstream_metadata = merge_metadata_object(
         key.upstream_metadata.as_ref(),
         "gemini_cli",
-        Value::Object(gemini_cli_bucket),
+        namespace_value.clone(),
     );
     let updated_status_snapshot = sync_provider_key_quota_status_snapshot(
         key.status_snapshot.as_ref(),
@@ -368,15 +392,22 @@ async fn sync_gemini_cli_credits_from_report(
         updated_upstream_metadata.as_ref(),
         "report_effect",
     );
-    let mut updated_key = key;
-    updated_key.upstream_metadata = updated_upstream_metadata;
-    updated_key.status_snapshot = updated_status_snapshot;
-    updated_key.updated_at_unix_secs = Some(now_unix_secs);
-
-    Ok(state
-        .update_provider_catalog_key(&updated_key)
-        .await?
-        .is_some())
+    let persisted = state
+        .update_provider_catalog_key_runtime_metadata(&ProviderCatalogKeyRuntimeMetadataUpdate {
+            key_id: key_id.clone(),
+            namespace: "gemini_cli".to_string(),
+            expected_upstream_metadata_value: expected_namespace_value,
+            upstream_metadata_value: namespace_value,
+            status_snapshot_patch: quota_status_snapshot_patch(updated_status_snapshot.as_ref()),
+            updated_at_unix_secs: Some(now_unix_secs),
+        })
+        .await?;
+    if persisted {
+        return Ok(true);
+    }
+    // Credits returned by the provider are an authoritative snapshot; do not
+    // replay it over a newer local namespace after a CAS conflict.
+    Ok(false)
 }
 
 fn grok_quota_reset_after_seconds(
@@ -479,70 +510,85 @@ async fn sync_grok_quota_from_report_context(
         return Ok(false);
     };
 
-    let Some(key) = state
-        .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
-        .await?
-        .into_iter()
-        .next()
-    else {
-        return Ok(false);
-    };
-    let Some(provider) = state
-        .read_provider_catalog_providers_by_ids(std::slice::from_ref(&key.provider_id))
-        .await?
-        .into_iter()
-        .next()
-    else {
-        return Ok(false);
-    };
-    if !provider.provider_type.trim().eq_ignore_ascii_case("grok") {
-        return Ok(false);
-    }
-
-    let Some(grok_bucket) = key
-        .upstream_metadata
-        .as_ref()
-        .and_then(Value::as_object)
-        .and_then(|metadata| metadata.get("grok"))
-        .and_then(Value::as_object)
-        .cloned()
-    else {
-        return Ok(false);
-    };
-
-    let mut updated_grok_bucket = grok_bucket;
     let now_unix_secs = current_unix_secs();
-    if !grok_apply_quota_feedback(
-        &mut updated_grok_bucket,
-        model.as_str(),
-        status_code,
-        grok_quota_reset_after_seconds(body_json, report_context),
-        now_unix_secs,
-    ) {
-        return Ok(false);
+    for attempt in 0..RUNTIME_METADATA_CAS_MAX_ATTEMPTS {
+        let Some(key) = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(false);
+        };
+        let Some(provider) = state
+            .read_provider_catalog_providers_by_ids(std::slice::from_ref(&key.provider_id))
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(false);
+        };
+        if !provider.provider_type.trim().eq_ignore_ascii_case("grok") {
+            return Ok(false);
+        }
+
+        let expected_namespace_value =
+            upstream_metadata_namespace_value(key.upstream_metadata.as_ref(), "grok");
+        let Some(grok_bucket) = expected_namespace_value
+            .as_ref()
+            .and_then(Value::as_object)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+
+        let mut updated_grok_bucket = grok_bucket;
+        if !grok_apply_quota_feedback(
+            &mut updated_grok_bucket,
+            model.as_str(),
+            status_code,
+            grok_quota_reset_after_seconds(body_json, report_context),
+            now_unix_secs,
+        ) {
+            return Ok(false);
+        }
+        grok_mark_quota_bucket_updated(&mut updated_grok_bucket, now_unix_secs);
+
+        let namespace_value = Value::Object(updated_grok_bucket);
+        let updated_upstream_metadata = merge_metadata_object(
+            key.upstream_metadata.as_ref(),
+            "grok",
+            namespace_value.clone(),
+        );
+        let updated_status_snapshot = sync_provider_key_quota_status_snapshot(
+            key.status_snapshot.as_ref(),
+            provider.provider_type.as_str(),
+            updated_upstream_metadata.as_ref(),
+            "report_effect",
+        );
+        let persisted = state
+            .update_provider_catalog_key_runtime_metadata(
+                &ProviderCatalogKeyRuntimeMetadataUpdate {
+                    key_id: key_id.clone(),
+                    namespace: "grok".to_string(),
+                    expected_upstream_metadata_value: expected_namespace_value,
+                    upstream_metadata_value: namespace_value,
+                    status_snapshot_patch: quota_status_snapshot_patch(
+                        updated_status_snapshot.as_ref(),
+                    ),
+                    updated_at_unix_secs: Some(now_unix_secs),
+                },
+            )
+            .await?;
+        if persisted {
+            return Ok(true);
+        }
+        if attempt + 1 < RUNTIME_METADATA_CAS_MAX_ATTEMPTS {
+            let backoff_us = 50_u64.saturating_mul((attempt + 1) as u64).min(1_000);
+            tokio::time::sleep(Duration::from_micros(backoff_us)).await;
+        }
     }
-    grok_mark_quota_bucket_updated(&mut updated_grok_bucket, now_unix_secs);
-
-    let updated_upstream_metadata = merge_metadata_object(
-        key.upstream_metadata.as_ref(),
-        "grok",
-        Value::Object(updated_grok_bucket),
-    );
-    let updated_status_snapshot = sync_provider_key_quota_status_snapshot(
-        key.status_snapshot.as_ref(),
-        provider.provider_type.as_str(),
-        updated_upstream_metadata.as_ref(),
-        "report_effect",
-    );
-    let mut updated_key = key;
-    updated_key.upstream_metadata = updated_upstream_metadata;
-    updated_key.status_snapshot = updated_status_snapshot;
-    updated_key.updated_at_unix_secs = Some(now_unix_secs);
-
-    Ok(state
-        .update_provider_catalog_key_runtime_state(&updated_key)
-        .await?
-        .is_some())
+    Ok(false)
 }
 
 async fn apply_local_sync_report_effect(state: &AppState, payload: &GatewaySyncReportRequest) {
@@ -820,7 +866,7 @@ async fn sync_codex_quota_from_response_headers(
         .into_iter()
         .next()
     else {
-        set_cached_codex_quota_fingerprint(&key_id, incoming_fingerprint, now);
+        set_cached_codex_quota_fingerprint(&key_id, incoming_fingerprint.clone(), now);
         return Ok(false);
     };
 
@@ -830,53 +876,56 @@ async fn sync_codex_quota_from_response_headers(
         .into_iter()
         .next()
     else {
-        set_cached_codex_quota_fingerprint(&key_id, incoming_fingerprint, now);
+        set_cached_codex_quota_fingerprint(&key_id, incoming_fingerprint.clone(), now);
         return Ok(false);
     };
     if !provider.provider_type.trim().eq_ignore_ascii_case("codex") {
-        set_cached_codex_quota_fingerprint(&key_id, incoming_fingerprint, now);
+        set_cached_codex_quota_fingerprint(&key_id, incoming_fingerprint.clone(), now);
         return Ok(false);
     }
 
-    let current_codex = key
-        .upstream_metadata
-        .as_ref()
-        .and_then(Value::as_object)
-        .and_then(|metadata| metadata.get("codex"))
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_else(serde_json::Map::new);
+    let expected_namespace_value =
+        upstream_metadata_namespace_value(key.upstream_metadata.as_ref(), "codex");
+    let current_codex = expected_namespace_value
+        .clone()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
     let current_codex = Value::Object(current_codex);
     let Some(current_fingerprint) = fingerprint_codex_payload(&current_codex) else {
-        set_cached_codex_quota_fingerprint(&key_id, incoming_fingerprint, now);
+        set_cached_codex_quota_fingerprint(&key_id, incoming_fingerprint.clone(), now);
         return Ok(false);
     };
     if current_fingerprint == incoming_fingerprint {
-        set_cached_codex_quota_fingerprint(&key_id, incoming_fingerprint, now);
+        set_cached_codex_quota_fingerprint(&key_id, incoming_fingerprint.clone(), now);
         return Ok(false);
     }
 
     let updated_upstream_metadata =
-        merge_metadata_object(key.upstream_metadata.as_ref(), "codex", parsed);
+        merge_metadata_object(key.upstream_metadata.as_ref(), "codex", parsed.clone());
     let updated_status_snapshot = sync_provider_key_quota_status_snapshot(
         key.status_snapshot.as_ref(),
         provider.provider_type.as_str(),
         updated_upstream_metadata.as_ref(),
         "response_headers",
     );
-    let mut updated_key = key;
-    updated_key.upstream_metadata = updated_upstream_metadata;
-    updated_key.status_snapshot = updated_status_snapshot;
-    updated_key.updated_at_unix_secs = Some(now_unix_secs);
-
     let updated = state
-        .update_provider_catalog_key_runtime_state(&updated_key)
-        .await?
-        .is_some();
+        .update_provider_catalog_key_runtime_metadata(&ProviderCatalogKeyRuntimeMetadataUpdate {
+            key_id: key_id.clone(),
+            namespace: "codex".to_string(),
+            expected_upstream_metadata_value: expected_namespace_value,
+            upstream_metadata_value: parsed.clone(),
+            status_snapshot_patch: quota_status_snapshot_patch(updated_status_snapshot.as_ref()),
+            updated_at_unix_secs: Some(now_unix_secs),
+        })
+        .await?;
     if updated {
-        set_cached_codex_quota_fingerprint(&key_id, incoming_fingerprint, now);
+        set_cached_codex_quota_fingerprint(&key_id, incoming_fingerprint.clone(), now);
+        return Ok(true);
     }
-    Ok(updated)
+    // Response headers describe an authoritative quota snapshot.  A CAS
+    // conflict means a newer snapshot/delta won, so avoid replaying stale
+    // data over it.
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -892,7 +941,86 @@ pub(crate) fn clear_local_report_effect_caches_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+    use aether_data_contracts::repository::provider_catalog::{
+        StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    };
     use serde_json::json;
+    use std::sync::Arc;
+
+    use crate::data::GatewayDataState;
+
+    #[tokio::test]
+    async fn gemini_report_metadata_write_preserves_adaptive_and_other_provider_state() {
+        let provider = StoredProviderCatalogProvider::new(
+            "gemini-provider".to_string(),
+            "Gemini CLI".to_string(),
+            None,
+            "gemini_cli".to_string(),
+        )
+        .expect("provider should build");
+        let mut key = StoredProviderCatalogKey::new(
+            "gemini-key".to_string(),
+            "gemini-provider".to_string(),
+            "Gemini Key".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.learned_rpm_limit = Some(12);
+        key.rpm_429_count = Some(3);
+        key.upstream_metadata = Some(json!({
+            "gemini_cli": {"credits":{"remaining":9}},
+            "codex": {"remaining":7}
+        }));
+        key.status_snapshot = Some(json!({
+            "quota": {"source":"old"},
+            "observation_count": 4,
+            "learning_confidence": 0.7,
+            "oauth": {"invalid":false}
+        }));
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider],
+            vec![],
+            vec![key],
+        ));
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(repository),
+            );
+
+        assert!(sync_gemini_cli_credits_from_report(
+            &state,
+            Some(&json!({"key_id":"gemini-key"})),
+            Some(json!({"remaining":3,"total":10}))
+        )
+        .await
+        .expect("report metadata should update"));
+
+        let stored = state
+            .read_provider_catalog_keys_by_ids(&["gemini-key".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(stored.learned_rpm_limit, Some(12));
+        assert_eq!(stored.rpm_429_count, Some(3));
+        assert_eq!(
+            stored.upstream_metadata.as_ref().unwrap()["codex"],
+            json!({"remaining":7})
+        );
+        assert_eq!(
+            stored.upstream_metadata.as_ref().unwrap()["gemini_cli"]["credits"]["remaining"],
+            json!(3)
+        );
+        let status = stored.status_snapshot.expect("status should exist");
+        assert_eq!(status["observation_count"], json!(4));
+        assert_eq!(status["learning_confidence"], json!(0.7));
+        assert_eq!(status["oauth"], json!({"invalid":false}));
+        assert_eq!(status["quota"]["provider_type"], json!("gemini_cli"));
+    }
 
     #[test]
     fn grok_quota_feedback_decrements_the_matching_window() {

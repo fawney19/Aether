@@ -137,7 +137,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.status
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.status
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.status
     ELSE EXCLUDED.status
   END,
@@ -147,7 +149,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.status_code
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.status_code
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.status_code
     ELSE COALESCE(EXCLUDED.status_code, request_candidates.status_code)
   END,
@@ -155,7 +159,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.error_type
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.error_type
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.error_type
     ELSE COALESCE(EXCLUDED.error_type, request_candidates.error_type)
   END,
@@ -163,7 +169,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.error_message
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.error_message
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.error_message
     ELSE COALESCE(EXCLUDED.error_message, request_candidates.error_message)
   END,
@@ -171,7 +179,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.latency_ms
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.latency_ms
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.latency_ms
     ELSE COALESCE(EXCLUDED.latency_ms, request_candidates.latency_ms)
   END,
@@ -195,7 +205,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.finished_at
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.finished_at
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.finished_at
     ELSE COALESCE(EXCLUDED.finished_at, request_candidates.finished_at)
   END
@@ -240,7 +252,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.status
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.status
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.status
     ELSE EXCLUDED.status
   END,
@@ -250,7 +264,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.status_code
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.status_code
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.status_code
     ELSE COALESCE(EXCLUDED.status_code, request_candidates.status_code)
   END,
@@ -258,7 +274,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.error_type
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.error_type
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.error_type
     ELSE COALESCE(EXCLUDED.error_type, request_candidates.error_type)
   END,
@@ -266,7 +284,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.error_message
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.error_message
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.error_message
     ELSE COALESCE(EXCLUDED.error_message, request_candidates.error_message)
   END,
@@ -274,7 +294,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.latency_ms
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.latency_ms
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.latency_ms
     ELSE COALESCE(EXCLUDED.latency_ms, request_candidates.latency_ms)
   END,
@@ -298,7 +320,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.finished_at
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.finished_at
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.finished_at
     ELSE COALESCE(EXCLUDED.finished_at, request_candidates.finished_at)
   END
@@ -318,7 +342,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.status
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.status
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.status
     ELSE EXCLUDED.status
   END,
@@ -328,7 +354,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.status_code
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.status_code
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.status_code
     ELSE COALESCE(EXCLUDED.status_code, request_candidates.status_code)
   END,
@@ -336,7 +364,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.error_type
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.error_type
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.error_type
     ELSE COALESCE(EXCLUDED.error_type, request_candidates.error_type)
   END,
@@ -344,7 +374,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.error_message
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.error_message
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.error_message
     ELSE COALESCE(EXCLUDED.error_message, request_candidates.error_message)
   END,
@@ -352,7 +384,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.latency_ms
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.latency_ms
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.latency_ms
     ELSE COALESCE(EXCLUDED.latency_ms, request_candidates.latency_ms)
   END,
@@ -376,7 +410,9 @@ DO UPDATE SET
     WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
       AND EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')
       THEN request_candidates.finished_at
-    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'
+    WHEN request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')
+      THEN request_candidates.finished_at
+    WHEN request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')
       THEN request_candidates.finished_at
     ELSE COALESCE(EXCLUDED.finished_at, request_candidates.finished_at)
   END
@@ -884,27 +920,27 @@ async fn execute_upsert_many_batch(
     let mut builder = QueryBuilder::<Postgres>::new(UPSERT_MANY_PREFIX_SQL);
     builder.push_values(rows, |mut values, row| {
         values
-            .push_bind(row.id.clone())
-            .push_bind(row.request_id.clone())
-            .push_bind(row.user_id.clone())
-            .push_bind(row.api_key_id.clone())
-            .push_bind(row.username.clone())
-            .push_bind(row.api_key_name.clone())
+            .push_bind(row.id.as_str())
+            .push_bind(row.request_id.as_str())
+            .push_bind(row.user_id.as_deref())
+            .push_bind(row.api_key_id.as_deref())
+            .push_bind(row.username.as_deref())
+            .push_bind(row.api_key_name.as_deref())
             .push_bind(row.candidate_index)
             .push_bind(row.retry_index)
-            .push_bind(row.provider_id.clone())
-            .push_bind(row.endpoint_id.clone())
-            .push_bind(row.key_id.clone())
+            .push_bind(row.provider_id.as_deref())
+            .push_bind(row.endpoint_id.as_deref())
+            .push_bind(row.key_id.as_deref())
             .push_bind(row.status)
-            .push_bind(row.skip_reason.clone())
+            .push_bind(row.skip_reason.as_deref())
             .push_bind(row.is_cached.unwrap_or(false))
             .push_bind(row.status_code)
-            .push_bind(row.error_type.clone())
-            .push_bind(row.error_message.clone())
+            .push_bind(row.error_type.as_deref())
+            .push_bind(row.error_message.as_deref())
             .push_bind(row.latency_ms)
             .push_bind(row.concurrent_requests)
-            .push_bind(row.extra_data.clone())
-            .push_bind(row.required_capabilities.clone())
+            .push_bind(row.extra_data.as_ref())
+            .push_bind(row.required_capabilities.as_ref())
             .push("COALESCE(CASE WHEN ")
             .push_bind_unseparated(row.created_at_unix_ms)
             .push_unseparated(" IS NOT NULL AND ")
@@ -1161,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_sql_keeps_terminal_candidate_state_when_lifecycle_events_arrive_late() {
+    fn upsert_sql_keeps_candidate_lifecycle_monotonic_when_events_arrive_late() {
         for sql in [
             UPSERT_SQL,
             UPSERT_CONFLICT_SQL,
@@ -1174,7 +1210,10 @@ mod tests {
                 sql.contains("EXCLUDED.status IN ('available', 'unused', 'pending', 'streaming')")
             );
             assert!(sql.contains(
-                "request_candidates.status = 'streaming' AND EXCLUDED.status = 'pending'"
+                "request_candidates.status = 'streaming' AND EXCLUDED.status IN ('available', 'unused', 'pending')"
+            ));
+            assert!(sql.contains(
+                "request_candidates.status = 'pending' AND EXCLUDED.status IN ('available', 'unused')"
             ));
             assert!(sql.contains("THEN request_candidates.status"));
             assert!(sql.contains("THEN request_candidates.latency_ms"));

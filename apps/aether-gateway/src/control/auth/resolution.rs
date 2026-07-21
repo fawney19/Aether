@@ -11,7 +11,7 @@ use serde_json::Value;
 use tracing::{debug, info};
 
 use crate::wallet_runtime::{
-    local_rejection_from_wallet_access, resolve_wallet_auth_gate, resolve_wallet_auth_gate_uncached,
+    local_rejection_from_wallet_access, resolve_wallet_auth_gate_uncached,
 };
 use crate::{AppState, GatewayError};
 
@@ -25,15 +25,16 @@ use super::principal::derive_principal_candidate;
 use super::types::{
     GatewayCredentialCarrier, GatewayPrincipalCandidate, GatewayTrustedAuthHeaders,
 };
-use crate::cache::AuthContextInflightRegistration;
+use crate::cache::{AuthContextCacheGeneration, AuthContextInflightRegistration};
 use crate::headers::header_value_str;
 
 const AUTH_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(60);
+const AUTH_CONTEXT_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 const AUTH_CONTEXT_NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(10);
 const AUTH_CONTEXT_CACHE_MAX_ENTRIES: usize = 10_000;
 const AUTH_CONTEXT_CACHE_MAX_ENTRIES_ENV: &str = "AETHER_GATEWAY_AUTH_CONTEXT_CACHE_MAX_ENTRIES";
-const AUTH_CONTEXT_CACHE_REFRESH_ON_HIT_ENV: &str =
-    "AETHER_GATEWAY_AUTH_CONTEXT_CACHE_REFRESH_ON_HIT";
+const AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS_ENV: &str =
+    "AETHER_GATEWAY_AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS";
 const AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS_ENV: &str =
     "AETHER_GATEWAY_AUTH_CONTEXT_NEGATIVE_CACHE_TTL_SECS";
 const AUTH_CONTEXT_NEGATIVE_CACHE_KEY_PREFIX: &str = "negative:";
@@ -136,20 +137,24 @@ pub(in super::super) async fn resolve_control_decision_auth(
 
     let mut resolved_auth_context = None;
     if let Some(cache_key) = auth_context_cache_key.as_deref() {
-        if let Some(auth_context) = get_cached_auth_context(state, cache_key) {
-            resolved_auth_context = if auth_context_cache_refresh_on_hit() {
-                Some(
-                    refresh_cached_auth_context_or_reuse(
+        if let Some((auth_context, age)) = get_cached_auth_context_with_age(state, cache_key) {
+            if auth_context_cache_refresh_due(state, age) {
+                resolved_auth_context = Some(
+                    revalidate_cached_auth_context(
                         state,
                         cache_key,
                         auth_context,
                         decision.auth_endpoint_signature.as_deref(),
+                        headers,
+                        uri,
                     )
                     .await?,
-                )
+                );
             } else {
-                Some(auth_context)
-            };
+                // The configured refresh interval is the bounded authorization
+                // freshness window. This path remains a lock-free cache hit.
+                resolved_auth_context = Some(auth_context);
+            }
         }
     }
 
@@ -163,12 +168,6 @@ pub(in super::super) async fn resolve_control_decision_auth(
             true,
         )
         .await?;
-        if let (Some(cache_key), Some(auth_context)) = (
-            auth_context_cache_key.as_ref(),
-            resolved_auth_context.as_ref(),
-        ) {
-            put_cached_auth_context(state, cache_key.clone(), auth_context.clone());
-        }
     }
 
     if let Some(auth_context) = resolved_auth_context {
@@ -501,19 +500,10 @@ pub(crate) async fn resolve_execution_runtime_auth_context(
 ) -> Result<Option<GatewayControlAuthContext>, GatewayError> {
     let _ = trace_id;
 
-    if let Some(auth_context) = decision.auth_context.clone() {
-        if !auth_context_cache_refresh_on_hit() {
-            return Ok(Some(auth_context));
-        }
-        return refresh_decision_auth_context_on_hit(
-            state,
-            headers,
-            uri,
-            decision.auth_endpoint_signature.as_deref(),
-            auth_context,
-        )
-        .await
-        .map(Some);
+    if let Some(auth_context) = decision.auth_context.as_ref() {
+        // Control-route auth resolution already refreshed and validated this context.
+        // Revalidating here would perform a second snapshot/wallet lookup per request.
+        return Ok(Some(auth_context.clone()));
     }
 
     let Some(auth_endpoint_signature) = decision.auth_endpoint_signature.as_deref() else {
@@ -524,19 +514,20 @@ pub(crate) async fn resolve_execution_runtime_auth_context(
         return Ok(None);
     };
 
-    if let Some(auth_context) = get_cached_auth_context(state, &cache_key) {
-        if !auth_context_cache_refresh_on_hit() {
-            return Ok(Some(auth_context));
+    if let Some((auth_context, age)) = get_cached_auth_context_with_age(state, &cache_key) {
+        if auth_context_cache_refresh_due(state, age) {
+            return revalidate_cached_auth_context(
+                state,
+                &cache_key,
+                auth_context,
+                Some(auth_endpoint_signature),
+                headers,
+                uri,
+            )
+            .await
+            .map(Some);
         }
-
-        let refreshed = refresh_cached_auth_context_or_reuse(
-            state,
-            &cache_key,
-            auth_context,
-            Some(auth_endpoint_signature),
-        )
-        .await?;
-        return Ok(Some(refreshed));
+        return Ok(Some(auth_context));
     }
 
     if let Some(auth_context) = resolve_data_backed_auth_context_cached(
@@ -552,64 +543,112 @@ pub(crate) async fn resolve_execution_runtime_auth_context(
         if auth_context.user_id.is_empty() || auth_context.api_key_id.is_empty() {
             return Ok(None);
         }
-        put_cached_auth_context(state, cache_key, auth_context.clone());
         return Ok(Some(auth_context));
     }
 
     Ok(None)
 }
 
-async fn refresh_decision_auth_context_on_hit(
-    state: &AppState,
-    headers: &http::HeaderMap,
-    uri: &Uri,
-    auth_endpoint_signature: Option<&str>,
-    auth_context: GatewayControlAuthContext,
-) -> Result<GatewayControlAuthContext, GatewayError> {
-    let Some(auth_endpoint_signature) = auth_endpoint_signature else {
-        return Ok(auth_context);
-    };
-    let Some(cache_key) = build_auth_context_cache_key(headers, uri, auth_endpoint_signature)
-    else {
-        return refresh_execution_runtime_auth_context(
-            state,
-            auth_context,
-            Some(auth_endpoint_signature),
-        )
-        .await;
-    };
-    refresh_cached_auth_context_or_reuse(
-        state,
-        &cache_key,
-        auth_context,
-        Some(auth_endpoint_signature),
-    )
-    .await
-}
-
-async fn refresh_cached_auth_context_or_reuse(
+async fn revalidate_cached_auth_context(
     state: &AppState,
     cache_key: &str,
     auth_context: GatewayControlAuthContext,
     auth_endpoint_signature: Option<&str>,
+    headers: &http::HeaderMap,
+    uri: &Uri,
 ) -> Result<GatewayControlAuthContext, GatewayError> {
-    match state.auth_context_cache.register_inflight(cache_key) {
-        AuthContextInflightRegistration::Leader(_guard) => {
-            let refreshed = refresh_execution_runtime_auth_context(
-                state,
-                auth_context,
-                auth_endpoint_signature,
-            )
-            .await?;
-            put_cached_auth_context(state, cache_key.to_string(), refreshed.clone());
-            Ok(refreshed)
-        }
-        AuthContextInflightRegistration::Follower => Ok(auth_context),
-        AuthContextInflightRegistration::Bypass => {
-            refresh_execution_runtime_auth_context(state, auth_context, auth_endpoint_signature)
+    if is_negative_auth_context(&auth_context)
+        || !auth_context.access_allowed
+        || !state.has_auth_api_key_reader()
+        || auth_context.user_id.trim().is_empty()
+        || auth_context.api_key_id.trim().is_empty()
+        || auth_endpoint_signature
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+    {
+        return Ok(auth_context);
+    }
+
+    loop {
+        match state.auth_context_cache.register_inflight(cache_key) {
+            AuthContextInflightRegistration::Leader(guard) => {
+                let refreshed = match resolve_security_fresh_auth_context(
+                    state,
+                    headers,
+                    uri,
+                    auth_context.clone(),
+                    auth_endpoint_signature,
+                )
                 .await
+                {
+                    Ok(refreshed) => refreshed,
+                    Err(error) => {
+                        // A failed security refresh must not leave the old allow
+                        // available to this flight's followers. Publish the same
+                        // error so a failed backend read is not retried once per
+                        // follower.
+                        guard.fail(error.clone());
+                        return Err(error);
+                    }
+                };
+                if guard.generation_is_current() {
+                    put_cached_auth_context(
+                        state,
+                        cache_key.to_string(),
+                        refreshed.clone(),
+                        Some(guard.generation()),
+                    );
+                }
+                return Ok(refreshed);
+            }
+            AuthContextInflightRegistration::Follower(waiter) => {
+                waiter.wait().await?;
+                if let Some((refreshed, age)) = get_cached_auth_context_with_age(state, cache_key) {
+                    // A cancelled/failed leader leaves the old due entry in
+                    // place. Only a newly published security-fresh value may
+                    // be reused by followers.
+                    if !auth_context_cache_refresh_due(state, age) {
+                        return Ok(refreshed);
+                    }
+                }
+            }
+            AuthContextInflightRegistration::Bypass => {
+                let refreshed = resolve_security_fresh_auth_context(
+                    state,
+                    headers,
+                    uri,
+                    auth_context,
+                    auth_endpoint_signature,
+                )
+                .await;
+                if refreshed.is_err() {
+                    state.auth_context_cache.invalidate(cache_key);
+                }
+                return refreshed;
+            }
         }
     }
+}
+
+async fn resolve_security_fresh_auth_context(
+    state: &AppState,
+    headers: &http::HeaderMap,
+    uri: &Uri,
+    stale: GatewayControlAuthContext,
+    auth_endpoint_signature: Option<&str>,
+) -> Result<GatewayControlAuthContext, GatewayError> {
+    if let Some(refreshed) =
+        resolve_data_backed_auth_context(state, headers, uri, auth_endpoint_signature).await?
+    {
+        return Ok(refreshed);
+    }
+
+    let mut denied = stale;
+    denied.access_allowed = false;
+    denied.local_rejection = Some(GatewayLocalAuthRejection::InvalidApiKey);
+    denied.balance_remaining = None;
+    Ok(denied)
 }
 
 async fn resolve_data_backed_auth_context_cached(
@@ -625,23 +664,40 @@ async fn resolve_data_backed_auth_context_cached(
             .await;
     };
     loop {
-        let notified = state.auth_context_cache.notified();
         match state.auth_context_cache.register_inflight(cache_key) {
-            AuthContextInflightRegistration::Leader(_guard) => {
-                let resolved =
-                    resolve_data_backed_auth_context(state, headers, uri, auth_endpoint_signature)
-                        .await?;
+            AuthContextInflightRegistration::Leader(guard) => {
+                let resolved = match resolve_data_backed_auth_context(
+                    state,
+                    headers,
+                    uri,
+                    auth_endpoint_signature,
+                )
+                .await
+                {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        guard.fail(error.clone());
+                        return Err(error);
+                    }
+                };
                 if let Some(auth_context) = resolved.as_ref() {
                     if cache_negative
                         || (!auth_context.user_id.is_empty() && !auth_context.api_key_id.is_empty())
                     {
-                        put_cached_auth_context(state, cache_key.to_string(), auth_context.clone());
+                        if guard.generation_is_current() {
+                            put_cached_auth_context(
+                                state,
+                                cache_key.to_string(),
+                                auth_context.clone(),
+                                Some(guard.generation()),
+                            );
+                        }
                     }
                 }
                 return Ok(resolved);
             }
-            AuthContextInflightRegistration::Follower => {
-                notified.await;
+            AuthContextInflightRegistration::Follower(notified) => {
+                notified.wait().await?;
                 if let Some(auth_context) = get_cached_auth_context(state, cache_key) {
                     return Ok(Some(auth_context));
                 }
@@ -683,15 +739,18 @@ pub(crate) async fn refresh_execution_runtime_auth_context(
         return Ok(auth_context);
     }
 
-    let snapshot = state
-        .data
-        .read_auth_api_key_snapshot(
-            &auth_context.user_id,
-            &auth_context.api_key_id,
-            current_unix_secs(),
-        )
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let snapshot = {
+        let _permit = state.acquire_auth_snapshot_load_gate().await?;
+        state
+            .data
+            .read_auth_api_key_snapshot_strong(
+                &auth_context.user_id,
+                &auth_context.api_key_id,
+                current_unix_secs(),
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+    };
     let Some(snapshot) = snapshot else {
         let mut denied = auth_context;
         denied.access_allowed = false;
@@ -716,6 +775,7 @@ fn put_cached_auth_context(
     state: &AppState,
     cache_key: String,
     auth_context: GatewayControlAuthContext,
+    generation: Option<AuthContextCacheGeneration>,
 ) {
     let (cache_key, ttl) = if is_negative_auth_context(&auth_context) {
         let ttl = auth_context_negative_cache_ttl();
@@ -729,12 +789,22 @@ fn put_cached_auth_context(
     } else {
         (cache_key, AUTH_CONTEXT_CACHE_TTL)
     };
-    state.auth_context_cache.insert(
-        cache_key,
-        auth_context,
-        ttl,
-        auth_context_cache_max_entries(),
-    );
+    if let Some(generation) = generation {
+        state.auth_context_cache.insert_if_generation(
+            cache_key,
+            auth_context,
+            ttl,
+            auth_context_cache_max_entries(),
+            &generation,
+        );
+    } else {
+        state.auth_context_cache.insert(
+            cache_key,
+            auth_context,
+            ttl,
+            auth_context_cache_max_entries(),
+        );
+    }
 }
 
 fn auth_context_cache_max_entries() -> usize {
@@ -748,19 +818,28 @@ fn auth_context_cache_max_entries() -> usize {
     })
 }
 
-fn auth_context_cache_refresh_on_hit() -> bool {
-    static REFRESH_ON_HIT: OnceLock<bool> = OnceLock::new();
-    *REFRESH_ON_HIT.get_or_init(|| {
-        std::env::var(AUTH_CONTEXT_CACHE_REFRESH_ON_HIT_ENV)
+fn auth_context_cache_refresh_interval(state: &AppState) -> Duration {
+    #[cfg(test)]
+    if let Some(interval) = state.auth_context_cache.refresh_interval_for_tests() {
+        return interval;
+    }
+
+    static REFRESH_INTERVAL: OnceLock<Duration> = OnceLock::new();
+    *REFRESH_INTERVAL.get_or_init(|| {
+        std::env::var(AUTH_CONTEXT_CACHE_REFRESH_INTERVAL_SECS_ENV)
             .ok()
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(true)
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .map(Duration::from_secs)
+            .unwrap_or(AUTH_CONTEXT_CACHE_REFRESH_INTERVAL)
+            // Operators may tighten the window, but cannot expand the maximum
+            // authorization staleness beyond the secure default.
+            .min(AUTH_CONTEXT_CACHE_REFRESH_INTERVAL)
     })
+}
+
+fn auth_context_cache_refresh_due(state: &AppState, age: Duration) -> bool {
+    age >= auth_context_cache_refresh_interval(state)
 }
 
 fn auth_context_negative_cache_ttl() -> Duration {
@@ -823,9 +902,14 @@ pub(super) async fn resolve_data_backed_auth_context(
             resolve_trusted_auth_context(state, signature, trusted_headers, now_unix_secs).await
         }
         Some(GatewayPrincipalCandidate::ApiKeyHash { key_hash, .. }) => {
-            let snapshot = state
-                .read_cached_auth_api_key_snapshot_by_key_hash(&key_hash, now_unix_secs)
-                .await?;
+            let snapshot = {
+                let _permit = state.acquire_auth_snapshot_load_gate().await?;
+                state
+                    .data
+                    .read_auth_api_key_snapshot_by_key_hash_strong(&key_hash, now_unix_secs)
+                    .await
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?
+            };
             let Some(snapshot) = snapshot else {
                 return Ok(Some(GatewayControlAuthContext {
                     user_id: String::new(),
@@ -847,7 +931,7 @@ pub(super) async fn resolve_data_backed_auth_context(
                 .touch_auth_api_key_last_used_best_effort(&snapshot.api_key_id)
                 .await;
 
-            let wallet_access = resolve_wallet_auth_gate(state, &snapshot).await?;
+            let wallet_access = resolve_wallet_auth_gate_uncached(state, &snapshot).await?;
             Ok(Some(
                 build_data_backed_auth_context(
                     state,
@@ -894,10 +978,15 @@ async fn resolve_antigravity_bearer_bridge_auth_context(
         return Ok(None);
     }
 
-    let Some(config_value) = state
-        .read_system_config_json_value(crate::constants::ANTIGRAVITY_BEARER_BRIDGE_CONFIG_KEY)
-        .await?
-    else {
+    let config_value = {
+        let _permit = state.acquire_auth_snapshot_load_gate().await?;
+        state
+            .data
+            .find_system_config_value_strong(crate::constants::ANTIGRAVITY_BEARER_BRIDGE_CONFIG_KEY)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+    };
+    let Some(config_value) = config_value else {
         return Ok(None);
     };
     if config_value.is_null() {
@@ -925,11 +1014,14 @@ async fn resolve_antigravity_bearer_bridge_auth_context(
         )));
     }
 
-    let snapshot = state
-        .data
-        .read_auth_api_key_snapshot(user_id, api_key_id, now_unix_secs)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let snapshot = {
+        let _permit = state.acquire_auth_snapshot_load_gate().await?;
+        state
+            .data
+            .read_auth_api_key_snapshot_strong(user_id, api_key_id, now_unix_secs)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+    };
     let Some(snapshot) = snapshot else {
         return Ok(Some(GatewayControlAuthContext {
             user_id: user_id.to_string(),
@@ -947,7 +1039,7 @@ async fn resolve_antigravity_bearer_bridge_auth_context(
         }));
     };
 
-    let wallet_access = resolve_wallet_auth_gate(state, &snapshot).await?;
+    let wallet_access = resolve_wallet_auth_gate_uncached(state, &snapshot).await?;
     let auth_context = build_data_backed_auth_context(
         state,
         snapshot,
@@ -976,15 +1068,18 @@ async fn resolve_trusted_auth_context(
     trusted_headers: GatewayTrustedAuthHeaders,
     now_unix_secs: u64,
 ) -> Result<Option<GatewayControlAuthContext>, GatewayError> {
-    let snapshot = state
-        .data
-        .read_auth_api_key_snapshot(
-            &trusted_headers.user_id,
-            &trusted_headers.api_key_id,
-            now_unix_secs,
-        )
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let snapshot = {
+        let _permit = state.acquire_auth_snapshot_load_gate().await?;
+        state
+            .data
+            .read_auth_api_key_snapshot_strong(
+                &trusted_headers.user_id,
+                &trusted_headers.api_key_id,
+                now_unix_secs,
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+    };
     let Some(snapshot) = snapshot else {
         return Ok(Some(GatewayControlAuthContext {
             user_id: trusted_headers.user_id,
@@ -1002,7 +1097,7 @@ async fn resolve_trusted_auth_context(
         }));
     };
 
-    let wallet_access = resolve_wallet_auth_gate(state, &snapshot).await?;
+    let wallet_access = resolve_wallet_auth_gate_uncached(state, &snapshot).await?;
     Ok(Some(
         build_data_backed_auth_context(
             state,
@@ -1268,35 +1363,45 @@ fn endpoint_matches_requested_provider(
 }
 
 fn get_cached_auth_context(state: &AppState, cache_key: &str) -> Option<GatewayControlAuthContext> {
+    get_cached_auth_context_with_age(state, cache_key).map(|(auth_context, _)| auth_context)
+}
+
+fn get_cached_auth_context_with_age(
+    state: &AppState,
+    cache_key: &str,
+) -> Option<(GatewayControlAuthContext, Duration)> {
     let negative_ttl = auth_context_negative_cache_ttl();
     if !negative_ttl.is_zero() {
         if let Some(auth_context) = state
             .auth_context_cache
-            .get_fresh(&negative_auth_context_cache_key(cache_key), negative_ttl)
+            .get_fresh_with_age(&negative_auth_context_cache_key(cache_key), negative_ttl)
         {
             return Some(auth_context);
         }
     }
     state
         .auth_context_cache
-        .get_fresh(cache_key, AUTH_CONTEXT_CACHE_TTL)
+        .get_fresh_with_age(cache_key, AUTH_CONTEXT_CACHE_TTL)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
 
     use aether_data::repository::auth::{
-        InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,
+        AuthApiKeyWriteRepository, InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,
     };
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data::repository::wallet::{
         InMemoryWalletRepository, StoredWalletSnapshot, WalletReadRepository,
     };
+    use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
     use aether_data_contracts::repository::provider_catalog::{
         StoredProviderCatalogEndpoint, StoredProviderCatalogProvider,
     };
+    use aether_runtime::ConcurrencyGate;
     use axum::http::{HeaderMap, Uri};
     use futures_util::future::join_all;
 
@@ -1307,7 +1412,7 @@ mod tests {
     };
     use crate::control::auth::credentials::{build_auth_context_cache_key, hash_api_key};
     use crate::control::GatewayControlDecision;
-    use crate::data::GatewayDataState;
+    use crate::data::{GatewayDataConfig, GatewayDataState};
     use crate::rate_limit::{
         FrontdoorUserRpmConfig, FrontdoorUserRpmLimiter, FrontdoorUserRpmOutcome,
     };
@@ -1370,6 +1475,126 @@ mod tests {
         .expect("endpoint should build")
     }
 
+    struct SqliteAuthConfigNodes {
+        first: AppState,
+        second: AppState,
+        _database: TemporarySqliteDatabase,
+    }
+
+    struct TemporarySqliteDatabase(PathBuf);
+
+    impl Drop for TemporarySqliteDatabase {
+        fn drop(&mut self) {
+            for suffix in ["", "-shm", "-wal"] {
+                let mut path = self.0.as_os_str().to_os_string();
+                path.push(suffix);
+                let _ = std::fs::remove_file(PathBuf::from(path));
+            }
+        }
+    }
+
+    async fn sqlite_auth_config_nodes(
+        auth_repository: Arc<InMemoryAuthApiKeySnapshotRepository>,
+    ) -> SqliteAuthConfigNodes {
+        let database_path = std::env::temp_dir().join(format!(
+            "aether-auth-config-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let mut pool = SqlPoolConfig::default();
+        pool.min_connections = 0;
+        pool.max_connections = 4;
+        let database = SqlDatabaseConfig::new(
+            DatabaseDriver::Sqlite,
+            format!("sqlite://{}", database_path.display()),
+            pool,
+        )
+        .expect("sqlite config should build");
+        let config = GatewayDataConfig::from_database_config(database);
+        let first_data = GatewayDataState::from_config(config.clone())
+            .expect("first data state should build")
+            .with_auth_api_key_reader(auth_repository.clone())
+            .without_wallet_reader_for_tests();
+        assert!(first_data
+            .run_database_migrations()
+            .await
+            .expect("sqlite migrations should run"));
+        let second_data = GatewayDataState::from_config(config)
+            .expect("second data state should build")
+            .with_auth_api_key_reader(auth_repository)
+            .without_wallet_reader_for_tests();
+
+        SqliteAuthConfigNodes {
+            first: AppState::new()
+                .expect("first app state should build")
+                .with_data_state_for_tests(first_data),
+            second: AppState::new()
+                .expect("second app state should build")
+                .with_data_state_for_tests(second_data),
+            _database: TemporarySqliteDatabase(database_path),
+        }
+    }
+
+    #[tokio::test]
+    async fn strong_system_config_read_bypasses_app_and_data_caches() {
+        let nodes =
+            sqlite_auth_config_nodes(Arc::new(InMemoryAuthApiKeySnapshotRepository::seed([])))
+                .await;
+        let key = format!("test.auth.strong-read.{}", uuid::Uuid::new_v4());
+        let old_value = serde_json::json!({"version": "old"});
+        let new_value = serde_json::json!({"version": "new"});
+
+        nodes
+            .first
+            .data
+            .upsert_system_config_value(&key, &old_value, None)
+            .await
+            .expect("initial config should write");
+        assert_eq!(
+            nodes
+                .first
+                .read_system_config_json_value(&key)
+                .await
+                .expect("initial app config read should succeed"),
+            Some(old_value.clone())
+        );
+        nodes
+            .second
+            .data
+            .upsert_system_config_value(&key, &new_value, None)
+            .await
+            .expect("cross-node config update should write");
+
+        assert_eq!(
+            nodes
+                .first
+                .read_system_config_json_value(&key)
+                .await
+                .expect("stale app config read should succeed"),
+            Some(old_value.clone()),
+            "node-local AppState cache should still contain the old value"
+        );
+        assert_eq!(
+            nodes
+                .first
+                .data
+                .find_system_config_value(&key)
+                .await
+                .expect("stale data config read should succeed"),
+            Some(old_value),
+            "node-local data cache should still contain the old value"
+        );
+        assert_eq!(
+            nodes
+                .first
+                .data
+                .find_system_config_value_strong(&key)
+                .await
+                .expect("strong config read should succeed"),
+            Some(new_value),
+            "strong reads must reach the shared repository"
+        );
+    }
+
     #[tokio::test]
     async fn control_auth_caches_invalid_api_key_rejections() {
         let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed([]));
@@ -1415,6 +1640,57 @@ mod tests {
         );
         assert!(cached.user_id.is_empty());
         assert!(cached.api_key_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn uncached_invalid_api_key_lookup_waits_for_auth_snapshot_gate() {
+        let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed([]));
+        let data = GatewayDataState::with_auth_api_key_repository_for_tests(repository.clone());
+        let mut state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data);
+        state.auth_snapshot_load_gate = Some(Arc::new(ConcurrencyGate::new(
+            "test_invalid_auth_snapshot_lookup",
+            1,
+        )));
+        let held = state
+            .acquire_auth_snapshot_load_gate()
+            .await
+            .expect("auth gate acquisition should succeed")
+            .expect("auth gate should be configured");
+        let api_key = "sk-missing-auth-gate";
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            format!("Bearer {api_key}").parse().unwrap(),
+        );
+        let request_uri = uri("/v1/chat/completions");
+
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(25),
+            resolve_data_backed_auth_context(&state, &headers, &request_uri, Some("openai:chat")),
+        )
+        .await;
+        assert!(
+            blocked.is_err(),
+            "an uncached invalid-key strong read must wait for auth DB admission"
+        );
+        assert_eq!(repository.key_hash_lookup_count(&hash_api_key(api_key)), 0);
+
+        drop(held);
+        let resolved = tokio::time::timeout(
+            Duration::from_secs(1),
+            resolve_data_backed_auth_context(&state, &headers, &request_uri, Some("openai:chat")),
+        )
+        .await
+        .expect("auth lookup should resume after releasing the gate")
+        .expect("auth resolution should succeed")
+        .expect("invalid API key should resolve to a rejection context");
+        assert_eq!(
+            resolved.local_rejection,
+            Some(GatewayLocalAuthRejection::InvalidApiKey)
+        );
+        assert_eq!(repository.key_hash_lookup_count(&hash_api_key(api_key)), 1);
     }
 
     #[tokio::test]
@@ -1661,7 +1937,7 @@ mod tests {
             .expect("wallet should build"),
         ]));
         let data = GatewayDataState::with_auth_and_wallet_for_tests(
-            auth_repository,
+            auth_repository.clone(),
             Arc::clone(&wallet_repository),
         );
         let state = AppState::new()
@@ -1688,6 +1964,9 @@ mod tests {
         .expect("resolution should succeed")
         .expect("auth context should exist");
         assert!(first.access_allowed);
+        state
+            .auth_context_cache
+            .set_refresh_interval_for_tests(Duration::from_millis(10));
 
         wallet_repository
             .update_auth_user_wallet_snapshot(
@@ -1706,26 +1985,169 @@ mod tests {
             .await
             .expect("wallet update should succeed")
             .expect("wallet should exist");
+        tokio::time::sleep(Duration::from_millis(15)).await;
 
-        let second = resolve_execution_runtime_auth_context(
+        let second = tokio::time::timeout(
+            Duration::from_millis(100),
+            resolve_execution_runtime_auth_context(
+                &state,
+                &decision,
+                &headers,
+                &uri("/v1/chat/completions"),
+                "trace-runtime-wallet-cache",
+            ),
+        )
+        .await
+        .expect("due security refresh should complete")
+        .expect("resolution should succeed")
+        .expect("auth context should exist");
+        assert!(
+            !second.access_allowed,
+            "the due request must observe denial"
+        );
+
+        let cache_key =
+            build_auth_context_cache_key(&headers, &uri("/v1/chat/completions"), "openai:chat")
+                .expect("cache key should exist");
+        let refreshed = get_cached_auth_context(&state, &cache_key)
+            .expect("synchronous refresh should publish the wallet denial");
+        assert_eq!(
+            refreshed.local_rejection,
+            Some(GatewayLocalAuthRejection::BalanceDenied {
+                remaining: Some(0.0),
+            }),
+            "auth refresh should publish current wallet state"
+        );
+        assert!(!refreshed.access_allowed);
+        assert_eq!(
+            auth_repository.key_hash_lookup_count(&hash_api_key(api_key)),
+            2,
+            "initial auth and due refresh must each validate the presented credential"
+        );
+        assert_eq!(
+            auth_repository.snapshot_lookup_count("key-runtime-wallet-cache"),
+            0,
+            "due refresh must not trust the cached user/key mapping"
+        );
+    }
+
+    #[tokio::test]
+    async fn due_auth_context_refresh_observes_cross_node_key_lock() {
+        let api_key = "sk-test-cross-node-lock";
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some(hash_api_key(api_key)),
+            sample_snapshot("key-cross-node-lock", "user-cross-node-lock"),
+        )]));
+        let data =
+            GatewayDataState::with_auth_api_key_repository_for_tests(auth_repository.clone());
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data);
+        state
+            .auth_context_cache
+            .set_refresh_interval_for_tests(Duration::from_millis(10));
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/chat/completions",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", api_key.parse().unwrap());
+        let request_uri = uri("/v1/chat/completions");
+
+        let first = resolve_execution_runtime_auth_context(
+            &state,
+            &decision,
+            &headers,
+            &request_uri,
+            "trace-cross-node-lock-prime",
+        )
+        .await
+        .expect("initial resolution should succeed")
+        .expect("auth context should exist");
+        assert!(first.access_allowed);
+
+        assert!(auth_repository
+            .set_user_api_key_locked("user-cross-node-lock", "key-cross-node-lock", true)
+            .await
+            .expect("simulated cross-node lock should succeed"));
+        tokio::time::sleep(Duration::from_millis(15)).await;
+
+        let refreshed = resolve_execution_runtime_auth_context(
+            &state,
+            &decision,
+            &headers,
+            &request_uri,
+            "trace-cross-node-lock-refresh",
+        )
+        .await
+        .expect("due resolution should succeed")
+        .expect("auth context should exist");
+        assert!(!refreshed.access_allowed);
+        assert_eq!(
+            refreshed.local_rejection,
+            Some(GatewayLocalAuthRejection::LockedApiKey)
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_context_hard_miss_bypasses_fresh_snapshot_allow_caches() {
+        let api_key = "sk-test-hard-miss-cross-node-lock";
+        let key_hash = hash_api_key(api_key);
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some(key_hash.clone()),
+            sample_snapshot("key-hard-miss-lock", "user-hard-miss-lock"),
+        )]));
+        let data = GatewayDataState::with_cached_auth_api_key_repository_for_tests(
+            auth_repository.clone(),
+        );
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data);
+
+        let primed = state
+            .read_cached_auth_api_key_snapshot_by_key_hash(&key_hash, super::current_unix_secs())
+            .await
+            .expect("snapshot cache prime should succeed")
+            .expect("snapshot should exist");
+        assert!(primed.currently_usable);
+        assert!(auth_repository
+            .set_user_api_key_locked("user-hard-miss-lock", "key-hard-miss-lock", true)
+            .await
+            .expect("simulated cross-node lock should succeed"));
+
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/chat/completions",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", api_key.parse().unwrap());
+        let resolved = resolve_execution_runtime_auth_context(
             &state,
             &decision,
             &headers,
             &uri("/v1/chat/completions"),
-            "trace-runtime-wallet-cache",
+            "trace-hard-miss-cross-node-lock",
         )
         .await
-        .expect("resolution should succeed")
+        .expect("hard-miss resolution should succeed")
         .expect("auth context should exist");
 
+        assert!(!resolved.access_allowed);
         assert_eq!(
-            second.local_rejection,
-            Some(GatewayLocalAuthRejection::BalanceDenied {
-                remaining: Some(0.0),
-            }),
-            "cached auth context should revalidate wallet state before execution"
+            resolved.local_rejection,
+            Some(GatewayLocalAuthRejection::LockedApiKey)
         );
-        assert!(!second.access_allowed);
+        assert_eq!(
+            auth_repository.key_hash_lookup_count(&key_hash),
+            2,
+            "hard miss must bypass both fresh snapshot cache layers"
+        );
     }
 
     #[tokio::test]
@@ -1736,7 +2158,7 @@ mod tests {
                 Some(hash_api_key(api_key)),
                 sample_snapshot("key-runtime-auth-refresh", "user-runtime-auth-refresh"),
             )])
-            .with_lookup_delay_for_tests(Duration::from_millis(20)),
+            .with_lookup_delay_for_tests(Duration::from_millis(200)),
         );
         let data =
             GatewayDataState::with_auth_api_key_repository_for_tests(auth_repository.clone());
@@ -1769,6 +2191,10 @@ mod tests {
             auth_repository.key_hash_lookup_count(&hash_api_key(api_key)),
             1
         );
+        state
+            .auth_context_cache
+            .set_refresh_interval_for_tests(Duration::from_millis(100));
+        tokio::time::sleep(Duration::from_millis(110)).await;
 
         let tasks = (0..32).map(|index| {
             let trace_id = format!("trace-runtime-auth-refresh-{index}");
@@ -1788,7 +2214,10 @@ mod tests {
             }
         });
 
-        for result in join_all(tasks).await {
+        let results = tokio::time::timeout(Duration::from_secs(1), join_all(tasks))
+            .await
+            .expect("same-key security refreshes should complete through one flight");
+        for result in results {
             let auth_context = result
                 .expect("resolution should succeed")
                 .expect("auth context should exist");
@@ -1797,13 +2226,116 @@ mod tests {
         }
         assert_eq!(
             auth_repository.key_hash_lookup_count(&hash_api_key(api_key)),
-            1,
-            "cache refreshes should reuse the existing auth context under concurrent pressure"
+            2,
+            "one due security refresh should revalidate the original API key hash"
         );
         assert_eq!(
             auth_repository.snapshot_lookup_count("key-runtime-auth-refresh"),
-            1,
-            "only one cached auth context refresh should read the snapshot by user/key id"
+            0,
+            "full credential revalidation must not trust the cached user/key mapping"
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_runtime_auth_context_reuses_control_resolved_context() {
+        let api_key = "sk-test-control-execution-auth-reuse";
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some(hash_api_key(api_key)),
+            sample_snapshot(
+                "key-control-execution-auth-reuse",
+                "user-control-execution-auth-reuse",
+            ),
+        )]));
+        let data =
+            GatewayDataState::with_auth_api_key_repository_for_tests(auth_repository.clone());
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", api_key.parse().unwrap());
+        let request_uri = uri("/v1/chat/completions");
+
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/chat/completions",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+        )
+        .with_execution_runtime_candidate(true);
+        let ControlDecisionAuthResolution::Resolved(first) = resolve_control_decision_auth(
+            &state,
+            &headers,
+            &request_uri,
+            "trace-control-execution-auth-reuse-first",
+            decision,
+        )
+        .await
+        .expect("control auth resolution should succeed");
+        assert!(first.auth_context.is_some());
+        assert_eq!(
+            auth_repository.snapshot_lookup_count("key-control-execution-auth-reuse"),
+            0,
+            "initial auth resolution should use the key-hash lookup"
+        );
+
+        let mut second = None;
+        for index in 0..32 {
+            let decision = GatewayControlDecision::synthetic(
+                "/v1/chat/completions",
+                Some("ai_public".to_string()),
+                Some("openai".to_string()),
+                Some("chat".to_string()),
+                Some("openai:chat".to_string()),
+            )
+            .with_execution_runtime_candidate(true);
+            let ControlDecisionAuthResolution::Resolved(resolved) = resolve_control_decision_auth(
+                &state,
+                &headers,
+                &request_uri,
+                &format!("trace-control-execution-auth-reuse-{index}"),
+                decision,
+            )
+            .await
+            .expect("control auth resolution should succeed");
+            second = Some(resolved);
+        }
+        let second = second.expect("fresh cache hit should resolve a decision");
+        assert!(second.auth_context.is_some());
+        let snapshot_lookups_after_control =
+            auth_repository.snapshot_lookup_count("key-control-execution-auth-reuse");
+        assert_eq!(
+            snapshot_lookups_after_control, 0,
+            "continuous fresh hits before soft TTL must not refresh auth"
+        );
+
+        let execution = resolve_execution_runtime_auth_context(
+            &state,
+            &second,
+            &headers,
+            &request_uri,
+            "trace-control-execution-auth-reuse-execution",
+        )
+        .await
+        .expect("execution auth resolution should succeed")
+        .expect("execution auth context should exist");
+        assert_eq!(execution.api_key_id, "key-control-execution-auth-reuse");
+        let control_context = second
+            .auth_context
+            .as_ref()
+            .expect("control auth context should exist");
+        assert_eq!(
+            execution.access_allowed, control_context.access_allowed,
+            "execution must preserve the control-stage access decision"
+        );
+        assert_eq!(
+            execution.local_rejection, control_context.local_rejection,
+            "execution must preserve the control-stage local rejection"
+        );
+        assert_eq!(
+            auth_repository.snapshot_lookup_count("key-control-execution-auth-reuse"),
+            snapshot_lookups_after_control,
+            "execution should reuse the control-resolved auth context without another snapshot lookup"
         );
     }
 
@@ -1893,6 +2425,143 @@ mod tests {
         .expect("auth context should exist");
 
         assert_eq!(auth_context.local_rejection, None);
+    }
+
+    #[tokio::test]
+    async fn due_antigravity_bearer_refresh_observes_cross_node_allowlist_revocation() {
+        let raw_bearer = "google-oauth-access-token-revoked-cross-node";
+        let mut snapshot = sample_snapshot(
+            "key-antigravity-bearer-revocation",
+            "user-antigravity-bearer-revocation",
+        );
+        snapshot.user_allowed_providers = Some(vec!["antigravity".to_string()]);
+        snapshot.api_key_allowed_providers = Some(vec!["antigravity".to_string()]);
+        snapshot.user_allowed_api_formats = Some(vec!["gemini:generate_content".to_string()]);
+        snapshot.api_key_allowed_api_formats = Some(vec!["gemini:generate_content".to_string()]);
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            None, snapshot,
+        )]));
+        let nodes = sqlite_auth_config_nodes(auth_repository.clone()).await;
+        nodes
+            .first
+            .auth_context_cache
+            .set_refresh_interval_for_tests(Duration::from_millis(10));
+        let allowed_config = serde_json::json!({
+            "enabled": true,
+            "auth_user_id": "user-antigravity-bearer-revocation",
+            "auth_api_key_id": "key-antigravity-bearer-revocation",
+            "bearer_sha256_allowlist": [hash_api_key(raw_bearer)]
+        });
+        nodes
+            .first
+            .data
+            .upsert_system_config_value(
+                crate::constants::ANTIGRAVITY_BEARER_BRIDGE_CONFIG_KEY,
+                &allowed_config,
+                None,
+            )
+            .await
+            .expect("initial bearer bridge config should write");
+        assert_eq!(
+            nodes
+                .first
+                .read_system_config_json_value(
+                    crate::constants::ANTIGRAVITY_BEARER_BRIDGE_CONFIG_KEY,
+                )
+                .await
+                .expect("initial bridge config read should succeed"),
+            Some(allowed_config.clone())
+        );
+
+        let decision = GatewayControlDecision::synthetic(
+            "/v1internal:streamGenerateContent",
+            Some("ai_public".to_string()),
+            Some("antigravity".to_string()),
+            Some("v1internal".to_string()),
+            Some("antigravity:v1internal".to_string()),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            format!("Bearer {raw_bearer}").parse().unwrap(),
+        );
+        let request_uri = uri("/v1internal:streamGenerateContent?alt=sse");
+        let initial = resolve_execution_runtime_auth_context(
+            &nodes.first,
+            &decision,
+            &headers,
+            &request_uri,
+            "trace-antigravity-bearer-revocation-prime",
+        )
+        .await
+        .expect("initial bearer auth should resolve")
+        .expect("initial bearer auth context should exist");
+        assert!(initial.access_allowed);
+
+        let revoked_config = serde_json::json!({
+            "enabled": true,
+            "auth_user_id": "user-antigravity-bearer-revocation",
+            "auth_api_key_id": "key-antigravity-bearer-revocation",
+            "bearer_sha256_allowlist": [hash_api_key("different-bearer")]
+        });
+        nodes
+            .second
+            .data
+            .upsert_system_config_value(
+                crate::constants::ANTIGRAVITY_BEARER_BRIDGE_CONFIG_KEY,
+                &revoked_config,
+                None,
+            )
+            .await
+            .expect("cross-node bearer revocation should write");
+        assert_eq!(
+            nodes
+                .first
+                .read_system_config_json_value(
+                    crate::constants::ANTIGRAVITY_BEARER_BRIDGE_CONFIG_KEY,
+                )
+                .await
+                .expect("stale app config read should succeed"),
+            Some(allowed_config),
+            "the node-local AppState cache should remain stale for the regression setup"
+        );
+        assert_eq!(
+            nodes
+                .first
+                .data
+                .find_system_config_value(crate::constants::ANTIGRAVITY_BEARER_BRIDGE_CONFIG_KEY,)
+                .await
+                .expect("stale data config read should succeed"),
+            Some(serde_json::json!({
+                "enabled": true,
+                "auth_user_id": "user-antigravity-bearer-revocation",
+                "auth_api_key_id": "key-antigravity-bearer-revocation",
+                "bearer_sha256_allowlist": [hash_api_key(raw_bearer)]
+            })),
+            "the node-local data cache should remain stale for the regression setup"
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+
+        let refreshed = resolve_execution_runtime_auth_context(
+            &nodes.first,
+            &decision,
+            &headers,
+            &request_uri,
+            "trace-antigravity-bearer-revocation-refresh",
+        )
+        .await
+        .expect("due bearer auth refresh should resolve")
+        .expect("due bearer auth context should exist");
+        assert!(!refreshed.access_allowed);
+        assert_eq!(
+            refreshed.local_rejection,
+            Some(GatewayLocalAuthRejection::InvalidApiKey)
+        );
+        assert_eq!(
+            auth_repository.snapshot_lookup_count("key-antigravity-bearer-revocation"),
+            1,
+            "a revoked bearer must be rejected before its mapped API key is reloaded"
+        );
     }
 
     #[tokio::test]

@@ -75,6 +75,10 @@ use crate::maintenance::spawn_usage_counter_flush_worker;
 use crate::maintenance::spawn_wallet_daily_usage_aggregation_worker;
 
 const SYSTEM_CONFIG_CACHE_TTL: Duration = Duration::from_secs(30);
+// Requests may use a stale value after the fresh window until the entry reaches
+// five minutes of total age. Direct database edits that bypass AppState
+// invalidation can therefore take at most this bounded interval to appear.
+const SYSTEM_CONFIG_CACHE_MAX_STALENESS: Duration = Duration::from_secs(5 * 60);
 const SCHEDULER_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &[
     "enable_format_conversion",
     "keep_priority_on_conversion",
@@ -102,6 +106,8 @@ const USAGE_QUEUE_HEALTH_METRICS_TIMEOUT: Duration = Duration::from_secs(2);
 const USAGE_COUNTER_HEALTH_METRICS_TIMEOUT: Duration = Duration::from_secs(2);
 const USAGE_COUNTER_EXACT_HEALTH_METRICS_TIMEOUT: Duration = Duration::from_secs(10);
 const USAGE_COUNTER_EXACT_HEALTH_METRICS_TTL: Duration = Duration::from_secs(5 * 60);
+const USAGE_COUNTER_EXACT_HEALTH_METRICS_MAX_STALENESS: Duration = Duration::from_secs(10 * 60);
+const USAGE_COUNTER_EXACT_HEALTH_METRICS_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
 fn system_config_key_affects_scheduler(key: &str) -> bool {
     let key = key.trim();
@@ -358,6 +364,7 @@ impl AppState {
             scheduler_affinity_epoch: Arc::new(AtomicU64::new(0)),
             dashboard_response_cache: Arc::new(DashboardResponseCache::default()),
             system_config_cache: Arc::new(SystemConfigCache::default()),
+            endpoint_response_header_rules_cache: Arc::new(JsonValueCache::default()),
             candidate_row_page_cache: Arc::new(crate::cache::CandidateRowPageCache::default()),
             candidate_page_cache: Arc::new(crate::cache::CandidatePageCache::default()),
             candidate_resolved_page_cache: Arc::new(
@@ -388,6 +395,7 @@ impl AppState {
                 runtime_state.clone(),
             ),
             provider_transport_snapshot_cache: Arc::new(DashMap::new()),
+            provider_transport_snapshot_cache_generation: Arc::new(AtomicU64::new(0)),
             provider_transport_snapshot_inflight: Arc::new(DashMap::new()),
             provider_key_rpm_resets: Arc::new(StdMutex::new(HashMap::new())),
             local_execution_runtime_miss_diagnostics: Arc::new(DashMap::new()),
@@ -622,6 +630,17 @@ impl AppState {
         }
     }
 
+    /// Route lifecycle writes away from foreground traffic when an isolated
+    /// background pool is configured. With shared pools this returns the same
+    /// state as the foreground path, preserving existing behavior.
+    pub(crate) fn usage_lifecycle_data_state(&self) -> &Arc<GatewayDataState> {
+        if self.background_data_isolated {
+            &self.background_data
+        } else {
+            &self.data
+        }
+    }
+
     pub fn with_distributed_request_concurrency_gate(mut self, gate: RuntimeSemaphore) -> Self {
         self.distributed_request_gate = Some(Arc::new(gate));
         self
@@ -704,48 +723,86 @@ impl AppState {
         &self,
         key: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
-        if let Some(value) = self.system_config_cache.get(key, SYSTEM_CONFIG_CACHE_TTL) {
+        self.read_system_config_json_value_with_cache_windows(
+            key,
+            SYSTEM_CONFIG_CACHE_TTL,
+            SYSTEM_CONFIG_CACHE_MAX_STALENESS,
+        )
+        .await
+    }
+
+    async fn read_system_config_json_value_with_cache_windows(
+        &self,
+        key: &str,
+        fresh_ttl: Duration,
+        max_staleness: Duration,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        let max_staleness = max_staleness.max(fresh_ttl);
+        if let Some((value, age)) = self.system_config_cache.get_with_age(key, max_staleness) {
+            if age > fresh_ttl {
+                self.spawn_system_config_refresh(key, max_staleness);
+            }
             return Ok(value);
         }
 
         loop {
-            let notified = self.system_config_cache.notified();
             match self.system_config_cache.register_load(key) {
                 SystemConfigInflightRegistration::Bypass => {
-                    let value = self
+                    return self
                         .data
                         .find_system_config_value(key)
                         .await
-                        .map_err(|err| GatewayError::Internal(err.to_string()))?;
-                    self.system_config_cache.insert(
-                        key.to_string(),
-                        value.clone(),
-                        SYSTEM_CONFIG_CACHE_TTL,
-                    );
-                    return Ok(value);
+                        .map_err(|err| GatewayError::Internal(err.to_string()));
                 }
-                SystemConfigInflightRegistration::Follower => {
-                    notified.await;
-                    if let Some(value) = self.system_config_cache.get(key, SYSTEM_CONFIG_CACHE_TTL)
+                SystemConfigInflightRegistration::Follower(waiter) => {
+                    waiter.wait().await?;
+                    if let Some((value, _age)) =
+                        self.system_config_cache.get_with_age(key, max_staleness)
                     {
                         return Ok(value);
                     }
                 }
-                SystemConfigInflightRegistration::Leader(_guard) => {
-                    let value = self
-                        .data
-                        .find_system_config_value(key)
-                        .await
-                        .map_err(|err| GatewayError::Internal(err.to_string()))?;
-                    self.system_config_cache.insert(
+                SystemConfigInflightRegistration::Leader(guard) => {
+                    let value = match self.data.find_system_config_value(key).await {
+                        Ok(value) => value,
+                        Err(error) => {
+                            let error = GatewayError::Internal(error.to_string());
+                            guard.fail(error.clone());
+                            return Err(error);
+                        }
+                    };
+                    self.system_config_cache.insert_if_generation(
                         key.to_string(),
                         value.clone(),
-                        SYSTEM_CONFIG_CACHE_TTL,
+                        max_staleness,
+                        guard.generation(),
                     );
                     return Ok(value);
                 }
             }
         }
+    }
+
+    fn spawn_system_config_refresh(&self, key: &str, max_staleness: Duration) {
+        let Some(guard) = self.system_config_cache.try_register_owned_leader(key) else {
+            return;
+        };
+        let key = key.to_string();
+        let cache = Arc::clone(&self.system_config_cache);
+        let data = Arc::clone(&self.data);
+        let generation = guard.generation();
+        tokio::spawn(async move {
+            match data.find_system_config_value(&key).await {
+                Ok(value) => {
+                    cache.insert_if_generation(key, value, max_staleness, generation);
+                }
+                Err(error) => {
+                    guard.fail(GatewayError::Internal(error.to_string()));
+                    warn!(error = %error, "background system config refresh failed");
+                }
+            }
+            drop(guard);
+        });
     }
 
     pub(crate) async fn upsert_system_config_json_value(
@@ -794,7 +851,7 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         self.system_config_cache
-            .insert(key.to_string(), None, SYSTEM_CONFIG_CACHE_TTL);
+            .insert(key.to_string(), None, SYSTEM_CONFIG_CACHE_MAX_STALENESS);
         if deleted && system_config_key_affects_scheduler(key) {
             self.invalidate_scheduler_affinity_cache();
         }
@@ -819,6 +876,7 @@ impl AppState {
         self.data.clear_minimal_candidate_selection_cache();
         self.data.clear_routing_group_cache();
         self.data.clear_provider_catalog_cache();
+        self.endpoint_response_header_rules_cache.clear();
         self.auth_request_cost_upper_bound_cache.clear();
         self.routing_group_selection_cache.clear();
         self.candidate_row_page_cache.clear();
@@ -834,16 +892,28 @@ impl AppState {
         self.candidate_row_page_cache.clear();
         self.candidate_page_cache.clear();
         self.candidate_resolved_page_cache.clear();
-        self.clear_provider_transport_snapshot_cache();
+        // Transport snapshots contain static provider/endpoint/key configuration,
+        // including `is_active`, but not runtime health, circuit-breaker, or
+        // adaptive projections. Keeping them avoids a global three-query transport
+        // reload after every runtime health feedback write.
     }
 
     pub(crate) fn invalidate_provider_runtime_state_caches(&self) {
         self.data.clear_minimal_candidate_selection_cache();
         self.data.clear_provider_catalog_cache();
+    }
+
+    pub(crate) fn invalidate_provider_transport_runtime_state_caches(&self) {
+        self.invalidate_provider_runtime_state_caches();
         self.clear_provider_transport_snapshot_cache();
     }
 
     pub(crate) fn invalidate_auth_context_cache(&self) {
+        // The data-layer reader has its own 30s read-through snapshot cache;
+        // clear it together with the request-level auth caches so a key or
+        // wallet mutation is visible immediately when refresh-on-hit is off.
+        self.data.clear_auth_api_key_read_cache();
+        self.background_data.clear_auth_api_key_read_cache();
         self.auth_context_cache.clear();
         self.auth_snapshot_cache.clear();
         self.user_model_capability_settings_cache.clear();
@@ -863,7 +933,7 @@ impl AppState {
 
     fn remember_system_config_write(&self, key: &str, value: Option<serde_json::Value>) {
         self.system_config_cache
-            .insert(key.to_string(), value, SYSTEM_CONFIG_CACHE_TTL);
+            .insert(key.to_string(), value, SYSTEM_CONFIG_CACHE_MAX_STALENESS);
         if system_config_key_affects_scheduler(key) {
             self.invalidate_scheduler_affinity_cache();
         }
@@ -1186,17 +1256,27 @@ impl AppState {
     }
 
     pub async fn prewarm_metric_snapshot(&self) -> bool {
+        self.prewarm_metric_snapshot_with_exact_refresh(
+            self.refresh_usage_counter_exact_health_metric_snapshot(),
+        )
+        .await
+    }
+
+    async fn prewarm_metric_snapshot_with_exact_refresh<F>(&self, exact_refresh: F) -> bool
+    where
+        F: std::future::Future<Output = Result<(), aether_data::DataLayerError>>,
+    {
         match tokio::time::timeout(METRIC_SNAPSHOT_PREWARM_TIMEOUT, async {
             let _refresh_guard = self.metric_snapshot_refresh.lock().await;
             let _exact_health_guard = self.usage_counter_exact_health_metric_refresh.lock().await;
-            self.mark_usage_counter_exact_health_metric_attempt();
-            self.refresh_usage_counter_exact_health_metric_snapshot()
-                .await;
+            let exact_refresh_result = exact_refresh.await;
             self.collect_and_store_metric_snapshot().await;
+            exact_refresh_result
         })
         .await
         {
-            Ok(()) => true,
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => false,
             Err(_) => {
                 warn!(
                     timeout_ms = METRIC_SNAPSHOT_PREWARM_TIMEOUT.as_millis() as u64,
@@ -1253,19 +1333,31 @@ impl AppState {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(std::time::Instant::now());
     }
 
-    fn usage_counter_exact_health_metric_refresh_is_due(&self) -> bool {
+    fn usage_counter_exact_health_metric_refresh_is_due(
+        &self,
+        snapshot_created_at: Option<std::time::Instant>,
+    ) -> bool {
+        let now = std::time::Instant::now();
+        if snapshot_created_at.is_some_and(|created_at| {
+            now.saturating_duration_since(created_at) < USAGE_COUNTER_EXACT_HEALTH_METRICS_TTL
+        }) {
+            return false;
+        }
         let last_attempt = *self
             .usage_counter_exact_health_metric_last_attempt
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         last_attempt.is_none_or(|last_attempt| {
-            std::time::Instant::now().saturating_duration_since(last_attempt)
-                >= USAGE_COUNTER_EXACT_HEALTH_METRICS_TTL
+            now.saturating_duration_since(last_attempt)
+                >= USAGE_COUNTER_EXACT_HEALTH_METRICS_RETRY_BACKOFF
         })
     }
 
-    fn spawn_usage_counter_exact_health_metric_refresh(&self) {
-        if !self.usage_counter_exact_health_metric_refresh_is_due() {
+    fn spawn_usage_counter_exact_health_metric_refresh(
+        &self,
+        snapshot_created_at: Option<std::time::Instant>,
+    ) {
+        if !self.usage_counter_exact_health_metric_refresh_is_due(snapshot_created_at) {
             return;
         }
         let Ok(refresh_guard) =
@@ -1277,13 +1369,15 @@ impl AppState {
         let state = self.clone();
         tokio::spawn(async move {
             let _refresh_guard = refresh_guard;
-            state
+            let _ = state
                 .refresh_usage_counter_exact_health_metric_snapshot()
                 .await;
         });
     }
 
-    async fn refresh_usage_counter_exact_health_metric_snapshot(&self) -> bool {
+    async fn refresh_usage_counter_exact_health_metric_snapshot(
+        &self,
+    ) -> Result<(), aether_data::DataLayerError> {
         match tokio::time::timeout(
             USAGE_COUNTER_EXACT_HEALTH_METRICS_TIMEOUT,
             self.background_data.read_usage_counter_health(),
@@ -1295,32 +1389,108 @@ impl AppState {
                     .usage_counter_exact_health_metric_snapshot
                     .write()
                     .await = Some((std::time::Instant::now(), snapshot));
-                true
+                Ok(())
             }
             Ok(Err(err)) => {
                 warn!(
                     error = %err,
                     "usage counter exact health metric refresh failed; retaining cached exact metrics"
                 );
-                false
+                Err(err)
             }
             Err(_) => {
                 warn!(
                     timeout_ms = USAGE_COUNTER_EXACT_HEALTH_METRICS_TIMEOUT.as_millis() as u64,
                     "usage counter exact health metric refresh timed out; retaining cached exact metrics"
                 );
-                false
+                Err(aether_data::DataLayerError::TimedOut(
+                    "usage counter exact health snapshot refresh".to_string(),
+                ))
             }
         }
     }
 
-    async fn usage_counter_exact_health_metric_samples(&self) -> Vec<MetricSample> {
-        if self.usage_counter_exact_health_metric_refresh_is_due() {
-            self.spawn_usage_counter_exact_health_metric_refresh();
-        }
-        self.usage_counter_exact_health_metric_snapshot
+    pub(crate) async fn read_cached_usage_counter_health(
+        &self,
+    ) -> Result<UsageCounterHealthSnapshot, aether_data::DataLayerError> {
+        let mut cached = self
+            .usage_counter_exact_health_metric_snapshot
             .read()
             .await
+            .clone();
+        let now = std::time::Instant::now();
+        let mut exact = cached.as_ref().and_then(|(created_at, snapshot)| {
+            (now.saturating_duration_since(*created_at)
+                <= USAGE_COUNTER_EXACT_HEALTH_METRICS_MAX_STALENESS)
+                .then(|| snapshot.clone())
+        });
+        if exact.is_some() {
+            let snapshot_created_at = cached.as_ref().map(|(created_at, _)| *created_at);
+            if self.usage_counter_exact_health_metric_refresh_is_due(snapshot_created_at) {
+                self.spawn_usage_counter_exact_health_metric_refresh(snapshot_created_at);
+            }
+        } else {
+            let _refresh_guard = self.usage_counter_exact_health_metric_refresh.lock().await;
+            cached = self
+                .usage_counter_exact_health_metric_snapshot
+                .read()
+                .await
+                .clone();
+            let now = std::time::Instant::now();
+            exact = cached.as_ref().and_then(|(created_at, snapshot)| {
+                (now.saturating_duration_since(*created_at)
+                    <= USAGE_COUNTER_EXACT_HEALTH_METRICS_MAX_STALENESS)
+                    .then(|| snapshot.clone())
+            });
+            if exact.is_none() {
+                let snapshot_created_at = cached.as_ref().map(|(created_at, _)| *created_at);
+                if !self.usage_counter_exact_health_metric_refresh_is_due(snapshot_created_at) {
+                    return Err(aether_data::DataLayerError::TimedOut(
+                        "usage counter exact health snapshot is unavailable or too stale after a recent refresh attempt"
+                            .to_string(),
+                    ));
+                }
+                self.mark_usage_counter_exact_health_metric_attempt();
+                self.refresh_usage_counter_exact_health_metric_snapshot()
+                    .await?;
+                exact = self
+                    .usage_counter_exact_health_metric_snapshot
+                    .read()
+                    .await
+                    .as_ref()
+                    .map(|(_, snapshot)| snapshot.clone());
+            }
+        }
+
+        let exact = exact.ok_or_else(|| {
+            aether_data::DataLayerError::UnexpectedValue(
+                "usage counter exact health refresh completed without a snapshot".to_string(),
+            )
+        })?;
+        let pending = tokio::time::timeout(
+            USAGE_COUNTER_HEALTH_METRICS_TIMEOUT,
+            self.background_data.read_usage_counter_pending_health(),
+        )
+        .await
+        .map_err(|_| {
+            aether_data::DataLayerError::TimedOut(
+                "usage counter pending health snapshot refresh".to_string(),
+            )
+        })??;
+        Ok(merge_usage_counter_health_snapshots(pending, exact))
+    }
+
+    async fn usage_counter_exact_health_metric_samples(&self) -> Vec<MetricSample> {
+        let snapshot = self
+            .usage_counter_exact_health_metric_snapshot
+            .read()
+            .await
+            .clone();
+        let snapshot_created_at = snapshot.as_ref().map(|(created_at, _)| *created_at);
+        if self.usage_counter_exact_health_metric_refresh_is_due(snapshot_created_at) {
+            self.spawn_usage_counter_exact_health_metric_refresh(snapshot_created_at);
+        }
+        snapshot
             .as_ref()
             .map(|(created_at, snapshot)| {
                 usage_counter_exact_health_metric_samples(
@@ -2982,6 +3152,18 @@ fn usage_runtime_metric_samples(
             snapshot.terminal_submission_limit as u64,
         ),
         MetricSample::new(
+            "usage_runtime_terminal_submission_pending",
+            "Terminal usage submissions waiting for or using end-to-end admission.",
+            MetricKind::Gauge,
+            snapshot.terminal_submission_pending as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_submission_max_pending",
+            "Maximum observed terminal usage submissions waiting for or using admission.",
+            MetricKind::Gauge,
+            snapshot.terminal_submission_max_pending as u64,
+        ),
+        MetricSample::new(
             "usage_runtime_terminal_submission_in_flight",
             "Current end-to-end terminal usage submissions in flight.",
             MetricKind::Gauge,
@@ -3100,6 +3282,222 @@ fn usage_runtime_metric_samples(
             "Total lifecycle usage enqueue failures that opened the lifecycle enqueue circuit.",
             MetricKind::Counter,
             snapshot.lifecycle_enqueue_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_submission_capacity",
+            "Soft capacity of the keyed lifecycle submission dispatcher.",
+            MetricKind::Gauge,
+            snapshot.lifecycle_submission_capacity as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_submission_workers",
+            "Number of keyed lifecycle submission workers.",
+            MetricKind::Gauge,
+            snapshot.lifecycle_submission_workers as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_submission_pending",
+            "Lifecycle submission slots queued or executing, including their database writes.",
+            MetricKind::Gauge,
+            snapshot.lifecycle_submission_pending as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_submission_max_pending",
+            "Maximum observed lifecycle submission slots queued or executing.",
+            MetricKind::Gauge,
+            snapshot.lifecycle_submission_max_pending as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_submission_enqueued_total",
+            "Total lifecycle submission slots admitted to keyed workers.",
+            MetricKind::Counter,
+            snapshot.lifecycle_submission_enqueued_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_submission_coalesced_total",
+            "Total lifecycle submissions coalesced into an existing request slot.",
+            MetricKind::Counter,
+            snapshot.lifecycle_submission_coalesced_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_submission_overflow_total",
+            "Total lifecycle submissions that used an overflow or worker-unavailable path.",
+            MetricKind::Counter,
+            snapshot.lifecycle_submission_overflow_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_submission_processed_total",
+            "Total keyed lifecycle submission slots fully executed.",
+            MetricKind::Counter,
+            snapshot.lifecycle_submission_processed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_ordered_lifecycle_pending",
+            "Current lifecycle phases waiting for an earlier phase of the same request.",
+            MetricKind::Gauge,
+            snapshot.ordered_lifecycle_pending as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_ordered_lifecycle_max_pending",
+            "Maximum observed lifecycle phases waiting in the per-request ordered dispatcher.",
+            MetricKind::Gauge,
+            snapshot.ordered_lifecycle_max_pending as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_pending_persistence_capacity",
+            "Hard queued-record capacity of the pending lifecycle persistence dispatcher.",
+            MetricKind::Gauge,
+            snapshot.pending_persistence_capacity as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_pending_persistence_pending",
+            "Current pending lifecycle records queued, writing, or retrying persistence.",
+            MetricKind::Gauge,
+            snapshot.pending_persistence_pending as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_pending_persistence_max_pending",
+            "Maximum observed pending lifecycle records queued, writing, or retrying persistence.",
+            MetricKind::Gauge,
+            snapshot.pending_persistence_max_pending as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_pending_persistence_batch_flush_total",
+            "Total pending lifecycle persistence batches submitted to repository writers.",
+            MetricKind::Counter,
+            snapshot.pending_persistence_batch_flush_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_pending_persistence_batch_records_total",
+            "Total pending lifecycle records included in persistence batches.",
+            MetricKind::Counter,
+            snapshot.pending_persistence_batch_records_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_pending_persistence_max_batch_size",
+            "Maximum observed pending lifecycle persistence dispatcher batch size.",
+            MetricKind::Gauge,
+            snapshot.pending_persistence_max_batch_size as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_pending_persistence_batch_failed_total",
+            "Total failed pending lifecycle persistence batch or isolated retry attempts.",
+            MetricKind::Counter,
+            snapshot.pending_persistence_batch_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_pending_persistence_retried_total",
+            "Total pending lifecycle records retained for a batch or isolated persistence retry.",
+            MetricKind::Counter,
+            snapshot.pending_persistence_retried_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_pending_persistence_overflow_total",
+            "Total pending-only lifecycle records skipped at capacity so later phases can create the usage row.",
+            MetricKind::Counter,
+            snapshot.pending_persistence_overflow_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_coalescer_entries",
+            "Current request lifecycle markers retained by the coalescer.",
+            MetricKind::Gauge,
+            snapshot.lifecycle_coalescer_entries as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_coalescer_compact_total",
+            "Total lifecycle coalescer expiry compactions.",
+            MetricKind::Counter,
+            snapshot.lifecycle_coalescer_compact_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_coalescer_compact_entries_scanned_total",
+            "Total lifecycle marker entries examined by expiry compactions.",
+            MetricKind::Counter,
+            snapshot.lifecycle_coalescer_compact_entries_scanned_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_first_byte_persistence_capacity",
+            "Maximum number of first-byte transitions buffered for direct persistence.",
+            MetricKind::Gauge,
+            snapshot.first_byte_persistence_capacity as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_first_byte_persistence_pending",
+            "Current first-byte transitions queued or active in the direct persistence dispatcher.",
+            MetricKind::Gauge,
+            snapshot.first_byte_persistence_pending as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_first_byte_persistence_max_pending",
+            "Maximum observed first-byte transitions queued or active in the direct persistence dispatcher.",
+            MetricKind::Gauge,
+            snapshot.first_byte_persistence_max_pending as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_first_byte_persistence_batch_flush_total",
+            "Total first-byte persistence dispatcher batches submitted to a repository writer.",
+            MetricKind::Counter,
+            snapshot.first_byte_persistence_batch_flush_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_first_byte_persistence_batch_records_total",
+            "Total first-byte transitions included in dispatcher batches before repository deduplication.",
+            MetricKind::Counter,
+            snapshot.first_byte_persistence_batch_records_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_first_byte_persistence_max_batch_size",
+            "Maximum first-byte transitions collected in one dispatcher batch.",
+            MetricKind::Gauge,
+            snapshot.first_byte_persistence_max_batch_size as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_first_byte_persistence_batch_failed_total",
+            "Total first-byte persistence dispatcher batches that failed before queue fallback.",
+            MetricKind::Counter,
+            snapshot.first_byte_persistence_batch_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_first_byte_persistence_dispatched_total",
+            "Total first-byte transitions admitted to the direct persistence dispatcher.",
+            MetricKind::Counter,
+            snapshot.first_byte_persistence_dispatched_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_first_byte_persistence_overflow_total",
+            "Total first-byte transitions redirected to the lifecycle queue because the direct dispatcher was full or closed.",
+            MetricKind::Counter,
+            snapshot.first_byte_persistence_overflow_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_first_byte_persistence_cancelled_total",
+            "Total buffered first-byte transitions cancelled after a terminal event became durable.",
+            MetricKind::Counter,
+            snapshot.first_byte_persistence_cancelled_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_first_byte_persistence_direct_succeeded_total",
+            "Total first-byte transitions persisted through the direct repository path.",
+            MetricKind::Counter,
+            snapshot.first_byte_persistence_direct_succeeded_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_first_byte_persistence_direct_failed_total",
+            "Total direct first-byte persistence attempts that failed before queue fallback.",
+            MetricKind::Counter,
+            snapshot.first_byte_persistence_direct_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_first_byte_persistence_fallback_accepted_total",
+            "Total first-byte transitions accepted by Redis or the bounded local enqueue retry path after direct persistence was unavailable or failed.",
+            MetricKind::Counter,
+            snapshot.first_byte_persistence_fallback_accepted_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_first_byte_persistence_fallback_failed_total",
+            "Total first-byte transitions rejected by both direct persistence and queue fallback.",
+            MetricKind::Counter,
+            snapshot.first_byte_persistence_fallback_failed_total,
         ),
         MetricSample::new(
             "usage_runtime_enqueue_retry_scheduled_total",
@@ -3297,6 +3695,19 @@ fn usage_counter_exact_health_metric_samples(
     ]
 }
 
+fn merge_usage_counter_health_snapshots(
+    pending: UsageCounterPendingHealthSnapshot,
+    exact: UsageCounterHealthSnapshot,
+) -> UsageCounterHealthSnapshot {
+    UsageCounterHealthSnapshot {
+        pending_rows: pending.pending_rows,
+        processed_rows: exact.processed_rows,
+        oldest_pending_created_at_unix_secs: pending.oldest_pending_created_at_unix_secs,
+        latest_processed_at_unix_secs: exact.latest_processed_at_unix_secs,
+        pending_by_kind: pending.pending_by_kind,
+    }
+}
+
 async fn usage_counter_pending_health_metric_samples_with_timeout<F, E>(
     timeout: Duration,
     future: F,
@@ -3339,13 +3750,17 @@ mod tests {
 
     use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
     use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
-    use aether_data_contracts::repository::usage::UsageCounterPendingHealthSnapshot;
+    use aether_data_contracts::repository::usage::{
+        UsageCounterHealthSnapshot, UsageCounterPendingHealthSnapshot,
+    };
     use serde_json::json;
 
     use super::{
-        database_bounded_auth_load_limit, usage_counter_pending_health_metric_samples_with_timeout,
-        usage_queue_health_metric_samples_with_timeout, AppState, MetricKind, MetricSample,
-        METRIC_SNAPSHOT_TTL,
+        database_bounded_auth_load_limit, merge_usage_counter_health_snapshots,
+        usage_counter_pending_health_metric_samples_with_timeout,
+        usage_queue_health_metric_samples_with_timeout, usage_runtime_metric_samples, AppState,
+        MetricKind, MetricSample, METRIC_SNAPSHOT_TTL,
+        USAGE_COUNTER_EXACT_HEALTH_METRICS_MAX_STALENESS, USAGE_COUNTER_EXACT_HEALTH_METRICS_TTL,
     };
     use crate::cache::SchedulerAffinityTarget;
     use crate::data::{GatewayDataConfig, GatewayDataState};
@@ -3360,6 +3775,319 @@ mod tests {
         assert_eq!(database_bounded_auth_load_limit(Some(64), Some(1)), Some(1));
         assert_eq!(database_bounded_auth_load_limit(None, Some(92)), None);
         assert_eq!(database_bounded_auth_load_limit(Some(64), None), Some(64));
+    }
+
+    #[test]
+    fn usage_runtime_metrics_export_first_byte_batch_counters() {
+        let mut snapshot = crate::usage::UsageRuntimeMetricsSnapshot::default();
+        snapshot.first_byte_persistence_batch_flush_total = 7;
+        snapshot.first_byte_persistence_batch_records_total = 896;
+        snapshot.first_byte_persistence_max_batch_size = 128;
+        snapshot.first_byte_persistence_batch_failed_total = 2;
+
+        let samples = usage_runtime_metric_samples(&snapshot);
+        let value = |name: &str| {
+            samples
+                .iter()
+                .find(|sample| sample.name == name)
+                .map(|sample| (sample.kind, sample.value))
+                .expect("first-byte batch metric should be exported")
+        };
+
+        assert_eq!(
+            value("usage_runtime_first_byte_persistence_batch_flush_total"),
+            (MetricKind::Counter, 7)
+        );
+        assert_eq!(
+            value("usage_runtime_first_byte_persistence_batch_records_total"),
+            (MetricKind::Counter, 896)
+        );
+        assert_eq!(
+            value("usage_runtime_first_byte_persistence_max_batch_size"),
+            (MetricKind::Gauge, 128)
+        );
+        assert_eq!(
+            value("usage_runtime_first_byte_persistence_batch_failed_total"),
+            (MetricKind::Counter, 2)
+        );
+    }
+
+    #[test]
+    fn usage_runtime_metrics_export_lifecycle_submission_health() {
+        let mut snapshot = crate::usage::UsageRuntimeMetricsSnapshot::default();
+        snapshot.lifecycle_submission_capacity = 32_768;
+        snapshot.lifecycle_submission_workers = 64;
+        snapshot.lifecycle_submission_pending = 123;
+        snapshot.lifecycle_submission_max_pending = 4_567;
+        snapshot.lifecycle_submission_enqueued_total = 20_000;
+        snapshot.lifecycle_submission_coalesced_total = 18_000;
+        snapshot.lifecycle_submission_overflow_total = 3;
+        snapshot.lifecycle_submission_processed_total = 19_877;
+        snapshot.ordered_lifecycle_pending = 321;
+        snapshot.ordered_lifecycle_max_pending = 8_765;
+        snapshot.pending_persistence_capacity = 65_536;
+        snapshot.pending_persistence_pending = 222;
+        snapshot.pending_persistence_max_pending = 7_654;
+        snapshot.pending_persistence_batch_flush_total = 40;
+        snapshot.pending_persistence_batch_records_total = 10_000;
+        snapshot.pending_persistence_max_batch_size = 512;
+        snapshot.pending_persistence_batch_failed_total = 2;
+        snapshot.pending_persistence_retried_total = 9;
+        snapshot.pending_persistence_overflow_total = 4;
+
+        let samples = usage_runtime_metric_samples(&snapshot);
+        let value = |name: &str| {
+            samples
+                .iter()
+                .find(|sample| sample.name == name)
+                .map(|sample| (sample.kind, sample.value))
+                .expect("lifecycle submission metric should be exported")
+        };
+
+        assert_eq!(
+            value("usage_runtime_lifecycle_submission_capacity"),
+            (MetricKind::Gauge, 32_768)
+        );
+        assert_eq!(
+            value("usage_runtime_lifecycle_submission_workers"),
+            (MetricKind::Gauge, 64)
+        );
+        assert_eq!(
+            value("usage_runtime_lifecycle_submission_pending"),
+            (MetricKind::Gauge, 123)
+        );
+        assert_eq!(
+            value("usage_runtime_lifecycle_submission_max_pending"),
+            (MetricKind::Gauge, 4_567)
+        );
+        assert_eq!(
+            value("usage_runtime_lifecycle_submission_enqueued_total"),
+            (MetricKind::Counter, 20_000)
+        );
+        assert_eq!(
+            value("usage_runtime_lifecycle_submission_coalesced_total"),
+            (MetricKind::Counter, 18_000)
+        );
+        assert_eq!(
+            value("usage_runtime_lifecycle_submission_overflow_total"),
+            (MetricKind::Counter, 3)
+        );
+        assert_eq!(
+            value("usage_runtime_lifecycle_submission_processed_total"),
+            (MetricKind::Counter, 19_877)
+        );
+        assert_eq!(
+            value("usage_runtime_ordered_lifecycle_pending"),
+            (MetricKind::Gauge, 321)
+        );
+        assert_eq!(
+            value("usage_runtime_ordered_lifecycle_max_pending"),
+            (MetricKind::Gauge, 8_765)
+        );
+        assert_eq!(
+            value("usage_runtime_pending_persistence_capacity"),
+            (MetricKind::Gauge, 65_536)
+        );
+        assert_eq!(
+            value("usage_runtime_pending_persistence_pending"),
+            (MetricKind::Gauge, 222)
+        );
+        assert_eq!(
+            value("usage_runtime_pending_persistence_max_pending"),
+            (MetricKind::Gauge, 7_654)
+        );
+        assert_eq!(
+            value("usage_runtime_pending_persistence_batch_flush_total"),
+            (MetricKind::Counter, 40)
+        );
+        assert_eq!(
+            value("usage_runtime_pending_persistence_batch_records_total"),
+            (MetricKind::Counter, 10_000)
+        );
+        assert_eq!(
+            value("usage_runtime_pending_persistence_max_batch_size"),
+            (MetricKind::Gauge, 512)
+        );
+        assert_eq!(
+            value("usage_runtime_pending_persistence_batch_failed_total"),
+            (MetricKind::Counter, 2)
+        );
+        assert_eq!(
+            value("usage_runtime_pending_persistence_retried_total"),
+            (MetricKind::Counter, 9)
+        );
+        assert_eq!(
+            value("usage_runtime_pending_persistence_overflow_total"),
+            (MetricKind::Counter, 4)
+        );
+    }
+
+    #[test]
+    fn cached_usage_counter_health_keeps_pending_fields_fresh() {
+        let mut pending_by_kind = std::collections::BTreeMap::new();
+        pending_by_kind.insert("api_key".to_string(), 3);
+        let pending = UsageCounterPendingHealthSnapshot {
+            pending_rows: 3,
+            oldest_pending_created_at_unix_secs: Some(1_050),
+            pending_by_kind: pending_by_kind.clone(),
+        };
+        let exact = UsageCounterHealthSnapshot {
+            pending_rows: 99,
+            processed_rows: 42,
+            oldest_pending_created_at_unix_secs: Some(1),
+            latest_processed_at_unix_secs: Some(1_100),
+            pending_by_kind: std::collections::BTreeMap::new(),
+        };
+
+        assert_eq!(
+            merge_usage_counter_health_snapshots(pending, exact),
+            UsageCounterHealthSnapshot {
+                pending_rows: 3,
+                processed_rows: 42,
+                oldest_pending_created_at_unix_secs: Some(1_050),
+                latest_processed_at_unix_secs: Some(1_100),
+                pending_by_kind,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_usage_counter_health_reuses_recent_exact_snapshot() {
+        let state = AppState::new().expect("app state should build");
+        *state
+            .usage_counter_exact_health_metric_snapshot
+            .write()
+            .await = Some((
+            std::time::Instant::now(),
+            UsageCounterHealthSnapshot {
+                pending_rows: 99,
+                processed_rows: 42,
+                oldest_pending_created_at_unix_secs: Some(1),
+                latest_processed_at_unix_secs: Some(1_100),
+                pending_by_kind: std::collections::BTreeMap::new(),
+            },
+        ));
+        state.mark_usage_counter_exact_health_metric_attempt();
+
+        let snapshot = state
+            .read_cached_usage_counter_health()
+            .await
+            .expect("cached health read should succeed");
+
+        assert_eq!(snapshot.pending_rows, 0);
+        assert_eq!(snapshot.oldest_pending_created_at_unix_secs, None);
+        assert_eq!(snapshot.processed_rows, 42);
+        assert_eq!(snapshot.latest_processed_at_unix_secs, Some(1_100));
+    }
+
+    #[tokio::test]
+    async fn admin_usage_counter_health_serves_bounded_stale_exact_snapshot_during_backoff() {
+        let state = AppState::new().expect("app state should build");
+        *state
+            .usage_counter_exact_health_metric_snapshot
+            .write()
+            .await = Some((
+            std::time::Instant::now()
+                - USAGE_COUNTER_EXACT_HEALTH_METRICS_TTL
+                - Duration::from_secs(1),
+            UsageCounterHealthSnapshot {
+                processed_rows: 42,
+                latest_processed_at_unix_secs: Some(1_100),
+                ..UsageCounterHealthSnapshot::default()
+            },
+        ));
+        state.mark_usage_counter_exact_health_metric_attempt();
+
+        let snapshot = state
+            .read_cached_usage_counter_health()
+            .await
+            .expect("bounded stale health should remain available during retry backoff");
+
+        assert_eq!(snapshot.processed_rows, 42);
+        assert_eq!(snapshot.latest_processed_at_unix_secs, Some(1_100));
+    }
+
+    #[tokio::test]
+    async fn admin_usage_counter_health_rejects_exact_snapshot_past_max_staleness() {
+        let state = AppState::new().expect("app state should build");
+        *state
+            .usage_counter_exact_health_metric_snapshot
+            .write()
+            .await = Some((
+            std::time::Instant::now()
+                - USAGE_COUNTER_EXACT_HEALTH_METRICS_MAX_STALENESS
+                - Duration::from_secs(1),
+            UsageCounterHealthSnapshot {
+                processed_rows: 42,
+                latest_processed_at_unix_secs: Some(1_100),
+                ..UsageCounterHealthSnapshot::default()
+            },
+        ));
+        state.mark_usage_counter_exact_health_metric_attempt();
+
+        let err = state
+            .read_cached_usage_counter_health()
+            .await
+            .expect_err("an over-age exact snapshot must not be returned during retry backoff");
+
+        assert!(matches!(err, aether_data::DataLayerError::TimedOut(_)));
+    }
+
+    #[tokio::test]
+    async fn admin_usage_counter_health_does_not_report_default_exact_values_after_failed_refresh()
+    {
+        let state = AppState::new().expect("app state should build");
+        state.mark_usage_counter_exact_health_metric_attempt();
+
+        let err = state
+            .read_cached_usage_counter_health()
+            .await
+            .expect_err("a recent failed refresh must remain unavailable");
+
+        assert!(matches!(err, aether_data::DataLayerError::TimedOut(_)));
+    }
+
+    #[test]
+    fn stale_or_missing_exact_health_snapshot_uses_short_retry_backoff() {
+        let state = AppState::new().expect("app state should build");
+        let stale_created_at = std::time::Instant::now() - USAGE_COUNTER_EXACT_HEALTH_METRICS_TTL;
+        state.mark_usage_counter_exact_health_metric_attempt();
+        assert!(!state.usage_counter_exact_health_metric_refresh_is_due(None));
+        assert!(!state.usage_counter_exact_health_metric_refresh_is_due(Some(stale_created_at)));
+
+        *state
+            .usage_counter_exact_health_metric_last_attempt
+            .lock()
+            .expect("last attempt lock should be available") =
+            Some(std::time::Instant::now() - Duration::from_secs(6));
+
+        assert!(state.usage_counter_exact_health_metric_refresh_is_due(None));
+        assert!(state.usage_counter_exact_health_metric_refresh_is_due(Some(stale_created_at)));
+        assert!(!state
+            .usage_counter_exact_health_metric_refresh_is_due(Some(std::time::Instant::now())));
+    }
+
+    #[tokio::test]
+    async fn metric_snapshot_prewarm_failure_allows_immediate_admin_retry() {
+        let state = AppState::new().expect("app state should build");
+
+        assert!(
+            !state
+                .prewarm_metric_snapshot_with_exact_refresh(std::future::ready(Err(
+                    aether_data::DataLayerError::TimedOut("test exact refresh failure".to_string()),
+                )))
+                .await
+        );
+        assert!(state
+            .usage_counter_exact_health_metric_last_attempt
+            .lock()
+            .expect("last attempt lock should be available")
+            .is_none());
+
+        state
+            .read_cached_usage_counter_health()
+            .await
+            .expect("admin read should retry immediately after failed prewarm");
     }
 
     #[tokio::test]
@@ -3427,6 +4155,105 @@ mod tests {
                 .await
                 .expect("refreshed system config read should succeed"),
             Some(json!("fresh"))
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_system_config_reads_return_before_background_refresh_finishes() {
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_system_config_values_for_tests([("site_name".to_string(), json!("old"))]),
+            );
+        let fresh_ttl = Duration::from_millis(2);
+        let max_staleness = Duration::from_millis(500);
+
+        assert_eq!(
+            state
+                .read_system_config_json_value_with_cache_windows(
+                    "site_name",
+                    fresh_ttl,
+                    max_staleness,
+                )
+                .await
+                .expect("initial system config read should succeed"),
+            Some(json!("old"))
+        );
+        state
+            .data
+            .upsert_system_config_value("site_name", &json!("new"), None)
+            .await
+            .expect("direct data write should succeed");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let started = std::time::Instant::now();
+        let stale = state
+            .read_system_config_json_value_with_cache_windows("site_name", fresh_ttl, max_staleness)
+            .await
+            .expect("stale system config read should succeed");
+        assert_eq!(stale, Some(json!("old")));
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "stale reads must not wait on refresh"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state
+                    .system_config_cache
+                    .get_with_age("site_name", max_staleness)
+                    .map(|(value, _)| value)
+                    == Some(Some(json!("new")))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background refresh should eventually publish the new value");
+    }
+
+    #[tokio::test]
+    async fn system_config_reads_reload_synchronously_after_hard_staleness() {
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_system_config_values_for_tests([("site_name".to_string(), json!("old"))]),
+            );
+        let fresh_ttl = Duration::from_millis(2);
+        let max_staleness = Duration::from_millis(10);
+
+        assert_eq!(
+            state
+                .read_system_config_json_value_with_cache_windows(
+                    "site_name",
+                    fresh_ttl,
+                    max_staleness,
+                )
+                .await
+                .expect("initial system config read should succeed"),
+            Some(json!("old"))
+        );
+        state
+            .data
+            .upsert_system_config_value("site_name", &json!("new"), None)
+            .await
+            .expect("direct data write should succeed");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        assert_eq!(
+            state
+                .read_system_config_json_value_with_cache_windows(
+                    "site_name",
+                    fresh_ttl,
+                    max_staleness,
+                )
+                .await
+                .expect("hard-stale system config read should succeed"),
+            Some(json!("new"))
         );
     }
 
@@ -3770,6 +4597,25 @@ mod tests {
             .request_candidate_writer()
             .expect("shared foreground writer should exist");
         assert!(Arc::ptr_eq(&selected_writer, &foreground_writer));
+    }
+
+    #[test]
+    fn usage_lifecycle_writes_use_background_data_only_when_isolated() {
+        let foreground = Arc::new(GatewayDataState::disabled());
+        let background = Arc::new(GatewayDataState::disabled());
+        let mut state = AppState::new().expect("app state should build");
+
+        state.replace_data_states(foreground, background, true);
+
+        let selected = state.usage_lifecycle_data_state();
+        assert!(Arc::ptr_eq(selected, &state.background_data));
+        assert!(!Arc::ptr_eq(selected, &state.data));
+
+        state.replace_data_state(Arc::new(GatewayDataState::disabled()));
+
+        let selected = state.usage_lifecycle_data_state();
+        assert!(Arc::ptr_eq(selected, &state.data));
+        assert!(!state.background_data_isolated);
     }
 
     #[test]

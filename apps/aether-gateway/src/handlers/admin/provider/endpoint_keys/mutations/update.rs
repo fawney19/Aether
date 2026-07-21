@@ -82,9 +82,22 @@ pub(super) async fn maybe_handle(
         Ok(record) => record,
         Err(detail) => return Ok(Some(bad_request_response(detail))),
     };
-    let Some(updated) = state.update_provider_catalog_key(&updated_record).await? else {
+    let Some(mut updated) = state.update_provider_catalog_key(&updated_record).await? else {
         return Ok(None);
     };
+    if updated_record.learned_rpm_limit != existing_key.learned_rpm_limit {
+        let Some(reloaded) = state
+            .set_provider_catalog_key_learned_rpm_limit(
+                &key_id,
+                updated_record.learned_rpm_limit,
+                updated_record.updated_at_unix_secs,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        updated = reloaded;
+    }
     let should_overwrite_allowed_models_immediately =
         admin_provider_key_update_requires_immediate_model_fetch(&existing_key, &updated);
     let updated = if should_overwrite_allowed_models_immediately {

@@ -7,6 +7,9 @@ use aether_admin::system::{
     build_admin_adaptive_set_limit_payload, build_admin_adaptive_stats_payload,
     build_admin_adaptive_summary_payload, build_admin_adaptive_toggle_mode_payload,
 };
+use aether_data_contracts::repository::provider_catalog::{
+    ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
+};
 use axum::{
     body::{Body, Bytes},
     http,
@@ -130,22 +133,49 @@ impl<'a> AdminAppState<'a> {
         &self,
         key_id: &str,
     ) -> Result<Response<Body>, GatewayError> {
-        let Some(mut key) = self.find_admin_adaptive_key(key_id).await? else {
-            return Ok(admin_adaptive_key_not_found_response(key_id));
-        };
-        key.learned_rpm_limit = None;
-        key.concurrent_429_count = Some(0);
-        key.rpm_429_count = Some(0);
-        key.last_429_at_unix_secs = None;
-        key.last_429_type = None;
-        key.adjustment_history = None;
-        key.utilization_samples = None;
-        key.last_probe_increase_at_unix_secs = None;
-        key.last_rpm_peak = None;
-        let Some(updated) = self.update_provider_catalog_key(&key).await? else {
-            return Ok(admin_adaptive_key_not_found_response(key_id));
-        };
-        Ok(Json(build_admin_adaptive_reset_learning_payload(&updated.id)).into_response())
+        for _ in 0..4 {
+            let Some(key) = self.find_admin_adaptive_key(key_id).await? else {
+                return Ok(admin_adaptive_key_not_found_response(key_id));
+            };
+            let expected = ProviderCatalogKeyAdaptiveState::from(&key);
+            let next = ProviderCatalogKeyAdaptiveState {
+                learned_rpm_limit: None,
+                concurrent_429_count: Some(0),
+                rpm_429_count: Some(0),
+                last_429_at_unix_secs: None,
+                last_429_type: None,
+                adjustment_history: None,
+                utilization_samples: None,
+                last_probe_increase_at_unix_secs: None,
+                last_rpm_peak: None,
+            };
+            if self
+                .compare_and_update_provider_catalog_key_adaptive_state(
+                    &ProviderCatalogKeyAdaptiveStateUpdate {
+                        key_id: key.id.clone(),
+                        expected,
+                        next,
+                        status_snapshot_patch: json!({
+                            "observation_count": 0,
+                            "header_observation_count": 0,
+                            "latest_upstream_limit": null,
+                            "learning_confidence": 0.0,
+                            "enforcement_active": false,
+                            "known_boundary": null
+                        }),
+                        updated_at_unix_secs: None,
+                    },
+                )
+                .await?
+            {
+                return Ok(
+                    Json(build_admin_adaptive_reset_learning_payload(&key.id)).into_response()
+                );
+            }
+        }
+        Err(GatewayError::Internal(format!(
+            "provider key {key_id} adaptive state changed repeatedly while resetting learning"
+        )))
     }
 
     pub(crate) fn admin_adaptive_dispatcher_not_found_response(&self) -> Response<Body> {

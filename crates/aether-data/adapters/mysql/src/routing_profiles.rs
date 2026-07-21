@@ -140,6 +140,14 @@ ORDER BY created_at ASC, id ASC
         rows.iter().map(map_binding_row).collect()
     }
 
+    async fn has_any_routing_group_binding(&self) -> Result<bool, DataLayerError> {
+        let row = sqlx::query("SELECT 1 FROM routing_group_bindings LIMIT 1")
+            .fetch_optional(&self.pool)
+            .await
+            .map_sql_err()?;
+        Ok(row.is_some())
+    }
+
     async fn list_routing_group_versions(
         &self,
         group_id: &str,

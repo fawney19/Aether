@@ -2,11 +2,16 @@ use super::state::{
     decode_jwt_claims, enrich_admin_provider_oauth_auth_config, json_non_empty_string,
     json_u64_value,
 };
+use crate::ai_serving::{
+    build_provider_key_pool_score_upsert, provider_key_pool_score_id, provider_key_pool_score_scope,
+};
 use crate::handlers::admin::admin_provider_pool_config;
 use crate::handlers::admin::request::AdminAppState;
-use crate::maintenance::ensure_provider_key_pool_scores_for_keys;
 use crate::provider_key_auth::provider_active_api_formats;
 use crate::GatewayError;
+use aether_data_contracts::repository::pool_scores::{
+    GetPoolMemberScoresByIdsQuery, PoolMemberIdentity,
+};
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
 };
@@ -211,14 +216,22 @@ pub(crate) async fn update_existing_provider_oauth_catalog_key(
     if updated.fingerprint.is_none() {
         updated.fingerprint = grok_oauth_catalog_key_fingerprint(provider_type, auth_config);
     }
-    updated.health_by_format = Some(json!({}));
-    updated.circuit_breaker_by_format = Some(json!({}));
-    updated.error_count = Some(0);
     if let Some(proxy) = proxy {
         updated.proxy = Some(proxy);
     }
     updated.updated_at_unix_secs = Some(now_unix_secs);
-    let persisted = state.update_provider_catalog_key(&updated).await?;
+    if state.update_provider_catalog_key(&updated).await?.is_none() {
+        return Ok(None);
+    }
+    if !state
+        .clear_provider_catalog_key_oauth_invalid_marker(&updated.id)
+        .await?
+    {
+        return Ok(None);
+    }
+    let persisted = state
+        .reset_provider_catalog_key_recovery_state(&updated.id)
+        .await?;
     if let Some(key) = persisted.as_ref() {
         let _ = state
             .app()
@@ -229,7 +242,7 @@ pub(crate) async fn update_existing_provider_oauth_catalog_key(
     Ok(persisted)
 }
 
-async fn seed_provider_oauth_pool_score(
+pub(super) async fn seed_provider_oauth_pool_score(
     state: &AdminAppState<'_>,
     provider_id: &str,
     key: &StoredProviderCatalogKey,
@@ -257,38 +270,45 @@ async fn seed_provider_oauth_pool_score(
     let Some(pool_config) = admin_provider_pool_config(&provider) else {
         return;
     };
-    let endpoints = match state
-        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
+    if !key.is_active || key.provider_id != provider.id {
+        return;
+    }
+
+    let identity = PoolMemberIdentity::provider_api_key(provider.id.clone(), key.id.clone());
+    let scope = provider_key_pool_score_scope();
+    let score_id = provider_key_pool_score_id(&identity, &scope);
+    let existing = match state
+        .app()
+        .data
+        .get_pool_member_scores_by_ids(&GetPoolMemberScoresByIdsQuery {
+            ids: vec![score_id],
+        })
         .await
     {
-        Ok(endpoints) => endpoints,
+        Ok(mut scores) => scores.pop(),
         Err(err) => {
             tracing::debug!(
                 provider_id = %provider_id,
                 key_id = %key.id,
                 error = ?err,
-                "gateway provider oauth provisioning: failed to read endpoints for pool score seed"
+                "gateway provider oauth provisioning: failed to read existing pool score"
             );
             return;
         }
     };
-    let score_ensure_budget = (pool_config.score_fallback_scan_limit as usize).clamp(1, 50_000);
-    if let Err(err) = ensure_provider_key_pool_scores_for_keys(
-        state.as_ref(),
-        &provider,
-        &pool_config,
-        &endpoints,
-        std::slice::from_ref(key),
+    let upsert = build_provider_key_pool_score_upsert(
+        key,
+        provider.provider_type.as_str(),
+        existing.as_ref(),
         now_unix_secs,
-        score_ensure_budget,
-    )
-    .await
-    {
+        pool_config.score_rules,
+    );
+    if let Err(err) = state.app().data.upsert_pool_member_score(upsert).await {
         tracing::debug!(
             provider_id = %provider_id,
             key_id = %key.id,
             error = ?err,
-            "gateway provider oauth provisioning: failed to seed pool score row"
+            "gateway provider oauth provisioning: failed to refresh pool score row"
         );
     }
 }

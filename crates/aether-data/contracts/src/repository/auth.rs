@@ -581,6 +581,10 @@ pub enum AuthApiKeyLookupKey<'a> {
 
 #[async_trait]
 pub trait AuthApiKeyReadRepository: Send + Sync {
+    /// Clears any local read-through cache maintained by a repository wrapper.
+    /// Concrete database readers normally use the default no-op implementation.
+    fn clear_cache(&self) {}
+
     async fn find_api_key_snapshot(
         &self,
         key: AuthApiKeyLookupKey<'_>,

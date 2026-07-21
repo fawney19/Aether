@@ -1203,6 +1203,7 @@ mod tests {
     #[test]
     fn to_config_enables_pretty_file_logging_with_defaults() {
         let mut app = sample_app();
+        set_global_field(&mut app, "install_service", "false");
         set_global_field(&mut app, "save_logs_to_file", "true");
 
         let cfg = app.to_config().expect("config should serialize");

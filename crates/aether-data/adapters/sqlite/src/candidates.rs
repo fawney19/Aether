@@ -304,19 +304,85 @@ ON CONFLICT(request_id, candidate_index, retry_index) DO UPDATE SET
   provider_id = excluded.provider_id,
   endpoint_id = excluded.endpoint_id,
   key_id = excluded.key_id,
-  status = excluded.status,
+  status = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND excluded.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.status
+    WHEN request_candidates.status = 'pending'
+      AND excluded.status IN ('available', 'unused')
+      THEN request_candidates.status
+    WHEN request_candidates.status = 'streaming'
+      AND excluded.status IN ('available', 'unused', 'pending')
+      THEN request_candidates.status
+    ELSE excluded.status
+  END,
   skip_reason = excluded.skip_reason,
   is_cached = excluded.is_cached,
-  status_code = excluded.status_code,
-  error_type = excluded.error_type,
-  error_message = excluded.error_message,
-  latency_ms = excluded.latency_ms,
+  status_code = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND excluded.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.status_code
+    WHEN request_candidates.status = 'pending'
+      AND excluded.status IN ('available', 'unused')
+      THEN request_candidates.status_code
+    WHEN request_candidates.status = 'streaming'
+      AND excluded.status IN ('available', 'unused', 'pending')
+      THEN request_candidates.status_code
+    ELSE COALESCE(excluded.status_code, request_candidates.status_code)
+  END,
+  error_type = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND excluded.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.error_type
+    WHEN request_candidates.status = 'pending'
+      AND excluded.status IN ('available', 'unused')
+      THEN request_candidates.error_type
+    WHEN request_candidates.status = 'streaming'
+      AND excluded.status IN ('available', 'unused', 'pending')
+      THEN request_candidates.error_type
+    ELSE COALESCE(excluded.error_type, request_candidates.error_type)
+  END,
+  error_message = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND excluded.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.error_message
+    WHEN request_candidates.status = 'pending'
+      AND excluded.status IN ('available', 'unused')
+      THEN request_candidates.error_message
+    WHEN request_candidates.status = 'streaming'
+      AND excluded.status IN ('available', 'unused', 'pending')
+      THEN request_candidates.error_message
+    ELSE COALESCE(excluded.error_message, request_candidates.error_message)
+  END,
+  latency_ms = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND excluded.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.latency_ms
+    WHEN request_candidates.status = 'pending'
+      AND excluded.status IN ('available', 'unused')
+      THEN request_candidates.latency_ms
+    WHEN request_candidates.status = 'streaming'
+      AND excluded.status IN ('available', 'unused', 'pending')
+      THEN request_candidates.latency_ms
+    ELSE COALESCE(excluded.latency_ms, request_candidates.latency_ms)
+  END,
   concurrent_requests = excluded.concurrent_requests,
   extra_data = excluded.extra_data,
   required_capabilities = excluded.required_capabilities,
   created_at = excluded.created_at,
   started_at = excluded.started_at,
-  finished_at = excluded.finished_at
+  finished_at = CASE
+    WHEN request_candidates.status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND excluded.status IN ('available', 'unused', 'pending', 'streaming')
+      THEN request_candidates.finished_at
+    WHEN request_candidates.status = 'pending'
+      AND excluded.status IN ('available', 'unused')
+      THEN request_candidates.finished_at
+    WHEN request_candidates.status = 'streaming'
+      AND excluded.status IN ('available', 'unused', 'pending')
+      THEN request_candidates.finished_at
+    ELSE COALESCE(excluded.finished_at, request_candidates.finished_at)
+  END
 "#,
     )
     .bind(&candidate.id)
@@ -802,6 +868,123 @@ mod tests {
                 .expect("old candidates should delete"),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn sqlite_atomic_conflict_keeps_candidate_lifecycle_monotonic() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        run_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+        let repository = SqliteRequestCandidateRepository::new(pool.clone());
+
+        let terminal = super::merge_candidate(
+            sample_upsert(
+                "terminal",
+                RequestCandidateStatus::Success,
+                Some(json!({"terminal": true})),
+                2_000_000,
+            ),
+            None,
+        )
+        .expect("terminal candidate should build");
+        super::upsert_merged_candidate(&pool, &terminal)
+            .await
+            .expect("terminal candidate should insert");
+
+        let mut stale_streaming = sample_upsert(
+            "stale-streaming",
+            RequestCandidateStatus::Streaming,
+            Some(json!({"stale": true})),
+            1_999_000,
+        );
+        stale_streaming.latency_ms = Some(9_999);
+        stale_streaming.finished_at_unix_ms = Some(9_999_999);
+        let stale_streaming = super::merge_candidate(stale_streaming, None)
+            .expect("stale streaming candidate should build");
+        super::upsert_merged_candidate(&pool, &stale_streaming)
+            .await
+            .expect("stale streaming conflict should execute");
+
+        let mut streaming_input = sample_upsert(
+            "streaming",
+            RequestCandidateStatus::Streaming,
+            None,
+            2_100_000,
+        );
+        streaming_input.candidate_index = 1;
+        let streaming = super::merge_candidate(streaming_input, None)
+            .expect("streaming candidate should build");
+        super::upsert_merged_candidate(&pool, &streaming)
+            .await
+            .expect("streaming candidate should insert");
+
+        let mut stale_pending = sample_upsert(
+            "stale-pending",
+            RequestCandidateStatus::Pending,
+            None,
+            2_099_000,
+        );
+        stale_pending.candidate_index = 1;
+        let stale_pending =
+            super::merge_candidate(stale_pending, None).expect("pending candidate should build");
+        super::upsert_merged_candidate(&pool, &stale_pending)
+            .await
+            .expect("stale pending conflict should execute");
+
+        let mut pending_input =
+            sample_upsert("pending", RequestCandidateStatus::Pending, None, 2_200_000);
+        pending_input.candidate_index = 2;
+        pending_input.latency_ms = Some(321);
+        pending_input.finished_at_unix_ms = None;
+        let pending =
+            super::merge_candidate(pending_input, None).expect("pending candidate should build");
+        super::upsert_merged_candidate(&pool, &pending)
+            .await
+            .expect("pending candidate should insert");
+
+        let mut stale_available = sample_upsert(
+            "stale-available",
+            RequestCandidateStatus::Available,
+            None,
+            2_199_000,
+        );
+        stale_available.candidate_index = 2;
+        stale_available.latency_ms = Some(9_999);
+        stale_available.finished_at_unix_ms = Some(9_999_999);
+        let stale_available = super::merge_candidate(stale_available, None)
+            .expect("stale available candidate should build");
+        super::upsert_merged_candidate(&pool, &stale_available)
+            .await
+            .expect("stale available conflict should execute");
+
+        let candidates = repository
+            .list_by_request_id("request-1")
+            .await
+            .expect("request candidates should load");
+        let terminal = candidates
+            .iter()
+            .find(|candidate| candidate.candidate_index == 0)
+            .expect("terminal candidate should remain");
+        assert_eq!(terminal.status, RequestCandidateStatus::Success);
+        assert_eq!(terminal.latency_ms, Some(123));
+        assert_eq!(terminal.finished_at_unix_ms, Some(2_000_002));
+        let streaming = candidates
+            .iter()
+            .find(|candidate| candidate.candidate_index == 1)
+            .expect("streaming candidate should remain");
+        assert_eq!(streaming.status, RequestCandidateStatus::Streaming);
+        let pending = candidates
+            .iter()
+            .find(|candidate| candidate.candidate_index == 2)
+            .expect("pending candidate should remain");
+        assert_eq!(pending.status, RequestCandidateStatus::Pending);
+        assert_eq!(pending.latency_ms, Some(321));
+        assert_eq!(pending.finished_at_unix_ms, None);
     }
 
     fn sample_upsert(

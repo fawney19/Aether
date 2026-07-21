@@ -104,13 +104,29 @@ pub(crate) trait RequestCandidateRuntimeReader {
 }
 
 #[async_trait]
-pub(crate) trait RequestCandidateRuntimeWriter {
+pub(crate) trait RequestCandidateRuntimeWriter: Sync {
     fn has_request_candidate_data_writer(&self) -> bool;
 
     async fn upsert_request_candidate(
         &self,
         candidate: UpsertRequestCandidateRecord,
     ) -> Result<Option<StoredRequestCandidate>, GatewayError>;
+
+    async fn enqueue_request_candidate_status(
+        &self,
+        candidate: UpsertRequestCandidateRecord,
+    ) -> Result<Option<()>, GatewayError> {
+        self.upsert_request_candidate(candidate)
+            .await
+            .map(|stored| stored.map(|_| ()))
+    }
+
+    fn try_enqueue_request_candidate_status(
+        &self,
+        candidate: UpsertRequestCandidateRecord,
+    ) -> Result<(), UpsertRequestCandidateRecord> {
+        Err(candidate)
+    }
 }
 
 #[async_trait]
@@ -276,7 +292,7 @@ pub(crate) fn snapshot_local_request_candidate_status(
     })
 }
 
-async fn persist_local_request_candidate_status_record(
+pub(crate) async fn persist_local_request_candidate_status_record(
     state: &(impl RequestCandidateRuntimeWriter + ?Sized),
     record: UpsertRequestCandidateRecord,
 ) {
@@ -301,13 +317,13 @@ async fn persist_local_request_candidate_status_record(
         return;
     }
 
-    match state.upsert_request_candidate(record).await {
-        Ok(Some(stored)) => {
+    match state.enqueue_request_candidate_status(record).await {
+        Ok(Some(())) => {
             debug!(
                 event_name = "request_candidate_status_persisted",
                 log_type = "event",
                 request_id = %request_id,
-                candidate_id = %stored.id,
+                candidate_id = %candidate_id,
                 candidate_index,
                 retry_index,
                 status = request_candidate_status_label(status),
@@ -400,11 +416,10 @@ pub(crate) async fn record_local_request_candidate_extra_data(
     persist_local_request_candidate_status_record(state, record).await;
 }
 
-pub(crate) async fn record_local_request_candidate_status_snapshot(
-    state: &(impl RequestCandidateRuntimeWriter + ?Sized),
+fn build_local_request_candidate_status_snapshot_record(
     snapshot: &LocalRequestCandidateStatusSnapshot,
     status_update: SchedulerRequestCandidateStatusUpdate,
-) {
+) -> UpsertRequestCandidateRecord {
     let SchedulerRequestCandidateStatusUpdate {
         status,
         status_code,
@@ -414,7 +429,7 @@ pub(crate) async fn record_local_request_candidate_status_snapshot(
         started_at_unix_ms,
         finished_at_unix_ms,
     } = status_update;
-    let record = UpsertRequestCandidateRecord {
+    UpsertRequestCandidateRecord {
         id: snapshot.candidate_id.clone(),
         request_id: snapshot.request_id.clone(),
         user_id: snapshot.user_id.clone(),
@@ -439,7 +454,27 @@ pub(crate) async fn record_local_request_candidate_status_snapshot(
         created_at_unix_ms: None,
         started_at_unix_ms,
         finished_at_unix_ms,
-    };
+    }
+}
+
+pub(crate) fn try_enqueue_local_request_candidate_status_snapshot(
+    state: &(impl RequestCandidateRuntimeWriter + ?Sized),
+    snapshot: &LocalRequestCandidateStatusSnapshot,
+    status_update: SchedulerRequestCandidateStatusUpdate,
+) -> Result<(), UpsertRequestCandidateRecord> {
+    let record = build_local_request_candidate_status_snapshot_record(snapshot, status_update);
+    if !should_persist_request_candidate_status(record.status) {
+        return Ok(());
+    }
+    state.try_enqueue_request_candidate_status(record)
+}
+
+pub(crate) async fn record_local_request_candidate_status_snapshot(
+    state: &(impl RequestCandidateRuntimeWriter + ?Sized),
+    snapshot: &LocalRequestCandidateStatusSnapshot,
+    status_update: SchedulerRequestCandidateStatusUpdate,
+) {
+    let record = build_local_request_candidate_status_snapshot_record(snapshot, status_update);
     persist_local_request_candidate_status_record(state, record).await;
 }
 
@@ -485,13 +520,13 @@ pub(crate) async fn record_report_request_candidate_status(
         return;
     }
 
-    match state.upsert_request_candidate(record).await {
-        Ok(Some(stored)) => {
+    match state.enqueue_request_candidate_status(record).await {
+        Ok(Some(())) => {
             debug!(
                 event_name = "request_candidate_report_status_persisted",
                 log_type = "event",
                 request_id = %request_id_for_log,
-                candidate_id = %stored.id,
+                candidate_id = %candidate_id,
                 candidate_index,
                 retry_index,
                 status = request_candidate_status_label(status),
@@ -906,7 +941,7 @@ async fn resolve_report_request_candidate_slot(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use aether_contracts::{ExecutionPlan, RequestBody};
     use aether_data::repository::auth::{
@@ -916,6 +951,7 @@ mod tests {
     use aether_data::repository::usage::InMemoryUsageReadRepository;
     use aether_data_contracts::repository::candidates::{
         RequestCandidateReadRepository, RequestCandidateStatus, StoredRequestCandidate,
+        UpsertRequestCandidateRecord,
     };
     use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
     use serde_json::json;
@@ -923,7 +959,9 @@ mod tests {
     use super::{
         ensure_execution_request_candidate_slot, persist_available_local_candidate,
         record_report_request_candidate_status, resolve_request_candidate_required_capabilities,
-        select_requested_model_capabilities, SchedulerRequestCandidateStatusUpdate,
+        select_requested_model_capabilities, snapshot_local_request_candidate_status,
+        try_enqueue_local_request_candidate_status_snapshot, RequestCandidateRuntimeWriter,
+        SchedulerRequestCandidateStatusUpdate,
     };
     use crate::data::GatewayDataState;
     use crate::AppState;
@@ -954,6 +992,36 @@ mod tests {
             )
     }
 
+    #[derive(Default)]
+    struct SynchronousStatusWriter {
+        records: Mutex<Vec<UpsertRequestCandidateRecord>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RequestCandidateRuntimeWriter for SynchronousStatusWriter {
+        fn has_request_candidate_data_writer(&self) -> bool {
+            true
+        }
+
+        async fn upsert_request_candidate(
+            &self,
+            _candidate: UpsertRequestCandidateRecord,
+        ) -> Result<Option<StoredRequestCandidate>, crate::GatewayError> {
+            panic!("synchronous status fast path must not call the async writer")
+        }
+
+        fn try_enqueue_request_candidate_status(
+            &self,
+            candidate: UpsertRequestCandidateRecord,
+        ) -> Result<(), UpsertRequestCandidateRecord> {
+            self.records
+                .lock()
+                .expect("synchronous status records lock")
+                .push(candidate);
+            Ok(())
+        }
+    }
+
     fn sample_plan() -> ExecutionPlan {
         ExecutionPlan {
             request_id: "req-request-candidate-seed-123".to_string(),
@@ -976,6 +1044,38 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         }
+    }
+
+    #[test]
+    fn streaming_snapshot_uses_synchronous_status_enqueue_fast_path() {
+        let mut plan = sample_plan();
+        plan.candidate_id = Some("candidate-streaming-fast-path".to_string());
+        let snapshot = snapshot_local_request_candidate_status(&plan, None)
+            .expect("candidate snapshot should build");
+        let writer = SynchronousStatusWriter::default();
+
+        try_enqueue_local_request_candidate_status_snapshot(
+            &writer,
+            &snapshot,
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Streaming,
+                status_code: Some(200),
+                error_type: None,
+                error_message: None,
+                latency_ms: None,
+                started_at_unix_ms: Some(123),
+                finished_at_unix_ms: None,
+            },
+        )
+        .expect("streaming status should use the synchronous enqueue path");
+
+        let records = writer
+            .records
+            .lock()
+            .expect("synchronous status records lock");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, RequestCandidateStatus::Streaming);
+        assert_eq!(records[0].status_code, Some(200));
     }
 
     fn sample_minimal_candidate() -> SchedulerMinimalCandidateSelectionCandidate {

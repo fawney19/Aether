@@ -749,16 +749,40 @@ impl<'a> AdminAppState<'a> {
             .collect::<BTreeSet<_>>();
 
         let staged_records = staged_updates
-            .into_iter()
-            .map(|(_, updated)| updated)
+            .iter()
+            .map(|(_, updated)| updated.clone())
             .collect::<Vec<_>>();
-        let Some(updated_keys) = self.update_provider_catalog_keys(&staged_records).await? else {
+        let Some(mut updated_keys) = self.update_provider_catalog_keys(&staged_records).await?
+        else {
             return Ok((
                 http::StatusCode::SERVICE_UNAVAILABLE,
                 Json(json!({ "detail": "Provider 密钥写入能力不可用" })),
             )
                 .into_response());
         };
+
+        for (existing, requested) in &staged_updates {
+            if requested.learned_rpm_limit == existing.learned_rpm_limit {
+                continue;
+            }
+            let Some(reloaded) = self
+                .set_provider_catalog_key_learned_rpm_limit(
+                    &requested.id,
+                    requested.learned_rpm_limit,
+                    requested.updated_at_unix_secs,
+                )
+                .await?
+            else {
+                return Ok((
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "detail": format!("Provider 密钥 {} 已不存在", requested.id) })),
+                )
+                    .into_response());
+            };
+            if let Some(updated) = updated_keys.iter_mut().find(|key| key.id == requested.id) {
+                *updated = reloaded;
+            }
+        }
 
         let endpoints = self
             .list_provider_catalog_endpoints_by_provider_ids(&provider_ids)

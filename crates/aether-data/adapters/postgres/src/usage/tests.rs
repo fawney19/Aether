@@ -1,6 +1,7 @@
 use chrono::{TimeZone, Utc};
 use serde_json::json;
 use sqlx::Row;
+use std::sync::Arc;
 
 use super::{
     attach_compressed_body_refs, attach_usage_http_audit_body_refs,
@@ -15,12 +16,13 @@ use super::{
     usage_routing_snapshot_from_usage, usage_settlement_pricing_snapshot_from_usage,
     usage_total_input_context, AggregateRangeSplit, SqlxUsageReadRepository, UsageHttpAuditRefs,
     UsageRoutingSnapshot, UsageSettlementPricingSnapshot, MAX_INLINE_USAGE_BODY_BYTES,
+    SELECT_STALE_PENDING_USAGE_BATCH_SQL,
 };
 use crate::{PostgresPoolConfig, PostgresPoolFactory};
 use aether_data_contracts::repository::usage::{
     UpsertUsageRecord, UsageAuditListQuery, UsageBodyCaptureState, UsageBodyField,
     UsageCostSavingsSummaryQuery, UsageDashboardDailyBreakdownQuery, UsageDashboardSummaryQuery,
-    UsageProviderPerformanceQuery, UsageTimeSeriesGranularity,
+    UsageProviderPerformanceQuery, UsageTimeSeriesGranularity, UsageWriteRepository,
 };
 
 fn fast_clear_usage_record(
@@ -113,6 +115,1173 @@ fn fast_clear_usage_record(
         created_at_unix_ms: Some(now_unix_secs),
         updated_at_unix_secs: now_unix_secs + u64::from(terminal),
     }
+}
+
+fn first_byte_usage_record(
+    request_id: &str,
+    provider_name: &str,
+    now_unix_secs: u64,
+    request_metadata: Option<serde_json::Value>,
+) -> UpsertUsageRecord {
+    let mut record = fast_clear_usage_record(
+        request_id,
+        provider_name,
+        now_unix_secs,
+        false,
+        UsageBodyCaptureState::Inline,
+        None,
+    );
+    record.status = "streaming".to_string();
+    record.is_stream = Some(true);
+    record.status_code = Some(200);
+    record.response_time_ms = Some(14);
+    record.first_byte_time_ms = Some(12);
+    record.provider_request_body = None;
+    record.provider_request_body_state = None;
+    record.request_metadata = request_metadata;
+    record
+}
+
+fn lazy_usage_repository() -> SqlxUsageReadRepository {
+    let factory = PostgresPoolFactory::new(PostgresPoolConfig {
+        database_url: "postgresql://postgres:postgres@127.0.0.1:1/aether".to_string(),
+        min_connections: 0,
+        max_connections: 1,
+        acquire_timeout_ms: 100,
+        idle_timeout_ms: 100,
+        max_lifetime_ms: 100,
+        statement_cache_capacity: 8,
+        require_ssl: false,
+    })
+    .expect("factory should build");
+    SqlxUsageReadRepository::new(factory.connect_lazy().expect("lazy pool should build"))
+}
+
+#[tokio::test]
+async fn pending_batch_is_opt_in_and_rejects_non_pending_before_connecting() {
+    let repository = lazy_usage_repository();
+    assert!(UsageWriteRepository::supports_pending_usage_batch(
+        &repository
+    ));
+
+    let mut streaming = fast_clear_usage_record(
+        "req-invalid-pending-batch",
+        "provider-invalid-pending-batch",
+        1_700_000_000,
+        false,
+        UsageBodyCaptureState::Inline,
+        None,
+    );
+    streaming.status = "streaming".to_string();
+    let err = repository
+        .upsert_pending_many(vec![streaming])
+        .await
+        .expect_err("non-pending lifecycle rows must be rejected before database access");
+    assert!(err
+        .to_string()
+        .contains("pending usage batch requires pending status"));
+}
+
+#[tokio::test]
+#[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+async fn live_pending_batch_persists_auxiliary_state_and_preserves_terminal_conflicts() {
+    let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
+        .expect("AETHER_TEST_DATABASE_URL must point at the test database");
+    let factory = PostgresPoolFactory::new(PostgresPoolConfig {
+        database_url,
+        min_connections: 1,
+        max_connections: 2,
+        acquire_timeout_ms: 10_000,
+        idle_timeout_ms: 30_000,
+        max_lifetime_ms: 60_000,
+        statement_cache_capacity: 64,
+        require_ssl: false,
+    })
+    .expect("factory should build");
+    let repository =
+        SqlxUsageReadRepository::new(factory.connect_lazy().expect("lazy pool should build"));
+    crate::run_migrations(repository.pool())
+        .await
+        .expect("test database migrations should succeed");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let rich_request_id = format!("req-pending-batch-rich-{suffix}");
+    let simple_request_id = format!("req-pending-batch-simple-{suffix}");
+    let terminal_request_id = format!("req-pending-batch-terminal-{suffix}");
+    let streaming_request_id = format!("req-pending-batch-streaming-{suffix}");
+    let provider_name = format!("pending-batch-provider-{suffix}");
+    let user_id = uuid::Uuid::new_v4().to_string();
+    let api_key_id = uuid::Uuid::new_v4().to_string();
+    let provider_id = uuid::Uuid::new_v4().to_string();
+    let provider_endpoint_id = uuid::Uuid::new_v4().to_string();
+    let provider_key_id = uuid::Uuid::new_v4().to_string();
+    let now_unix_secs = Utc::now().timestamp().max(0) as u64;
+
+    let mut terminal = fast_clear_usage_record(
+        &terminal_request_id,
+        &provider_name,
+        now_unix_secs,
+        true,
+        UsageBodyCaptureState::None,
+        None,
+    );
+    terminal.candidate_id = Some("terminal-candidate".to_string());
+    terminal.request_metadata = Some(json!({"terminal": true}));
+    repository
+        .upsert(terminal)
+        .await
+        .expect("terminal conflict seed should persist");
+    repository
+        .upsert(first_byte_usage_record(
+            &streaming_request_id,
+            &provider_name,
+            now_unix_secs,
+            Some(json!({"streaming": true})),
+        ))
+        .await
+        .expect("streaming conflict seed should persist");
+
+    let mut rich = fast_clear_usage_record(
+        &rich_request_id,
+        &provider_name,
+        now_unix_secs,
+        false,
+        UsageBodyCaptureState::Inline,
+        None,
+    );
+    rich.user_id = Some(user_id);
+    rich.api_key_id = Some(api_key_id);
+    rich.provider_id = Some(provider_id);
+    rich.provider_endpoint_id = Some(provider_endpoint_id);
+    rich.provider_api_key_id = Some(provider_key_id.clone());
+    rich.request_headers = Some(json!({"x-request": "request-value"}));
+    rich.request_body = Some(json!({"messages": [{"role": "user", "content": "hello"}]}));
+    rich.request_body_state = Some(UsageBodyCaptureState::Inline);
+    rich.provider_request_headers = Some(json!({"x-provider": "provider-value"}));
+    rich.provider_request_body = Some(json!({"model": "gpt-5", "input": "hello"}));
+    rich.provider_request_body_state = Some(UsageBodyCaptureState::Inline);
+    rich.response_headers = Some(json!({"x-upstream": "upstream-value"}));
+    rich.response_body = Some(json!({"phase": "pending"}));
+    rich.response_body_state = Some(UsageBodyCaptureState::Inline);
+    rich.client_response_headers = Some(json!({"x-client": "client-value"}));
+    rich.client_response_body = Some(json!({"phase": "pending-client"}));
+    rich.client_response_body_state = Some(UsageBodyCaptureState::Inline);
+    rich.candidate_id = Some("rich-candidate".to_string());
+    rich.candidate_index = Some(7);
+    rich.key_name = Some("rich-key".to_string());
+    rich.planner_kind = Some("rich-planner".to_string());
+    rich.route_family = Some("rich-family".to_string());
+    rich.route_kind = Some("rich-route".to_string());
+    rich.execution_path = Some("rich-path".to_string());
+    rich.local_execution_runtime_miss_reason = Some("rich-miss".to_string());
+    rich.request_metadata = Some(json!({
+        "trace_id": "rich-trace",
+        "rate_multiplier": 0.75,
+        "billing_snapshot_schema_version": "billing-v1",
+        "settlement_snapshot": {"schema_version": "settlement-v1", "status": "pending"}
+    }));
+
+    let simple = fast_clear_usage_record(
+        &simple_request_id,
+        &provider_name,
+        now_unix_secs,
+        false,
+        UsageBodyCaptureState::Inline,
+        None,
+    );
+    let mut late_pending = fast_clear_usage_record(
+        &terminal_request_id,
+        "late-pending-provider",
+        now_unix_secs + 1,
+        false,
+        UsageBodyCaptureState::Inline,
+        None,
+    );
+    late_pending.candidate_id = Some("late-pending-candidate".to_string());
+    late_pending.request_metadata = Some(json!({"late_pending": true}));
+    let mut late_streaming_pending = fast_clear_usage_record(
+        &streaming_request_id,
+        "late-streaming-pending-provider",
+        now_unix_secs + 1,
+        false,
+        UsageBodyCaptureState::Inline,
+        None,
+    );
+    late_streaming_pending.status_code = None;
+    late_streaming_pending.first_byte_time_ms = None;
+
+    repository
+        .upsert_pending_many(vec![rich, simple, late_pending, late_streaming_pending])
+        .await
+        .expect("pending usage batch should persist");
+
+    let base_rows = sqlx::query(
+        "SELECT request_id, status, billing_status, provider_name, status_code, first_byte_time_ms, request_metadata FROM \"usage\" WHERE request_id = ANY($1)",
+    )
+    .bind(vec![
+        rich_request_id.clone(),
+        simple_request_id.clone(),
+        terminal_request_id.clone(),
+        streaming_request_id.clone(),
+    ])
+    .fetch_all(repository.pool())
+    .await
+    .expect("pending batch base rows should be readable");
+    assert_eq!(base_rows.len(), 4);
+    let rich_base = base_rows
+        .iter()
+        .find(|row| row.try_get::<String, _>("request_id").unwrap() == rich_request_id)
+        .expect("rich base row should exist");
+    assert_eq!(rich_base.try_get::<String, _>("status").unwrap(), "pending");
+    assert_eq!(
+        rich_base.try_get::<String, _>("billing_status").unwrap(),
+        "pending"
+    );
+    assert_eq!(
+        rich_base
+            .try_get::<serde_json::Value, _>("request_metadata")
+            .unwrap()
+            .get("trace_id"),
+        Some(&json!("rich-trace"))
+    );
+    let terminal_base = base_rows
+        .iter()
+        .find(|row| row.try_get::<String, _>("request_id").unwrap() == terminal_request_id)
+        .expect("terminal base row should exist");
+    assert_eq!(
+        terminal_base.try_get::<String, _>("status").unwrap(),
+        "completed"
+    );
+    assert_eq!(
+        terminal_base.try_get::<String, _>("provider_name").unwrap(),
+        provider_name,
+        "late pending must not replace terminal provider state"
+    );
+    let streaming_base = base_rows
+        .iter()
+        .find(|row| row.try_get::<String, _>("request_id").unwrap() == streaming_request_id)
+        .expect("streaming base row should exist");
+    assert_eq!(
+        streaming_base.try_get::<String, _>("status").unwrap(),
+        "streaming"
+    );
+    assert_eq!(
+        streaming_base
+            .try_get::<Option<i32>, _>("status_code")
+            .unwrap(),
+        Some(200),
+        "late pending must not clear the streaming response status"
+    );
+    assert_eq!(
+        streaming_base
+            .try_get::<Option<i32>, _>("first_byte_time_ms")
+            .unwrap(),
+        Some(12),
+        "late pending must not clear the first-byte observation"
+    );
+
+    let http = sqlx::query(
+        "SELECT request_headers, provider_request_headers, response_headers, client_response_headers, request_body_ref, provider_request_body_ref, response_body_ref, client_response_body_ref, request_body_state, provider_request_body_state, response_body_state, client_response_body_state FROM usage_http_audits WHERE request_id = $1",
+    )
+    .bind(&rich_request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("rich HTTP audit should exist");
+    assert_eq!(
+        http.try_get::<serde_json::Value, _>("request_headers")
+            .unwrap(),
+        json!({"x-request": "request-value"})
+    );
+    for field in [
+        "request_body_ref",
+        "provider_request_body_ref",
+        "response_body_ref",
+        "client_response_body_ref",
+    ] {
+        assert!(http.try_get::<Option<String>, _>(field).unwrap().is_some());
+    }
+    for field in [
+        "request_body_state",
+        "provider_request_body_state",
+        "response_body_state",
+        "client_response_body_state",
+    ] {
+        assert_eq!(
+            http.try_get::<Option<String>, _>(field).unwrap().as_deref(),
+            Some("reference")
+        );
+    }
+    let blob_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::BIGINT FROM usage_body_blobs WHERE request_id = $1",
+    )
+    .bind(&rich_request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("body blob count should be readable");
+    assert_eq!(blob_count, 4);
+
+    let routing = sqlx::query(
+        "SELECT candidate_id, candidate_index, selected_provider_api_key_id FROM usage_routing_snapshots WHERE request_id = $1",
+    )
+    .bind(&rich_request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("rich routing snapshot should exist");
+    assert_eq!(
+        routing
+            .try_get::<Option<String>, _>("candidate_id")
+            .unwrap()
+            .as_deref(),
+        Some("rich-candidate")
+    );
+    assert_eq!(
+        routing
+            .try_get::<Option<i32>, _>("candidate_index")
+            .unwrap(),
+        Some(7)
+    );
+    assert_eq!(
+        routing
+            .try_get::<Option<String>, _>("selected_provider_api_key_id")
+            .unwrap()
+            .as_deref(),
+        Some(provider_key_id.as_str())
+    );
+
+    let settlement = sqlx::query(
+        "SELECT billing_status, CAST(rate_multiplier AS DOUBLE PRECISION) AS rate_multiplier, settlement_snapshot FROM usage_settlement_snapshots WHERE request_id = $1",
+    )
+    .bind(&rich_request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("rich settlement snapshot should exist");
+    assert_eq!(
+        settlement.try_get::<String, _>("billing_status").unwrap(),
+        "pending"
+    );
+    assert_eq!(
+        settlement
+            .try_get::<Option<f64>, _>("rate_multiplier")
+            .unwrap(),
+        Some(0.75)
+    );
+    assert!(settlement
+        .try_get::<Option<serde_json::Value>, _>("settlement_snapshot")
+        .unwrap()
+        .is_some());
+
+    let counter = sqlx::query(
+        "SELECT request_count_delta, target_id, candidate_last_used_at_unix_secs, usage_created_at_unix_secs FROM usage_counter_deltas WHERE request_id = $1 AND kind = 'provider_api_key' AND processed_at IS NULL",
+    )
+    .bind(&rich_request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("pending provider counter delta should exist");
+    assert_eq!(counter.try_get::<i64, _>("request_count_delta").unwrap(), 1);
+    assert_eq!(
+        counter.try_get::<String, _>("target_id").unwrap(),
+        provider_key_id
+    );
+    assert_eq!(
+        counter
+            .try_get::<Option<i64>, _>("candidate_last_used_at_unix_secs")
+            .unwrap(),
+        counter
+            .try_get::<Option<i64>, _>("usage_created_at_unix_secs")
+            .unwrap()
+    );
+
+    let request_ids = vec![
+        rich_request_id,
+        simple_request_id,
+        terminal_request_id,
+        streaming_request_id,
+    ];
+    sqlx::query("DELETE FROM usage_counter_deltas WHERE request_id = ANY($1)")
+        .bind(&request_ids)
+        .execute(repository.pool())
+        .await
+        .expect("pending batch counter deltas should be removed");
+    sqlx::query("DELETE FROM \"usage\" WHERE request_id = ANY($1)")
+        .bind(&request_ids)
+        .execute(repository.pool())
+        .await
+        .expect("pending batch usage rows should be removed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+async fn live_pending_batch_and_terminal_upserts_count_each_provider_request_once() {
+    const REQUESTS: usize = 32;
+
+    let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
+        .expect("AETHER_TEST_DATABASE_URL must point at the test database");
+    let factory = PostgresPoolFactory::new(PostgresPoolConfig {
+        database_url,
+        min_connections: 1,
+        max_connections: 16,
+        acquire_timeout_ms: 10_000,
+        idle_timeout_ms: 30_000,
+        max_lifetime_ms: 60_000,
+        statement_cache_capacity: 64,
+        require_ssl: false,
+    })
+    .expect("factory should build");
+    let repository =
+        SqlxUsageReadRepository::new(factory.connect_lazy().expect("lazy pool should build"));
+    crate::run_migrations(repository.pool())
+        .await
+        .expect("test database migrations should succeed");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let provider_name = format!("pending-terminal-race-provider-{suffix}");
+    let provider_key_id = format!("pending-terminal-race-key-{suffix}");
+    let now_unix_secs = Utc::now().timestamp().max(0) as u64;
+    let request_ids = (0..REQUESTS)
+        .map(|index| format!("req-pending-terminal-race-{index}-{suffix}"))
+        .collect::<Vec<_>>();
+    let pending_rows = request_ids
+        .iter()
+        .map(|request_id| {
+            let mut row = fast_clear_usage_record(
+                request_id,
+                &provider_name,
+                now_unix_secs,
+                false,
+                UsageBodyCaptureState::Inline,
+                None,
+            );
+            row.provider_api_key_id = Some(provider_key_id.clone());
+            row
+        })
+        .collect::<Vec<_>>();
+    let terminal_rows = request_ids
+        .iter()
+        .map(|request_id| {
+            let mut row = fast_clear_usage_record(
+                request_id,
+                &provider_name,
+                now_unix_secs + 1,
+                true,
+                UsageBodyCaptureState::None,
+                None,
+            );
+            row.provider_api_key_id = Some(provider_key_id.clone());
+            row
+        })
+        .collect::<Vec<_>>();
+
+    let start = Arc::new(tokio::sync::Barrier::new(3));
+    let pending_repository = repository.clone();
+    let pending_start = Arc::clone(&start);
+    let pending = tokio::spawn(async move {
+        pending_start.wait().await;
+        pending_repository.upsert_pending_many(pending_rows).await
+    });
+    let terminal_repository = repository.clone();
+    let terminal_start = Arc::clone(&start);
+    let terminal = tokio::spawn(async move {
+        terminal_start.wait().await;
+        let mut writes = tokio::task::JoinSet::new();
+        for row in terminal_rows {
+            let repository = terminal_repository.clone();
+            writes.spawn(async move { repository.upsert(row).await });
+        }
+        while let Some(result) = writes.join_next().await {
+            result.expect("terminal upsert task should not panic")?;
+        }
+        Ok::<(), aether_data_contracts::DataLayerError>(())
+    });
+    start.wait().await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        pending
+            .await
+            .expect("pending batch task should not panic")
+            .expect("pending batch should commit");
+        terminal
+            .await
+            .expect("terminal tasks should not panic")
+            .expect("terminal upserts should commit");
+    })
+    .await
+    .expect("stable request locks must avoid deadlock");
+
+    let rows = sqlx::query(
+        r#"SELECT request_id, COALESCE(SUM(request_count_delta), 0)::BIGINT AS request_count
+           FROM usage_counter_deltas
+           WHERE request_id = ANY($1) AND kind = 'provider_api_key' AND target_id = $2
+           GROUP BY request_id"#,
+    )
+    .bind(&request_ids)
+    .bind(&provider_key_id)
+    .fetch_all(repository.pool())
+    .await
+    .expect("provider request contributions should be readable");
+    assert_eq!(rows.len(), REQUESTS);
+    for row in rows {
+        assert_eq!(row.try_get::<i64, _>("request_count").unwrap(), 1);
+    }
+
+    sqlx::query("DELETE FROM usage_counter_deltas WHERE request_id = ANY($1)")
+        .bind(&request_ids)
+        .execute(repository.pool())
+        .await
+        .expect("race counter deltas should be removed");
+    sqlx::query("DELETE FROM \"usage\" WHERE request_id = ANY($1)")
+        .bind(&request_ids)
+        .execute(repository.pool())
+        .await
+        .expect("race usage rows should be removed");
+}
+
+#[tokio::test]
+#[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+async fn live_first_byte_fast_path_is_atomic_and_preserves_terminal_state() {
+    let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
+        .expect("AETHER_TEST_DATABASE_URL must point at the test database");
+    let factory = PostgresPoolFactory::new(PostgresPoolConfig {
+        database_url,
+        min_connections: 1,
+        max_connections: 2,
+        acquire_timeout_ms: 10_000,
+        idle_timeout_ms: 30_000,
+        max_lifetime_ms: 60_000,
+        statement_cache_capacity: 64,
+        require_ssl: false,
+    })
+    .expect("factory should build");
+    let repository =
+        SqlxUsageReadRepository::new(factory.connect_lazy().expect("lazy pool should build"));
+    crate::run_migrations(repository.pool())
+        .await
+        .expect("test database migrations should succeed");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let missing_request_id = format!("req-first-byte-missing-{suffix}");
+    let existing_request_id = format!("req-first-byte-existing-{suffix}");
+    let metadata_fill_request_id = format!("req-first-byte-metadata-fill-{suffix}");
+    let provider_name = format!("first-byte-fast-{suffix}");
+    let missing_provider_key_id = format!("key-first-byte-missing-{suffix}");
+    let now_unix_secs = Utc::now().timestamp().max(0) as u64;
+
+    let mut missing_first_byte = first_byte_usage_record(
+        &missing_request_id,
+        &provider_name,
+        now_unix_secs,
+        Some(json!({
+            "trace_id": "missing-row-trace",
+            "upstream_is_stream": false
+        })),
+    );
+    missing_first_byte.provider_api_key_id = Some(missing_provider_key_id.clone());
+    repository
+        .upsert_first_byte(missing_first_byte)
+        .await
+        .expect("first-byte fast path should insert a missing row");
+    let missing = sqlx::query(
+        "SELECT status, billing_status, first_byte_time_ms, upstream_is_stream, request_metadata FROM \"usage\" WHERE request_id = $1",
+    )
+    .bind(&missing_request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("inserted first-byte row should be readable");
+    assert_eq!(
+        missing
+            .try_get::<String, _>("status")
+            .expect("status should decode"),
+        "streaming"
+    );
+    assert_eq!(
+        missing
+            .try_get::<String, _>("billing_status")
+            .expect("billing status should decode"),
+        "pending"
+    );
+    assert_eq!(
+        missing
+            .try_get::<Option<i32>, _>("first_byte_time_ms")
+            .expect("first-byte time should decode"),
+        Some(12)
+    );
+    assert!(!missing
+        .try_get::<bool, _>("upstream_is_stream")
+        .expect("upstream stream mode should decode"));
+    assert_eq!(
+        missing
+            .try_get::<Option<serde_json::Value>, _>("request_metadata")
+            .expect("metadata should decode"),
+        Some(json!({
+            "trace_id": "missing-row-trace",
+            "upstream_is_stream": false
+        }))
+    );
+    let missing_provider_request_count = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COALESCE(SUM(request_count_delta), 0)::BIGINT
+           FROM usage_counter_deltas
+           WHERE request_id = $1 AND kind = 'provider_api_key' AND target_id = $2"#,
+    )
+    .bind(&missing_request_id)
+    .bind(&missing_provider_key_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("missing first-byte provider contribution should be readable");
+    assert_eq!(
+        missing_provider_request_count, 1,
+        "a first-byte insert must create the initial provider request contribution"
+    );
+
+    let mut pending = first_byte_usage_record(
+        &existing_request_id,
+        &provider_name,
+        now_unix_secs,
+        Some(json!({"trace_id": "pending-trace"})),
+    );
+    pending.status = "pending".to_string();
+    pending.status_code = None;
+    pending.response_time_ms = None;
+    pending.first_byte_time_ms = None;
+    repository
+        .upsert(pending)
+        .await
+        .expect("pending usage should be inserted");
+
+    repository
+        .upsert_first_byte(first_byte_usage_record(
+            &existing_request_id,
+            &provider_name,
+            now_unix_secs + 1,
+            Some(json!({"trace_id": "incoming-first-byte-trace"})),
+        ))
+        .await
+        .expect("first-byte fast path should advance pending usage");
+    let streaming = sqlx::query(
+        "SELECT status, first_byte_time_ms, request_metadata FROM \"usage\" WHERE request_id = $1",
+    )
+    .bind(&existing_request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("streaming usage should be readable");
+    assert_eq!(
+        streaming
+            .try_get::<String, _>("status")
+            .expect("status should decode"),
+        "streaming"
+    );
+    assert_eq!(
+        streaming
+            .try_get::<Option<serde_json::Value>, _>("request_metadata")
+            .expect("metadata should decode"),
+        Some(json!({"trace_id": "pending-trace"})),
+        "the single-row fast path must not replace metadata already captured by pending usage"
+    );
+
+    let mut replay = first_byte_usage_record(
+        &existing_request_id,
+        &provider_name,
+        now_unix_secs + 2,
+        Some(json!({"trace_id": "replayed-first-byte-trace"})),
+    );
+    replay.first_byte_time_ms = Some(3);
+    repository
+        .upsert_first_byte(replay)
+        .await
+        .expect("replayed first-byte write should succeed");
+    let replayed_first_byte_time = sqlx::query_scalar::<_, Option<i32>>(
+        "SELECT first_byte_time_ms FROM \"usage\" WHERE request_id = $1",
+    )
+    .bind(&existing_request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("replayed first-byte time should be readable");
+    assert_eq!(
+        replayed_first_byte_time,
+        Some(12),
+        "a replay must preserve the first non-zero TTFB"
+    );
+
+    let mut metadata_pending = first_byte_usage_record(
+        &metadata_fill_request_id,
+        &provider_name,
+        now_unix_secs,
+        None,
+    );
+    metadata_pending.status = "pending".to_string();
+    metadata_pending.status_code = None;
+    metadata_pending.response_time_ms = None;
+    metadata_pending.first_byte_time_ms = None;
+    repository
+        .upsert(metadata_pending)
+        .await
+        .expect("metadata-fill pending usage should be inserted");
+    repository
+        .upsert_first_byte(first_byte_usage_record(
+            &metadata_fill_request_id,
+            &provider_name,
+            now_unix_secs + 1,
+            Some(json!({"trace_id": "filled-first-byte-trace"})),
+        ))
+        .await
+        .expect("first-byte metadata should fill a missing pending snapshot");
+    let filled_metadata = sqlx::query_scalar::<_, Option<serde_json::Value>>(
+        "SELECT request_metadata FROM \"usage\" WHERE request_id = $1",
+    )
+    .bind(&metadata_fill_request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("filled first-byte metadata should be readable");
+    assert_eq!(
+        filled_metadata,
+        Some(json!({"trace_id": "filled-first-byte-trace"}))
+    );
+
+    let mut terminal = fast_clear_usage_record(
+        &existing_request_id,
+        &provider_name,
+        now_unix_secs + 3,
+        true,
+        UsageBodyCaptureState::None,
+        None,
+    );
+    terminal.is_stream = Some(true);
+    terminal.first_byte_time_ms = Some(44);
+    terminal.request_metadata = Some(json!({"trace_id": "terminal-trace"}));
+    repository
+        .upsert(terminal)
+        .await
+        .expect("terminal usage should be persisted");
+
+    let mut late_first_byte = first_byte_usage_record(
+        &existing_request_id,
+        &provider_name,
+        now_unix_secs + 4,
+        Some(json!({"trace_id": "late-first-byte-trace"})),
+    );
+    late_first_byte.first_byte_time_ms = Some(3);
+    repository
+        .upsert_first_byte(late_first_byte)
+        .await
+        .expect("late first-byte write should be ignored without failing");
+    let terminal = sqlx::query(
+        "SELECT status, billing_status, first_byte_time_ms, request_metadata, finalized_at FROM \"usage\" WHERE request_id = $1",
+    )
+    .bind(&existing_request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("terminal usage should be readable");
+    assert_eq!(
+        terminal
+            .try_get::<String, _>("status")
+            .expect("status should decode"),
+        "completed"
+    );
+    assert_eq!(
+        terminal
+            .try_get::<Option<i32>, _>("first_byte_time_ms")
+            .expect("first-byte time should decode"),
+        Some(44)
+    );
+    assert_eq!(
+        terminal
+            .try_get::<Option<serde_json::Value>, _>("request_metadata")
+            .expect("metadata should decode"),
+        Some(json!({"trace_id": "terminal-trace"}))
+    );
+    assert!(terminal
+        .try_get::<Option<chrono::DateTime<Utc>>, _>("finalized_at")
+        .expect("finalized timestamp should decode")
+        .is_some());
+
+    sqlx::query("DELETE FROM \"usage\" WHERE request_id = ANY($1)")
+        .bind(vec![
+            missing_request_id.clone(),
+            existing_request_id,
+            metadata_fill_request_id,
+        ])
+        .execute(repository.pool())
+        .await
+        .expect("first-byte test rows should be removed");
+    sqlx::query("DELETE FROM usage_counter_deltas WHERE request_id = $1")
+        .bind(missing_request_id)
+        .execute(repository.pool())
+        .await
+        .expect("first-byte provider delta should be removed");
+}
+
+#[tokio::test]
+#[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+async fn live_first_byte_reads_provider_contribution_after_waiting_for_canonical_lock() {
+    let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
+        .expect("AETHER_TEST_DATABASE_URL must point at the test database");
+    let factory = PostgresPoolFactory::new(PostgresPoolConfig {
+        database_url,
+        min_connections: 1,
+        max_connections: 4,
+        acquire_timeout_ms: 10_000,
+        idle_timeout_ms: 30_000,
+        max_lifetime_ms: 60_000,
+        statement_cache_capacity: 64,
+        require_ssl: false,
+    })
+    .expect("factory should build");
+    let repository =
+        SqlxUsageReadRepository::new(factory.connect_lazy().expect("lazy pool should build"));
+    crate::run_migrations(repository.pool())
+        .await
+        .expect("test database migrations should succeed");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let request_id = format!("req-first-byte-lock-snapshot-{suffix}");
+    let provider_name = format!("first-byte-lock-snapshot-{suffix}");
+    let provider_key_id = format!("key-first-byte-lock-snapshot-{suffix}");
+    let now_unix_secs = Utc::now().timestamp().max(0) as u64;
+    let mut pending = first_byte_usage_record(
+        &request_id,
+        &provider_name,
+        now_unix_secs,
+        Some(json!({"phase": "pending"})),
+    );
+    pending.status = "pending".to_string();
+    pending.status_code = None;
+    pending.response_time_ms = None;
+    pending.first_byte_time_ms = None;
+    pending.provider_api_key_id = None;
+    repository
+        .upsert(pending)
+        .await
+        .expect("pending row without a provider key should be inserted");
+
+    let mut canonical = repository
+        .pool()
+        .begin()
+        .await
+        .expect("canonical transaction should begin");
+    sqlx::query(super::LOCK_USAGE_REQUEST_ID_SQL)
+        .bind(&request_id)
+        .execute(&mut *canonical)
+        .await
+        .expect("canonical writer should hold the request advisory lock");
+    sqlx::query("UPDATE \"usage\" SET provider_api_key_id = $2 WHERE request_id = $1")
+        .bind(&request_id)
+        .bind(&provider_key_id)
+        .execute(&mut *canonical)
+        .await
+        .expect("canonical writer should attach the provider key");
+    sqlx::query(
+        r#"INSERT INTO usage_counter_deltas
+           (id, request_id, kind, target_id, request_count_delta)
+           VALUES ($1, $2, 'provider_api_key', $3, 1)"#,
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(&request_id)
+    .bind(&provider_key_id)
+    .execute(&mut *canonical)
+    .await
+    .expect("canonical writer should enqueue the provider contribution");
+
+    let mut first_byte = first_byte_usage_record(
+        &request_id,
+        &provider_name,
+        now_unix_secs + 1,
+        Some(json!({"phase": "first-byte"})),
+    );
+    first_byte.provider_api_key_id = Some(provider_key_id.clone());
+    let first_byte_repository = repository.clone();
+    let first_byte_task =
+        tokio::spawn(async move { first_byte_repository.upsert_first_byte(first_byte).await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting = sqlx::query_scalar::<_, bool>(
+                r#"SELECT EXISTS (
+                     SELECT 1
+                     FROM pg_locks
+                     WHERE locktype = 'advisory'
+                       AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                       AND NOT granted
+                   )"#,
+            )
+            .fetch_one(repository.pool())
+            .await
+            .expect("advisory lock wait should be observable");
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first-byte writer should block behind the canonical lock");
+
+    canonical
+        .commit()
+        .await
+        .expect("canonical provider contribution should commit");
+    tokio::time::timeout(std::time::Duration::from_secs(5), first_byte_task)
+        .await
+        .expect("first-byte writer should resume after canonical commit")
+        .expect("first-byte task should not panic")
+        .expect("first-byte write should succeed");
+
+    let provider_request_count = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COALESCE(SUM(request_count_delta), 0)::BIGINT
+           FROM usage_counter_deltas
+           WHERE request_id = $1 AND kind = 'provider_api_key' AND target_id = $2"#,
+    )
+    .bind(&request_id)
+    .bind(&provider_key_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("provider contribution should be readable");
+    assert_eq!(
+        provider_request_count, 1,
+        "the post-lock fresh snapshot must prevent a duplicate provider contribution"
+    );
+
+    sqlx::query("DELETE FROM \"usage\" WHERE request_id = $1")
+        .bind(&request_id)
+        .execute(repository.pool())
+        .await
+        .expect("lock snapshot usage row should be removed");
+    sqlx::query("DELETE FROM usage_counter_deltas WHERE request_id = $1")
+        .bind(request_id)
+        .execute(repository.pool())
+        .await
+        .expect("lock snapshot counter rows should be removed");
+}
+
+#[tokio::test]
+#[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+async fn live_first_byte_batch_preserves_duplicate_order_and_terminal_guards() {
+    let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
+        .expect("AETHER_TEST_DATABASE_URL must point at the test database");
+    let factory = PostgresPoolFactory::new(PostgresPoolConfig {
+        database_url,
+        min_connections: 1,
+        max_connections: 2,
+        acquire_timeout_ms: 10_000,
+        idle_timeout_ms: 30_000,
+        max_lifetime_ms: 60_000,
+        statement_cache_capacity: 64,
+        require_ssl: false,
+    })
+    .expect("factory should build");
+    let repository =
+        SqlxUsageReadRepository::new(factory.connect_lazy().expect("lazy pool should build"));
+    crate::run_migrations(repository.pool())
+        .await
+        .expect("test database migrations should succeed");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let provider_name = format!("first-byte-batch-{suffix}");
+    let request_a = format!("req-first-byte-batch-a-{suffix}");
+    let request_b = format!("req-first-byte-batch-b-{suffix}");
+    let request_missing = format!("req-first-byte-batch-missing-{suffix}");
+    let request_terminal = format!("req-first-byte-batch-terminal-{suffix}");
+    let missing_provider_key_id = format!("key-first-byte-batch-missing-{suffix}");
+    let now_unix_secs = Utc::now().timestamp().max(0) as u64;
+
+    let mut pending_a = first_byte_usage_record(
+        &request_a,
+        &provider_name,
+        now_unix_secs,
+        Some(json!({"seed": "a"})),
+    );
+    pending_a.status = "pending".to_string();
+    pending_a.first_byte_time_ms = None;
+    pending_a.status_code = None;
+    pending_a.response_time_ms = None;
+    pending_a.has_format_conversion = Some(true);
+
+    let mut pending_b = first_byte_usage_record(&request_b, &provider_name, now_unix_secs, None);
+    pending_b.status = "pending".to_string();
+    pending_b.first_byte_time_ms = None;
+    pending_b.status_code = None;
+    pending_b.response_time_ms = None;
+    pending_b.has_format_conversion = Some(false);
+
+    let mut terminal = fast_clear_usage_record(
+        &request_terminal,
+        &provider_name,
+        now_unix_secs,
+        true,
+        UsageBodyCaptureState::None,
+        None,
+    );
+    terminal.is_stream = Some(true);
+    terminal.first_byte_time_ms = Some(44);
+    terminal.request_metadata = Some(json!({"terminal": true}));
+
+    repository
+        .upsert(pending_a)
+        .await
+        .expect("pending A should be inserted");
+    repository
+        .upsert(pending_b)
+        .await
+        .expect("pending B should be inserted");
+    repository
+        .upsert(terminal)
+        .await
+        .expect("terminal row should be inserted");
+
+    let mut first_a = first_byte_usage_record(
+        &request_a,
+        &provider_name,
+        now_unix_secs + 1,
+        Some(json!({"incoming": "a"})),
+    );
+    first_a.first_byte_time_ms = Some(30);
+    first_a.has_format_conversion = None;
+    let mut replay_a = first_a.clone();
+    replay_a.first_byte_time_ms = Some(7);
+    replay_a.response_time_ms = Some(99);
+
+    let mut first_b = first_byte_usage_record(
+        &request_b,
+        &provider_name,
+        now_unix_secs + 1,
+        Some(json!({"incoming": "b"})),
+    );
+    first_b.has_format_conversion = Some(true);
+
+    let mut late_terminal = first_byte_usage_record(
+        &request_terminal,
+        &provider_name,
+        now_unix_secs + 2,
+        Some(json!({"late": true})),
+    );
+    late_terminal.first_byte_time_ms = Some(3);
+    late_terminal.has_format_conversion = None;
+    let mut first_missing = first_byte_usage_record(
+        &request_missing,
+        &provider_name,
+        now_unix_secs + 1,
+        Some(json!({"incoming": "missing"})),
+    );
+    first_missing.provider_api_key_id = Some(missing_provider_key_id.clone());
+
+    repository
+        .upsert_first_byte_many(vec![
+            first_a,
+            first_b,
+            late_terminal,
+            replay_a,
+            first_missing,
+        ])
+        .await
+        .expect("first-byte batch should commit");
+
+    let rows = sqlx::query(
+        "SELECT request_id, status, response_time_ms, first_byte_time_ms, has_format_conversion, request_metadata, finalized_at FROM \"usage\" WHERE request_id = ANY($1) ORDER BY request_id",
+    )
+    .bind(vec![
+        request_a.clone(),
+        request_b.clone(),
+        request_missing.clone(),
+        request_terminal.clone(),
+    ])
+    .fetch_all(repository.pool())
+    .await
+    .expect("batch rows should be readable");
+    assert_eq!(rows.len(), 4);
+
+    let row_a = rows
+        .iter()
+        .find(|row| row.try_get::<String, _>("request_id").unwrap() == request_a)
+        .expect("row A should exist");
+    assert_eq!(row_a.try_get::<String, _>("status").unwrap(), "streaming");
+    assert_eq!(
+        row_a
+            .try_get::<Option<i32>, _>("first_byte_time_ms")
+            .unwrap(),
+        Some(30),
+        "duplicate request IDs must keep the first non-zero TTFB in caller order"
+    );
+    assert_eq!(
+        row_a.try_get::<Option<i32>, _>("response_time_ms").unwrap(),
+        Some(99),
+        "later duplicate fields must still merge with single-row semantics"
+    );
+    assert_eq!(
+        row_a
+            .try_get::<Option<bool>, _>("has_format_conversion")
+            .unwrap(),
+        Some(true),
+        "a None conversion flag must not overwrite an existing true value"
+    );
+    assert_eq!(
+        row_a
+            .try_get::<Option<serde_json::Value>, _>("request_metadata")
+            .unwrap(),
+        Some(json!({"seed": "a"})),
+        "existing metadata remains authoritative"
+    );
+
+    let row_b = rows
+        .iter()
+        .find(|row| row.try_get::<String, _>("request_id").unwrap() == request_b)
+        .expect("row B should exist");
+    assert_eq!(row_b.try_get::<String, _>("status").unwrap(), "streaming");
+    assert_eq!(
+        row_b
+            .try_get::<Option<bool>, _>("has_format_conversion")
+            .unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        row_b
+            .try_get::<Option<serde_json::Value>, _>("request_metadata")
+            .unwrap(),
+        Some(json!({"incoming": "b"}))
+    );
+
+    let row_terminal = rows
+        .iter()
+        .find(|row| row.try_get::<String, _>("request_id").unwrap() == request_terminal)
+        .expect("terminal row should exist");
+    assert_eq!(
+        row_terminal.try_get::<String, _>("status").unwrap(),
+        "completed",
+        "a late first-byte batch must not regress a terminal row"
+    );
+    assert_eq!(
+        row_terminal
+            .try_get::<Option<i32>, _>("first_byte_time_ms")
+            .unwrap(),
+        Some(44)
+    );
+    assert!(row_terminal
+        .try_get::<Option<chrono::DateTime<Utc>>, _>("finalized_at")
+        .unwrap()
+        .is_some());
+
+    let missing_provider_request_count = sqlx::query_scalar::<_, i64>(
+        r#"SELECT COALESCE(SUM(request_count_delta), 0)::BIGINT
+           FROM usage_counter_deltas
+           WHERE request_id = $1 AND kind = 'provider_api_key' AND target_id = $2"#,
+    )
+    .bind(&request_missing)
+    .bind(&missing_provider_key_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("batch first-byte provider contribution should be readable");
+    assert_eq!(missing_provider_request_count, 1);
+
+    sqlx::query("DELETE FROM \"usage\" WHERE request_id = ANY($1)")
+        .bind(vec![
+            request_a,
+            request_b,
+            request_missing.clone(),
+            request_terminal,
+        ])
+        .execute(repository.pool())
+        .await
+        .expect("batch test rows should be removed");
+    sqlx::query("DELETE FROM usage_counter_deltas WHERE request_id = $1")
+        .bind(request_missing)
+        .execute(repository.pool())
+        .await
+        .expect("batch first-byte provider delta should be removed");
 }
 
 #[tokio::test]
@@ -1781,6 +2950,22 @@ fn dashboard_covering_index_keeps_canonical_billing_reads_heap_light() {
 }
 
 #[test]
+fn stale_pending_cleanup_index_matches_the_batch_filter_and_order() {
+    let migration =
+        include_str!("../../migrations/20260720000000_add_usage_stale_pending_cleanup_index.sql");
+    assert!(migration.starts_with("-- no-transaction"));
+    assert!(migration.contains("CREATE INDEX CONCURRENTLY IF NOT EXISTS"));
+    assert!(migration.contains("idx_usage_stale_pending_created_request"));
+    assert!(migration.contains("ON public.usage USING btree (created_at, request_id)"));
+
+    let active_predicate = "status IN ('pending', 'streaming')";
+    assert!(migration.contains(active_predicate));
+    assert!(SELECT_STALE_PENDING_USAGE_BATCH_SQL.contains(active_predicate));
+    assert!(SELECT_STALE_PENDING_USAGE_BATCH_SQL
+        .contains("ORDER BY usage.created_at ASC, usage.request_id ASC"));
+}
+
+#[test]
 fn dashboard_combined_summary_scans_each_raw_window_once() {
     let source = include_str!("mod.rs");
     let combined = source
@@ -2340,6 +3525,307 @@ fn usage_sql_does_not_allow_streaming_to_regress_back_to_pending() {
     assert!(super::UPSERT_SQL.contains(
         "WHEN \"usage\".status = 'streaming' AND EXCLUDED.status = 'pending' THEN \"usage\".status"
     ));
+}
+
+#[test]
+fn first_byte_upsert_sql_is_single_row_guarded_and_preserves_existing_metadata() {
+    let sql = super::UPSERT_FIRST_BYTE_SQL;
+    assert_eq!(sql.matches("INSERT INTO").count(), 1);
+    assert!(!sql.contains("usage_http_audits"));
+    assert!(!sql.contains("usage_routing_snapshots"));
+    assert!(!sql.contains("usage_settlement_snapshots"));
+    assert!(!sql.contains("usage_counter_deltas"));
+    assert!(sql.contains("'streaming'"));
+    assert!(sql.contains("'pending'"));
+    assert!(sql.contains("WHERE \"usage\".billing_status = 'pending'"));
+    assert!(sql.contains("\"usage\".status IN ('pending', 'streaming')"));
+    assert!(sql.contains("\"usage\".finalized_at IS NULL"));
+    assert!(sql.contains("$22::json->>'upstream_is_stream'"));
+    assert!(sql.contains("\"usage\".upstream_is_stream"));
+
+    let update_clause = sql
+        .split_once("DO UPDATE SET")
+        .map(|(_, update)| update)
+        .expect("first-byte SQL should have an update clause");
+    assert!(update_clause.contains(
+        "request_metadata = COALESCE(\"usage\".request_metadata, EXCLUDED.request_metadata)"
+    ));
+    assert!(update_clause.contains(
+        "WHEN \"usage\".first_byte_time_ms IS NOT NULL AND \"usage\".first_byte_time_ms <> 0"
+    ));
+    assert!(sql.contains("RETURNING\n  request_id,\n  provider_api_key_id"));
+}
+
+#[test]
+fn first_byte_batch_partition_preserves_duplicate_input_order_and_fields() {
+    let mut first_a = first_byte_usage_record(
+        "req-first-byte-partition-a",
+        "provider-first-byte-partition",
+        100,
+        Some(json!({"sequence": "a-first"})),
+    );
+    first_a.first_byte_time_ms = Some(30);
+    first_a.response_time_ms = Some(31);
+
+    let mut unique = first_byte_usage_record(
+        "req-first-byte-partition-unique",
+        "provider-first-byte-partition",
+        101,
+        Some(json!({"sequence": "unique"})),
+    );
+    unique.first_byte_time_ms = Some(40);
+    unique.response_time_ms = Some(41);
+
+    let mut replay_a = first_a.clone();
+    replay_a.first_byte_time_ms = Some(7);
+    replay_a.response_time_ms = Some(99);
+    replay_a.request_metadata = Some(json!({"sequence": "a-replay"}));
+
+    let mut first_c = first_byte_usage_record(
+        "req-first-byte-partition-c",
+        "provider-first-byte-partition",
+        102,
+        Some(json!({"sequence": "c-first"})),
+    );
+    first_c.first_byte_time_ms = Some(50);
+    first_c.response_time_ms = Some(51);
+    let mut replay_c = first_c.clone();
+    replay_c.first_byte_time_ms = Some(5);
+    replay_c.response_time_ms = Some(52);
+    replay_c.request_metadata = Some(json!({"sequence": "c-replay"}));
+
+    let (batch, fallback) =
+        super::partition_first_byte_usages(vec![first_a, unique, replay_a, first_c, replay_c])
+            .expect("valid first-byte rows should partition");
+
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0].usage.request_id, "req-first-byte-partition-unique");
+    assert_eq!(batch[0].first_byte_time_ms, Some(40));
+    assert_eq!(batch[0].response_time_ms, Some(41));
+    let duplicate_fields = fallback
+        .iter()
+        .map(|(sequence, usage)| {
+            (
+                *sequence,
+                usage.request_id.as_str(),
+                usage.first_byte_time_ms,
+                usage.response_time_ms,
+                usage.request_metadata.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        duplicate_fields,
+        vec![
+            (
+                0,
+                "req-first-byte-partition-a",
+                Some(30),
+                Some(31),
+                Some(json!({"sequence": "a-first"})),
+            ),
+            (
+                2,
+                "req-first-byte-partition-a",
+                Some(7),
+                Some(99),
+                Some(json!({"sequence": "a-replay"})),
+            ),
+            (
+                3,
+                "req-first-byte-partition-c",
+                Some(50),
+                Some(51),
+                Some(json!({"sequence": "c-first"})),
+            ),
+            (
+                4,
+                "req-first-byte-partition-c",
+                Some(5),
+                Some(52),
+                Some(json!({"sequence": "c-replay"})),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn first_byte_provider_counter_transitions_cover_key_changes_and_same_key_noops() {
+    let usage = |request_id: &str, key_id: Option<&str>, created_at_unix_secs: u64| {
+        super::InsertedPendingUsage {
+            request_id: request_id.to_string(),
+            provider_api_key_id: key_id.map(ToOwned::to_owned),
+            created_at_unix_secs,
+        }
+    };
+
+    let missing_after = usage("req-missing", Some("key-new"), 10);
+    let missing = super::first_byte_provider_contribution_transitions(None, &missing_after);
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].key_id, "key-new");
+    assert_eq!(missing[0].delta.request_count, 1);
+    assert_eq!(missing[0].delta.candidate_last_used_at_unix_secs, Some(10));
+    assert_eq!(missing[0].delta.usage_created_at_unix_secs, Some(10));
+
+    let no_key_before = usage("req-no-key", None, 11);
+    let no_key_after = usage("req-no-key", Some("key-added"), 11);
+    let no_key =
+        super::first_byte_provider_contribution_transitions(Some(&no_key_before), &no_key_after);
+    assert_eq!(no_key.len(), 1);
+    assert_eq!(no_key[0].key_id, "key-added");
+    assert_eq!(no_key[0].delta.request_count, 1);
+
+    let changed_before = usage("req-changed", Some("key-a"), 12);
+    let changed_after = usage("req-changed", Some("key-b"), 12);
+    let changed =
+        super::first_byte_provider_contribution_transitions(Some(&changed_before), &changed_after);
+    assert_eq!(changed.len(), 2);
+    assert_eq!(changed[0].key_id, "key-a");
+    assert_eq!(changed[0].delta.request_count, -1);
+    assert_eq!(changed[0].delta.removed_last_used_at_unix_secs, Some(12));
+    assert_eq!(changed[1].key_id, "key-b");
+    assert_eq!(changed[1].delta.request_count, 1);
+    assert_eq!(changed[1].delta.candidate_last_used_at_unix_secs, Some(12));
+
+    let same_before = usage("req-same", Some("key-same"), 13);
+    let same_after = usage("req-same", Some("key-same"), 13);
+    assert!(
+        super::first_byte_provider_contribution_transitions(Some(&same_before), &same_after,)
+            .is_empty()
+    );
+
+    let newer_after = usage("req-same", Some("key-same"), 14);
+    let newer =
+        super::first_byte_provider_contribution_transitions(Some(&same_before), &newer_after);
+    assert_eq!(newer.len(), 1);
+    assert_eq!(newer[0].key_id, "key-same");
+    assert_eq!(newer[0].delta.request_count, 0);
+    assert_eq!(newer[0].delta.candidate_last_used_at_unix_secs, Some(14));
+}
+
+#[test]
+fn first_byte_provider_counter_batch_prepares_all_columns_before_query_building() {
+    let input = super::UsageCounterDeltaInsert {
+        request_id: "  req-counter-prepared  ",
+        kind: "provider_api_key",
+        target_id: "  key-counter-prepared  ",
+        request_count_delta: 1,
+        total_requests_delta: 2,
+        success_count_delta: 3,
+        error_count_delta: 4,
+        dns_failures_delta: 5,
+        stream_errors_delta: 6,
+        total_tokens_delta: 7,
+        total_cost_usd_delta: f64::NAN,
+        total_response_time_ms_delta: 8,
+        last_used_at_unix_secs: Some(9),
+        last_used_ip: Some("  127.0.0.1  "),
+        candidate_last_used_at_unix_secs: Some(10),
+        removed_last_used_at_unix_secs: Some(11),
+        usage_created_at_unix_secs: Some(12),
+    };
+    let prepared = super::prepare_usage_counter_delta_insert(input)
+        .expect("counter row should prepare")
+        .expect("non-empty counter row should remain");
+
+    assert!(!prepared.id.is_empty());
+    assert_eq!(prepared.request_id, "req-counter-prepared");
+    assert_eq!(prepared.kind, "provider_api_key");
+    assert_eq!(prepared.target_id, "key-counter-prepared");
+    assert_eq!(prepared.request_count_delta, 1);
+    assert_eq!(prepared.total_requests_delta, 2);
+    assert_eq!(prepared.success_count_delta, 3);
+    assert_eq!(prepared.error_count_delta, 4);
+    assert_eq!(prepared.dns_failures_delta, 5);
+    assert_eq!(prepared.stream_errors_delta, 6);
+    assert_eq!(prepared.total_tokens_delta, 7);
+    assert_eq!(prepared.total_cost_usd_delta, 0.0);
+    assert_eq!(prepared.total_response_time_ms_delta, 8);
+    assert_eq!(prepared.last_used_at_unix_secs, Some(9));
+    assert_eq!(prepared.last_used_ip.as_deref(), Some("127.0.0.1"));
+    assert_eq!(prepared.candidate_last_used_at_unix_secs, Some(10));
+    assert_eq!(prepared.removed_last_used_at_unix_secs, Some(11));
+    assert_eq!(prepared.usage_created_at_unix_secs, Some(12));
+    const { assert!(super::USAGE_COUNTER_DELTA_INSERT_BATCH_SIZE >= 1_024) };
+    assert!(
+        super::USAGE_COUNTER_DELTA_INSERT_BATCH_SIZE
+            * super::USAGE_COUNTER_DELTA_INSERT_BINDS_PER_ROW
+            <= u16::MAX as usize
+    );
+    assert!(
+        (super::USAGE_COUNTER_DELTA_INSERT_BATCH_SIZE + 1)
+            * super::USAGE_COUNTER_DELTA_INSERT_BINDS_PER_ROW
+            > u16::MAX as usize
+    );
+
+    let out_of_range = super::UsageCounterDeltaInsert {
+        request_id: "req-counter-out-of-range",
+        kind: "provider_api_key",
+        target_id: "key-counter-out-of-range",
+        request_count_delta: 0,
+        total_requests_delta: 0,
+        success_count_delta: 0,
+        error_count_delta: 0,
+        dns_failures_delta: 0,
+        stream_errors_delta: 0,
+        total_tokens_delta: 0,
+        total_cost_usd_delta: 0.0,
+        total_response_time_ms_delta: 0,
+        last_used_at_unix_secs: None,
+        last_used_ip: None,
+        candidate_last_used_at_unix_secs: Some(u64::MAX),
+        removed_last_used_at_unix_secs: None,
+        usage_created_at_unix_secs: None,
+    };
+    assert!(super::prepare_usage_counter_delta_insert(out_of_range).is_err());
+}
+
+#[test]
+fn first_byte_contribution_read_uses_a_fresh_statement_after_canonical_locks() {
+    assert!(super::LOCK_USAGE_REQUEST_IDS_SQL.contains("pg_advisory_xact_lock"));
+    assert!(super::FIND_USAGE_PROVIDER_CONTRIBUTIONS_SQL.contains("FROM \"usage\" AS u"));
+    assert!(!super::FIND_USAGE_PROVIDER_CONTRIBUTIONS_SQL.contains("pg_advisory_xact_lock"));
+    assert!(!super::FIND_USAGE_PROVIDER_CONTRIBUTIONS_SQL.contains("MATERIALIZED"));
+
+    let source = include_str!("mod.rs");
+    let implementation = source
+        .split("async fn lock_and_find_usage_provider_contributions_in_tx")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn pending_provider_api_key_contribution")
+                .next()
+        })
+        .expect("lock-and-find implementation should be present");
+    let lock_position = implementation
+        .find("lock_usage_request_ids_in_tx(tx, request_ids).await?")
+        .expect("canonical lock statement should run first");
+    let read_position = implementation
+        .find("sqlx::query(FIND_USAGE_PROVIDER_CONTRIBUTIONS_SQL)")
+        .expect("provider contributions should be read in a later statement");
+    assert!(lock_position < read_position);
+}
+
+#[test]
+fn first_byte_batch_writes_provider_counter_transitions_in_bulk() {
+    let source = include_str!("mod.rs");
+    let implementation = source
+        .split("pub async fn upsert_first_byte_many")
+        .nth(1)
+        .and_then(|tail| tail.split("async fn execute_first_byte_batch").next())
+        .expect("first-byte batch implementation should be present");
+    assert!(implementation.contains("prepare_first_byte_provider_contribution_transitions"));
+    assert!(implementation.contains("insert_usage_counter_deltas_batch_in_tx"));
+    assert!(!implementation.contains("enqueue_first_byte_provider_contribution_transition_in_tx"));
+    const { assert!(super::USAGE_COUNTER_DELTA_INSERT_BATCH_SIZE > 512 * 2) };
+}
+
+#[test]
+fn usage_batch_advisory_locks_share_the_canonical_key_and_stable_order() {
+    assert!(super::LOCK_USAGE_REQUEST_ID_SQL.contains("hashtext($1)::BIGINT"));
+    assert!(super::LOCK_USAGE_REQUEST_IDS_SQL
+        .contains("SELECT DISTINCT hashtext(request_id)::BIGINT AS lock_id"));
+    assert!(super::LOCK_USAGE_REQUEST_IDS_SQL.contains("UNNEST($1::TEXT[])"));
+    assert!(super::LOCK_USAGE_REQUEST_IDS_SQL.contains("ORDER BY lock_id"));
 }
 
 #[test]

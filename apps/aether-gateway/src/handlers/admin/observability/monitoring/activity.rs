@@ -191,8 +191,7 @@ pub(super) async fn build_admin_monitoring_system_status_response(
     .unwrap_or(usize::MAX);
     let tunnel = state.tunnel.stats();
     let usage_counter_snapshot = state
-        .data
-        .read_usage_counter_health()
+        .read_cached_usage_counter_health()
         .await
         .map_err(|err| GatewayError::Internal(err.to_string()))?;
     let usage_counter =

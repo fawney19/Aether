@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use sqlx::{
@@ -7,9 +9,11 @@ use sqlx::{
 };
 
 use aether_data_contracts::repository::provider_catalog::{
-    ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery, ProviderCatalogReadRepository,
-    ProviderCatalogUpstreamMetadataNamespaceUpdate, ProviderCatalogWriteRepository,
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    ProviderCatalogKeyAdaptiveStateUpdate, ProviderCatalogKeyHealthStateUpdate,
+    ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
+    ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
+    ProviderCatalogReadRepository, ProviderCatalogUpstreamMetadataNamespaceUpdate,
+    ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
     StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
     StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
@@ -343,8 +347,6 @@ UPDATE provider_api_keys
 SET
   provider_id = $2,
   api_formats = $3,
-  auth_type_by_format = $40,
-  allow_auth_channel_mismatch_formats = $41,
   auth_type = $4,
   api_key = $5,
   auth_config = $6,
@@ -355,53 +357,54 @@ SET
   global_priority_by_format = $11,
   rpm_limit = $12,
   concurrent_limit = $13,
-  learned_rpm_limit = $14,
-  allowed_models = $15,
-  capabilities = $16,
-  cache_ttl_minutes = $17,
-  max_probe_interval_minutes = $18,
-  auto_fetch_models = $19,
-  locked_models = $20,
-  model_include_patterns = $21,
-  model_exclude_patterns = $22,
-  proxy = $23,
-  fingerprint = $24,
-  upstream_metadata = $25,
+  allowed_models = $14,
+  capabilities = $15,
+  cache_ttl_minutes = $16,
+  max_probe_interval_minutes = $17,
+  auto_fetch_models = $18,
+  locked_models = $19,
+  model_include_patterns = $20,
+  model_exclude_patterns = $21,
+  proxy = $22,
+  fingerprint = $23,
   expires_at = CASE
-    WHEN $39::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($39::double precision)
+    WHEN $24::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($24::double precision)
   END,
-  oauth_invalid_at = CASE
-    WHEN $26::double precision IS NULL THEN NULL
+  is_active = $25,
+  updated_at = CASE
+    WHEN $26::double precision IS NULL THEN NOW()
     ELSE TO_TIMESTAMP($26::double precision)
   END,
-  oauth_invalid_reason = $27,
-  status_snapshot = $28,
-  concurrent_429_count = COALESCE($29, 0),
-  rpm_429_count = COALESCE($30, 0),
-  last_429_at = CASE
-    WHEN $31::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($31::double precision)
-  END,
-  last_429_type = $32,
-  adjustment_history = $33,
-  utilization_samples = $34,
-  last_probe_increase_at = CASE
-    WHEN $35::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($35::double precision)
-  END,
-  last_rpm_peak = $36,
-  is_active = $37,
-  updated_at = CASE
-    WHEN $38::double precision IS NULL THEN NOW()
-    ELSE TO_TIMESTAMP($38::double precision)
-  END,
-  last_models_fetch_at = CASE
-    WHEN $42::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($42::double precision)
-  END,
-  last_models_fetch_error = $43
+  auth_type_by_format = $27,
+  allow_auth_channel_mismatch_formats = $28
 WHERE id = $1
+"#;
+
+const KEY_RUNTIME_HEALTH_CAS_SQL: &str = r#"
+UPDATE provider_api_keys
+SET
+  health_by_format = $2,
+  circuit_breaker_by_format = $3,
+  updated_at = NOW()
+WHERE id = $1
+  AND health_by_format::jsonb IS NOT DISTINCT FROM $4::jsonb
+  AND circuit_breaker_by_format::jsonb IS NOT DISTINCT FROM $5::jsonb
+"#;
+
+const KEY_RUNTIME_METADATA_CAS_SQL: &str = r#"
+UPDATE provider_api_keys
+SET
+  upstream_metadata = COALESCE(upstream_metadata, '{}'::jsonb)
+    || jsonb_build_object($2, $3::jsonb),
+  status_snapshot = (COALESCE(status_snapshot::jsonb, '{}'::jsonb) || $4::jsonb)::json,
+  updated_at = CASE
+    WHEN $5::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($5::double precision)
+  END
+WHERE id = $1
+  AND (COALESCE(upstream_metadata, '{}'::jsonb) -> $2)
+      IS NOT DISTINCT FROM $6::jsonb
 "#;
 
 fn validate_key_for_update(key: &StoredProviderCatalogKey) -> Result<(), DataLayerError> {
@@ -413,6 +416,51 @@ fn validate_key_for_update(key: &StoredProviderCatalogKey) -> Result<(), DataLay
     if key.provider_id.trim().is_empty() {
         return Err(DataLayerError::InvalidInput(
             "provider catalog key.provider_id is empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn adaptive_status_snapshot_patch(
+    patch: &serde_json::Value,
+) -> Result<serde_json::Value, DataLayerError> {
+    const OWNED_FIELDS: [&str; 6] = [
+        "observation_count",
+        "header_observation_count",
+        "latest_upstream_limit",
+        "learning_confidence",
+        "enforcement_active",
+        "known_boundary",
+    ];
+    let object = patch.as_object().ok_or_else(|| {
+        DataLayerError::InvalidInput(
+            "provider catalog adaptive status snapshot patch must be an object".to_string(),
+        )
+    })?;
+    Ok(serde_json::Value::Object(
+        OWNED_FIELDS
+            .into_iter()
+            .filter_map(|field| {
+                object
+                    .get(field)
+                    .cloned()
+                    .map(|value| (field.to_string(), value))
+            })
+            .collect(),
+    ))
+}
+
+fn validate_runtime_metadata_update(
+    update: &ProviderCatalogKeyRuntimeMetadataUpdate,
+) -> Result<(), DataLayerError> {
+    if update.key_id.trim().is_empty() || update.namespace.trim().is_empty() {
+        return Err(DataLayerError::InvalidInput(
+            "provider catalog key_id and runtime metadata namespace are required".to_string(),
+        ));
+    }
+    if !update.status_snapshot_patch.is_object() {
+        return Err(DataLayerError::InvalidInput(
+            "provider catalog runtime status snapshot patch must be an object".to_string(),
         ));
     }
     Ok(())
@@ -433,7 +481,6 @@ fn key_update_query(key: &StoredProviderCatalogKey) -> Query<'_, Postgres, PgArg
         .bind(&key.global_priority_by_format)
         .bind(key.rpm_limit.map(|value| value as i32))
         .bind(key.concurrent_limit)
-        .bind(key.learned_rpm_limit.map(|value| value as i32))
         .bind(&key.allowed_models)
         .bind(&key.capabilities)
         .bind(key.cache_ttl_minutes)
@@ -444,28 +491,11 @@ fn key_update_query(key: &StoredProviderCatalogKey) -> Query<'_, Postgres, PgArg
         .bind(&key.model_exclude_patterns)
         .bind(&key.proxy)
         .bind(&key.fingerprint)
-        .bind(&key.upstream_metadata)
-        .bind(key.oauth_invalid_at_unix_secs.map(|value| value as f64))
-        .bind(&key.oauth_invalid_reason)
-        .bind(&key.status_snapshot)
-        .bind(key.concurrent_429_count.map(|value| value as i32))
-        .bind(key.rpm_429_count.map(|value| value as i32))
-        .bind(key.last_429_at_unix_secs.map(|value| value as f64))
-        .bind(&key.last_429_type)
-        .bind(&key.adjustment_history)
-        .bind(&key.utilization_samples)
-        .bind(
-            key.last_probe_increase_at_unix_secs
-                .map(|value| value as f64),
-        )
-        .bind(key.last_rpm_peak.map(|value| value as i32))
+        .bind(key.expires_at_unix_secs.map(|value| value as f64))
         .bind(key.is_active)
         .bind(key.updated_at_unix_secs.map(|value| value as f64))
-        .bind(key.expires_at_unix_secs.map(|value| value as f64))
         .bind(&key.auth_type_by_format)
         .bind(&key.allow_auth_channel_mismatch_formats)
-        .bind(key.last_models_fetch_at_unix_secs.map(|value| value as f64))
-        .bind(&key.last_models_fetch_error)
 }
 
 #[derive(Debug, Clone)]
@@ -792,8 +822,6 @@ SET
     WHEN $4::double precision IS NULL THEN NULL
     ELSE TO_TIMESTAMP($4::double precision)
   END,
-  oauth_invalid_at = NULL,
-  oauth_invalid_reason = NULL,
   updated_at = NOW()
 WHERE id = $1
 "#,
@@ -807,6 +835,48 @@ WHERE id = $1
         .map_postgres_err()?
         .rows_affected();
 
+        Ok(rows_affected > 0)
+    }
+
+    pub async fn update_key_oauth_runtime_state(
+        &self,
+        key_id: &str,
+        oauth_invalid_at_unix_secs: Option<u64>,
+        oauth_invalid_reason: Option<&str>,
+        encrypted_auth_config_update: Option<&str>,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<bool, DataLayerError> {
+        if key_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog key_id is empty".to_string(),
+            ));
+        }
+        let rows_affected = sqlx::query(
+            r#"
+UPDATE provider_api_keys
+SET
+  oauth_invalid_at = CASE
+    WHEN $2::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($2::double precision)
+  END,
+  oauth_invalid_reason = $3,
+  auth_config = COALESCE($4, auth_config),
+  updated_at = CASE
+    WHEN $5::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($5::double precision)
+  END
+WHERE id = $1
+"#,
+        )
+        .bind(key_id)
+        .bind(oauth_invalid_at_unix_secs.map(|value| value as f64))
+        .bind(oauth_invalid_reason)
+        .bind(encrypted_auth_config_update)
+        .bind(updated_at_unix_secs.map(|value| value as f64))
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?
+        .rows_affected();
         Ok(rows_affected > 0)
     }
 
@@ -1838,7 +1908,23 @@ WHERE id = $1
             }
         }
         transaction.commit().await.map_postgres_err()?;
-        Ok(keys.to_vec())
+        let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
+        let mut reloaded = self
+            .list_keys_by_ids(&key_ids)
+            .await?
+            .into_iter()
+            .map(|key| (key.id.clone(), key))
+            .collect::<BTreeMap<_, _>>();
+        keys.iter()
+            .map(|key| {
+                reloaded.remove(&key.id).ok_or_else(|| {
+                    DataLayerError::UnexpectedValue(format!(
+                        "updated provider catalog key {} could not be reloaded",
+                        key.id
+                    ))
+                })
+            })
+            .collect()
     }
 
     pub async fn delete_key(&self, key_id: &str) -> Result<bool, DataLayerError> {
@@ -2072,6 +2158,188 @@ WHERE id = $1
         .map_postgres_err()?
         .rows_affected();
 
+        Ok(rows_affected > 0)
+    }
+
+    pub async fn reset_key_error_count(&self, key_id: &str) -> Result<bool, DataLayerError> {
+        if key_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog key_id is empty".to_string(),
+            ));
+        }
+
+        let rows_affected = sqlx::query(
+            r#"
+UPDATE provider_api_keys
+SET error_count = 0, updated_at = NOW()
+WHERE id = $1
+"#,
+        )
+        .bind(key_id)
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?
+        .rows_affected();
+
+        Ok(rows_affected > 0)
+    }
+
+    pub async fn compare_and_update_key_adaptive_state(
+        &self,
+        update: &ProviderCatalogKeyAdaptiveStateUpdate,
+    ) -> Result<bool, DataLayerError> {
+        if update.key_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog key_id is empty".to_string(),
+            ));
+        }
+        let status_snapshot_patch = adaptive_status_snapshot_patch(&update.status_snapshot_patch)?;
+        let expected = update.expected.canonicalized();
+        let next = update.next.canonicalized();
+        let rows_affected = sqlx::query(
+            r#"
+UPDATE provider_api_keys
+SET
+  learned_rpm_limit = $2,
+  rpm_429_count = $3,
+  last_429_at = CASE
+    WHEN $4::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($4::double precision)
+  END,
+  last_429_type = $5,
+  adjustment_history = $6,
+  utilization_samples = $7,
+  last_probe_increase_at = CASE
+    WHEN $8::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($8::double precision)
+  END,
+  last_rpm_peak = $9,
+  concurrent_429_count = $10,
+  status_snapshot = (COALESCE(status_snapshot::jsonb, '{}'::jsonb) || $11::jsonb)::json,
+  updated_at = CASE
+    WHEN $12::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($12::double precision)
+  END
+WHERE id = $1
+  AND learned_rpm_limit IS NOT DISTINCT FROM $13
+  AND rpm_429_count IS NOT DISTINCT FROM $14
+  AND CAST(EXTRACT(EPOCH FROM last_429_at) AS BIGINT) IS NOT DISTINCT FROM $15
+  AND last_429_type IS NOT DISTINCT FROM $16
+  AND adjustment_history::jsonb IS NOT DISTINCT FROM $17::jsonb
+  AND utilization_samples::jsonb IS NOT DISTINCT FROM $18::jsonb
+  AND CAST(EXTRACT(EPOCH FROM last_probe_increase_at) AS BIGINT) IS NOT DISTINCT FROM $19
+  AND last_rpm_peak IS NOT DISTINCT FROM $20
+  AND concurrent_429_count IS NOT DISTINCT FROM $21
+"#,
+        )
+        .bind(&update.key_id)
+        .bind(next.learned_rpm_limit.map(|value| value as i32))
+        .bind(next.rpm_429_count.map(|value| value as i32))
+        .bind(next.last_429_at_unix_secs.map(|value| value as f64))
+        .bind(&next.last_429_type)
+        .bind(&next.adjustment_history)
+        .bind(&next.utilization_samples)
+        .bind(
+            next.last_probe_increase_at_unix_secs
+                .map(|value| value as f64),
+        )
+        .bind(next.last_rpm_peak.map(|value| value as i32))
+        .bind(next.concurrent_429_count.map(|value| value as i32))
+        .bind(&status_snapshot_patch)
+        .bind(update.updated_at_unix_secs.map(|value| value as f64))
+        .bind(expected.learned_rpm_limit.map(|value| value as i32))
+        .bind(expected.rpm_429_count.map(|value| value as i32))
+        .bind(
+            expected
+                .last_429_at_unix_secs
+                .and_then(|value| i64::try_from(value).ok()),
+        )
+        .bind(&expected.last_429_type)
+        .bind(&expected.adjustment_history)
+        .bind(&expected.utilization_samples)
+        .bind(
+            expected
+                .last_probe_increase_at_unix_secs
+                .and_then(|value| i64::try_from(value).ok()),
+        )
+        .bind(expected.last_rpm_peak.map(|value| value as i32))
+        .bind(expected.concurrent_429_count.map(|value| value as i32))
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?
+        .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
+    pub async fn update_key_runtime_metadata(
+        &self,
+        update: &ProviderCatalogKeyRuntimeMetadataUpdate,
+    ) -> Result<bool, DataLayerError> {
+        validate_runtime_metadata_update(update)?;
+        let rows_affected = sqlx::query(KEY_RUNTIME_METADATA_CAS_SQL)
+            .bind(&update.key_id)
+            .bind(&update.namespace)
+            .bind(&update.upstream_metadata_value)
+            .bind(&update.status_snapshot_patch)
+            .bind(update.updated_at_unix_secs.map(|value| value as f64))
+            .bind(update.expected_upstream_metadata_value.as_ref())
+            .execute(&self.pool)
+            .await
+            .map_postgres_err()?
+            .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
+    pub async fn update_key_status_snapshot(
+        &self,
+        update: &ProviderCatalogKeyStatusSnapshotUpdate,
+    ) -> Result<bool, DataLayerError> {
+        if update.key_id.trim().is_empty() || !update.status_snapshot_patch.is_object() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog key_id and object status snapshot patch are required".to_string(),
+            ));
+        }
+        let rows_affected = sqlx::query(
+            r#"
+UPDATE provider_api_keys
+SET
+  status_snapshot = (COALESCE(status_snapshot::jsonb, '{}'::jsonb) || $2::jsonb)::json,
+  updated_at = CASE
+    WHEN $3::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($3::double precision)
+  END
+WHERE id = $1
+"#,
+        )
+        .bind(&update.key_id)
+        .bind(&update.status_snapshot_patch)
+        .bind(update.updated_at_unix_secs.map(|value| value as f64))
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?
+        .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
+    pub async fn compare_and_update_key_health_state(
+        &self,
+        update: &ProviderCatalogKeyHealthStateUpdate,
+    ) -> Result<bool, DataLayerError> {
+        if update.key_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog key_id is empty".to_string(),
+            ));
+        }
+        let rows_affected = sqlx::query(KEY_RUNTIME_HEALTH_CAS_SQL)
+            .bind(&update.key_id)
+            .bind(&update.health_by_format)
+            .bind(&update.circuit_breaker_by_format)
+            .bind(&update.expected_health_by_format)
+            .bind(&update.expected_circuit_breaker_by_format)
+            .execute(&self.pool)
+            .await
+            .map_postgres_err()?
+            .rows_affected();
         Ok(rows_affected > 0)
     }
 }
@@ -2316,6 +2584,25 @@ impl ProviderCatalogWriteRepository for SqlxProviderCatalogReadRepository {
         .await
     }
 
+    async fn update_key_oauth_runtime_state(
+        &self,
+        key_id: &str,
+        oauth_invalid_at_unix_secs: Option<u64>,
+        oauth_invalid_reason: Option<&str>,
+        encrypted_auth_config_update: Option<&str>,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<bool, DataLayerError> {
+        Self::update_key_oauth_runtime_state(
+            self,
+            key_id,
+            oauth_invalid_at_unix_secs,
+            oauth_invalid_reason,
+            encrypted_auth_config_update,
+            updated_at_unix_secs,
+        )
+        .await
+    }
+
     async fn update_key_health_state(
         &self,
         key_id: &str,
@@ -2331,6 +2618,38 @@ impl ProviderCatalogWriteRepository for SqlxProviderCatalogReadRepository {
             circuit_breaker_by_format,
         )
         .await
+    }
+
+    async fn reset_key_error_count(&self, key_id: &str) -> Result<bool, DataLayerError> {
+        Self::reset_key_error_count(self, key_id).await
+    }
+
+    async fn compare_and_update_key_adaptive_state(
+        &self,
+        update: &ProviderCatalogKeyAdaptiveStateUpdate,
+    ) -> Result<bool, DataLayerError> {
+        Self::compare_and_update_key_adaptive_state(self, update).await
+    }
+
+    async fn update_key_runtime_metadata(
+        &self,
+        update: &ProviderCatalogKeyRuntimeMetadataUpdate,
+    ) -> Result<bool, DataLayerError> {
+        Self::update_key_runtime_metadata(self, update).await
+    }
+
+    async fn update_key_status_snapshot(
+        &self,
+        update: &ProviderCatalogKeyStatusSnapshotUpdate,
+    ) -> Result<bool, DataLayerError> {
+        Self::update_key_status_snapshot(self, update).await
+    }
+
+    async fn compare_and_update_key_health_state(
+        &self,
+        update: &ProviderCatalogKeyHealthStateUpdate,
+    ) -> Result<bool, DataLayerError> {
+        Self::compare_and_update_key_health_state(self, update).await
     }
 }
 
@@ -2883,5 +3202,51 @@ mod tests {
         assert!(source.contains(
             "  CASE\n    WHEN $52::double precision IS NULL THEN NOW()\n    ELSE TO_TIMESTAMP($52::double precision)\n  END,\n  $53"
         ));
+    }
+
+    #[test]
+    fn runtime_health_cas_never_updates_admin_activation() {
+        let sql = super::KEY_RUNTIME_HEALTH_CAS_SQL.to_ascii_lowercase();
+        assert!(sql.contains("health_by_format = $2"));
+        assert!(sql.contains("circuit_breaker_by_format = $3"));
+        assert!(sql.contains("health_by_format::jsonb is not distinct from $4::jsonb"));
+        assert!(!sql.contains("is_active"));
+    }
+
+    #[test]
+    fn runtime_metadata_cas_compares_only_the_requested_namespace() {
+        let sql = super::KEY_RUNTIME_METADATA_CAS_SQL.to_ascii_lowercase();
+        assert!(sql.contains("upstream_metadata, '{}'::jsonb) -> $2"));
+        assert!(sql.contains("is not distinct from $6::jsonb"));
+        assert!(sql.contains("status_snapshot::jsonb"));
+        assert!(!sql.contains("is_active"));
+    }
+
+    #[test]
+    fn ordinary_key_update_does_not_own_runtime_observation_fields() {
+        let sql = super::KEY_UPDATE_SQL.to_ascii_lowercase();
+        for runtime_assignment in [
+            "learned_rpm_limit =",
+            "rpm_429_count =",
+            "last_429_at =",
+            "last_429_type =",
+            "adjustment_history =",
+            "utilization_samples =",
+            "last_probe_increase_at =",
+            "last_rpm_peak =",
+            "upstream_metadata =",
+            "oauth_invalid_at =",
+            "oauth_invalid_reason =",
+            "status_snapshot =",
+            "health_by_format =",
+            "circuit_breaker_by_format =",
+        ] {
+            assert!(
+                !sql.contains(runtime_assignment),
+                "ordinary key update unexpectedly owns {runtime_assignment}"
+            );
+        }
+        assert!(sql.contains("is_active = $25"));
+        assert!(sql.contains("rpm_limit = $12"));
     }
 }

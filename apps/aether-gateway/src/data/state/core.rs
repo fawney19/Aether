@@ -3,76 +3,248 @@ use aether_data_contracts::repository::candidate_selection::MinimalCandidateSele
 use aether_data_contracts::repository::candidates::RequestCandidateReadRepository;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
 use aether_runtime_state::RuntimeQueueStore;
-use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::Notify;
+use std::time::Duration;
 
-use super::{GatewayDataConfig, GatewayDataState, StoredSystemConfigEntry};
+use super::{
+    GatewayDataConfig, GatewayDataState, StoredSystemConfigEntry, SystemConfigValueCacheState,
+    SystemConfigValueInflightCompletion, SystemConfigValueInflightState,
+};
 
 const SYSTEM_CONFIG_VALUE_CACHE_TTL: Duration = Duration::from_secs(30);
-
-fn system_config_value_load_state() -> &'static SystemConfigValueLoadState {
-    static STATE: std::sync::OnceLock<SystemConfigValueLoadState> = std::sync::OnceLock::new();
-    STATE.get_or_init(SystemConfigValueLoadState::default)
-}
-
-#[derive(Debug, Default)]
-struct SystemConfigValueLoadState {
-    inflight: std::sync::Mutex<HashSet<String>>,
-    notify: Notify,
-}
+const SYSTEM_CONFIG_VALUE_CACHE_MAX_ENTRIES: usize = 512;
+const SYSTEM_CONFIG_VALUE_CACHE_MAX_INFLIGHT: usize = 512;
 
 enum SystemConfigValueLoadRegistration<'a> {
     Leader(SystemConfigValueLoadGuard<'a>),
-    Follower,
-    Bypass,
+    Follower(Arc<SystemConfigValueInflightState>),
+    Saturated,
 }
 
 struct SystemConfigValueLoadGuard<'a> {
-    state: &'a SystemConfigValueLoadState,
+    cache: &'a SystemConfigValueCacheState,
     key: Option<String>,
+    state: Arc<SystemConfigValueInflightState>,
+    admission: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl SystemConfigValueInflightState {
+    async fn wait(&self) -> SystemConfigValueInflightCompletion {
+        loop {
+            if let Some(completion) = self.completion.get() {
+                return completion.clone();
+            }
+
+            let mut notified = Box::pin(self.notify.notified());
+            notified.as_mut().enable();
+            if let Some(completion) = self.completion.get() {
+                return completion.clone();
+            }
+            notified.await;
+        }
+    }
+}
+
+impl SystemConfigValueCacheState {
+    fn get(&self, key: &str) -> Option<Option<serde_json::Value>> {
+        self.entries.get_fresh(key, SYSTEM_CONFIG_VALUE_CACHE_TTL)
+    }
+
+    fn register(&self, key: &str) -> SystemConfigValueLoadRegistration<'_> {
+        {
+            let inflight = self
+                .inflight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(state) = inflight.get(key) {
+                return SystemConfigValueLoadRegistration::Follower(Arc::clone(state));
+            }
+        }
+
+        let _mutation = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut inflight = self
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(state) = inflight.get(key) {
+            return SystemConfigValueLoadRegistration::Follower(Arc::clone(state));
+        }
+        if inflight.len() >= SYSTEM_CONFIG_VALUE_CACHE_MAX_INFLIGHT {
+            return SystemConfigValueLoadRegistration::Saturated;
+        }
+        let Ok(admission) = Arc::clone(&self.admission).try_acquire_owned() else {
+            return SystemConfigValueLoadRegistration::Saturated;
+        };
+
+        let state = Arc::new(SystemConfigValueInflightState {
+            notify: Arc::new(tokio::sync::Notify::new()),
+            completion: std::sync::OnceLock::new(),
+        });
+        inflight.insert(key.to_string(), Arc::clone(&state));
+        SystemConfigValueLoadRegistration::Leader(SystemConfigValueLoadGuard {
+            cache: self,
+            key: Some(key.to_string()),
+            state,
+            admission: Some(admission),
+        })
+    }
+
+    fn finish_loaded(
+        &self,
+        key: &str,
+        state: &Arc<SystemConfigValueInflightState>,
+        admission: tokio::sync::OwnedSemaphorePermit,
+        value: Option<serde_json::Value>,
+    ) {
+        self.finish_current(
+            key,
+            state,
+            admission,
+            SystemConfigValueInflightCompletion::Loaded,
+            Some(value),
+        );
+    }
+
+    fn finish_current(
+        &self,
+        key: &str,
+        state: &Arc<SystemConfigValueInflightState>,
+        admission: tokio::sync::OwnedSemaphorePermit,
+        completion: SystemConfigValueInflightCompletion,
+        cache_value: Option<Option<serde_json::Value>>,
+    ) {
+        let _mutation = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut inflight = self
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(admission);
+        debug_assert!(self.admission.available_permits() > 0);
+        if !inflight
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, state))
+        {
+            return;
+        }
+        if let Some(value) = cache_value {
+            self.entries.insert(
+                key.to_string(),
+                value,
+                SYSTEM_CONFIG_VALUE_CACHE_TTL,
+                SYSTEM_CONFIG_VALUE_CACHE_MAX_ENTRIES,
+            );
+        }
+        let completed = state.completion.set(completion).is_ok();
+        inflight.remove(key);
+        drop(inflight);
+        drop(_mutation);
+        if completed {
+            state.notify.notify_waiters();
+        }
+    }
+
+    fn invalidate(&self, key: &str) {
+        let _mutation = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.entries.remove(key);
+        let state = self
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(key);
+        let completed = state.as_ref().is_some_and(|state| {
+            state
+                .completion
+                .set(SystemConfigValueInflightCompletion::Invalidated)
+                .is_ok()
+        });
+        drop(_mutation);
+        if completed {
+            state
+                .expect("completed state should exist")
+                .notify
+                .notify_waiters();
+        }
+    }
+
+    fn clear(&self) {
+        let _mutation = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.entries.clear();
+        let states = self
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .map(|(_, state)| state)
+            .collect::<Vec<_>>();
+        let completed = states
+            .iter()
+            .filter(|state| {
+                state
+                    .completion
+                    .set(SystemConfigValueInflightCompletion::Invalidated)
+                    .is_ok()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        drop(_mutation);
+        for state in completed {
+            state.notify.notify_waiters();
+        }
+    }
+}
+
+impl Default for SystemConfigValueCacheState {
+    fn default() -> Self {
+        Self {
+            entries: aether_cache::ExpiringMap::default(),
+            inflight: std::sync::Mutex::new(std::collections::HashMap::new()),
+            mutation: std::sync::Mutex::new(()),
+            admission: Arc::new(tokio::sync::Semaphore::new(
+                SYSTEM_CONFIG_VALUE_CACHE_MAX_INFLIGHT,
+            )),
+        }
+    }
+}
+
+impl SystemConfigValueLoadGuard<'_> {
+    fn finish_loaded(&mut self, value: Option<serde_json::Value>) {
+        if let Some(key) = self.key.take() {
+            let admission = self
+                .admission
+                .take()
+                .expect("active system config leader must own admission");
+            self.cache
+                .finish_loaded(&key, &self.state, admission, value);
+        }
+    }
+
+    fn finish(&mut self, completion: SystemConfigValueInflightCompletion) {
+        if let Some(key) = self.key.take() {
+            let admission = self
+                .admission
+                .take()
+                .expect("active system config leader must own admission");
+            self.cache
+                .finish_current(&key, &self.state, admission, completion, None);
+        }
+    }
 }
 
 impl Drop for SystemConfigValueLoadGuard<'_> {
     fn drop(&mut self) {
-        if let Some(key) = self.key.take() {
-            self.state.finish(&key);
-        }
-    }
-}
-
-impl SystemConfigValueLoadState {
-    fn register(&self, key: &str) -> SystemConfigValueLoadRegistration<'_> {
-        match self.inflight.lock() {
-            Ok(mut inflight) => {
-                if inflight.contains(key) {
-                    SystemConfigValueLoadRegistration::Follower
-                } else {
-                    inflight.insert(key.to_string());
-                    SystemConfigValueLoadRegistration::Leader(SystemConfigValueLoadGuard {
-                        state: self,
-                        key: Some(key.to_string()),
-                    })
-                }
-            }
-            Err(_) => SystemConfigValueLoadRegistration::Bypass,
-        }
-    }
-
-    fn notified(&self) -> tokio::sync::futures::Notified<'_> {
-        self.notify.notified()
-    }
-
-    fn finish(&self, key: &str) {
-        let removed = self
-            .inflight
-            .lock()
-            .map(|mut inflight| inflight.remove(key))
-            .unwrap_or(false);
-        if removed {
-            self.notify.notify_waiters();
-        }
+        self.finish(SystemConfigValueInflightCompletion::Cancelled);
     }
 }
 
@@ -81,6 +253,139 @@ fn current_system_config_updated_at_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod system_config_value_cache_tests {
+    use super::*;
+
+    fn leader<'a>(
+        cache: &'a SystemConfigValueCacheState,
+        key: &str,
+    ) -> SystemConfigValueLoadGuard<'a> {
+        match cache.register(key) {
+            SystemConfigValueLoadRegistration::Leader(guard) => guard,
+            _ => panic!("first registration should lead"),
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_before_first_poll_releases_system_config_follower() {
+        let cache = SystemConfigValueCacheState::default();
+        let mut leader = leader(&cache, "key-a");
+        let follower = match cache.register("key-a") {
+            SystemConfigValueLoadRegistration::Follower(state) => state,
+            _ => panic!("second registration should follow"),
+        };
+
+        leader.finish_loaded(Some(serde_json::json!({"version": 1})));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(100), follower.wait())
+                .await
+                .expect("completed follower must not miss the notification"),
+            SystemConfigValueInflightCompletion::Loaded
+        ));
+        assert_eq!(
+            cache.get("key-a"),
+            Some(Some(serde_json::json!({"version": 1})))
+        );
+    }
+
+    #[tokio::test]
+    async fn system_config_follower_receives_leader_failure() {
+        let cache = SystemConfigValueCacheState::default();
+        let mut leader = leader(&cache, "key-a");
+        let follower = match cache.register("key-a") {
+            SystemConfigValueLoadRegistration::Follower(state) => state,
+            _ => panic!("second registration should follow"),
+        };
+
+        leader.finish(SystemConfigValueInflightCompletion::Failed(
+            DataLayerError::Sql("forced system config failure".to_string()),
+        ));
+        let completion = tokio::time::timeout(Duration::from_millis(100), follower.wait())
+            .await
+            .expect("failed load should release its follower");
+        let SystemConfigValueInflightCompletion::Failed(error) = completion else {
+            panic!("follower should observe the leader failure");
+        };
+        assert_eq!(error.to_string(), "sql error: forced system config failure");
+    }
+
+    #[tokio::test]
+    async fn invalidation_wins_and_old_guard_preserves_replacement() {
+        let cache = SystemConfigValueCacheState::default();
+        let mut old_leader = leader(&cache, "key-a");
+        let old_follower = match cache.register("key-a") {
+            SystemConfigValueLoadRegistration::Follower(state) => state,
+            _ => panic!("second registration should follow"),
+        };
+
+        cache.invalidate("key-a");
+        let replacement = leader(&cache, "key-a");
+        old_leader.finish_loaded(Some(serde_json::json!({"stale": true})));
+        assert!(matches!(
+            old_follower.wait().await,
+            SystemConfigValueInflightCompletion::Invalidated
+        ));
+        assert_eq!(cache.get("key-a"), None);
+        assert!(matches!(
+            cache.register("key-a"),
+            SystemConfigValueLoadRegistration::Follower(_)
+        ));
+        drop(replacement);
+    }
+
+    #[test]
+    fn system_config_states_are_independent_and_inflight_is_bounded() {
+        let first = SystemConfigValueCacheState::default();
+        let second = SystemConfigValueCacheState::default();
+        let first_guard = leader(&first, "shared-key");
+        let second_guard = leader(&second, "shared-key");
+        drop(first_guard);
+        drop(second_guard);
+
+        let mut guards = Vec::with_capacity(SYSTEM_CONFIG_VALUE_CACHE_MAX_INFLIGHT);
+        for index in 0..SYSTEM_CONFIG_VALUE_CACHE_MAX_INFLIGHT {
+            let key = format!("bounded-{index}");
+            guards.push(leader(&first, &key));
+        }
+        assert!(matches!(
+            first.register("over-capacity"),
+            SystemConfigValueLoadRegistration::Saturated
+        ));
+        drop(guards);
+    }
+
+    #[test]
+    fn capacity_full_cancelled_system_config_follower_can_retry() {
+        let cache = SystemConfigValueCacheState::default();
+        let mut active = Vec::with_capacity(SYSTEM_CONFIG_VALUE_CACHE_MAX_INFLIGHT - 1);
+        for index in 0..SYSTEM_CONFIG_VALUE_CACHE_MAX_INFLIGHT - 1 {
+            active.push(leader(&cache, &format!("active-{index}")));
+        }
+
+        let current = leader(&cache, "retry-key");
+        let follower = match cache.register("retry-key") {
+            SystemConfigValueLoadRegistration::Follower(state) => state,
+            _ => panic!("same-key request should follow at full capacity"),
+        };
+        assert_eq!(cache.admission.available_permits(), 0);
+        assert!(matches!(
+            cache.register("over-capacity"),
+            SystemConfigValueLoadRegistration::Saturated
+        ));
+
+        drop(current);
+        assert!(matches!(
+            follower.completion.get(),
+            Some(SystemConfigValueInflightCompletion::Cancelled)
+        ));
+        let mut replacement = leader(&cache, "retry-key");
+        replacement.finish(SystemConfigValueInflightCompletion::Cancelled);
+        assert_eq!(cache.admission.available_permits(), 1);
+        drop(active);
+    }
 }
 
 impl GatewayDataState {
@@ -478,6 +783,12 @@ impl GatewayDataState {
         self.wallet_reader.is_some()
     }
 
+    #[cfg(test)]
+    pub(crate) fn without_wallet_reader_for_tests(mut self) -> Self {
+        self.wallet_reader = None;
+        self
+    }
+
     pub(crate) fn has_wallet_writer(&self) -> bool {
         self.wallet_writer.is_some()
     }
@@ -502,80 +813,85 @@ impl GatewayDataState {
                 .get(key)
                 .map(|entry| entry.value.clone()));
         }
-        let cached_value = self
-            .system_config_value_cache
-            .read()
-            .expect("system config value cache lock")
-            .get(key)
-            .cloned();
-        if let Some((cached_at, value)) = cached_value {
-            if cached_at.elapsed() <= SYSTEM_CONFIG_VALUE_CACHE_TTL {
-                return Ok(value);
-            }
+        if let Some(value) = self.system_config_value_cache.get(key) {
+            return Ok(value);
         }
-        let load_state = system_config_value_load_state();
+
         loop {
-            let notified = load_state.notified();
-            match load_state.register(key) {
-                SystemConfigValueLoadRegistration::Bypass => {
-                    let Some(backends) = self.backends.as_ref() else {
-                        return Ok(None);
-                    };
-                    let value = crate::request_diagnostics::observe_db_operation(
-                        "system_config_value",
-                        self.database_pool_summary(),
-                        backends.find_system_config_value(key),
-                    )
-                    .await?;
-                    self.system_config_value_cache
-                        .write()
-                        .expect("system config value cache lock")
-                        .insert(key.to_string(), (Instant::now(), value.clone()));
-                    return Ok(value);
+            match self.system_config_value_cache.register(key) {
+                SystemConfigValueLoadRegistration::Saturated => {
+                    return Err(DataLayerError::TimedOut(format!(
+                        "system config cache admission saturated for key '{key}'"
+                    )));
                 }
-                SystemConfigValueLoadRegistration::Follower => {
-                    notified.await;
-                    let cached_value = self
-                        .system_config_value_cache
-                        .read()
-                        .expect("system config value cache lock")
-                        .get(key)
-                        .cloned();
-                    if let Some((cached_at, value)) = cached_value {
-                        if cached_at.elapsed() <= SYSTEM_CONFIG_VALUE_CACHE_TTL {
+                SystemConfigValueLoadRegistration::Follower(state) => match state.wait().await {
+                    SystemConfigValueInflightCompletion::Failed(error) => {
+                        return Err(error);
+                    }
+                    SystemConfigValueInflightCompletion::Loaded => {
+                        if let Some(value) = self.system_config_value_cache.get(key) {
                             return Ok(value);
                         }
                     }
-                }
-                SystemConfigValueLoadRegistration::Leader(_guard) => {
-                    let cached_value = self
-                        .system_config_value_cache
-                        .read()
-                        .expect("system config value cache lock")
-                        .get(key)
-                        .cloned();
-                    if let Some((cached_at, value)) = cached_value {
-                        if cached_at.elapsed() <= SYSTEM_CONFIG_VALUE_CACHE_TTL {
+                    SystemConfigValueInflightCompletion::Cancelled
+                    | SystemConfigValueInflightCompletion::Invalidated => {}
+                },
+                SystemConfigValueLoadRegistration::Leader(mut guard) => {
+                    if let Some(value) = self.system_config_value_cache.get(key) {
+                        guard.finish(SystemConfigValueInflightCompletion::Loaded);
+                        return Ok(value);
+                    }
+                    match self.load_system_config_value_uncached(key).await {
+                        Ok(value) => {
+                            guard.finish_loaded(value.clone());
                             return Ok(value);
                         }
+                        Err(error) => {
+                            guard
+                                .finish(SystemConfigValueInflightCompletion::Failed(error.clone()));
+                            return Err(error);
+                        }
                     }
-                    let Some(backends) = self.backends.as_ref() else {
-                        return Ok(None);
-                    };
-                    let value = crate::request_diagnostics::observe_db_operation(
-                        "system_config_value",
-                        self.database_pool_summary(),
-                        backends.find_system_config_value(key),
-                    )
-                    .await?;
-                    self.system_config_value_cache
-                        .write()
-                        .expect("system config value cache lock")
-                        .insert(key.to_string(), (Instant::now(), value.clone()));
-                    return Ok(value);
                 }
             }
         }
+    }
+
+    async fn load_system_config_value_uncached(
+        &self,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, DataLayerError> {
+        let Some(backends) = self.backends.as_ref() else {
+            return Ok(None);
+        };
+        crate::request_diagnostics::observe_db_operation(
+            "system_config_value",
+            self.database_pool_summary(),
+            backends.find_system_config_value(key),
+        )
+        .await
+    }
+
+    pub(crate) async fn find_system_config_value_strong(
+        &self,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, DataLayerError> {
+        if let Some(values) = &self.system_config_values {
+            return Ok(values
+                .read()
+                .expect("system config values lock")
+                .get(key)
+                .map(|entry| entry.value.clone()));
+        }
+        let Some(backends) = self.backends.as_ref() else {
+            return Ok(None);
+        };
+        crate::request_diagnostics::observe_db_operation(
+            "system_config_value_strong",
+            self.database_pool_summary(),
+            backends.find_system_config_value(key),
+        )
+        .await
     }
 
     pub(crate) async fn upsert_system_config_value(
@@ -668,10 +984,7 @@ impl GatewayDataState {
     }
 
     fn clear_cached_system_config_value(&self, key: &str) {
-        self.system_config_value_cache
-            .write()
-            .expect("system config value cache lock")
-            .remove(key);
+        self.system_config_value_cache.invalidate(key);
     }
 
     pub(crate) async fn read_admin_system_stats(
@@ -687,24 +1000,30 @@ impl GatewayDataState {
         &self,
         target: aether_data::repository::system::AdminSystemPurgeTarget,
     ) -> Result<aether_data::repository::system::AdminSystemPurgeSummary, DataLayerError> {
-        if matches!(
-            target,
+        let purges_config = matches!(
+            &target,
             aether_data::repository::system::AdminSystemPurgeTarget::Config
-        ) {
+        );
+        if purges_config {
             if let Some(values) = &self.system_config_values {
                 let mut values = values.write().expect("system config values lock");
                 let deleted = values.len() as u64;
                 values.clear();
+                self.system_config_value_cache.clear();
                 let mut summary =
                     aether_data::repository::system::AdminSystemPurgeSummary::default();
                 summary.add("system_configs", deleted);
                 return Ok(summary);
             }
         }
-        match self.backends.as_ref() {
+        let result = match self.backends.as_ref() {
             Some(backends) => backends.purge_admin_system_data(target).await,
             None => Ok(aether_data::repository::system::AdminSystemPurgeSummary::default()),
+        };
+        if purges_config && result.is_ok() {
+            self.system_config_value_cache.clear();
         }
+        result
     }
 
     pub(crate) async fn export_admin_system_usage_aggregates(

@@ -14,12 +14,17 @@ use aether_data::repository::global_models::InMemoryGlobalModelReadRepository;
 use aether_data::repository::oauth_providers::{
     InMemoryOAuthProviderRepository, OAuthProviderReadRepository, StoredOAuthProviderConfig,
 };
+use aether_data::repository::pool_scores::InMemoryPoolMemberScoreRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::users::{StoredUserAuthRecord, UserReadRepository};
 use aether_data::repository::wallet::{StoredWalletSnapshot, WalletLookupKey};
 use aether_data_contracts::repository::global_models::{
     AdminGlobalModelListQuery, AdminProviderModelListQuery, GlobalModelReadRepository,
     StoredPublicGlobalModel,
+};
+use aether_data_contracts::repository::pool_scores::{
+    GetPoolMemberScoresByIdsQuery, PoolMemberHardState, PoolMemberIdentity, PoolMemberProbeStatus,
+    PoolScoreReadRepository,
 };
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
 use axum::body::{Body, Bytes};
@@ -32,6 +37,9 @@ use serde_json::{json, Value};
 use super::super::helpers::{hash_api_key, sample_endpoint, sample_key, sample_provider};
 use super::super::{
     build_router_with_state, build_state_with_execution_runtime_override, start_server, AppState,
+};
+use crate::ai_serving::{
+    build_provider_key_pool_score_upsert, provider_key_pool_score_id, provider_key_pool_score_scope,
 };
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
@@ -227,6 +235,7 @@ fn sample_oauth_system_import_payload(access_token: &str, refresh_token: &str) -
                     refresh_token
                 ),
                 "api_formats": ["openai:responses"],
+                "rpm_limit": null,
                 "is_active": true
             }],
             "models": []
@@ -1960,11 +1969,10 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
     .with_system_config_values_for_tests(Vec::<(String, Value)>::new())
     .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
 
-    let gateway = build_router_with_state(
-        AppState::new()
-            .expect("gateway should build")
-            .with_data_state_for_tests(data_state),
-    );
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(data_state);
+    let gateway = build_router_with_state(state.clone());
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();
 
@@ -2024,6 +2032,68 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
         serde_json::from_str(&auth_config).expect("oauth auth config json should parse");
     assert_eq!(auth_config["refresh_token"], "oauth-refresh-token-new");
 
+    assert!(state
+        .update_provider_catalog_key_oauth_runtime_state(
+            &keys[0].id,
+            Some(1_700_000_001),
+            Some("[REFRESH_FAILED] imported token remains invalid"),
+            None,
+            Some(1_700_000_001),
+        )
+        .await
+        .expect("invalid marker should be seeded"));
+    let mut metadata_only_payload = sample_oauth_system_import_payload("unused", "unused");
+    let key_payload = metadata_only_payload["providers"][0]["api_keys"][0]
+        .as_object_mut()
+        .expect("OAuth key payload should be an object");
+    key_payload.remove("api_key");
+    key_payload.remove("auth_config");
+    key_payload.insert("internal_priority".to_string(), json!(71));
+
+    let response = client
+        .post(format!("{gateway_url}/api/admin/system/config/import"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&metadata_only_payload)
+        .send()
+        .await
+        .expect("metadata-only import should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let keys = provider_catalog_repository
+        .list_keys_by_provider_ids(std::slice::from_ref(&providers[0].id))
+        .await
+        .expect("keys should reload");
+    assert_eq!(keys[0].internal_priority, 71);
+    assert_eq!(keys[0].oauth_invalid_at_unix_secs, Some(1_700_000_001));
+    assert_eq!(
+        keys[0].oauth_invalid_reason.as_deref(),
+        Some("[REFRESH_FAILED] imported token remains invalid")
+    );
+
+    let response = client
+        .post(format!("{gateway_url}/api/admin/system/config/import"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&sample_oauth_system_import_payload(
+            "oauth-access-token-new",
+            "oauth-refresh-token-new",
+        ))
+        .send()
+        .await
+        .expect("same valid credentials should be accepted as recovery input");
+    assert_eq!(response.status(), StatusCode::OK);
+    let keys = provider_catalog_repository
+        .list_keys_by_provider_ids(std::slice::from_ref(&providers[0].id))
+        .await
+        .expect("keys should reload after credential recovery");
+    assert_eq!(keys[0].oauth_invalid_at_unix_secs, None);
+    assert_eq!(keys[0].oauth_invalid_reason, None);
+
     gateway_handle.abort();
 }
 
@@ -2058,6 +2128,7 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
 
     let mut provider = sample_provider("provider-codex-existing", "oauth-import-provider", 10);
     provider.provider_type = "codex".to_string();
+    provider.config = Some(json!({"pool_advanced": {}}));
     let endpoint = sample_endpoint(
         "endpoint-codex-existing",
         "provider-codex-existing",
@@ -2073,9 +2144,17 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
     existing_key.name = "oauth-primary".to_string();
     existing_key.auth_type = "oauth".to_string();
     existing_key.expires_at_unix_secs = Some(1);
+    existing_key.learned_rpm_limit = Some(31);
     existing_key.oauth_invalid_at_unix_secs = Some(1_700_000_000);
     existing_key.oauth_invalid_reason =
         Some("[REFRESH_FAILED] refresh_token 无效、已过期或已撤销，请重新登录授权".to_string());
+    existing_key.error_count = Some(7);
+    existing_key.health_by_format = Some(json!({
+        "openai:responses": {"consecutive_failures": 3}
+    }));
+    existing_key.circuit_breaker_by_format = Some(json!({
+        "openai:responses": {"state": "open"}
+    }));
     existing_key.encrypted_auth_config = Some(
         encrypt_python_fernet_plaintext(
             DEVELOPMENT_ENCRYPTION_KEY,
@@ -2084,11 +2163,30 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
         .expect("auth config should encrypt"),
     );
 
+    let score_identity =
+        PoolMemberIdentity::provider_api_key("provider-codex-existing", "key-codex-existing");
+    let score_scope = provider_key_pool_score_scope();
+    let mut invalid_score = build_provider_key_pool_score_upsert(
+        &existing_key,
+        "codex",
+        None,
+        1_700_000_000,
+        aether_pool_core::PoolMemberScoreRules::default(),
+    )
+    .into_stored();
+    invalid_score.last_failure_at = Some(1_700_000_000);
+    invalid_score.failure_count = 9;
+    invalid_score.last_probe_failure_at = Some(1_700_000_000);
+    invalid_score.probe_failure_count = 4;
+    invalid_score.probe_status = PoolMemberProbeStatus::Failed;
+    assert_eq!(invalid_score.hard_state, PoolMemberHardState::AuthInvalid);
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
         vec![endpoint],
         vec![existing_key],
     ));
+    let pool_score_repository =
+        Arc::new(InMemoryPoolMemberScoreRepository::seed(vec![invalid_score]));
     let global_model_repository = Arc::new(InMemoryGlobalModelReadRepository::seed(Vec::<
         StoredPublicGlobalModel,
     >::new()));
@@ -2114,6 +2212,7 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
     .with_global_model_repository_for_tests(Arc::clone(&global_model_repository))
     .attach_auth_module_repository_for_tests(Arc::clone(&auth_module_repository))
     .attach_oauth_provider_repository_for_tests(Arc::clone(&oauth_provider_repository))
+    .with_pool_score_repository_for_tests(Arc::clone(&pool_score_repository))
     .with_system_config_values_for_tests(Vec::<(String, Value)>::new())
     .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
 
@@ -2125,16 +2224,16 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
+    let mut import_payload =
+        sample_oauth_system_import_payload("oauth-access-token-new", "oauth-refresh-token-new");
+    import_payload["providers"][0]["config"] = json!({"pool_advanced": {}});
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/api/admin/system/config/import"))
         .header(GATEWAY_HEADER, "rust-phase3b")
         .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
-        .json(&sample_oauth_system_import_payload(
-            "oauth-access-token-new",
-            "oauth-refresh-token-new",
-        ))
+        .json(&import_payload)
         .send()
         .await
         .expect("request should succeed");
@@ -2159,6 +2258,10 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
     assert_eq!(key.oauth_invalid_at_unix_secs, None);
     assert_eq!(key.oauth_invalid_reason, None);
     assert_eq!(key.expires_at_unix_secs, None);
+    assert_eq!(key.learned_rpm_limit, None);
+    assert_eq!(key.error_count, Some(0));
+    assert_eq!(key.health_by_format, Some(json!({})));
+    assert_eq!(key.circuit_breaker_by_format, Some(json!({})));
     assert_eq!(
         decrypt_python_fernet_ciphertext(
             DEVELOPMENT_ENCRYPTION_KEY,
@@ -2186,6 +2289,24 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
     assert_eq!(auth_config["plan_type"], "plus");
     assert!(auth_config.get("token_type").is_none());
     assert!(auth_config.get("expires_at").is_none());
+
+    let scores = pool_score_repository
+        .get_pool_member_scores_by_ids(&GetPoolMemberScoresByIdsQuery {
+            ids: vec![provider_key_pool_score_id(&score_identity, &score_scope)],
+        })
+        .await
+        .expect("pool score should load");
+    assert_eq!(scores.len(), 1);
+    assert!(
+        scores[0].hard_state.schedulable(),
+        "OAuth credential import should reset the pool score: {:?}",
+        scores[0]
+    );
+    assert_eq!(scores[0].last_failure_at, None);
+    assert_eq!(scores[0].failure_count, 0);
+    assert_eq!(scores[0].last_probe_failure_at, None);
+    assert_eq!(scores[0].probe_failure_count, 0);
+    assert_eq!(scores[0].probe_status, PoolMemberProbeStatus::Never);
 
     gateway_handle.abort();
     refresh_handle.abort();

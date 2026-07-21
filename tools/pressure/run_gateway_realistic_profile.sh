@@ -46,7 +46,7 @@ case "$PROFILE" in
     default_concurrency=1000
     default_start_ramp_ms=10000
     default_response_mode=full
-    default_settle_after_ms=5000
+    default_settle_after_ms=10000
     default_output=/tmp/aether_gateway_realistic_stream_1k.json
     ;;
   tps)
@@ -133,6 +133,12 @@ args+=(
   --response-mode "$PRESSURE_RESPONSE_MODE"
   --output "$OUTPUT"
 )
+
+case "$(printf '%s' "$PRESSURE_RESPONSE_MODE" | tr '[:upper:]' '[:lower:]')" in
+  full|full-body|full_body|body)
+    args+=(--require-sse-done)
+    ;;
+esac
 
 if [[ -n "$api_key_list_file" && -s "$api_key_list_file" ]]; then
   args+=(--api-key-list-file "$api_key_list_file")

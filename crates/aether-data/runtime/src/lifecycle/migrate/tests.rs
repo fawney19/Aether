@@ -409,6 +409,7 @@ fn empty_database_snapshot_covers_current_cutoff_versions() {
             20260716000000,
             20260718000000,
             20260718010000,
+            20260720000000,
         ]
     );
 }
@@ -546,6 +547,7 @@ fn empty_database_snapshot_sql_includes_usage_body_blobs_and_audit_admin_role() 
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("idx_background_task_runs_status_created"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("idx_usage_legacy_body_ref_cleanup_created_at"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("idx_usage_settlement_dashboard_cover"));
+    assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("idx_usage_stale_pending_created_request"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("autovacuum_analyze_scale_factor = 0.02"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("request_count bigint DEFAULT 0"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("usage_count bigint DEFAULT 0 NOT NULL"));
@@ -1702,6 +1704,7 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20260716000000,
             20260718000000,
             20260718010000,
+            20260720000000,
         ]
     );
 }

@@ -1,7 +1,9 @@
 use super::{
     AdminAppState, ADMIN_SYSTEM_DATA_EXPORT_VERSION, ADMIN_SYSTEM_DATA_IMPORT_MAX_SIZE_BYTES,
 };
+use crate::ai_serving::build_provider_key_pool_score_upsert;
 use crate::api::ai::admin_endpoint_signature_parts;
+use crate::handlers::admin::admin_provider_pool_config;
 use crate::handlers::admin::provider::endpoints_admin::payloads::AdminProviderEndpointUpdatePatch;
 use crate::handlers::admin::provider::shared::payloads::{
     AdminProviderCreateRequest, AdminProviderKeyCreateRequest, AdminProviderKeyUpdatePatch,
@@ -47,6 +49,7 @@ use aether_data_contracts::repository::global_models::{
     AdminGlobalModelListQuery, AdminProviderModelListQuery, CreateAdminGlobalModelRecord,
     UpdateAdminGlobalModelRecord, UpsertAdminProviderModelRecord,
 };
+use aether_data_contracts::repository::pool_scores::PoolMemberScoreUpsertMode;
 use axum::{body::Bytes, http};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -362,18 +365,24 @@ fn apply_imported_oauth_key_credentials(
     raw_key: &Map<String, Value>,
     normalized_auth_config: Option<&Value>,
     record: &mut aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    let mut credentials_supplied = false;
+    let mut api_key_supplied = false;
     if let Some(api_key_value) = raw_key.get("api_key") {
         let plaintext = api_key_value
             .as_str()
             .map(str::trim)
             .filter(|value| !value.is_empty());
         record.encrypted_api_key = match plaintext {
-            Some(plaintext) => Some(
-                state
-                    .encrypt_catalog_secret_with_fallbacks(plaintext)
-                    .ok_or_else(|| "gateway 未配置 provider key 加密密钥".to_string())?,
-            ),
+            Some(plaintext) => {
+                credentials_supplied = true;
+                api_key_supplied = true;
+                Some(
+                    state
+                        .encrypt_catalog_secret_with_fallbacks(plaintext)
+                        .ok_or_else(|| "gateway 未配置 provider key 加密密钥".to_string())?,
+                )
+            }
             None => None,
         };
     }
@@ -381,6 +390,7 @@ fn apply_imported_oauth_key_credentials(
     if raw_key.contains_key("auth_config") {
         record.encrypted_auth_config = match normalized_auth_config {
             Some(auth_config) => {
+                credentials_supplied |= imported_oauth_auth_config_has_credentials(auth_config);
                 let plaintext =
                     serde_json::to_string(auth_config).map_err(|err| err.to_string())?;
                 Some(
@@ -392,14 +402,66 @@ fn apply_imported_oauth_key_credentials(
             None => None,
         };
     }
+    record.expires_at_unix_secs = imported_oauth_expiry_after_import(
+        record.expires_at_unix_secs,
+        raw_key.contains_key("auth_config"),
+        normalized_auth_config,
+        api_key_supplied,
+    );
 
-    // Importing OAuth credentials replaces the previous session state, so stale
-    // expiry/invalid markers must not survive across the overwrite.
-    record.expires_at_unix_secs = imported_oauth_expires_at_unix_secs(normalized_auth_config);
-    record.oauth_invalid_at_unix_secs = None;
-    record.oauth_invalid_reason = None;
+    if credentials_supplied {
+        record.oauth_invalid_at_unix_secs = None;
+        record.oauth_invalid_reason = None;
+    }
 
-    Ok(())
+    Ok(credentials_supplied)
+}
+
+fn imported_oauth_auth_config_has_credentials(value: &Value) -> bool {
+    const CREDENTIAL_FIELDS: &[&str] = &[
+        "access_token",
+        "accessToken",
+        "api_key",
+        "apiKey",
+        "auth_token",
+        "authToken",
+        "cf_clearance",
+        "cfClearance",
+        "cf_cookies",
+        "cfCookies",
+        "cookie",
+        "cookieHeader",
+        "cookies",
+        "id_token",
+        "idToken",
+        "refresh_token",
+        "refreshToken",
+        "session_token",
+        "sessionToken",
+        "sso_rw_token",
+        "ssoRwToken",
+        "sso_token",
+        "ssoToken",
+        "token",
+    ];
+
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            (CREDENTIAL_FIELDS.contains(&key.as_str()) && imported_credential_value_present(value))
+                || imported_oauth_auth_config_has_credentials(value)
+        }),
+        Value::Array(items) => items.iter().any(imported_oauth_auth_config_has_credentials),
+        _ => false,
+    }
+}
+
+fn imported_credential_value_present(value: &Value) -> bool {
+    match value {
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(object) => !object.is_empty(),
+        _ => false,
+    }
 }
 
 fn imported_oauth_expires_at_unix_secs(normalized_auth_config: Option<&Value>) -> Option<u64> {
@@ -423,6 +485,63 @@ fn imported_oauth_expires_at_unix_secs(normalized_auth_config: Option<&Value>) -
         }
     }
     None
+}
+
+fn imported_oauth_expiry_after_import(
+    current: Option<u64>,
+    auth_config_present: bool,
+    normalized_auth_config: Option<&Value>,
+    api_key_supplied: bool,
+) -> Option<u64> {
+    if auth_config_present {
+        imported_oauth_expires_at_unix_secs(normalized_auth_config)
+    } else if api_key_supplied {
+        None
+    } else {
+        current
+    }
+}
+
+async fn seed_imported_oauth_pool_score(
+    state: &AdminAppState<'_>,
+    provider_id: &str,
+    key: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey,
+    now_unix_secs: u64,
+) -> Result<(), GatewayError> {
+    let provider_id = provider_id.to_string();
+    let provider = state
+        .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
+        .await?
+        .pop();
+    let Some(provider) = provider else {
+        return Ok(());
+    };
+    let Some(pool_config) = admin_provider_pool_config(&provider) else {
+        return Ok(());
+    };
+    if !key.is_active || key.provider_id != provider.id {
+        return Ok(());
+    }
+
+    let upsert = build_provider_key_pool_score_upsert(
+        key,
+        provider.provider_type.as_str(),
+        None,
+        now_unix_secs,
+        pool_config.score_rules,
+    );
+    state
+        .app()
+        .data
+        .upsert_pool_member_score_with_mode(upsert, PoolMemberScoreUpsertMode::OAuthRecovery)
+        .await
+        .map_err(|error| {
+            GatewayError::Internal(format!(
+                "failed to recover OAuth pool score for key '{}': {error}",
+                key.id
+            ))
+        })?;
+    Ok(())
 }
 
 fn build_import_provider_model_record(
@@ -1528,6 +1647,11 @@ impl<'a> AdminAppState<'a> {
                 .keys()
                 .cloned()
                 .collect::<BTreeSet<_>>();
+            let now_unix_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
 
             let imported_keys = routed!(parse_admin_system_config_nested_array::<
                 ImportedProviderKey,
@@ -1638,27 +1762,74 @@ impl<'a> AdminAppState<'a> {
                                 )
                                 .await
                             );
-                            if auth_type == "oauth" {
+                            let oauth_credentials_supplied = if auth_type == "oauth" {
                                 invalid!(apply_imported_oauth_key_credentials(
                                     self,
                                     &raw_key,
                                     normalized_auth_config.as_ref(),
                                     &mut updated,
-                                ));
-                            }
+                                ))
+                            } else {
+                                false
+                            };
                             updated.proxy =
                                 remap_import_proxy(imported_key.proxy.clone(), &node_id_map);
                             updated.fingerprint = invalid!(normalize_json_object(
                                 imported_key.fingerprint.clone(),
                                 "fingerprint",
                             ));
-                            let Some(persisted) =
+                            let Some(mut persisted) =
                                 self.update_provider_catalog_key(&updated).await?
                             else {
                                 return Ok(Err(invalid_request(format!(
                                     "更新 Provider '{provider_name}' 的 Key 失败"
                                 ))));
                             };
+                            if updated.learned_rpm_limit != existing_key.learned_rpm_limit {
+                                let Some(reloaded) = self
+                                    .set_provider_catalog_key_learned_rpm_limit(
+                                        &updated.id,
+                                        updated.learned_rpm_limit,
+                                        updated.updated_at_unix_secs,
+                                    )
+                                    .await?
+                                else {
+                                    return Ok(Err(invalid_request(format!(
+                                        "更新 Provider '{provider_name}' 的 Key 失败"
+                                    ))));
+                                };
+                                persisted = reloaded;
+                            }
+                            if oauth_credentials_supplied {
+                                if !self
+                                    .clear_provider_catalog_key_oauth_invalid_marker(&updated.id)
+                                    .await?
+                                {
+                                    return Ok(Err(invalid_request(format!(
+                                        "更新 Provider '{provider_name}' 的 Key 失败"
+                                    ))));
+                                }
+                                let Some(reloaded) = self
+                                    .reset_provider_catalog_key_recovery_state(&updated.id)
+                                    .await?
+                                else {
+                                    return Ok(Err(invalid_request(format!(
+                                        "更新 Provider '{provider_name}' 的 Key 失败"
+                                    ))));
+                                };
+                                persisted = reloaded;
+                                let _ = self
+                                    .app()
+                                    .invalidate_local_oauth_refresh_entry(&updated.id)
+                                    .await;
+                                seed_imported_oauth_pool_score(
+                                    self,
+                                    &provider.id,
+                                    &persisted,
+                                    now_unix_secs,
+                                )
+                                .await?;
+                            }
                             existing_keys[existing_index] = persisted;
                             stats.keys.updated += 1;
                         }
@@ -1676,14 +1847,16 @@ impl<'a> AdminAppState<'a> {
                     self.build_admin_create_provider_key_record(&provider, payload)
                         .await
                 );
-                if auth_type == "oauth" {
+                let oauth_credentials_supplied = if auth_type == "oauth" {
                     invalid!(apply_imported_oauth_key_credentials(
                         self,
                         &raw_key,
                         normalized_auth_config.as_ref(),
                         &mut record,
-                    ));
-                }
+                    ))
+                } else {
+                    false
+                };
                 record.is_active = imported_key.is_active;
                 record.global_priority_by_format = invalid!(normalize_json_object(
                     imported_key.global_priority_by_format.clone(),
@@ -1699,6 +1872,10 @@ impl<'a> AdminAppState<'a> {
                         "创建 Provider '{provider_name}' 的 Key 失败"
                     ))));
                 };
+                if oauth_credentials_supplied {
+                    seed_imported_oauth_pool_score(self, &provider.id, &created, now_unix_secs)
+                        .await?;
+                }
                 existing_keys.push(created);
                 stats.keys.created += 1;
             }
@@ -3283,16 +3460,27 @@ enum WalletOwner<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use aether_data::repository::pool_scores::SqlitePoolMemberScoreRepository;
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+    use aether_data_contracts::repository::provider_catalog::{
+        StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    };
     use serde_json::json;
 
     use super::{
-        build_imported_user_usage_total_aggregates, imported_optional_bool, imported_optional_f64,
+        build_imported_user_usage_total_aggregates, imported_oauth_auth_config_has_credentials,
+        imported_oauth_expiry_after_import, imported_optional_bool, imported_optional_f64,
         imported_optional_i32, imported_optional_u64, imported_rfc3339_to_unix_secs,
         imported_string_list_from_value, normalize_import_endpoint_format,
         normalize_import_key_formats, normalize_import_key_raw_payload,
-        normalize_imported_wallet_target, validate_imported_system_users_export_version,
-        ImportedProviderKey,
+        normalize_imported_wallet_target, seed_imported_oauth_pool_score,
+        validate_imported_system_users_export_version, ImportedProviderKey,
     };
+    use crate::admin_api::AdminAppState;
+    use crate::data::GatewayDataState;
+    use crate::AppState;
 
     #[test]
     fn users_import_requires_supported_export_version() {
@@ -3456,6 +3644,123 @@ mod tests {
         );
 
         assert_eq!(payload["allow_auth_channel_mismatch_formats"], json!([]));
+    }
+
+    #[test]
+    fn oauth_import_only_treats_non_empty_secret_fields_as_credentials() {
+        assert!(!imported_oauth_auth_config_has_credentials(&json!({})));
+        assert!(!imported_oauth_auth_config_has_credentials(&json!({
+            "provider_type": "codex",
+            "expires_at": 4_102_444_800u64,
+            "account_id": "acct-1",
+            "refresh_token": "  "
+        })));
+        assert!(imported_oauth_auth_config_has_credentials(&json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-1"
+        })));
+        assert!(imported_oauth_auth_config_has_credentials(&json!({
+            "session": {"sso_token": "sso-1"}
+        })));
+        for field in [
+            "sso_rw_token",
+            "ssoRwToken",
+            "cf_cookies",
+            "cfCookies",
+            "cf_clearance",
+            "cfClearance",
+            "cookieHeader",
+        ] {
+            let mut config = serde_json::Map::new();
+            config.insert(field.to_string(), json!("credential-1"));
+            assert!(
+                imported_oauth_auth_config_has_credentials(&serde_json::Value::Object(config)),
+                "{field} is transport credential material"
+            );
+        }
+    }
+
+    #[test]
+    fn oauth_import_expiry_tracks_the_supplied_credential_source() {
+        let old_expiry = Some(1_700_000_000);
+        assert_eq!(
+            imported_oauth_expiry_after_import(old_expiry, false, None, true),
+            None,
+            "a new top-level api_key replaces the old session and clears its expiry"
+        );
+        assert_eq!(
+            imported_oauth_expiry_after_import(old_expiry, false, None, false),
+            old_expiry,
+            "metadata-only imports preserve the current OAuth expiry"
+        );
+        assert_eq!(
+            imported_oauth_expiry_after_import(
+                old_expiry,
+                true,
+                Some(&json!({"expires_at": 4_102_444_800u64})),
+                false,
+            ),
+            Some(4_102_444_800),
+            "an explicit auth_config owns the replacement expiry"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_pool_score_persistence_failure_is_propagated() {
+        let mut provider = StoredProviderCatalogProvider::new(
+            "provider-1".to_string(),
+            "Provider One".to_string(),
+            None,
+            "codex".to_string(),
+        )
+        .expect("provider should build");
+        provider.config = Some(json!({"pool_advanced": {}}));
+        let key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            provider.id.clone(),
+            "OAuth Key".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        let provider_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider],
+            Vec::new(),
+            vec![key.clone()],
+        ));
+        let no_writer_app = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(Arc::clone(
+                    &provider_repository,
+                )),
+            );
+        seed_imported_oauth_pool_score(&AdminAppState::new(&no_writer_app), "provider-1", &key, 99)
+            .await
+            .expect("a disabled score writer remains an allowed no-op");
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        let score_repository = Arc::new(SqlitePoolMemberScoreRepository::new(pool.clone()));
+        pool.close().await;
+        let app = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(provider_repository)
+                    .with_pool_score_repository_for_tests(score_repository),
+            );
+
+        let error =
+            seed_imported_oauth_pool_score(&AdminAppState::new(&app), "provider-1", &key, 100)
+                .await
+                .expect_err("closed pool must fail OAuth score recovery");
+        assert!(error
+            .into_message()
+            .contains("failed to recover OAuth pool score for key 'key-1'"));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use aether_contracts::ExecutionPlan;
 use serde_json::{Map, Value};
@@ -10,6 +11,7 @@ const RESPONSE_HEADER_RULES_KEY: &str = "response_header_rules";
 const RESPONSE_HEADER_RULES_CAMEL_KEY: &str = "responseHeaderRules";
 const PROVIDER_RESPONSE_HEADERS_CONTEXT_KEY: &str = "provider_response_headers";
 const RESPONSE_HEADER_RULE_PROTECTED_KEYS: &[&str] = &["content-length"];
+const RESPONSE_HEADER_RULES_CACHE_TTL: Duration = Duration::from_secs(5);
 
 fn endpoint_response_header_rules_from_config(config: Option<&Value>) -> Option<&Value> {
     let config = config?.as_object()?;
@@ -26,18 +28,28 @@ async fn read_endpoint_response_header_rules(state: &AppState, endpoint_id: &str
     }
     let endpoint_id = endpoint_id.to_string();
 
+    let endpoint_id_for_load = endpoint_id.clone();
     match state
-        .read_provider_catalog_endpoints_by_ids(std::slice::from_ref(&endpoint_id))
+        .endpoint_response_header_rules_cache
+        .get_or_load(endpoint_id, RESPONSE_HEADER_RULES_CACHE_TTL, || async {
+            state
+                .read_provider_catalog_endpoints_by_ids(std::slice::from_ref(&endpoint_id_for_load))
+                .await
+                .map(|endpoints| {
+                    endpoints.into_iter().next().and_then(|endpoint| {
+                        endpoint_response_header_rules_from_config(endpoint.config.as_ref())
+                            .cloned()
+                    })
+                })
+        })
         .await
     {
-        Ok(endpoints) => endpoints.into_iter().next().and_then(|endpoint| {
-            endpoint_response_header_rules_from_config(endpoint.config.as_ref()).cloned()
-        }),
+        Ok(rules) => rules,
         Err(err) => {
             warn!(
                 event_name = "response_header_rules_endpoint_read_failed",
                 log_type = "ops",
-                endpoint_id = %endpoint_id,
+                endpoint_id = %endpoint_id_for_load,
                 error = ?err,
                 "gateway failed to read endpoint response header rules; skipping response header edits"
             );

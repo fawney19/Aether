@@ -2,6 +2,7 @@ use crate::handlers::admin::provider::shared::paths::admin_reset_cycle_stats_key
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::provider_key_status_snapshot_payload;
 use crate::GatewayError;
+use aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyStatusSnapshotUpdate;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -33,7 +34,7 @@ pub(super) async fn maybe_handle(
     let Some(key_id) = admin_reset_cycle_stats_key_id(request_context.path()) else {
         return Ok(Some(not_found_response("Key 不存在")));
     };
-    let Some(mut key) = state
+    let Some(key) = state
         .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
         .await?
         .into_iter()
@@ -65,11 +66,17 @@ pub(super) async fn maybe_handle(
         return Ok(Some(bad_request_response("当前账号没有可重置的周期窗口")));
     }
 
-    key.status_snapshot = Some(status_snapshot);
-    key.updated_at_unix_secs = Some(now_unix_secs);
-    let Some(_) = state.update_provider_catalog_key(&key).await? else {
+    let quota = status_snapshot.get("quota").cloned().unwrap_or(Value::Null);
+    if !state
+        .update_provider_catalog_key_status_snapshot(&ProviderCatalogKeyStatusSnapshotUpdate {
+            key_id: key.id.clone(),
+            status_snapshot_patch: json!({"quota":quota}),
+            updated_at_unix_secs: Some(now_unix_secs),
+        })
+        .await?
+    {
         return Ok(None);
-    };
+    }
 
     Ok(Some(
         Json(json!({

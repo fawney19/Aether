@@ -106,15 +106,17 @@ pub async fn read_provider_transport_snapshot(
     };
     let fallback_encryption_keys = fallback_encryption_keys(encryption_key);
 
-    let providers = state
-        .list_provider_catalog_providers_by_ids(&[provider_id.to_string()])
-        .await?;
-    let endpoints = state
-        .list_provider_catalog_endpoints_by_ids(&[endpoint_id.to_string()])
-        .await?;
-    let keys = state
-        .list_provider_catalog_keys_by_ids(&[key_id.to_string()])
-        .await?;
+    // These reads are independent. Running them together avoids three
+    // sequential pool round trips when a transport snapshot is cold or being
+    // refreshed for a burst of keys.
+    let provider_ids = [provider_id.to_string()];
+    let endpoint_ids = [endpoint_id.to_string()];
+    let key_ids = [key_id.to_string()];
+    let (providers, endpoints, keys) = tokio::try_join!(
+        state.list_provider_catalog_providers_by_ids(&provider_ids),
+        state.list_provider_catalog_endpoints_by_ids(&endpoint_ids),
+        state.list_provider_catalog_keys_by_ids(&key_ids),
+    )?;
 
     let Some(provider) = providers.into_iter().next() else {
         return Ok(None);

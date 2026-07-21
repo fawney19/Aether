@@ -2819,6 +2819,13 @@ fn merge_usage_status_code(
 
 #[async_trait]
 impl UsageWriteRepository for InMemoryUsageReadRepository {
+    fn supports_first_byte_usage_fast_path(&self) -> bool {
+        // The in-memory repository only implements the general merge path. Do not advertise the
+        // lightweight path, whose metadata contract is backend-specific and would replace a
+        // pending row's full audit snapshot with a slim first-byte payload.
+        false
+    }
+
     async fn upsert(
         &self,
         usage: UpsertUsageRecord,

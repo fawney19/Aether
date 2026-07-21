@@ -181,6 +181,19 @@ pub trait RoutingGroupReadRepository: Send + Sync {
         query: &RoutingGroupBindingQuery,
     ) -> Result<Vec<StoredRoutingGroupBinding>, crate::DataLayerError>;
 
+    /// Return whether at least one routing-group binding exists.
+    ///
+    /// Implementations backed by a database should override this with an
+    /// existence query so callers do not have to materialize the full binding
+    /// table just to choose a fast path. The default keeps third-party and test
+    /// repositories source-compatible.
+    async fn has_any_routing_group_binding(&self) -> Result<bool, crate::DataLayerError> {
+        Ok(!self
+            .list_routing_group_bindings(&RoutingGroupBindingQuery::default())
+            .await?
+            .is_empty())
+    }
+
     async fn list_routing_group_versions(
         &self,
         group_id: &str,

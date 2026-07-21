@@ -15,6 +15,7 @@ const MIGRATIONS_TABLE_EXISTS_SQL: &str =
     "SELECT to_regclass('public._sqlx_migrations') IS NOT NULL";
 const USAGE_LEGACY_BODY_REF_CLEANUP_INDEX_MIGRATION_VERSION: i64 = 20260715000000;
 const USAGE_SETTLEMENT_DASHBOARD_INDEX_MIGRATION_VERSION: i64 = 20260715130000;
+const USAGE_STALE_PENDING_CLEANUP_INDEX_MIGRATION_VERSION: i64 = 20260720000000;
 const INVALID_USAGE_LEGACY_BODY_REF_CLEANUP_INDEX_EXISTS_SQL: &str = r#"
 SELECT EXISTS (
     SELECT 1
@@ -45,6 +46,21 @@ SELECT EXISTS (
 "#;
 const DROP_USAGE_SETTLEMENT_DASHBOARD_INDEX_SQL: &str =
     "DROP INDEX CONCURRENTLY IF EXISTS public.idx_usage_settlement_dashboard_cover";
+const INVALID_USAGE_STALE_PENDING_CLEANUP_INDEX_EXISTS_SQL: &str = r#"
+SELECT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_class AS index_relation
+    JOIN pg_catalog.pg_namespace AS index_namespace
+      ON index_namespace.oid = index_relation.relnamespace
+    JOIN pg_catalog.pg_index AS index_state
+      ON index_state.indexrelid = index_relation.oid
+    WHERE index_namespace.nspname = 'public'
+      AND index_relation.relname = 'idx_usage_stale_pending_created_request'
+      AND NOT index_state.indisvalid
+)
+"#;
+const DROP_USAGE_STALE_PENDING_CLEANUP_INDEX_SQL: &str =
+    "DROP INDEX CONCURRENTLY IF EXISTS public.idx_usage_stale_pending_created_request";
 
 pub type BootstrapFuture<'a> = Pin<Box<dyn Future<Output = Result<(), MigrateError>> + 'a>>;
 
@@ -229,6 +245,11 @@ async fn repair_invalid_concurrent_index(
             INVALID_USAGE_SETTLEMENT_DASHBOARD_INDEX_EXISTS_SQL,
             DROP_USAGE_SETTLEMENT_DASHBOARD_INDEX_SQL,
         ),
+        USAGE_STALE_PENDING_CLEANUP_INDEX_MIGRATION_VERSION => (
+            "idx_usage_stale_pending_created_request",
+            INVALID_USAGE_STALE_PENDING_CLEANUP_INDEX_EXISTS_SQL,
+            DROP_USAGE_STALE_PENDING_CLEANUP_INDEX_SQL,
+        ),
         _ => return Ok(()),
     };
 
@@ -363,7 +384,7 @@ mod tests {
 
     #[test]
     fn concurrent_index_migrations_opt_out_of_transactions() {
-        for version in [20260715000000, 20260715130000] {
+        for version in [20260715000000, 20260715130000, 20260720000000] {
             let migration = POSTGRES_MIGRATOR
                 .iter()
                 .find(|migration| migration.version == version)

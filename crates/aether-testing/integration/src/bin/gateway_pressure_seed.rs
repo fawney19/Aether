@@ -48,6 +48,7 @@ struct Config {
     operator_id: String,
     model: String,
     mock_upstream_base_url: String,
+    mock_upstream_h2c: bool,
     gateway_base_url: String,
     api_key: String,
     api_key_count: usize,
@@ -91,6 +92,8 @@ impl Config {
             model: env_value("PRESSURE_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             mock_upstream_base_url: env_value("PRESSURE_MOCK_UPSTREAM_BASE_URL")
                 .unwrap_or_else(|| DEFAULT_MOCK_UPSTREAM_BASE_URL.to_string()),
+            mock_upstream_h2c: env_value("PRESSURE_MOCK_UPSTREAM_H2C")
+                .is_some_and(|value| matches_truthy(&value)),
             gateway_base_url: env_value("GATEWAY_BASE_URL")
                 .unwrap_or_else(|| DEFAULT_GATEWAY_BASE_URL.to_string()),
             api_key: env_value("AETHER_API_KEY").unwrap_or_else(|| DEFAULT_API_KEY.to_string()),
@@ -129,6 +132,7 @@ impl Config {
                 "--mock-upstream-base-url" => {
                     config.mock_upstream_base_url = arg_value(&args, &mut index, arg)?
                 }
+                "--mock-upstream-h2c" => config.mock_upstream_h2c = true,
                 "--gateway-base-url" => {
                     config.gateway_base_url = arg_value(&args, &mut index, arg)?
                 }
@@ -221,6 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("model={}", config.model);
     println!("api_key_id={}", config.api_key_id);
     println!("api_key_count={}", config.api_key_count);
+    println!("mock_upstream_h2c={}", config.mock_upstream_h2c);
     println!("env written to {}", config.output_env_path.display());
     println!("api key written to {}", config.output_key_path.display());
     println!(
@@ -244,6 +249,7 @@ async fn seed_provider_catalog(
         .provider_catalog()
         .ok_or("provider catalog writer unavailable")?;
 
+    let provider_config = pressure_provider_transport_config(config.mock_upstream_h2c);
     let provider = StoredProviderCatalogProvider::new(
         config.provider_id.clone(),
         "Local pressure OpenAI mock".to_string(),
@@ -259,7 +265,7 @@ async fn seed_provider_catalog(
         None,
         Some(120.0),
         Some(30.0),
-        None,
+        provider_config,
     )
     .with_routing_fields(0)
     .with_description(Some(
@@ -342,6 +348,21 @@ async fn seed_provider_catalog(
     }
 
     Ok(())
+}
+
+fn pressure_provider_transport_config(mock_upstream_h2c: bool) -> Option<serde_json::Value> {
+    mock_upstream_h2c.then(|| {
+        json!({
+            "fingerprint": {
+                "transport_profile": {
+                    "profile_id": "pressure-mock-h2c",
+                    "backend": "reqwest_rustls",
+                    "http_mode": "h2c_prior_knowledge",
+                    "pool_scope": "key"
+                }
+            }
+        })
+    })
 }
 
 async fn seed_models(
@@ -712,6 +733,13 @@ fn env_value(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn matches_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 fn arg_value(args: &[String], index: &mut usize, name: &str) -> Result<String, String> {
     *index += 1;
     args.get(*index)
@@ -743,6 +771,7 @@ Options:\n\
   --output-key-list PATH\n\
   --gateway-base-url URL\n\
   --mock-upstream-base-url URL\n\
+  --mock-upstream-h2c\n\
   --model NAME\n\
   --api-key VALUE\n\
   --api-key-count N\n\
@@ -754,4 +783,32 @@ Options:\n\
   --model-id ID\n\
   --api-key-id ID\n"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::pressure_provider_transport_config;
+
+    #[test]
+    fn pressure_provider_transport_config_enables_h2c_prior_knowledge() {
+        let config = pressure_provider_transport_config(true)
+            .expect("H2C pressure provider config should be present");
+
+        assert_eq!(
+            config.pointer("/fingerprint/transport_profile"),
+            Some(&json!({
+                "profile_id": "pressure-mock-h2c",
+                "backend": "reqwest_rustls",
+                "http_mode": "h2c_prior_knowledge",
+                "pool_scope": "key"
+            }))
+        );
+    }
+
+    #[test]
+    fn pressure_provider_transport_config_is_absent_by_default() {
+        assert_eq!(pressure_provider_transport_config(false), None);
+    }
 }

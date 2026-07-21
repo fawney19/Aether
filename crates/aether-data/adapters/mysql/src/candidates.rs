@@ -303,19 +303,73 @@ ON DUPLICATE KEY UPDATE
   provider_id = VALUES(provider_id),
   endpoint_id = VALUES(endpoint_id),
   key_id = VALUES(key_id),
-  status = VALUES(status),
+  status = CASE
+    WHEN status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND VALUES(status) IN ('available', 'unused', 'pending', 'streaming')
+      THEN status
+    WHEN status = 'pending' AND VALUES(status) IN ('available', 'unused')
+      THEN status
+    WHEN status = 'streaming' AND VALUES(status) IN ('available', 'unused', 'pending')
+      THEN status
+    ELSE VALUES(status)
+  END,
   skip_reason = VALUES(skip_reason),
   is_cached = VALUES(is_cached),
-  status_code = VALUES(status_code),
-  error_type = VALUES(error_type),
-  error_message = VALUES(error_message),
-  latency_ms = VALUES(latency_ms),
+  status_code = CASE
+    WHEN status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND VALUES(status) IN ('available', 'unused', 'pending', 'streaming')
+      THEN status_code
+    WHEN status = 'pending' AND VALUES(status) IN ('available', 'unused')
+      THEN status_code
+    WHEN status = 'streaming' AND VALUES(status) IN ('available', 'unused', 'pending')
+      THEN status_code
+    ELSE COALESCE(VALUES(status_code), status_code)
+  END,
+  error_type = CASE
+    WHEN status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND VALUES(status) IN ('available', 'unused', 'pending', 'streaming')
+      THEN error_type
+    WHEN status = 'pending' AND VALUES(status) IN ('available', 'unused')
+      THEN error_type
+    WHEN status = 'streaming' AND VALUES(status) IN ('available', 'unused', 'pending')
+      THEN error_type
+    ELSE COALESCE(VALUES(error_type), error_type)
+  END,
+  error_message = CASE
+    WHEN status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND VALUES(status) IN ('available', 'unused', 'pending', 'streaming')
+      THEN error_message
+    WHEN status = 'pending' AND VALUES(status) IN ('available', 'unused')
+      THEN error_message
+    WHEN status = 'streaming' AND VALUES(status) IN ('available', 'unused', 'pending')
+      THEN error_message
+    ELSE COALESCE(VALUES(error_message), error_message)
+  END,
+  latency_ms = CASE
+    WHEN status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND VALUES(status) IN ('available', 'unused', 'pending', 'streaming')
+      THEN latency_ms
+    WHEN status = 'pending' AND VALUES(status) IN ('available', 'unused')
+      THEN latency_ms
+    WHEN status = 'streaming' AND VALUES(status) IN ('available', 'unused', 'pending')
+      THEN latency_ms
+    ELSE COALESCE(VALUES(latency_ms), latency_ms)
+  END,
   concurrent_requests = VALUES(concurrent_requests),
   extra_data = VALUES(extra_data),
   required_capabilities = VALUES(required_capabilities),
   created_at = VALUES(created_at),
   started_at = VALUES(started_at),
-  finished_at = VALUES(finished_at)
+  finished_at = CASE
+    WHEN status IN ('success', 'failed', 'cancelled', 'skipped')
+      AND VALUES(status) IN ('available', 'unused', 'pending', 'streaming')
+      THEN finished_at
+    WHEN status = 'pending' AND VALUES(status) IN ('available', 'unused')
+      THEN finished_at
+    WHEN status = 'streaming' AND VALUES(status) IN ('available', 'unused', 'pending')
+      THEN finished_at
+    ELSE COALESCE(VALUES(finished_at), finished_at)
+  END
 "#,
     )
     .bind(&candidate.id)
@@ -720,8 +774,10 @@ fn optional_u64_to_i64(value: Option<u64>, name: &str) -> Result<Option<i64>, Da
 #[cfg(test)]
 mod tests {
     use super::MysqlRequestCandidateRepository;
+    use crate::run_migrations;
     use aether_data_contracts::repository::candidates::{
-        RequestCandidateStatus, StoredRequestCandidate, UpsertRequestCandidateRecord,
+        RequestCandidateReadRepository, RequestCandidateStatus, StoredRequestCandidate,
+        UpsertRequestCandidateRecord,
     };
 
     #[tokio::test]
@@ -733,6 +789,128 @@ mod tests {
         );
 
         let _repository = MysqlRequestCandidateRepository::new(pool);
+    }
+
+    #[tokio::test]
+    async fn mysql_atomic_conflict_keeps_candidate_lifecycle_monotonic_when_configured() {
+        let Some(database_url) = std::env::var("AETHER_TEST_MYSQL_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            eprintln!(
+                "skipping mysql candidate lifecycle test because AETHER_TEST_MYSQL_URL is unset"
+            );
+            return;
+        };
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("mysql test pool should connect");
+        run_migrations(&pool)
+            .await
+            .expect("mysql migrations should run");
+        let repository = MysqlRequestCandidateRepository::new(pool.clone());
+        let request_id = format!("candidate-lifecycle-{}", uuid::Uuid::new_v4());
+
+        let terminal = stored_candidate(
+            &request_id,
+            "terminal",
+            0,
+            RequestCandidateStatus::Success,
+            Some(123),
+            Some(2_000_002),
+        );
+        super::upsert_merged_candidate(&pool, &terminal)
+            .await
+            .expect("terminal candidate should insert");
+        let stale_streaming = stored_candidate(
+            &request_id,
+            "stale-streaming",
+            0,
+            RequestCandidateStatus::Streaming,
+            Some(9_999),
+            Some(9_999_999),
+        );
+        super::upsert_merged_candidate(&pool, &stale_streaming)
+            .await
+            .expect("stale streaming conflict should execute");
+
+        let streaming = stored_candidate(
+            &request_id,
+            "streaming",
+            1,
+            RequestCandidateStatus::Streaming,
+            None,
+            None,
+        );
+        super::upsert_merged_candidate(&pool, &streaming)
+            .await
+            .expect("streaming candidate should insert");
+        let stale_pending = stored_candidate(
+            &request_id,
+            "stale-pending",
+            1,
+            RequestCandidateStatus::Pending,
+            None,
+            None,
+        );
+        super::upsert_merged_candidate(&pool, &stale_pending)
+            .await
+            .expect("stale pending conflict should execute");
+
+        let pending = stored_candidate(
+            &request_id,
+            "pending",
+            2,
+            RequestCandidateStatus::Pending,
+            Some(321),
+            None,
+        );
+        super::upsert_merged_candidate(&pool, &pending)
+            .await
+            .expect("pending candidate should insert");
+        let stale_available = stored_candidate(
+            &request_id,
+            "stale-available",
+            2,
+            RequestCandidateStatus::Available,
+            Some(9_999),
+            Some(9_999_999),
+        );
+        super::upsert_merged_candidate(&pool, &stale_available)
+            .await
+            .expect("stale available conflict should execute");
+
+        let candidates = repository
+            .list_by_request_id(&request_id)
+            .await
+            .expect("mysql request candidates should load");
+        let terminal = candidates
+            .iter()
+            .find(|candidate| candidate.candidate_index == 0)
+            .expect("terminal candidate should remain");
+        assert_eq!(terminal.status, RequestCandidateStatus::Success);
+        assert_eq!(terminal.latency_ms, Some(123));
+        assert_eq!(terminal.finished_at_unix_ms, Some(2_000_002));
+        let streaming = candidates
+            .iter()
+            .find(|candidate| candidate.candidate_index == 1)
+            .expect("streaming candidate should remain");
+        assert_eq!(streaming.status, RequestCandidateStatus::Streaming);
+        let pending = candidates
+            .iter()
+            .find(|candidate| candidate.candidate_index == 2)
+            .expect("pending candidate should remain");
+        assert_eq!(pending.status, RequestCandidateStatus::Pending);
+        assert_eq!(pending.latency_ms, Some(321));
+        assert_eq!(pending.finished_at_unix_ms, None);
+
+        sqlx::query("DELETE FROM request_candidates WHERE request_id = ?")
+            .bind(&request_id)
+            .execute(&pool)
+            .await
+            .expect("mysql candidate test rows should clean up");
     }
 
     #[test]
@@ -804,5 +982,42 @@ mod tests {
             merged.extra_data,
             Some(serde_json::json!({"terminal": true, "late": true}))
         );
+    }
+
+    fn stored_candidate(
+        request_id: &str,
+        id: &str,
+        candidate_index: u32,
+        status: RequestCandidateStatus,
+        latency_ms: Option<i32>,
+        finished_at_unix_ms: Option<i64>,
+    ) -> StoredRequestCandidate {
+        StoredRequestCandidate::new(
+            id.to_string(),
+            request_id.to_string(),
+            Some("user-1".to_string()),
+            Some("key-1".to_string()),
+            None,
+            None,
+            i32::try_from(candidate_index).expect("candidate index should fit"),
+            0,
+            Some("provider-1".to_string()),
+            Some("endpoint-1".to_string()),
+            Some("provider-key-1".to_string()),
+            status,
+            None,
+            false,
+            Some(200),
+            None,
+            None,
+            latency_ms,
+            None,
+            None,
+            None,
+            2_000_000,
+            Some(2_000_001),
+            finished_at_unix_ms,
+        )
+        .expect("stored candidate should build")
     }
 }

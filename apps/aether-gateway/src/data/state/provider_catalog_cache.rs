@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use aether_cache::ExpiringMap;
@@ -16,14 +16,16 @@ use tokio::sync::Notify;
 
 const PROVIDER_CATALOG_CACHE_TTL: Duration = Duration::from_secs(5);
 const PROVIDER_CATALOG_CACHE_MAX_ENTRIES: usize = 1024;
+const PROVIDER_CATALOG_CACHE_MAX_INFLIGHT: usize = 1024;
+const PROVIDER_CATALOG_CACHE_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(super) struct CachedProviderCatalogReadRepository {
     inner: Arc<dyn ProviderCatalogReadRepository>,
     entries: ExpiringMap<ProviderCatalogCacheKey, ProviderCatalogCacheValue>,
-    inflight: Mutex<HashMap<ProviderCatalogCacheKey, u64>>,
-    inflight_notify: Notify,
-    next_inflight_token: AtomicU64,
+    inflight: Mutex<HashMap<ProviderCatalogCacheKey, Arc<ProviderCatalogInflightState>>>,
+    admission: Arc<tokio::sync::Semaphore>,
     epoch: AtomicU64,
+    mutation: Mutex<()>,
 }
 
 impl CachedProviderCatalogReadRepository {
@@ -32,9 +34,11 @@ impl CachedProviderCatalogReadRepository {
             inner,
             entries: ExpiringMap::new(),
             inflight: Mutex::new(HashMap::new()),
-            inflight_notify: Notify::new(),
-            next_inflight_token: AtomicU64::new(1),
+            admission: Arc::new(tokio::sync::Semaphore::new(
+                PROVIDER_CATALOG_CACHE_MAX_INFLIGHT,
+            )),
             epoch: AtomicU64::new(0),
+            mutation: Mutex::new(()),
         }
     }
 
@@ -47,78 +51,181 @@ impl CachedProviderCatalogReadRepository {
         F: Fn() -> Fut,
         Fut: Future<Output = Result<ProviderCatalogCacheValue, DataLayerError>>,
     {
-        if let Some(value) = self.entries.get_fresh(&key, PROVIDER_CATALOG_CACHE_TTL) {
-            return Ok(value);
-        }
-
         loop {
-            let notified = self.inflight_notify.notified();
+            if let Some(value) = self.entries.get_fresh(&key, PROVIDER_CATALOG_CACHE_TTL) {
+                return Ok(value);
+            }
+
             match self.register_inflight(&key) {
-                InflightRegistration::Bypass => return load().await,
-                InflightRegistration::Follower => {
-                    notified.await;
+                InflightRegistration::Saturated => {
+                    return Err(DataLayerError::TimedOut(format!(
+                        "provider catalog cache admission saturated for {key:?}"
+                    )));
+                }
+                InflightRegistration::Follower(state) => {
+                    state.wait().await;
+                    match self.follower_completion(&state) {
+                        Some(ProviderCatalogInflightCompletion::Loaded(value)) => return Ok(value),
+                        Some(ProviderCatalogInflightCompletion::Failed(error)) => {
+                            return Err(error);
+                        }
+                        Some(
+                            ProviderCatalogInflightCompletion::Cancelled
+                            | ProviderCatalogInflightCompletion::Invalidated,
+                        )
+                        | None => continue,
+                    }
+                }
+                InflightRegistration::Leader(mut guard) => {
                     if let Some(value) = self.entries.get_fresh(&key, PROVIDER_CATALOG_CACHE_TTL) {
+                        guard.finish(ProviderCatalogInflightCompletion::Loaded(value.clone()));
                         return Ok(value);
                     }
-                }
-                InflightRegistration::Leader(token) => {
-                    let mut guard = InflightGuard::new(self, key.clone(), token);
-                    let load_epoch = self.epoch.load(Ordering::Acquire);
-                    let result = load().await;
-                    if let Ok(value) = &result {
-                        if load_epoch == self.epoch.load(Ordering::Acquire) {
-                            self.entries.insert(
-                                key.clone(),
-                                value.clone(),
-                                PROVIDER_CATALOG_CACHE_TTL,
-                                PROVIDER_CATALOG_CACHE_MAX_ENTRIES,
-                            );
+                    let result =
+                        match tokio::time::timeout(PROVIDER_CATALOG_CACHE_LOAD_TIMEOUT, load())
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(DataLayerError::TimedOut(format!(
+                                "provider catalog cache load exceeded {}ms for {key:?}",
+                                PROVIDER_CATALOG_CACHE_LOAD_TIMEOUT.as_millis()
+                            ))),
+                        };
+                    match result {
+                        Ok(value) => {
+                            guard.finish_loaded(value.clone());
+                            return Ok(value);
+                        }
+                        Err(error) => {
+                            guard.finish(ProviderCatalogInflightCompletion::Failed(error.clone()));
+                            return Err(error);
                         }
                     }
-                    guard.finish();
-                    return result;
                 }
             }
         }
     }
 
-    fn register_inflight(&self, key: &ProviderCatalogCacheKey) -> InflightRegistration {
-        match self.inflight.lock() {
-            Ok(mut inflight) => {
-                if inflight.contains_key(key) {
-                    return InflightRegistration::Follower;
-                }
-                let token = self.next_inflight_token.fetch_add(1, Ordering::AcqRel);
-                inflight.insert(key.clone(), token);
-                InflightRegistration::Leader(token)
+    fn register_inflight(&self, key: &ProviderCatalogCacheKey) -> InflightRegistration<'_> {
+        {
+            let inflight = self
+                .inflight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(state) = inflight.get(key) {
+                return InflightRegistration::Follower(Arc::clone(state));
             }
-            Err(_) => InflightRegistration::Bypass,
         }
+
+        let _mutation = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut inflight = self
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(state) = inflight.get(key) {
+            return InflightRegistration::Follower(Arc::clone(state));
+        }
+        if inflight.len() >= PROVIDER_CATALOG_CACHE_MAX_INFLIGHT {
+            return InflightRegistration::Saturated;
+        }
+        let Ok(admission) = Arc::clone(&self.admission).try_acquire_owned() else {
+            return InflightRegistration::Saturated;
+        };
+
+        let state = Arc::new(ProviderCatalogInflightState {
+            notify: Arc::new(Notify::new()),
+            completion: OnceLock::new(),
+            epoch: self.epoch.load(Ordering::Acquire),
+        });
+        inflight.insert(key.clone(), Arc::clone(&state));
+        InflightRegistration::Leader(InflightGuard {
+            cache: self,
+            key: Some(key.clone()),
+            state,
+            admission: Some(admission),
+        })
     }
 
-    fn finish_inflight(&self, key: &ProviderCatalogCacheKey, token: u64) {
-        let mut removed = false;
-        if let Ok(mut inflight) = self.inflight.lock() {
-            if inflight.get(key).copied() == Some(token) {
+    fn finish_inflight(
+        &self,
+        key: &ProviderCatalogCacheKey,
+        state: &Arc<ProviderCatalogInflightState>,
+        admission: tokio::sync::OwnedSemaphorePermit,
+        completion: ProviderCatalogInflightCompletion,
+        cache_value: Option<ProviderCatalogCacheValue>,
+    ) {
+        let _mutation = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let removed = {
+            let mut inflight = self
+                .inflight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop(admission);
+            debug_assert!(self.admission.available_permits() > 0);
+            if inflight
+                .get(key)
+                .is_some_and(|current| Arc::ptr_eq(current, state))
+                && self.epoch.load(Ordering::Acquire) == state.epoch
+            {
+                if let Some(value) = cache_value {
+                    self.entries.insert(
+                        key.clone(),
+                        value,
+                        PROVIDER_CATALOG_CACHE_TTL,
+                        PROVIDER_CATALOG_CACHE_MAX_ENTRIES,
+                    );
+                }
+                state.complete(completion);
                 inflight.remove(key);
-                removed = true;
+                true
+            } else {
+                false
             }
-        }
+        };
+        drop(_mutation);
         if removed {
-            self.inflight_notify.notify_waiters();
+            state.notify.notify_waiters();
         }
+    }
+
+    fn follower_completion(
+        &self,
+        state: &ProviderCatalogInflightState,
+    ) -> Option<ProviderCatalogInflightCompletion> {
+        let before = self.epoch.load(Ordering::Acquire);
+        let completion = state.completion.get().cloned();
+        let after = self.epoch.load(Ordering::Acquire);
+        (before == state.epoch && before == after)
+            .then_some(completion)
+            .flatten()
     }
 
     fn clear(&self) {
+        let _mutation = self
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.epoch.fetch_add(1, Ordering::AcqRel);
         self.entries.clear();
-        let mut cleared_inflight = false;
-        if let Ok(mut inflight) = self.inflight.lock() {
-            cleared_inflight = !inflight.is_empty();
-            inflight.clear();
+        let states = self
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .map(|(_, state)| state)
+            .collect::<Vec<_>>();
+        for state in &states {
+            state.complete(ProviderCatalogInflightCompletion::Invalidated);
         }
-        if cleared_inflight {
-            self.inflight_notify.notify_waiters();
+        drop(_mutation);
+        for state in states {
+            state.notify.notify_waiters();
         }
     }
 }
@@ -335,41 +442,83 @@ enum ProviderCatalogCacheValue {
     KeyStats(Vec<StoredProviderCatalogKeyStats>),
 }
 
-enum InflightRegistration {
-    Leader(u64),
-    Follower,
-    Bypass,
+struct ProviderCatalogInflightState {
+    notify: Arc<Notify>,
+    completion: OnceLock<ProviderCatalogInflightCompletion>,
+    epoch: u64,
+}
+
+impl ProviderCatalogInflightState {
+    fn complete(&self, completion: ProviderCatalogInflightCompletion) {
+        let _ = self.completion.set(completion);
+    }
+
+    async fn wait(&self) {
+        loop {
+            if self.completion.get().is_some() {
+                return;
+            }
+
+            let mut notified = Box::pin(self.notify.notified());
+            notified.as_mut().enable();
+            if self.completion.get().is_some() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[derive(Clone)]
+enum ProviderCatalogInflightCompletion {
+    Loaded(ProviderCatalogCacheValue),
+    Failed(DataLayerError),
+    Cancelled,
+    Invalidated,
+}
+
+enum InflightRegistration<'a> {
+    Leader(InflightGuard<'a>),
+    Follower(Arc<ProviderCatalogInflightState>),
+    Saturated,
 }
 
 struct InflightGuard<'a> {
     cache: &'a CachedProviderCatalogReadRepository,
     key: Option<ProviderCatalogCacheKey>,
-    token: u64,
+    state: Arc<ProviderCatalogInflightState>,
+    admission: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
-impl<'a> InflightGuard<'a> {
-    fn new(
-        cache: &'a CachedProviderCatalogReadRepository,
-        key: ProviderCatalogCacheKey,
-        token: u64,
-    ) -> Self {
-        Self {
-            cache,
-            key: Some(key),
-            token,
-        }
+impl InflightGuard<'_> {
+    fn finish_loaded(&mut self, value: ProviderCatalogCacheValue) {
+        let completion = ProviderCatalogInflightCompletion::Loaded(value.clone());
+        self.finish_with_cache(completion, Some(value));
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, completion: ProviderCatalogInflightCompletion) {
+        self.finish_with_cache(completion, None);
+    }
+
+    fn finish_with_cache(
+        &mut self,
+        completion: ProviderCatalogInflightCompletion,
+        cache_value: Option<ProviderCatalogCacheValue>,
+    ) {
         if let Some(key) = self.key.take() {
-            self.cache.finish_inflight(&key, self.token);
+            let admission = self
+                .admission
+                .take()
+                .expect("active provider catalog leader must own admission");
+            self.cache
+                .finish_inflight(&key, &self.state, admission, completion, cache_value);
         }
     }
 }
 
 impl Drop for InflightGuard<'_> {
     fn drop(&mut self) {
-        self.finish();
+        self.finish(ProviderCatalogInflightCompletion::Cancelled);
     }
 }
 
@@ -383,4 +532,174 @@ fn normalize_ids(ids: &[String]) -> Vec<String> {
     normalized.sort();
     normalized.dedup();
     normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+
+    fn cache() -> CachedProviderCatalogReadRepository {
+        CachedProviderCatalogReadRepository::new(Arc::new(
+            InMemoryProviderCatalogReadRepository::seed(Vec::new(), Vec::new(), Vec::new()),
+        ))
+    }
+
+    fn provider(id: &str) -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            id.to_string(),
+            id.to_string(),
+            None,
+            "openai".to_string(),
+        )
+        .expect("provider should be valid")
+    }
+
+    #[tokio::test]
+    async fn provider_catalog_follower_observes_completion_before_first_poll() {
+        let cache = cache();
+        let key = ProviderCatalogCacheKey::Providers { active_only: false };
+        let mut leader = match cache.register_inflight(&key) {
+            InflightRegistration::Leader(guard) => guard,
+            _ => panic!("first registration should lead"),
+        };
+        let follower = match cache.register_inflight(&key) {
+            InflightRegistration::Follower(state) => state,
+            _ => panic!("second registration should follow"),
+        };
+
+        leader.finish(ProviderCatalogInflightCompletion::Loaded(
+            ProviderCatalogCacheValue::Providers(Vec::new()),
+        ));
+        tokio::time::timeout(Duration::from_millis(100), follower.wait())
+            .await
+            .expect("completion before the first poll must release the follower");
+        assert!(matches!(
+            cache.follower_completion(&follower),
+            Some(ProviderCatalogInflightCompletion::Loaded(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn provider_catalog_follower_receives_leader_failure() {
+        let cache = cache();
+        let key = ProviderCatalogCacheKey::Providers { active_only: false };
+        let mut leader = match cache.register_inflight(&key) {
+            InflightRegistration::Leader(guard) => guard,
+            _ => panic!("first registration should lead"),
+        };
+        let follower = match cache.register_inflight(&key) {
+            InflightRegistration::Follower(state) => state,
+            _ => panic!("second registration should follow"),
+        };
+
+        leader.finish(ProviderCatalogInflightCompletion::Failed(
+            DataLayerError::Sql("forced provider catalog failure".to_string()),
+        ));
+        tokio::time::timeout(Duration::from_millis(100), follower.wait())
+            .await
+            .expect("failed load must release the follower");
+        let Some(ProviderCatalogInflightCompletion::Failed(error)) =
+            cache.follower_completion(&follower)
+        else {
+            panic!("follower should observe the failed completion");
+        };
+        assert_eq!(
+            error.to_string(),
+            "sql error: forced provider catalog failure"
+        );
+    }
+
+    #[test]
+    fn provider_catalog_old_guard_cannot_remove_replacement_after_clear() {
+        let cache = cache();
+        let key = ProviderCatalogCacheKey::Providers { active_only: false };
+        let old_leader = match cache.register_inflight(&key) {
+            InflightRegistration::Leader(guard) => guard,
+            _ => panic!("first registration should lead"),
+        };
+
+        cache.clear();
+        let replacement = match cache.register_inflight(&key) {
+            InflightRegistration::Leader(guard) => guard,
+            _ => panic!("clear should admit a replacement"),
+        };
+        drop(old_leader);
+        assert!(matches!(
+            cache.register_inflight(&key),
+            InflightRegistration::Follower(_)
+        ));
+        drop(replacement);
+    }
+
+    #[test]
+    fn provider_catalog_old_flight_after_clear_cannot_overwrite_replacement() {
+        let cache = cache();
+        let key = ProviderCatalogCacheKey::Providers { active_only: false };
+        let mut old_leader = match cache.register_inflight(&key) {
+            InflightRegistration::Leader(guard) => guard,
+            _ => panic!("first registration should lead"),
+        };
+
+        cache.clear();
+        let mut replacement = match cache.register_inflight(&key) {
+            InflightRegistration::Leader(guard) => guard,
+            _ => panic!("clear should admit a replacement"),
+        };
+        replacement.finish_loaded(ProviderCatalogCacheValue::Providers(vec![provider(
+            "fresh",
+        )]));
+        old_leader.finish_loaded(ProviderCatalogCacheValue::Providers(vec![provider(
+            "stale",
+        )]));
+
+        let Some(ProviderCatalogCacheValue::Providers(cached)) =
+            cache.entries.get_fresh(&key, PROVIDER_CATALOG_CACHE_TTL)
+        else {
+            panic!("replacement value should remain cached");
+        };
+        assert_eq!(cached[0].id, "fresh");
+    }
+
+    #[test]
+    fn provider_catalog_capacity_full_cancelled_follower_can_retry_after_repeated_clear() {
+        let cache = cache();
+        let key = ProviderCatalogCacheKey::Providers { active_only: false };
+        let mut active = Vec::with_capacity(PROVIDER_CATALOG_CACHE_MAX_INFLIGHT);
+
+        for _ in 0..PROVIDER_CATALOG_CACHE_MAX_INFLIGHT - 1 {
+            let leader = match cache.register_inflight(&key) {
+                InflightRegistration::Leader(guard) => guard,
+                _ => panic!("each available permit should admit one leader"),
+            };
+            active.push(leader);
+            cache.clear();
+        }
+
+        let current = match cache.register_inflight(&key) {
+            InflightRegistration::Leader(guard) => guard,
+            _ => panic!("the final available permit should admit a leader"),
+        };
+        let follower = match cache.register_inflight(&key) {
+            InflightRegistration::Follower(state) => state,
+            _ => panic!("the same-key request should follow at full capacity"),
+        };
+        assert_eq!(cache.admission.available_permits(), 0);
+        assert!(matches!(
+            cache.register_inflight(&ProviderCatalogCacheKey::Providers { active_only: true }),
+            InflightRegistration::Saturated
+        ));
+
+        drop(current);
+        assert!(matches!(
+            cache.follower_completion(&follower),
+            Some(ProviderCatalogInflightCompletion::Cancelled)
+        ));
+        let mut replacement = match cache.register_inflight(&key) {
+            InflightRegistration::Leader(guard) => guard,
+            _ => panic!("cancelled follower retry should use the released permit"),
+        };
+        replacement.finish(ProviderCatalogInflightCompletion::Cancelled);
+        assert_eq!(cache.admission.available_permits(), 1);
+    }
 }

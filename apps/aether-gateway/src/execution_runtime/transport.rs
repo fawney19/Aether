@@ -4,7 +4,7 @@ use std::future::Future;
 use std::io::Read;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, OnceLock, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 use aether_contracts::{
@@ -74,6 +74,9 @@ const DIRECT_H2C_POOL_MAX_IDLE_PER_HOST_ENV: &str =
 const DIRECT_H2C_TARGET_STREAMS_PER_CLIENT_ENV: &str =
     "AETHER_GATEWAY_DIRECT_H2C_TARGET_STREAMS_PER_CLIENT";
 const DIRECT_H2C_SENDER_SELECT_WINDOW_ENV: &str = "AETHER_GATEWAY_DIRECT_H2C_SENDER_SELECT_WINDOW";
+const DIRECT_H2C_ADAPTIVE_WINDOW_ENV: &str = "AETHER_GATEWAY_DIRECT_H2C_ADAPTIVE_WINDOW";
+const DIRECT_H2C_DRIVER_RUNTIME_THREADS_ENV: &str =
+    "AETHER_GATEWAY_DIRECT_H2C_DRIVER_RUNTIME_THREADS";
 const DIRECT_H2C_PREWARM_URLS_ENV: &str = "AETHER_GATEWAY_DIRECT_H2C_PREWARM_URLS";
 const DIRECT_H2C_PREWARM_READY_ENV: &str = "AETHER_GATEWAY_DIRECT_H2C_PREWARM_READY";
 const DIRECT_H2C_PREWARM_CONNECT_TIMEOUT_MS_ENV: &str =
@@ -87,6 +90,10 @@ const DEFAULT_HTTP1_TARGET_STREAMS_PER_CLIENT: usize = 512;
 const DEFAULT_DIRECT_H2C_POOL_MAX_IDLE_PER_HOST: usize = 512;
 const DEFAULT_DIRECT_H2C_TARGET_STREAMS_PER_CLIENT: usize = 128;
 const DEFAULT_DIRECT_H2C_SENDER_SELECT_WINDOW: usize = 4;
+const MAX_DIRECT_H2C_DRIVER_RUNTIME_THREADS: usize = 16;
+const DIRECT_H2C_DRIVER_RUNTIME_MAX_BLOCKING_THREADS: usize = 16;
+const DIRECT_H2C_DRIVER_RUNTIME_STACK_BYTES: usize = 2 * 1024 * 1024;
+const DIRECT_H2C_DRIVER_RUNTIME_THREAD_NAME: &str = "aether-h2c-driver";
 const DEFAULT_DIRECT_REQWEST_SYNC_WARM_CLIENTS: usize = 4;
 const MAX_DIRECT_REQWEST_SYNC_WARM_CLIENTS: usize = 16;
 const MAX_DIRECT_H2C_CLIENT_SHARDS: usize = 512;
@@ -334,8 +341,8 @@ static DIRECT_H2C_CLIENT_CACHE: LazyLock<
 > = LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 static DIRECT_H2C_SENDER_CACHE: LazyLock<
-    StdMutex<HashMap<DirectHyperH2cClientCacheKey, Arc<DirectHyperH2cSenderCacheCell>>>,
-> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+    StdRwLock<HashMap<DirectHyperH2cClientCacheKey, Arc<DirectHyperH2cSenderCacheCell>>>,
+> = LazyLock::new(|| StdRwLock::new(HashMap::new()));
 
 static DIRECT_H2C_POOL_MAX_IDLE_PER_HOST: LazyLock<usize> = LazyLock::new(|| {
     env_positive_usize(DIRECT_H2C_POOL_MAX_IDLE_PER_HOST_ENV)
@@ -1560,24 +1567,47 @@ fn direct_h2c_sender_cache_cell(
     cache_key: &DirectHyperH2cClientCacheKey,
 ) -> Arc<DirectHyperH2cSenderCacheCell> {
     let cache_lock_started_at = Instant::now();
-    if let Ok(mut cache) = DIRECT_H2C_SENDER_CACHE.lock() {
+    if let Ok(cache) = DIRECT_H2C_SENDER_CACHE.read() {
+        if let Some(cell) = cache.get(cache_key) {
+            let cell = Arc::clone(cell);
+            drop(cache);
+            observe_gateway_stage_ms(
+                "direct_reqwest_client_cache_lock",
+                cache_lock_started_at.elapsed().as_millis() as u64,
+            );
+            DIRECT_H2C_SENDER_CACHE_METRICS
+                .hits
+                .fetch_add(1, Ordering::Relaxed);
+            return cell;
+        }
+    }
+
+    // Recheck after acquiring the write lock so simultaneous first requests
+    // still share one OnceCell and one connection warmup.
+    if let Ok(mut cache) = DIRECT_H2C_SENDER_CACHE.write() {
+        let (cell, hit) = match cache.get(cache_key) {
+            Some(cell) => (Arc::clone(cell), true),
+            None => {
+                let cell = Arc::new(TokioOnceCell::new());
+                cache.insert(cache_key.clone(), Arc::clone(&cell));
+                (cell, false)
+            }
+        };
+        drop(cache);
         observe_gateway_stage_ms(
             "direct_reqwest_client_cache_lock",
             cache_lock_started_at.elapsed().as_millis() as u64,
         );
-        if let Some(cell) = cache.get(cache_key) {
+        if hit {
             DIRECT_H2C_SENDER_CACHE_METRICS
                 .hits
                 .fetch_add(1, Ordering::Relaxed);
-            Arc::clone(cell)
         } else {
             DIRECT_H2C_SENDER_CACHE_METRICS
                 .misses
                 .fetch_add(1, Ordering::Relaxed);
-            let cell = Arc::new(TokioOnceCell::new());
-            cache.insert(cache_key.clone(), Arc::clone(&cell));
-            cell
         }
+        return cell;
     } else {
         observe_gateway_stage_ms(
             "direct_reqwest_client_cache_lock",
@@ -1586,8 +1616,8 @@ fn direct_h2c_sender_cache_cell(
         DIRECT_H2C_SENDER_CACHE_METRICS
             .misses
             .fetch_add(1, Ordering::Relaxed);
-        Arc::new(TokioOnceCell::new())
     }
+    Arc::new(TokioOnceCell::new())
 }
 
 fn direct_h2c_client_cache_key(
@@ -1626,6 +1656,33 @@ async fn build_direct_h2c_sender_cache_entry_from_cache_key(
 }
 
 async fn connect_direct_h2c_sender(
+    cache_key: &DirectHyperH2cClientCacheKey,
+) -> Result<DirectHyperH2cSender, ExecutionRuntimeTransportError> {
+    let driver_runtime = configured_direct_h2c_driver_runtime()?;
+    connect_direct_h2c_sender_on_runtime(cache_key, driver_runtime).await
+}
+
+async fn connect_direct_h2c_sender_on_runtime(
+    cache_key: &DirectHyperH2cClientCacheKey,
+    driver_runtime: Option<&'static tokio::runtime::Runtime>,
+) -> Result<DirectHyperH2cSender, ExecutionRuntimeTransportError> {
+    let Some(driver_runtime) = driver_runtime else {
+        return connect_direct_h2c_sender_on_current_runtime(cache_key).await;
+    };
+
+    let cache_key = cache_key.clone();
+    driver_runtime
+        .handle()
+        .spawn(async move { connect_direct_h2c_sender_on_current_runtime(&cache_key).await })
+        .await
+        .map_err(|err| {
+            ExecutionRuntimeTransportError::UpstreamRequest(format!(
+                "direct H2C connect task failed: {err}"
+            ))
+        })?
+}
+
+async fn connect_direct_h2c_sender_on_current_runtime(
     cache_key: &DirectHyperH2cClientCacheKey,
 ) -> Result<DirectHyperH2cSender, ExecutionRuntimeTransportError> {
     let upstream = reqwest::Url::parse(&cache_key.upstream_origin).map_err(|err| {
@@ -1678,11 +1735,13 @@ async fn connect_direct_h2c_sender(
     })?;
     let io = TokioIo::new(stream);
     let mut builder = hyper::client::conn::http2::Builder::new(TokioExecutor::new());
-    builder.adaptive_window(true);
+    builder.adaptive_window(direct_h2c_adaptive_window_enabled());
     let (sender, connection) = builder.handshake(io).await.map_err(|err| {
         ExecutionRuntimeTransportError::UpstreamRequest(format_hyper_error_chain(&err))
     })?;
-    tokio::spawn(async move {
+    // Connect, handshake, and drive the connection on the same runtime so the
+    // socket remains registered with the reactor polling the H2 connection.
+    spawn_direct_h2c_driver_task(None, async move {
         if let Err(err) = connection.await {
             tracing::debug!(
                 error = %format_hyper_error_chain(&err),
@@ -1778,6 +1837,82 @@ fn direct_h2c_client_shard_count() -> usize {
 
 fn direct_h2c_sender_select_window() -> usize {
     *DIRECT_H2C_SENDER_SELECT_WINDOW
+}
+
+fn direct_h2c_adaptive_window_enabled() -> bool {
+    std::env::var(DIRECT_H2C_ADAPTIVE_WINDOW_ENV)
+        .ok()
+        .map(|value| matches_truthy_env_value(value.trim()))
+        .unwrap_or(true)
+}
+
+fn direct_h2c_driver_runtime_threads() -> Option<usize> {
+    parse_direct_h2c_driver_runtime_threads(
+        std::env::var(DIRECT_H2C_DRIVER_RUNTIME_THREADS_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_direct_h2c_driver_runtime_threads(value: Option<&str>) -> Option<usize> {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|threads| *threads > 0)
+        .map(|threads| threads.clamp(1, MAX_DIRECT_H2C_DRIVER_RUNTIME_THREADS))
+}
+
+fn configured_direct_h2c_driver_runtime(
+) -> Result<Option<&'static tokio::runtime::Runtime>, ExecutionRuntimeTransportError> {
+    direct_h2c_driver_runtime_threads()
+        .map(direct_h2c_driver_runtime)
+        .transpose()
+}
+
+fn direct_h2c_driver_runtime(
+    worker_threads: usize,
+) -> Result<&'static tokio::runtime::Runtime, ExecutionRuntimeTransportError> {
+    struct RuntimeEntry {
+        runtime: &'static tokio::runtime::Runtime,
+        worker_threads: usize,
+    }
+
+    static RUNTIME: OnceLock<Result<RuntimeEntry, String>> = OnceLock::new();
+    let entry = RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(worker_threads)
+            .max_blocking_threads(DIRECT_H2C_DRIVER_RUNTIME_MAX_BLOCKING_THREADS)
+            .thread_name(DIRECT_H2C_DRIVER_RUNTIME_THREAD_NAME)
+            .thread_stack_size(DIRECT_H2C_DRIVER_RUNTIME_STACK_BYTES)
+            .build()
+            .map(|runtime| RuntimeEntry {
+                runtime: Box::leak(Box::new(runtime)),
+                worker_threads,
+            })
+            .map_err(|err| format!("failed to build direct H2C driver runtime: {err}"))
+    });
+    match entry {
+        Ok(entry) if entry.worker_threads == worker_threads => Ok(entry.runtime),
+        Ok(entry) => Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
+            "direct H2C driver runtime was initialized with {} worker threads, not {worker_threads}",
+            entry.worker_threads
+        ))),
+        Err(err) => Err(ExecutionRuntimeTransportError::UpstreamRequest(err.clone())),
+    }
+}
+
+fn spawn_direct_h2c_driver_task<F>(
+    driver_runtime: Option<&'static tokio::runtime::Runtime>,
+    task: F,
+) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match driver_runtime {
+        Some(runtime) => runtime.handle().spawn(task),
+        None => tokio::spawn(task),
+    }
 }
 
 async fn send_via_direct_h2c_fast_path(
@@ -3017,7 +3152,7 @@ pub(crate) fn direct_reqwest_client_cache_metric_samples() -> Vec<MetricSample> 
         h2c_sender_in_flight,
         h2c_sender_max_in_flight,
     ) = DIRECT_H2C_SENDER_CACHE
-        .lock()
+        .read()
         .map_or((0, 0, 0, 0, 0, 0, 0), |cache| {
             let entries = cache.len() as u64;
             let ready_entries = cache
@@ -4186,6 +4321,74 @@ mod tests {
         let _guard = direct_reqwest_env_lock();
         let _shards = set_test_env_var(super::DIRECT_H2C_CLIENT_SHARDS_ENV, "7");
         assert_eq!(super::direct_h2c_client_shard_count(), 7);
+    }
+
+    #[test]
+    fn direct_h2c_adaptive_window_respects_explicit_env() {
+        let _guard = direct_reqwest_env_lock();
+        {
+            let _adaptive = set_test_env_var(super::DIRECT_H2C_ADAPTIVE_WINDOW_ENV, "0");
+            assert!(!super::direct_h2c_adaptive_window_enabled());
+        }
+        let _adaptive = set_test_env_var(super::DIRECT_H2C_ADAPTIVE_WINDOW_ENV, "true");
+        assert!(super::direct_h2c_adaptive_window_enabled());
+    }
+
+    #[test]
+    fn direct_h2c_driver_runtime_threads_are_opt_in_and_bounded() {
+        assert_eq!(super::parse_direct_h2c_driver_runtime_threads(None), None);
+        assert_eq!(
+            super::parse_direct_h2c_driver_runtime_threads(Some("")),
+            None
+        );
+        assert_eq!(
+            super::parse_direct_h2c_driver_runtime_threads(Some("invalid")),
+            None
+        );
+        assert_eq!(
+            super::parse_direct_h2c_driver_runtime_threads(Some("0")),
+            None
+        );
+        assert_eq!(
+            super::parse_direct_h2c_driver_runtime_threads(Some(" 1 ")),
+            Some(1)
+        );
+        assert_eq!(
+            super::parse_direct_h2c_driver_runtime_threads(Some("16")),
+            Some(16)
+        );
+        assert_eq!(
+            super::parse_direct_h2c_driver_runtime_threads(Some("128")),
+            Some(super::MAX_DIRECT_H2C_DRIVER_RUNTIME_THREADS)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn direct_h2c_driver_task_defaults_to_current_runtime_and_can_use_dedicated_runtime() {
+        let current_runtime_id = tokio::runtime::Handle::current().id();
+        let default_runtime_id = super::spawn_direct_h2c_driver_task(None, async {
+            tokio::runtime::Handle::current().id()
+        })
+        .await
+        .expect("default direct H2C driver task should join");
+        assert_eq!(default_runtime_id, current_runtime_id);
+
+        let driver_runtime = super::direct_h2c_driver_runtime(1)
+            .expect("dedicated direct H2C driver runtime should build");
+        let (dedicated_runtime_id, thread_name) =
+            super::spawn_direct_h2c_driver_task(Some(driver_runtime), async {
+                (
+                    tokio::runtime::Handle::current().id(),
+                    std::thread::current().name().map(ToOwned::to_owned),
+                )
+            })
+            .await
+            .expect("dedicated direct H2C driver task should join");
+        assert_ne!(dedicated_runtime_id, current_runtime_id);
+        assert_eq!(
+            thread_name.as_deref(),
+            Some(super::DIRECT_H2C_DRIVER_RUNTIME_THREAD_NAME)
+        );
     }
 
     #[test]
@@ -6283,6 +6486,148 @@ mod tests {
         );
         super::build_direct_reqwest_client_from_cache_key(&cache_key)
             .expect("h2c prior-knowledge client should build");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn direct_sync_execution_runtime_uses_h2c_prior_knowledge_on_wire() {
+        let _guard = direct_reqwest_env_lock();
+        let _shards = set_test_env_var(super::DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV, "1");
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let service = hyper::service::service_fn(
+                |request: hyper::Request<hyper::body::Incoming>| async move {
+                    let body = if request.version() == hyper::Version::HTTP_2 {
+                        Bytes::from_static(br#"{"http_version":"h2c"}"#)
+                    } else {
+                        Bytes::from_static(br#"{"http_version":"unexpected"}"#)
+                    };
+                    Ok::<_, std::convert::Infallible>(
+                        hyper::Response::builder()
+                            .header(hyper::header::CONTENT_TYPE, "application/json")
+                            .body(http_body_util::Full::new(body))
+                            .expect("response should build"),
+                    )
+                },
+            );
+            hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                .await
+                .expect("H2C server connection should run");
+        });
+
+        let result = DirectSyncExecutionRuntime::new()
+            .execute_sync(&ExecutionPlan {
+                request_id: "req-h2c-wire-1".into(),
+                candidate_id: Some("cand-h2c-wire-1".into()),
+                provider_name: Some("mock".into()),
+                provider_id: "prov-h2c-wire".into(),
+                endpoint_id: "ep-h2c-wire".into(),
+                key_id: "key-h2c-wire".into(),
+                method: "POST".into(),
+                url: format!("http://{addr}/chat"),
+                headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+                content_type: Some("application/json".into()),
+                content_encoding: None,
+                body: RequestBody::from_json(json!({"model": "mock-model"})),
+                stream: false,
+                client_api_format: "openai:chat".into(),
+                provider_api_format: "openai:chat".into(),
+                model_name: Some("mock-model".into()),
+                proxy: None,
+                transport_profile: Some(ResolvedTransportProfile {
+                    profile_id: "mock-h2c-wire".into(),
+                    backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
+                    http_mode: TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE.into(),
+                    pool_scope: "key".into(),
+                    header_fingerprint: None,
+                    extra: None,
+                }),
+                timeouts: Some(ExecutionTimeouts {
+                    connect_ms: Some(5_000),
+                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
+                    ..ExecutionTimeouts::default()
+                }),
+            })
+            .await
+            .expect("H2C prior-knowledge request should succeed");
+
+        server.abort();
+        let _ = server.await;
+
+        assert_eq!(result.status_code, 200);
+        assert_eq!(
+            result.body.and_then(|body| body.json_body),
+            Some(json!({"http_version": "h2c"}))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn direct_h2c_connection_driver_can_run_on_dedicated_runtime() {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let service = hyper::service::service_fn(
+                |request: hyper::Request<hyper::body::Incoming>| async move {
+                    assert_eq!(request.version(), hyper::Version::HTTP_2);
+                    Ok::<_, std::convert::Infallible>(
+                        hyper::Response::builder()
+                            .header("x-aether-driver-runtime", "dedicated")
+                            .body(http_body_util::Full::new(Bytes::from_static(b"ok")))
+                            .expect("response should build"),
+                    )
+                },
+            );
+            hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                .await
+                .expect("H2C server connection should run");
+        });
+
+        let driver_runtime = super::direct_h2c_driver_runtime(1)
+            .expect("dedicated direct H2C driver runtime should build");
+        let cache_key = super::DirectHyperH2cClientCacheKey {
+            upstream_origin: format!("http://{addr}"),
+            connect_timeout_ms: Some(5_000),
+            pool_max_idle_per_host: 1,
+        };
+        let sender = super::connect_direct_h2c_sender_on_runtime(&cache_key, Some(driver_runtime))
+            .await
+            .expect("dedicated-runtime H2C sender should connect");
+        let slot = super::DirectHyperH2cSenderSlot::new(sender);
+        let request = hyper::Request::builder()
+            .method(hyper::Method::POST)
+            .uri(format!("http://{addr}/chat"))
+            .header(hyper::header::HOST, addr.to_string())
+            .body(http_body_util::Full::new(Bytes::from_static(b"{}")))
+            .expect("request should build");
+        let response = super::send_hyper_h2c_request(
+            slot.acquire(),
+            request,
+            Some(std::time::Duration::from_secs(5)),
+        )
+        .await
+        .expect("dedicated-runtime H2C request should succeed");
+
+        assert_eq!(response.status(), hyper::StatusCode::OK);
+        assert_eq!(response.version(), hyper::Version::HTTP_2);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-aether-driver-runtime")
+                .and_then(|value| value.to_str().ok()),
+            Some("dedicated")
+        );
+        drop(response);
+        drop(slot);
+        server.abort();
+        let _ = server.await;
     }
 
     #[test]

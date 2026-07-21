@@ -32,7 +32,7 @@ use sqlx::{
     query::Query,
     PgPool, Postgres, QueryBuilder, Row,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use uuid::Uuid;
 
@@ -44,12 +44,12 @@ use aether_data_contracts::repository::usage::{
     api_key_usage_contribution, incoming_usage_can_recover_terminal_failure,
     model_usage_contribution, provider_api_key_usage_contribution,
     strip_deprecated_usage_display_fields, ApiKeyUsageDelta, ModelUsageDelta,
-    PendingUsageCleanupSummary, ProviderApiKeyUsageDelta, ProviderApiKeyWindowUsageRequest,
-    StoredProviderApiKeyUsageSummary, StoredProviderApiKeyWindowUsageSummary,
-    StoredProviderUsageSummary, StoredRequestUsageAudit, StoredUsageDailySummary,
-    UpsertUsageRecord, UsageAuditListQuery, UsageCounterFlushSummary, UsageCounterHealthSnapshot,
-    UsageCounterPendingHealthSnapshot, UsageDailyHeatmapQuery, UsageReadRepository,
-    UsageWriteRepository, PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY,
+    PendingUsageCleanupSummary, ProviderApiKeyUsageContribution, ProviderApiKeyUsageDelta,
+    ProviderApiKeyWindowUsageRequest, StoredProviderApiKeyUsageSummary,
+    StoredProviderApiKeyWindowUsageSummary, StoredProviderUsageSummary, StoredRequestUsageAudit,
+    StoredUsageDailySummary, UpsertUsageRecord, UsageAuditListQuery, UsageCounterFlushSummary,
+    UsageCounterHealthSnapshot, UsageCounterPendingHealthSnapshot, UsageDailyHeatmapQuery,
+    UsageReadRepository, UsageWriteRepository, PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY,
     PROVIDER_REASONING_EFFORT_METADATA_KEY, PROVIDER_SERVICE_TIER_METADATA_KEY,
     REQUESTED_REASONING_EFFORT_METADATA_KEY,
 };
@@ -1356,6 +1356,22 @@ const RESET_STALE_VOID_USAGE_SQL: &str = include_str!("queries/reset_stale_void_
 const RESET_STALE_VOID_USAGE_SETTLEMENT_SNAPSHOT_SQL: &str =
     include_str!("queries/reset_stale_void_usage_settlement_snapshot_sql.sql");
 const LOCK_USAGE_REQUEST_ID_SQL: &str = include_str!("queries/lock_usage_request_id_sql.sql");
+const LOCK_USAGE_REQUEST_IDS_SQL: &str = r#"
+SELECT pg_advisory_xact_lock(lock_id)
+FROM (
+  SELECT DISTINCT hashtext(request_id)::BIGINT AS lock_id
+  FROM UNNEST($1::TEXT[]) AS request_ids(request_id)
+) AS usage_locks
+ORDER BY lock_id
+"#;
+const FIND_USAGE_PROVIDER_CONTRIBUTIONS_SQL: &str = r#"
+SELECT
+  u.request_id,
+  u.provider_api_key_id,
+  CAST(EXTRACT(EPOCH FROM u.created_at) AS BIGINT) AS created_at_unix_secs
+FROM "usage" AS u
+WHERE u.request_id = ANY($1)
+"#;
 const UPSERT_USAGE_HTTP_AUDIT_SQL: &str = include_str!("queries/upsert_usage_http_audit_sql.sql");
 const UPSERT_USAGE_ROUTING_SNAPSHOT_SQL: &str =
     include_str!("queries/upsert_usage_routing_snapshot_sql.sql");
@@ -1420,6 +1436,30 @@ INSERT INTO usage_counter_deltas (
   $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
 )
 "#;
+const INSERT_USAGE_COUNTER_DELTAS_PREFIX_SQL: &str = r#"
+INSERT INTO usage_counter_deltas (
+  id,
+  request_id,
+  kind,
+  target_id,
+  request_count_delta,
+  total_requests_delta,
+  success_count_delta,
+  error_count_delta,
+  dns_failures_delta,
+  stream_errors_delta,
+  total_tokens_delta,
+  total_cost_usd_delta,
+  total_response_time_ms_delta,
+  last_used_at_unix_secs,
+  last_used_ip,
+  candidate_last_used_at_unix_secs,
+  removed_last_used_at_unix_secs,
+  usage_created_at_unix_secs
+) "#;
+const USAGE_COUNTER_DELTA_INSERT_BINDS_PER_ROW: usize = 18;
+const USAGE_COUNTER_DELTA_INSERT_BATCH_SIZE: usize =
+    u16::MAX as usize / USAGE_COUNTER_DELTA_INSERT_BINDS_PER_ROW;
 
 const CLAIM_USAGE_COUNTER_DELTAS_SQL: &str = r#"
 WITH claimed AS (
@@ -1781,6 +1821,103 @@ const LIST_RECENT_USAGE_AUDITS_PREFIX: &str =
     include_str!("queries/list_recent_usage_audits_prefix.sql");
 
 const UPSERT_SQL: &str = include_str!("queries/upsert_sql.sql");
+const UPSERT_FIRST_BYTE_SQL: &str = include_str!("queries/upsert_first_byte_sql.sql");
+const PENDING_USAGE_BATCH_SIZE: usize = 128;
+const INSERT_PENDING_USAGE_BATCH_PREFIX_SQL: &str = r#"
+INSERT INTO "usage" (
+  id,
+  request_id,
+  user_id,
+  api_key_id,
+  username,
+  api_key_name,
+  provider_name,
+  model,
+  target_model,
+  provider_id,
+  provider_endpoint_id,
+  provider_api_key_id,
+  request_type,
+  api_format,
+  api_family,
+  endpoint_kind,
+  endpoint_api_format,
+  provider_api_family,
+  provider_endpoint_kind,
+  has_format_conversion,
+  is_stream,
+  upstream_is_stream,
+  input_tokens,
+  output_tokens,
+  total_tokens,
+  input_output_total_tokens,
+  input_context_tokens,
+  cache_creation_input_tokens,
+  cache_creation_input_tokens_5m,
+  cache_creation_input_tokens_1h,
+  cache_read_input_tokens,
+  cache_creation_cost_usd,
+  cache_read_cost_usd,
+  output_price_per_1m,
+  total_cost_usd,
+  actual_total_cost_usd,
+  status_code,
+  error_message,
+  error_category,
+  response_time_ms,
+  first_byte_time_ms,
+  status,
+  billing_status,
+  request_headers,
+  request_body,
+  request_body_compressed,
+  provider_request_headers,
+  provider_request_body,
+  provider_request_body_compressed,
+  response_headers,
+  response_body,
+  response_body_compressed,
+  client_response_headers,
+  client_response_body,
+  client_response_body_compressed,
+  request_metadata,
+  finalized_at,
+  created_at,
+  updated_at_unix_secs
+)
+"#;
+const UPSERT_FIRST_BYTE_BATCH_PREFIX_SQL: &str = r#"
+INSERT INTO "usage" (
+  id,
+  request_id,
+  user_id,
+  api_key_id,
+  provider_name,
+  model,
+  target_model,
+  provider_id,
+  provider_endpoint_id,
+  provider_api_key_id,
+  request_type,
+  api_format,
+  api_family,
+  endpoint_kind,
+  endpoint_api_format,
+  provider_api_family,
+  provider_endpoint_kind,
+  has_format_conversion,
+  is_stream,
+  upstream_is_stream,
+  status_code,
+  response_time_ms,
+  first_byte_time_ms,
+  status,
+  billing_status,
+  request_metadata,
+  created_at,
+  updated_at_unix_secs
+)
+"#;
 
 const SELECT_STALE_PENDING_USAGE_BATCH_SQL: &str = r#"
 SELECT
@@ -1894,6 +2031,224 @@ WHERE request_id = $1
 pub struct SqlxUsageReadRepository {
     pool: PgPool,
     tx_runner: PostgresTransactionRunner,
+}
+
+#[derive(Debug)]
+struct PreparedFirstByteUsage {
+    usage: UpsertUsageRecord,
+    request_metadata_json: Option<String>,
+    response_time_ms: Option<i32>,
+    first_byte_time_ms: Option<i32>,
+    created_at_unix_ms: Option<f64>,
+    updated_at_unix_secs: i64,
+}
+
+#[derive(Debug)]
+struct PreparedPendingUsage {
+    usage: UpsertUsageRecord,
+    prepared: PreparedUsageUpsert,
+    input_tokens: i32,
+    output_tokens: i32,
+    total_tokens: i32,
+    input_output_total_tokens: i32,
+    input_context_tokens: i32,
+    cache_creation_input_tokens: i32,
+    cache_creation_ephemeral_5m_input_tokens: i32,
+    cache_creation_ephemeral_1h_input_tokens: i32,
+    cache_read_input_tokens: i32,
+    response_time_ms: Option<i32>,
+    first_byte_time_ms: Option<i32>,
+    routing_candidate_index: Option<i32>,
+    finalized_at_unix_secs: Option<f64>,
+    created_at_unix_ms: Option<f64>,
+    updated_at_unix_secs: i64,
+}
+
+#[derive(Debug)]
+struct InsertedPendingUsage {
+    request_id: String,
+    provider_api_key_id: Option<String>,
+    created_at_unix_secs: u64,
+}
+
+impl PreparedPendingUsage {
+    fn try_from_usage(usage: UpsertUsageRecord) -> Result<Self, DataLayerError> {
+        usage.validate()?;
+        if usage.status != "pending" || usage.billing_status != "pending" {
+            return Err(DataLayerError::InvalidInput(
+                "pending usage batch requires pending status with pending billing".to_string(),
+            ));
+        }
+
+        let usage = strip_deprecated_usage_display_fields(usage);
+        let prepared = prepare_usage_upsert_context(&usage)?;
+        let input_tokens = usage
+            .input_tokens
+            .map(to_i32)
+            .transpose()?
+            .unwrap_or_default();
+        let output_tokens = usage
+            .output_tokens
+            .map(to_i32)
+            .transpose()?
+            .unwrap_or_default();
+        let cache_creation_input_tokens = usage
+            .cache_creation_input_tokens
+            .map(to_i32)
+            .transpose()?
+            .unwrap_or_default();
+        let cache_creation_ephemeral_5m_input_tokens = usage
+            .cache_creation_ephemeral_5m_input_tokens
+            .map(to_i32)
+            .transpose()?
+            .unwrap_or_default();
+        let cache_creation_ephemeral_1h_input_tokens = usage
+            .cache_creation_ephemeral_1h_input_tokens
+            .map(to_i32)
+            .transpose()?
+            .unwrap_or_default();
+        let cache_read_input_tokens = usage
+            .cache_read_input_tokens
+            .map(to_i32)
+            .transpose()?
+            .unwrap_or_default();
+        let categorized_cache_creation_tokens = checked_pending_usage_sum(&[
+            cache_creation_ephemeral_5m_input_tokens,
+            cache_creation_ephemeral_1h_input_tokens,
+        ])?;
+        let effective_cache_creation_tokens = if cache_creation_input_tokens == 0 {
+            categorized_cache_creation_tokens
+        } else {
+            cache_creation_input_tokens
+        };
+        let input_output_total_tokens = checked_pending_usage_sum(&[input_tokens, output_tokens])?;
+        let input_context_tokens = checked_pending_usage_sum(&[
+            input_tokens,
+            effective_cache_creation_tokens,
+            cache_read_input_tokens,
+        ])?;
+        let total_tokens = match usage.total_tokens {
+            Some(value) => to_i32(value)?,
+            None => checked_pending_usage_sum(&[
+                input_tokens,
+                output_tokens,
+                effective_cache_creation_tokens,
+                cache_read_input_tokens,
+            ])?,
+        };
+        let response_time_ms = usage.response_time_ms.map(to_i32).transpose()?;
+        let first_byte_time_ms = usage.first_byte_time_ms.map(to_i32).transpose()?;
+        let routing_candidate_index = prepared
+            .routing_snapshot
+            .candidate_index
+            .map(to_i32)
+            .transpose()?;
+        let finalized_at_unix_secs = usage.finalized_at_unix_secs.map(|value| value as f64);
+        let created_at_unix_ms = usage.created_at_unix_ms.map(|value| value as f64);
+        let updated_at_unix_secs = i64::try_from(usage.updated_at_unix_secs).map_err(|_| {
+            DataLayerError::InvalidInput(format!(
+                "usage.updated_at_unix_secs out of range: {}",
+                usage.updated_at_unix_secs
+            ))
+        })?;
+
+        Ok(Self {
+            usage,
+            prepared,
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            input_output_total_tokens,
+            input_context_tokens,
+            cache_creation_input_tokens,
+            cache_creation_ephemeral_5m_input_tokens,
+            cache_creation_ephemeral_1h_input_tokens,
+            cache_read_input_tokens,
+            response_time_ms,
+            first_byte_time_ms,
+            routing_candidate_index,
+            finalized_at_unix_secs,
+            created_at_unix_ms,
+            updated_at_unix_secs,
+        })
+    }
+}
+
+fn checked_pending_usage_sum(values: &[i32]) -> Result<i32, DataLayerError> {
+    let value = values
+        .iter()
+        .try_fold(0_i64, |total, value| total.checked_add(i64::from(*value)))
+        .ok_or_else(|| {
+            DataLayerError::UnexpectedValue("pending usage token total overflowed".to_string())
+        })?;
+    i32::try_from(value).map_err(|_| {
+        DataLayerError::UnexpectedValue(format!(
+            "pending usage token total exceeds integer range: {value}"
+        ))
+    })
+}
+
+impl PreparedFirstByteUsage {
+    fn try_from_usage(usage: UpsertUsageRecord) -> Result<Self, DataLayerError> {
+        usage.validate()?;
+        if usage.status != "streaming" || usage.billing_status != "pending" {
+            return Err(DataLayerError::InvalidInput(
+                "first-byte usage upsert requires streaming status with pending billing"
+                    .to_string(),
+            ));
+        }
+
+        let usage = strip_deprecated_usage_display_fields(usage);
+        let request_metadata_json = json_bind_text(usage.request_metadata.as_ref())?;
+        let response_time_ms = usage.response_time_ms.map(to_i32).transpose()?;
+        let first_byte_time_ms = usage.first_byte_time_ms.map(to_i32).transpose()?;
+        let created_at_unix_ms = usage.created_at_unix_ms.map(|value| value as f64);
+        let updated_at_unix_secs = i64::try_from(usage.updated_at_unix_secs).map_err(|_| {
+            DataLayerError::InvalidInput(format!(
+                "usage.updated_at_unix_secs out of range: {}",
+                usage.updated_at_unix_secs
+            ))
+        })?;
+
+        Ok(Self {
+            usage,
+            request_metadata_json,
+            response_time_ms,
+            first_byte_time_ms,
+            created_at_unix_ms,
+            updated_at_unix_secs,
+        })
+    }
+}
+
+type FirstByteUsagePartitions = (Vec<PreparedFirstByteUsage>, Vec<(usize, UpsertUsageRecord)>);
+
+fn partition_first_byte_usages(
+    usages: Vec<UpsertUsageRecord>,
+) -> Result<FirstByteUsagePartitions, DataLayerError> {
+    let mut request_id_counts = BTreeMap::<String, usize>::new();
+    for usage in &usages {
+        *request_id_counts
+            .entry(usage.request_id.clone())
+            .or_default() += 1;
+    }
+
+    let mut batch_rows = Vec::new();
+    let mut fallback_rows = Vec::new();
+    for (sequence, usage) in usages.into_iter().enumerate() {
+        let prepared = PreparedFirstByteUsage::try_from_usage(usage)?;
+        if request_id_counts
+            .get(&prepared.usage.request_id)
+            .copied()
+            .unwrap_or_default()
+            == 1
+        {
+            batch_rows.push(prepared);
+        } else {
+            fallback_rows.push((sequence, prepared.usage));
+        }
+    }
+    Ok((batch_rows, fallback_rows))
 }
 
 impl SqlxUsageReadRepository {
@@ -8433,10 +8788,891 @@ ORDER BY "usage".user_id ASC
                             }
                         }
                     }
+
                     Ok(stored)
                 }) as BoxFuture<'_, Result<StoredRequestUsageAudit, DataLayerError>>
             })
             .await
+    }
+
+    pub async fn upsert_pending_many(
+        &self,
+        usages: Vec<UpsertUsageRecord>,
+    ) -> Result<(), DataLayerError> {
+        if usages.is_empty() {
+            return Ok(());
+        }
+
+        let mut request_id_counts = BTreeMap::<String, usize>::new();
+        for usage in &usages {
+            *request_id_counts
+                .entry(usage.request_id.clone())
+                .or_default() += 1;
+        }
+
+        // Duplicate request IDs must retain the caller's exact sequential merge order. They are
+        // uncommon in lifecycle batches, so keep them on the canonical single-row path.
+        let mut batch_rows = Vec::<(usize, PreparedPendingUsage)>::new();
+        let mut fallback_rows = Vec::<(usize, UpsertUsageRecord)>::new();
+        for (sequence, usage) in usages.into_iter().enumerate() {
+            let prepared = PreparedPendingUsage::try_from_usage(usage)?;
+            if request_id_counts
+                .get(&prepared.usage.request_id)
+                .copied()
+                .unwrap_or_default()
+                == 1
+            {
+                batch_rows.push((sequence, prepared));
+            } else {
+                fallback_rows.push((sequence, prepared.usage));
+            }
+        }
+
+        let mut inserted_request_ids = BTreeSet::<String>::new();
+        if !batch_rows.is_empty() {
+            let mut tx = self.pool.begin().await.map_postgres_err()?;
+            let request_ids = batch_rows
+                .iter()
+                .map(|(_, row)| row.usage.request_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            lock_usage_request_ids_in_tx(&mut tx, &request_ids).await?;
+            for chunk in batch_rows.chunks(PENDING_USAGE_BATCH_SIZE) {
+                let rows = chunk.iter().map(|(_, row)| row).collect::<Vec<_>>();
+                let inserted = Self::insert_pending_usage_batch(&mut tx, &rows).await?;
+                if inserted.is_empty() {
+                    continue;
+                }
+                let chunk_inserted_ids = inserted
+                    .iter()
+                    .map(|row| row.request_id.as_str())
+                    .collect::<BTreeSet<_>>();
+                let inserted_rows = rows
+                    .into_iter()
+                    .filter(|row| chunk_inserted_ids.contains(row.usage.request_id.as_str()))
+                    .collect::<Vec<_>>();
+
+                Self::insert_pending_usage_body_blobs_batch(&mut tx, &inserted_rows).await?;
+                Self::insert_pending_usage_http_audits_batch(&mut tx, &inserted_rows).await?;
+                Self::insert_pending_usage_routing_snapshots_batch(&mut tx, &inserted_rows).await?;
+                Self::insert_pending_usage_settlement_snapshots_batch(&mut tx, &inserted_rows)
+                    .await?;
+                Self::insert_pending_usage_counter_deltas_batch(&mut tx, &inserted).await?;
+
+                inserted_request_ids.extend(inserted.into_iter().map(|row| row.request_id));
+            }
+            tx.commit().await.map_postgres_err()?;
+        }
+
+        // ON CONFLICT is intentionally DO NOTHING: an existing row can be streaming, terminal, or
+        // settled and therefore needs every guard in the canonical upsert transaction. Retrying
+        // those rare rows here avoids maintaining a second conflict-merge implementation.
+        for (sequence, row) in batch_rows {
+            if !inserted_request_ids.contains(&row.usage.request_id) {
+                fallback_rows.push((sequence, row.usage));
+            }
+        }
+        fallback_rows.sort_by_key(|(sequence, _)| *sequence);
+        for (_, usage) in fallback_rows {
+            self.upsert(usage).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn insert_pending_usage_batch(
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        rows: &[&PreparedPendingUsage],
+    ) -> Result<Vec<InsertedPendingUsage>, DataLayerError> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut builder = QueryBuilder::<Postgres>::new(INSERT_PENDING_USAGE_BATCH_PREFIX_SQL);
+        builder.push_values(rows, |mut values, row| {
+            values
+                .push_bind(Uuid::new_v4().to_string())
+                .push_bind(row.usage.request_id.clone())
+                .push_bind(row.usage.user_id.clone())
+                .push_bind(row.usage.api_key_id.clone())
+                .push_bind(None::<String>)
+                .push_bind(None::<String>)
+                .push_bind(row.usage.provider_name.clone())
+                .push_bind(row.usage.model.clone())
+                .push_bind(row.usage.target_model.clone())
+                .push_bind(row.usage.provider_id.clone())
+                .push_bind(row.usage.provider_endpoint_id.clone())
+                .push_bind(row.usage.provider_api_key_id.clone())
+                .push_bind(row.usage.request_type.clone())
+                .push_bind(row.usage.api_format.clone())
+                .push_bind(row.usage.api_family.clone())
+                .push_bind(row.usage.endpoint_kind.clone())
+                .push_bind(row.usage.endpoint_api_format.clone())
+                .push_bind(row.usage.provider_api_family.clone())
+                .push_bind(row.usage.provider_endpoint_kind.clone())
+                .push_bind(row.usage.has_format_conversion.unwrap_or(false))
+                .push_bind(row.usage.is_stream.unwrap_or(false))
+                .push("COALESCE(CASE WHEN (CAST(")
+                .push_bind_unseparated(row.prepared.request_metadata_json.clone())
+                .push_unseparated(
+                    " AS json)->>'upstream_is_stream') IN ('true', 'false') THEN (CAST(",
+                )
+                .push_bind_unseparated(row.prepared.request_metadata_json.clone())
+                .push_unseparated(" AS json)->>'upstream_is_stream')::boolean ELSE NULL END, ")
+                .push_bind_unseparated(row.usage.is_stream.unwrap_or(false))
+                .push_unseparated(")")
+                .push_bind(row.input_tokens)
+                .push_bind(row.output_tokens)
+                .push_bind(row.total_tokens)
+                .push_bind(row.input_output_total_tokens)
+                .push_bind(row.input_context_tokens)
+                .push_bind(row.cache_creation_input_tokens)
+                .push_bind(row.cache_creation_ephemeral_5m_input_tokens)
+                .push_bind(row.cache_creation_ephemeral_1h_input_tokens)
+                .push_bind(row.cache_read_input_tokens)
+                .push_bind(row.usage.cache_creation_cost_usd.unwrap_or_default())
+                .push_bind(row.usage.cache_read_cost_usd)
+                .push_bind(0.0_f64)
+                .push_bind(row.usage.total_cost_usd.unwrap_or_default())
+                .push_bind(row.usage.actual_total_cost_usd)
+                .push_bind(row.usage.status_code.map(i32::from))
+                .push_bind(row.usage.error_message.clone())
+                .push_bind(row.usage.error_category.clone())
+                .push_bind(row.response_time_ms)
+                .push_bind(row.first_byte_time_ms)
+                .push_bind(row.usage.status.clone())
+                .push_bind(row.usage.billing_status.clone())
+                .push("CAST(NULL AS json)")
+                .push("CAST(")
+                .push_bind_unseparated(row.prepared.request_body_storage.inline_json.clone())
+                .push_unseparated(" AS json)")
+                .push_bind(None::<Vec<u8>>)
+                .push("CAST(NULL AS json)")
+                .push("CAST(")
+                .push_bind_unseparated(
+                    row.prepared
+                        .provider_request_body_storage
+                        .inline_json
+                        .clone(),
+                )
+                .push_unseparated(" AS json)")
+                .push_bind(None::<Vec<u8>>)
+                .push("CAST(NULL AS json)")
+                .push("CAST(")
+                .push_bind_unseparated(row.prepared.response_body_storage.inline_json.clone())
+                .push_unseparated(" AS json)")
+                .push_bind(None::<Vec<u8>>)
+                .push("CAST(NULL AS json)")
+                .push("CAST(")
+                .push_bind_unseparated(
+                    row.prepared
+                        .client_response_body_storage
+                        .inline_json
+                        .clone(),
+                )
+                .push_unseparated(" AS json)")
+                .push_bind(None::<Vec<u8>>)
+                .push("CAST(")
+                .push_bind_unseparated(row.prepared.request_metadata_json.clone())
+                .push_unseparated(" AS json)")
+                .push("CASE WHEN ")
+                .push_bind_unseparated(row.finalized_at_unix_secs)
+                .push_unseparated("::double precision IS NULL THEN NULL ELSE TO_TIMESTAMP(")
+                .push_bind_unseparated(row.finalized_at_unix_secs)
+                .push_unseparated("::double precision) END")
+                .push("COALESCE(TO_TIMESTAMP(")
+                .push_bind_unseparated(row.created_at_unix_ms)
+                .push_unseparated("::double precision), NOW())")
+                .push("COALESCE(NULLIF(")
+                .push_bind_unseparated(row.updated_at_unix_secs)
+                .push_unseparated("::bigint, 0), CAST(EXTRACT(EPOCH FROM COALESCE(TO_TIMESTAMP(")
+                .push_bind_unseparated(row.created_at_unix_ms)
+                .push_unseparated("::double precision), NOW())) AS BIGINT))");
+        });
+        builder.push(
+            r#"
+ON CONFLICT (request_id) DO NOTHING
+RETURNING
+  request_id,
+  provider_api_key_id,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs
+"#,
+        );
+
+        let rows = builder
+            .build()
+            .fetch_all(&mut **tx)
+            .await
+            .map_postgres_err()?;
+        rows.into_iter()
+            .map(|row| {
+                let created_at_unix_secs = row
+                    .try_get::<i64, _>("created_at_unix_secs")
+                    .map_postgres_err()?;
+                Ok(InsertedPendingUsage {
+                    request_id: row.try_get("request_id").map_postgres_err()?,
+                    provider_api_key_id: row.try_get("provider_api_key_id").map_postgres_err()?,
+                    created_at_unix_secs: u64::try_from(created_at_unix_secs).map_err(|_| {
+                        DataLayerError::UnexpectedValue(format!(
+                            "pending usage created_at is negative: {created_at_unix_secs}"
+                        ))
+                    })?,
+                })
+            })
+            .collect()
+    }
+
+    async fn insert_pending_usage_body_blobs_batch(
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        rows: &[&PreparedPendingUsage],
+    ) -> Result<(), DataLayerError> {
+        let mut blobs = Vec::<(String, String, &'static str, Vec<u8>)>::new();
+        for row in rows {
+            for (field, storage) in [
+                (
+                    UsageBodyField::RequestBody,
+                    &row.prepared.request_body_storage,
+                ),
+                (
+                    UsageBodyField::ProviderRequestBody,
+                    &row.prepared.provider_request_body_storage,
+                ),
+                (
+                    UsageBodyField::ResponseBody,
+                    &row.prepared.response_body_storage,
+                ),
+                (
+                    UsageBodyField::ClientResponseBody,
+                    &row.prepared.client_response_body_storage,
+                ),
+            ] {
+                if let Some(payload) = storage.detached_blob_bytes.as_ref() {
+                    blobs.push((
+                        usage_body_ref(&row.usage.request_id, field),
+                        row.usage.request_id.clone(),
+                        field.as_storage_field(),
+                        payload.clone(),
+                    ));
+                }
+            }
+        }
+        if blobs.is_empty() {
+            return Ok(());
+        }
+
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "INSERT INTO usage_body_blobs (body_ref, request_id, body_field, payload_gzip) ",
+        );
+        builder.push_values(&blobs, |mut values, row| {
+            values
+                .push_bind(row.0.clone())
+                .push_bind(row.1.clone())
+                .push_bind(row.2)
+                .push_bind(row.3.clone());
+        });
+        builder.push(
+            " ON CONFLICT (body_ref) DO UPDATE SET payload_gzip = EXCLUDED.payload_gzip, updated_at = NOW()",
+        );
+        builder
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_postgres_err()?;
+        Ok(())
+    }
+
+    async fn insert_pending_usage_http_audits_batch(
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        rows: &[&PreparedPendingUsage],
+    ) -> Result<(), DataLayerError> {
+        let rows = rows
+            .iter()
+            .copied()
+            .filter(|row| {
+                row.prepared.request_headers_json.is_some()
+                    || row.prepared.provider_request_headers_json.is_some()
+                    || row.prepared.response_headers_json.is_some()
+                    || row.prepared.client_response_headers_json.is_some()
+                    || row.prepared.http_audit_refs.any_present()
+                    || row.prepared.http_audit_states.any_present()
+                    || row.prepared.http_audit_capture_mode != "none"
+            })
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"INSERT INTO usage_http_audits (
+request_id, request_headers, provider_request_headers, response_headers,
+client_response_headers, request_body_ref, provider_request_body_ref,
+response_body_ref, client_response_body_ref, request_body_state,
+provider_request_body_state, response_body_state, client_response_body_state,
+body_capture_mode
+) "#,
+        );
+        builder.push_values(&rows, |mut values, row| {
+            values
+                .push_bind(row.usage.request_id.clone())
+                .push("CAST(")
+                .push_bind_unseparated(row.prepared.request_headers_json.clone())
+                .push_unseparated(" AS json)")
+                .push("CAST(")
+                .push_bind_unseparated(row.prepared.provider_request_headers_json.clone())
+                .push_unseparated(" AS json)")
+                .push("CAST(")
+                .push_bind_unseparated(row.prepared.response_headers_json.clone())
+                .push_unseparated(" AS json)")
+                .push("CAST(")
+                .push_bind_unseparated(row.prepared.client_response_headers_json.clone())
+                .push_unseparated(" AS json)")
+                .push_bind(row.prepared.http_audit_refs.request_body_ref.clone())
+                .push_bind(
+                    row.prepared
+                        .http_audit_refs
+                        .provider_request_body_ref
+                        .clone(),
+                )
+                .push_bind(row.prepared.http_audit_refs.response_body_ref.clone())
+                .push_bind(
+                    row.prepared
+                        .http_audit_refs
+                        .client_response_body_ref
+                        .clone(),
+                )
+                .push_bind(usage_body_capture_state_bind_text(
+                    row.prepared.http_audit_states.request_body_state,
+                ))
+                .push_bind(usage_body_capture_state_bind_text(
+                    row.prepared.http_audit_states.provider_request_body_state,
+                ))
+                .push_bind(usage_body_capture_state_bind_text(
+                    row.prepared.http_audit_states.response_body_state,
+                ))
+                .push_bind(usage_body_capture_state_bind_text(
+                    row.prepared.http_audit_states.client_response_body_state,
+                ))
+                .push_bind(row.prepared.http_audit_capture_mode);
+        });
+        builder.push(
+            r#"
+ON CONFLICT (request_id) DO UPDATE SET
+  request_headers = COALESCE(EXCLUDED.request_headers, usage_http_audits.request_headers),
+  provider_request_headers = COALESCE(EXCLUDED.provider_request_headers, usage_http_audits.provider_request_headers),
+  response_headers = COALESCE(EXCLUDED.response_headers, usage_http_audits.response_headers),
+  client_response_headers = COALESCE(EXCLUDED.client_response_headers, usage_http_audits.client_response_headers),
+  request_body_ref = CASE WHEN EXCLUDED.request_body_state = 'none' THEN NULL ELSE COALESCE(EXCLUDED.request_body_ref, usage_http_audits.request_body_ref) END,
+  provider_request_body_ref = CASE WHEN EXCLUDED.provider_request_body_state = 'none' THEN NULL ELSE COALESCE(EXCLUDED.provider_request_body_ref, usage_http_audits.provider_request_body_ref) END,
+  response_body_ref = CASE WHEN EXCLUDED.response_body_state = 'none' THEN NULL ELSE COALESCE(EXCLUDED.response_body_ref, usage_http_audits.response_body_ref) END,
+  client_response_body_ref = CASE WHEN EXCLUDED.client_response_body_state = 'none' THEN NULL ELSE COALESCE(EXCLUDED.client_response_body_ref, usage_http_audits.client_response_body_ref) END,
+  request_body_state = COALESCE(EXCLUDED.request_body_state, usage_http_audits.request_body_state),
+  provider_request_body_state = COALESCE(EXCLUDED.provider_request_body_state, usage_http_audits.provider_request_body_state),
+  response_body_state = COALESCE(EXCLUDED.response_body_state, usage_http_audits.response_body_state),
+  client_response_body_state = COALESCE(EXCLUDED.client_response_body_state, usage_http_audits.client_response_body_state),
+  body_capture_mode = CASE
+    WHEN EXCLUDED.body_capture_mode = 'none' AND (
+      EXCLUDED.request_body_state = 'none' OR EXCLUDED.provider_request_body_state = 'none'
+      OR EXCLUDED.response_body_state = 'none' OR EXCLUDED.client_response_body_state = 'none'
+    ) THEN 'none'
+    ELSE COALESCE(NULLIF(EXCLUDED.body_capture_mode, 'none'), usage_http_audits.body_capture_mode, 'none')
+  END,
+  updated_at = NOW()
+"#,
+        );
+        builder
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_postgres_err()?;
+        Ok(())
+    }
+
+    async fn insert_pending_usage_routing_snapshots_batch(
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        rows: &[&PreparedPendingUsage],
+    ) -> Result<(), DataLayerError> {
+        let rows = rows
+            .iter()
+            .copied()
+            .filter(|row| row.prepared.routing_snapshot.any_present())
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"INSERT INTO usage_routing_snapshots (
+request_id, candidate_id, candidate_index, key_name, planner_kind, route_family,
+route_kind, execution_path, local_execution_runtime_miss_reason,
+selected_provider_id, selected_endpoint_id, selected_provider_api_key_id,
+has_format_conversion
+) "#,
+        );
+        builder.push_values(&rows, |mut values, row| {
+            let snapshot = &row.prepared.routing_snapshot;
+            values
+                .push_bind(row.usage.request_id.clone())
+                .push_bind(snapshot.candidate_id.clone())
+                .push_bind(row.routing_candidate_index)
+                .push_bind(snapshot.key_name.clone())
+                .push_bind(snapshot.planner_kind.clone())
+                .push_bind(snapshot.route_family.clone())
+                .push_bind(snapshot.route_kind.clone())
+                .push_bind(snapshot.execution_path.clone())
+                .push_bind(snapshot.local_execution_runtime_miss_reason.clone())
+                .push_bind(snapshot.selected_provider_id.clone())
+                .push_bind(snapshot.selected_endpoint_id.clone())
+                .push_bind(snapshot.selected_provider_api_key_id.clone())
+                .push_bind(snapshot.has_format_conversion);
+        });
+        builder.push(
+            r#"
+ON CONFLICT (request_id) DO UPDATE SET
+  candidate_id = COALESCE(EXCLUDED.candidate_id, usage_routing_snapshots.candidate_id),
+  candidate_index = COALESCE(EXCLUDED.candidate_index, usage_routing_snapshots.candidate_index),
+  key_name = COALESCE(EXCLUDED.key_name, usage_routing_snapshots.key_name),
+  planner_kind = COALESCE(EXCLUDED.planner_kind, usage_routing_snapshots.planner_kind),
+  route_family = COALESCE(EXCLUDED.route_family, usage_routing_snapshots.route_family),
+  route_kind = COALESCE(EXCLUDED.route_kind, usage_routing_snapshots.route_kind),
+  execution_path = COALESCE(EXCLUDED.execution_path, usage_routing_snapshots.execution_path),
+  local_execution_runtime_miss_reason = COALESCE(EXCLUDED.local_execution_runtime_miss_reason, usage_routing_snapshots.local_execution_runtime_miss_reason),
+  selected_provider_id = COALESCE(EXCLUDED.selected_provider_id, usage_routing_snapshots.selected_provider_id),
+  selected_endpoint_id = COALESCE(EXCLUDED.selected_endpoint_id, usage_routing_snapshots.selected_endpoint_id),
+  selected_provider_api_key_id = COALESCE(EXCLUDED.selected_provider_api_key_id, usage_routing_snapshots.selected_provider_api_key_id),
+  has_format_conversion = COALESCE(EXCLUDED.has_format_conversion, usage_routing_snapshots.has_format_conversion),
+  updated_at = NOW()
+"#,
+        );
+        builder
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_postgres_err()?;
+        Ok(())
+    }
+
+    async fn insert_pending_usage_settlement_snapshots_batch(
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        rows: &[&PreparedPendingUsage],
+    ) -> Result<(), DataLayerError> {
+        let rows = rows
+            .iter()
+            .copied()
+            .filter(|row| row.prepared.settlement_pricing_snapshot.any_present())
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"INSERT INTO usage_settlement_snapshots (
+request_id, billing_status, billing_snapshot_schema_version, billing_snapshot_status,
+settlement_snapshot_schema_version, settlement_snapshot, billing_dimensions,
+billing_input_tokens, billing_effective_input_tokens, billing_output_tokens,
+billing_cache_creation_tokens, billing_cache_creation_5m_tokens,
+billing_cache_creation_1h_tokens, billing_cache_read_tokens,
+billing_total_input_context, billing_cache_creation_cost_usd,
+billing_cache_read_cost_usd, billing_total_cost_usd, billing_actual_total_cost_usd,
+billing_pricing_source, billing_rule_id, billing_rule_version, rate_multiplier,
+is_free_tier, input_price_per_1m, output_price_per_1m,
+cache_creation_price_per_1m, cache_read_price_per_1m, price_per_request
+) "#,
+        );
+        builder.push_values(&rows, |mut values, row| {
+            let snapshot = &row.prepared.settlement_pricing_snapshot;
+            values
+                .push_bind(row.usage.request_id.clone())
+                .push_bind(
+                    snapshot
+                        .billing_status
+                        .clone()
+                        .unwrap_or_else(|| "pending".to_string()),
+                )
+                .push_bind(snapshot.billing_snapshot_schema_version.clone())
+                .push_bind(snapshot.billing_snapshot_status.clone())
+                .push_bind(snapshot.settlement_snapshot_schema_version.clone())
+                .push_bind(snapshot.settlement_snapshot.clone())
+                .push_bind(snapshot.billing_dimensions.clone())
+                .push_bind(snapshot.billing_input_tokens)
+                .push_bind(snapshot.billing_effective_input_tokens)
+                .push_bind(snapshot.billing_output_tokens)
+                .push_bind(snapshot.billing_cache_creation_tokens)
+                .push_bind(snapshot.billing_cache_creation_5m_tokens)
+                .push_bind(snapshot.billing_cache_creation_1h_tokens)
+                .push_bind(snapshot.billing_cache_read_tokens)
+                .push_bind(snapshot.billing_total_input_context)
+                .push_bind(snapshot.billing_cache_creation_cost_usd)
+                .push_bind(snapshot.billing_cache_read_cost_usd)
+                .push_bind(snapshot.billing_total_cost_usd)
+                .push_bind(snapshot.billing_actual_total_cost_usd)
+                .push_bind(snapshot.billing_pricing_source.clone())
+                .push_bind(snapshot.billing_rule_id.clone())
+                .push_bind(snapshot.billing_rule_version.clone())
+                .push_bind(snapshot.rate_multiplier)
+                .push_bind(snapshot.is_free_tier)
+                .push_bind(snapshot.input_price_per_1m)
+                .push_bind(snapshot.output_price_per_1m)
+                .push_bind(snapshot.cache_creation_price_per_1m)
+                .push_bind(snapshot.cache_read_price_per_1m)
+                .push_bind(snapshot.price_per_request);
+        });
+        builder.push(
+            r#"
+ON CONFLICT (request_id) DO UPDATE SET
+  billing_status = usage_settlement_snapshots.billing_status,
+  billing_snapshot_schema_version = COALESCE(EXCLUDED.billing_snapshot_schema_version, usage_settlement_snapshots.billing_snapshot_schema_version),
+  billing_snapshot_status = COALESCE(EXCLUDED.billing_snapshot_status, usage_settlement_snapshots.billing_snapshot_status),
+  settlement_snapshot_schema_version = COALESCE(EXCLUDED.settlement_snapshot_schema_version, usage_settlement_snapshots.settlement_snapshot_schema_version),
+  settlement_snapshot = COALESCE(EXCLUDED.settlement_snapshot, usage_settlement_snapshots.settlement_snapshot),
+  billing_dimensions = COALESCE(EXCLUDED.billing_dimensions, usage_settlement_snapshots.billing_dimensions),
+  billing_input_tokens = COALESCE(EXCLUDED.billing_input_tokens, usage_settlement_snapshots.billing_input_tokens),
+  billing_effective_input_tokens = COALESCE(EXCLUDED.billing_effective_input_tokens, usage_settlement_snapshots.billing_effective_input_tokens),
+  billing_output_tokens = COALESCE(EXCLUDED.billing_output_tokens, usage_settlement_snapshots.billing_output_tokens),
+  billing_cache_creation_tokens = COALESCE(EXCLUDED.billing_cache_creation_tokens, usage_settlement_snapshots.billing_cache_creation_tokens),
+  billing_cache_creation_5m_tokens = COALESCE(EXCLUDED.billing_cache_creation_5m_tokens, usage_settlement_snapshots.billing_cache_creation_5m_tokens),
+  billing_cache_creation_1h_tokens = COALESCE(EXCLUDED.billing_cache_creation_1h_tokens, usage_settlement_snapshots.billing_cache_creation_1h_tokens),
+  billing_cache_read_tokens = COALESCE(EXCLUDED.billing_cache_read_tokens, usage_settlement_snapshots.billing_cache_read_tokens),
+  billing_total_input_context = COALESCE(EXCLUDED.billing_total_input_context, usage_settlement_snapshots.billing_total_input_context),
+  billing_cache_creation_cost_usd = COALESCE(EXCLUDED.billing_cache_creation_cost_usd, usage_settlement_snapshots.billing_cache_creation_cost_usd),
+  billing_cache_read_cost_usd = COALESCE(EXCLUDED.billing_cache_read_cost_usd, usage_settlement_snapshots.billing_cache_read_cost_usd),
+  billing_total_cost_usd = COALESCE(EXCLUDED.billing_total_cost_usd, usage_settlement_snapshots.billing_total_cost_usd),
+  billing_actual_total_cost_usd = COALESCE(EXCLUDED.billing_actual_total_cost_usd, usage_settlement_snapshots.billing_actual_total_cost_usd),
+  billing_pricing_source = COALESCE(EXCLUDED.billing_pricing_source, usage_settlement_snapshots.billing_pricing_source),
+  billing_rule_id = COALESCE(EXCLUDED.billing_rule_id, usage_settlement_snapshots.billing_rule_id),
+  billing_rule_version = COALESCE(EXCLUDED.billing_rule_version, usage_settlement_snapshots.billing_rule_version),
+  rate_multiplier = COALESCE(EXCLUDED.rate_multiplier, usage_settlement_snapshots.rate_multiplier),
+  is_free_tier = COALESCE(EXCLUDED.is_free_tier, usage_settlement_snapshots.is_free_tier),
+  input_price_per_1m = COALESCE(EXCLUDED.input_price_per_1m, usage_settlement_snapshots.input_price_per_1m),
+  output_price_per_1m = COALESCE(EXCLUDED.output_price_per_1m, usage_settlement_snapshots.output_price_per_1m),
+  cache_creation_price_per_1m = COALESCE(EXCLUDED.cache_creation_price_per_1m, usage_settlement_snapshots.cache_creation_price_per_1m),
+  cache_read_price_per_1m = COALESCE(EXCLUDED.cache_read_price_per_1m, usage_settlement_snapshots.cache_read_price_per_1m),
+  price_per_request = COALESCE(EXCLUDED.price_per_request, usage_settlement_snapshots.price_per_request),
+  updated_at = NOW()
+"#,
+        );
+        builder
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_postgres_err()?;
+        Ok(())
+    }
+
+    async fn insert_pending_usage_counter_deltas_batch(
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        rows: &[InsertedPendingUsage],
+    ) -> Result<(), DataLayerError> {
+        let rows = rows
+            .iter()
+            .filter(|row| {
+                row.provider_api_key_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"INSERT INTO usage_counter_deltas (
+id, request_id, kind, target_id, request_count_delta, total_requests_delta,
+success_count_delta, error_count_delta, dns_failures_delta, stream_errors_delta,
+total_tokens_delta, total_cost_usd_delta, total_response_time_ms_delta,
+last_used_at_unix_secs, last_used_ip, candidate_last_used_at_unix_secs,
+removed_last_used_at_unix_secs, usage_created_at_unix_secs
+) "#,
+        );
+        builder.push_values(&rows, |mut values, row| {
+            let created_at_unix_secs = i64::try_from(row.created_at_unix_secs).unwrap_or(i64::MAX);
+            values
+                .push_bind(Uuid::new_v4().to_string())
+                .push_bind(row.request_id.clone())
+                .push_bind(USAGE_COUNTER_KIND_PROVIDER_API_KEY)
+                .push_bind(
+                    row.provider_api_key_id
+                        .as_deref()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string(),
+                )
+                .push_bind(1_i64)
+                .push_bind(0_i64)
+                .push_bind(0_i64)
+                .push_bind(0_i64)
+                .push_bind(0_i64)
+                .push_bind(0_i64)
+                .push_bind(0_i64)
+                .push_bind(0.0_f64)
+                .push_bind(0_i64)
+                .push_bind(None::<i64>)
+                .push_bind(None::<String>)
+                .push_bind(Some(created_at_unix_secs))
+                .push_bind(None::<i64>)
+                .push_bind(Some(created_at_unix_secs));
+        });
+        builder
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_postgres_err()?;
+        Ok(())
+    }
+
+    pub async fn upsert_first_byte(&self, usage: UpsertUsageRecord) -> Result<(), DataLayerError> {
+        usage.validate()?;
+        if usage.status != "streaming" || usage.billing_status != "pending" {
+            return Err(DataLayerError::InvalidInput(
+                "first-byte usage upsert requires streaming status with pending billing"
+                    .to_string(),
+            ));
+        }
+
+        let usage = strip_deprecated_usage_display_fields(usage);
+        let request_metadata_json = json_bind_text(usage.request_metadata.as_ref())?;
+        let response_time_ms = usage.response_time_ms.map(to_i32).transpose()?;
+        let first_byte_time_ms = usage.first_byte_time_ms.map(to_i32).transpose()?;
+        let updated_at_unix_secs = i64::try_from(usage.updated_at_unix_secs).map_err(|_| {
+            DataLayerError::InvalidInput(format!(
+                "usage.updated_at_unix_secs out of range: {}",
+                usage.updated_at_unix_secs
+            ))
+        })?;
+
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        let request_ids = vec![usage.request_id.clone()];
+        let mut before =
+            lock_and_find_usage_provider_contributions_in_tx(&mut tx, &request_ids).await?;
+        let before = before.remove(&usage.request_id);
+        let stored = sqlx::query(UPSERT_FIRST_BYTE_SQL)
+            .bind(Uuid::new_v4().to_string())
+            .bind(&usage.request_id)
+            .bind(&usage.user_id)
+            .bind(&usage.api_key_id)
+            .bind(&usage.provider_name)
+            .bind(&usage.model)
+            .bind(&usage.target_model)
+            .bind(&usage.provider_id)
+            .bind(&usage.provider_endpoint_id)
+            .bind(&usage.provider_api_key_id)
+            .bind(&usage.request_type)
+            .bind(&usage.api_format)
+            .bind(&usage.api_family)
+            .bind(&usage.endpoint_kind)
+            .bind(&usage.endpoint_api_format)
+            .bind(&usage.provider_api_family)
+            .bind(&usage.provider_endpoint_kind)
+            .bind(usage.has_format_conversion)
+            .bind(usage.status_code.map(i32::from))
+            .bind(response_time_ms)
+            .bind(first_byte_time_ms)
+            .bind(&request_metadata_json)
+            .bind(usage.created_at_unix_ms.map(|value| value as f64))
+            .bind(updated_at_unix_secs)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        if let Some(stored) = stored {
+            let after = map_inserted_pending_usage(stored, "first-byte usage")?;
+            enqueue_first_byte_provider_contribution_transition_in_tx(
+                &mut tx,
+                before.as_ref(),
+                &after,
+            )
+            .await?;
+        }
+        tx.commit().await.map_postgres_err()?;
+        Ok(())
+    }
+
+    pub async fn upsert_first_byte_many(
+        &self,
+        usages: Vec<UpsertUsageRecord>,
+    ) -> Result<(), DataLayerError> {
+        if usages.is_empty() {
+            return Ok(());
+        }
+
+        // PostgreSQL rejects a multi-row UPSERT when the same conflict key occurs twice in one
+        // statement. Preserve exact single-row merge semantics by replaying duplicate IDs in the
+        // caller's input order; the normal unique-ID hot path remains batched.
+        let (batch_rows, mut fallback_rows) = partition_first_byte_usages(usages)?;
+
+        if !batch_rows.is_empty() {
+            let request_ids = batch_rows
+                .iter()
+                .map(|row| row.usage.request_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let mut tx = self.pool.begin().await.map_postgres_err()?;
+            let before =
+                lock_and_find_usage_provider_contributions_in_tx(&mut tx, &request_ids).await?;
+            let mut updated = Vec::new();
+            for has_format_conversion in [false, true] {
+                let matching = batch_rows
+                    .iter()
+                    .filter(|row| {
+                        row.usage.has_format_conversion.is_some() == has_format_conversion
+                    })
+                    .collect::<Vec<_>>();
+                for chunk in matching.chunks(128) {
+                    updated.extend(
+                        Self::execute_first_byte_batch(&mut tx, chunk, !has_format_conversion)
+                            .await?,
+                    );
+                }
+            }
+            let counter_deltas =
+                prepare_first_byte_provider_contribution_transitions(&before, &updated)?;
+            insert_usage_counter_deltas_batch_in_tx(&mut tx, &counter_deltas).await?;
+            tx.commit().await.map_postgres_err()?;
+        }
+
+        fallback_rows.sort_by_key(|(sequence, _)| *sequence);
+        for (_, usage) in fallback_rows {
+            self.upsert_first_byte(usage).await?;
+        }
+        Ok(())
+    }
+
+    async fn execute_first_byte_batch(
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        rows: &[&PreparedFirstByteUsage],
+        preserve_existing_format_conversion: bool,
+    ) -> Result<Vec<InsertedPendingUsage>, DataLayerError> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut builder = QueryBuilder::<Postgres>::new(UPSERT_FIRST_BYTE_BATCH_PREFIX_SQL);
+        builder.push_values(rows, |mut values, row| {
+            values
+                .push_bind(Uuid::new_v4().to_string())
+                .push_bind(row.usage.request_id.clone())
+                .push_bind(row.usage.user_id.clone())
+                .push_bind(row.usage.api_key_id.clone())
+                .push_bind(row.usage.provider_name.clone())
+                .push_bind(row.usage.model.clone())
+                .push_bind(row.usage.target_model.clone())
+                .push_bind(row.usage.provider_id.clone())
+                .push_bind(row.usage.provider_endpoint_id.clone())
+                .push_bind(row.usage.provider_api_key_id.clone())
+                .push_bind(row.usage.request_type.clone())
+                .push_bind(row.usage.api_format.clone())
+                .push_bind(row.usage.api_family.clone())
+                .push_bind(row.usage.endpoint_kind.clone())
+                .push_bind(row.usage.endpoint_api_format.clone())
+                .push_bind(row.usage.provider_api_family.clone())
+                .push_bind(row.usage.provider_endpoint_kind.clone())
+                .push("COALESCE(")
+                .push_bind_unseparated(row.usage.has_format_conversion)
+                .push_unseparated(", FALSE)")
+                .push("TRUE")
+                .push("COALESCE(CASE WHEN (CAST(")
+                .push_bind_unseparated(row.request_metadata_json.clone())
+                .push_unseparated(
+                    " AS json)->>'upstream_is_stream') IN ('true', 'false') THEN (CAST(",
+                )
+                .push_bind_unseparated(row.request_metadata_json.clone())
+                .push_unseparated(" AS json)->>'upstream_is_stream')::boolean ELSE NULL END, TRUE)")
+                .push_bind(row.usage.status_code.map(i32::from))
+                .push_bind(row.response_time_ms)
+                .push_bind(row.first_byte_time_ms)
+                .push("'streaming'")
+                .push("'pending'")
+                .push("CAST(")
+                .push_bind_unseparated(row.request_metadata_json.clone())
+                .push_unseparated(" AS json)")
+                .push("COALESCE(TO_TIMESTAMP(")
+                .push_bind_unseparated(row.created_at_unix_ms)
+                .push_unseparated("::double precision), NOW())")
+                .push("COALESCE(NULLIF(")
+                .push_bind_unseparated(row.updated_at_unix_secs)
+                .push_unseparated("::bigint, 0), CAST(EXTRACT(EPOCH FROM COALESCE(TO_TIMESTAMP(")
+                .push_bind_unseparated(row.created_at_unix_ms)
+                .push_unseparated("::double precision), NOW())) AS BIGINT))");
+        });
+        builder.push(
+            r#"
+ON CONFLICT (request_id)
+DO UPDATE SET
+  user_id = COALESCE(EXCLUDED.user_id, "usage".user_id),
+  api_key_id = COALESCE(EXCLUDED.api_key_id, "usage".api_key_id),
+  provider_name = EXCLUDED.provider_name,
+  model = EXCLUDED.model,
+  target_model = COALESCE(EXCLUDED.target_model, "usage".target_model),
+  provider_id = COALESCE(EXCLUDED.provider_id, "usage".provider_id),
+  provider_endpoint_id = COALESCE(EXCLUDED.provider_endpoint_id, "usage".provider_endpoint_id),
+  provider_api_key_id = COALESCE(EXCLUDED.provider_api_key_id, "usage".provider_api_key_id),
+  request_type = COALESCE(EXCLUDED.request_type, "usage".request_type),
+  api_format = COALESCE(EXCLUDED.api_format, "usage".api_format),
+  api_family = COALESCE(EXCLUDED.api_family, "usage".api_family),
+  endpoint_kind = COALESCE(EXCLUDED.endpoint_kind, "usage".endpoint_kind),
+  endpoint_api_format = COALESCE(EXCLUDED.endpoint_api_format, "usage".endpoint_api_format),
+  provider_api_family = COALESCE(EXCLUDED.provider_api_family, "usage".provider_api_family),
+  provider_endpoint_kind = COALESCE(EXCLUDED.provider_endpoint_kind, "usage".provider_endpoint_kind),
+  has_format_conversion =
+"#,
+        );
+        if preserve_existing_format_conversion {
+            builder.push("COALESCE(\"usage\".has_format_conversion, FALSE)");
+        } else {
+            builder.push(
+                "COALESCE(EXCLUDED.has_format_conversion, \"usage\".has_format_conversion, FALSE)",
+            );
+        }
+        builder.push(
+            r#",
+  is_stream = TRUE,
+  upstream_is_stream = COALESCE(
+    CASE
+      WHEN (EXCLUDED.request_metadata->>'upstream_is_stream') IN ('true', 'false')
+      THEN (EXCLUDED.request_metadata->>'upstream_is_stream')::boolean
+      ELSE NULL
+    END,
+    "usage".upstream_is_stream,
+    "usage".is_stream,
+    TRUE
+  ),
+  status_code = COALESCE(EXCLUDED.status_code, "usage".status_code),
+  response_time_ms = CASE
+    WHEN EXCLUDED.response_time_ms IS NULL OR EXCLUDED.response_time_ms = 0
+      THEN "usage".response_time_ms
+    ELSE EXCLUDED.response_time_ms
+  END,
+  first_byte_time_ms = CASE
+    WHEN "usage".first_byte_time_ms IS NOT NULL AND "usage".first_byte_time_ms <> 0
+      THEN "usage".first_byte_time_ms
+    WHEN EXCLUDED.first_byte_time_ms IS NULL OR EXCLUDED.first_byte_time_ms = 0
+      THEN "usage".first_byte_time_ms
+    ELSE EXCLUDED.first_byte_time_ms
+  END,
+  status = 'streaming',
+  request_metadata = COALESCE("usage".request_metadata, EXCLUDED.request_metadata),
+  updated_at_unix_secs = GREATEST(
+    COALESCE(NULLIF("usage".updated_at_unix_secs, 0), 0),
+    COALESCE(NULLIF(EXCLUDED.updated_at_unix_secs, 0), 0),
+    CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT)
+  )
+WHERE "usage".billing_status = 'pending'
+  AND "usage".status IN ('pending', 'streaming')
+  AND "usage".finalized_at IS NULL
+RETURNING
+  request_id,
+  provider_api_key_id,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs
+"#,
+        );
+        builder
+            .build()
+            .fetch_all(&mut **tx)
+            .await
+            .map_postgres_err()?
+            .into_iter()
+            .map(|row| map_inserted_pending_usage(row, "first-byte usage"))
+            .collect()
     }
 
     pub async fn flush_usage_counter_deltas(
@@ -9187,11 +10423,41 @@ impl UsageReadRepository for SqlxUsageReadRepository {
 
 #[async_trait]
 impl UsageWriteRepository for SqlxUsageReadRepository {
+    fn supports_first_byte_usage_fast_path(&self) -> bool {
+        true
+    }
+
+    fn supports_first_byte_usage_batch(&self) -> bool {
+        true
+    }
+
+    fn supports_pending_usage_batch(&self) -> bool {
+        true
+    }
+
     async fn upsert(
         &self,
         usage: UpsertUsageRecord,
     ) -> Result<StoredRequestUsageAudit, DataLayerError> {
         Self::upsert(self, usage).await
+    }
+
+    async fn upsert_first_byte(&self, usage: UpsertUsageRecord) -> Result<(), DataLayerError> {
+        Self::upsert_first_byte(self, usage).await
+    }
+
+    async fn upsert_first_byte_many(
+        &self,
+        usages: Vec<UpsertUsageRecord>,
+    ) -> Result<(), DataLayerError> {
+        Self::upsert_first_byte_many(self, usages).await
+    }
+
+    async fn upsert_pending_many(
+        &self,
+        usages: Vec<UpsertUsageRecord>,
+    ) -> Result<(), DataLayerError> {
+        Self::upsert_pending_many(self, usages).await
     }
 
     async fn rebuild_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
@@ -9339,6 +10605,206 @@ async fn lock_usage_request_id_in_tx(
         .await
         .map_postgres_err()?;
     Ok(())
+}
+
+async fn lock_usage_request_ids_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    request_ids: &[String],
+) -> Result<(), DataLayerError> {
+    if request_ids.is_empty() {
+        return Ok(());
+    }
+    debug_assert!(request_ids.windows(2).all(|ids| ids[0] < ids[1]));
+    sqlx::query(LOCK_USAGE_REQUEST_IDS_SQL)
+        .bind(request_ids)
+        .execute(&mut **tx)
+        .await
+        .map_postgres_err()?;
+    Ok(())
+}
+
+async fn lock_and_find_usage_provider_contributions_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    request_ids: &[String],
+) -> Result<BTreeMap<String, InsertedPendingUsage>, DataLayerError> {
+    if request_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    // Keep locking and reading in separate statements. Under READ COMMITTED, a statement that
+    // waits for an advisory lock retains its earlier snapshot and cannot safely read the row that
+    // the lock holder just committed.
+    lock_usage_request_ids_in_tx(tx, request_ids).await?;
+    let rows = sqlx::query(FIND_USAGE_PROVIDER_CONTRIBUTIONS_SQL)
+        .bind(request_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_postgres_err()?;
+    let mut contributions = BTreeMap::new();
+    for row in rows {
+        let request_id = row.try_get::<String, _>("request_id").map_postgres_err()?;
+        let created_at_unix_secs = row
+            .try_get::<i64, _>("created_at_unix_secs")
+            .map_postgres_err()?;
+        contributions.insert(
+            request_id.clone(),
+            InsertedPendingUsage {
+                request_id,
+                provider_api_key_id: row.try_get("provider_api_key_id").map_postgres_err()?,
+                created_at_unix_secs: u64::try_from(created_at_unix_secs).map_err(|_| {
+                    DataLayerError::UnexpectedValue(format!(
+                        "first-byte existing usage created_at is negative: {created_at_unix_secs}"
+                    ))
+                })?,
+            },
+        );
+    }
+    Ok(contributions)
+}
+
+fn pending_provider_api_key_contribution(
+    usage: &InsertedPendingUsage,
+) -> Option<ProviderApiKeyUsageContribution> {
+    let key_id = usage
+        .provider_api_key_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    Some(ProviderApiKeyUsageContribution {
+        key_id,
+        request_count: 1,
+        success_count: 0,
+        error_count: 0,
+        total_tokens: 0,
+        total_cost_usd: 0.0,
+        total_response_time_ms: 0,
+        last_used_at_unix_secs: Some(usage.created_at_unix_secs),
+        usage_created_at_unix_secs: Some(usage.created_at_unix_secs),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ProviderApiKeyUsageTransition {
+    request_id: String,
+    key_id: String,
+    delta: ProviderApiKeyUsageDelta,
+}
+
+fn first_byte_provider_contribution_transitions(
+    before: Option<&InsertedPendingUsage>,
+    after: &InsertedPendingUsage,
+) -> Vec<ProviderApiKeyUsageTransition> {
+    let request_id = after.request_id.as_str();
+    let before_contribution = before.and_then(pending_provider_api_key_contribution);
+    let after_contribution = pending_provider_api_key_contribution(after);
+    let mut transitions = Vec::with_capacity(2);
+
+    match (before_contribution.as_ref(), after_contribution.as_ref()) {
+        (Some(before), Some(after)) if before.key_id == after.key_id => {
+            let delta = ProviderApiKeyUsageDelta::between(before, after);
+            if !delta.is_noop() {
+                transitions.push(ProviderApiKeyUsageTransition {
+                    request_id: request_id.to_string(),
+                    key_id: after.key_id.clone(),
+                    delta,
+                });
+            }
+        }
+        _ => {
+            if let Some(before) = before_contribution.as_ref() {
+                let delta = ProviderApiKeyUsageDelta::removal(before);
+                if !delta.is_noop() {
+                    transitions.push(ProviderApiKeyUsageTransition {
+                        request_id: request_id.to_string(),
+                        key_id: before.key_id.clone(),
+                        delta,
+                    });
+                }
+            }
+            if let Some(after) = after_contribution.as_ref() {
+                let delta = ProviderApiKeyUsageDelta::addition(after);
+                if !delta.is_noop() {
+                    transitions.push(ProviderApiKeyUsageTransition {
+                        request_id: request_id.to_string(),
+                        key_id: after.key_id.clone(),
+                        delta,
+                    });
+                }
+            }
+        }
+    }
+    transitions
+}
+
+fn prepare_first_byte_provider_contribution_transitions(
+    before: &BTreeMap<String, InsertedPendingUsage>,
+    updated: &[InsertedPendingUsage],
+) -> Result<Vec<PreparedUsageCounterDeltaInsert>, DataLayerError> {
+    let mut prepared = Vec::with_capacity(updated.len());
+    for after in updated {
+        for transition in
+            first_byte_provider_contribution_transitions(before.get(&after.request_id), after)
+        {
+            let input = UsageCounterDeltaInsert {
+                request_id: &transition.request_id,
+                kind: USAGE_COUNTER_KIND_PROVIDER_API_KEY,
+                target_id: &transition.key_id,
+                request_count_delta: transition.delta.request_count,
+                total_requests_delta: 0,
+                success_count_delta: transition.delta.success_count,
+                error_count_delta: transition.delta.error_count,
+                dns_failures_delta: 0,
+                stream_errors_delta: 0,
+                total_tokens_delta: transition.delta.total_tokens,
+                total_cost_usd_delta: transition.delta.total_cost_usd,
+                total_response_time_ms_delta: transition.delta.total_response_time_ms,
+                last_used_at_unix_secs: None,
+                last_used_ip: None,
+                candidate_last_used_at_unix_secs: transition.delta.candidate_last_used_at_unix_secs,
+                removed_last_used_at_unix_secs: transition.delta.removed_last_used_at_unix_secs,
+                usage_created_at_unix_secs: transition.delta.usage_created_at_unix_secs,
+            };
+            if let Some(input) = prepare_usage_counter_delta_insert(input)? {
+                prepared.push(input);
+            }
+        }
+    }
+    Ok(prepared)
+}
+
+async fn enqueue_first_byte_provider_contribution_transition_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    before: Option<&InsertedPendingUsage>,
+    after: &InsertedPendingUsage,
+) -> Result<(), DataLayerError> {
+    for transition in first_byte_provider_contribution_transitions(before, after) {
+        enqueue_provider_api_key_usage_delta_in_tx(
+            tx,
+            &transition.request_id,
+            &transition.key_id,
+            &transition.delta,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn map_inserted_pending_usage(
+    row: PgRow,
+    context: &str,
+) -> Result<InsertedPendingUsage, DataLayerError> {
+    let created_at_unix_secs = row
+        .try_get::<i64, _>("created_at_unix_secs")
+        .map_postgres_err()?;
+    Ok(InsertedPendingUsage {
+        request_id: row.try_get("request_id").map_postgres_err()?,
+        provider_api_key_id: row.try_get("provider_api_key_id").map_postgres_err()?,
+        created_at_unix_secs: u64::try_from(created_at_unix_secs).map_err(|_| {
+            DataLayerError::UnexpectedValue(format!(
+                "{context} created_at is negative: {created_at_unix_secs}"
+            ))
+        })?,
+    })
 }
 
 struct UsageCounterDeltaRow {
@@ -9682,14 +11148,35 @@ struct UsageCounterDeltaInsert<'a> {
     usage_created_at_unix_secs: Option<u64>,
 }
 
-async fn insert_usage_counter_delta_in_tx(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
+#[derive(Debug)]
+struct PreparedUsageCounterDeltaInsert {
+    id: String,
+    request_id: String,
+    kind: String,
+    target_id: String,
+    request_count_delta: i64,
+    total_requests_delta: i64,
+    success_count_delta: i64,
+    error_count_delta: i64,
+    dns_failures_delta: i64,
+    stream_errors_delta: i64,
+    total_tokens_delta: i64,
+    total_cost_usd_delta: f64,
+    total_response_time_ms_delta: i64,
+    last_used_at_unix_secs: Option<i64>,
+    last_used_ip: Option<String>,
+    candidate_last_used_at_unix_secs: Option<i64>,
+    removed_last_used_at_unix_secs: Option<i64>,
+    usage_created_at_unix_secs: Option<i64>,
+}
+
+fn prepare_usage_counter_delta_insert(
     input: UsageCounterDeltaInsert<'_>,
-) -> Result<(), DataLayerError> {
+) -> Result<Option<PreparedUsageCounterDeltaInsert>, DataLayerError> {
     let request_id = input.request_id.trim();
     let target_id = input.target_id.trim();
     if request_id.is_empty() || target_id.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let candidate_last_used_at_unix_secs = optional_unix_secs_to_i64(
         "usage counter candidate_last_used_at_unix_secs",
@@ -9707,12 +11194,51 @@ async fn insert_usage_counter_delta_in_tx(
         "usage counter last_used_at_unix_secs",
         input.last_used_at_unix_secs,
     )?;
+    let total_cost_usd_delta = if input.total_cost_usd_delta.is_finite() {
+        input.total_cost_usd_delta
+    } else {
+        0.0
+    };
+
+    Ok(Some(PreparedUsageCounterDeltaInsert {
+        id: Uuid::new_v4().to_string(),
+        request_id: request_id.to_string(),
+        kind: input.kind.to_string(),
+        target_id: target_id.to_string(),
+        request_count_delta: input.request_count_delta,
+        total_requests_delta: input.total_requests_delta,
+        success_count_delta: input.success_count_delta,
+        error_count_delta: input.error_count_delta,
+        dns_failures_delta: input.dns_failures_delta,
+        stream_errors_delta: input.stream_errors_delta,
+        total_tokens_delta: input.total_tokens_delta,
+        total_cost_usd_delta,
+        total_response_time_ms_delta: input.total_response_time_ms_delta,
+        last_used_at_unix_secs,
+        last_used_ip: input
+            .last_used_ip
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        candidate_last_used_at_unix_secs,
+        removed_last_used_at_unix_secs,
+        usage_created_at_unix_secs,
+    }))
+}
+
+async fn insert_usage_counter_delta_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    input: UsageCounterDeltaInsert<'_>,
+) -> Result<(), DataLayerError> {
+    let Some(input) = prepare_usage_counter_delta_insert(input)? else {
+        return Ok(());
+    };
 
     sqlx::query(INSERT_USAGE_COUNTER_DELTA_SQL)
-        .bind(Uuid::new_v4().to_string())
-        .bind(request_id)
+        .bind(input.id)
+        .bind(input.request_id)
         .bind(input.kind)
-        .bind(target_id)
+        .bind(input.target_id)
         .bind(input.request_count_delta)
         .bind(input.total_requests_delta)
         .bind(input.success_count_delta)
@@ -9722,19 +11248,50 @@ async fn insert_usage_counter_delta_in_tx(
         .bind(input.total_tokens_delta)
         .bind(input.total_cost_usd_delta)
         .bind(input.total_response_time_ms_delta)
-        .bind(last_used_at_unix_secs)
-        .bind(
-            input
-                .last_used_ip
-                .map(str::trim)
-                .filter(|value| !value.is_empty()),
-        )
-        .bind(candidate_last_used_at_unix_secs)
-        .bind(removed_last_used_at_unix_secs)
-        .bind(usage_created_at_unix_secs)
+        .bind(input.last_used_at_unix_secs)
+        .bind(input.last_used_ip)
+        .bind(input.candidate_last_used_at_unix_secs)
+        .bind(input.removed_last_used_at_unix_secs)
+        .bind(input.usage_created_at_unix_secs)
         .execute(&mut **tx)
         .await
         .map_postgres_err()?;
+    Ok(())
+}
+
+async fn insert_usage_counter_deltas_batch_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    inputs: &[PreparedUsageCounterDeltaInsert],
+) -> Result<(), DataLayerError> {
+    for chunk in inputs.chunks(USAGE_COUNTER_DELTA_INSERT_BATCH_SIZE) {
+        let mut builder = QueryBuilder::<Postgres>::new(INSERT_USAGE_COUNTER_DELTAS_PREFIX_SQL);
+        builder.push_values(chunk, |mut values, input| {
+            values
+                .push_bind(input.id.clone())
+                .push_bind(input.request_id.clone())
+                .push_bind(input.kind.clone())
+                .push_bind(input.target_id.clone())
+                .push_bind(input.request_count_delta)
+                .push_bind(input.total_requests_delta)
+                .push_bind(input.success_count_delta)
+                .push_bind(input.error_count_delta)
+                .push_bind(input.dns_failures_delta)
+                .push_bind(input.stream_errors_delta)
+                .push_bind(input.total_tokens_delta)
+                .push_bind(input.total_cost_usd_delta)
+                .push_bind(input.total_response_time_ms_delta)
+                .push_bind(input.last_used_at_unix_secs)
+                .push_bind(input.last_used_ip.clone())
+                .push_bind(input.candidate_last_used_at_unix_secs)
+                .push_bind(input.removed_last_used_at_unix_secs)
+                .push_bind(input.usage_created_at_unix_secs);
+        });
+        builder
+            .build()
+            .execute(&mut **tx)
+            .await
+            .map_postgres_err()?;
+    }
     Ok(())
 }
 

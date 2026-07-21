@@ -369,12 +369,18 @@ fn capacity_point(
     metrics: GateMetricSnapshot,
 ) -> CapacityCurvePointResult {
     let rejected_requests = result.status_counts.get(&503).copied().unwrap_or_default();
-    let successful_requests = result
+    let successful_statuses = result
         .status_counts
         .iter()
         .filter(|(status, _)| **status >= 200 && **status < 300)
         .map(|(_, count)| *count)
         .sum::<usize>();
+    let responses_received = result.status_counts.values().sum::<usize>();
+    let failures_without_response = result.total_requests.saturating_sub(responses_received);
+    let failures_after_response = result
+        .failed_requests
+        .saturating_sub(failures_without_response);
+    let successful_requests = successful_statuses.saturating_sub(failures_after_response);
     let throughput_rps = if duration_ms == 0 {
         successful_requests as u64
     } else {

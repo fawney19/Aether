@@ -66,6 +66,24 @@ pub(crate) async fn select_gateway_routing_group(
         });
     }
 
+    // When there are no bindings at all, no principal-specific lookup can
+    // produce a group. The data-state repository answers this with a cached
+    // existence query, so the common "routing configured but unused" case
+    // does not materialize the binding table per API key/user.
+    let has_bindings = repository.has_any_routing_group_binding().await;
+    if matches!(has_bindings, Ok(false)) {
+        let system_default = repository
+            .find_routing_group(RoutingGroupLookupKey::SystemDefault)
+            .await
+            .ok()
+            .flatten()
+            .filter(|group| group.enabled);
+        return Ok(GatewayRoutingGroupSelection {
+            group: system_default,
+            source: "system_default".to_string(),
+        });
+    }
+
     for (subject_type, subject_id, source) in default_binding_candidates(&input) {
         let bindings = repository
             .list_routing_group_bindings(&RoutingGroupBindingQuery {
@@ -211,6 +229,89 @@ mod tests {
 
         assert_eq!(selection.source, "api_key_default");
         assert_eq!(selection.group.unwrap().id, "group-1");
+    }
+
+    #[tokio::test]
+    async fn selects_system_default_when_no_bindings_exist() {
+        let repository = InMemoryRoutingGroupRepository::default();
+        repository
+            .create_routing_group(CreateRoutingGroupRecord {
+                id: "system-default".to_string(),
+                name: "system-default".to_string(),
+                description: None,
+                enabled: true,
+                is_system_default: true,
+                config_json: json!({}),
+                version: 1,
+                created_at: 1,
+                updated_at: 1,
+                published_at: None,
+            })
+            .await
+            .unwrap();
+
+        let selection = select_gateway_routing_group(
+            &repository,
+            GatewayRoutingSelectionInput {
+                explicit_group: None,
+                user_id: Some("user-1"),
+                api_key_id: Some("api-key-1"),
+                user_group_ids: &["user-group-1".to_string()],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(selection.source, "system_default");
+        assert_eq!(selection.group.unwrap().id, "system-default");
+    }
+
+    #[tokio::test]
+    async fn selects_explicit_group_allowed_by_user_group_binding() {
+        let repository = InMemoryRoutingGroupRepository::default();
+        repository
+            .create_routing_group(CreateRoutingGroupRecord {
+                id: "private-group".to_string(),
+                name: "private".to_string(),
+                description: None,
+                enabled: true,
+                is_system_default: false,
+                config_json: json!({}),
+                version: 1,
+                created_at: 1,
+                updated_at: 1,
+                published_at: None,
+            })
+            .await
+            .unwrap();
+        repository
+            .create_routing_group_binding(CreateRoutingGroupBindingRecord {
+                id: "binding-explicit".to_string(),
+                group_id: "private-group".to_string(),
+                subject_type: RoutingGroupBindingSubject::UserGroup,
+                subject_id: "team-1".to_string(),
+                is_default: false,
+                allow_explicit_select: true,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .unwrap();
+
+        let selection = select_gateway_routing_group(
+            &repository,
+            GatewayRoutingSelectionInput {
+                explicit_group: Some("private-group"),
+                user_id: Some("user-1"),
+                api_key_id: Some("api-key-1"),
+                user_group_ids: &["team-1".to_string()],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(selection.source, "explicit_header");
+        assert_eq!(selection.group.unwrap().id, "private-group");
     }
 
     #[tokio::test]

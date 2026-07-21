@@ -734,6 +734,7 @@ dependencies = [
  "aether-runtime-state",
  "async-trait",
  "base64 0.22.1",
+ "futures-util",
  "serde",
  "serde_json",
  "tokio",

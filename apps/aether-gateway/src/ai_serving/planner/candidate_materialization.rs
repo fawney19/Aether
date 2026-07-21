@@ -1161,36 +1161,54 @@ async fn resolve_priority_candidate_page_with_cache(
             .resolved_page_cache_model_directive_policy_hash(),
         cursor.resolution_mode,
     );
-    let page_candidates_for_fallback = page_candidates.clone();
-    let page_candidates_for_load = page_candidates;
-    let cache = cursor.state.app().candidate_resolved_page_cache.clone();
+    let page_candidates_for_fallback = page_candidates;
+    let app = cursor.state.app();
+    let cache = app.candidate_resolved_page_cache.clone();
     let ttl = candidate_page_cache_ttl_from_env();
     let stale_ttl = candidate_page_cache_stale_ttl(ttl);
+    // Keep request-owned planner inputs borrowed until the cache tells us a
+    // cold load or stale refresh is actually needed. Fresh hits must not pay
+    // for deep copies of candidate pages and auth/routing snapshots.
+    let client_api_format = cursor.client_api_format.as_str();
+    let requested_model = cursor.requested_model.as_str();
+    let auth_snapshot = &cursor.auth_snapshot;
+    let client_session_affinity = cursor.client_session_affinity.as_ref();
+    let required_capabilities = cursor.required_capabilities.as_ref();
+    let routing_policy = cursor.routing_policy.as_ref();
+    let request_auth_channel = cursor.request_auth_channel.as_deref();
+    let resolution_mode = cursor.resolution_mode;
     let cached = cache
-        .get_or_load_once_stale_while_refreshing(
+        .get_or_load_once_stale_while_revalidating(
             key,
             ttl,
             stale_ttl,
-            || async move {
-                let (candidates, resolved_skipped) =
-                    resolve_and_rank_logical_local_execution_candidates(
-                        cursor.state,
-                        page_candidates_for_load,
-                        &cursor.client_api_format,
-                        Some(&cursor.requested_model),
-                        Some(&cursor.auth_snapshot),
-                        cursor.client_session_affinity.as_ref(),
-                        cursor.required_capabilities.as_ref(),
-                        cursor.routing_policy.as_ref(),
-                        cursor.sticky_session_token.as_deref(),
-                        cursor.request_auth_channel.as_deref(),
-                        cursor.resolution_mode,
-                    )
-                    .await;
-                Ok::<_, GatewayError>(Some(Arc::new(CandidateResolvedPageSnapshot {
-                    candidates,
-                    resolved_skipped,
-                })))
+            || {
+                resolve_candidate_page_snapshot(
+                    (*app).clone(),
+                    page_candidates_for_fallback.clone(),
+                    client_api_format.to_owned(),
+                    requested_model.to_owned(),
+                    auth_snapshot.clone(),
+                    client_session_affinity.cloned(),
+                    required_capabilities.cloned(),
+                    routing_policy.cloned(),
+                    request_auth_channel.map(ToOwned::to_owned),
+                    resolution_mode,
+                )
+            },
+            || {
+                resolve_candidate_page_snapshot(
+                    (*app).clone(),
+                    page_candidates_for_fallback.clone(),
+                    client_api_format.to_owned(),
+                    requested_model.to_owned(),
+                    auth_snapshot.clone(),
+                    client_session_affinity.cloned(),
+                    required_capabilities.cloned(),
+                    routing_policy.cloned(),
+                    request_auth_channel.map(ToOwned::to_owned),
+                    resolution_mode,
+                )
             },
             CacheLoadObserver::new()
                 .on_hit(record_candidate_page_resolve_cache_hit)
@@ -1226,6 +1244,39 @@ async fn resolve_priority_candidate_page_with_cache(
             .await
         }
     }
+}
+
+async fn resolve_candidate_page_snapshot(
+    app: AppState,
+    page_candidates: Vec<SchedulerMinimalCandidateSelectionCandidate>,
+    client_api_format: String,
+    requested_model: String,
+    auth_snapshot: GatewayAuthApiKeySnapshot,
+    client_session_affinity: Option<ClientSessionAffinity>,
+    required_capabilities: Option<Value>,
+    routing_policy: Option<ResolvedRoutingPolicy>,
+    request_auth_channel: Option<String>,
+    resolution_mode: LocalCandidateResolutionMode,
+) -> Result<Option<Arc<CandidateResolvedPageSnapshot>>, GatewayError> {
+    let state = PlannerAppState::new(&app);
+    let (candidates, resolved_skipped) = resolve_and_rank_logical_local_execution_candidates(
+        state,
+        page_candidates,
+        &client_api_format,
+        Some(&requested_model),
+        Some(&auth_snapshot),
+        client_session_affinity.as_ref(),
+        required_capabilities.as_ref(),
+        routing_policy.as_ref(),
+        None,
+        request_auth_channel.as_deref(),
+        resolution_mode,
+    )
+    .await;
+    Ok(Some(Arc::new(CandidateResolvedPageSnapshot {
+        candidates,
+        resolved_skipped,
+    })))
 }
 
 fn should_cache_resolved_candidate_page(cursor: &RequestedModelAttemptPageCursor<'_>) -> bool {

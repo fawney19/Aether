@@ -112,6 +112,14 @@ impl RoutingGroupReadRepository for InMemoryRoutingGroupRepository {
         Ok(rows)
     }
 
+    async fn has_any_routing_group_binding(&self) -> Result<bool, DataLayerError> {
+        Ok(!self
+            .bindings
+            .read()
+            .expect("routing group binding repository lock")
+            .is_empty())
+    }
+
     async fn list_routing_group_versions(
         &self,
         group_id: &str,

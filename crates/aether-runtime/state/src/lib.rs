@@ -1575,6 +1575,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_rate_limit_keeps_user_limit_atomic_across_api_keys() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let first_key = RateLimitInput {
+            user_key: "rpm:user:shared:1",
+            key_key: "rpm:key:first:1",
+            bucket: 1,
+            user_limit: 2,
+            key_limit: 10,
+            ttl_seconds: 60,
+        };
+        let second_key = RateLimitInput {
+            key_key: "rpm:key:second:1",
+            ..first_key
+        };
+
+        assert!(matches!(
+            runtime
+                .check_and_consume_rate_limit(first_key)
+                .await
+                .expect("first key"),
+            RateLimitCheck::Allowed { .. }
+        ));
+        assert!(matches!(
+            runtime
+                .check_and_consume_rate_limit(second_key)
+                .await
+                .expect("second key"),
+            RateLimitCheck::Allowed { .. }
+        ));
+        assert_eq!(
+            runtime
+                .check_and_consume_rate_limit(first_key)
+                .await
+                .expect("user limit"),
+            RateLimitCheck::Rejected {
+                scope: RateLimitScope::User,
+                limit: 2,
+            }
+        );
+        assert_eq!(
+            runtime
+                .rate_limit_count(first_key.user_key, first_key.bucket)
+                .await
+                .expect("user count"),
+            2
+        );
+        assert_eq!(
+            runtime
+                .rate_limit_count(first_key.key_key, first_key.bucket)
+                .await
+                .expect("first key count"),
+            1
+        );
+        assert_eq!(
+            runtime
+                .rate_limit_count(second_key.key_key, second_key.bucket)
+                .await
+                .expect("second key count"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_rate_limit_concurrent_checks_do_not_exceed_limit() {
+        let runtime =
+            std::sync::Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let input = RateLimitInput {
+            user_key: "rpm:user:concurrent:1",
+            key_key: "rpm:key:concurrent:1",
+            bucket: 1,
+            user_limit: 32,
+            key_limit: 64,
+            ttl_seconds: 60,
+        };
+        let mut tasks = Vec::new();
+        for _ in 0..128 {
+            let runtime = std::sync::Arc::clone(&runtime);
+            tasks.push(tokio::spawn(async move {
+                runtime
+                    .check_and_consume_rate_limit(input)
+                    .await
+                    .expect("concurrent rate-limit check")
+            }));
+        }
+
+        let mut allowed = 0;
+        let mut rejected = 0;
+        for task in tasks {
+            match task.await.expect("rate-limit task") {
+                RateLimitCheck::Allowed { .. } => allowed += 1,
+                RateLimitCheck::Rejected {
+                    scope: RateLimitScope::User,
+                    limit: 32,
+                } => rejected += 1,
+                other => panic!("unexpected rate-limit result: {other:?}"),
+            }
+        }
+        assert_eq!(allowed, 32);
+        assert_eq!(rejected, 96);
+    }
+
+    #[tokio::test]
     async fn memory_lock_fencing_tokens_increase_after_release() {
         let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
         let first = runtime

@@ -59,6 +59,7 @@ impl AppState {
         if cache_key.is_empty() {
             return Ok(None);
         }
+        let cache_generation = self.auth_snapshot_cache.generation();
         let snapshot = self
             .auth_snapshot_cache
             .get_or_load(
@@ -74,10 +75,11 @@ impl AppState {
             )
             .await?;
         if let Some(snapshot) = snapshot.as_ref() {
-            self.auth_snapshot_cache.insert(
+            self.auth_snapshot_cache.insert_if_generation(
                 AuthSnapshotCacheKey::user_api_key_ids(&snapshot.user_id, &snapshot.api_key_id),
                 Some(snapshot.clone()),
                 AUTH_API_KEY_SNAPSHOT_RUNTIME_CACHE_TTL,
+                cache_generation,
             );
         }
         Ok(snapshot)

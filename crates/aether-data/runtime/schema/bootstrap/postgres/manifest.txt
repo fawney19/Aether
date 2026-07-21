@@ -12,3 +12,4 @@
 150_background_tasks.sql
 160_routing_profiles.sql
 170_usage_legacy_body_ref_cleanup_index.sql
+180_usage_stale_pending_cleanup_index.sql

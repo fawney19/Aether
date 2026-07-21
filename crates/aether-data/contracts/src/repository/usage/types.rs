@@ -2021,10 +2021,60 @@ impl UpsertUsageRecord {
 
 #[async_trait]
 pub trait UsageWriteRepository: Send + Sync {
+    /// Whether lightweight first-byte upserts avoid backend-wide counter rebuilds.
+    fn supports_first_byte_usage_fast_path(&self) -> bool {
+        false
+    }
+
+    /// Whether this backend can persist several first-byte transitions in one statement.
+    ///
+    /// The default deliberately remains disabled so adapters that do not implement a native
+    /// batch write retain the existing single-row behavior through `upsert_first_byte_many`.
+    fn supports_first_byte_usage_batch(&self) -> bool {
+        false
+    }
+
+    /// Whether this backend can persist new pending lifecycle rows and their auxiliary snapshots
+    /// in native batches.
+    ///
+    /// Implementations must preserve the full [`Self::upsert`] persistence contract. In
+    /// particular, opting into this capability must not drop HTTP audit/body data, routing or
+    /// settlement snapshots, counter deltas, or the non-regression rules for existing rows.
+    fn supports_pending_usage_batch(&self) -> bool {
+        false
+    }
+
     async fn upsert(
         &self,
         usage: UpsertUsageRecord,
     ) -> Result<StoredRequestUsageAudit, crate::DataLayerError>;
+
+    async fn upsert_first_byte(
+        &self,
+        usage: UpsertUsageRecord,
+    ) -> Result<(), crate::DataLayerError> {
+        self.upsert(usage).await.map(|_| ())
+    }
+
+    async fn upsert_first_byte_many(
+        &self,
+        usages: Vec<UpsertUsageRecord>,
+    ) -> Result<(), crate::DataLayerError> {
+        for usage in usages {
+            self.upsert_first_byte(usage).await?;
+        }
+        Ok(())
+    }
+
+    async fn upsert_pending_many(
+        &self,
+        usages: Vec<UpsertUsageRecord>,
+    ) -> Result<(), crate::DataLayerError> {
+        for usage in usages {
+            self.upsert(usage).await?;
+        }
+        Ok(())
+    }
 
     async fn rebuild_api_key_usage_stats(&self) -> Result<u64, crate::DataLayerError>;
 

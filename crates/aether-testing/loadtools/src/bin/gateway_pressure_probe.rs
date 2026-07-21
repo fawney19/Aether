@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_loadtools::{
-    fetch_prometheus_samples, find_metric_value_u64, run_http_load_probe, HttpLoadProbeConfig,
-    HttpLoadProbeResponseMode, HttpLoadProbeResult, PrometheusSample,
+    fetch_prometheus_samples, find_metric_value_u64, run_http_load_probe_with_options,
+    HttpLoadProbeConfig, HttpLoadProbeOptions, HttpLoadProbeResponseMode, HttpLoadProbeResult,
+    PrometheusSample,
 };
 use reqwest::Method;
 use serde::Serialize;
@@ -15,10 +16,55 @@ use tokio::sync::Mutex;
 
 const DB_POOL_PRESSURE_USAGE_BASIS_POINTS: u64 = 9_000;
 const MAX_DB_POOL_PRESSURE_WINDOWS: usize = 32;
+const ACCEPTANCE_CONTRACT_VERSION: u32 = 2;
+const DEFAULT_SETTLE_AFTER: Duration = Duration::from_secs(10);
+const SETTLE_DRAIN_QUIET_PERIOD: Duration = Duration::from_secs(7);
+const SETTLE_DRAIN_MIN_CONSECUTIVE_SAMPLES: usize = 3;
+const SETTLE_DRAIN_TOKIO_ALIVE_TASKS_TOLERANCE: u64 = 64;
+const SETTLE_DRAIN_TOKIO_GLOBAL_QUEUE_DEPTH_TOLERANCE: u64 = 2;
+const REQUIRED_SETTLE_DRAIN_METRICS: &[&str] = &[
+    "request_candidate_queue_depth",
+    "request_candidate_queue_pending_depth",
+    "request_candidate_active_queue_depth",
+    "request_candidate_active_queue_pending_depth",
+    "request_candidate_terminal_queue_depth",
+    "request_candidate_terminal_queue_pending_depth",
+    "request_candidate_terminal_barrier_pending",
+    "usage_runtime_terminal_submission_pending",
+    "usage_runtime_terminal_submission_in_flight",
+    "usage_runtime_terminal_submission_rejected_total",
+    "usage_runtime_terminal_enqueue_in_flight",
+    "usage_runtime_terminal_enqueue_deferred_dropped_total",
+    "usage_runtime_terminal_direct_fallback_in_flight",
+    "usage_runtime_terminal_direct_fallback_failed_total",
+    "usage_runtime_terminal_direct_fallback_rejected_total",
+    "usage_runtime_lifecycle_enqueue_in_flight",
+    "usage_runtime_lifecycle_submission_pending",
+    "usage_runtime_ordered_lifecycle_pending",
+    "usage_runtime_pending_persistence_pending",
+    "usage_runtime_first_byte_persistence_pending",
+    "usage_runtime_first_byte_persistence_overflow_total",
+    "usage_runtime_first_byte_persistence_cancelled_total",
+    "usage_runtime_first_byte_persistence_direct_failed_total",
+    "usage_runtime_first_byte_persistence_fallback_accepted_total",
+    "usage_runtime_first_byte_persistence_fallback_failed_total",
+    "usage_queue_group_pending",
+    "usage_queue_group_lag",
+    "usage_queue_dlq_length",
+    "usage_runtime_enqueue_retry_pending",
+    "usage_counter_outbox_pending_rows",
+    "postgres_lock_waiting_connections",
+    "postgres_idle_in_transaction_connections",
+    "gateway_tokio_runtime_alive_tasks",
+    "gateway_tokio_runtime_global_queue_depth",
+    "upstream_target_gate_active_targets",
+    "upstream_target_gate_in_flight",
+];
 
 #[derive(Debug, Clone)]
 struct Config {
     load: HttpLoadProbeConfig,
+    require_sse_done: bool,
     metrics_url: String,
     sample_interval: Duration,
     settle_after: Duration,
@@ -28,12 +74,15 @@ struct Config {
 #[derive(Debug, Serialize)]
 struct GatewayPressureReport {
     suite: &'static str,
+    acceptance_contract_version: u32,
     target_url: String,
     metrics_url: String,
     sample_interval_ms: u64,
     settle_after_ms: u64,
     settle_drain_completed: bool,
     settle_drain_elapsed_ms: u64,
+    settle_required_metrics_available: bool,
+    settle_missing_required_metrics: Vec<String>,
     load: HttpLoadProbeResult,
     metrics: GatewayPressureMetricsSummary,
 }
@@ -148,6 +197,27 @@ struct GatewayPressureMetricsSummary {
     request_candidate_queue_max_pending_depth: u64,
     request_candidate_queue_final_pending_depth: u64,
     request_candidate_queue_capacity: u64,
+    request_candidate_priority_queue_max_depth: u64,
+    request_candidate_priority_queue_final_depth: u64,
+    request_candidate_priority_queue_max_pending_depth: u64,
+    request_candidate_priority_queue_final_pending_depth: u64,
+    request_candidate_priority_queue_capacity: u64,
+    #[serde(skip)]
+    request_candidate_priority_queue_first_async_overflow_total: Option<u64>,
+    request_candidate_priority_queue_async_overflow_total_delta: u64,
+    request_candidate_active_queue_max_depth: u64,
+    request_candidate_active_queue_final_depth: u64,
+    request_candidate_active_queue_max_pending_depth: u64,
+    request_candidate_active_queue_final_pending_depth: u64,
+    request_candidate_active_queue_max_reported_depth: u64,
+    request_candidate_terminal_queue_max_depth: u64,
+    request_candidate_terminal_queue_final_depth: u64,
+    request_candidate_terminal_queue_max_pending_depth: u64,
+    request_candidate_terminal_queue_final_pending_depth: u64,
+    request_candidate_terminal_queue_max_reported_depth: u64,
+    request_candidate_terminal_barrier_max_pending: u64,
+    request_candidate_terminal_barrier_final_pending: u64,
+    request_candidate_terminal_barrier_max_reported_pending: u64,
     request_candidate_queue_max_enqueued_total: u64,
     request_candidate_queue_max_flushed_total: u64,
     request_candidate_queue_max_flush_batches_total: u64,
@@ -160,9 +230,116 @@ struct GatewayPressureMetricsSummary {
     request_candidate_queue_max_dropped_total: u64,
     request_candidate_queue_max_flush_failed_total: u64,
     request_candidate_queue_max_sync_fallback_total: u64,
+    usage_runtime_max_terminal_submission_limit: u64,
+    usage_runtime_max_terminal_submission_pending: u64,
+    usage_runtime_final_terminal_submission_pending: u64,
+    usage_runtime_max_terminal_submission_max_pending: u64,
+    usage_runtime_max_terminal_submission_in_flight: u64,
+    usage_runtime_final_terminal_submission_in_flight: u64,
+    usage_runtime_max_terminal_submission_max_in_flight: u64,
+    usage_runtime_first_terminal_submission_rejected_total: Option<u64>,
+    usage_runtime_final_terminal_submission_rejected_total: u64,
+    usage_runtime_terminal_submission_rejected_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_terminal_enqueue_deferred_dropped_total: Option<u64>,
+    usage_runtime_final_terminal_enqueue_deferred_dropped_total: u64,
+    usage_runtime_terminal_enqueue_deferred_dropped_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_terminal_direct_fallback_failed_total: Option<u64>,
+    usage_runtime_final_terminal_direct_fallback_failed_total: u64,
+    usage_runtime_terminal_direct_fallback_failed_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_terminal_direct_fallback_rejected_total: Option<u64>,
+    usage_runtime_final_terminal_direct_fallback_rejected_total: u64,
+    usage_runtime_terminal_direct_fallback_rejected_total_delta: u64,
     usage_runtime_max_terminal_enqueue_failed_total: u64,
     usage_runtime_max_lifecycle_enqueue_failed_total: u64,
     usage_runtime_max_lifecycle_enqueue_deferred_dropped_total: u64,
+    usage_runtime_lifecycle_submission_capacity: u64,
+    usage_runtime_lifecycle_submission_workers: u64,
+    usage_runtime_lifecycle_submission_max_pending: u64,
+    usage_runtime_lifecycle_submission_final_pending: u64,
+    usage_runtime_lifecycle_submission_max_reported_pending: u64,
+    #[serde(skip)]
+    usage_runtime_first_lifecycle_submission_enqueued_total: Option<u64>,
+    usage_runtime_lifecycle_submission_enqueued_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_lifecycle_submission_coalesced_total: Option<u64>,
+    usage_runtime_lifecycle_submission_coalesced_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_lifecycle_submission_overflow_total: Option<u64>,
+    usage_runtime_lifecycle_submission_overflow_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_lifecycle_submission_processed_total: Option<u64>,
+    usage_runtime_lifecycle_submission_processed_total_delta: u64,
+    usage_runtime_ordered_lifecycle_max_pending: u64,
+    usage_runtime_ordered_lifecycle_final_pending: u64,
+    usage_runtime_ordered_lifecycle_max_reported_pending: u64,
+    usage_runtime_pending_persistence_capacity: u64,
+    usage_runtime_pending_persistence_max_pending: u64,
+    usage_runtime_pending_persistence_final_pending: u64,
+    #[serde(skip)]
+    usage_runtime_first_pending_persistence_batch_flush_total: Option<u64>,
+    usage_runtime_pending_persistence_batch_flush_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_pending_persistence_batch_records_total: Option<u64>,
+    usage_runtime_pending_persistence_batch_records_total_delta: u64,
+    usage_runtime_pending_persistence_max_batch_size: u64,
+    #[serde(skip)]
+    usage_runtime_first_pending_persistence_batch_failed_total: Option<u64>,
+    usage_runtime_pending_persistence_batch_failed_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_pending_persistence_retried_total: Option<u64>,
+    usage_runtime_pending_persistence_retried_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_pending_persistence_overflow_total: Option<u64>,
+    usage_runtime_pending_persistence_overflow_total_delta: u64,
+    usage_runtime_lifecycle_coalescer_max_entries: u64,
+    usage_runtime_lifecycle_coalescer_final_entries: u64,
+    #[serde(skip)]
+    usage_runtime_first_lifecycle_coalescer_compact_total: Option<u64>,
+    usage_runtime_lifecycle_coalescer_compact_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_lifecycle_coalescer_compact_entries_scanned_total: Option<u64>,
+    usage_runtime_lifecycle_coalescer_compact_entries_scanned_total_delta: u64,
+    usage_runtime_first_byte_persistence_capacity: u64,
+    usage_runtime_first_byte_persistence_max_pending: u64,
+    usage_runtime_first_byte_persistence_final_pending: u64,
+    usage_runtime_first_byte_persistence_max_batch_flush_total: u64,
+    usage_runtime_first_byte_persistence_final_batch_flush_total: u64,
+    #[serde(skip)]
+    usage_runtime_first_first_byte_persistence_batch_flush_total: Option<u64>,
+    usage_runtime_first_byte_persistence_batch_flush_total_delta: u64,
+    usage_runtime_first_byte_persistence_max_batch_records_total: u64,
+    usage_runtime_first_byte_persistence_final_batch_records_total: u64,
+    #[serde(skip)]
+    usage_runtime_first_first_byte_persistence_batch_records_total: Option<u64>,
+    usage_runtime_first_byte_persistence_batch_records_total_delta: u64,
+    usage_runtime_first_byte_persistence_max_batch_size: u64,
+    usage_runtime_first_byte_persistence_final_batch_size: u64,
+    usage_runtime_first_byte_persistence_max_batch_failed_total: u64,
+    usage_runtime_first_byte_persistence_final_batch_failed_total: u64,
+    #[serde(skip)]
+    usage_runtime_first_first_byte_persistence_batch_failed_total: Option<u64>,
+    usage_runtime_first_byte_persistence_batch_failed_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_first_byte_persistence_overflow_total: Option<u64>,
+    usage_runtime_first_byte_persistence_overflow_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_first_byte_persistence_cancelled_total: Option<u64>,
+    usage_runtime_first_byte_persistence_cancelled_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_first_byte_persistence_direct_succeeded_total: Option<u64>,
+    usage_runtime_first_byte_persistence_direct_succeeded_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_first_byte_persistence_direct_failed_total: Option<u64>,
+    usage_runtime_first_byte_persistence_direct_failed_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_first_byte_persistence_fallback_accepted_total: Option<u64>,
+    usage_runtime_first_byte_persistence_fallback_accepted_total_delta: u64,
+    #[serde(skip)]
+    usage_runtime_first_first_byte_persistence_fallback_failed_total: Option<u64>,
+    usage_runtime_first_byte_persistence_fallback_failed_total_delta: u64,
     usage_runtime_max_enqueue_retry_pending: u64,
     usage_runtime_final_enqueue_retry_pending: u64,
     usage_runtime_first_enqueue_retry_scheduled_total: Option<u64>,
@@ -329,6 +506,21 @@ struct GatewayDbPoolPressureWindow {
     usage_runtime_worker_record_concurrency_max_in_flight: u64,
     usage_runtime_worker_record_concurrency_wait_total: u64,
     usage_runtime_worker_record_deferred_total: u64,
+    usage_runtime_ordered_lifecycle_pending: u64,
+    usage_runtime_pending_persistence_pending: u64,
+    usage_runtime_pending_persistence_max_pending: u64,
+    usage_runtime_pending_persistence_batch_flush_total: u64,
+    usage_runtime_pending_persistence_batch_records_total: u64,
+    usage_runtime_pending_persistence_max_batch_size: u64,
+    usage_runtime_pending_persistence_batch_failed_total: u64,
+    usage_runtime_pending_persistence_retried_total: u64,
+    usage_runtime_lifecycle_coalescer_entries: u64,
+    usage_runtime_first_byte_persistence_pending: u64,
+    usage_runtime_first_byte_persistence_max_pending: u64,
+    usage_runtime_first_byte_persistence_batch_flush_total: u64,
+    usage_runtime_first_byte_persistence_batch_records_total: u64,
+    usage_runtime_first_byte_persistence_max_batch_size: u64,
+    usage_runtime_first_byte_persistence_batch_failed_total: u64,
     usage_queue_group_pending: u64,
     usage_queue_group_lag: u64,
     usage_counter_outbox_pending_rows: u64,
@@ -375,10 +567,51 @@ struct GatewayPostgresActivityGroup {
     max_transaction_age_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct SettleDrainResult {
     completed: bool,
     elapsed: Duration,
+    required_metrics_available: bool,
+    missing_required_metrics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SettleDrainBaseline {
+    tokio_alive_tasks: u64,
+    tokio_global_queue_depth: u64,
+}
+
+impl SettleDrainBaseline {
+    fn from_samples(samples: &[PrometheusSample]) -> Self {
+        Self {
+            tokio_alive_tasks: metric_max(samples, "gateway_tokio_runtime_alive_tasks"),
+            tokio_global_queue_depth: metric_max(
+                samples,
+                "gateway_tokio_runtime_global_queue_depth",
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct SettleDrainStability {
+    drained_since: Option<Duration>,
+    consecutive_drained_samples: usize,
+}
+
+impl SettleDrainStability {
+    fn observe(&mut self, elapsed: Duration, drained: bool) -> bool {
+        if !drained {
+            self.drained_since = None;
+            self.consecutive_drained_samples = 0;
+            return false;
+        }
+
+        let drained_since = *self.drained_since.get_or_insert(elapsed);
+        self.consecutive_drained_samples += 1;
+        self.consecutive_drained_samples >= SETTLE_DRAIN_MIN_CONSECUTIVE_SAMPLES
+            && elapsed.saturating_sub(drained_since) >= SETTLE_DRAIN_QUIET_PERIOD
+    }
 }
 
 impl GatewayPressureMetricsSummary {
@@ -846,6 +1079,81 @@ impl GatewayPressureMetricsSummary {
         self.request_candidate_queue_capacity = self
             .request_candidate_queue_capacity
             .max(metric_max(samples, "request_candidate_queue_capacity"));
+        let priority_candidate_depth =
+            metric_max(samples, "request_candidate_priority_queue_depth");
+        self.request_candidate_priority_queue_max_depth = self
+            .request_candidate_priority_queue_max_depth
+            .max(priority_candidate_depth);
+        self.request_candidate_priority_queue_final_depth = priority_candidate_depth;
+        let priority_candidate_pending_depth =
+            metric_max(samples, "request_candidate_priority_queue_pending_depth");
+        self.request_candidate_priority_queue_max_pending_depth = self
+            .request_candidate_priority_queue_max_pending_depth
+            .max(priority_candidate_pending_depth);
+        self.request_candidate_priority_queue_final_pending_depth =
+            priority_candidate_pending_depth;
+        self.request_candidate_priority_queue_capacity = self
+            .request_candidate_priority_queue_capacity
+            .max(metric_max(
+                samples,
+                "request_candidate_priority_queue_capacity",
+            ));
+        let priority_candidate_async_overflow_total = metric_max(
+            samples,
+            "request_candidate_priority_queue_async_overflow_total",
+        );
+        self.request_candidate_priority_queue_async_overflow_total_delta = observe_counter_delta(
+            &mut self.request_candidate_priority_queue_first_async_overflow_total,
+            priority_candidate_async_overflow_total,
+        );
+        let active_candidate_depth = metric_max(samples, "request_candidate_active_queue_depth");
+        self.request_candidate_active_queue_max_depth = self
+            .request_candidate_active_queue_max_depth
+            .max(active_candidate_depth);
+        self.request_candidate_active_queue_final_depth = active_candidate_depth;
+        let active_candidate_pending_depth =
+            metric_max(samples, "request_candidate_active_queue_pending_depth");
+        self.request_candidate_active_queue_max_pending_depth = self
+            .request_candidate_active_queue_max_pending_depth
+            .max(active_candidate_pending_depth);
+        self.request_candidate_active_queue_final_pending_depth = active_candidate_pending_depth;
+        self.request_candidate_active_queue_max_reported_depth = self
+            .request_candidate_active_queue_max_reported_depth
+            .max(metric_max(
+                samples,
+                "request_candidate_active_queue_max_depth",
+            ));
+        let terminal_candidate_depth =
+            metric_max(samples, "request_candidate_terminal_queue_depth");
+        self.request_candidate_terminal_queue_max_depth = self
+            .request_candidate_terminal_queue_max_depth
+            .max(terminal_candidate_depth);
+        self.request_candidate_terminal_queue_final_depth = terminal_candidate_depth;
+        let terminal_candidate_pending_depth =
+            metric_max(samples, "request_candidate_terminal_queue_pending_depth");
+        self.request_candidate_terminal_queue_max_pending_depth = self
+            .request_candidate_terminal_queue_max_pending_depth
+            .max(terminal_candidate_pending_depth);
+        self.request_candidate_terminal_queue_final_pending_depth =
+            terminal_candidate_pending_depth;
+        self.request_candidate_terminal_queue_max_reported_depth = self
+            .request_candidate_terminal_queue_max_reported_depth
+            .max(metric_max(
+                samples,
+                "request_candidate_terminal_queue_max_depth",
+            ));
+        let terminal_barrier_pending =
+            metric_max(samples, "request_candidate_terminal_barrier_pending");
+        self.request_candidate_terminal_barrier_max_pending = self
+            .request_candidate_terminal_barrier_max_pending
+            .max(terminal_barrier_pending);
+        self.request_candidate_terminal_barrier_final_pending = terminal_barrier_pending;
+        self.request_candidate_terminal_barrier_max_reported_pending = self
+            .request_candidate_terminal_barrier_max_reported_pending
+            .max(metric_max(
+                samples,
+                "request_candidate_terminal_barrier_max_pending",
+            ));
         self.request_candidate_queue_max_enqueued_total = self
             .request_candidate_queue_max_enqueued_total
             .max(metric_max(
@@ -912,6 +1220,74 @@ impl GatewayPressureMetricsSummary {
                 samples,
                 "request_candidate_queue_sync_fallback_total",
             ));
+        self.usage_runtime_max_terminal_submission_limit = self
+            .usage_runtime_max_terminal_submission_limit
+            .max(metric_max(
+                samples,
+                "usage_runtime_terminal_submission_limit",
+            ));
+        let terminal_submission_pending =
+            metric_max(samples, "usage_runtime_terminal_submission_pending");
+        self.usage_runtime_max_terminal_submission_pending = self
+            .usage_runtime_max_terminal_submission_pending
+            .max(terminal_submission_pending);
+        self.usage_runtime_final_terminal_submission_pending = terminal_submission_pending;
+        self.usage_runtime_max_terminal_submission_max_pending = self
+            .usage_runtime_max_terminal_submission_max_pending
+            .max(metric_max(
+                samples,
+                "usage_runtime_terminal_submission_max_pending",
+            ));
+        let terminal_submission_in_flight =
+            metric_max(samples, "usage_runtime_terminal_submission_in_flight");
+        self.usage_runtime_max_terminal_submission_in_flight = self
+            .usage_runtime_max_terminal_submission_in_flight
+            .max(terminal_submission_in_flight);
+        self.usage_runtime_final_terminal_submission_in_flight = terminal_submission_in_flight;
+        self.usage_runtime_max_terminal_submission_max_in_flight = self
+            .usage_runtime_max_terminal_submission_max_in_flight
+            .max(metric_max(
+                samples,
+                "usage_runtime_terminal_submission_max_in_flight",
+            ));
+        let terminal_submission_rejected_total =
+            metric_max(samples, "usage_runtime_terminal_submission_rejected_total");
+        self.usage_runtime_final_terminal_submission_rejected_total =
+            terminal_submission_rejected_total;
+        self.usage_runtime_terminal_submission_rejected_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_terminal_submission_rejected_total,
+            terminal_submission_rejected_total,
+        );
+        let terminal_enqueue_deferred_dropped_total = metric_max(
+            samples,
+            "usage_runtime_terminal_enqueue_deferred_dropped_total",
+        );
+        self.usage_runtime_final_terminal_enqueue_deferred_dropped_total =
+            terminal_enqueue_deferred_dropped_total;
+        self.usage_runtime_terminal_enqueue_deferred_dropped_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_terminal_enqueue_deferred_dropped_total,
+            terminal_enqueue_deferred_dropped_total,
+        );
+        let terminal_direct_fallback_failed_total = metric_max(
+            samples,
+            "usage_runtime_terminal_direct_fallback_failed_total",
+        );
+        self.usage_runtime_final_terminal_direct_fallback_failed_total =
+            terminal_direct_fallback_failed_total;
+        self.usage_runtime_terminal_direct_fallback_failed_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_terminal_direct_fallback_failed_total,
+            terminal_direct_fallback_failed_total,
+        );
+        let terminal_direct_fallback_rejected_total = metric_max(
+            samples,
+            "usage_runtime_terminal_direct_fallback_rejected_total",
+        );
+        self.usage_runtime_final_terminal_direct_fallback_rejected_total =
+            terminal_direct_fallback_rejected_total;
+        self.usage_runtime_terminal_direct_fallback_rejected_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_terminal_direct_fallback_rejected_total,
+            terminal_direct_fallback_rejected_total,
+        );
         self.usage_runtime_max_terminal_enqueue_failed_total = self
             .usage_runtime_max_terminal_enqueue_failed_total
             .max(metric_max(
@@ -930,6 +1306,260 @@ impl GatewayPressureMetricsSummary {
                 samples,
                 "usage_runtime_lifecycle_enqueue_deferred_dropped_total",
             ));
+        self.usage_runtime_lifecycle_submission_capacity = self
+            .usage_runtime_lifecycle_submission_capacity
+            .max(metric_max(
+                samples,
+                "usage_runtime_lifecycle_submission_capacity",
+            ));
+        self.usage_runtime_lifecycle_submission_workers = self
+            .usage_runtime_lifecycle_submission_workers
+            .max(metric_max(
+                samples,
+                "usage_runtime_lifecycle_submission_workers",
+            ));
+        let lifecycle_submission_pending =
+            metric_max(samples, "usage_runtime_lifecycle_submission_pending");
+        self.usage_runtime_lifecycle_submission_max_pending = self
+            .usage_runtime_lifecycle_submission_max_pending
+            .max(lifecycle_submission_pending);
+        self.usage_runtime_lifecycle_submission_final_pending = lifecycle_submission_pending;
+        self.usage_runtime_lifecycle_submission_max_reported_pending = self
+            .usage_runtime_lifecycle_submission_max_reported_pending
+            .max(metric_max(
+                samples,
+                "usage_runtime_lifecycle_submission_max_pending",
+            ));
+        let lifecycle_submission_enqueued_total =
+            metric_max(samples, "usage_runtime_lifecycle_submission_enqueued_total");
+        self.usage_runtime_lifecycle_submission_enqueued_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_lifecycle_submission_enqueued_total,
+            lifecycle_submission_enqueued_total,
+        );
+        let lifecycle_submission_coalesced_total = metric_max(
+            samples,
+            "usage_runtime_lifecycle_submission_coalesced_total",
+        );
+        self.usage_runtime_lifecycle_submission_coalesced_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_lifecycle_submission_coalesced_total,
+            lifecycle_submission_coalesced_total,
+        );
+        let lifecycle_submission_overflow_total =
+            metric_max(samples, "usage_runtime_lifecycle_submission_overflow_total");
+        self.usage_runtime_lifecycle_submission_overflow_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_lifecycle_submission_overflow_total,
+            lifecycle_submission_overflow_total,
+        );
+        let lifecycle_submission_processed_total = metric_max(
+            samples,
+            "usage_runtime_lifecycle_submission_processed_total",
+        );
+        self.usage_runtime_lifecycle_submission_processed_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_lifecycle_submission_processed_total,
+            lifecycle_submission_processed_total,
+        );
+        let ordered_lifecycle_pending =
+            metric_max(samples, "usage_runtime_ordered_lifecycle_pending");
+        self.usage_runtime_ordered_lifecycle_max_pending = self
+            .usage_runtime_ordered_lifecycle_max_pending
+            .max(ordered_lifecycle_pending);
+        self.usage_runtime_ordered_lifecycle_final_pending = ordered_lifecycle_pending;
+        self.usage_runtime_ordered_lifecycle_max_reported_pending = self
+            .usage_runtime_ordered_lifecycle_max_reported_pending
+            .max(metric_max(
+                samples,
+                "usage_runtime_ordered_lifecycle_max_pending",
+            ));
+        self.usage_runtime_pending_persistence_capacity = self
+            .usage_runtime_pending_persistence_capacity
+            .max(metric_max(
+                samples,
+                "usage_runtime_pending_persistence_capacity",
+            ));
+        let pending_persistence_pending =
+            metric_max(samples, "usage_runtime_pending_persistence_pending");
+        self.usage_runtime_pending_persistence_max_pending = self
+            .usage_runtime_pending_persistence_max_pending
+            .max(pending_persistence_pending)
+            .max(metric_max(
+                samples,
+                "usage_runtime_pending_persistence_max_pending",
+            ));
+        self.usage_runtime_pending_persistence_final_pending = pending_persistence_pending;
+        let pending_batch_flush_total = metric_max(
+            samples,
+            "usage_runtime_pending_persistence_batch_flush_total",
+        );
+        self.usage_runtime_pending_persistence_batch_flush_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_pending_persistence_batch_flush_total,
+            pending_batch_flush_total,
+        );
+        let pending_batch_records_total = metric_max(
+            samples,
+            "usage_runtime_pending_persistence_batch_records_total",
+        );
+        self.usage_runtime_pending_persistence_batch_records_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_pending_persistence_batch_records_total,
+            pending_batch_records_total,
+        );
+        self.usage_runtime_pending_persistence_max_batch_size = self
+            .usage_runtime_pending_persistence_max_batch_size
+            .max(metric_max(
+                samples,
+                "usage_runtime_pending_persistence_max_batch_size",
+            ));
+        let pending_batch_failed_total = metric_max(
+            samples,
+            "usage_runtime_pending_persistence_batch_failed_total",
+        );
+        self.usage_runtime_pending_persistence_batch_failed_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_pending_persistence_batch_failed_total,
+            pending_batch_failed_total,
+        );
+        let pending_retried_total =
+            metric_max(samples, "usage_runtime_pending_persistence_retried_total");
+        self.usage_runtime_pending_persistence_retried_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_pending_persistence_retried_total,
+            pending_retried_total,
+        );
+        let pending_overflow_total =
+            metric_max(samples, "usage_runtime_pending_persistence_overflow_total");
+        self.usage_runtime_pending_persistence_overflow_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_pending_persistence_overflow_total,
+            pending_overflow_total,
+        );
+        let coalescer_entries = metric_max(samples, "usage_runtime_lifecycle_coalescer_entries");
+        self.usage_runtime_lifecycle_coalescer_max_entries = self
+            .usage_runtime_lifecycle_coalescer_max_entries
+            .max(coalescer_entries);
+        self.usage_runtime_lifecycle_coalescer_final_entries = coalescer_entries;
+        let coalescer_compact_total =
+            metric_max(samples, "usage_runtime_lifecycle_coalescer_compact_total");
+        self.usage_runtime_lifecycle_coalescer_compact_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_lifecycle_coalescer_compact_total,
+            coalescer_compact_total,
+        );
+        let coalescer_scanned_total = metric_max(
+            samples,
+            "usage_runtime_lifecycle_coalescer_compact_entries_scanned_total",
+        );
+        self.usage_runtime_lifecycle_coalescer_compact_entries_scanned_total_delta =
+            observe_counter_delta(
+                &mut self.usage_runtime_first_lifecycle_coalescer_compact_entries_scanned_total,
+                coalescer_scanned_total,
+            );
+        self.usage_runtime_first_byte_persistence_capacity = self
+            .usage_runtime_first_byte_persistence_capacity
+            .max(metric_max(
+                samples,
+                "usage_runtime_first_byte_persistence_capacity",
+            ));
+        self.usage_runtime_first_byte_persistence_max_pending = self
+            .usage_runtime_first_byte_persistence_max_pending
+            .max(metric_max(
+                samples,
+                "usage_runtime_first_byte_persistence_max_pending",
+            ));
+        self.usage_runtime_first_byte_persistence_final_pending =
+            metric_max(samples, "usage_runtime_first_byte_persistence_pending");
+        let first_byte_batch_flush_total = metric_max(
+            samples,
+            "usage_runtime_first_byte_persistence_batch_flush_total",
+        );
+        self.usage_runtime_first_byte_persistence_max_batch_flush_total = self
+            .usage_runtime_first_byte_persistence_max_batch_flush_total
+            .max(first_byte_batch_flush_total);
+        self.usage_runtime_first_byte_persistence_final_batch_flush_total =
+            first_byte_batch_flush_total;
+        self.usage_runtime_first_byte_persistence_batch_flush_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_first_byte_persistence_batch_flush_total,
+            first_byte_batch_flush_total,
+        );
+        let first_byte_batch_records_total = metric_max(
+            samples,
+            "usage_runtime_first_byte_persistence_batch_records_total",
+        );
+        self.usage_runtime_first_byte_persistence_max_batch_records_total = self
+            .usage_runtime_first_byte_persistence_max_batch_records_total
+            .max(first_byte_batch_records_total);
+        self.usage_runtime_first_byte_persistence_final_batch_records_total =
+            first_byte_batch_records_total;
+        self.usage_runtime_first_byte_persistence_batch_records_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_first_byte_persistence_batch_records_total,
+            first_byte_batch_records_total,
+        );
+        let first_byte_batch_size = metric_max(
+            samples,
+            "usage_runtime_first_byte_persistence_max_batch_size",
+        );
+        self.usage_runtime_first_byte_persistence_max_batch_size = self
+            .usage_runtime_first_byte_persistence_max_batch_size
+            .max(first_byte_batch_size);
+        self.usage_runtime_first_byte_persistence_final_batch_size = first_byte_batch_size;
+        let first_byte_batch_failed_total = metric_max(
+            samples,
+            "usage_runtime_first_byte_persistence_batch_failed_total",
+        );
+        self.usage_runtime_first_byte_persistence_max_batch_failed_total = self
+            .usage_runtime_first_byte_persistence_max_batch_failed_total
+            .max(first_byte_batch_failed_total);
+        self.usage_runtime_first_byte_persistence_final_batch_failed_total =
+            first_byte_batch_failed_total;
+        self.usage_runtime_first_byte_persistence_batch_failed_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_first_byte_persistence_batch_failed_total,
+            first_byte_batch_failed_total,
+        );
+        let first_byte_overflow = metric_max(
+            samples,
+            "usage_runtime_first_byte_persistence_overflow_total",
+        );
+        self.usage_runtime_first_byte_persistence_overflow_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_first_byte_persistence_overflow_total,
+            first_byte_overflow,
+        );
+        let first_byte_cancelled = metric_max(
+            samples,
+            "usage_runtime_first_byte_persistence_cancelled_total",
+        );
+        self.usage_runtime_first_byte_persistence_cancelled_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_first_byte_persistence_cancelled_total,
+            first_byte_cancelled,
+        );
+        let first_byte_direct_succeeded = metric_max(
+            samples,
+            "usage_runtime_first_byte_persistence_direct_succeeded_total",
+        );
+        self.usage_runtime_first_byte_persistence_direct_succeeded_total_delta =
+            observe_counter_delta(
+                &mut self.usage_runtime_first_first_byte_persistence_direct_succeeded_total,
+                first_byte_direct_succeeded,
+            );
+        let first_byte_direct_failed = metric_max(
+            samples,
+            "usage_runtime_first_byte_persistence_direct_failed_total",
+        );
+        self.usage_runtime_first_byte_persistence_direct_failed_total_delta = observe_counter_delta(
+            &mut self.usage_runtime_first_first_byte_persistence_direct_failed_total,
+            first_byte_direct_failed,
+        );
+        let first_byte_fallback_accepted = metric_max(
+            samples,
+            "usage_runtime_first_byte_persistence_fallback_accepted_total",
+        );
+        self.usage_runtime_first_byte_persistence_fallback_accepted_total_delta =
+            observe_counter_delta(
+                &mut self.usage_runtime_first_first_byte_persistence_fallback_accepted_total,
+                first_byte_fallback_accepted,
+            );
+        let first_byte_fallback_failed = metric_max(
+            samples,
+            "usage_runtime_first_byte_persistence_fallback_failed_total",
+        );
+        self.usage_runtime_first_byte_persistence_fallback_failed_total_delta =
+            observe_counter_delta(
+                &mut self.usage_runtime_first_first_byte_persistence_fallback_failed_total,
+                first_byte_fallback_failed,
+            );
         let enqueue_retry_pending = metric_max(samples, "usage_runtime_enqueue_retry_pending");
         self.usage_runtime_max_enqueue_retry_pending = self
             .usage_runtime_max_enqueue_retry_pending
@@ -1557,6 +2187,66 @@ impl GatewayDbPoolPressureWindow {
                 samples,
                 "usage_runtime_queue_worker_record_deferred_total",
             ),
+            usage_runtime_ordered_lifecycle_pending: metric_max(
+                samples,
+                "usage_runtime_ordered_lifecycle_pending",
+            ),
+            usage_runtime_pending_persistence_pending: metric_max(
+                samples,
+                "usage_runtime_pending_persistence_pending",
+            ),
+            usage_runtime_pending_persistence_max_pending: metric_max(
+                samples,
+                "usage_runtime_pending_persistence_max_pending",
+            ),
+            usage_runtime_pending_persistence_batch_flush_total: metric_max(
+                samples,
+                "usage_runtime_pending_persistence_batch_flush_total",
+            ),
+            usage_runtime_pending_persistence_batch_records_total: metric_max(
+                samples,
+                "usage_runtime_pending_persistence_batch_records_total",
+            ),
+            usage_runtime_pending_persistence_max_batch_size: metric_max(
+                samples,
+                "usage_runtime_pending_persistence_max_batch_size",
+            ),
+            usage_runtime_pending_persistence_batch_failed_total: metric_max(
+                samples,
+                "usage_runtime_pending_persistence_batch_failed_total",
+            ),
+            usage_runtime_pending_persistence_retried_total: metric_max(
+                samples,
+                "usage_runtime_pending_persistence_retried_total",
+            ),
+            usage_runtime_lifecycle_coalescer_entries: metric_max(
+                samples,
+                "usage_runtime_lifecycle_coalescer_entries",
+            ),
+            usage_runtime_first_byte_persistence_pending: metric_max(
+                samples,
+                "usage_runtime_first_byte_persistence_pending",
+            ),
+            usage_runtime_first_byte_persistence_max_pending: metric_max(
+                samples,
+                "usage_runtime_first_byte_persistence_max_pending",
+            ),
+            usage_runtime_first_byte_persistence_batch_flush_total: metric_max(
+                samples,
+                "usage_runtime_first_byte_persistence_batch_flush_total",
+            ),
+            usage_runtime_first_byte_persistence_batch_records_total: metric_max(
+                samples,
+                "usage_runtime_first_byte_persistence_batch_records_total",
+            ),
+            usage_runtime_first_byte_persistence_max_batch_size: metric_max(
+                samples,
+                "usage_runtime_first_byte_persistence_max_batch_size",
+            ),
+            usage_runtime_first_byte_persistence_batch_failed_total: metric_max(
+                samples,
+                "usage_runtime_first_byte_persistence_batch_failed_total",
+            ),
             usage_queue_group_pending: metric_max(samples, "usage_queue_group_pending"),
             usage_queue_group_lag: metric_max(samples, "usage_queue_group_lag"),
             usage_counter_outbox_pending_rows: metric_max(
@@ -1610,9 +2300,24 @@ impl GatewayDbPoolPressureWindow {
     }
 }
 
-fn samples_are_drained(samples: &[PrometheusSample]) -> bool {
-    metric_max(samples, "request_candidate_queue_depth") == 0
+fn samples_are_drained(samples: &[PrometheusSample], baseline: SettleDrainBaseline) -> bool {
+    missing_required_settle_drain_metrics(samples).is_empty()
+        && metric_max(samples, "request_candidate_queue_depth") == 0
         && metric_max(samples, "request_candidate_queue_pending_depth") == 0
+        && metric_max(samples, "request_candidate_active_queue_depth") == 0
+        && metric_max(samples, "request_candidate_active_queue_pending_depth") == 0
+        && metric_max(samples, "request_candidate_terminal_queue_depth") == 0
+        && metric_max(samples, "request_candidate_terminal_queue_pending_depth") == 0
+        && metric_max(samples, "request_candidate_terminal_barrier_pending") == 0
+        && metric_max(samples, "usage_runtime_terminal_submission_pending") == 0
+        && metric_max(samples, "usage_runtime_terminal_submission_in_flight") == 0
+        && metric_max(samples, "usage_runtime_terminal_enqueue_in_flight") == 0
+        && metric_max(samples, "usage_runtime_terminal_direct_fallback_in_flight") == 0
+        && metric_max(samples, "usage_runtime_lifecycle_enqueue_in_flight") == 0
+        && metric_max(samples, "usage_runtime_lifecycle_submission_pending") == 0
+        && metric_max(samples, "usage_runtime_ordered_lifecycle_pending") == 0
+        && metric_max(samples, "usage_runtime_pending_persistence_pending") == 0
+        && metric_max(samples, "usage_runtime_first_byte_persistence_pending") == 0
         && metric_max(samples, "usage_queue_group_pending") == 0
         && metric_max(samples, "usage_queue_group_lag") == 0
         && metric_max(samples, "usage_queue_dlq_length") == 0
@@ -1620,36 +2325,135 @@ fn samples_are_drained(samples: &[PrometheusSample]) -> bool {
         && metric_max(samples, "usage_counter_outbox_pending_rows") == 0
         && metric_max(samples, "postgres_lock_waiting_connections") == 0
         && metric_max(samples, "postgres_idle_in_transaction_connections") == 0
+        && metric_max(samples, "gateway_tokio_runtime_alive_tasks")
+            <= baseline
+                .tokio_alive_tasks
+                .saturating_add(SETTLE_DRAIN_TOKIO_ALIVE_TASKS_TOLERANCE)
+        && metric_max(samples, "gateway_tokio_runtime_global_queue_depth")
+            <= baseline
+                .tokio_global_queue_depth
+                .saturating_add(SETTLE_DRAIN_TOKIO_GLOBAL_QUEUE_DEPTH_TOLERANCE)
+        && metric_max(samples, "upstream_target_gate_in_flight") == 0
+}
+
+fn missing_required_settle_drain_metrics(samples: &[PrometheusSample]) -> Vec<String> {
+    // The gateway emits per-target in-flight series only while at least one target is tracked.
+    // A valid zero active-target gauge therefore makes an absent in-flight series unambiguous.
+    let inactive_gate_omits_in_flight =
+        metric_is_available(samples, "upstream_target_gate_active_targets")
+            && metric_max(samples, "upstream_target_gate_active_targets") == 0
+            && !samples
+                .iter()
+                .any(|sample| metric_name_matches(&sample.name, "upstream_target_gate_in_flight"));
+
+    REQUIRED_SETTLE_DRAIN_METRICS
+        .iter()
+        .filter(|metric_name| {
+            !(metric_is_available(samples, metric_name)
+                || (**metric_name == "upstream_target_gate_in_flight"
+                    && inactive_gate_omits_in_flight))
+        })
+        .map(|metric_name| (*metric_name).to_string())
+        .collect()
+}
+
+fn missing_required_preflight_metrics(samples: &[PrometheusSample]) -> Vec<String> {
+    missing_required_settle_drain_metrics(samples)
+}
+
+fn metric_is_available(samples: &[PrometheusSample], metric_name: &str) -> bool {
+    samples.iter().any(|sample| {
+        metric_name_matches(&sample.name, metric_name) && sample.value.parse::<u64>().is_ok()
+    })
+}
+
+fn terminal_persistence_loss_detected(summary: &GatewayPressureMetricsSummary) -> bool {
+    summary.usage_runtime_terminal_submission_rejected_total_delta > 0
+        || summary.usage_runtime_terminal_enqueue_deferred_dropped_total_delta > 0
+        || summary.usage_runtime_terminal_direct_fallback_failed_total_delta > 0
+        || summary.usage_runtime_terminal_direct_fallback_rejected_total_delta > 0
+}
+
+fn first_byte_persistence_loss_detected(summary: &GatewayPressureMetricsSummary) -> bool {
+    if summary.usage_runtime_first_byte_persistence_fallback_failed_total_delta > 0 {
+        return true;
+    }
+    let fallback_attempts = summary
+        .usage_runtime_first_byte_persistence_direct_failed_total_delta
+        .saturating_add(summary.usage_runtime_first_byte_persistence_overflow_total_delta);
+    let fallback_outcomes = summary
+        .usage_runtime_first_byte_persistence_fallback_accepted_total_delta
+        .saturating_add(summary.usage_runtime_first_byte_persistence_fallback_failed_total_delta)
+        .saturating_add(summary.usage_runtime_first_byte_persistence_cancelled_total_delta);
+    fallback_attempts > fallback_outcomes
+}
+
+fn usage_persistence_loss_detected(summary: &GatewayPressureMetricsSummary) -> bool {
+    terminal_persistence_loss_detected(summary)
+        || first_byte_persistence_loss_detected(summary)
+        || summary.usage_runtime_pending_persistence_overflow_total_delta > 0
 }
 
 async fn wait_for_settle_drain(
     metrics_url: &str,
     settle_after: Duration,
     sample_interval: Duration,
+    baseline: SettleDrainBaseline,
     summary: &Arc<Mutex<GatewayPressureMetricsSummary>>,
 ) -> SettleDrainResult {
     if settle_after.is_zero() {
-        return SettleDrainResult::default();
+        return SettleDrainResult {
+            completed: false,
+            elapsed: Duration::ZERO,
+            required_metrics_available: false,
+            missing_required_metrics: REQUIRED_SETTLE_DRAIN_METRICS
+                .iter()
+                .map(|metric_name| (*metric_name).to_string())
+                .collect(),
+        };
     }
 
     let started = tokio::time::Instant::now();
+    let mut missing_required_metrics = REQUIRED_SETTLE_DRAIN_METRICS
+        .iter()
+        .map(|metric_name| (*metric_name).to_string())
+        .collect::<Vec<_>>();
     let poll_interval = sample_interval
         .min(Duration::from_millis(500))
         .max(Duration::from_millis(50));
+    let mut stability = SettleDrainStability::default();
 
     loop {
         match fetch_prometheus_samples(metrics_url).await {
             Ok(samples) => {
-                let drained = samples_are_drained(&samples);
-                summary.lock().await.observe(&samples);
-                if drained {
+                missing_required_metrics = missing_required_settle_drain_metrics(&samples);
+                let drained = samples_are_drained(&samples, baseline);
+                let terminal_loss_detected = {
+                    let mut snapshot = summary.lock().await;
+                    snapshot.observe(&samples);
+                    usage_persistence_loss_detected(&snapshot)
+                };
+                if terminal_loss_detected {
+                    return SettleDrainResult {
+                        completed: false,
+                        elapsed: started.elapsed(),
+                        required_metrics_available: missing_required_metrics.is_empty(),
+                        missing_required_metrics,
+                    };
+                }
+                if stability.observe(started.elapsed(), drained) {
                     return SettleDrainResult {
                         completed: true,
                         elapsed: started.elapsed(),
+                        required_metrics_available: true,
+                        missing_required_metrics,
                     };
                 }
             }
-            Err(err) => eprintln!("gateway pressure probe settle metrics failed: {err}"),
+            Err(err) => {
+                stability.observe(started.elapsed(), false);
+                eprintln!("gateway pressure probe settle metrics failed: {err}");
+            }
         }
 
         let elapsed = started.elapsed();
@@ -1661,13 +2465,20 @@ async fn wait_for_settle_drain(
 
     let mut completed = false;
     if let Ok(samples) = fetch_prometheus_samples(metrics_url).await {
-        completed = samples_are_drained(&samples);
-        summary.lock().await.observe(&samples);
+        missing_required_metrics = missing_required_settle_drain_metrics(&samples);
+        completed = stability.observe(started.elapsed(), samples_are_drained(&samples, baseline));
+        let mut snapshot = summary.lock().await;
+        snapshot.observe(&samples);
+        if usage_persistence_loss_detected(&snapshot) {
+            completed = false;
+        }
     }
 
     SettleDrainResult {
         completed,
         elapsed: started.elapsed(),
+        required_metrics_available: missing_required_metrics.is_empty(),
+        missing_required_metrics,
     }
 }
 
@@ -1677,10 +2488,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stop = Arc::new(AtomicBool::new(false));
     let summary = Arc::new(Mutex::new(GatewayPressureMetricsSummary::default()));
 
-    match fetch_prometheus_samples(&config.metrics_url).await {
-        Ok(samples) => summary.lock().await.observe(&samples),
-        Err(err) => eprintln!("gateway pressure probe metrics baseline failed: {err}"),
+    let baseline_samples = fetch_prometheus_samples(&config.metrics_url)
+        .await
+        .map_err(|err| {
+            std::io::Error::other(format!(
+                "gateway pressure probe metrics preflight failed: {err}"
+            ))
+        })?;
+    let missing_baseline_metrics = missing_required_preflight_metrics(&baseline_samples);
+    if !missing_baseline_metrics.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "gateway pressure probe metrics preflight missing required metrics: {}",
+                missing_baseline_metrics.join(", ")
+            ),
+        )
+        .into());
     }
+    summary.lock().await.observe(&baseline_samples);
+    let settle_drain_baseline = SettleDrainBaseline::from_samples(&baseline_samples);
 
     let sampler = spawn_metrics_sampler(
         config.metrics_url.clone(),
@@ -1689,9 +2516,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&summary),
     );
 
-    let load = run_http_load_probe(&config.load)
-        .await
-        .map_err(std::io::Error::other)?;
+    let load = run_http_load_probe_with_options(
+        &config.load,
+        HttpLoadProbeOptions {
+            require_sse_done: config.require_sse_done,
+        },
+    )
+    .await
+    .map_err(std::io::Error::other)?;
     stop.store(true, Ordering::Release);
     sampler.await??;
 
@@ -1699,18 +2531,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config.metrics_url,
         config.settle_after,
         config.sample_interval,
+        settle_drain_baseline,
         &summary,
     )
     .await;
 
     let report = GatewayPressureReport {
         suite: "gateway_pressure_probe",
+        acceptance_contract_version: ACCEPTANCE_CONTRACT_VERSION,
         target_url: config.load.url,
         metrics_url: config.metrics_url,
         sample_interval_ms: config.sample_interval.as_millis() as u64,
         settle_after_ms: config.settle_after.as_millis() as u64,
         settle_drain_completed: settle_drain.completed,
         settle_drain_elapsed_ms: settle_drain.elapsed.as_millis() as u64,
+        settle_required_metrics_available: settle_drain.required_metrics_available,
+        settle_missing_required_metrics: settle_drain.missing_required_metrics,
         load,
         metrics: Arc::try_unwrap(summary)
             .unwrap_or_else(|_| panic!("metrics summary still referenced"))
@@ -1761,12 +2597,13 @@ fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn std::error::Error>> {
     let mut start_ramp_ms: u64 = 0;
     let mut first_body_hold_ms: u64 = 0;
     let mut sample_interval_ms: u64 = 500;
-    let mut settle_after_ms: u64 = 2_000;
+    let mut settle_after_ms = DEFAULT_SETTLE_AFTER.as_millis() as u64;
     let mut method = Method::GET;
     let mut headers = BTreeMap::new();
     let mut api_key_list: Option<Vec<String>> = None;
     let mut body: Option<Vec<u8>> = None;
     let mut response_mode = HttpLoadProbeResponseMode::HeadersOnly;
+    let mut require_sse_done = false;
     let mut http1_only = false;
     let mut http2_prior_knowledge = false;
     let mut output_path = None;
@@ -1829,6 +2666,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn std::error::Error>> {
             "--response-mode" => {
                 response_mode = parse_response_mode(&next_value(&mut iter, "--response-mode")?)?
             }
+            "--require-sse-done" => require_sse_done = true,
             "--output" => output_path = Some(PathBuf::from(next_value(&mut iter, "--output")?)),
             "--help" | "-h" => {
                 print_usage();
@@ -1899,8 +2737,26 @@ fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn std::error::Error>> {
         )
         .into());
     }
+    if settle_after_ms == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--settle-after-ms must be positive for acceptance contract v2",
+        )
+        .into());
+    }
+    if Duration::from_millis(settle_after_ms) < SETTLE_DRAIN_QUIET_PERIOD {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "--settle-after-ms must be at least {} for the acceptance contract v2 quiet period",
+                SETTLE_DRAIN_QUIET_PERIOD.as_millis()
+            ),
+        )
+        .into());
+    }
     Ok(Config {
         load,
+        require_sse_done,
         metrics_url: metrics_url.ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -2110,6 +2966,11 @@ fn delta_from_first(first: Option<u64>, current: u64) -> u64 {
         .unwrap_or_default()
 }
 
+fn observe_counter_delta(first: &mut Option<u64>, current: u64) -> u64 {
+    let baseline = *first.get_or_insert(current);
+    current.saturating_sub(baseline)
+}
+
 fn metric_name_matches(actual: &str, expected: &str) -> bool {
     actual == expected
         || actual.strip_prefix("aether-gateway_") == Some(expected)
@@ -2118,7 +2979,7 @@ fn metric_name_matches(actual: &str, expected: &str) -> bool {
 
 fn print_usage() {
     eprintln!(
-        "usage: cargo run -p aether-loadtools --bin gateway_pressure_probe -- --url <URL> --metrics-url <URL> --requests <N> --concurrency <N> [--warmup-url <URL>] [--warmup-connections N] [--method GET] [--timeout-ms 30000] [--connect-timeout-ms 10000] [--client-shards 1] [--pool-max-idle-per-host N] [--start-ramp-ms 0] [--first-body-hold-ms 0] [--http1-only | --http2-prior-knowledge] [--sample-interval-ms 500] [-H 'Name: value'] [--api-key-file path | --api-key-list-file path] [--body JSON | --body-file path] [--response-mode headers|first-body-byte|full] [--output /tmp/gateway_pressure.json]"
+        "usage: cargo run -p aether-loadtools --bin gateway_pressure_probe -- --url <URL> --metrics-url <URL> --requests <N> --concurrency <N> [--warmup-url <URL>] [--warmup-connections N] [--method GET] [--timeout-ms 30000] [--connect-timeout-ms 10000] [--client-shards 1] [--pool-max-idle-per-host N] [--start-ramp-ms 0] [--first-body-hold-ms 0] [--http1-only | --http2-prior-knowledge] [--sample-interval-ms 500] [--settle-after-ms 10000] [-H 'Name: value'] [--api-key-file path | --api-key-list-file path] [--body JSON | --body-file path] [--response-mode headers|first-body-byte|full] [--require-sse-done] [--output /tmp/gateway_pressure.json]"
     );
 }
 
@@ -2368,6 +3229,501 @@ mod tests {
     }
 
     #[test]
+    fn terminal_submission_metrics_track_capacity_concurrency_and_rejection_delta() {
+        let mut summary = GatewayPressureMetricsSummary::default();
+
+        summary.observe(&[
+            sample("usage_runtime_terminal_submission_limit", 1_024),
+            sample("usage_runtime_terminal_submission_pending", 3),
+            sample("usage_runtime_terminal_submission_max_pending", 12),
+            sample("usage_runtime_terminal_submission_in_flight", 7),
+            sample("usage_runtime_terminal_submission_max_in_flight", 800),
+            sample("usage_runtime_terminal_submission_rejected_total", 41),
+        ]);
+        assert_eq!(summary.usage_runtime_max_terminal_submission_limit, 1_024);
+        assert_eq!(summary.usage_runtime_max_terminal_submission_pending, 3);
+        assert_eq!(summary.usage_runtime_final_terminal_submission_pending, 3);
+        assert_eq!(
+            summary.usage_runtime_max_terminal_submission_max_pending,
+            12
+        );
+        assert_eq!(summary.usage_runtime_max_terminal_submission_in_flight, 7);
+        assert_eq!(summary.usage_runtime_final_terminal_submission_in_flight, 7);
+        assert_eq!(
+            summary.usage_runtime_max_terminal_submission_max_in_flight,
+            800
+        );
+        assert_eq!(
+            summary.usage_runtime_first_terminal_submission_rejected_total,
+            Some(41)
+        );
+        assert_eq!(
+            summary.usage_runtime_terminal_submission_rejected_total_delta,
+            0
+        );
+
+        summary.observe(&[
+            sample("usage_runtime_terminal_submission_limit", 1_024),
+            sample("usage_runtime_terminal_submission_pending", 0),
+            sample("usage_runtime_terminal_submission_max_pending", 1_024),
+            sample("usage_runtime_terminal_submission_in_flight", 0),
+            sample("usage_runtime_terminal_submission_max_in_flight", 1_024),
+            sample("usage_runtime_terminal_submission_rejected_total", 1_451),
+        ]);
+        assert_eq!(summary.usage_runtime_max_terminal_submission_in_flight, 7);
+        assert_eq!(summary.usage_runtime_final_terminal_submission_pending, 0);
+        assert_eq!(summary.usage_runtime_max_terminal_submission_pending, 3);
+        assert_eq!(
+            summary.usage_runtime_max_terminal_submission_max_pending,
+            1_024
+        );
+        assert_eq!(summary.usage_runtime_final_terminal_submission_in_flight, 0);
+        assert_eq!(
+            summary.usage_runtime_max_terminal_submission_max_in_flight,
+            1_024
+        );
+        assert_eq!(
+            summary.usage_runtime_final_terminal_submission_rejected_total,
+            1_451
+        );
+        assert_eq!(
+            summary.usage_runtime_terminal_submission_rejected_total_delta,
+            1_410
+        );
+    }
+
+    #[test]
+    fn lifecycle_submission_and_priority_candidate_metrics_track_backlog_and_overflow() {
+        let mut summary = GatewayPressureMetricsSummary::default();
+
+        summary.observe(&[
+            sample("request_candidate_priority_queue_depth", 40),
+            sample("request_candidate_priority_queue_pending_depth", 44),
+            sample("request_candidate_priority_queue_capacity", 64),
+            sample("request_candidate_priority_queue_async_overflow_total", 7),
+            sample("request_candidate_active_queue_depth", 30),
+            sample("request_candidate_active_queue_pending_depth", 32),
+            sample("request_candidate_active_queue_max_depth", 36),
+            sample("request_candidate_terminal_queue_depth", 20),
+            sample("request_candidate_terminal_queue_pending_depth", 22),
+            sample("request_candidate_terminal_queue_max_depth", 28),
+            sample("request_candidate_terminal_barrier_pending", 18),
+            sample("request_candidate_terminal_barrier_max_pending", 22),
+            sample("usage_runtime_lifecycle_submission_capacity", 128),
+            sample("usage_runtime_lifecycle_submission_workers", 8),
+            sample("usage_runtime_lifecycle_submission_pending", 70),
+            sample("usage_runtime_lifecycle_submission_max_pending", 90),
+            sample("usage_runtime_lifecycle_submission_enqueued_total", 100),
+            sample("usage_runtime_lifecycle_submission_coalesced_total", 10),
+            sample("usage_runtime_lifecycle_submission_overflow_total", 2),
+            sample("usage_runtime_lifecycle_submission_processed_total", 20),
+            sample("usage_runtime_ordered_lifecycle_pending", 75),
+            sample("usage_runtime_ordered_lifecycle_max_pending", 95),
+            sample("usage_runtime_pending_persistence_capacity", 1_024),
+            sample("usage_runtime_pending_persistence_pending", 64),
+            sample("usage_runtime_pending_persistence_max_pending", 88),
+            sample("usage_runtime_pending_persistence_batch_flush_total", 10),
+            sample("usage_runtime_pending_persistence_batch_records_total", 700),
+            sample("usage_runtime_pending_persistence_max_batch_size", 96),
+            sample("usage_runtime_pending_persistence_batch_failed_total", 3),
+            sample("usage_runtime_pending_persistence_retried_total", 12),
+            sample("usage_runtime_pending_persistence_overflow_total", 7),
+        ]);
+        summary.observe(&[
+            sample("request_candidate_priority_queue_depth", 0),
+            sample("request_candidate_priority_queue_pending_depth", 0),
+            sample("request_candidate_priority_queue_capacity", 64),
+            sample("request_candidate_priority_queue_async_overflow_total", 11),
+            sample("request_candidate_active_queue_depth", 0),
+            sample("request_candidate_active_queue_pending_depth", 0),
+            sample("request_candidate_active_queue_max_depth", 40),
+            sample("request_candidate_terminal_queue_depth", 0),
+            sample("request_candidate_terminal_queue_pending_depth", 0),
+            sample("request_candidate_terminal_queue_max_depth", 30),
+            sample("request_candidate_terminal_barrier_pending", 0),
+            sample("request_candidate_terminal_barrier_max_pending", 26),
+            sample("usage_runtime_lifecycle_submission_capacity", 128),
+            sample("usage_runtime_lifecycle_submission_workers", 8),
+            sample("usage_runtime_lifecycle_submission_pending", 0),
+            sample("usage_runtime_lifecycle_submission_max_pending", 110),
+            sample("usage_runtime_lifecycle_submission_enqueued_total", 140),
+            sample("usage_runtime_lifecycle_submission_coalesced_total", 15),
+            sample("usage_runtime_lifecycle_submission_overflow_total", 5),
+            sample("usage_runtime_lifecycle_submission_processed_total", 140),
+            sample("usage_runtime_ordered_lifecycle_pending", 0),
+            sample("usage_runtime_ordered_lifecycle_max_pending", 120),
+            sample("usage_runtime_pending_persistence_capacity", 1_024),
+            sample("usage_runtime_pending_persistence_pending", 0),
+            sample("usage_runtime_pending_persistence_max_pending", 100),
+            sample("usage_runtime_pending_persistence_batch_flush_total", 30),
+            sample(
+                "usage_runtime_pending_persistence_batch_records_total",
+                10_700,
+            ),
+            sample("usage_runtime_pending_persistence_max_batch_size", 512),
+            sample("usage_runtime_pending_persistence_batch_failed_total", 5),
+            sample("usage_runtime_pending_persistence_retried_total", 20),
+            sample("usage_runtime_pending_persistence_overflow_total", 11),
+        ]);
+
+        assert_eq!(summary.request_candidate_priority_queue_max_depth, 40);
+        assert_eq!(summary.request_candidate_priority_queue_final_depth, 0);
+        assert_eq!(
+            summary.request_candidate_priority_queue_max_pending_depth,
+            44
+        );
+        assert_eq!(summary.request_candidate_priority_queue_capacity, 64);
+        assert_eq!(
+            summary.request_candidate_priority_queue_async_overflow_total_delta,
+            4
+        );
+        assert_eq!(summary.request_candidate_active_queue_max_depth, 30);
+        assert_eq!(summary.request_candidate_active_queue_final_depth, 0);
+        assert_eq!(summary.request_candidate_active_queue_max_pending_depth, 32);
+        assert_eq!(
+            summary.request_candidate_active_queue_final_pending_depth,
+            0
+        );
+        assert_eq!(
+            summary.request_candidate_active_queue_max_reported_depth,
+            40
+        );
+        assert_eq!(summary.request_candidate_terminal_queue_max_depth, 20);
+        assert_eq!(summary.request_candidate_terminal_queue_final_depth, 0);
+        assert_eq!(
+            summary.request_candidate_terminal_queue_max_pending_depth,
+            22
+        );
+        assert_eq!(
+            summary.request_candidate_terminal_queue_final_pending_depth,
+            0
+        );
+        assert_eq!(
+            summary.request_candidate_terminal_queue_max_reported_depth,
+            30
+        );
+        assert_eq!(summary.request_candidate_terminal_barrier_max_pending, 18);
+        assert_eq!(summary.request_candidate_terminal_barrier_final_pending, 0);
+        assert_eq!(
+            summary.request_candidate_terminal_barrier_max_reported_pending,
+            26
+        );
+        assert_eq!(summary.usage_runtime_lifecycle_submission_capacity, 128);
+        assert_eq!(summary.usage_runtime_lifecycle_submission_workers, 8);
+        assert_eq!(summary.usage_runtime_lifecycle_submission_max_pending, 70);
+        assert_eq!(summary.usage_runtime_lifecycle_submission_final_pending, 0);
+        assert_eq!(
+            summary.usage_runtime_lifecycle_submission_max_reported_pending,
+            110
+        );
+        assert_eq!(
+            summary.usage_runtime_lifecycle_submission_enqueued_total_delta,
+            40
+        );
+        assert_eq!(
+            summary.usage_runtime_lifecycle_submission_coalesced_total_delta,
+            5
+        );
+        assert_eq!(
+            summary.usage_runtime_lifecycle_submission_overflow_total_delta,
+            3
+        );
+        assert_eq!(
+            summary.usage_runtime_lifecycle_submission_processed_total_delta,
+            120
+        );
+        assert_eq!(summary.usage_runtime_ordered_lifecycle_max_pending, 75);
+        assert_eq!(summary.usage_runtime_ordered_lifecycle_final_pending, 0);
+        assert_eq!(
+            summary.usage_runtime_ordered_lifecycle_max_reported_pending,
+            120
+        );
+        assert_eq!(summary.usage_runtime_pending_persistence_capacity, 1_024);
+        assert_eq!(summary.usage_runtime_pending_persistence_max_pending, 100);
+        assert_eq!(summary.usage_runtime_pending_persistence_final_pending, 0);
+        assert_eq!(
+            summary.usage_runtime_pending_persistence_batch_flush_total_delta,
+            20
+        );
+        assert_eq!(
+            summary.usage_runtime_pending_persistence_batch_records_total_delta,
+            10_000
+        );
+        assert_eq!(
+            summary.usage_runtime_pending_persistence_max_batch_size,
+            512
+        );
+        assert_eq!(
+            summary.usage_runtime_pending_persistence_batch_failed_total_delta,
+            2
+        );
+        assert_eq!(
+            summary.usage_runtime_pending_persistence_retried_total_delta,
+            8
+        );
+        assert_eq!(
+            summary.usage_runtime_pending_persistence_overflow_total_delta,
+            4
+        );
+        assert!(usage_persistence_loss_detected(&summary));
+    }
+
+    #[test]
+    fn terminal_persistence_loss_metrics_track_deltas_and_fail_settle() {
+        let mut summary = GatewayPressureMetricsSummary::default();
+
+        summary.observe(&[
+            sample("usage_runtime_terminal_enqueue_deferred_dropped_total", 11),
+            sample("usage_runtime_terminal_direct_fallback_failed_total", 23),
+            sample("usage_runtime_terminal_direct_fallback_rejected_total", 37),
+        ]);
+        assert!(!terminal_persistence_loss_detected(&summary));
+
+        summary.observe(&[
+            sample("usage_runtime_terminal_enqueue_deferred_dropped_total", 13),
+            sample("usage_runtime_terminal_direct_fallback_failed_total", 26),
+            sample("usage_runtime_terminal_direct_fallback_rejected_total", 41),
+        ]);
+
+        assert_eq!(
+            summary.usage_runtime_final_terminal_enqueue_deferred_dropped_total,
+            13
+        );
+        assert_eq!(
+            summary.usage_runtime_terminal_enqueue_deferred_dropped_total_delta,
+            2
+        );
+        assert_eq!(
+            summary.usage_runtime_final_terminal_direct_fallback_failed_total,
+            26
+        );
+        assert_eq!(
+            summary.usage_runtime_terminal_direct_fallback_failed_total_delta,
+            3
+        );
+        assert_eq!(
+            summary.usage_runtime_final_terminal_direct_fallback_rejected_total,
+            41
+        );
+        assert_eq!(
+            summary.usage_runtime_terminal_direct_fallback_rejected_total_delta,
+            4
+        );
+        assert!(terminal_persistence_loss_detected(&summary));
+    }
+
+    #[test]
+    fn first_byte_persistence_loss_requires_failed_or_unaccounted_fallback() {
+        let mut summary = GatewayPressureMetricsSummary::default();
+        summary.observe(&[
+            sample("usage_runtime_first_byte_persistence_overflow_total", 10),
+            sample("usage_runtime_first_byte_persistence_cancelled_total", 20),
+            sample(
+                "usage_runtime_first_byte_persistence_direct_failed_total",
+                30,
+            ),
+            sample(
+                "usage_runtime_first_byte_persistence_fallback_accepted_total",
+                40,
+            ),
+            sample(
+                "usage_runtime_first_byte_persistence_fallback_failed_total",
+                50,
+            ),
+        ]);
+        assert!(!first_byte_persistence_loss_detected(&summary));
+
+        summary.observe(&[
+            sample("usage_runtime_first_byte_persistence_overflow_total", 11),
+            sample("usage_runtime_first_byte_persistence_cancelled_total", 21),
+            sample(
+                "usage_runtime_first_byte_persistence_direct_failed_total",
+                32,
+            ),
+            sample(
+                "usage_runtime_first_byte_persistence_fallback_accepted_total",
+                42,
+            ),
+            sample(
+                "usage_runtime_first_byte_persistence_fallback_failed_total",
+                50,
+            ),
+        ]);
+        assert_eq!(
+            summary.usage_runtime_first_byte_persistence_overflow_total_delta,
+            1
+        );
+        assert_eq!(
+            summary.usage_runtime_first_byte_persistence_direct_failed_total_delta,
+            2
+        );
+        assert_eq!(
+            summary.usage_runtime_first_byte_persistence_fallback_accepted_total_delta,
+            2
+        );
+        assert_eq!(
+            summary.usage_runtime_first_byte_persistence_cancelled_total_delta,
+            1
+        );
+        assert!(!first_byte_persistence_loss_detected(&summary));
+
+        let mut incomplete = summary.clone();
+        incomplete.usage_runtime_first_byte_persistence_direct_failed_total_delta += 1;
+        assert!(first_byte_persistence_loss_detected(&incomplete));
+
+        summary.observe(&[
+            sample("usage_runtime_first_byte_persistence_overflow_total", 11),
+            sample("usage_runtime_first_byte_persistence_cancelled_total", 21),
+            sample(
+                "usage_runtime_first_byte_persistence_direct_failed_total",
+                33,
+            ),
+            sample(
+                "usage_runtime_first_byte_persistence_fallback_accepted_total",
+                42,
+            ),
+            sample(
+                "usage_runtime_first_byte_persistence_fallback_failed_total",
+                51,
+            ),
+        ]);
+        assert!(first_byte_persistence_loss_detected(&summary));
+    }
+
+    #[test]
+    fn first_byte_batch_metrics_track_dispatcher_batches_and_failures() {
+        let mut summary = GatewayPressureMetricsSummary::default();
+        summary.observe(&[
+            sample("usage_runtime_first_byte_persistence_batch_flush_total", 4),
+            sample(
+                "usage_runtime_first_byte_persistence_batch_records_total",
+                256,
+            ),
+            sample("usage_runtime_first_byte_persistence_max_batch_size", 128),
+            sample("usage_runtime_first_byte_persistence_batch_failed_total", 1),
+        ]);
+        assert_eq!(
+            summary.usage_runtime_first_byte_persistence_batch_flush_total_delta,
+            0
+        );
+        assert_eq!(
+            summary.usage_runtime_first_byte_persistence_batch_records_total_delta,
+            0
+        );
+        assert_eq!(
+            summary.usage_runtime_first_byte_persistence_batch_failed_total_delta,
+            0
+        );
+        assert_eq!(
+            summary.usage_runtime_first_byte_persistence_max_batch_size,
+            128
+        );
+
+        summary.observe(&[
+            sample("usage_runtime_first_byte_persistence_batch_flush_total", 12),
+            sample(
+                "usage_runtime_first_byte_persistence_batch_records_total",
+                1_024,
+            ),
+            sample("usage_runtime_first_byte_persistence_max_batch_size", 96),
+            sample("usage_runtime_first_byte_persistence_batch_failed_total", 3),
+        ]);
+        assert_eq!(
+            summary.usage_runtime_first_byte_persistence_batch_flush_total_delta,
+            8
+        );
+        assert_eq!(
+            summary.usage_runtime_first_byte_persistence_batch_records_total_delta,
+            768
+        );
+        assert_eq!(
+            summary.usage_runtime_first_byte_persistence_max_batch_size,
+            128
+        );
+        assert_eq!(
+            summary.usage_runtime_first_byte_persistence_final_batch_size,
+            96
+        );
+        assert_eq!(
+            summary.usage_runtime_first_byte_persistence_batch_failed_total_delta,
+            2
+        );
+        assert_eq!(
+            summary.usage_runtime_first_byte_persistence_final_batch_failed_total,
+            3
+        );
+    }
+
+    #[test]
+    fn parse_args_rejects_zero_settle_window_for_v2_contract() {
+        let args = [
+            "--url",
+            "http://127.0.0.1:8084/v1/chat/completions",
+            "--metrics-url",
+            "http://127.0.0.1:8084/_gateway/metrics",
+            "--requests",
+            "1",
+            "--concurrency",
+            "1",
+            "--settle-after-ms",
+            "0",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        let error = parse_args(args).expect_err("zero settle window must be rejected");
+        assert!(error
+            .to_string()
+            .contains("--settle-after-ms must be positive for acceptance contract v2"));
+    }
+
+    #[test]
+    fn parse_args_rejects_settle_window_shorter_than_quiet_period() {
+        let args = [
+            "--url",
+            "http://127.0.0.1:8084/v1/chat/completions",
+            "--metrics-url",
+            "http://127.0.0.1:8084/_gateway/metrics",
+            "--requests",
+            "1",
+            "--concurrency",
+            "1",
+            "--settle-after-ms",
+            "6999",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        let error = parse_args(args).expect_err("short settle window must be rejected");
+        assert!(error
+            .to_string()
+            .contains("--settle-after-ms must be at least 7000"));
+    }
+
+    #[test]
+    fn parse_args_default_settle_window_covers_quiet_period() {
+        let args = [
+            "--url",
+            "http://127.0.0.1:8084/v1/chat/completions",
+            "--metrics-url",
+            "http://127.0.0.1:8084/_gateway/metrics",
+            "--requests",
+            "1",
+            "--concurrency",
+            "1",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+        let config = parse_args(args).expect("default settle window should be valid");
+        assert_eq!(config.settle_after, DEFAULT_SETTLE_AFTER);
+        assert!(config.settle_after >= SETTLE_DRAIN_QUIET_PERIOD);
+    }
+
+    #[test]
     fn db_pool_pressure_window_triggers_on_usage_or_full_pool() {
         assert!(db_pool_pressure_window_triggered(64, 64, 8_500, 0));
         assert!(db_pool_pressure_window_triggered(63, 64, 9_000, 0));
@@ -2558,6 +3914,38 @@ mod tests {
         let drained = [
             sample("request_candidate_queue_depth", 0),
             sample("request_candidate_queue_pending_depth", 0),
+            sample("request_candidate_active_queue_depth", 0),
+            sample("request_candidate_active_queue_pending_depth", 0),
+            sample("request_candidate_terminal_queue_depth", 0),
+            sample("request_candidate_terminal_queue_pending_depth", 0),
+            sample("request_candidate_terminal_barrier_pending", 0),
+            sample("usage_runtime_terminal_submission_pending", 0),
+            sample("usage_runtime_terminal_submission_in_flight", 0),
+            sample("usage_runtime_terminal_submission_rejected_total", 0),
+            sample("usage_runtime_terminal_enqueue_in_flight", 0),
+            sample("usage_runtime_terminal_enqueue_deferred_dropped_total", 0),
+            sample("usage_runtime_terminal_direct_fallback_in_flight", 0),
+            sample("usage_runtime_terminal_direct_fallback_failed_total", 0),
+            sample("usage_runtime_terminal_direct_fallback_rejected_total", 0),
+            sample("usage_runtime_lifecycle_enqueue_in_flight", 0),
+            sample("usage_runtime_lifecycle_submission_pending", 0),
+            sample("usage_runtime_ordered_lifecycle_pending", 0),
+            sample("usage_runtime_pending_persistence_pending", 0),
+            sample("usage_runtime_first_byte_persistence_pending", 0),
+            sample("usage_runtime_first_byte_persistence_overflow_total", 0),
+            sample("usage_runtime_first_byte_persistence_cancelled_total", 0),
+            sample(
+                "usage_runtime_first_byte_persistence_direct_failed_total",
+                0,
+            ),
+            sample(
+                "usage_runtime_first_byte_persistence_fallback_accepted_total",
+                0,
+            ),
+            sample(
+                "usage_runtime_first_byte_persistence_fallback_failed_total",
+                0,
+            ),
             sample("usage_queue_group_pending", 0),
             sample("usage_queue_group_lag", 0),
             sample("usage_queue_dlq_length", 0),
@@ -2565,8 +3953,106 @@ mod tests {
             sample("usage_counter_outbox_pending_rows", 0),
             sample("postgres_lock_waiting_connections", 0),
             sample("postgres_idle_in_transaction_connections", 0),
+            sample("gateway_tokio_runtime_alive_tasks", 100),
+            sample("gateway_tokio_runtime_global_queue_depth", 0),
+            sample("upstream_target_gate_active_targets", 1),
+            sample("upstream_target_gate_in_flight", 0),
         ];
-        assert!(samples_are_drained(&drained));
+        let baseline = SettleDrainBaseline::from_samples(&drained);
+        assert!(samples_are_drained(&drained, baseline));
+
+        let mut inactive_preflight = drained
+            .iter()
+            .filter(|sample| {
+                sample.name != "upstream_target_gate_active_targets"
+                    && sample.name != "upstream_target_gate_in_flight"
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        inactive_preflight.push(sample("upstream_target_gate_active_targets", 0));
+        assert!(missing_required_preflight_metrics(&inactive_preflight).is_empty());
+        assert!(missing_required_settle_drain_metrics(&inactive_preflight).is_empty());
+        assert!(samples_are_drained(&inactive_preflight, baseline));
+
+        let mut invalid_inactive_gate = inactive_preflight.clone();
+        invalid_inactive_gate.push(PrometheusSample {
+            name: "upstream_target_gate_in_flight".to_string(),
+            labels: BTreeMap::new(),
+            value: "not-a-number".to_string(),
+        });
+        assert_eq!(
+            missing_required_settle_drain_metrics(&invalid_inactive_gate),
+            vec!["upstream_target_gate_in_flight"]
+        );
+        assert!(!samples_are_drained(&invalid_inactive_gate, baseline));
+
+        let active_preflight = drained
+            .iter()
+            .filter(|sample| sample.name != "upstream_target_gate_in_flight")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            missing_required_preflight_metrics(&active_preflight),
+            vec!["upstream_target_gate_in_flight"]
+        );
+
+        for metric_name in [
+            "request_candidate_active_queue_depth",
+            "request_candidate_active_queue_pending_depth",
+            "request_candidate_terminal_queue_depth",
+            "request_candidate_terminal_queue_pending_depth",
+            "request_candidate_terminal_barrier_pending",
+            "usage_runtime_terminal_submission_pending",
+            "usage_runtime_terminal_submission_in_flight",
+            "usage_runtime_terminal_enqueue_in_flight",
+            "usage_runtime_terminal_direct_fallback_in_flight",
+            "usage_runtime_lifecycle_enqueue_in_flight",
+            "usage_runtime_lifecycle_submission_pending",
+            "usage_runtime_ordered_lifecycle_pending",
+            "usage_runtime_pending_persistence_pending",
+            "usage_runtime_first_byte_persistence_pending",
+            "upstream_target_gate_in_flight",
+        ] {
+            let mut in_flight = drained.to_vec();
+            in_flight.push(sample(metric_name, 1));
+            assert!(
+                !samples_are_drained(&in_flight, baseline),
+                "{metric_name} must prevent settle drain completion"
+            );
+        }
+
+        let mut busy_tokio = drained.to_vec();
+        busy_tokio.push(sample(
+            "gateway_tokio_runtime_alive_tasks",
+            baseline
+                .tokio_alive_tasks
+                .saturating_add(SETTLE_DRAIN_TOKIO_ALIVE_TASKS_TOLERANCE + 1),
+        ));
+        assert!(!samples_are_drained(&busy_tokio, baseline));
+
+        let mut tokio_at_tolerance = drained.to_vec();
+        tokio_at_tolerance.push(sample(
+            "gateway_tokio_runtime_alive_tasks",
+            baseline
+                .tokio_alive_tasks
+                .saturating_add(SETTLE_DRAIN_TOKIO_ALIVE_TASKS_TOLERANCE),
+        ));
+        tokio_at_tolerance.push(sample(
+            "gateway_tokio_runtime_global_queue_depth",
+            baseline
+                .tokio_global_queue_depth
+                .saturating_add(SETTLE_DRAIN_TOKIO_GLOBAL_QUEUE_DEPTH_TOLERANCE),
+        ));
+        assert!(samples_are_drained(&tokio_at_tolerance, baseline));
+
+        let mut queued_tokio = drained.to_vec();
+        queued_tokio.push(sample(
+            "gateway_tokio_runtime_global_queue_depth",
+            baseline
+                .tokio_global_queue_depth
+                .saturating_add(SETTLE_DRAIN_TOKIO_GLOBAL_QUEUE_DEPTH_TOLERANCE + 1),
+        ));
+        assert!(!samples_are_drained(&queued_tokio, baseline));
 
         let pending_usage = [
             sample("request_candidate_queue_depth", 0),
@@ -2578,8 +4064,10 @@ mod tests {
             sample("usage_counter_outbox_pending_rows", 0),
             sample("postgres_lock_waiting_connections", 0),
             sample("postgres_idle_in_transaction_connections", 0),
+            sample("upstream_target_gate_active_targets", 1),
+            sample("upstream_target_gate_in_flight", 0),
         ];
-        assert!(!samples_are_drained(&pending_usage));
+        assert!(!samples_are_drained(&pending_usage, baseline));
 
         let lock_wait = [
             sample("request_candidate_queue_depth", 0),
@@ -2592,7 +4080,7 @@ mod tests {
             sample("postgres_lock_waiting_connections", 1),
             sample("postgres_idle_in_transaction_connections", 0),
         ];
-        assert!(!samples_are_drained(&lock_wait));
+        assert!(!samples_are_drained(&lock_wait, baseline));
 
         let pending_local_dispatch = [
             sample("request_candidate_queue_depth", 0),
@@ -2605,6 +4093,126 @@ mod tests {
             sample("postgres_lock_waiting_connections", 0),
             sample("postgres_idle_in_transaction_connections", 0),
         ];
-        assert!(!samples_are_drained(&pending_local_dispatch));
+        assert!(!samples_are_drained(&pending_local_dispatch, baseline));
+    }
+
+    #[test]
+    fn settle_drain_requires_a_continuous_quiet_period() {
+        let mut stability = SettleDrainStability::default();
+
+        assert!(!stability.observe(Duration::ZERO, true));
+        assert!(!stability.observe(Duration::from_secs(3), true));
+        assert!(stability.observe(Duration::from_secs(7), true));
+    }
+
+    #[test]
+    fn settle_drain_stability_resets_when_work_reappears() {
+        let mut stability = SettleDrainStability::default();
+
+        assert!(!stability.observe(Duration::ZERO, true));
+        assert!(!stability.observe(Duration::from_secs(3), true));
+        assert!(!stability.observe(Duration::from_secs(4), false));
+        assert!(!stability.observe(Duration::from_secs(5), true));
+        assert!(!stability.observe(Duration::from_secs(8), true));
+        assert!(stability.observe(Duration::from_secs(12), true));
+    }
+
+    #[test]
+    fn settle_drain_fails_closed_when_required_metrics_are_missing_or_invalid() {
+        let drained = [
+            sample("request_candidate_queue_depth", 0),
+            sample("request_candidate_queue_pending_depth", 0),
+            sample("request_candidate_active_queue_depth", 0),
+            sample("request_candidate_active_queue_pending_depth", 0),
+            sample("request_candidate_terminal_queue_depth", 0),
+            sample("request_candidate_terminal_queue_pending_depth", 0),
+            sample("request_candidate_terminal_barrier_pending", 0),
+            sample("usage_runtime_terminal_submission_pending", 0),
+            sample("usage_runtime_terminal_submission_in_flight", 0),
+            sample("usage_runtime_terminal_submission_rejected_total", 0),
+            sample("usage_runtime_terminal_enqueue_in_flight", 0),
+            sample("usage_runtime_terminal_enqueue_deferred_dropped_total", 0),
+            sample("usage_runtime_terminal_direct_fallback_in_flight", 0),
+            sample("usage_runtime_terminal_direct_fallback_failed_total", 0),
+            sample("usage_runtime_terminal_direct_fallback_rejected_total", 0),
+            sample("usage_runtime_lifecycle_enqueue_in_flight", 0),
+            sample("usage_runtime_lifecycle_submission_pending", 0),
+            sample("usage_runtime_ordered_lifecycle_pending", 0),
+            sample("usage_runtime_pending_persistence_pending", 0),
+            sample("usage_runtime_first_byte_persistence_pending", 0),
+            sample("usage_runtime_first_byte_persistence_overflow_total", 0),
+            sample("usage_runtime_first_byte_persistence_cancelled_total", 0),
+            sample(
+                "usage_runtime_first_byte_persistence_direct_failed_total",
+                0,
+            ),
+            sample(
+                "usage_runtime_first_byte_persistence_fallback_accepted_total",
+                0,
+            ),
+            sample(
+                "usage_runtime_first_byte_persistence_fallback_failed_total",
+                0,
+            ),
+            sample("usage_queue_group_pending", 0),
+            sample("usage_queue_group_lag", 0),
+            sample("usage_queue_dlq_length", 0),
+            sample("usage_runtime_enqueue_retry_pending", 0),
+            sample("usage_counter_outbox_pending_rows", 0),
+            sample("postgres_lock_waiting_connections", 0),
+            sample("postgres_idle_in_transaction_connections", 0),
+            sample("gateway_tokio_runtime_alive_tasks", 100),
+            sample("gateway_tokio_runtime_global_queue_depth", 0),
+            sample("upstream_target_gate_active_targets", 1),
+            sample("upstream_target_gate_in_flight", 0),
+        ];
+        let baseline = SettleDrainBaseline::from_samples(&drained);
+        assert!(samples_are_drained(&drained, baseline));
+        assert!(missing_required_settle_drain_metrics(&drained).is_empty());
+
+        for metric_name in REQUIRED_SETTLE_DRAIN_METRICS {
+            let missing = drained
+                .iter()
+                .filter(|sample| sample.name != *metric_name)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert!(
+                !samples_are_drained(&missing, baseline),
+                "missing {metric_name} must fail closed"
+            );
+            assert_eq!(
+                missing_required_settle_drain_metrics(&missing),
+                vec![(*metric_name).to_string()]
+            );
+        }
+
+        let mut invalid = drained
+            .iter()
+            .filter(|sample| sample.name != "usage_runtime_terminal_submission_pending")
+            .cloned()
+            .collect::<Vec<_>>();
+        invalid.push(PrometheusSample {
+            name: "usage_runtime_terminal_submission_pending".to_string(),
+            labels: BTreeMap::new(),
+            value: "not-a-number".to_string(),
+        });
+        assert!(!samples_are_drained(&invalid, baseline));
+        assert_eq!(
+            missing_required_settle_drain_metrics(&invalid),
+            vec!["usage_runtime_terminal_submission_pending"]
+        );
+    }
+
+    #[test]
+    fn settle_drain_fails_closed_without_upstream_in_flight_metric() {
+        let samples = [sample("upstream_target_gate_active_targets", 1)];
+
+        assert!(!samples_are_drained(
+            &samples,
+            SettleDrainBaseline::default()
+        ));
+        assert!(missing_required_settle_drain_metrics(&samples)
+            .iter()
+            .any(|metric| metric == "upstream_target_gate_in_flight"));
     }
 }

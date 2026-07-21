@@ -261,7 +261,7 @@ async fn record_sync_attempt_forced_terminal_state(
     state
         .usage_runtime
         .record_terminal_event_direct(
-            state.data.as_ref(),
+            state.usage_lifecycle_data_state().as_ref(),
             UsageEvent::new(usage_event_type, plan.request_id.clone(), usage_data),
         )
         .await;
@@ -315,7 +315,7 @@ fn record_sync_response_started(
     ttfb_ms: u64,
 ) {
     state.usage_runtime.record_stream_started_immediate_async(
-        state.data.as_ref(),
+        state.usage_lifecycle_data_state().as_ref(),
         lifecycle_seed,
         status_code,
         Some(ExecutionTelemetry {
@@ -349,9 +349,10 @@ fn record_sync_execution_active(
     candidate_started_unix_ms: u64,
 ) {
     let lifecycle_seed = build_lifecycle_usage_seed(plan, report_context);
-    state
-        .usage_runtime
-        .record_sync_active_immediate_async(state.data.as_ref(), lifecycle_seed);
+    state.usage_runtime.record_sync_active_immediate_async(
+        state.usage_lifecycle_data_state().as_ref(),
+        lifecycle_seed,
+    );
 
     if let Some(snapshot) = snapshot_local_request_candidate_status(plan, report_context) {
         spawn_sync_candidate_status_update(
@@ -370,7 +371,7 @@ fn record_sync_execution_active(
     }
 }
 
-fn record_sync_terminal_usage(
+async fn record_sync_terminal_usage(
     state: &AppState,
     plan: &ExecutionPlan,
     report_context: Option<&serde_json::Value>,
@@ -385,17 +386,22 @@ fn record_sync_terminal_usage(
     let payload_seed = build_sync_terminal_usage_payload_seed(payload);
     state
         .usage_runtime
-        .record_sync_terminal(state.data.as_ref(), context_seed, payload_seed);
+        .record_sync_terminal(
+            state.usage_lifecycle_data_state().as_ref(),
+            context_seed,
+            payload_seed,
+        )
+        .await;
 }
 
-fn record_sync_terminal_usage_and_disarm_guard(
+async fn record_sync_terminal_usage_and_disarm_guard(
     state: &AppState,
     plan: &ExecutionPlan,
     report_context: Option<&serde_json::Value>,
     payload: &GatewaySyncReportRequest,
     terminal_guard: &mut SyncAttemptTerminalGuard,
 ) {
-    record_sync_terminal_usage(state, plan, report_context, payload);
+    record_sync_terminal_usage(state, plan, report_context, payload).await;
     terminal_guard.disarm();
 }
 
@@ -1675,7 +1681,7 @@ async fn execute_execution_runtime_sync_impl(
         .unwrap_or_else(|| "-".to_string());
     let candidate_started_unix_secs = current_request_candidate_unix_ms();
     let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
-    let usage_data = state.data.as_ref().clone();
+    let usage_data = state.usage_lifecycle_data_state().as_ref().clone();
     state
         .usage_runtime
         .record_pending_direct(&usage_data, lifecycle_seed)
@@ -2433,7 +2439,8 @@ async fn execute_execution_runtime_sync_impl(
             implicit_finalize.payload.report_context.as_ref(),
             usage_payload,
             &mut terminal_guard,
-        );
+        )
+        .await;
         if let Some(report_payload) = implicit_finalize.outcome.background_report {
             spawn_sync_report(state.clone(), report_payload);
         } else {
@@ -2486,7 +2493,8 @@ async fn execute_execution_runtime_sync_impl(
                 payload.report_context.as_ref(),
                 usage_payload,
                 &mut terminal_guard,
-            );
+            )
+            .await;
             if let Some(report_payload) = outcome.background_report {
                 spawn_sync_report(state.clone(), report_payload);
             } else {
@@ -2532,7 +2540,8 @@ async fn execute_execution_runtime_sync_impl(
                     original_report_context.as_ref(),
                     &report_payload,
                     &mut terminal_guard,
-                );
+                )
+                .await;
                 if let Some(snapshot) = local_task_snapshot {
                     let _ = state.upsert_video_task_snapshot(&snapshot).await?;
                     state.video_tasks.record_snapshot(snapshot);
@@ -2566,7 +2575,8 @@ async fn execute_execution_runtime_sync_impl(
                 payload.report_context.as_ref(),
                 &payload,
                 &mut terminal_guard,
-            );
+            )
+            .await;
             state
                 .video_tasks
                 .apply_finalize_mutation(request_path, payload.report_kind.as_str());
@@ -2612,7 +2622,8 @@ async fn execute_execution_runtime_sync_impl(
                 payload.report_context.as_ref(),
                 &payload,
                 &mut terminal_guard,
-            );
+            )
+            .await;
             if background_error_report_kind.is_some() {
                 spawn_sync_report(state.clone(), payload);
             } else {
@@ -2638,7 +2649,8 @@ async fn execute_execution_runtime_sync_impl(
             payload.report_context.as_ref(),
             &payload,
             &mut terminal_guard,
-        );
+        )
+        .await;
         let response =
             submit_local_core_error_or_sync_finalize(state, trace_id, decision, payload).await?;
         return Ok(Some(attach_control_metadata_headers(
@@ -2673,7 +2685,8 @@ async fn execute_execution_runtime_sync_impl(
         usage_payload.report_context.as_ref(),
         &usage_payload,
         &mut terminal_guard,
-    );
+    )
+    .await;
     let response = attach_control_metadata_headers(
         build_client_response_from_parts(
             status_code,
@@ -3089,7 +3102,7 @@ mod tests {
         ensure_execution_request_candidate_slot(&state, &mut plan, &mut report_context).await;
         let started_at = current_request_candidate_unix_ms();
         state.usage_runtime.record_pending(
-            state.data.as_ref(),
+            state.usage_lifecycle_data_state().as_ref(),
             build_lifecycle_usage_seed(&plan, report_context.as_ref()),
         );
         record_local_request_candidate_status(
@@ -3220,7 +3233,7 @@ mod tests {
         state
             .usage_runtime
             .record_pending_direct(
-                state.data.as_ref(),
+                state.usage_lifecycle_data_state().as_ref(),
                 build_lifecycle_usage_seed(&plan, report_context.as_ref()),
             )
             .await;

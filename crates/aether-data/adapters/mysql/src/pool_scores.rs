@@ -34,6 +34,91 @@ SELECT
 FROM pool_member_scores
 "#;
 
+const UPSERT_PRESERVING_NULLABLE_TIMESTAMPS_SQL: &str = r#"
+INSERT INTO pool_member_scores (
+  id, pool_kind, pool_id, member_kind, member_id, capability, scope_kind, scope_id,
+  score, hard_state, score_version, score_reason, last_ranked_at, last_scheduled_at,
+  last_success_at, last_failure_at, failure_count, last_probe_attempt_at,
+  last_probe_success_at, last_probe_failure_at, probe_failure_count, probe_status, updated_at
+) VALUES (
+  ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+)
+ON DUPLICATE KEY UPDATE
+  pool_kind = VALUES(pool_kind),
+  pool_id = VALUES(pool_id),
+  member_kind = VALUES(member_kind),
+  member_id = VALUES(member_id),
+  capability = VALUES(capability),
+  scope_kind = VALUES(scope_kind),
+  scope_id = VALUES(scope_id),
+  score = VALUES(score),
+  hard_state = VALUES(hard_state),
+  score_version = VALUES(score_version),
+  score_reason = VALUES(score_reason),
+  last_ranked_at = VALUES(last_ranked_at),
+  last_scheduled_at = COALESCE(VALUES(last_scheduled_at), last_scheduled_at),
+  last_success_at = COALESCE(VALUES(last_success_at), last_success_at),
+  last_failure_at = COALESCE(VALUES(last_failure_at), last_failure_at),
+  failure_count = VALUES(failure_count),
+  last_probe_attempt_at = COALESCE(VALUES(last_probe_attempt_at), last_probe_attempt_at),
+  last_probe_success_at = COALESCE(VALUES(last_probe_success_at), last_probe_success_at),
+  last_probe_failure_at = COALESCE(VALUES(last_probe_failure_at), last_probe_failure_at),
+  probe_failure_count = VALUES(probe_failure_count),
+  probe_status = VALUES(probe_status),
+  updated_at = VALUES(updated_at)
+"#;
+
+const UPSERT_OAUTH_RECOVERY_SQL: &str = r#"
+INSERT INTO pool_member_scores (
+  id, pool_kind, pool_id, member_kind, member_id, capability, scope_kind, scope_id,
+  score, hard_state, score_version, score_reason, last_ranked_at, last_scheduled_at,
+  last_success_at, last_failure_at, failure_count, last_probe_attempt_at,
+  last_probe_success_at, last_probe_failure_at, probe_failure_count, probe_status, updated_at
+) VALUES (
+  ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+)
+ON DUPLICATE KEY UPDATE
+  pool_kind = VALUES(pool_kind),
+  pool_id = VALUES(pool_id),
+  member_kind = VALUES(member_kind),
+  member_id = VALUES(member_id),
+  capability = VALUES(capability),
+  scope_kind = VALUES(scope_kind),
+  scope_id = VALUES(scope_id),
+  score = IF(updated_at <= VALUES(updated_at), VALUES(score), score),
+  hard_state = IF(updated_at <= VALUES(updated_at), VALUES(hard_state), hard_state),
+  score_version = IF(updated_at <= VALUES(updated_at), VALUES(score_version), score_version),
+  score_reason = IF(updated_at <= VALUES(updated_at), VALUES(score_reason), score_reason),
+  last_ranked_at = IF(updated_at <= VALUES(updated_at), VALUES(last_ranked_at), last_ranked_at),
+  failure_count = IF(
+    last_failure_at IS NULL OR last_failure_at <= VALUES(updated_at),
+    VALUES(failure_count), failure_count),
+  last_failure_at = IF(
+    last_failure_at IS NULL OR last_failure_at <= VALUES(updated_at),
+    VALUES(last_failure_at), last_failure_at),
+  probe_status = IF(
+    (last_probe_attempt_at IS NOT NULL AND last_probe_attempt_at > VALUES(updated_at))
+      OR (last_probe_success_at IS NOT NULL AND last_probe_success_at > VALUES(updated_at))
+      OR (last_probe_failure_at IS NOT NULL AND last_probe_failure_at > VALUES(updated_at)),
+    probe_status, VALUES(probe_status)),
+  probe_failure_count = IF(
+    last_probe_failure_at IS NULL OR last_probe_failure_at <= VALUES(updated_at),
+    VALUES(probe_failure_count), probe_failure_count),
+  last_probe_failure_at = IF(
+    last_probe_failure_at IS NULL OR last_probe_failure_at <= VALUES(updated_at),
+    VALUES(last_probe_failure_at), last_probe_failure_at),
+  updated_at = GREATEST(updated_at, VALUES(updated_at))
+"#;
+
+fn pool_member_score_upsert_sql(mode: PoolMemberScoreUpsertMode) -> &'static str {
+    match mode {
+        PoolMemberScoreUpsertMode::PreserveExistingNullableTimestamps => {
+            UPSERT_PRESERVING_NULLABLE_TIMESTAMPS_SQL
+        }
+        PoolMemberScoreUpsertMode::OAuthRecovery => UPSERT_OAUTH_RECOVERY_SQL,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MysqlPoolMemberScoreRepository {
     pool: MysqlPool,
@@ -252,102 +337,69 @@ impl PoolScoreReadRepository for MysqlPoolMemberScoreRepository {
 
 #[async_trait]
 impl PoolMemberScoreWriteRepository for MysqlPoolMemberScoreRepository {
-    async fn upsert_pool_member_score(
+    async fn upsert_pool_member_score_with_mode(
         &self,
         score: UpsertPoolMemberScore,
+        mode: PoolMemberScoreUpsertMode,
     ) -> Result<StoredPoolMemberScore, DataLayerError> {
         score.validate()?;
         let stored = score.into_stored();
         let score_reason = serde_json::to_string(&stored.score_reason)
             .map_err(|err| DataLayerError::InvalidInput(err.to_string()))?;
-        sqlx::query(
-            r#"
-INSERT INTO pool_member_scores (
-  id, pool_kind, pool_id, member_kind, member_id, capability, scope_kind, scope_id,
-  score, hard_state, score_version, score_reason, last_ranked_at, last_scheduled_at,
-  last_success_at, last_failure_at, failure_count, last_probe_attempt_at,
-  last_probe_success_at, last_probe_failure_at, probe_failure_count, probe_status, updated_at
-) VALUES (
-  ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
-)
-ON DUPLICATE KEY UPDATE
-  pool_kind = VALUES(pool_kind),
-  pool_id = VALUES(pool_id),
-  member_kind = VALUES(member_kind),
-  member_id = VALUES(member_id),
-  capability = VALUES(capability),
-  scope_kind = VALUES(scope_kind),
-  scope_id = VALUES(scope_id),
-  score = VALUES(score),
-  hard_state = VALUES(hard_state),
-  score_version = VALUES(score_version),
-  score_reason = VALUES(score_reason),
-  last_ranked_at = VALUES(last_ranked_at),
-  last_scheduled_at = COALESCE(VALUES(last_scheduled_at), last_scheduled_at),
-  last_success_at = COALESCE(VALUES(last_success_at), last_success_at),
-  last_failure_at = COALESCE(VALUES(last_failure_at), last_failure_at),
-  failure_count = VALUES(failure_count),
-  last_probe_attempt_at = COALESCE(VALUES(last_probe_attempt_at), last_probe_attempt_at),
-  last_probe_success_at = COALESCE(VALUES(last_probe_success_at), last_probe_success_at),
-  last_probe_failure_at = COALESCE(VALUES(last_probe_failure_at), last_probe_failure_at),
-  probe_failure_count = VALUES(probe_failure_count),
-  probe_status = VALUES(probe_status),
-  updated_at = VALUES(updated_at)
-"#,
-        )
-        .bind(stored.id.as_str())
-        .bind(stored.pool_kind.as_str())
-        .bind(stored.pool_id.as_str())
-        .bind(stored.member_kind.as_str())
-        .bind(stored.member_id.as_str())
-        .bind(stored.capability.as_str())
-        .bind(stored.scope_kind.as_str())
-        .bind(stored.scope_id.as_deref())
-        .bind(stored.score)
-        .bind(stored.hard_state.as_database())
-        .bind(i64_from_u64(stored.score_version, "pool score version")?)
-        .bind(score_reason)
-        .bind(i64_opt_from_u64(
-            stored.last_ranked_at,
-            "pool score last_ranked_at",
-        )?)
-        .bind(i64_opt_from_u64(
-            stored.last_scheduled_at,
-            "pool score last_scheduled_at",
-        )?)
-        .bind(i64_opt_from_u64(
-            stored.last_success_at,
-            "pool score last_success_at",
-        )?)
-        .bind(i64_opt_from_u64(
-            stored.last_failure_at,
-            "pool score last_failure_at",
-        )?)
-        .bind(i64_from_u64(
-            stored.failure_count,
-            "pool score failure_count",
-        )?)
-        .bind(i64_opt_from_u64(
-            stored.last_probe_attempt_at,
-            "pool score last_probe_attempt_at",
-        )?)
-        .bind(i64_opt_from_u64(
-            stored.last_probe_success_at,
-            "pool score last_probe_success_at",
-        )?)
-        .bind(i64_opt_from_u64(
-            stored.last_probe_failure_at,
-            "pool score last_probe_failure_at",
-        )?)
-        .bind(i64_from_u64(
-            stored.probe_failure_count,
-            "pool score probe_failure_count",
-        )?)
-        .bind(stored.probe_status.as_database())
-        .bind(i64_from_u64(stored.updated_at, "pool score updated_at")?)
-        .execute(&self.pool)
-        .await
-        .map_sql_err()?;
+        sqlx::query(pool_member_score_upsert_sql(mode))
+            .bind(stored.id.as_str())
+            .bind(stored.pool_kind.as_str())
+            .bind(stored.pool_id.as_str())
+            .bind(stored.member_kind.as_str())
+            .bind(stored.member_id.as_str())
+            .bind(stored.capability.as_str())
+            .bind(stored.scope_kind.as_str())
+            .bind(stored.scope_id.as_deref())
+            .bind(stored.score)
+            .bind(stored.hard_state.as_database())
+            .bind(i64_from_u64(stored.score_version, "pool score version")?)
+            .bind(score_reason)
+            .bind(i64_opt_from_u64(
+                stored.last_ranked_at,
+                "pool score last_ranked_at",
+            )?)
+            .bind(i64_opt_from_u64(
+                stored.last_scheduled_at,
+                "pool score last_scheduled_at",
+            )?)
+            .bind(i64_opt_from_u64(
+                stored.last_success_at,
+                "pool score last_success_at",
+            )?)
+            .bind(i64_opt_from_u64(
+                stored.last_failure_at,
+                "pool score last_failure_at",
+            )?)
+            .bind(i64_from_u64(
+                stored.failure_count,
+                "pool score failure_count",
+            )?)
+            .bind(i64_opt_from_u64(
+                stored.last_probe_attempt_at,
+                "pool score last_probe_attempt_at",
+            )?)
+            .bind(i64_opt_from_u64(
+                stored.last_probe_success_at,
+                "pool score last_probe_success_at",
+            )?)
+            .bind(i64_opt_from_u64(
+                stored.last_probe_failure_at,
+                "pool score last_probe_failure_at",
+            )?)
+            .bind(i64_from_u64(
+                stored.probe_failure_count,
+                "pool score probe_failure_count",
+            )?)
+            .bind(stored.probe_status.as_database())
+            .bind(i64_from_u64(stored.updated_at, "pool score updated_at")?)
+            .execute(&self.pool)
+            .await
+            .map_sql_err()?;
         Ok(stored)
     }
 
@@ -576,4 +628,66 @@ fn upsert_from_stored(score: StoredPoolMemberScore) -> UpsertPoolMemberScore {
 fn i64_from_usize(value: usize, field: &str) -> Result<i64, DataLayerError> {
     i64::try_from(value)
         .map_err(|_| DataLayerError::InvalidInput(format!("{field} exceeds signed 64-bit range")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mysql_upsert_mode_selects_nullable_timestamp_semantics() {
+        let preserving = pool_member_score_upsert_sql(
+            PoolMemberScoreUpsertMode::PreserveExistingNullableTimestamps,
+        );
+        let recovering = pool_member_score_upsert_sql(PoolMemberScoreUpsertMode::OAuthRecovery);
+
+        for field in [
+            "last_scheduled_at",
+            "last_success_at",
+            "last_failure_at",
+            "last_probe_attempt_at",
+            "last_probe_success_at",
+            "last_probe_failure_at",
+        ] {
+            assert!(preserving.contains(&format!("{field} = COALESCE(VALUES({field}), {field})")));
+        }
+        for field in [
+            "last_scheduled_at",
+            "last_success_at",
+            "last_probe_attempt_at",
+            "last_probe_success_at",
+        ] {
+            assert!(!recovering.contains(&format!("\n  {field} =")));
+        }
+        for field in [
+            "score",
+            "hard_state",
+            "score_version",
+            "score_reason",
+            "last_ranked_at",
+        ] {
+            assert!(recovering.contains(&format!(
+                "{field} = IF(updated_at <= VALUES(updated_at), VALUES({field}), {field})"
+            )));
+        }
+        assert!(
+            recovering.contains("last_failure_at IS NULL OR last_failure_at <= VALUES(updated_at)")
+        );
+        assert!(recovering.contains("failure_count = IF("));
+        assert!(recovering.contains(
+            "last_probe_failure_at IS NULL OR last_probe_failure_at <= VALUES(updated_at)"
+        ));
+        assert!(recovering.contains("probe_failure_count = IF("));
+        assert!(recovering.contains("updated_at = GREATEST(updated_at, VALUES(updated_at))"));
+        assert!(
+            recovering.find("failure_count =").unwrap()
+                < recovering.find("last_failure_at =").unwrap()
+        );
+        assert!(
+            recovering.find("probe_status =").unwrap()
+                < recovering.find("last_probe_failure_at =").unwrap()
+        );
+        assert_eq!(preserving.matches('?').count(), 23);
+        assert_eq!(recovering.matches('?').count(), 23);
+    }
 }

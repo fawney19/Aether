@@ -1,4 +1,4 @@
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum DataLayerError {
     #[error("invalid configuration: {0}")]
     InvalidConfiguration(String),

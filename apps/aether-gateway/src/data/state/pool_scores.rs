@@ -4,6 +4,7 @@ use super::{
     PoolMemberHardState, PoolMemberIdentity, PoolMemberProbeAttempt, PoolMemberProbeResult,
     PoolMemberScheduleFeedback, PoolScoreScope, StoredPoolMemberScore, UpsertPoolMemberScore,
 };
+use aether_data_contracts::repository::pool_scores::PoolMemberScoreUpsertMode;
 
 impl GatewayDataState {
     pub(crate) async fn list_ranked_pool_members(
@@ -52,6 +53,20 @@ impl GatewayDataState {
     ) -> Result<Option<StoredPoolMemberScore>, DataLayerError> {
         match &self.pool_score_writer {
             Some(repository) => repository.upsert_pool_member_score(score).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn upsert_pool_member_score_with_mode(
+        &self,
+        score: UpsertPoolMemberScore,
+        mode: PoolMemberScoreUpsertMode,
+    ) -> Result<Option<StoredPoolMemberScore>, DataLayerError> {
+        match &self.pool_score_writer {
+            Some(repository) => repository
+                .upsert_pool_member_score_with_mode(score, mode)
+                .await
+                .map(Some),
             None => Ok(None),
         }
     }

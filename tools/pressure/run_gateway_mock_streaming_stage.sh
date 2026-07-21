@@ -154,6 +154,12 @@ args+=(
   --response-mode "$PRESSURE_RESPONSE_MODE"
 )
 
+case "$(printf '%s' "$PRESSURE_RESPONSE_MODE" | tr '[:upper:]' '[:lower:]')" in
+  full|full-body|full_body|body)
+    args+=(--require-sse-done)
+    ;;
+esac
+
 if [[ -n "$api_key_file" && -s "$api_key_file" ]]; then
   args+=(--api-key-file "$api_key_file")
 else

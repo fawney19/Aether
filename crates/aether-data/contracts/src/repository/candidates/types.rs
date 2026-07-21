@@ -583,15 +583,25 @@ pub fn request_candidate_lifecycle_would_regress(
             | RequestCandidateStatus::Unused
             | RequestCandidateStatus::Pending
             | RequestCandidateStatus::Streaming
-    ) || existing == RequestCandidateStatus::Streaming
-        && incoming == RequestCandidateStatus::Pending
+    ) || existing == RequestCandidateStatus::Pending
+        && matches!(
+            incoming,
+            RequestCandidateStatus::Available | RequestCandidateStatus::Unused
+        )
+        || existing == RequestCandidateStatus::Streaming
+            && matches!(
+                incoming,
+                RequestCandidateStatus::Available
+                    | RequestCandidateStatus::Unused
+                    | RequestCandidateStatus::Pending
+            )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        derive_request_candidate_final_status, RequestCandidateFinalStatus, RequestCandidateStatus,
-        StoredRequestCandidate,
+        derive_request_candidate_final_status, request_candidate_lifecycle_would_regress,
+        RequestCandidateFinalStatus, RequestCandidateStatus, StoredRequestCandidate,
     };
 
     fn candidate(
@@ -653,5 +663,45 @@ mod tests {
             derive_request_candidate_final_status(&candidates),
             RequestCandidateFinalStatus::Success
         );
+    }
+
+    #[test]
+    fn streaming_candidate_cannot_regress_to_an_earlier_planning_state() {
+        for incoming in [
+            RequestCandidateStatus::Available,
+            RequestCandidateStatus::Unused,
+            RequestCandidateStatus::Pending,
+        ] {
+            assert!(request_candidate_lifecycle_would_regress(
+                RequestCandidateStatus::Streaming,
+                incoming,
+            ));
+        }
+        assert!(!request_candidate_lifecycle_would_regress(
+            RequestCandidateStatus::Streaming,
+            RequestCandidateStatus::Success,
+        ));
+    }
+
+    #[test]
+    fn pending_candidate_cannot_regress_to_an_earlier_planning_state() {
+        for incoming in [
+            RequestCandidateStatus::Available,
+            RequestCandidateStatus::Unused,
+        ] {
+            assert!(request_candidate_lifecycle_would_regress(
+                RequestCandidateStatus::Pending,
+                incoming,
+            ));
+        }
+        for incoming in [
+            RequestCandidateStatus::Streaming,
+            RequestCandidateStatus::Success,
+        ] {
+            assert!(!request_candidate_lifecycle_would_regress(
+                RequestCandidateStatus::Pending,
+                incoming,
+            ));
+        }
     }
 }

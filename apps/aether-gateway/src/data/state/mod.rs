@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::RwLock;
-use std::time::Instant;
 
 use super::auth::GatewayAuthApiKeySnapshot;
 use super::candidates::{read_request_candidate_trace, RequestCandidateTrace};
@@ -13,6 +13,7 @@ use crate::provider_transport::{
     read_provider_transport_snapshot, GatewayProviderTransportSnapshot,
 };
 use crate::video_tasks::LocalVideoTaskReadResponse;
+use aether_cache::ExpiringMap;
 use aether_data::repository::announcements::{
     AnnouncementListQuery, AnnouncementReadRepository, AnnouncementWriteRepository,
     CreateAnnouncementRecord, StoredAnnouncement, StoredAnnouncementPage, UpdateAnnouncementRecord,
@@ -120,8 +121,10 @@ use aether_data_contracts::repository::pool_scores::{
     UpsertPoolMemberScore,
 };
 use aether_data_contracts::repository::provider_catalog::{
-    ProviderCatalogKeyListQuery, ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    ProviderCatalogKeyAdaptiveStateUpdate, ProviderCatalogKeyHealthStateUpdate,
+    ProviderCatalogKeyListQuery, ProviderCatalogKeyRuntimeMetadataUpdate,
+    ProviderCatalogKeyStatusSnapshotUpdate, ProviderCatalogReadRepository,
+    ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
     StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
     StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
@@ -196,8 +199,28 @@ pub(crate) struct GatewayDataState {
     wallet_writer: Option<Arc<dyn WalletWriteRepository>>,
     settlement_writer: Option<Arc<dyn SettlementWriteRepository>>,
     system_config_values: Option<Arc<RwLock<BTreeMap<String, StoredSystemConfigEntry>>>>,
-    system_config_value_cache: Arc<RwLock<BTreeMap<String, (Instant, Option<serde_json::Value>)>>>,
+    system_config_value_cache: Arc<SystemConfigValueCacheState>,
     billing_model_context_cache: Arc<BillingModelContextCacheState>,
+}
+
+pub(super) struct SystemConfigValueCacheState {
+    pub(super) entries: ExpiringMap<String, Option<serde_json::Value>>,
+    pub(super) inflight: std::sync::Mutex<HashMap<String, Arc<SystemConfigValueInflightState>>>,
+    pub(super) mutation: std::sync::Mutex<()>,
+    pub(super) admission: Arc<tokio::sync::Semaphore>,
+}
+
+pub(super) struct SystemConfigValueInflightState {
+    pub(super) notify: Arc<tokio::sync::Notify>,
+    pub(super) completion: OnceLock<SystemConfigValueInflightCompletion>,
+}
+
+#[derive(Clone)]
+pub(super) enum SystemConfigValueInflightCompletion {
+    Loaded,
+    Failed(DataLayerError),
+    Cancelled,
+    Invalidated,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -214,14 +237,20 @@ pub(super) enum BillingModelContextCacheKey {
     },
 }
 
-#[derive(Default)]
 pub(super) struct BillingModelContextCacheState {
-    pub(super) entries:
-        RwLock<HashMap<BillingModelContextCacheKey, (Instant, Option<StoredBillingModelContext>)>>,
-    pub(super) inflight: std::sync::Mutex<HashMap<BillingModelContextCacheKey, u64>>,
-    pub(super) inflight_notify: tokio::sync::Notify,
-    pub(super) next_inflight_token: std::sync::atomic::AtomicU64,
+    pub(super) entries: ExpiringMap<BillingModelContextCacheKey, Option<StoredBillingModelContext>>,
+    pub(super) inflight: std::sync::Mutex<
+        HashMap<BillingModelContextCacheKey, Arc<BillingModelContextInflightState>>,
+    >,
     pub(super) epoch: std::sync::atomic::AtomicU64,
+    pub(super) mutation: std::sync::Mutex<()>,
+    pub(super) admission: Arc<tokio::sync::Semaphore>,
+}
+
+pub(super) struct BillingModelContextInflightState {
+    pub(super) epoch: u64,
+    pub(super) completion: std::sync::OnceLock<Result<(), DataLayerError>>,
+    pub(super) notify: tokio::sync::Notify,
 }
 
 impl fmt::Debug for GatewayDataState {

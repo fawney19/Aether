@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
@@ -6,6 +7,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use crate::{DataLayerError, RuntimeQueueEntry, RuntimeQueueReclaimConfig, RuntimeQueueStats};
+
+const MEMORY_RATE_LIMIT_COUNTER_SHARD_COUNT: usize = 64;
+const MEMORY_RATE_LIMIT_COUNTER_PRUNE_INTERVAL: u64 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryRuntimeStateConfig {
@@ -37,7 +41,7 @@ impl MemoryKvEntry {
 pub(crate) struct MemoryRuntimeBackend {
     config: MemoryRuntimeStateConfig,
     kv: Mutex<HashMap<String, MemoryKvEntry>>,
-    counters: StdMutex<HashMap<String, MemoryCounterEntry>>,
+    counters: MemoryRateLimitCounters,
     sets: Mutex<HashMap<String, MemorySetEntry>>,
     scores: Mutex<HashMap<String, MemoryScoreEntry>>,
     queues: Mutex<HashMap<String, MemoryQueueStream>>,
@@ -52,6 +56,36 @@ struct MemoryCounterEntry {
     value: u32,
     bucket: u64,
     expires_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct MemoryRateLimitCounterShard {
+    entries: HashMap<String, MemoryCounterEntry>,
+    operations_since_prune: u64,
+}
+
+impl MemoryRateLimitCounterShard {
+    fn amortized_prune(&mut self, now: Instant) {
+        self.operations_since_prune = self.operations_since_prune.saturating_add(1);
+        if self.operations_since_prune < MEMORY_RATE_LIMIT_COUNTER_PRUNE_INTERVAL {
+            return;
+        }
+        self.operations_since_prune = 0;
+        self.entries.retain(|_, entry| entry.expires_at > now);
+    }
+}
+
+#[derive(Debug)]
+struct MemoryRateLimitCounters {
+    shards: [StdMutex<MemoryRateLimitCounterShard>; MEMORY_RATE_LIMIT_COUNTER_SHARD_COUNT],
+}
+
+impl Default for MemoryRateLimitCounters {
+    fn default() -> Self {
+        Self {
+            shards: std::array::from_fn(|_| StdMutex::new(MemoryRateLimitCounterShard::default())),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -385,15 +419,20 @@ impl MemoryRuntimeBackend {
         key_limit: u32,
         ttl: Duration,
     ) -> Result<crate::RateLimitCheck, crate::DataLayerError> {
-        let mut counters = self.counters.lock().map_err(|_| {
+        // A user's API keys belong to the same rate-limit partition, so both
+        // counters can be checked and updated atomically under one shard lock.
+        let shard_index = memory_rate_limit_counter_shard_index(user_key);
+        let mut shard = self.counters.shards[shard_index].lock().map_err(|_| {
             DataLayerError::UnexpectedValue("memory rate-limit counter lock poisoned".to_string())
         })?;
         let now = Instant::now();
-        prune_rate_limit_counter(&mut counters, user_key, bucket, now);
-        prune_rate_limit_counter(&mut counters, key_key, bucket, now);
+        shard.amortized_prune(now);
+        prune_rate_limit_counter(&mut shard.entries, user_key, bucket, now);
+        prune_rate_limit_counter(&mut shard.entries, key_key, bucket, now);
 
         if user_limit > 0 {
-            let user_count = counters
+            let user_count = shard
+                .entries
                 .get(user_key)
                 .filter(|entry| entry.bucket == bucket)
                 .map(|entry| entry.value)
@@ -407,7 +446,8 @@ impl MemoryRuntimeBackend {
         }
 
         if key_limit > 0 {
-            let key_count = counters
+            let key_count = shard
+                .entries
                 .get(key_key)
                 .filter(|entry| entry.bucket == bucket)
                 .map(|entry| entry.value)
@@ -423,7 +463,8 @@ impl MemoryRuntimeBackend {
         let mut remaining = None::<u32>;
         let expires_at = now + ttl;
         if user_limit > 0 {
-            let next = counters
+            let next = shard
+                .entries
                 .entry(user_key.to_string())
                 .and_modify(|entry| {
                     entry.bucket = bucket;
@@ -439,7 +480,8 @@ impl MemoryRuntimeBackend {
             remaining = Some(user_limit.saturating_sub(next));
         }
         if key_limit > 0 {
-            let next = counters
+            let next = shard
+                .entries
                 .entry(key_key.to_string())
                 .and_modify(|entry| {
                     entry.bucket = bucket;
@@ -461,15 +503,29 @@ impl MemoryRuntimeBackend {
     }
 
     pub(crate) fn rate_limit_count(&self, key: &str, bucket: u64) -> Result<u32, DataLayerError> {
-        let mut counters = self.counters.lock().map_err(|_| {
-            DataLayerError::UnexpectedValue("memory rate-limit counter lock poisoned".to_string())
-        })?;
-        prune_rate_limit_counter(&mut counters, key, bucket, Instant::now());
-        Ok(counters
-            .get(key)
-            .filter(|entry| entry.bucket == bucket)
-            .map(|entry| entry.value)
-            .unwrap_or_default())
+        let now = Instant::now();
+        let mut total = 0_u32;
+        // Key counters are co-located with their owning user's shard. Count
+        // reads are diagnostic-only, so scan shards without reintroducing a
+        // global index or lock on the request hot path.
+        for shard in &self.counters.shards {
+            let mut shard = shard.lock().map_err(|_| {
+                DataLayerError::UnexpectedValue(
+                    "memory rate-limit counter lock poisoned".to_string(),
+                )
+            })?;
+            shard.amortized_prune(now);
+            prune_rate_limit_counter(&mut shard.entries, key, bucket, now);
+            total = total.saturating_add(
+                shard
+                    .entries
+                    .get(key)
+                    .filter(|entry| entry.bucket == bucket)
+                    .map(|entry| entry.value)
+                    .unwrap_or_default(),
+            );
+        }
+        Ok(total)
     }
 
     pub(crate) async fn set_add(&self, key: &str, member: &str) -> bool {
@@ -974,6 +1030,12 @@ fn prune_kv(kv: &mut HashMap<String, MemoryKvEntry>, now: Instant) {
     kv.retain(|_, entry| !entry.is_expired(now));
 }
 
+fn memory_rate_limit_counter_shard_index(key: &str) -> usize {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    (hasher.finish() as usize) % MEMORY_RATE_LIMIT_COUNTER_SHARD_COUNT
+}
+
 fn prune_rate_limit_counter(
     counters: &mut HashMap<String, MemoryCounterEntry>,
     key: &str,
@@ -1089,4 +1151,50 @@ fn unix_time_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rate_limit_shard_amortizes_expired_entry_cleanup() {
+        let backend = MemoryRuntimeBackend::new(MemoryRuntimeStateConfig::default());
+        let user_key = "rpm:user:cleanup:1";
+        let shard_index = memory_rate_limit_counter_shard_index(user_key);
+        {
+            let mut shard = backend.counters.shards[shard_index]
+                .lock()
+                .expect("rate-limit shard should lock");
+            shard.entries.insert(
+                "expired-unrelated-key".to_string(),
+                MemoryCounterEntry {
+                    value: 1,
+                    bucket: 1,
+                    expires_at: Instant::now()
+                        .checked_sub(Duration::from_secs(1))
+                        .expect("test instant should support subtraction"),
+                },
+            );
+            shard.operations_since_prune = MEMORY_RATE_LIMIT_COUNTER_PRUNE_INTERVAL - 1;
+        }
+
+        backend
+            .check_and_consume_rate_limit(
+                user_key,
+                "rpm:key:cleanup:1",
+                1,
+                10,
+                10,
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("rate-limit check should succeed");
+
+        let shard = backend.counters.shards[shard_index]
+            .lock()
+            .expect("rate-limit shard should lock");
+        assert!(!shard.entries.contains_key("expired-unrelated-key"));
+        assert_eq!(shard.operations_since_prune, 0);
+    }
 }

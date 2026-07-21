@@ -20,6 +20,16 @@ fn local_mutation_outcome<T>(outcome: AdminBillingMutationOutcome<T>) -> LocalMu
 }
 
 impl AppState {
+    fn finish_billing_model_context_mutation<T>(
+        &self,
+        outcome: LocalMutationOutcome<T>,
+    ) -> LocalMutationOutcome<T> {
+        if matches!(&outcome, LocalMutationOutcome::Applied(_)) {
+            self.auth_request_cost_upper_bound_cache.clear();
+        }
+        outcome
+    }
+
     pub(crate) async fn admin_billing_enabled_default_value_exists(
         &self,
         api_format: &str,
@@ -81,14 +91,18 @@ impl AppState {
                 .lock()
                 .expect("admin billing rule store should lock")
                 .insert(record.id.clone(), record.clone());
-            return Ok(LocalMutationOutcome::Applied(record));
+            return Ok(
+                self.finish_billing_model_context_mutation(LocalMutationOutcome::Applied(record))
+            );
         }
 
-        self.data
+        let outcome = self
+            .data
             .create_admin_billing_rule(input)
             .await
             .map(local_mutation_outcome)
-            .map_err(data_error)
+            .map_err(data_error)?;
+        Ok(self.finish_billing_model_context_mutation(outcome))
     }
 
     pub(crate) async fn list_admin_billing_rules(
@@ -171,14 +185,20 @@ impl AppState {
             record.dimension_mappings = input.dimension_mappings.clone();
             record.is_enabled = input.is_enabled;
             record.updated_at_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
-            return Ok(LocalMutationOutcome::Applied(record.clone()));
+            return Ok(
+                self.finish_billing_model_context_mutation(LocalMutationOutcome::Applied(
+                    record.clone(),
+                )),
+            );
         }
 
-        self.data
+        let outcome = self
+            .data
             .update_admin_billing_rule(rule_id, input)
             .await
             .map(local_mutation_outcome)
-            .map_err(data_error)
+            .map_err(data_error)?;
+        Ok(self.finish_billing_model_context_mutation(outcome))
     }
 
     pub(crate) async fn create_admin_billing_collector(
@@ -207,14 +227,18 @@ impl AppState {
                 .lock()
                 .expect("admin billing collector store should lock")
                 .insert(record.id.clone(), record.clone());
-            return Ok(LocalMutationOutcome::Applied(record));
+            return Ok(
+                self.finish_billing_model_context_mutation(LocalMutationOutcome::Applied(record))
+            );
         }
 
-        self.data
+        let outcome = self
+            .data
             .create_admin_billing_collector(input)
             .await
             .map(local_mutation_outcome)
-            .map_err(data_error)
+            .map_err(data_error)?;
+        Ok(self.finish_billing_model_context_mutation(outcome))
     }
 
     pub(crate) async fn list_admin_billing_collectors(
@@ -313,14 +337,20 @@ impl AppState {
             record.priority = input.priority;
             record.is_enabled = input.is_enabled;
             record.updated_at_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
-            return Ok(LocalMutationOutcome::Applied(record.clone()));
+            return Ok(
+                self.finish_billing_model_context_mutation(LocalMutationOutcome::Applied(
+                    record.clone(),
+                )),
+            );
         }
 
-        self.data
+        let outcome = self
+            .data
             .update_admin_billing_collector(collector_id, input)
             .await
             .map(local_mutation_outcome)
-            .map_err(data_error)
+            .map_err(data_error)?;
+        Ok(self.finish_billing_model_context_mutation(outcome))
     }
 
     pub(crate) async fn apply_admin_billing_preset(
@@ -389,23 +419,27 @@ impl AppState {
                     }
                 }
             }
-            return Ok(LocalMutationOutcome::Applied(
-                AdminBillingPresetApplyResult {
-                    preset: preset.to_string(),
-                    mode: mode.to_string(),
-                    created,
-                    updated,
-                    skipped,
-                    errors: Vec::new(),
-                },
-            ));
+            return Ok(
+                self.finish_billing_model_context_mutation(LocalMutationOutcome::Applied(
+                    AdminBillingPresetApplyResult {
+                        preset: preset.to_string(),
+                        mode: mode.to_string(),
+                        created,
+                        updated,
+                        skipped,
+                        errors: Vec::new(),
+                    },
+                )),
+            );
         }
 
-        self.data
+        let outcome = self
+            .data
             .apply_admin_billing_preset(preset, mode, collectors)
             .await
             .map(local_mutation_outcome)
-            .map_err(data_error)
+            .map_err(data_error)?;
+        Ok(self.finish_billing_model_context_mutation(outcome))
     }
 
     pub(crate) async fn find_payment_gateway_config(
@@ -547,5 +581,137 @@ impl AppState {
         }
         let _permit = self.acquire_auth_snapshot_load_gate().await?;
         self.find_user_daily_quota_availability(user_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use serde_json::json;
+
+    use super::{
+        AdminBillingCollectorWriteInput, AdminBillingRuleWriteInput, AppState, LocalMutationOutcome,
+    };
+
+    const CACHE_KEY: &str = "billing-mutation-test";
+
+    fn rule_input() -> AdminBillingRuleWriteInput {
+        AdminBillingRuleWriteInput {
+            name: "chat-input".to_string(),
+            task_type: "chat".to_string(),
+            global_model_id: Some("global-model".to_string()),
+            model_id: Some("model-1".to_string()),
+            expression: "input_tokens * 0.01".to_string(),
+            variables: json!({"base": 1}),
+            dimension_mappings: json!({"input_tokens": "input_tokens"}),
+            is_enabled: true,
+        }
+    }
+
+    fn collector_input(dimension_name: &str) -> AdminBillingCollectorWriteInput {
+        AdminBillingCollectorWriteInput {
+            api_format: "openai".to_string(),
+            task_type: "chat".to_string(),
+            dimension_name: dimension_name.to_string(),
+            source_type: "request".to_string(),
+            source_path: Some("usage.input_tokens".to_string()),
+            value_type: "float".to_string(),
+            transform_expression: None,
+            default_value: None,
+            priority: 10,
+            is_enabled: true,
+        }
+    }
+
+    fn prime_cache(state: &AppState) {
+        state.auth_request_cost_upper_bound_cache.insert(
+            CACHE_KEY.to_string(),
+            Some(1.0),
+            Duration::from_secs(60),
+        );
+        assert!(state
+            .auth_request_cost_upper_bound_cache
+            .get(&CACHE_KEY.to_string(), Duration::from_secs(60),)
+            .is_some());
+    }
+
+    fn assert_cache_cleared(state: &AppState) {
+        assert_eq!(
+            state
+                .auth_request_cost_upper_bound_cache
+                .get(&CACHE_KEY.to_string(), Duration::from_secs(60),),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn applied_admin_billing_mutations_clear_auth_cost_cache() {
+        let state = AppState::new().expect("app state should build");
+
+        prime_cache(&state);
+        let created_rule = state
+            .create_admin_billing_rule(&rule_input())
+            .await
+            .expect("rule create should succeed");
+        let rule_id = match created_rule {
+            LocalMutationOutcome::Applied(record) => record.id,
+            other => panic!("expected applied rule create, got {other:?}"),
+        };
+        assert_cache_cleared(&state);
+
+        prime_cache(&state);
+        let updated_rule = state
+            .update_admin_billing_rule(&rule_id, &rule_input())
+            .await
+            .expect("rule update should succeed");
+        assert!(matches!(updated_rule, LocalMutationOutcome::Applied(_)));
+        assert_cache_cleared(&state);
+
+        prime_cache(&state);
+        let created_collector = state
+            .create_admin_billing_collector(&collector_input("latency"))
+            .await
+            .expect("collector create should succeed");
+        let collector_id = match created_collector {
+            LocalMutationOutcome::Applied(record) => record.id,
+            other => panic!("expected applied collector create, got {other:?}"),
+        };
+        assert_cache_cleared(&state);
+
+        prime_cache(&state);
+        let updated_collector = state
+            .update_admin_billing_collector(&collector_id, &collector_input("latency"))
+            .await
+            .expect("collector update should succeed");
+        assert!(matches!(
+            updated_collector,
+            LocalMutationOutcome::Applied(_)
+        ));
+        assert_cache_cleared(&state);
+
+        prime_cache(&state);
+        let applied_preset = state
+            .apply_admin_billing_preset("test", "merge", &[collector_input("images")])
+            .await
+            .expect("preset apply should succeed");
+        assert!(matches!(applied_preset, LocalMutationOutcome::Applied(_)));
+        assert_cache_cleared(&state);
+    }
+
+    #[tokio::test]
+    async fn non_applied_admin_billing_mutation_keeps_auth_cost_cache() {
+        let state = AppState::new().expect("app state should build");
+        prime_cache(&state);
+
+        let outcome = state
+            .update_admin_billing_rule("missing", &rule_input())
+            .await
+            .expect("missing rule update should return a local outcome");
+        assert_eq!(outcome, LocalMutationOutcome::NotFound);
+        assert!(state
+            .auth_request_cost_upper_bound_cache
+            .get(&CACHE_KEY.to_string(), Duration::from_secs(60),)
+            .is_some());
     }
 }

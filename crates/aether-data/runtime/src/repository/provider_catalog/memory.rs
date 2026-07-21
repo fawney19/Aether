@@ -1,11 +1,15 @@
 use std::collections::BTreeMap;
 use std::sync::RwLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 
 use super::{
-    ProviderCatalogKeyListQuery, ProviderCatalogReadRepository, ProviderCatalogSnapshot,
+    ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
+    ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListQuery,
+    ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
+    ProviderCatalogReadRepository, ProviderCatalogSnapshot,
     ProviderCatalogUpstreamMetadataNamespaceUpdate, ProviderCatalogWriteRepository,
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
     StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
@@ -533,7 +537,7 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
                 key.id
             )));
         };
-        *stored = key.clone();
+        *stored = merge_admin_key_update(stored, key);
         Ok(stored.clone())
     }
 
@@ -554,9 +558,16 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
             }
         }
         for key in keys {
-            index.keys.insert(key.id.clone(), key.clone());
+            let stored = index
+                .keys
+                .get_mut(&key.id)
+                .expect("provider catalog key existence was validated");
+            *stored = merge_admin_key_update(stored, key);
         }
-        Ok(keys.to_vec())
+        Ok(keys
+            .iter()
+            .filter_map(|key| index.keys.get(&key.id).cloned())
+            .collect())
     }
 
     async fn update_key_upstream_metadata(
@@ -574,7 +585,7 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         };
 
         key.upstream_metadata = upstream_metadata.cloned();
-        key.updated_at_unix_secs = updated_at_unix_secs;
+        key.updated_at_unix_secs = Some(updated_at_unix_secs.unwrap_or_else(current_unix_secs));
         Ok(true)
     }
 
@@ -606,7 +617,7 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
             ));
         };
         metadata.insert(namespace.to_string(), value.clone());
-        key.updated_at_unix_secs = updated_at_unix_secs;
+        key.updated_at_unix_secs = Some(updated_at_unix_secs.unwrap_or_else(current_unix_secs));
         Ok(true)
     }
 
@@ -628,7 +639,7 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         key.allowed_models = allowed_models.cloned();
         key.last_models_fetch_at_unix_secs = last_models_fetch_at_unix_secs;
         key.last_models_fetch_error = last_models_fetch_error.map(str::to_string);
-        key.updated_at_unix_secs = updated_at_unix_secs;
+        key.updated_at_unix_secs = Some(updated_at_unix_secs.unwrap_or_else(current_unix_secs));
         Ok(true)
     }
 
@@ -669,7 +680,7 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         key.allowed_models = allowed_models.cloned();
         key.last_models_fetch_at_unix_secs = Some(last_models_fetch_at_unix_secs);
         key.last_models_fetch_error = None;
-        key.updated_at_unix_secs = updated_at_unix_secs;
+        key.updated_at_unix_secs = Some(updated_at_unix_secs.unwrap_or_else(current_unix_secs));
         if !upstream_metadata_updates.is_empty() {
             let metadata = key
                 .upstream_metadata
@@ -702,6 +713,7 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
 
         key.oauth_invalid_at_unix_secs = None;
         key.oauth_invalid_reason = None;
+        key.updated_at_unix_secs = Some(current_unix_secs());
         Ok(true)
     }
 
@@ -729,6 +741,32 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         key.encrypted_api_key = Some(encrypted_api_key.to_string());
         key.encrypted_auth_config = encrypted_auth_config.map(ToOwned::to_owned);
         key.expires_at_unix_secs = expires_at_unix_secs;
+        key.updated_at_unix_secs = Some(current_unix_secs());
+        Ok(true)
+    }
+
+    async fn update_key_oauth_runtime_state(
+        &self,
+        key_id: &str,
+        oauth_invalid_at_unix_secs: Option<u64>,
+        oauth_invalid_reason: Option<&str>,
+        encrypted_auth_config_update: Option<&str>,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<bool, DataLayerError> {
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        let Some(key) = index.keys.get_mut(key_id) else {
+            return Ok(false);
+        };
+
+        key.oauth_invalid_at_unix_secs = oauth_invalid_at_unix_secs;
+        key.oauth_invalid_reason = oauth_invalid_reason.map(ToOwned::to_owned);
+        if let Some(encrypted_auth_config) = encrypted_auth_config_update {
+            key.encrypted_auth_config = Some(encrypted_auth_config.to_string());
+        }
+        key.updated_at_unix_secs = Some(updated_at_unix_secs.unwrap_or_else(current_unix_secs));
         Ok(true)
     }
 
@@ -750,20 +788,311 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         key.is_active = is_active;
         key.health_by_format = health_by_format.cloned();
         key.circuit_breaker_by_format = circuit_breaker_by_format.cloned();
+        key.updated_at_unix_secs = Some(current_unix_secs());
         Ok(true)
     }
+
+    async fn reset_key_error_count(&self, key_id: &str) -> Result<bool, DataLayerError> {
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        let Some(key) = index.keys.get_mut(key_id) else {
+            return Ok(false);
+        };
+
+        key.error_count = Some(0);
+        key.updated_at_unix_secs = Some(current_unix_secs());
+        Ok(true)
+    }
+
+    async fn compare_and_update_key_adaptive_state(
+        &self,
+        update: &ProviderCatalogKeyAdaptiveStateUpdate,
+    ) -> Result<bool, DataLayerError> {
+        if update.key_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog key_id is empty".to_string(),
+            ));
+        }
+        let patch = adaptive_status_snapshot_patch(&update.status_snapshot_patch)?;
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        let Some(key) = index.keys.get_mut(&update.key_id) else {
+            return Ok(false);
+        };
+        let expected = update.expected.canonicalized();
+        let next = update.next.canonicalized();
+        if ProviderCatalogKeyAdaptiveState::from(&*key) != expected {
+            return Ok(false);
+        }
+        let status_snapshot = json_object_for_merge(
+            key.status_snapshot.as_ref(),
+            "provider catalog status snapshot",
+        )?;
+        key.learned_rpm_limit = next.learned_rpm_limit;
+        key.concurrent_429_count = next.concurrent_429_count;
+        key.rpm_429_count = next.rpm_429_count;
+        key.last_429_at_unix_secs = next.last_429_at_unix_secs;
+        key.last_429_type.clone_from(&next.last_429_type);
+        key.adjustment_history.clone_from(&next.adjustment_history);
+        key.utilization_samples
+            .clone_from(&next.utilization_samples);
+        key.last_probe_increase_at_unix_secs = next.last_probe_increase_at_unix_secs;
+        key.last_rpm_peak = next.last_rpm_peak;
+        key.status_snapshot = Some(Value::Object(merge_json_objects(status_snapshot, patch)));
+        key.updated_at_unix_secs = Some(
+            update
+                .updated_at_unix_secs
+                .unwrap_or_else(current_unix_secs),
+        );
+        Ok(true)
+    }
+
+    async fn update_key_runtime_metadata(
+        &self,
+        update: &ProviderCatalogKeyRuntimeMetadataUpdate,
+    ) -> Result<bool, DataLayerError> {
+        if update.key_id.trim().is_empty() || update.namespace.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog key_id and runtime metadata namespace are required".to_string(),
+            ));
+        }
+        let status_patch = update
+            .status_snapshot_patch
+            .as_object()
+            .cloned()
+            .ok_or_else(|| {
+                DataLayerError::InvalidInput(
+                    "provider catalog runtime status snapshot patch must be an object".to_string(),
+                )
+            })?;
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        let Some(key) = index.keys.get_mut(&update.key_id) else {
+            return Ok(false);
+        };
+        let current_namespace = key
+            .upstream_metadata
+            .as_ref()
+            .and_then(Value::as_object)
+            .and_then(|metadata| metadata.get(&update.namespace))
+            .cloned();
+        if current_namespace != update.expected_upstream_metadata_value {
+            return Ok(false);
+        }
+        let mut metadata = json_object_for_merge(
+            key.upstream_metadata.as_ref(),
+            "provider catalog upstream metadata",
+        )?;
+        let status_snapshot = json_object_for_merge(
+            key.status_snapshot.as_ref(),
+            "provider catalog status snapshot",
+        )?;
+        metadata.insert(
+            update.namespace.clone(),
+            update.upstream_metadata_value.clone(),
+        );
+        key.upstream_metadata = Some(Value::Object(metadata));
+        key.status_snapshot = Some(Value::Object(merge_json_objects(
+            status_snapshot,
+            status_patch,
+        )));
+        key.updated_at_unix_secs = Some(
+            update
+                .updated_at_unix_secs
+                .unwrap_or_else(current_unix_secs),
+        );
+        Ok(true)
+    }
+
+    async fn update_key_status_snapshot(
+        &self,
+        update: &ProviderCatalogKeyStatusSnapshotUpdate,
+    ) -> Result<bool, DataLayerError> {
+        if update.key_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog key_id is empty".to_string(),
+            ));
+        }
+        let patch = update
+            .status_snapshot_patch
+            .as_object()
+            .cloned()
+            .ok_or_else(|| {
+                DataLayerError::InvalidInput(
+                    "provider catalog status snapshot patch must be an object".to_string(),
+                )
+            })?;
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        let Some(key) = index.keys.get_mut(&update.key_id) else {
+            return Ok(false);
+        };
+        let status_snapshot = json_object_for_merge(
+            key.status_snapshot.as_ref(),
+            "provider catalog status snapshot",
+        )?;
+        key.status_snapshot = Some(Value::Object(merge_json_objects(status_snapshot, patch)));
+        key.updated_at_unix_secs = Some(
+            update
+                .updated_at_unix_secs
+                .unwrap_or_else(current_unix_secs),
+        );
+        Ok(true)
+    }
+
+    async fn compare_and_update_key_health_state(
+        &self,
+        update: &ProviderCatalogKeyHealthStateUpdate,
+    ) -> Result<bool, DataLayerError> {
+        if update.key_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog key_id is empty".to_string(),
+            ));
+        }
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        let Some(key) = index.keys.get_mut(&update.key_id) else {
+            return Ok(false);
+        };
+        if key.health_by_format != update.expected_health_by_format
+            || key.circuit_breaker_by_format != update.expected_circuit_breaker_by_format
+        {
+            return Ok(false);
+        }
+        key.health_by_format.clone_from(&update.health_by_format);
+        key.circuit_breaker_by_format
+            .clone_from(&update.circuit_breaker_by_format);
+        key.updated_at_unix_secs = Some(current_unix_secs());
+        Ok(true)
+    }
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn merge_admin_key_update(
+    stored: &StoredProviderCatalogKey,
+    requested: &StoredProviderCatalogKey,
+) -> StoredProviderCatalogKey {
+    let mut merged = requested.clone();
+
+    // Catalog edits own configuration, not live observations. Keep operational
+    // fields from the current row so stale admin snapshots cannot undo runtime writes.
+    merged.learned_rpm_limit = stored.learned_rpm_limit;
+    merged.concurrent_429_count = stored.concurrent_429_count;
+    merged.rpm_429_count = stored.rpm_429_count;
+    merged.last_429_at_unix_secs = stored.last_429_at_unix_secs;
+    merged.last_429_type.clone_from(&stored.last_429_type);
+    merged
+        .adjustment_history
+        .clone_from(&stored.adjustment_history);
+    merged
+        .utilization_samples
+        .clone_from(&stored.utilization_samples);
+    merged.last_probe_increase_at_unix_secs = stored.last_probe_increase_at_unix_secs;
+    merged.last_rpm_peak = stored.last_rpm_peak;
+    merged.last_models_fetch_at_unix_secs = stored.last_models_fetch_at_unix_secs;
+    merged
+        .last_models_fetch_error
+        .clone_from(&stored.last_models_fetch_error);
+    merged
+        .upstream_metadata
+        .clone_from(&stored.upstream_metadata);
+    merged.oauth_invalid_at_unix_secs = stored.oauth_invalid_at_unix_secs;
+    merged
+        .oauth_invalid_reason
+        .clone_from(&stored.oauth_invalid_reason);
+    merged.status_snapshot.clone_from(&stored.status_snapshot);
+    merged.health_by_format.clone_from(&stored.health_by_format);
+    merged
+        .circuit_breaker_by_format
+        .clone_from(&stored.circuit_breaker_by_format);
+    merged.request_count = stored.request_count;
+    merged.total_tokens = stored.total_tokens;
+    merged.total_cost_usd = stored.total_cost_usd;
+    merged.success_count = stored.success_count;
+    merged.error_count = stored.error_count;
+    merged.total_response_time_ms = stored.total_response_time_ms;
+    merged.last_used_at_unix_secs = stored.last_used_at_unix_secs;
+    merged.created_at_unix_ms = stored.created_at_unix_ms;
+    merged
+}
+
+fn adaptive_status_snapshot_patch(patch: &Value) -> Result<Map<String, Value>, DataLayerError> {
+    const OWNED_FIELDS: [&str; 6] = [
+        "observation_count",
+        "header_observation_count",
+        "latest_upstream_limit",
+        "learning_confidence",
+        "enforcement_active",
+        "known_boundary",
+    ];
+    let object = patch.as_object().ok_or_else(|| {
+        DataLayerError::InvalidInput(
+            "provider catalog adaptive status snapshot patch must be an object".to_string(),
+        )
+    })?;
+    Ok(OWNED_FIELDS
+        .into_iter()
+        .filter_map(|field| {
+            object
+                .get(field)
+                .cloned()
+                .map(|value| (field.to_string(), value))
+        })
+        .collect())
+}
+
+fn json_object_for_merge(
+    value: Option<&Value>,
+    field_name: &str,
+) -> Result<Map<String, Value>, DataLayerError> {
+    match value {
+        None => Ok(Map::new()),
+        Some(Value::Object(object)) => Ok(object.clone()),
+        Some(_) => Err(DataLayerError::UnexpectedValue(format!(
+            "{field_name} must be an object"
+        ))),
+    }
+}
+
+fn merge_json_objects(
+    mut current: Map<String, Value>,
+    patch: Map<String, Value>,
+) -> Map<String, Value> {
+    current.extend(patch);
+    current
 }
 
 #[cfg(test)]
 mod tests {
     use super::InMemoryProviderCatalogReadRepository;
     use crate::repository::provider_catalog::{
-        ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery, ProviderCatalogReadRepository,
-        ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
-        StoredProviderCatalogProvider,
+        ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
+        ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListOrder,
+        ProviderCatalogKeyListQuery, ProviderCatalogKeyRuntimeMetadataUpdate,
+        ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
+        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
     use crate::repository::usage::ProviderApiKeyUsageDelta;
-    use serde_json::json;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
 
     fn sample_provider(id: &str) -> StoredProviderCatalogProvider {
         StoredProviderCatalogProvider::new(
@@ -1243,6 +1572,383 @@ mod tests {
             .expect("keys should read");
         assert_eq!(reloaded[0].name, "updated");
         assert_eq!(reloaded[0].internal_priority, 7);
+    }
+
+    #[tokio::test]
+    async fn runtime_health_cas_preserves_admin_activation_and_rejects_stale_state() {
+        let mut key = sample_key("key-1", "provider-1");
+        key.is_active = false;
+        key.health_by_format = Some(json!({"openai:chat":{"consecutive_failures":1}}));
+        let repository = InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-1")],
+            vec![],
+            vec![key],
+        );
+        let update = ProviderCatalogKeyHealthStateUpdate {
+            key_id: "key-1".to_string(),
+            expected_health_by_format: Some(json!({"openai:chat":{"consecutive_failures":1}})),
+            expected_circuit_breaker_by_format: None,
+            health_by_format: Some(json!({"openai:chat":{"consecutive_failures":2}})),
+            circuit_breaker_by_format: None,
+        };
+
+        assert!(repository
+            .compare_and_update_key_health_state(&update)
+            .await
+            .expect("health CAS should succeed"));
+        assert!(!repository
+            .compare_and_update_key_health_state(&update)
+            .await
+            .expect("stale health CAS should report a conflict"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert!(!stored.is_active);
+        assert_eq!(
+            stored.health_by_format,
+            Some(json!({"openai:chat":{"consecutive_failures":2}}))
+        );
+    }
+
+    #[tokio::test]
+    async fn adaptive_cas_detects_conflicts_and_merges_only_owned_status_fields() {
+        let mut key = sample_key("key-1", "provider-1");
+        key.learned_rpm_limit = Some(10);
+        key.rpm_429_count = Some(1);
+        key.status_snapshot = Some(json!({
+            "quota": {"remaining": 9},
+            "oauth": {"invalid": false},
+            "observation_count": 1
+        }));
+        let expected = ProviderCatalogKeyAdaptiveState::from(&key);
+        let mut next = expected.clone();
+        next.learned_rpm_limit = Some(8);
+        next.rpm_429_count = Some(2);
+        let repository = InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-1")],
+            vec![],
+            vec![key],
+        );
+        let update = ProviderCatalogKeyAdaptiveStateUpdate {
+            key_id: "key-1".to_string(),
+            expected,
+            next,
+            status_snapshot_patch: json!({
+                "observation_count": 2,
+                "learning_confidence": 0.5,
+                "quota": {"remaining": 0}
+            }),
+            updated_at_unix_secs: Some(10),
+        };
+
+        assert!(repository
+            .compare_and_update_key_adaptive_state(&update)
+            .await
+            .expect("adaptive CAS should succeed"));
+        assert!(!repository
+            .compare_and_update_key_adaptive_state(&update)
+            .await
+            .expect("stale adaptive CAS should report a conflict"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        let status = stored.status_snapshot.expect("status should exist");
+        assert_eq!(stored.learned_rpm_limit, Some(8));
+        assert_eq!(stored.rpm_429_count, Some(2));
+        assert_eq!(status["quota"], json!({"remaining": 9}));
+        assert_eq!(status["oauth"], json!({"invalid": false}));
+        assert_eq!(status["observation_count"], json!(2));
+        assert_eq!(status["learning_confidence"], json!(0.5));
+    }
+
+    #[tokio::test]
+    async fn runtime_metadata_update_preserves_adaptive_state_and_other_namespaces() {
+        let mut key = sample_key("key-1", "provider-1");
+        key.learned_rpm_limit = Some(12);
+        key.upstream_metadata = Some(json!({
+            "codex": {"remaining": 5},
+            "grok": {"remaining": 7}
+        }));
+        key.status_snapshot = Some(json!({
+            "quota": {"remaining": 5},
+            "observation_count": 4,
+            "oauth": {"invalid": false}
+        }));
+        let repository = InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-1")],
+            vec![],
+            vec![key],
+        );
+
+        assert!(repository
+            .update_key_runtime_metadata(&ProviderCatalogKeyRuntimeMetadataUpdate {
+                key_id: "key-1".to_string(),
+                namespace: "codex".to_string(),
+                expected_upstream_metadata_value: Some(json!({"remaining": 5})),
+                upstream_metadata_value: json!({"remaining": 3}),
+                status_snapshot_patch: json!({"quota":{"remaining":3}}),
+                updated_at_unix_secs: Some(20),
+            })
+            .await
+            .expect("runtime metadata should update"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(stored.learned_rpm_limit, Some(12));
+        assert_eq!(
+            stored.upstream_metadata,
+            Some(json!({
+                "codex": {"remaining": 3},
+                "grok": {"remaining": 7}
+            }))
+        );
+        let status = stored.status_snapshot.expect("status should exist");
+        assert_eq!(status["quota"], json!({"remaining": 3}));
+        assert_eq!(status["observation_count"], json!(4));
+        assert_eq!(status["oauth"], json!({"invalid": false}));
+    }
+
+    #[tokio::test]
+    async fn runtime_metadata_namespace_cas_serializes_concurrent_read_modify_writes() {
+        let mut key = sample_key("key-1", "provider-1");
+        key.upstream_metadata = Some(json!({"grok": {"remaining": 10, "updates": 0}}));
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-1")],
+            vec![],
+            vec![key],
+        ));
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let repository = Arc::clone(&repository);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                let observed = repository
+                    .list_keys_by_ids(&["key-1".to_string()])
+                    .await
+                    .expect("key should read")
+                    .pop()
+                    .expect("key should exist");
+                let expected = observed
+                    .upstream_metadata
+                    .as_ref()
+                    .and_then(Value::as_object)
+                    .and_then(|metadata| metadata.get("grok"))
+                    .cloned();
+                let mut next = expected
+                    .as_ref()
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .expect("grok namespace should be an object");
+                let updates = next
+                    .get("updates")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default();
+                next.insert("updates".to_string(), json!(updates + 1));
+                barrier.wait().await;
+
+                let first = repository
+                    .update_key_runtime_metadata(&ProviderCatalogKeyRuntimeMetadataUpdate {
+                        key_id: "key-1".to_string(),
+                        namespace: "grok".to_string(),
+                        expected_upstream_metadata_value: expected,
+                        upstream_metadata_value: Value::Object(next),
+                        status_snapshot_patch: json!({}),
+                        updated_at_unix_secs: Some(100),
+                    })
+                    .await
+                    .expect("CAS should run");
+                if first {
+                    return (true, true);
+                }
+
+                // A stale writer must reload and retry from the winner's value;
+                // otherwise one of two concurrent quota deltas is lost.
+                let refreshed = repository
+                    .list_keys_by_ids(&["key-1".to_string()])
+                    .await
+                    .expect("key should reload")
+                    .pop()
+                    .expect("key should exist");
+                let expected = refreshed
+                    .upstream_metadata
+                    .as_ref()
+                    .and_then(Value::as_object)
+                    .and_then(|metadata| metadata.get("grok"))
+                    .cloned();
+                let mut next = expected
+                    .as_ref()
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .expect("grok namespace should remain an object");
+                let updates = next
+                    .get("updates")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default();
+                next.insert("updates".to_string(), json!(updates + 1));
+                let retried = repository
+                    .update_key_runtime_metadata(&ProviderCatalogKeyRuntimeMetadataUpdate {
+                        key_id: "key-1".to_string(),
+                        namespace: "grok".to_string(),
+                        expected_upstream_metadata_value: expected,
+                        upstream_metadata_value: Value::Object(next),
+                        status_snapshot_patch: json!({}),
+                        updated_at_unix_secs: Some(101),
+                    })
+                    .await
+                    .expect("retry CAS should run");
+                (false, retried)
+            }));
+        }
+
+        let outcomes = futures_util::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|result| result.expect("CAS task should finish"))
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes.iter().filter(|(first, _)| !*first).count(), 1);
+        assert!(outcomes.iter().all(|(_, persisted)| *persisted));
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(
+            stored.upstream_metadata.unwrap()["grok"]["updates"],
+            json!(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_metadata_namespace_cas_distinguishes_missing_and_stale_values() {
+        let repository = InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-1")],
+            vec![],
+            vec![sample_key("key-1", "provider-1")],
+        );
+        let create = ProviderCatalogKeyRuntimeMetadataUpdate {
+            key_id: "key-1".to_string(),
+            namespace: "new_namespace".to_string(),
+            expected_upstream_metadata_value: None,
+            upstream_metadata_value: json!({"value": 1}),
+            status_snapshot_patch: json!({}),
+            updated_at_unix_secs: Some(1),
+        };
+        assert!(repository
+            .update_key_runtime_metadata(&create)
+            .await
+            .expect("missing namespace CAS should succeed"));
+        assert!(!repository
+            .update_key_runtime_metadata(&create)
+            .await
+            .expect("stale missing namespace CAS should conflict"));
+        let stale = ProviderCatalogKeyRuntimeMetadataUpdate {
+            expected_upstream_metadata_value: Some(json!({"value": 1})),
+            upstream_metadata_value: json!({"value": 2}),
+            ..create
+        };
+        assert!(repository
+            .update_key_runtime_metadata(&stale)
+            .await
+            .expect("matching namespace CAS should succeed"));
+    }
+
+    #[tokio::test]
+    async fn stale_admin_update_preserves_concurrent_runtime_owned_fields() {
+        let mut key = sample_key("key-1", "provider-1");
+        key.learned_rpm_limit = Some(10);
+        key.rpm_429_count = Some(1);
+        key.health_by_format = Some(json!({"openai:chat":{"consecutive_failures":1}}));
+        key.upstream_metadata = Some(json!({"codex":{"remaining":5}}));
+        key.status_snapshot = Some(json!({
+            "quota":{"remaining":5},
+            "observation_count":1
+        }));
+        let mut stale_admin_key = key.clone();
+        let repository = InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-1")],
+            vec![],
+            vec![key.clone()],
+        );
+
+        repository
+            .compare_and_update_key_health_state(&ProviderCatalogKeyHealthStateUpdate {
+                key_id: key.id.clone(),
+                expected_health_by_format: key.health_by_format.clone(),
+                expected_circuit_breaker_by_format: None,
+                health_by_format: Some(json!({"openai:chat":{"consecutive_failures":2}})),
+                circuit_breaker_by_format: None,
+            })
+            .await
+            .expect("health CAS should run");
+        let expected = ProviderCatalogKeyAdaptiveState::from(&key);
+        let mut next = expected.clone();
+        next.learned_rpm_limit = Some(8);
+        next.rpm_429_count = Some(2);
+        repository
+            .compare_and_update_key_adaptive_state(&ProviderCatalogKeyAdaptiveStateUpdate {
+                key_id: key.id.clone(),
+                expected,
+                next,
+                status_snapshot_patch: json!({"observation_count":2}),
+                updated_at_unix_secs: Some(20),
+            })
+            .await
+            .expect("adaptive CAS should run");
+        repository
+            .update_key_runtime_metadata(&ProviderCatalogKeyRuntimeMetadataUpdate {
+                key_id: key.id.clone(),
+                namespace: "codex".to_string(),
+                expected_upstream_metadata_value: Some(json!({"remaining": 5})),
+                upstream_metadata_value: json!({"remaining":3}),
+                status_snapshot_patch: json!({"quota":{"remaining":3}}),
+                updated_at_unix_secs: Some(21),
+            })
+            .await
+            .expect("runtime metadata should update");
+
+        stale_admin_key.name = "admin-renamed".to_string();
+        stale_admin_key.is_active = false;
+        repository
+            .update_key(&stale_admin_key)
+            .await
+            .expect("admin update should succeed");
+
+        let stored = repository
+            .list_keys_by_ids(&[key.id])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(stored.name, "admin-renamed");
+        assert!(!stored.is_active);
+        assert_eq!(stored.learned_rpm_limit, Some(8));
+        assert_eq!(stored.rpm_429_count, Some(2));
+        assert_eq!(
+            stored.health_by_format,
+            Some(json!({"openai:chat":{"consecutive_failures":2}}))
+        );
+        assert_eq!(
+            stored.upstream_metadata,
+            Some(json!({"codex":{"remaining":3}}))
+        );
+        assert_eq!(
+            stored.status_snapshot,
+            Some(json!({"quota":{"remaining":3},"observation_count":2}))
+        );
     }
 
     #[tokio::test]

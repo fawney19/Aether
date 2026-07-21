@@ -115,6 +115,37 @@ pub(crate) fn sanitize_usage_request_metadata(value: Option<Value>) -> Option<Va
     (!filtered.is_empty()).then_some(Value::Object(filtered))
 }
 
+pub(crate) fn retain_first_byte_request_metadata(value: Option<Value>) -> Option<Value> {
+    let Value::Object(mut metadata) = sanitize_usage_request_metadata(value)? else {
+        return None;
+    };
+    metadata.retain(|key, _| {
+        matches!(
+            key.as_str(),
+            "trace_id"
+                | "client_ip"
+                | "user_agent"
+                | "client_family"
+                | "client_requested_stream"
+                | "upstream_is_stream"
+                | "client_session_affinity"
+                | "api_key_is_standalone"
+                | "request_path"
+                | "request_query_string"
+                | "request_path_and_query"
+                | "requested_reasoning_effort"
+                | "provider_reasoning_effort"
+                | "provider_service_tier"
+                | "provider_cache_ttl_minutes"
+                | "model_id"
+                | "global_model_id"
+                | "global_model_name"
+                | "proxy"
+        )
+    });
+    (!metadata.is_empty()).then_some(Value::Object(metadata))
+}
+
 pub(crate) fn sanitize_usage_request_metadata_ref(value: Option<&Value>) -> Option<Value> {
     let object = value.and_then(Value::as_object)?;
 
@@ -669,9 +700,9 @@ mod tests {
         attach_provider_request_body_metadata, attach_provider_response_body_metadata,
         build_usage_request_metadata_seed, merge_usage_request_metadata,
         merge_usage_request_metadata_owned, refresh_provider_response_body_metadata,
-        sanitize_usage_request_metadata, sanitize_usage_request_metadata_ref,
-        MAX_USAGE_REQUEST_METADATA_BYTES, MAX_USAGE_REQUEST_METADATA_DEPTH,
-        MAX_USAGE_REQUEST_METADATA_NODES,
+        retain_first_byte_request_metadata, sanitize_usage_request_metadata,
+        sanitize_usage_request_metadata_ref, MAX_USAGE_REQUEST_METADATA_BYTES,
+        MAX_USAGE_REQUEST_METADATA_DEPTH, MAX_USAGE_REQUEST_METADATA_NODES,
     };
 
     fn sample_plan() -> ExecutionPlan {
@@ -806,6 +837,33 @@ mod tests {
                 "price_per_request": 0.02,
                 "stage_timings_ms": stage_timings_ms,
                 "db_timings_ms": db_timings_ms
+            })
+        );
+    }
+
+    #[test]
+    fn first_byte_metadata_keeps_trace_context_and_drops_large_snapshots() {
+        let metadata = retain_first_byte_request_metadata(Some(json!({
+            "trace_id": "trace-first-byte",
+            "client_ip": "203.0.113.8",
+            "request_path": "/v1/chat/completions",
+            "upstream_is_stream": true,
+            "proxy": {"mode": "manual", "node_id": "proxy-1"},
+            "billing_snapshot": {"dimensions": [1, 2, 3]},
+            "settlement_snapshot": {"status": "pending"},
+            "stage_timings_ms": {"planning": 12}
+        })))
+        .expect("first-byte metadata should remain");
+
+        assert_eq!(
+            metadata,
+            json!({
+                "trace_id": "trace-first-byte",
+                "client_ip": "203.0.113.8",
+                "request_path": "/v1/chat/completions",
+                "request_path_and_query": "/v1/chat/completions",
+                "upstream_is_stream": true,
+                "proxy": {"mode": "manual", "node_id": "proxy-1"}
             })
         );
     }

@@ -368,7 +368,12 @@ async fn record_stream_sync_failure(
         let payload_seed = build_sync_terminal_usage_payload_seed(payload);
         state
             .usage_runtime
-            .record_sync_terminal(state.data.as_ref(), context_seed, payload_seed);
+            .record_sync_terminal(
+                state.usage_lifecycle_data_state().as_ref(),
+                context_seed,
+                payload_seed,
+            )
+            .await;
     }
     let terminal_unix_secs = current_request_candidate_unix_ms();
     record_report_request_candidate_status(

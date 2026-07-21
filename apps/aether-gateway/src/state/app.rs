@@ -31,6 +31,7 @@ use super::{
     AdminWalletPaymentOrderRecord, AdminWalletRefundRecord, AdminWalletTransactionRecord,
     CachedProviderTransportSnapshot, FrontdoorCorsConfig, LocalExecutionRuntimeMissDiagnostic,
     LocalProviderDeleteTaskState, ProviderTransportSnapshotCacheKey,
+    ProviderTransportSnapshotFlight,
 };
 
 const DEFAULT_REQUEST_BODY_READ_TIMEOUT_MS: u64 = 120_000;
@@ -54,8 +55,8 @@ const DEFAULT_UPSTREAM_EXECUTION_GATE_LIMIT: usize = 10_000;
 const DEFAULT_UPSTREAM_TARGET_GATE_LIMIT: usize = 10_000;
 const MAX_AUTH_SNAPSHOT_LOAD_GATE_LIMIT: usize = 1024;
 const MAX_CANDIDATE_PLANNING_GATE_LIMIT: usize = 8192;
-const MAX_UPSTREAM_EXECUTION_GATE_LIMIT: usize = 16_384;
-const MAX_UPSTREAM_TARGET_GATE_LIMIT: usize = 16_384;
+const MAX_UPSTREAM_EXECUTION_GATE_LIMIT: usize = 32_768;
+const MAX_UPSTREAM_TARGET_GATE_LIMIT: usize = 32_768;
 const AUTH_SNAPSHOT_LOAD_GATE_LIMIT_PER_CPU: usize = 16;
 const CANDIDATE_PLANNING_GATE_LIMIT_PER_CPU: usize = 256;
 const UPSTREAM_EXECUTION_GATE_LIMIT_PER_CPU: usize = 1024;
@@ -408,6 +409,7 @@ pub struct AppState {
     pub(crate) scheduler_affinity_epoch: Arc<AtomicU64>,
     pub(crate) dashboard_response_cache: Arc<DashboardResponseCache>,
     pub(crate) system_config_cache: Arc<SystemConfigCache>,
+    pub(crate) endpoint_response_header_rules_cache: Arc<JsonValueCache<String>>,
     pub(crate) candidate_row_page_cache: Arc<super::super::cache::CandidateRowPageCache>,
     pub(crate) candidate_page_cache: Arc<super::super::cache::CandidatePageCache>,
     pub(crate) candidate_resolved_page_cache: Arc<super::super::cache::CandidateResolvedPageCache>,
@@ -430,8 +432,9 @@ pub struct AppState {
     pub(crate) tunnel: crate::tunnel::EmbeddedTunnelState,
     pub(crate) provider_transport_snapshot_cache:
         Arc<DashMap<ProviderTransportSnapshotCacheKey, CachedProviderTransportSnapshot>>,
+    pub(crate) provider_transport_snapshot_cache_generation: Arc<AtomicU64>,
     pub(crate) provider_transport_snapshot_inflight:
-        Arc<DashMap<ProviderTransportSnapshotCacheKey, Arc<TokioMutex<()>>>>,
+        Arc<DashMap<ProviderTransportSnapshotCacheKey, Arc<ProviderTransportSnapshotFlight>>>,
     pub(crate) provider_key_rpm_resets: Arc<StdMutex<HashMap<String, u64>>>,
     pub(crate) local_execution_runtime_miss_diagnostics:
         Arc<DashMap<String, LocalExecutionRuntimeMissDiagnostic>>,
@@ -546,6 +549,22 @@ mod tests {
         assert_eq!(
             parse_gate_limit_value(Some("4096"), TEST_PROFILE, TEST_CAPACITY),
             Some(4096)
+        );
+        assert_eq!(
+            parse_gate_limit_value(
+                Some("20000"),
+                UPSTREAM_TARGET_GATE_AUTO_PROFILE,
+                TEST_CAPACITY
+            ),
+            Some(20_000)
+        );
+        assert_eq!(
+            parse_gate_limit_value(
+                Some("20000"),
+                UPSTREAM_EXECUTION_GATE_AUTO_PROFILE,
+                TEST_CAPACITY
+            ),
+            Some(20_000)
         );
     }
 

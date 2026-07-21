@@ -566,6 +566,9 @@ const options = parseArgs(process.argv.slice(2))
 const report = readReport(options.reportPath)
 const load = report.load || {}
 const metrics = report.metrics || {}
+const acceptanceContractVersionRaw = report.acceptance_contract_version
+const acceptanceContractVersion = Number(acceptanceContractVersionRaw)
+const usesStrictAcceptanceContract = acceptanceContractVersion >= 2
 let failures = 0
 
 function fail(message) {
@@ -590,6 +593,23 @@ function metric(name, { required = true } = {}) {
 function optionalMetric(name) {
   if (metrics[name] == null) return null
   return metric(name)
+}
+
+function isRecord(value) {
+  return value != null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function assertReportNonNegativeInteger(name) {
+  const value = report[name]
+  if (value == null) {
+    fail(`missing ${name}`)
+    return null
+  }
+  if (!Number.isSafeInteger(value) || value < 0) {
+    fail(`${name} must be a non-negative integer, got ${JSON.stringify(value)}`)
+    return null
+  }
+  return value
 }
 
 function loadNumber(name, { required = true } = {}) {
@@ -639,10 +659,44 @@ function assertLoadEquals(name, expected) {
   }
 }
 
-const statusCounts = load.status_counts || {}
-const non2xx = Object.entries(statusCounts)
-  .filter(([status]) => !String(status).startsWith('2'))
-  .reduce((total, [, count]) => total + Number(count || 0), 0)
+if (
+  acceptanceContractVersionRaw != null
+  && (!Number.isSafeInteger(acceptanceContractVersionRaw) || acceptanceContractVersionRaw < 1)
+) {
+  fail(
+    `acceptance_contract_version must be a positive integer, got ${JSON.stringify(acceptanceContractVersionRaw)}`,
+  )
+}
+
+const statusCountsAreValidRecord = isRecord(load.status_counts)
+if (usesStrictAcceptanceContract && load.status_counts == null) {
+  fail('missing load.status_counts')
+} else if (usesStrictAcceptanceContract && !statusCountsAreValidRecord) {
+  fail(`load.status_counts must be an object, got ${JSON.stringify(load.status_counts)}`)
+}
+const statusCounts = statusCountsAreValidRecord ? load.status_counts : {}
+let non2xx = 0
+let successfulResponses = 0
+let http200Responses = 0
+let other2xxResponses = 0
+for (const [status, rawCount] of Object.entries(statusCounts)) {
+  const count = Number(rawCount)
+  if (usesStrictAcceptanceContract && (!Number.isSafeInteger(rawCount) || rawCount < 0)) {
+    fail(`load.status_counts[${JSON.stringify(status)}] must be a non-negative integer, got ${JSON.stringify(rawCount)}`)
+    continue
+  }
+  const numericStatus = Number(status)
+  if (Number.isInteger(numericStatus) && numericStatus >= 200 && numericStatus < 300) {
+    successfulResponses += count
+    if (numericStatus === 200) {
+      http200Responses += count
+    } else {
+      other2xxResponses += count
+    }
+  } else {
+    non2xx += count
+  }
+}
 
 const totalRequests = loadNumber('total_requests')
 const completedRequests = loadNumber('completed_requests')
@@ -669,6 +723,18 @@ if (non2xx !== 0) {
   fail(`non-2xx responses=${non2xx}`)
 }
 
+if (usesStrictAcceptanceContract && successfulResponses !== totalRequests) {
+  fail(`load.status_counts 2xx total=${successfulResponses}, expected ${totalRequests}`)
+}
+
+if (usesStrictAcceptanceContract && http200Responses !== totalRequests) {
+  fail(`load.status_counts HTTP 200 total=${http200Responses}, expected ${totalRequests}`)
+}
+
+if (usesStrictAcceptanceContract && other2xxResponses !== 0) {
+  fail(`load.status_counts contains non-200 2xx responses=${other2xxResponses}`)
+}
+
 if (Object.keys(load.error_counts || {}).length > 0) {
   fail(`load.error_counts is not empty: ${JSON.stringify(load.error_counts)}`)
 }
@@ -683,6 +749,14 @@ if (options.expectedResponseMode != null) {
   } else if (responseMode !== options.expectedResponseMode) {
     fail(`load.response_mode=${load.response_mode}, expected ${options.expectedResponseMode}`)
   }
+}
+
+if (
+  usesStrictAcceptanceContract
+  && normalizeResponseMode(load.response_mode) === 'FullBody'
+  && load.require_sse_done !== true
+) {
+  fail(`load.require_sse_done=${JSON.stringify(load.require_sse_done) ?? 'missing'}, expected true for FullBody`)
 }
 
 assertLoadAtLeast('throughput_rps', options.minThroughputRps)
@@ -911,6 +985,68 @@ if (metric('usage_runtime_max_lifecycle_enqueue_deferred_dropped_total') !== 0) 
   fail(`usage_runtime_max_lifecycle_enqueue_deferred_dropped_total=${metrics.usage_runtime_max_lifecycle_enqueue_deferred_dropped_total}`)
 }
 
+if (usesStrictAcceptanceContract) {
+  if (metric('usage_runtime_final_terminal_submission_pending') !== 0) {
+    fail(`usage_runtime_final_terminal_submission_pending=${metrics.usage_runtime_final_terminal_submission_pending}`)
+  }
+  if (metric('usage_runtime_final_terminal_submission_in_flight') !== 0) {
+    fail(`usage_runtime_final_terminal_submission_in_flight=${metrics.usage_runtime_final_terminal_submission_in_flight}`)
+  }
+  if (metric('usage_runtime_terminal_submission_rejected_total_delta') !== 0) {
+    fail(`usage_runtime_terminal_submission_rejected_total_delta=${metrics.usage_runtime_terminal_submission_rejected_total_delta}`)
+  }
+  const terminalEnqueueDeferredDroppedDelta = metric(
+    'usage_runtime_terminal_enqueue_deferred_dropped_total_delta',
+  )
+  const terminalDirectFallbackFailedDelta = metric(
+    'usage_runtime_terminal_direct_fallback_failed_total_delta',
+  )
+  const terminalDirectFallbackRejectedDelta = metric(
+    'usage_runtime_terminal_direct_fallback_rejected_total_delta',
+  )
+  // The final counters are retained for post-run diagnosis; only the baseline
+  // deltas determine whether this run lost a terminal transition.
+  metric('usage_runtime_final_terminal_enqueue_deferred_dropped_total')
+  metric('usage_runtime_final_terminal_direct_fallback_failed_total')
+  metric('usage_runtime_final_terminal_direct_fallback_rejected_total')
+  if (terminalEnqueueDeferredDroppedDelta !== 0) {
+    fail(`usage_runtime_terminal_enqueue_deferred_dropped_total_delta=${terminalEnqueueDeferredDroppedDelta}`)
+  }
+  if (terminalDirectFallbackFailedDelta !== 0) {
+    fail(`usage_runtime_terminal_direct_fallback_failed_total_delta=${terminalDirectFallbackFailedDelta}`)
+  }
+  if (terminalDirectFallbackRejectedDelta !== 0) {
+    fail(`usage_runtime_terminal_direct_fallback_rejected_total_delta=${terminalDirectFallbackRejectedDelta}`)
+  }
+
+  const firstByteOverflowDelta = metric(
+    'usage_runtime_first_byte_persistence_overflow_total_delta',
+  )
+  const firstByteCancelledDelta = metric(
+    'usage_runtime_first_byte_persistence_cancelled_total_delta',
+  )
+  const firstByteDirectFailedDelta = metric(
+    'usage_runtime_first_byte_persistence_direct_failed_total_delta',
+  )
+  const firstByteFallbackAcceptedDelta = metric(
+    'usage_runtime_first_byte_persistence_fallback_accepted_total_delta',
+  )
+  const firstByteFallbackFailedDelta = metric(
+    'usage_runtime_first_byte_persistence_fallback_failed_total_delta',
+  )
+  if (firstByteFallbackFailedDelta !== 0) {
+    fail(`usage_runtime_first_byte_persistence_fallback_failed_total_delta=${firstByteFallbackFailedDelta}`)
+  }
+  const firstByteFallbackAttempts = firstByteDirectFailedDelta + firstByteOverflowDelta
+  const firstByteFallbackOutcomes =
+    firstByteFallbackAcceptedDelta + firstByteFallbackFailedDelta + firstByteCancelledDelta
+  if (firstByteFallbackAttempts > firstByteFallbackOutcomes) {
+    fail(
+      `usage runtime first-byte fallback accounting incomplete: attempts=${firstByteFallbackAttempts} outcomes=${firstByteFallbackOutcomes}`,
+    )
+  }
+}
+
 const usageRuntimeFinalEnqueueRetryPending = optionalMetric('usage_runtime_final_enqueue_retry_pending')
 if (usageRuntimeFinalEnqueueRetryPending != null && usageRuntimeFinalEnqueueRetryPending !== 0) {
   fail(`usage_runtime_final_enqueue_retry_pending=${usageRuntimeFinalEnqueueRetryPending}`)
@@ -936,7 +1072,33 @@ if (usageRuntimeEnqueueRetryClosedDelta != null && usageRuntimeEnqueueRetryClose
   fail(`usage_runtime_enqueue_retry_closed_or_unavailable_total_delta=${usageRuntimeEnqueueRetryClosedDelta}`)
 }
 
-if (report.settle_after_ms > 0 && report.settle_drain_completed === false) {
+if (usesStrictAcceptanceContract) {
+  const settleAfterMs = assertReportNonNegativeInteger('settle_after_ms')
+  assertReportNonNegativeInteger('settle_drain_elapsed_ms')
+  if (settleAfterMs === 0) {
+    fail('settle_after_ms must be positive for acceptance contract v2')
+  }
+
+  if (typeof report.settle_drain_completed !== 'boolean') {
+    fail(`settle_drain_completed must be a boolean, got ${JSON.stringify(report.settle_drain_completed) ?? 'missing'}`)
+  } else if (!report.settle_drain_completed) {
+    fail(`settle_drain_completed=false after ${report.settle_after_ms}ms`)
+  }
+
+  if (typeof report.settle_required_metrics_available !== 'boolean') {
+    fail(`settle_required_metrics_available must be a boolean, got ${JSON.stringify(report.settle_required_metrics_available) ?? 'missing'}`)
+  } else if (!report.settle_required_metrics_available) {
+    fail('settle_required_metrics_available=false')
+  }
+
+  if (!Array.isArray(report.settle_missing_required_metrics)) {
+    fail(`settle_missing_required_metrics must be an array, got ${JSON.stringify(report.settle_missing_required_metrics) ?? 'missing'}`)
+  } else if (!report.settle_missing_required_metrics.every((name) => typeof name === 'string')) {
+    fail('settle_missing_required_metrics must contain only strings')
+  } else if (report.settle_missing_required_metrics.length > 0) {
+    fail(`settle_missing_required_metrics is not empty: ${JSON.stringify(report.settle_missing_required_metrics)}`)
+  }
+} else if (report.settle_after_ms > 0 && report.settle_drain_completed === false) {
   fail(`settle_drain_completed=false after ${report.settle_after_ms}ms`)
 }
 

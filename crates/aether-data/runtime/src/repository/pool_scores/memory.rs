@@ -7,8 +7,8 @@ use super::{
     score_with_delta, GetPoolMemberScoresByIdsQuery, ListPoolMemberProbeCandidatesQuery,
     ListPoolMemberScoresQuery, ListRankedPoolMembersQuery, PoolMemberHardState, PoolMemberIdentity,
     PoolMemberProbeAttempt, PoolMemberProbeResult, PoolMemberProbeStatus,
-    PoolMemberScheduleFeedback, PoolMemberScoreWriteRepository, PoolScoreReadRepository,
-    PoolScoreScope, StoredPoolMemberScore, UpsertPoolMemberScore,
+    PoolMemberScheduleFeedback, PoolMemberScoreUpsertMode, PoolMemberScoreWriteRepository,
+    PoolScoreReadRepository, PoolScoreScope, StoredPoolMemberScore, UpsertPoolMemberScore,
 };
 use crate::repository::pool_scores::merge_score_reason_patch;
 use crate::DataLayerError;
@@ -244,16 +244,82 @@ impl PoolScoreReadRepository for InMemoryPoolMemberScoreRepository {
 
 #[async_trait]
 impl PoolMemberScoreWriteRepository for InMemoryPoolMemberScoreRepository {
-    async fn upsert_pool_member_score(
+    async fn upsert_pool_member_score_with_mode(
         &self,
         score: UpsertPoolMemberScore,
+        mode: PoolMemberScoreUpsertMode,
     ) -> Result<StoredPoolMemberScore, DataLayerError> {
         score.validate()?;
         let stored = score.into_stored();
-        self.scores
+        let mut persisted = stored.clone();
+        let mut scores = self
+            .scores
             .write()
-            .expect("pool member score repository lock")
-            .insert(stored.id.clone(), stored.clone());
+            .expect("pool member score repository lock");
+        if let Some(existing) = scores.get(&stored.id) {
+            match mode {
+                PoolMemberScoreUpsertMode::PreserveExistingNullableTimestamps => {
+                    persisted.last_scheduled_at =
+                        persisted.last_scheduled_at.or(existing.last_scheduled_at);
+                    persisted.last_success_at =
+                        persisted.last_success_at.or(existing.last_success_at);
+                    persisted.last_failure_at =
+                        persisted.last_failure_at.or(existing.last_failure_at);
+                    persisted.last_probe_attempt_at = persisted
+                        .last_probe_attempt_at
+                        .or(existing.last_probe_attempt_at);
+                    persisted.last_probe_success_at = persisted
+                        .last_probe_success_at
+                        .or(existing.last_probe_success_at);
+                    persisted.last_probe_failure_at = persisted
+                        .last_probe_failure_at
+                        .or(existing.last_probe_failure_at);
+                }
+                PoolMemberScoreUpsertMode::OAuthRecovery => {
+                    let recovery_at = stored.updated_at;
+                    if existing.updated_at > recovery_at {
+                        persisted.score = existing.score;
+                        persisted.hard_state = existing.hard_state;
+                        persisted.score_version = existing.score_version;
+                        persisted.score_reason = existing.score_reason.clone();
+                        persisted.last_ranked_at = existing.last_ranked_at;
+                    }
+
+                    persisted.last_scheduled_at = existing.last_scheduled_at;
+                    persisted.last_success_at = existing.last_success_at;
+                    persisted.last_probe_attempt_at = existing.last_probe_attempt_at;
+                    persisted.last_probe_success_at = existing.last_probe_success_at;
+
+                    if existing
+                        .last_failure_at
+                        .is_some_and(|failed_at| failed_at > recovery_at)
+                    {
+                        persisted.last_failure_at = existing.last_failure_at;
+                        persisted.failure_count = existing.failure_count;
+                    }
+                    if existing
+                        .last_probe_failure_at
+                        .is_some_and(|failed_at| failed_at > recovery_at)
+                    {
+                        persisted.last_probe_failure_at = existing.last_probe_failure_at;
+                        persisted.probe_failure_count = existing.probe_failure_count;
+                    }
+                    if [
+                        existing.last_probe_attempt_at,
+                        existing.last_probe_success_at,
+                        existing.last_probe_failure_at,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|observed_at| observed_at > recovery_at)
+                    {
+                        persisted.probe_status = existing.probe_status;
+                    }
+                    persisted.updated_at = existing.updated_at.max(recovery_at);
+                }
+            }
+        }
+        scores.insert(stored.id.clone(), persisted);
         Ok(stored)
     }
 
@@ -445,6 +511,38 @@ mod tests {
         }
     }
 
+    fn upsert(score: &StoredPoolMemberScore) -> UpsertPoolMemberScore {
+        UpsertPoolMemberScore {
+            id: score.id.clone(),
+            identity: PoolMemberIdentity {
+                pool_kind: score.pool_kind.clone(),
+                pool_id: score.pool_id.clone(),
+                member_kind: score.member_kind.clone(),
+                member_id: score.member_id.clone(),
+            },
+            scope: PoolScoreScope {
+                capability: score.capability.clone(),
+                scope_kind: score.scope_kind.clone(),
+                scope_id: score.scope_id.clone(),
+            },
+            score: score.score,
+            hard_state: score.hard_state,
+            score_version: score.score_version,
+            score_reason: score.score_reason.clone(),
+            last_ranked_at: score.last_ranked_at,
+            last_scheduled_at: score.last_scheduled_at,
+            last_success_at: score.last_success_at,
+            last_failure_at: score.last_failure_at,
+            failure_count: score.failure_count,
+            last_probe_attempt_at: score.last_probe_attempt_at,
+            last_probe_success_at: score.last_probe_success_at,
+            last_probe_failure_at: score.last_probe_failure_at,
+            probe_failure_count: score.probe_failure_count,
+            probe_status: score.probe_status,
+            updated_at: score.updated_at,
+        }
+    }
+
     #[tokio::test]
     async fn lists_ranked_members_by_score() {
         let repository = InMemoryPoolMemberScoreRepository::seed(vec![
@@ -509,5 +607,148 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].last_probe_attempt_at, Some(100));
         assert_eq!(rows[0].probe_failure_count, 0);
+    }
+
+    async fn load_score(repository: &InMemoryPoolMemberScoreRepository) -> StoredPoolMemberScore {
+        repository
+            .get_pool_member_scores_by_ids(&GetPoolMemberScoresByIdsQuery {
+                ids: vec!["score-1".to_string()],
+            })
+            .await
+            .expect("pool score should load")
+            .pop()
+            .expect("pool score should exist")
+    }
+
+    #[tokio::test]
+    async fn ordinary_upsert_preserves_existing_nullable_timestamps() {
+        let mut existing = score("score-1", "key-1", 0.2);
+        existing.last_scheduled_at = Some(100);
+        existing.last_success_at = Some(101);
+        existing.last_failure_at = Some(102);
+        existing.last_probe_attempt_at = Some(103);
+        existing.last_probe_success_at = Some(104);
+        existing.last_probe_failure_at = Some(105);
+        let repository = InMemoryPoolMemberScoreRepository::seed(vec![existing]);
+        let incoming = score("score-1", "key-1", 0.9);
+
+        repository
+            .upsert_pool_member_score(upsert(&incoming))
+            .await
+            .expect("ordinary upsert should succeed");
+        let preserved = load_score(&repository).await;
+        assert_eq!(preserved.last_scheduled_at, Some(100));
+        assert_eq!(preserved.last_success_at, Some(101));
+        assert_eq!(preserved.last_failure_at, Some(102));
+        assert_eq!(preserved.last_probe_attempt_at, Some(103));
+        assert_eq!(preserved.last_probe_success_at, Some(104));
+        assert_eq!(preserved.last_probe_failure_at, Some(105));
+    }
+
+    #[tokio::test]
+    async fn oauth_recovery_clears_old_failures_and_preserves_success_history() {
+        let mut existing = score("score-1", "key-1", 0.2);
+        existing.hard_state = PoolMemberHardState::AuthInvalid;
+        existing.score_reason = serde_json::json!({"state": "invalid"});
+        existing.last_ranked_at = Some(90);
+        existing.last_scheduled_at = Some(80);
+        existing.last_success_at = Some(81);
+        existing.last_failure_at = Some(90);
+        existing.failure_count = 9;
+        existing.last_probe_attempt_at = Some(82);
+        existing.last_probe_success_at = Some(83);
+        existing.last_probe_failure_at = Some(91);
+        existing.probe_failure_count = 4;
+        existing.probe_status = PoolMemberProbeStatus::Failed;
+        existing.updated_at = 91;
+        let repository = InMemoryPoolMemberScoreRepository::seed(vec![existing]);
+        let mut recovery = score("score-1", "key-1", 0.9);
+        recovery.score_reason = serde_json::json!({"state": "recovered"});
+        recovery.last_ranked_at = Some(100);
+        recovery.updated_at = 100;
+
+        repository
+            .upsert_pool_member_score_with_mode(
+                upsert(&recovery),
+                PoolMemberScoreUpsertMode::OAuthRecovery,
+            )
+            .await
+            .expect("OAuth recovery should succeed");
+        let recovered = load_score(&repository).await;
+        assert_eq!(recovered.score, 0.9);
+        assert_eq!(recovered.hard_state, PoolMemberHardState::Available);
+        assert_eq!(
+            recovered.score_reason,
+            serde_json::json!({"state": "recovered"})
+        );
+        assert_eq!(recovered.last_ranked_at, Some(100));
+        assert_eq!(recovered.last_scheduled_at, Some(80));
+        assert_eq!(recovered.last_success_at, Some(81));
+        assert_eq!(recovered.last_failure_at, None);
+        assert_eq!(recovered.failure_count, 0);
+        assert_eq!(recovered.last_probe_attempt_at, Some(82));
+        assert_eq!(recovered.last_probe_success_at, Some(83));
+        assert_eq!(recovered.last_probe_failure_at, None);
+        assert_eq!(recovered.probe_failure_count, 0);
+        assert_eq!(recovered.probe_status, PoolMemberProbeStatus::Never);
+        assert_eq!(recovered.updated_at, 100);
+    }
+
+    #[tokio::test]
+    async fn oauth_recovery_preserves_feedback_newer_than_recovery() {
+        let mut current = score("score-1", "key-1", 0.3);
+        current.hard_state = PoolMemberHardState::AuthInvalid;
+        current.score_version = 7;
+        current.score_reason = serde_json::json!({"state": "newer_failure"});
+        current.last_ranked_at = Some(120);
+        current.last_scheduled_at = Some(120);
+        current.last_success_at = Some(80);
+        current.last_failure_at = Some(120);
+        current.failure_count = 3;
+        current.last_probe_attempt_at = Some(130);
+        current.last_probe_success_at = Some(85);
+        current.last_probe_failure_at = Some(130);
+        current.probe_failure_count = 2;
+        current.probe_status = PoolMemberProbeStatus::Failed;
+        current.updated_at = 130;
+        let repository = InMemoryPoolMemberScoreRepository::seed(vec![current.clone()]);
+        let mut stale_recovery = score("score-1", "key-1", 1.0);
+        stale_recovery.score_version = 8;
+        stale_recovery.score_reason = serde_json::json!({"state": "recovered"});
+        stale_recovery.last_ranked_at = Some(100);
+        stale_recovery.updated_at = 100;
+
+        repository
+            .upsert_pool_member_score_with_mode(
+                upsert(&stale_recovery),
+                PoolMemberScoreUpsertMode::OAuthRecovery,
+            )
+            .await
+            .expect("stale OAuth recovery should succeed");
+        let preserved = load_score(&repository).await;
+        assert_eq!(preserved.score, current.score);
+        assert_eq!(preserved.hard_state, current.hard_state);
+        assert_eq!(preserved.score_version, current.score_version);
+        assert_eq!(preserved.score_reason, current.score_reason);
+        assert_eq!(preserved.last_ranked_at, current.last_ranked_at);
+        assert_eq!(preserved.last_scheduled_at, current.last_scheduled_at);
+        assert_eq!(preserved.last_success_at, current.last_success_at);
+        assert_eq!(preserved.last_failure_at, current.last_failure_at);
+        assert_eq!(preserved.failure_count, current.failure_count);
+        assert_eq!(
+            preserved.last_probe_attempt_at,
+            current.last_probe_attempt_at
+        );
+        assert_eq!(
+            preserved.last_probe_success_at,
+            current.last_probe_success_at
+        );
+        assert_eq!(
+            preserved.last_probe_failure_at,
+            current.last_probe_failure_at
+        );
+        assert_eq!(preserved.probe_failure_count, current.probe_failure_count);
+        assert_eq!(preserved.probe_status, current.probe_status);
+        assert_eq!(preserved.updated_at, current.updated_at);
     }
 }

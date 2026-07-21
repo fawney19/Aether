@@ -18,6 +18,7 @@ use crate::ai_serving::{
     ExecutionRuntimeAuthContext, GatewayAuthApiKeySnapshot, GatewayProviderTransportSnapshot,
     PlannerAppState, CODEX_RESPONSES_LITE_HEADER,
 };
+use crate::cache::CacheLoadObserver;
 use crate::client_session_affinity::client_session_affinity_from_api_request;
 use crate::clock::current_unix_secs;
 use crate::routing::{
@@ -29,7 +30,10 @@ use crate::routing::{
 use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AiExecutionDecision, AppState, GatewayError};
 
+// Keep normal freshness bounded for cross-node routing changes. Stale values
+// are served while a single background refresh updates the cache.
 const ROUTING_GROUP_SELECTION_CACHE_TTL: Duration = Duration::from_secs(30);
+const ROUTING_GROUP_SELECTION_CACHE_STALE_TTL: Duration = Duration::from_secs(120);
 const CODEX_ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 const CODEX_FEDRAMP_HEADER: &str = "x-openai-fedramp";
 
@@ -392,47 +396,64 @@ pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
     let explicit_group = routing_header_value_str(&parts.headers, ROUTING_GROUP_HEADER);
     let selected_group = match state.routing_group_read_repository() {
         Some(repository) => {
-            let user_groups_lookup_started_at = std::time::Instant::now();
-            let user_group_ids = match state
-                .list_user_groups_for_user(&input.auth_context.user_id)
-                .await
-            {
-                Ok(groups) => groups.into_iter().map(|group| group.id).collect::<Vec<_>>(),
-                Err(error) => {
-                    warn!(
-                        user_id = %input.auth_context.user_id,
-                        error = ?error,
-                        "gateway routing profile user group lookup failed"
-                    );
-                    Vec::new()
-                }
+            // Explicit non-default groups are authorized against principal
+            // bindings, so both selection and its cache key must retain the
+            // caller context. Only the implicit no-binding system-default
+            // path is global and can skip the membership lookup.
+            let principal_context_required = if explicit_group.is_some() {
+                true
+            } else {
+                !matches!(repository.has_any_routing_group_binding().await, Ok(false))
             };
-            observe_gateway_stage_ms(
-                "routing_user_groups_lookup",
-                user_groups_lookup_started_at.elapsed().as_millis() as u64,
-            );
+            let user_group_ids = if principal_context_required {
+                let user_groups_lookup_started_at = std::time::Instant::now();
+                let user_group_ids = match state
+                    .list_user_groups_for_user(&input.auth_context.user_id)
+                    .await
+                {
+                    Ok(groups) => groups.into_iter().map(|group| group.id).collect::<Vec<_>>(),
+                    Err(error) => {
+                        warn!(
+                            user_id = %input.auth_context.user_id,
+                            error = ?error,
+                            "gateway routing profile user group lookup failed"
+                        );
+                        Vec::new()
+                    }
+                };
+                observe_gateway_stage_ms(
+                    "routing_user_groups_lookup",
+                    user_groups_lookup_started_at.elapsed().as_millis() as u64,
+                );
+                user_group_ids
+            } else {
+                Vec::new()
+            };
+            let selection_user_id =
+                principal_context_required.then(|| input.auth_context.user_id.clone());
+            let selection_api_key_id =
+                principal_context_required.then(|| input.auth_context.api_key_id.clone());
             let selection_cache_key = routing_group_selection_cache_key(
                 explicit_group.as_deref(),
-                Some(input.auth_context.user_id.as_str()),
-                Some(input.auth_context.api_key_id.as_str()),
+                selection_user_id.as_deref(),
+                selection_api_key_id.as_deref(),
                 &user_group_ids,
             );
-            let user_id = input.auth_context.user_id.clone();
-            let api_key_id = input.auth_context.api_key_id.clone();
             let group_selection_started_at = std::time::Instant::now();
             let selection = state
                 .routing_group_selection_cache
-                .get_or_load_once(
+                .get_or_load_once_stale_while_revalidating(
                     selection_cache_key,
                     ROUTING_GROUP_SELECTION_CACHE_TTL,
-                    || async move {
+                    ROUTING_GROUP_SELECTION_CACHE_STALE_TTL,
+                    || async {
                         let selection_load_started_at = std::time::Instant::now();
                         let selection = select_gateway_routing_group(
                             repository.as_ref(),
                             GatewayRoutingSelectionInput {
                                 explicit_group: explicit_group.as_deref(),
-                                user_id: Some(user_id.as_str()),
-                                api_key_id: Some(api_key_id.as_str()),
+                                user_id: selection_user_id.as_deref(),
+                                api_key_id: selection_api_key_id.as_deref(),
                                 user_group_ids: &user_group_ids,
                             },
                         )
@@ -444,6 +465,33 @@ pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
                         );
                         Ok::<_, GatewayError>(Some(selection))
                     },
+                    || {
+                        let repository = repository.clone();
+                        let explicit_group = explicit_group.clone();
+                        let user_id = selection_user_id.clone();
+                        let api_key_id = selection_api_key_id.clone();
+                        let user_group_ids = user_group_ids.clone();
+                        async move {
+                            let selection_load_started_at = std::time::Instant::now();
+                            let selection = select_gateway_routing_group(
+                                repository.as_ref(),
+                                GatewayRoutingSelectionInput {
+                                    explicit_group: explicit_group.as_deref(),
+                                    user_id: user_id.as_deref(),
+                                    api_key_id: api_key_id.as_deref(),
+                                    user_group_ids: &user_group_ids,
+                                },
+                            )
+                            .await
+                            .map_err(routing_selection_error)?;
+                            observe_gateway_stage_ms(
+                                "routing_group_selection_load",
+                                selection_load_started_at.elapsed().as_millis() as u64,
+                            );
+                            Ok::<_, GatewayError>(Some(selection))
+                        }
+                    },
+                    CacheLoadObserver::default(),
                 )
                 .await?
                 .unwrap_or_default();
@@ -919,11 +967,118 @@ fn ensure_report_context_routing_trace(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use aether_data::repository::routing_profiles::InMemoryRoutingGroupRepository;
+    use aether_data_contracts::repository::routing_profiles::{
+        CreateRoutingGroupBindingRecord, CreateRoutingGroupRecord, RoutingGroupBindingSubject,
+        RoutingGroupWriteRepository,
+    };
     use aether_provider_transport::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
         GatewayProviderTransportProvider,
     };
+
+    #[test]
+    fn explicit_routing_selection_cache_key_is_principal_specific() {
+        let first = routing_group_selection_cache_key(
+            Some("private"),
+            Some("user-1"),
+            Some("key-1"),
+            &["team-1".to_string()],
+        );
+        let second = routing_group_selection_cache_key(
+            Some("private"),
+            Some("user-2"),
+            Some("key-2"),
+            &["team-2".to_string()],
+        );
+
+        assert_ne!(first, second);
+        assert!(first.contains("user=user-1"));
+        assert!(first.contains("api_key=key-1"));
+        assert!(first.contains("groups=team-1"));
+    }
+
+    #[tokio::test]
+    async fn explicit_routing_attachment_authorizes_and_caches_per_principal() {
+        let repository = Arc::new(InMemoryRoutingGroupRepository::default());
+        repository
+            .create_routing_group(CreateRoutingGroupRecord {
+                id: "private-group".to_string(),
+                name: "private".to_string(),
+                description: None,
+                enabled: true,
+                is_system_default: false,
+                config_json: json!({}),
+                version: 1,
+                created_at: 1,
+                updated_at: 1,
+                published_at: None,
+            })
+            .await
+            .unwrap();
+        repository
+            .create_routing_group_binding(CreateRoutingGroupBindingRecord {
+                id: "binding-user-1".to_string(),
+                group_id: "private-group".to_string(),
+                subject_type: RoutingGroupBindingSubject::User,
+                subject_id: "user-1".to_string(),
+                is_default: false,
+                allow_explicit_select: true,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .unwrap();
+        let state = AppState::new().unwrap().with_data_state_for_tests(
+            crate::data::GatewayDataState::disabled()
+                .with_routing_group_repository_for_tests(repository),
+        );
+        let (parts, _) = http::Request::builder()
+            .header(ROUTING_GROUP_HEADER, "private-group")
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let mut allowed = sample_decision_input();
+        attach_routing_policy_to_local_requested_model_input(
+            &state,
+            &parts,
+            &mut allowed,
+            &json!({"model": "gpt-5"}),
+            "openai:chat",
+        )
+        .await
+        .expect("bound principal should explicitly select the private group");
+        let policy = allowed
+            .routing_policy
+            .as_ref()
+            .expect("explicit selection should attach routing policy");
+        assert_eq!(policy.group_id.as_deref(), Some("private-group"));
+        assert_eq!(policy.selection_source, "explicit_header");
+
+        let mut denied = sample_decision_input();
+        denied.auth_context.user_id = "user-2".to_string();
+        denied.auth_context.api_key_id = "api-key-2".to_string();
+        let error = attach_routing_policy_to_local_requested_model_input(
+            &state,
+            &parts,
+            &mut denied,
+            &json!({"model": "gpt-5"}),
+            "openai:chat",
+        )
+        .await
+        .expect_err("another principal must not reuse the authorized cache entry");
+        match error {
+            GatewayError::Client { status, message } => {
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert!(message.contains("not allowed for this principal"));
+            }
+            other => panic!("unexpected explicit selection error: {other:?}"),
+        }
+    }
 
     fn sample_auth_context() -> ExecutionRuntimeAuthContext {
         ExecutionRuntimeAuthContext {

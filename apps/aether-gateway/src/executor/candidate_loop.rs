@@ -363,7 +363,6 @@ where
         let Some(attempt) = next_attempt else {
             break;
         };
-        last_attempted = Some((attempt.execution_plan().clone(), attempt.report_context()));
         let execute_started_at = std::time::Instant::now();
         let response = match port.execute_attempt(&attempt).await {
             Ok(response) => response,
@@ -387,6 +386,10 @@ where
             );
             return Ok(LocalExecutionRequestOutcome::responded(response));
         }
+
+        // Only retain a deep plan/context snapshot when this candidate really
+        // failed and exhaustion reporting will need it.
+        last_attempted = Some((attempt.execution_plan().clone(), attempt.report_context()));
     }
 
     let Some((last_plan, last_report_context)) = last_attempted else {
@@ -447,7 +450,7 @@ where
     type Error = GatewayError;
 
     async fn execute_attempt(&self, attempt: &T) -> Result<Option<Self::Response>, Self::Error> {
-        let plan = attempt.execution_plan().clone();
+        let plan = attempt.execution_plan();
         let report_context = attempt.report_context();
         let candidate_index = parse_request_candidate_report_context(report_context.as_ref())
             .and_then(|context| context.candidate_index)
@@ -471,31 +474,41 @@ where
             self.state,
             self.trace_id,
             self.decision,
-            &plan,
+            plan,
             report_context.as_ref(),
         )
         .await?
         {
             return Ok(Some(response));
         }
-        prewarm_direct_reqwest_candidate_client(&plan);
-        let watchdog_plan = plan.clone();
-        let watchdog_report_context = report_context.clone();
+        prewarm_direct_reqwest_candidate_client(plan);
+        // The attempt owns the canonical report context. Borrow it for the
+        // watchdog; only third-party/synthesized attempts using the default
+        // trait implementation need an owned fallback clone.
+        let watchdog_report_context_owned = if attempt.report_context_ref().is_none() {
+            report_context.clone()
+        } else {
+            None
+        };
+        let watchdog_report_context = attempt
+            .report_context_ref()
+            .or(watchdog_report_context_owned.as_ref());
         let execution_state = self.state.clone();
         let execution_trace_id = self.trace_id.to_string();
         let execution_plan_kind = self.plan_kind.to_string();
         let execution_decision = self.decision.clone();
         let execution_report_kind = attempt.report_kind();
+        let execution_plan = plan.clone();
         let mut response = execute_stream_candidate_with_watchdog(
             self.state,
             self.trace_id,
             self.plan_kind,
-            &watchdog_plan,
-            watchdog_report_context.as_ref(),
+            plan,
+            watchdog_report_context,
             move || async move {
                 execute_execution_runtime_stream(
                     &execution_state,
-                    plan,
+                    execution_plan,
                     execution_trace_id.as_str(),
                     &execution_decision,
                     execution_plan_kind.as_str(),
@@ -507,7 +520,7 @@ where
         )
         .await?;
         if let Some(response) = response.as_mut() {
-            attach_redaction_execution_candidate(response, watchdog_plan.candidate_id.as_deref());
+            attach_redaction_execution_candidate(response, plan.candidate_id.as_deref());
         }
         Ok(response)
     }

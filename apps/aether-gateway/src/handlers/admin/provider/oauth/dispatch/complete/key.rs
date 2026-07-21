@@ -1,5 +1,7 @@
 use super::super::super::errors::build_internal_control_error_response;
-use super::super::super::provisioning::provider_oauth_token_payload_expires_at_unix_secs;
+use super::super::super::provisioning::{
+    provider_oauth_token_payload_expires_at_unix_secs, seed_provider_oauth_pool_score,
+};
 use super::super::super::runtime::{
     resolve_provider_oauth_runtime_endpoints,
     spawn_provider_oauth_account_state_refresh_after_update,
@@ -220,6 +222,25 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
             "Key 不存在",
         ));
     }
+    if !state
+        .clear_provider_catalog_key_oauth_invalid_marker(&key_id)
+        .await?
+    {
+        return Ok(build_internal_control_error_response(
+            http::StatusCode::NOT_FOUND,
+            "Key 不存在",
+        ));
+    }
+    let Some(recovered_key) = state
+        .reset_provider_catalog_key_recovery_state(&key_id)
+        .await?
+    else {
+        return Ok(build_internal_control_error_response(
+            http::StatusCode::NOT_FOUND,
+            "Key 不存在",
+        ));
+    };
+    seed_provider_oauth_pool_score(state, &provider.id, &recovered_key, now_unix_secs).await;
 
     spawn_provider_oauth_account_state_refresh_after_update(
         state.cloned_app(),

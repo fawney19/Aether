@@ -485,6 +485,20 @@ impl RequestCandidateRuntimeWriter for AppState {
     ) -> Result<Option<StoredRequestCandidate>, GatewayError> {
         AppState::upsert_request_candidate(self, candidate).await
     }
+
+    async fn enqueue_request_candidate_status(
+        &self,
+        candidate: UpsertRequestCandidateRecord,
+    ) -> Result<Option<()>, GatewayError> {
+        AppState::enqueue_request_candidate_status(self, candidate).await
+    }
+
+    fn try_enqueue_request_candidate_status(
+        &self,
+        candidate: UpsertRequestCandidateRecord,
+    ) -> Result<(), UpsertRequestCandidateRecord> {
+        AppState::try_enqueue_request_candidate_status(self, candidate)
+    }
 }
 
 #[async_trait]

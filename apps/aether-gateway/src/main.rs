@@ -377,6 +377,7 @@ fn usage_database_config_for_role<'a>(
 fn usage_queue_worker_database_cap(
     node_role: NodeRoleArg,
     database: Option<&SqlDatabaseConfig>,
+    database_is_isolated: bool,
 ) -> usize {
     let Some(database) = database else {
         return MAX_USAGE_QUEUE_WORKERS;
@@ -385,12 +386,20 @@ fn usage_queue_worker_database_cap(
         return 1;
     }
 
+    let max_connections = database.pool.max_connections.max(1) as usize;
+    // An isolated pool is already a dedicated background budget. Applying the shared-pool
+    // divisor a second time would underutilize that pool.
+    if database_is_isolated {
+        return max_connections
+            .saturating_sub(1)
+            .max(1)
+            .clamp(1, MAX_USAGE_QUEUE_WORKERS);
+    }
     let divisor = if matches!(node_role, NodeRoleArg::Background) {
         AUTO_USAGE_QUEUE_WORKERS_DB_SHARE_BACKGROUND
     } else {
         AUTO_USAGE_QUEUE_WORKERS_DB_SHARE_ALL
     };
-    let max_connections = database.pool.max_connections.max(1) as usize;
     max_connections
         .saturating_add(divisor - 1)
         .checked_div(divisor)
@@ -401,18 +410,29 @@ fn usage_queue_worker_database_cap(
 fn usage_worker_record_concurrency_database_cap(
     node_role: NodeRoleArg,
     database: Option<&SqlDatabaseConfig>,
+    database_is_isolated: bool,
 ) -> Option<usize> {
     let database = database?;
     if database.driver == DatabaseDriver::Sqlite {
         return Some(1);
     }
 
+    let max_connections = database.pool.max_connections.max(1) as usize;
+    // The isolated background pool has already been carved out of the foreground pool. Keep one
+    // connection available for maintenance/health work and use the rest for usage persistence.
+    if database_is_isolated {
+        return Some(
+            max_connections
+                .saturating_sub(1)
+                .max(1)
+                .clamp(1, MAX_USAGE_QUEUE_WORKERS),
+        );
+    }
     let divisor = if matches!(node_role, NodeRoleArg::Background) {
         AUTO_USAGE_WORKER_RECORD_DB_SHARE_BACKGROUND
     } else {
         AUTO_USAGE_WORKER_RECORD_DB_SHARE_ALL
     };
-    let max_connections = database.pool.max_connections.max(1) as usize;
     Some(
         max_connections
             .checked_div(divisor.max(1))
@@ -427,6 +447,7 @@ fn automatic_usage_queue_workers_for_parallelism(
     max_in_flight_requests: Option<usize>,
     distributed_request_limit: Option<usize>,
     database: Option<&SqlDatabaseConfig>,
+    database_is_isolated: bool,
 ) -> usize {
     let cpu_default = parallelism.max(1).clamp(
         AUTO_USAGE_QUEUE_WORKERS_MIN,
@@ -437,7 +458,11 @@ fn automatic_usage_queue_workers_for_parallelism(
             .map(usage_queue_workers_for_request_concurrency)
             .unwrap_or(cpu_default);
     requested
-        .min(usage_queue_worker_database_cap(node_role, database))
+        .min(usage_queue_worker_database_cap(
+            node_role,
+            database,
+            database_is_isolated,
+        ))
         .clamp(1, MAX_USAGE_QUEUE_WORKERS)
 }
 
@@ -446,6 +471,7 @@ fn automatic_usage_queue_workers(
     max_in_flight_requests: Option<usize>,
     distributed_request_limit: Option<usize>,
     database: Option<&SqlDatabaseConfig>,
+    database_is_isolated: bool,
 ) -> usize {
     automatic_usage_queue_workers_for_parallelism(
         available_parallelism_usize(),
@@ -453,6 +479,7 @@ fn automatic_usage_queue_workers(
         max_in_flight_requests,
         distributed_request_limit,
         database,
+        database_is_isolated,
     )
 }
 
@@ -888,6 +915,7 @@ impl GatewayUsageArgs {
         max_in_flight_requests: Option<usize>,
         distributed_request_limit: Option<usize>,
         database: Option<&SqlDatabaseConfig>,
+        database_is_isolated: bool,
     ) -> usize {
         if let Some(queue_workers) = self.queue_workers {
             return queue_workers.clamp(1, MAX_USAGE_QUEUE_WORKERS);
@@ -900,6 +928,7 @@ impl GatewayUsageArgs {
             max_in_flight_requests,
             distributed_request_limit,
             database,
+            database_is_isolated,
         )
     }
 
@@ -908,14 +937,21 @@ impl GatewayUsageArgs {
         node_role: NodeRoleArg,
         database: Option<&SqlDatabaseConfig>,
         worker_count: usize,
+        database_is_isolated: bool,
     ) -> usize {
         if !self.queue_worker_autoscale_enabled {
             return worker_count.clamp(1, MAX_USAGE_QUEUE_WORKERS);
         }
         self.queue_worker_max_count
-            .unwrap_or_else(|| usage_queue_worker_database_cap(node_role, database))
+            .unwrap_or_else(|| {
+                usage_queue_worker_database_cap(node_role, database, database_is_isolated)
+            })
             .max(1)
-            .min(usage_queue_worker_database_cap(node_role, database))
+            .min(usage_queue_worker_database_cap(
+                node_role,
+                database,
+                database_is_isolated,
+            ))
             .clamp(worker_count.max(1), MAX_USAGE_QUEUE_WORKERS)
     }
 
@@ -938,6 +974,7 @@ impl GatewayUsageArgs {
         &self,
         node_role: NodeRoleArg,
         database: Option<&SqlDatabaseConfig>,
+        database_is_isolated: bool,
     ) -> Option<usize> {
         if let Some(limit) = self.worker_record_concurrency_limit {
             if limit == 0 {
@@ -947,8 +984,12 @@ impl GatewayUsageArgs {
                 limit
                     .min(MAX_USAGE_QUEUE_WORKERS)
                     .min(
-                        usage_worker_record_concurrency_database_cap(node_role, database)
-                            .unwrap_or(MAX_USAGE_QUEUE_WORKERS),
+                        usage_worker_record_concurrency_database_cap(
+                            node_role,
+                            database,
+                            database_is_isolated,
+                        )
+                        .unwrap_or(MAX_USAGE_QUEUE_WORKERS),
                     )
                     .max(1),
             );
@@ -958,7 +999,7 @@ impl GatewayUsageArgs {
         {
             return None;
         }
-        usage_worker_record_concurrency_database_cap(node_role, database)
+        usage_worker_record_concurrency_database_cap(node_role, database, database_is_isolated)
     }
 
     fn to_config(
@@ -1741,6 +1782,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    let usage_database_is_isolated =
+        isolate_background_database && background_database_config.is_some();
     let usage_database_config = usage_database_config_for_role(
         args.node_role,
         data_config.database(),
@@ -1765,15 +1808,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some(request_concurrency_limit),
         args.distributed_request_limit,
         usage_database_config,
+        usage_database_is_isolated,
     );
     let usage_queue_worker_max_count = args.usage.effective_queue_worker_max_count(
         args.node_role,
         usage_database_config,
         usage_queue_workers,
+        usage_database_is_isolated,
     );
-    let usage_worker_record_concurrency_limit = args
-        .usage
-        .effective_worker_record_concurrency_limit(args.node_role, usage_database_config);
+    let usage_worker_record_concurrency_limit =
+        args.usage.effective_worker_record_concurrency_limit(
+            args.node_role,
+            usage_database_config,
+            usage_database_is_isolated,
+        );
     let usage_config = args.usage.to_config(
         usage_queue_workers,
         usage_queue_worker_max_count,
@@ -2780,6 +2828,7 @@ mod tests {
             Some(10_000),
             None,
             Some(&database),
+            false,
         );
 
         assert_eq!(workers, 64);
@@ -2796,6 +2845,7 @@ mod tests {
             None,
             None,
             Some(&database),
+            false,
         );
 
         assert_eq!(workers, 4);
@@ -2807,12 +2857,19 @@ mod tests {
         args.usage.queue_workers = None;
         let database = test_database(DatabaseDriver::Postgres, 40);
 
-        let workers =
-            args.usage
-                .effective_queue_workers(args.node_role, Some(1_024), None, Some(&database));
-        let max_workers =
-            args.usage
-                .effective_queue_worker_max_count(args.node_role, Some(&database), workers);
+        let workers = args.usage.effective_queue_workers(
+            args.node_role,
+            Some(1_024),
+            None,
+            Some(&database),
+            false,
+        );
+        let max_workers = args.usage.effective_queue_worker_max_count(
+            args.node_role,
+            Some(&database),
+            workers,
+            false,
+        );
 
         assert_eq!(workers, 8);
         assert_eq!(max_workers, 10);
@@ -2825,12 +2882,19 @@ mod tests {
         args.usage.queue_worker_max_count = Some(32);
         let database = test_database(DatabaseDriver::Postgres, 200);
 
-        let workers =
-            args.usage
-                .effective_queue_workers(args.node_role, Some(1_024), None, Some(&database));
-        let max_workers =
-            args.usage
-                .effective_queue_worker_max_count(args.node_role, Some(&database), workers);
+        let workers = args.usage.effective_queue_workers(
+            args.node_role,
+            Some(1_024),
+            None,
+            Some(&database),
+            false,
+        );
+        let max_workers = args.usage.effective_queue_worker_max_count(
+            args.node_role,
+            Some(&database),
+            workers,
+            false,
+        );
 
         assert_eq!(workers, 8);
         assert_eq!(max_workers, 32);
@@ -2842,16 +2906,60 @@ mod tests {
         let database = test_database(DatabaseDriver::Postgres, 64);
 
         assert_eq!(
-            args.usage
-                .effective_worker_record_concurrency_limit(NodeRoleArg::All, Some(&database)),
+            args.usage.effective_worker_record_concurrency_limit(
+                NodeRoleArg::All,
+                Some(&database),
+                false,
+            ),
             Some(8)
         );
         assert_eq!(
             args.usage.effective_worker_record_concurrency_limit(
                 NodeRoleArg::Background,
-                Some(&database)
+                Some(&database),
+                false,
             ),
             Some(16)
+        );
+    }
+
+    #[test]
+    fn gateway_usage_isolated_database_uses_dedicated_capacity_once() {
+        let mut args = test_args();
+        args.usage.queue_workers = None;
+        let database = test_database(DatabaseDriver::Postgres, 64);
+        let isolated_background = test_database(DatabaseDriver::Postgres, 8);
+        let usage_database = usage_database_config_for_role(
+            NodeRoleArg::All,
+            Some(&database),
+            Some(&isolated_background),
+        )
+        .expect("isolated usage database");
+
+        let workers = args.usage.effective_queue_workers(
+            NodeRoleArg::All,
+            Some(5_000),
+            None,
+            Some(usage_database),
+            true,
+        );
+        let max_workers = args.usage.effective_queue_worker_max_count(
+            NodeRoleArg::All,
+            Some(usage_database),
+            workers,
+            true,
+        );
+
+        assert_eq!(usage_database.pool.max_connections, 8);
+        assert_eq!(workers, 7);
+        assert_eq!(max_workers, 7);
+        assert_eq!(
+            args.usage.effective_worker_record_concurrency_limit(
+                NodeRoleArg::All,
+                Some(usage_database),
+                true,
+            ),
+            Some(7)
         );
     }
 
@@ -2862,8 +2970,11 @@ mod tests {
         let database = test_database(DatabaseDriver::Postgres, 64);
 
         assert_eq!(
-            args.usage
-                .effective_worker_record_concurrency_limit(NodeRoleArg::All, Some(&database)),
+            args.usage.effective_worker_record_concurrency_limit(
+                NodeRoleArg::All,
+                Some(&database),
+                false,
+            ),
             None
         );
     }
@@ -2913,6 +3024,7 @@ mod tests {
             Some(1_536),
             None,
             Some(&database),
+            false,
         );
 
         assert_eq!(workers, 12);
@@ -2928,6 +3040,7 @@ mod tests {
             Some(2_048),
             Some(256),
             Some(&database),
+            false,
         );
 
         assert_eq!(workers, 2);
@@ -2943,6 +3056,7 @@ mod tests {
             Some(5_000),
             None,
             Some(&database),
+            false,
         );
 
         assert_eq!(workers, 5);
@@ -2958,6 +3072,7 @@ mod tests {
             Some(5_000),
             None,
             Some(&database),
+            false,
         );
 
         assert_eq!(workers, 10);
@@ -2973,6 +3088,7 @@ mod tests {
             Some(5_000),
             None,
             Some(&database),
+            false,
         );
 
         assert_eq!(workers, 1);

@@ -3566,8 +3566,10 @@ async fn gateway_batch_updates_shared_pool_key_configuration() {
     first_key.name = "alpha".to_string();
     first_key.auto_fetch_models = true;
     first_key.allowed_models = Some(json!(["legacy-model"]));
+    first_key.learned_rpm_limit = Some(18);
     let mut second_key = sample_key("key-openai-b", "provider-openai", "openai:chat", "sk-b");
     second_key.name = "beta".to_string();
+    second_key.learned_rpm_limit = Some(24);
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
         Vec::new(),
@@ -3619,6 +3621,7 @@ async fn gateway_batch_updates_shared_pool_key_configuration() {
         assert_eq!(key.api_formats, Some(json!(["openai:responses"])));
         assert_eq!(key.internal_priority, 7);
         assert_eq!(key.rpm_limit, None);
+        assert_eq!(key.learned_rpm_limit, None);
         assert!(!key.auto_fetch_models);
         assert_eq!(
             key.allowed_models,

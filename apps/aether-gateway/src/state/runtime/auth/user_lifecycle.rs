@@ -4,6 +4,8 @@ use crate::constants::{BUILTIN_DEFAULT_USER_GROUP_ID, DEFAULT_USER_GROUP_CONFIG_
 use crate::{AppState, GatewayError};
 use std::time::Duration;
 
+// Membership changes should propagate promptly across gateway instances. The
+// routing fast path skips this lookup entirely when no bindings exist.
 const USER_GROUPS_FOR_USER_CACHE_TTL: Duration = Duration::from_secs(30);
 
 impl AppState {

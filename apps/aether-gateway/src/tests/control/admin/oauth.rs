@@ -36,7 +36,9 @@ use super::super::{
 use crate::admin_api::{
     maybe_build_local_admin_provider_oauth_response, AdminAppState, AdminRequestContext,
 };
-use crate::ai_serving::{provider_key_pool_score_id, provider_key_pool_score_scope};
+use crate::ai_serving::{
+    build_provider_key_pool_score_upsert, provider_key_pool_score_id, provider_key_pool_score_scope,
+};
 use crate::audit::AdminAuditEvent;
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER,
@@ -1982,6 +1984,14 @@ async fn gateway_handles_admin_provider_oauth_start_key_locally_with_trusted_adm
         "oauth-access-token",
     );
     key.auth_type = "oauth".to_string();
+    key.is_active = false;
+    key.error_count = Some(7);
+    key.health_by_format = Some(json!({
+        "openai:chat": {"consecutive_failures": 3}
+    }));
+    key.circuit_breaker_by_format = Some(json!({
+        "openai:chat": {"state": "open"}
+    }));
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
@@ -2982,6 +2992,7 @@ async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_p
 
     let mut provider = sample_provider("provider-codex", "codex", 10);
     provider.provider_type = "codex".to_string();
+    provider.config = Some(json!({"pool_advanced": {}}));
 
     let mut key = sample_key(
         "key-codex-oauth",
@@ -2990,12 +3001,35 @@ async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_p
         "__placeholder__",
     );
     key.auth_type = "oauth".to_string();
+    key.oauth_invalid_at_unix_secs = Some(1_700_000_000);
+    key.oauth_invalid_reason = Some("[ACCOUNT_BLOCK] token invalid".to_string());
+    key.error_count = Some(7);
+    key.health_by_format = Some(json!({
+        "openai:chat": {"consecutive_failures": 3}
+    }));
+    key.circuit_breaker_by_format = Some(json!({
+        "openai:chat": {"state": "open"}
+    }));
+
+    let score_identity = PoolMemberIdentity::provider_api_key("provider-codex", "key-codex-oauth");
+    let score_scope = provider_key_pool_score_scope();
+    let invalid_score = build_provider_key_pool_score_upsert(
+        &key,
+        "codex",
+        None,
+        1_700_000_000,
+        aether_pool_core::PoolMemberScoreRules::default(),
+    )
+    .into_stored();
+    assert_eq!(invalid_score.hard_state, PoolMemberHardState::AuthInvalid);
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
         vec![],
         vec![key],
     ));
+    let pool_score_repository =
+        Arc::new(InMemoryPoolMemberScoreRepository::seed(vec![invalid_score]));
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
     let (token_url, token_handle) = start_server(token_server).await;
@@ -3006,6 +3040,7 @@ async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_p
                 GatewayDataState::with_provider_catalog_repository_for_tests(
                     provider_catalog_repository.clone(),
                 )
+                .with_pool_score_repository_for_tests(Arc::clone(&pool_score_repository))
                 .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
             )
             .with_provider_oauth_state_entry_for_tests(
@@ -3070,6 +3105,23 @@ async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_p
         .expect("keys should load");
     let persisted = reloaded.first().expect("persisted key should exist");
     assert_eq!(persisted.expires_at_unix_secs, Some(4_102_444_800));
+    assert!(persisted.is_active);
+    assert_eq!(persisted.oauth_invalid_at_unix_secs, None);
+    assert_eq!(persisted.oauth_invalid_reason, None);
+    assert_eq!(persisted.error_count, Some(0));
+    assert_eq!(persisted.health_by_format, Some(json!({})));
+    assert_eq!(persisted.circuit_breaker_by_format, Some(json!({})));
+    let scores = pool_score_repository
+        .get_pool_member_scores_by_ids(&GetPoolMemberScoresByIdsQuery {
+            ids: vec![provider_key_pool_score_id(&score_identity, &score_scope)],
+        })
+        .await
+        .expect("pool score should load");
+    assert_eq!(scores.len(), 1);
+    assert!(
+        scores[0].hard_state.schedulable(),
+        "OAuth completion should replace AuthInvalid with a schedulable score"
+    );
     let decrypted_api_key = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
         persisted
@@ -4201,19 +4253,16 @@ async fn gateway_import_invalidate_cached_oauth_entry_before_followup_resolution
         cached_entry.auth_header_value,
         "Bearer cached-old-codex-access-token"
     );
-    let mut replaceable_key = provider_catalog_repository
-        .list_keys_by_ids(&["key-codex-import-cache-duplicate".to_string()])
-        .await
-        .expect("keys should load")
-        .into_iter()
-        .next()
-        .expect("key should exist");
-    replaceable_key.oauth_invalid_at_unix_secs = Some(1_700_000_000);
-    replaceable_key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] token invalidated".to_string());
     provider_catalog_repository
-        .update_key(&replaceable_key)
+        .update_key_oauth_runtime_state(
+            "key-codex-import-cache-duplicate",
+            Some(1_700_000_000),
+            Some("[OAUTH_EXPIRED] token invalidated"),
+            None,
+            Some(1_700_000_000),
+        )
         .await
-        .expect("key should update");
+        .expect("oauth invalid marker should be seeded through the runtime mutation");
 
     let gateway = build_router_with_state(app_state.clone());
     let (gateway_url, gateway_handle) = start_server(gateway).await;

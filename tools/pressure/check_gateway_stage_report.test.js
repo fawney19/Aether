@@ -181,6 +181,208 @@ test('tps report fails when settle drain does not complete', () => {
   assert.match(result.stderr, /TPS FAIL: settle_drain_completed=false after 5000ms/)
 })
 
+test('full-body v2 report requires SSE done validation', () => {
+  const report = tpsReport()
+  report.load.require_sse_done = false
+  const result = runChecker('--stage', 'tps', writeReport(report))
+
+  assert.equal(result.status, 1)
+  assert.match(
+    result.stderr,
+    /TPS FAIL: load\.require_sse_done=false, expected true for FullBody/,
+  )
+})
+
+test('first-body-byte v2 report does not require SSE done validation', () => {
+  const report = reportFor({
+    totalRequests: 1000,
+    concurrency: 1000,
+    throughputRps: 40,
+    headersP95Ms: 120,
+    firstBodyP95Ms: 350,
+    p95Ms: 120000,
+    p99Ms: 120100,
+    responseMode: 'FirstBodyByte',
+    firstBodyHoldMs: 120000,
+    requireSseDone: false,
+  })
+  const result = runChecker('--stage', 'S1', writeReport(report))
+
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('v2 report requires complete 2xx status counts', () => {
+  const missing = tpsReport()
+  delete missing.load.status_counts
+  const missingResult = runChecker('--stage', 'tps', writeReport(missing))
+  assert.equal(missingResult.status, 1)
+  assert.match(missingResult.stderr, /TPS FAIL: missing load\.status_counts/)
+  assert.match(
+    missingResult.stderr,
+    /TPS FAIL: load\.status_counts 2xx total=0, expected 30000/,
+  )
+
+  const incomplete = tpsReport()
+  incomplete.load.status_counts = { 200: 29999 }
+  const incompleteResult = runChecker('--stage', 'tps', writeReport(incomplete))
+  assert.equal(incompleteResult.status, 1)
+  assert.match(
+    incompleteResult.stderr,
+    /TPS FAIL: load\.status_counts 2xx total=29999, expected 30000/,
+  )
+})
+
+test('v2 report requires every response to be HTTP 200', () => {
+  const report = tpsReport()
+  report.load.status_counts = { 201: report.load.total_requests }
+  const result = runChecker('--stage', 'tps', writeReport(report))
+
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /TPS FAIL: load\.status_counts HTTP 200 total=0, expected 30000/)
+  assert.match(result.stderr, /TPS FAIL: load\.status_counts contains non-200 2xx responses=30000/)
+})
+
+test('v2 report requires typed and successful settle fields', () => {
+  const report = tpsReport()
+  delete report.settle_after_ms
+  report.settle_drain_completed = 'true'
+  report.settle_drain_elapsed_ms = '250'
+  delete report.settle_required_metrics_available
+  report.settle_missing_required_metrics = 'none'
+  const result = runChecker('--stage', 'tps', writeReport(report))
+
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /TPS FAIL: missing settle_after_ms/)
+  assert.match(
+    result.stderr,
+    /TPS FAIL: settle_drain_completed must be a boolean, got "true"/,
+  )
+  assert.match(
+    result.stderr,
+    /TPS FAIL: settle_drain_elapsed_ms must be a non-negative integer, got "250"/,
+  )
+  assert.match(
+    result.stderr,
+    /TPS FAIL: settle_required_metrics_available must be a boolean, got missing/,
+  )
+  assert.match(
+    result.stderr,
+    /TPS FAIL: settle_missing_required_metrics must be an array, got "none"/,
+  )
+})
+
+test('v2 report rejects unavailable settle metrics and terminal admission residue', () => {
+  const report = tpsReport()
+  report.settle_required_metrics_available = false
+  report.settle_missing_required_metrics = ['usage_runtime_terminal_submission_pending']
+  report.metrics.usage_runtime_final_terminal_submission_pending = 1
+  report.metrics.usage_runtime_final_terminal_submission_in_flight = 2
+  report.metrics.usage_runtime_terminal_submission_rejected_total_delta = 3
+  const result = runChecker('--stage', 'tps', writeReport(report))
+
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /TPS FAIL: settle_required_metrics_available=false/)
+  assert.match(
+    result.stderr,
+    /TPS FAIL: settle_missing_required_metrics is not empty: \["usage_runtime_terminal_submission_pending"\]/,
+  )
+  assert.match(
+    result.stderr,
+    /TPS FAIL: usage_runtime_final_terminal_submission_pending=1/,
+  )
+  assert.match(
+    result.stderr,
+    /TPS FAIL: usage_runtime_final_terminal_submission_in_flight=2/,
+  )
+  assert.match(
+    result.stderr,
+    /TPS FAIL: usage_runtime_terminal_submission_rejected_total_delta=3/,
+  )
+})
+
+test('v2 report rejects terminal persistence loss deltas', () => {
+  const report = tpsReport()
+  report.metrics.usage_runtime_terminal_enqueue_deferred_dropped_total_delta = 1
+  report.metrics.usage_runtime_terminal_direct_fallback_failed_total_delta = 2
+  report.metrics.usage_runtime_terminal_direct_fallback_rejected_total_delta = 3
+  const result = runChecker('--stage', 'tps', writeReport(report))
+
+  assert.equal(result.status, 1)
+  assert.match(
+    result.stderr,
+    /TPS FAIL: usage_runtime_terminal_enqueue_deferred_dropped_total_delta=1/,
+  )
+  assert.match(
+    result.stderr,
+    /TPS FAIL: usage_runtime_terminal_direct_fallback_failed_total_delta=2/,
+  )
+  assert.match(
+    result.stderr,
+    /TPS FAIL: usage_runtime_terminal_direct_fallback_rejected_total_delta=3/,
+  )
+})
+
+test('v2 report accepts recovered first-byte fallback but rejects lost transitions', () => {
+  const recovered = tpsReport()
+  recovered.metrics.usage_runtime_first_byte_persistence_direct_failed_total_delta = 2
+  recovered.metrics.usage_runtime_first_byte_persistence_overflow_total_delta = 1
+  recovered.metrics.usage_runtime_first_byte_persistence_fallback_accepted_total_delta = 2
+  recovered.metrics.usage_runtime_first_byte_persistence_cancelled_total_delta = 1
+  const recoveredResult = runChecker('--stage', 'tps', writeReport(recovered))
+  assert.equal(recoveredResult.status, 0, recoveredResult.stderr)
+
+  const failed = tpsReport()
+  failed.metrics.usage_runtime_first_byte_persistence_direct_failed_total_delta = 1
+  failed.metrics.usage_runtime_first_byte_persistence_fallback_failed_total_delta = 1
+  const failedResult = runChecker('--stage', 'tps', writeReport(failed))
+  assert.equal(failedResult.status, 1)
+  assert.match(
+    failedResult.stderr,
+    /TPS FAIL: usage_runtime_first_byte_persistence_fallback_failed_total_delta=1/,
+  )
+
+  const incomplete = tpsReport()
+  incomplete.metrics.usage_runtime_first_byte_persistence_overflow_total_delta = 1
+  const incompleteResult = runChecker('--stage', 'tps', writeReport(incomplete))
+  assert.equal(incompleteResult.status, 1)
+  assert.match(
+    incompleteResult.stderr,
+    /TPS FAIL: usage runtime first-byte fallback accounting incomplete: attempts=1 outcomes=0/,
+  )
+})
+
+test('v2 report rejects a zero settle window', () => {
+  const report = tpsReport()
+  report.settle_after_ms = 0
+  report.settle_drain_elapsed_ms = 0
+  const result = runChecker('--stage', 'tps', writeReport(report))
+
+  assert.equal(result.status, 1)
+  assert.match(
+    result.stderr,
+    /TPS FAIL: settle_after_ms must be positive for acceptance contract v2/,
+  )
+})
+
+test('legacy report remains readable without v2 acceptance fields', () => {
+  const report = tpsReport()
+  delete report.acceptance_contract_version
+  delete report.settle_after_ms
+  delete report.settle_drain_completed
+  delete report.settle_drain_elapsed_ms
+  delete report.settle_required_metrics_available
+  delete report.settle_missing_required_metrics
+  delete report.load.require_sse_done
+  delete report.load.status_counts
+  delete report.metrics.usage_runtime_final_terminal_submission_pending
+  delete report.metrics.usage_runtime_final_terminal_submission_in_flight
+  delete report.metrics.usage_runtime_terminal_submission_rejected_total_delta
+  const result = runChecker('--stage', 'tps', writeReport(report))
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /TPS PASS/)
+})
+
 test('tps report fails when lifecycle enqueue drops deferred events', () => {
   const report = reportFor({
     totalRequests: 30000,
@@ -326,6 +528,18 @@ function writeReport(report) {
   return file
 }
 
+function tpsReport() {
+  return reportFor({
+    totalRequests: 30000,
+    concurrency: 600,
+    throughputRps: 1050,
+    headersP95Ms: 90,
+    firstBodyP95Ms: 180,
+    p95Ms: 900,
+    p99Ms: 1600,
+  })
+}
+
 function reportFor({
   totalRequests,
   concurrency,
@@ -337,13 +551,18 @@ function reportFor({
   timeoutMs = 150000,
   firstBodyHoldMs = 0,
   responseMode = 'FullBody',
+  requireSseDone = responseMode === 'FullBody',
 }) {
   return {
+    acceptance_contract_version: 2,
     settle_after_ms: 5000,
     settle_drain_completed: true,
     settle_drain_elapsed_ms: 250,
+    settle_required_metrics_available: true,
+    settle_missing_required_metrics: [],
     load: {
       response_mode: responseMode,
+      require_sse_done: requireSseDone,
       total_requests: totalRequests,
       completed_requests: totalRequests,
       failed_requests: 0,
@@ -372,6 +591,20 @@ function reportFor({
       usage_runtime_max_terminal_enqueue_failed_total: 0,
       usage_runtime_max_lifecycle_enqueue_failed_total: 0,
       usage_runtime_max_lifecycle_enqueue_deferred_dropped_total: 0,
+      usage_runtime_final_terminal_submission_pending: 0,
+      usage_runtime_final_terminal_submission_in_flight: 0,
+      usage_runtime_terminal_submission_rejected_total_delta: 0,
+      usage_runtime_final_terminal_enqueue_deferred_dropped_total: 0,
+      usage_runtime_terminal_enqueue_deferred_dropped_total_delta: 0,
+      usage_runtime_final_terminal_direct_fallback_failed_total: 0,
+      usage_runtime_terminal_direct_fallback_failed_total_delta: 0,
+      usage_runtime_final_terminal_direct_fallback_rejected_total: 0,
+      usage_runtime_terminal_direct_fallback_rejected_total_delta: 0,
+      usage_runtime_first_byte_persistence_overflow_total_delta: 0,
+      usage_runtime_first_byte_persistence_cancelled_total_delta: 0,
+      usage_runtime_first_byte_persistence_direct_failed_total_delta: 0,
+      usage_runtime_first_byte_persistence_fallback_accepted_total_delta: 0,
+      usage_runtime_first_byte_persistence_fallback_failed_total_delta: 0,
       usage_runtime_final_enqueue_retry_pending: 0,
       usage_runtime_enqueue_retry_scheduled_total_delta: totalRequests,
       usage_runtime_enqueue_retry_recovered_total_delta: totalRequests,

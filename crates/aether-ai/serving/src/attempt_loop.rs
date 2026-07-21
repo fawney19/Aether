@@ -6,6 +6,13 @@ pub trait AiExecutionAttempt {
     fn report_kind(&self) -> Option<String>;
 
     fn report_context(&self) -> Option<serde_json::Value>;
+
+    /// Borrow the stored report context when the attempt owns one. This keeps
+    /// watchdog/telemetry paths from cloning a potentially large JSON value.
+    /// Implementations that synthesize a context may use the default.
+    fn report_context_ref(&self) -> Option<&serde_json::Value> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -50,7 +57,6 @@ where
     let mut last_attempted = None;
 
     while let Some(attempt) = remaining.next() {
-        last_attempted = Some((attempt.execution_plan().clone(), attempt.report_context()));
         let response = match port.execute_attempt(&attempt).await {
             Ok(response) => response,
             Err(err) => {
@@ -62,6 +68,10 @@ where
             port.mark_unused_attempts(remaining.collect()).await?;
             return Ok(AiAttemptLoopOutcome::Responded(response));
         }
+
+        // Exhaustion diagnostics are only needed after an attempt fails. Keep
+        // the common successful path free of a deep plan/report-context clone.
+        last_attempted = Some((attempt.execution_plan().clone(), attempt.report_context()));
     }
 
     let Some((last_plan, last_report_context)) = last_attempted else {
@@ -86,6 +96,10 @@ impl AiExecutionAttempt for crate::dto::AiSyncAttempt {
     fn report_context(&self) -> Option<serde_json::Value> {
         self.report_context.clone()
     }
+
+    fn report_context_ref(&self) -> Option<&serde_json::Value> {
+        self.report_context.as_ref()
+    }
 }
 
 impl AiExecutionAttempt for crate::dto::AiStreamAttempt {
@@ -99,6 +113,10 @@ impl AiExecutionAttempt for crate::dto::AiStreamAttempt {
 
     fn report_context(&self) -> Option<serde_json::Value> {
         self.report_context.clone()
+    }
+
+    fn report_context_ref(&self) -> Option<&serde_json::Value> {
+        self.report_context.as_ref()
     }
 }
 

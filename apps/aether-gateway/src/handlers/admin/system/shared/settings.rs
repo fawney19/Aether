@@ -536,8 +536,7 @@ pub(crate) async fn build_admin_system_stats_payload(
     let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
     let usage_counter_snapshot = state
         .as_ref()
-        .data
-        .read_usage_counter_health()
+        .read_cached_usage_counter_health()
         .await
         .map_err(|err| GatewayError::Internal(err.to_string()))?;
     let usage_counter =

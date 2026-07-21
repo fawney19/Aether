@@ -4,9 +4,15 @@ use axum::http::Uri;
 use super::super::GatewayControlDecision;
 use super::credentials::{contains_string, extract_requested_model};
 use super::GatewayControlAuthContext;
+use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AppState, GatewayError};
 
 const DAILY_QUOTA_EPSILON_USD: f64 = 0.000_000_01;
+const AUTH_PRICING_VALIDATION_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+// Billing mutations clear this cache locally. The bounded stale window leaves
+// room for cross-node propagation without synchronously reloading at every
+// short TTL boundary.
+const AUTH_CAPACITY_CACHE_STALE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum GatewayLocalAuthRejection {
@@ -97,6 +103,23 @@ pub(crate) async fn execution_plan_balance_capacity_rejection(
     plan: &aether_contracts::ExecutionPlan,
     report_context: Option<&serde_json::Value>,
 ) -> Result<Option<GatewayLocalAuthRejection>, GatewayError> {
+    let started_at = std::time::Instant::now();
+    let result =
+        execution_plan_balance_capacity_rejection_inner(state, decision, plan, report_context)
+            .await;
+    observe_gateway_stage_ms(
+        "auth_capacity_total",
+        started_at.elapsed().as_millis() as u64,
+    );
+    result
+}
+
+async fn execution_plan_balance_capacity_rejection_inner(
+    state: &AppState,
+    decision: &GatewayControlDecision,
+    plan: &aether_contracts::ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+) -> Result<Option<GatewayLocalAuthRejection>, GatewayError> {
     let Some(auth_context) = decision.auth_context.as_ref() else {
         return Ok(None);
     };
@@ -154,17 +177,29 @@ async fn available_balance_capacity_usd(
     state: &AppState,
     auth_context: &GatewayControlAuthContext,
 ) -> Result<Option<f64>, GatewayError> {
-    let quota = state
+    let quota_started_at = std::time::Instant::now();
+    let quota_result = state
         .find_user_daily_quota_availability_for_auth(&auth_context.user_id)
-        .await?
-        .filter(|quota| quota.has_active_daily_quota);
-    let wallet = state
+        .await;
+    observe_gateway_stage_ms(
+        "auth_capacity_quota",
+        quota_started_at.elapsed().as_millis() as u64,
+    );
+    let quota = quota_result?.filter(|quota| quota.has_active_daily_quota);
+
+    let wallet_started_at = std::time::Instant::now();
+    let wallet_result = state
         .read_wallet_snapshot_for_auth(
             &auth_context.user_id,
             &auth_context.api_key_id,
             auth_context.api_key_is_standalone,
         )
-        .await?;
+        .await;
+    observe_gateway_stage_ms(
+        "auth_capacity_wallet",
+        wallet_started_at.elapsed().as_millis() as u64,
+    );
+    let wallet = wallet_result?;
     let wallet_available_usd = wallet.as_ref().and_then(wallet_finite_available_usd);
     let wallet_is_unlimited = wallet
         .as_ref()
@@ -190,6 +225,21 @@ fn wallet_finite_available_usd(
 }
 
 async fn estimate_execution_plan_cost_upper_bound_usd(
+    state: &AppState,
+    plan: &aether_contracts::ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+) -> Result<Option<f64>, GatewayError> {
+    let started_at = std::time::Instant::now();
+    let result =
+        estimate_execution_plan_cost_upper_bound_usd_inner(state, plan, report_context).await;
+    observe_gateway_stage_ms(
+        "auth_capacity_cost_estimate",
+        started_at.elapsed().as_millis() as u64,
+    );
+    result
+}
+
+async fn estimate_execution_plan_cost_upper_bound_usd_inner(
     state: &AppState,
     plan: &aether_contracts::ExecutionPlan,
     report_context: Option<&serde_json::Value>,
@@ -347,9 +397,100 @@ async fn validate_execution_plan_pricing_for_unavailable_estimate(
     global_model_name: Option<&str>,
     requested_processing_tier: Option<&str>,
 ) -> Result<(), GatewayError> {
+    let started_at = std::time::Instant::now();
+    let result = validate_execution_plan_pricing_for_unavailable_estimate_inner(
+        state,
+        plan,
+        model_id,
+        global_model_name,
+        requested_processing_tier,
+    )
+    .await;
+    observe_gateway_stage_ms(
+        "auth_capacity_pricing_validation",
+        started_at.elapsed().as_millis() as u64,
+    );
+    result
+}
+
+async fn validate_execution_plan_pricing_for_unavailable_estimate_inner(
+    state: &AppState,
+    plan: &aether_contracts::ExecutionPlan,
+    model_id: Option<&str>,
+    global_model_name: Option<&str>,
+    requested_processing_tier: Option<&str>,
+) -> Result<(), GatewayError> {
     if model_id.is_none() && global_model_name.is_none() {
         return Ok(());
     }
+
+    let capacity_ttl = state.frontdoor_runtime_guards.auth_capacity_cache_ttl;
+    if capacity_ttl.is_zero() {
+        return validate_execution_plan_pricing_uncached(
+            state,
+            plan,
+            model_id,
+            global_model_name,
+            requested_processing_tier,
+        )
+        .await;
+    }
+    let ttl = capacity_ttl.max(AUTH_PRICING_VALIDATION_CACHE_TTL);
+
+    let cache_key = execution_plan_pricing_validation_cache_key(
+        plan,
+        model_id,
+        global_model_name,
+        requested_processing_tier,
+    );
+    let cache = state.auth_request_cost_upper_bound_cache.clone();
+    cache
+        .get_or_load_once_stale_while_revalidating(
+            cache_key,
+            ttl,
+            AUTH_CAPACITY_CACHE_STALE_TTL,
+            || async {
+                validate_execution_plan_pricing_uncached(
+                    state,
+                    plan,
+                    model_id,
+                    global_model_name,
+                    requested_processing_tier,
+                )
+                .await?;
+                Ok::<Option<f64>, GatewayError>(Some(0.0))
+            },
+            || {
+                let state = state.clone();
+                let plan = plan.clone();
+                let model_id = model_id.map(ToOwned::to_owned);
+                let global_model_name = global_model_name.map(ToOwned::to_owned);
+                let requested_processing_tier = requested_processing_tier.map(ToOwned::to_owned);
+                async move {
+                    validate_execution_plan_pricing_uncached(
+                        &state,
+                        &plan,
+                        model_id.as_deref(),
+                        global_model_name.as_deref(),
+                        requested_processing_tier.as_deref(),
+                    )
+                    .await?;
+                    Ok::<Option<f64>, GatewayError>(Some(0.0))
+                }
+            },
+            crate::cache::CacheLoadObserver::default(),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn validate_execution_plan_pricing_uncached(
+    state: &AppState,
+    plan: &aether_contracts::ExecutionPlan,
+    model_id: Option<&str>,
+    global_model_name: Option<&str>,
+    requested_processing_tier: Option<&str>,
+) -> Result<(), GatewayError> {
     let _permit = state.acquire_auth_snapshot_load_gate().await?;
     let Some(context) =
         load_execution_plan_billing_context(state, plan, model_id, global_model_name).await?
@@ -414,6 +555,22 @@ fn execution_plan_cost_upper_bound_cache_key(
         cache_ttl_minutes
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
+    )
+}
+
+fn execution_plan_pricing_validation_cache_key(
+    plan: &aether_contracts::ExecutionPlan,
+    model_id: Option<&str>,
+    global_model_name: Option<&str>,
+    requested_processing_tier: Option<&str>,
+) -> String {
+    format!(
+        "pricing-validation\x1f{}\x1f{}\x1f{}\x1f{}\x1f{}",
+        plan.provider_id,
+        plan.key_id,
+        model_id.unwrap_or(""),
+        global_model_name.unwrap_or(""),
+        requested_processing_tier.unwrap_or("standard"),
     )
 }
 
@@ -1498,6 +1655,93 @@ mod tests {
             })
         );
         assert_eq!(quota_calls.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn standalone_auth_capacity_reuses_pricing_validation_within_ttl() {
+        let context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 1.0,
+                    "output_price_per_1m": 2.0
+                }]
+            })),
+            None,
+            None,
+            None,
+        );
+        let quota_calls = Arc::new(AtomicUsize::new(0));
+        let model_context_calls = Arc::new(AtomicUsize::new(0));
+        let candidate_repository =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+                sample_row(),
+            ]));
+        let billing_repository = Arc::new(FixedBillingReadRepository::with_counters(
+            quota_availability(1.0, true),
+            context,
+            Arc::clone(&quota_calls),
+            Arc::clone(&model_context_calls),
+        ));
+        let data = GatewayDataState::with_minimal_candidate_selection_and_billing_for_tests(
+            candidate_repository,
+            billing_repository,
+        );
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data);
+        let mut decision = decision_with_allowed_models(vec!["gpt-5".to_string()]);
+        decision
+            .auth_context
+            .as_mut()
+            .expect("auth context should exist")
+            .api_key_is_standalone = true;
+        let plan = execution_plan(
+            json!({
+                "model": "gpt-5",
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+            "openai:chat",
+        );
+        let report_context = billing_report_context();
+
+        for _ in 0..2 {
+            assert_eq!(
+                execution_plan_balance_capacity_rejection(
+                    &state,
+                    &decision,
+                    &plan,
+                    Some(&report_context),
+                )
+                .await
+                .expect("standalone pricing validation should resolve"),
+                None
+            );
+        }
+        assert_eq!(quota_calls.load(Ordering::Acquire), 0);
+        assert_eq!(model_context_calls.load(Ordering::Acquire), 1);
+
+        let cache_key = super::execution_plan_pricing_validation_cache_key(
+            &plan,
+            Some("model-1"),
+            Some("gpt-5"),
+            None,
+        );
+        assert_eq!(
+            state.auth_request_cost_upper_bound_cache.get(
+                &cache_key,
+                state.frontdoor_runtime_guards.auth_capacity_cache_ttl,
+            ),
+            Some(Some(0.0))
+        );
+        state.invalidate_provider_routing_caches();
+        assert_eq!(
+            state.auth_request_cost_upper_bound_cache.get(
+                &cache_key,
+                state.frontdoor_runtime_guards.auth_capacity_cache_ttl,
+            ),
+            None
+        );
     }
 
     #[tokio::test]

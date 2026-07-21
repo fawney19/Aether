@@ -345,7 +345,7 @@ pub(crate) async fn record_failed_usage_for_exhausted_request(
     state
         .usage_runtime
         .record_terminal_event_direct(
-            state.data.as_ref(),
+            state.usage_lifecycle_data_state().as_ref(),
             UsageEvent::new(UsageEventType::Failed, request_id, data),
         )
         .await;
@@ -484,7 +484,7 @@ pub(crate) async fn record_failed_usage_for_runtime_miss_request(
     state
         .usage_runtime
         .record_terminal_event_direct(
-            state.data.as_ref(),
+            state.usage_lifecycle_data_state().as_ref(),
             UsageEvent::new(UsageEventType::Failed, request_id, data),
         )
         .await;

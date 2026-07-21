@@ -13,7 +13,7 @@ use aether_data_contracts::repository::provider_catalog::{
 };
 use aether_data_contracts::repository::settlement::{StoredUsageSettlement, UsageSettlementInput};
 use aether_data_contracts::repository::usage::{
-    ProxyNodeCounterDelta, StoredRequestUsageAudit, UpsertUsageRecord,
+    ProxyNodeCounterDelta, StoredRequestUsageAudit, UpsertUsageRecord, UsageWriteRepository,
 };
 use aether_data_contracts::repository::video_tasks::{StoredVideoTask, VideoTaskLookupKey};
 use aether_runtime_state::RuntimeQueueStore;
@@ -252,6 +252,12 @@ impl UsageRuntimeAccess for GatewayDataState {
         GatewayDataState::usage_worker_queue(self)
     }
 
+    fn supports_first_byte_usage_fast_path(&self) -> bool {
+        self.usage_writer
+            .as_ref()
+            .is_some_and(|repository| repository.supports_first_byte_usage_fast_path())
+    }
+
     fn usage_worker_should_defer_for_database_pressure(&self) -> bool {
         self.database_pool_summary()
             .as_ref()
@@ -323,11 +329,56 @@ impl aether_usage_runtime::ManualProxyNodeCounter for GatewayDataState {
 
 #[async_trait]
 impl UsageRecordWriter for GatewayDataState {
+    fn supports_first_byte_usage_batch(&self) -> bool {
+        self.usage_writer
+            .as_ref()
+            .is_some_and(|repository| repository.supports_first_byte_usage_batch())
+    }
+
+    fn first_byte_usage_writer_identity(&self) -> Option<usize> {
+        self.usage_writer
+            .as_ref()
+            .map(|repository| std::sync::Arc::as_ptr(repository) as *const () as usize)
+    }
+
+    fn supports_pending_usage_batch(&self) -> bool {
+        self.usage_writer
+            .as_ref()
+            .is_some_and(|repository| repository.supports_pending_usage_batch())
+    }
+
+    fn pending_usage_writer_identity(&self) -> Option<usize> {
+        self.usage_writer
+            .as_ref()
+            .map(|repository| std::sync::Arc::as_ptr(repository) as *const () as usize)
+    }
+
     async fn upsert_usage_record(
         &self,
         record: UpsertUsageRecord,
     ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
         GatewayDataState::upsert_usage(self, record).await
+    }
+
+    async fn upsert_first_byte_usage_record(
+        &self,
+        record: UpsertUsageRecord,
+    ) -> Result<(), DataLayerError> {
+        GatewayDataState::upsert_first_byte_usage(self, record).await
+    }
+
+    async fn upsert_first_byte_usage_records(
+        &self,
+        records: Vec<UpsertUsageRecord>,
+    ) -> Result<(), DataLayerError> {
+        GatewayDataState::upsert_first_byte_usage_many(self, records).await
+    }
+
+    async fn upsert_pending_usage_records(
+        &self,
+        records: Vec<UpsertUsageRecord>,
+    ) -> Result<(), DataLayerError> {
+        GatewayDataState::upsert_pending_usage_many(self, records).await
     }
 }
 

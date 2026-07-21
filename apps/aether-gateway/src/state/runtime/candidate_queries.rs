@@ -127,6 +127,44 @@ impl AppState {
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
+
+    /// Persist a candidate status when the caller does not need the materialized row.
+    ///
+    /// Lifecycle updates are emitted on the hot path (in particular the first-byte
+    /// `pending -> streaming` transition). Rebuilding `StoredRequestCandidate` here
+    /// only to discard it adds validation and clones for every update, especially when
+    /// the async queue is enabled.
+    pub(crate) async fn enqueue_request_candidate_status(
+        &self,
+        candidate: candidates::UpsertRequestCandidateRecord,
+    ) -> Result<Option<()>, GatewayError> {
+        if let Some(queue) = self.request_candidate_queue.as_ref() {
+            queue
+                .enqueue_or_fallback(candidate)
+                .await
+                .map_err(|err| GatewayError::Internal(err.to_string()))?;
+            return Ok(Some(()));
+        }
+
+        self.data
+            .upsert_request_candidate(candidate)
+            .await
+            .map(|stored| stored.map(|_| ()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    /// Try the in-memory lifecycle lane without awaiting or touching the repository.
+    /// The returned record must be persisted through `enqueue_request_candidate_status`
+    /// when the queue is disabled or closed.
+    pub(crate) fn try_enqueue_request_candidate_status(
+        &self,
+        candidate: candidates::UpsertRequestCandidateRecord,
+    ) -> Result<(), candidates::UpsertRequestCandidateRecord> {
+        let Some(queue) = self.request_candidate_queue.as_ref() else {
+            return Err(candidate);
+        };
+        queue.try_enqueue_priority_status(candidate)
+    }
 }
 
 fn stored_request_candidate_from_upsert(

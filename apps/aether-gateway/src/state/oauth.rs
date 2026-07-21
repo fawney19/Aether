@@ -1,7 +1,8 @@
 use super::{
     provider_transport_snapshot_looks_refreshed, AppState, CachedProviderTransportSnapshot,
-    GatewayError, ProviderTransportSnapshotCacheKey, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES,
-    PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL,
+    GatewayError, ProviderTransportSnapshotCacheKey, ProviderTransportSnapshotFlight,
+    ProviderTransportSnapshotFlightResult, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES,
+    PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
 };
 use crate::handlers::shared::default_provider_key_status_snapshot;
 use crate::provider_transport::LocalOAuthHttpExecutor;
@@ -13,13 +14,17 @@ use aether_contracts::{
     ExecutionPlan, ExecutionTimeouts, ProxySnapshot, RequestBody,
     EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
 };
-use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
+use aether_data_contracts::repository::provider_catalog::{
+    ProviderCatalogKeyStatusSnapshotUpdate, StoredProviderCatalogKey,
+};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use dashmap::{mapref::entry::Entry as DashMapEntry, DashMap};
 use flate2::read::{DeflateDecoder, GzDecoder};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Read;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -33,6 +38,80 @@ const OAUTH_REQUEST_FAILED_PREFIX: &str = "[REQUEST_FAILED] ";
 
 struct GatewayLocalOAuthHttpExecutor<'a> {
     state: &'a AppState,
+}
+
+enum ProviderTransportSnapshotCacheLookup {
+    Fresh(Arc<provider_transport::GatewayProviderTransportSnapshot>),
+    Stale(Arc<provider_transport::GatewayProviderTransportSnapshot>),
+    Miss,
+}
+
+enum ProviderTransportSnapshotReloadResult {
+    Published(Arc<provider_transport::GatewayProviderTransportSnapshot>),
+    Missing,
+    Invalidated,
+}
+
+enum ProviderTransportSnapshotInflightRegistration {
+    Leader(ProviderTransportSnapshotInflightGuard),
+    Follower(Arc<ProviderTransportSnapshotFlight>),
+    Retry,
+}
+
+struct ProviderTransportSnapshotInflightGuard {
+    inflight: Arc<DashMap<ProviderTransportSnapshotCacheKey, Arc<ProviderTransportSnapshotFlight>>>,
+    cache_key: Option<ProviderTransportSnapshotCacheKey>,
+    flight: Arc<ProviderTransportSnapshotFlight>,
+}
+
+impl ProviderTransportSnapshotInflightGuard {
+    fn generation(&self) -> u64 {
+        self.flight.generation()
+    }
+
+    fn generation_is_current(&self, state: &AppState) -> bool {
+        state
+            .provider_transport_snapshot_cache_generation
+            .load(Ordering::Acquire)
+            == self.generation()
+    }
+
+    fn finish(&mut self, result: ProviderTransportSnapshotFlightResult) {
+        let Some(cache_key) = self.cache_key.take() else {
+            return;
+        };
+        // Publish completion before exposing a vacant map entry. Requests in
+        // this small window join the completed flight instead of issuing a
+        // duplicate reload for a missing/error result.
+        self.flight.complete(result);
+        self.inflight
+            .remove_if(&cache_key, |_, current| Arc::ptr_eq(current, &self.flight));
+    }
+}
+
+impl Drop for ProviderTransportSnapshotInflightGuard {
+    fn drop(&mut self) {
+        // Cancellation must release the key and wake every follower. One of
+        // them can then claim leadership and retry the interrupted load.
+        self.finish(ProviderTransportSnapshotFlightResult::Retry);
+    }
+}
+
+fn provider_transport_snapshot_flight_result(
+    result: &Result<ProviderTransportSnapshotReloadResult, GatewayError>,
+) -> ProviderTransportSnapshotFlightResult {
+    match result {
+        Ok(ProviderTransportSnapshotReloadResult::Published(snapshot)) => {
+            ProviderTransportSnapshotFlightResult::Published(Arc::clone(snapshot))
+        }
+        Ok(ProviderTransportSnapshotReloadResult::Missing) => {
+            ProviderTransportSnapshotFlightResult::Missing
+        }
+        Ok(ProviderTransportSnapshotReloadResult::Invalidated) => {
+            ProviderTransportSnapshotFlightResult::Invalidated
+        }
+        Err(err) => ProviderTransportSnapshotFlightResult::Error(err.clone()),
+    }
 }
 
 fn trimmed_reason(reason: Option<&str>) -> Option<String> {
@@ -479,20 +558,110 @@ impl<'a> provider_transport::LocalOAuthHttpExecutor for GatewayLocalOAuthHttpExe
 
 impl AppState {
     pub(crate) fn clear_provider_transport_snapshot_cache(&self) {
+        self.provider_transport_snapshot_cache_generation
+            .fetch_add(1, Ordering::AcqRel);
         self.provider_transport_snapshot_cache.clear();
-        self.provider_transport_snapshot_inflight.clear();
+
+        // Keep a concurrently-created flight from the new generation. Every
+        // older flight is completed as invalidated so its followers retry
+        // immediately instead of waiting for the old database read to finish.
+        let mut invalidated = Vec::new();
+        self.provider_transport_snapshot_inflight
+            .retain(|_, flight| {
+                let current_generation = self
+                    .provider_transport_snapshot_cache_generation
+                    .load(Ordering::Acquire);
+                if flight.generation() < current_generation {
+                    invalidated.push(Arc::clone(flight));
+                    false
+                } else {
+                    true
+                }
+            });
+        for flight in invalidated {
+            flight.complete(ProviderTransportSnapshotFlightResult::Invalidated);
+        }
+    }
+
+    fn register_provider_transport_snapshot_inflight(
+        &self,
+        cache_key: &ProviderTransportSnapshotCacheKey,
+        generation: u64,
+    ) -> ProviderTransportSnapshotInflightRegistration {
+        let flight = Arc::new(ProviderTransportSnapshotFlight::new(generation));
+        match self
+            .provider_transport_snapshot_inflight
+            .entry(cache_key.clone())
+        {
+            DashMapEntry::Occupied(entry) => {
+                let current = Arc::clone(entry.get());
+                if current.generation() == generation {
+                    return ProviderTransportSnapshotInflightRegistration::Follower(current);
+                }
+
+                // A caller that observed an older generation must never evict
+                // a newer flight. If this caller is current, the occupied
+                // entry is left over from a clear that has not retained its
+                // shard yet and can be invalidated here.
+                if self
+                    .provider_transport_snapshot_cache_generation
+                    .load(Ordering::Acquire)
+                    != generation
+                {
+                    return ProviderTransportSnapshotInflightRegistration::Retry;
+                }
+                let invalidated = entry.remove();
+                invalidated.complete(ProviderTransportSnapshotFlightResult::Invalidated);
+                ProviderTransportSnapshotInflightRegistration::Retry
+            }
+            DashMapEntry::Vacant(entry) => {
+                if self
+                    .provider_transport_snapshot_cache_generation
+                    .load(Ordering::Acquire)
+                    != generation
+                {
+                    return ProviderTransportSnapshotInflightRegistration::Retry;
+                }
+                entry.insert(Arc::clone(&flight));
+                ProviderTransportSnapshotInflightRegistration::Leader(
+                    ProviderTransportSnapshotInflightGuard {
+                        inflight: Arc::clone(&self.provider_transport_snapshot_inflight),
+                        cache_key: Some(cache_key.clone()),
+                        flight,
+                    },
+                )
+            }
+        }
     }
 
     fn get_cached_provider_transport_snapshot_arc(
         &self,
         cache_key: &ProviderTransportSnapshotCacheKey,
-    ) -> Option<Arc<provider_transport::GatewayProviderTransportSnapshot>> {
+    ) -> ProviderTransportSnapshotCacheLookup {
         let cached = self
             .provider_transport_snapshot_cache
             .get(cache_key)
-            .map(|entry| entry.clone())?;
-        if cached.loaded_at.elapsed() <= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL {
-            return Some(cached.snapshot);
+            .map(|entry| entry.clone());
+        let Some(cached) = cached else {
+            return ProviderTransportSnapshotCacheLookup::Miss;
+        };
+        if cached.generation
+            != self
+                .provider_transport_snapshot_cache_generation
+                .load(Ordering::Acquire)
+        {
+            self.provider_transport_snapshot_cache
+                .remove_if(cache_key, |_, current| {
+                    current.generation == cached.generation
+                });
+            return ProviderTransportSnapshotCacheLookup::Miss;
+        }
+        let age = cached.loaded_at.elapsed();
+        if age <= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL {
+            return ProviderTransportSnapshotCacheLookup::Fresh(cached.snapshot);
+        }
+        if age <= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL {
+            return ProviderTransportSnapshotCacheLookup::Stale(cached.snapshot);
         }
         if self
             .provider_transport_snapshot_cache
@@ -501,16 +670,27 @@ impl AppState {
                 entry.loaded_at.elapsed() > PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL
             })
         {
-            self.provider_transport_snapshot_cache.remove(cache_key);
+            self.provider_transport_snapshot_cache
+                .remove_if(cache_key, |_, current| {
+                    current.generation == cached.generation
+                });
         }
-        None
+        ProviderTransportSnapshotCacheLookup::Miss
     }
 
     fn put_cached_provider_transport_snapshot(
         &self,
         cache_key: ProviderTransportSnapshotCacheKey,
         snapshot: Arc<provider_transport::GatewayProviderTransportSnapshot>,
-    ) {
+        generation: u64,
+    ) -> bool {
+        if generation
+            != self
+                .provider_transport_snapshot_cache_generation
+                .load(Ordering::Acquire)
+        {
+            return false;
+        }
         if self.provider_transport_snapshot_cache.len()
             >= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES
         {
@@ -520,16 +700,133 @@ impl AppState {
             if self.provider_transport_snapshot_cache.len()
                 >= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES
             {
-                self.provider_transport_snapshot_cache.clear();
+                let oldest_key = self
+                    .provider_transport_snapshot_cache
+                    .iter()
+                    .min_by_key(|entry| entry.value().loaded_at)
+                    .map(|entry| entry.key().clone());
+                if let Some(oldest_key) = oldest_key {
+                    self.provider_transport_snapshot_cache.remove(&oldest_key);
+                }
             }
         }
         self.provider_transport_snapshot_cache.insert(
-            cache_key,
+            cache_key.clone(),
             CachedProviderTransportSnapshot {
                 loaded_at: std::time::Instant::now(),
+                generation,
                 snapshot,
             },
         );
+        if generation
+            != self
+                .provider_transport_snapshot_cache_generation
+                .load(Ordering::Acquire)
+        {
+            self.provider_transport_snapshot_cache
+                .remove_if(&cache_key, |_, current| current.generation == generation);
+            return false;
+        }
+        true
+    }
+
+    async fn reload_provider_transport_snapshot(
+        &self,
+        cache_key: &ProviderTransportSnapshotCacheKey,
+        provider_id: &str,
+        endpoint_id: &str,
+        key_id: &str,
+        generation: u64,
+    ) -> Result<ProviderTransportSnapshotReloadResult, GatewayError> {
+        if generation
+            != self
+                .provider_transport_snapshot_cache_generation
+                .load(Ordering::Acquire)
+        {
+            return Ok(ProviderTransportSnapshotReloadResult::Invalidated);
+        }
+
+        let loaded = self
+            .read_provider_transport_snapshot_uncached(provider_id, endpoint_id, key_id)
+            .await?;
+        if generation
+            != self
+                .provider_transport_snapshot_cache_generation
+                .load(Ordering::Acquire)
+        {
+            return Ok(ProviderTransportSnapshotReloadResult::Invalidated);
+        }
+
+        let Some(snapshot) = loaded else {
+            return Ok(ProviderTransportSnapshotReloadResult::Missing);
+        };
+        let snapshot = self.apply_global_format_conversion_override(snapshot).await;
+        if generation
+            != self
+                .provider_transport_snapshot_cache_generation
+                .load(Ordering::Acquire)
+        {
+            return Ok(ProviderTransportSnapshotReloadResult::Invalidated);
+        }
+
+        let snapshot = Arc::new(snapshot);
+        if self.put_cached_provider_transport_snapshot(
+            cache_key.clone(),
+            Arc::clone(&snapshot),
+            generation,
+        ) {
+            Ok(ProviderTransportSnapshotReloadResult::Published(snapshot))
+        } else {
+            Ok(ProviderTransportSnapshotReloadResult::Invalidated)
+        }
+    }
+
+    fn start_provider_transport_snapshot_background_refresh(
+        &self,
+        cache_key: ProviderTransportSnapshotCacheKey,
+        provider_id: String,
+        endpoint_id: String,
+        key_id: String,
+    ) {
+        let mut inflight_guard = loop {
+            let generation = self
+                .provider_transport_snapshot_cache_generation
+                .load(Ordering::Acquire);
+            match self.register_provider_transport_snapshot_inflight(&cache_key, generation) {
+                ProviderTransportSnapshotInflightRegistration::Leader(guard) => break guard,
+                ProviderTransportSnapshotInflightRegistration::Follower(_) => return,
+                ProviderTransportSnapshotInflightRegistration::Retry => continue,
+            }
+        };
+        let generation = inflight_guard.generation();
+        let state = self.clone();
+        tokio::spawn(async move {
+            let result = state
+                .reload_provider_transport_snapshot(
+                    &cache_key,
+                    &provider_id,
+                    &endpoint_id,
+                    &key_id,
+                    generation,
+                )
+                .await;
+            if matches!(&result, Ok(ProviderTransportSnapshotReloadResult::Missing))
+                && state
+                    .provider_transport_snapshot_cache_generation
+                    .load(Ordering::Acquire)
+                    == generation
+            {
+                state
+                    .provider_transport_snapshot_cache
+                    .remove_if(&cache_key, |_, current| current.generation == generation);
+            }
+            let flight_result = if inflight_guard.generation_is_current(&state) {
+                provider_transport_snapshot_flight_result(&result)
+            } else {
+                ProviderTransportSnapshotFlightResult::Invalidated
+            };
+            inflight_guard.finish(flight_result);
+        });
     }
 
     pub(crate) async fn read_provider_transport_snapshot_uncached(
@@ -819,41 +1116,103 @@ impl AppState {
                 .await?
                 .map(Arc::new));
         };
-        if let Some(snapshot) = self.get_cached_provider_transport_snapshot_arc(&cache_key) {
-            return Ok(Some(snapshot));
-        }
+        loop {
+            match self.get_cached_provider_transport_snapshot_arc(&cache_key) {
+                ProviderTransportSnapshotCacheLookup::Fresh(snapshot) => {
+                    return Ok(Some(snapshot));
+                }
+                ProviderTransportSnapshotCacheLookup::Stale(snapshot) => {
+                    self.start_provider_transport_snapshot_background_refresh(
+                        cache_key.clone(),
+                        provider_id.to_string(),
+                        endpoint_id.to_string(),
+                        key_id.to_string(),
+                    );
+                    return Ok(Some(snapshot));
+                }
+                ProviderTransportSnapshotCacheLookup::Miss => {}
+            }
 
-        let inflight = self
-            .provider_transport_snapshot_inflight
-            .entry(cache_key.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let result = {
-            let _inflight_guard = inflight.lock().await;
-            if let Some(snapshot) = self.get_cached_provider_transport_snapshot_arc(&cache_key) {
-                Ok(Some(snapshot))
-            } else {
-                match self
-                    .read_provider_transport_snapshot_uncached(provider_id, endpoint_id, key_id)
-                    .await
-                {
-                    Ok(Some(snapshot)) => {
-                        let snapshot = self.apply_global_format_conversion_override(snapshot).await;
-                        let snapshot = Arc::new(snapshot);
-                        self.put_cached_provider_transport_snapshot(
-                            cache_key.clone(),
-                            Arc::clone(&snapshot),
-                        );
-                        Ok(Some(snapshot))
+            let generation = self
+                .provider_transport_snapshot_cache_generation
+                .load(Ordering::Acquire);
+            match self.register_provider_transport_snapshot_inflight(&cache_key, generation) {
+                ProviderTransportSnapshotInflightRegistration::Retry => continue,
+                ProviderTransportSnapshotInflightRegistration::Follower(flight) => {
+                    let flight_generation = flight.generation();
+                    let result = flight.wait().await;
+                    if self
+                        .provider_transport_snapshot_cache_generation
+                        .load(Ordering::Acquire)
+                        != flight_generation
+                    {
+                        continue;
                     }
-                    Ok(None) => Ok(None),
-                    Err(err) => Err(err),
+                    match result {
+                        ProviderTransportSnapshotFlightResult::Published(snapshot) => {
+                            return Ok(Some(snapshot));
+                        }
+                        ProviderTransportSnapshotFlightResult::Missing => return Ok(None),
+                        ProviderTransportSnapshotFlightResult::Error(err) => return Err(err),
+                        ProviderTransportSnapshotFlightResult::Invalidated
+                        | ProviderTransportSnapshotFlightResult::Retry => continue,
+                    }
+                }
+                ProviderTransportSnapshotInflightRegistration::Leader(mut inflight_guard) => {
+                    if !inflight_guard.generation_is_current(self) {
+                        inflight_guard.finish(ProviderTransportSnapshotFlightResult::Invalidated);
+                        continue;
+                    }
+
+                    // A different flight may have published between the first
+                    // cache check and this registration. Recheck before doing
+                    // the only database reload for this flight.
+                    if let ProviderTransportSnapshotCacheLookup::Fresh(snapshot) =
+                        self.get_cached_provider_transport_snapshot_arc(&cache_key)
+                    {
+                        if !inflight_guard.generation_is_current(self) {
+                            inflight_guard
+                                .finish(ProviderTransportSnapshotFlightResult::Invalidated);
+                            continue;
+                        }
+                        inflight_guard.finish(ProviderTransportSnapshotFlightResult::Published(
+                            Arc::clone(&snapshot),
+                        ));
+                        if !inflight_guard.generation_is_current(self) {
+                            continue;
+                        }
+                        return Ok(Some(snapshot));
+                    }
+
+                    let result = self
+                        .reload_provider_transport_snapshot(
+                            &cache_key,
+                            provider_id,
+                            endpoint_id,
+                            key_id,
+                            generation,
+                        )
+                        .await;
+                    let flight_result = if inflight_guard.generation_is_current(self) {
+                        provider_transport_snapshot_flight_result(&result)
+                    } else {
+                        ProviderTransportSnapshotFlightResult::Invalidated
+                    };
+                    inflight_guard.finish(flight_result);
+                    if !inflight_guard.generation_is_current(self) {
+                        continue;
+                    }
+                    match result {
+                        Ok(ProviderTransportSnapshotReloadResult::Published(snapshot)) => {
+                            return Ok(Some(snapshot));
+                        }
+                        Ok(ProviderTransportSnapshotReloadResult::Missing) => return Ok(None),
+                        Ok(ProviderTransportSnapshotReloadResult::Invalidated) => continue,
+                        Err(err) => return Err(err),
+                    }
                 }
             }
-        };
-        self.provider_transport_snapshot_inflight
-            .remove_if(&cache_key, |_, current| Arc::ptr_eq(current, &inflight));
-        result
+        }
     }
 
     pub(crate) async fn read_provider_transport_snapshot(
@@ -883,6 +1242,31 @@ impl AppState {
                 encrypted_api_key,
                 encrypted_auth_config,
                 expires_at_unix_secs,
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if updated {
+            self.clear_provider_transport_snapshot_cache();
+        }
+        Ok(updated)
+    }
+
+    pub(crate) async fn update_provider_catalog_key_oauth_runtime_state(
+        &self,
+        key_id: &str,
+        oauth_invalid_at_unix_secs: Option<u64>,
+        oauth_invalid_reason: Option<&str>,
+        encrypted_auth_config_update: Option<&str>,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<bool, GatewayError> {
+        let updated = self
+            .data
+            .update_provider_catalog_key_oauth_runtime_state(
+                key_id,
+                oauth_invalid_at_unix_secs,
+                oauth_invalid_reason,
+                encrypted_auth_config_update,
+                updated_at_unix_secs,
             )
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
@@ -1137,11 +1521,21 @@ impl AppState {
         let current_status_snapshot = latest_key.status_snapshot.take();
         latest_key.status_snapshot =
             sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
-        let updated = self
-            .update_provider_catalog_key(&latest_key)
-            .await?
-            .is_some();
+        let mut updated = self
+            .update_provider_catalog_key_oauth_runtime_state(
+                key_id,
+                latest_key.oauth_invalid_at_unix_secs,
+                latest_key.oauth_invalid_reason.as_deref(),
+                None,
+                latest_key.updated_at_unix_secs,
+            )
+            .await?;
         if updated {
+            updated = self
+                .update_provider_catalog_key_status_snapshot(
+                    &provider_key_oauth_status_snapshot_update(&latest_key),
+                )
+                .await?;
             self.clear_provider_transport_snapshot_cache();
             let _ = self.invalidate_local_oauth_refresh_entry(key_id).await;
         }
@@ -1208,8 +1602,8 @@ impl AppState {
             return Ok(());
         };
 
-        latest_key.encrypted_api_key = Some(encrypted_api_key);
-        latest_key.encrypted_auth_config = encrypted_auth_config;
+        latest_key.encrypted_api_key = Some(encrypted_api_key.clone());
+        latest_key.encrypted_auth_config = encrypted_auth_config.clone();
         latest_key.expires_at_unix_secs = entry.expires_at_unix_secs;
         let (oauth_invalid_at_unix_secs, oauth_invalid_reason) =
             local_oauth_refresh_success_invalid_state(&latest_key);
@@ -1225,11 +1619,31 @@ impl AppState {
         let current_status_snapshot = latest_key.status_snapshot.take();
         latest_key.status_snapshot =
             sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
-        let updated = self
-            .update_provider_catalog_key(&latest_key)
-            .await?
-            .is_some();
+        let mut updated = self
+            .update_provider_catalog_key_oauth_credentials(
+                key_id,
+                &encrypted_api_key,
+                encrypted_auth_config.as_deref(),
+                entry.expires_at_unix_secs,
+            )
+            .await?;
         if updated {
+            updated = self
+                .update_provider_catalog_key_oauth_runtime_state(
+                    key_id,
+                    latest_key.oauth_invalid_at_unix_secs,
+                    latest_key.oauth_invalid_reason.as_deref(),
+                    None,
+                    latest_key.updated_at_unix_secs,
+                )
+                .await?;
+        }
+        if updated {
+            updated = self
+                .update_provider_catalog_key_status_snapshot(
+                    &provider_key_oauth_status_snapshot_update(&latest_key),
+                )
+                .await?;
             self.clear_provider_transport_snapshot_cache();
         }
         let metadata_refresh_token_fingerprint =
@@ -1313,10 +1727,20 @@ impl AppState {
                 sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
 
             updated = self
-                .update_provider_catalog_key(&latest_key)
-                .await?
-                .is_some();
+                .update_provider_catalog_key_oauth_runtime_state(
+                    key_id,
+                    latest_key.oauth_invalid_at_unix_secs,
+                    latest_key.oauth_invalid_reason.as_deref(),
+                    None,
+                    latest_key.updated_at_unix_secs,
+                )
+                .await?;
             if updated {
+                updated = self
+                    .update_provider_catalog_key_status_snapshot(
+                        &provider_key_oauth_status_snapshot_update(&latest_key),
+                    )
+                    .await?;
                 self.clear_provider_transport_snapshot_cache();
                 let _ = self.invalidate_local_oauth_refresh_entry(key_id).await;
             }
@@ -1561,6 +1985,23 @@ impl AppState {
     }
 }
 
+fn provider_key_oauth_status_snapshot_update(
+    key: &StoredProviderCatalogKey,
+) -> ProviderCatalogKeyStatusSnapshotUpdate {
+    let oauth = key
+        .status_snapshot
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|snapshot| snapshot.get("oauth"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    ProviderCatalogKeyStatusSnapshotUpdate {
+        key_id: key.id.clone(),
+        status_snapshot_patch: json!({"oauth":oauth}),
+        updated_at_unix_secs: key.updated_at_unix_secs,
+    }
+}
+
 fn merge_runtime_oauth_invalid_state(
     provider_type: &str,
     key: &StoredProviderCatalogKey,
@@ -1660,15 +2101,27 @@ fn local_oauth_request_uses_direct_client(url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data_contracts::repository::provider_catalog::{
-        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+        ProviderCatalogKeyListQuery, ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
+        StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+        StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
+        StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
     };
+    use aether_data_contracts::DataLayerError;
+    use async_trait::async_trait;
     use serde_json::json;
+    use tokio::sync::Notify;
 
-    use super::AppState;
+    use super::{
+        AppState, ProviderTransportSnapshotCacheKey, ProviderTransportSnapshotFlight,
+        ProviderTransportSnapshotFlightResult, ProviderTransportSnapshotInflightRegistration,
+        PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
+    };
     use crate::data::GatewayDataState;
 
     fn sample_provider() -> StoredProviderCatalogProvider {
@@ -1748,6 +2201,120 @@ mod tests {
             .with_data_state_for_tests(data_state)
     }
 
+    struct BlockingProviderCatalogReadRepository {
+        inner: Arc<InMemoryProviderCatalogReadRepository>,
+        key_reads: AtomicUsize,
+        block_on_key_read: usize,
+        blocked_key_read_started: Notify,
+        release_blocked_key_read: Notify,
+    }
+
+    impl BlockingProviderCatalogReadRepository {
+        fn new(inner: Arc<InMemoryProviderCatalogReadRepository>) -> Self {
+            Self::blocking_on_key_read(inner, 1)
+        }
+
+        fn blocking_on_key_read(
+            inner: Arc<InMemoryProviderCatalogReadRepository>,
+            block_on_key_read: usize,
+        ) -> Self {
+            Self {
+                inner,
+                key_reads: AtomicUsize::new(0),
+                block_on_key_read,
+                blocked_key_read_started: Notify::new(),
+                release_blocked_key_read: Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ProviderCatalogReadRepository for BlockingProviderCatalogReadRepository {
+        async fn list_providers(
+            &self,
+            active_only: bool,
+        ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
+            self.inner.list_providers(active_only).await
+        }
+
+        async fn list_providers_by_ids(
+            &self,
+            provider_ids: &[String],
+        ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
+            self.inner.list_providers_by_ids(provider_ids).await
+        }
+
+        async fn list_endpoints_by_ids(
+            &self,
+            endpoint_ids: &[String],
+        ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
+            self.inner.list_endpoints_by_ids(endpoint_ids).await
+        }
+
+        async fn list_endpoints_by_provider_ids(
+            &self,
+            provider_ids: &[String],
+        ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
+            self.inner
+                .list_endpoints_by_provider_ids(provider_ids)
+                .await
+        }
+
+        async fn list_keys_by_ids(
+            &self,
+            key_ids: &[String],
+        ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+            let keys = self.inner.list_keys_by_ids(key_ids).await?;
+            let read_number = self.key_reads.fetch_add(1, Ordering::AcqRel) + 1;
+            if read_number == self.block_on_key_read {
+                self.blocked_key_read_started.notify_one();
+                self.release_blocked_key_read.notified().await;
+            }
+            Ok(keys)
+        }
+
+        async fn list_keys_by_provider_ids(
+            &self,
+            provider_ids: &[String],
+        ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+            self.inner.list_keys_by_provider_ids(provider_ids).await
+        }
+
+        async fn list_key_summaries_by_provider_ids(
+            &self,
+            provider_ids: &[String],
+        ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+            self.inner
+                .list_key_summaries_by_provider_ids(provider_ids)
+                .await
+        }
+
+        async fn list_key_maintenance_summaries_by_provider_ids(
+            &self,
+            provider_ids: &[String],
+        ) -> Result<Vec<StoredProviderCatalogKeyMaintenanceSummary>, DataLayerError> {
+            self.inner
+                .list_key_maintenance_summaries_by_provider_ids(provider_ids)
+                .await
+        }
+
+        async fn list_keys_page(
+            &self,
+            query: &ProviderCatalogKeyListQuery,
+        ) -> Result<StoredProviderCatalogKeyPage, DataLayerError> {
+            self.inner.list_keys_page(query).await
+        }
+
+        async fn list_key_stats_by_provider_ids(
+            &self,
+            provider_ids: &[String],
+        ) -> Result<Vec<StoredProviderCatalogKeyStats>, DataLayerError> {
+            self.inner
+                .list_key_stats_by_provider_ids(provider_ids)
+                .await
+        }
+    }
+
     #[tokio::test]
     async fn global_format_conversion_overrides_snapshot_without_persisting_provider_value() {
         let state = state_with_global_format_conversion(false);
@@ -1793,6 +2360,593 @@ mod tests {
 
         assert!(snapshot.is_some());
         assert!(state.provider_transport_snapshot_inflight.is_empty());
+    }
+
+    #[tokio::test]
+    async fn finished_transport_flight_detects_generation_clear_before_return() {
+        let state = state_with_global_format_conversion(false);
+        let snapshot = state
+            .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("snapshot read should succeed")
+            .expect("snapshot should exist");
+        state.clear_provider_transport_snapshot_cache();
+
+        let cache_key = ProviderTransportSnapshotCacheKey::new("provider-1", "endpoint-1", "key-1")
+            .expect("cache key should build");
+        let generation = state
+            .provider_transport_snapshot_cache_generation
+            .load(Ordering::Acquire);
+        let mut guard =
+            match state.register_provider_transport_snapshot_inflight(&cache_key, generation) {
+                ProviderTransportSnapshotInflightRegistration::Leader(guard) => guard,
+                _ => panic!("empty current-generation key should register a leader"),
+            };
+        guard.finish(ProviderTransportSnapshotFlightResult::Published(snapshot));
+        assert!(guard.generation_is_current(&state));
+
+        state.clear_provider_transport_snapshot_cache();
+        assert!(!guard.generation_is_current(&state));
+    }
+
+    #[tokio::test]
+    async fn transport_cache_clear_retries_inflight_load_before_publishing_snapshot() {
+        let inner = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider()],
+            vec![sample_endpoint()],
+            vec![sample_key()],
+        ));
+        let reader = Arc::new(BlockingProviderCatalogReadRepository::new(Arc::clone(
+            &inner,
+        )));
+        let data_state = GatewayDataState::with_provider_transport_reader_for_tests(
+            reader.clone(),
+            "test-encryption-key",
+        );
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+
+        let read_state = state.clone();
+        let read_task = tokio::spawn(async move {
+            read_state
+                .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+                .await
+                .expect("transport snapshot read should succeed")
+                .expect("transport snapshot should exist")
+        });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            reader.blocked_key_read_started.notified(),
+        )
+        .await
+        .expect("first transport load should reach the blocked key read");
+
+        let mut inactive_key = sample_key();
+        inactive_key.is_active = false;
+        inner
+            .update_key(&inactive_key)
+            .await
+            .expect("provider key should update while the old snapshot load is blocked");
+        state.clear_provider_transport_snapshot_cache();
+        reader.release_blocked_key_read.notify_one();
+
+        let snapshot = tokio::time::timeout(Duration::from_secs(1), read_task)
+            .await
+            .expect("transport load should retry promptly after invalidation")
+            .expect("transport load task should join");
+        assert!(!snapshot.key.is_active);
+        assert!(reader.key_reads.load(Ordering::Acquire) >= 2);
+
+        let cached = state
+            .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("cached transport read should succeed")
+            .expect("cached transport should exist");
+        assert!(!cached.key.is_active);
+        assert!(Arc::ptr_eq(&snapshot, &cached));
+    }
+
+    fn blocking_transport_state(
+        block_on_key_read: usize,
+    ) -> (
+        AppState,
+        Arc<InMemoryProviderCatalogReadRepository>,
+        Arc<BlockingProviderCatalogReadRepository>,
+    ) {
+        let inner = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider()],
+            vec![sample_endpoint()],
+            vec![sample_key()],
+        ));
+        let reader = Arc::new(BlockingProviderCatalogReadRepository::blocking_on_key_read(
+            Arc::clone(&inner),
+            block_on_key_read,
+        ));
+        let data_state = GatewayDataState::with_provider_transport_reader_for_tests(
+            reader.clone(),
+            "test-encryption-key",
+        );
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+        (state, inner, reader)
+    }
+
+    fn age_transport_snapshot_cache(state: &AppState, age: Duration) {
+        let cache_key = ProviderTransportSnapshotCacheKey::new("provider-1", "endpoint-1", "key-1")
+            .expect("cache key should build");
+        let mut cached = state
+            .provider_transport_snapshot_cache
+            .get_mut(&cache_key)
+            .expect("snapshot should be cached before aging");
+        cached.loaded_at = Instant::now() - age;
+    }
+
+    async fn wait_for_transport_refresh_to_finish(state: &AppState) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state.provider_transport_snapshot_inflight.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background transport refresh should finish");
+    }
+
+    async fn wait_for_transport_flight_followers(
+        state: &AppState,
+        expected_strong_count: usize,
+    ) -> Arc<ProviderTransportSnapshotFlight> {
+        let cache_key = ProviderTransportSnapshotCacheKey::new("provider-1", "endpoint-1", "key-1")
+            .expect("cache key should build");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(flight) = state
+                    .provider_transport_snapshot_inflight
+                    .get(&cache_key)
+                    .filter(|flight| Arc::strong_count(flight.value()) >= expected_strong_count)
+                    .map(|flight| flight.clone())
+                {
+                    return flight;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all transport snapshot followers should register")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cold_transport_snapshot_broadcasts_to_twenty_thousand_followers() {
+        const REQUESTS: usize = 20_000;
+        let (state, _inner, reader) = blocking_transport_state(1);
+        let mut reads = Vec::with_capacity(REQUESTS);
+        for _ in 0..REQUESTS {
+            let read_state = state.clone();
+            reads.push(tokio::spawn(async move {
+                read_state
+                    .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+                    .await
+                    .expect("transport snapshot read should succeed")
+                    .expect("transport snapshot should exist")
+            }));
+        }
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            reader.blocked_key_read_started.notified(),
+        )
+        .await
+        .expect("leader should reach the database barrier");
+        let _flight = wait_for_transport_flight_followers(&state, REQUESTS + 1).await;
+        assert_eq!(reader.key_reads.load(Ordering::Acquire), 1);
+
+        reader.release_blocked_key_read.notify_one();
+        let snapshots = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut snapshots = Vec::with_capacity(REQUESTS);
+            for read in reads {
+                snapshots.push(read.await.expect("transport read task should join"));
+            }
+            snapshots
+        })
+        .await
+        .expect("all followers should wake from one broadcast");
+        assert_eq!(reader.key_reads.load(Ordering::Acquire), 1);
+        let first = snapshots
+            .first()
+            .expect("at least one snapshot should exist");
+        for snapshot in snapshots.iter().skip(1) {
+            assert!(Arc::ptr_eq(first, snapshot));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn transport_cache_clear_wakes_old_followers_before_old_leader_finishes() {
+        const REQUESTS: usize = 64;
+        let (state, inner, reader) = blocking_transport_state(1);
+        let mut reads = Vec::with_capacity(REQUESTS);
+        for _ in 0..REQUESTS {
+            let read_state = state.clone();
+            reads.push(tokio::spawn(async move {
+                read_state
+                    .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+                    .await
+                    .expect("transport snapshot read should succeed")
+                    .expect("transport snapshot should exist")
+            }));
+        }
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            reader.blocked_key_read_started.notified(),
+        )
+        .await
+        .expect("old leader should reach the database barrier");
+        let _old_flight = wait_for_transport_flight_followers(&state, REQUESTS + 1).await;
+
+        let mut inactive_key = sample_key();
+        inactive_key.is_active = false;
+        inner
+            .update_key(&inactive_key)
+            .await
+            .expect("provider key should update before invalidation");
+        state.clear_provider_transport_snapshot_cache();
+
+        // The old leader is still blocked. A follower must nevertheless claim
+        // the new generation and perform the replacement read immediately.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while reader.key_reads.load(Ordering::Acquire) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("new generation follower should reload before old leader release");
+
+        reader.release_blocked_key_read.notify_one();
+        let snapshots = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut snapshots = Vec::with_capacity(REQUESTS);
+            for read in reads {
+                snapshots.push(read.await.expect("transport read task should join"));
+            }
+            snapshots
+        })
+        .await
+        .expect("invalidated followers should complete");
+        assert_eq!(reader.key_reads.load(Ordering::Acquire), 2);
+        assert!(snapshots.iter().all(|snapshot| !snapshot.key.is_active));
+    }
+
+    #[tokio::test]
+    async fn cancelled_transport_snapshot_leader_releases_followers() {
+        let (state, _inner, reader) = blocking_transport_state(1);
+        let leader_state = state.clone();
+        let leader = tokio::spawn(async move {
+            leader_state
+                .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+                .await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            reader.blocked_key_read_started.notified(),
+        )
+        .await
+        .expect("leader should reach the database barrier");
+
+        let follower_state = state.clone();
+        let follower = tokio::spawn(async move {
+            follower_state
+                .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+                .await
+                .expect("replacement transport read should succeed")
+                .expect("replacement snapshot should exist")
+        });
+        let _old_flight = wait_for_transport_flight_followers(&state, 3).await;
+        leader.abort();
+        assert!(leader
+            .await
+            .expect_err("leader should be cancelled")
+            .is_cancelled());
+
+        let replacement = tokio::time::timeout(Duration::from_secs(2), follower)
+            .await
+            .expect("follower should be released after leader cancellation")
+            .expect("follower task should join");
+        assert_eq!(reader.key_reads.load(Ordering::Acquire), 2);
+        assert!(replacement.key.is_active);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn missing_transport_snapshot_result_is_broadcast_to_all_followers() {
+        const REQUESTS: usize = 64;
+        let inner = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider()],
+            vec![sample_endpoint()],
+            Vec::new(),
+        ));
+        let reader = Arc::new(BlockingProviderCatalogReadRepository::new(Arc::clone(
+            &inner,
+        )));
+        let data_state = GatewayDataState::with_provider_transport_reader_for_tests(
+            reader.clone(),
+            "test-encryption-key",
+        );
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+
+        let mut reads = Vec::with_capacity(REQUESTS);
+        for _ in 0..REQUESTS {
+            let read_state = state.clone();
+            reads.push(tokio::spawn(async move {
+                read_state
+                    .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+                    .await
+                    .expect("missing transport read should not fail")
+            }));
+        }
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            reader.blocked_key_read_started.notified(),
+        )
+        .await
+        .expect("missing-result leader should reach the database barrier");
+        let _flight = wait_for_transport_flight_followers(&state, REQUESTS + 1).await;
+
+        reader.release_blocked_key_read.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for read in reads {
+                assert!(read.await.expect("missing read task should join").is_none());
+            }
+        })
+        .await
+        .expect("missing result should wake all followers");
+        assert_eq!(reader.key_reads.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn transport_snapshot_error_is_broadcast_to_all_followers() {
+        const REQUESTS: usize = 64;
+        let mut mismatched_key = sample_key();
+        mismatched_key.provider_id = "provider-other".to_string();
+        let inner = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider()],
+            vec![sample_endpoint()],
+            vec![mismatched_key],
+        ));
+        let reader = Arc::new(BlockingProviderCatalogReadRepository::new(Arc::clone(
+            &inner,
+        )));
+        let data_state = GatewayDataState::with_provider_transport_reader_for_tests(
+            reader.clone(),
+            "test-encryption-key",
+        );
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+
+        let mut reads = Vec::with_capacity(REQUESTS);
+        for _ in 0..REQUESTS {
+            let read_state = state.clone();
+            reads.push(tokio::spawn(async move {
+                read_state
+                    .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+                    .await
+                    .expect_err("provider mismatch should fail")
+                    .into_message()
+            }));
+        }
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            reader.blocked_key_read_started.notified(),
+        )
+        .await
+        .expect("error-result leader should reach the database barrier");
+        let _flight = wait_for_transport_flight_followers(&state, REQUESTS + 1).await;
+
+        reader.release_blocked_key_read.notify_one();
+        let messages = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut messages = Vec::with_capacity(REQUESTS);
+            for read in reads {
+                messages.push(read.await.expect("error read task should join"));
+            }
+            messages
+        })
+        .await
+        .expect("error result should wake all followers");
+        assert_eq!(reader.key_reads.load(Ordering::Acquire), 1);
+        assert!(messages
+            .iter()
+            .all(|message| message.contains("provider_api_keys.provider_id mismatch")));
+    }
+
+    #[tokio::test]
+    async fn stale_transport_snapshot_returns_immediately_and_refreshes_once() {
+        let (state, inner, reader) = blocking_transport_state(2);
+        let original = state
+            .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("initial transport read should succeed")
+            .expect("initial transport snapshot should exist");
+        age_transport_snapshot_cache(
+            &state,
+            PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL + Duration::from_millis(10),
+        );
+
+        let mut inactive_key = sample_key();
+        inactive_key.is_active = false;
+        inner
+            .update_key(&inactive_key)
+            .await
+            .expect("provider key should update before stale refresh");
+
+        let stale = tokio::time::timeout(
+            Duration::from_millis(250),
+            state.read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1"),
+        )
+        .await
+        .expect("stale cache hit must not wait for the database refresh")
+        .expect("stale transport read should succeed")
+        .expect("stale transport snapshot should exist");
+        assert!(Arc::ptr_eq(&original, &stale));
+        assert!(stale.key.is_active);
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            reader.blocked_key_read_started.notified(),
+        )
+        .await
+        .expect("stale hit should start one background refresh");
+        assert_eq!(reader.key_reads.load(Ordering::Acquire), 2);
+
+        for _ in 0..32 {
+            let observed = state
+                .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+                .await
+                .expect("concurrent stale read should succeed")
+                .expect("concurrent stale snapshot should exist");
+            assert!(Arc::ptr_eq(&original, &observed));
+        }
+        assert_eq!(reader.key_reads.load(Ordering::Acquire), 2);
+
+        reader.release_blocked_key_read.notify_one();
+        wait_for_transport_refresh_to_finish(&state).await;
+        let refreshed = state
+            .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("refreshed transport read should succeed")
+            .expect("refreshed transport snapshot should exist");
+        assert!(!refreshed.key.is_active);
+        assert_eq!(reader.key_reads.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn stale_transport_refresh_cannot_publish_after_generation_clear() {
+        let (state, inner, reader) = blocking_transport_state(2);
+        let _initial = state
+            .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("initial transport read should succeed")
+            .expect("initial transport snapshot should exist");
+        age_transport_snapshot_cache(
+            &state,
+            PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL + Duration::from_millis(10),
+        );
+
+        let mut inactive_key = sample_key();
+        inactive_key.is_active = false;
+        inner
+            .update_key(&inactive_key)
+            .await
+            .expect("provider key should update before stale refresh");
+        let stale = state
+            .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("stale transport read should succeed")
+            .expect("stale transport snapshot should exist");
+        assert!(stale.key.is_active);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            reader.blocked_key_read_started.notified(),
+        )
+        .await
+        .expect("background refresh should reach the barrier");
+        let cache_key = ProviderTransportSnapshotCacheKey::new("provider-1", "endpoint-1", "key-1")
+            .expect("cache key should build");
+        let old_inflight = state
+            .provider_transport_snapshot_inflight
+            .get(&cache_key)
+            .expect("background refresh should own the inflight entry")
+            .clone();
+
+        inner
+            .update_key(&sample_key())
+            .await
+            .expect("provider key should update for the new generation");
+        state.clear_provider_transport_snapshot_cache();
+        let current = state
+            .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("new generation transport read should succeed")
+            .expect("new generation snapshot should exist");
+        assert!(current.key.is_active);
+
+        reader.release_blocked_key_read.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while Arc::strong_count(&old_inflight) > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("old background refresh should finish after invalidation");
+        let cached = state
+            .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("cached new generation read should succeed")
+            .expect("cached new generation snapshot should exist");
+        assert!(cached.key.is_active);
+        assert!(Arc::ptr_eq(&current, &cached));
+    }
+
+    #[tokio::test]
+    async fn hard_expired_transport_snapshot_uses_one_synchronous_reload() {
+        let (state, inner, reader) = blocking_transport_state(2);
+        let _initial = state
+            .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("initial transport read should succeed")
+            .expect("initial transport snapshot should exist");
+        age_transport_snapshot_cache(
+            &state,
+            PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL + Duration::from_secs(1),
+        );
+        let mut inactive_key = sample_key();
+        inactive_key.is_active = false;
+        inner
+            .update_key(&inactive_key)
+            .await
+            .expect("provider key should update before hard-expiry read");
+
+        let mut reads = Vec::new();
+        for _ in 0..32 {
+            let read_state = state.clone();
+            reads.push(tokio::spawn(async move {
+                read_state
+                    .read_provider_transport_snapshot_arc("provider-1", "endpoint-1", "key-1")
+                    .await
+                    .expect("hard-expiry transport read should succeed")
+                    .expect("hard-expiry snapshot should exist")
+            }));
+        }
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            reader.blocked_key_read_started.notified(),
+        )
+        .await
+        .expect("one synchronous reload should reach the barrier");
+        tokio::task::yield_now().await;
+        assert_eq!(reader.key_reads.load(Ordering::Acquire), 2);
+        assert!(reads.iter().any(|read| !read.is_finished()));
+
+        reader.release_blocked_key_read.notify_one();
+        let snapshots = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut snapshots = Vec::with_capacity(reads.len());
+            for read in reads {
+                snapshots.push(read.await.expect("transport read task should join"));
+            }
+            snapshots
+        })
+        .await
+        .expect("synchronous reload waiters should complete after one reload");
+        assert_eq!(reader.key_reads.load(Ordering::Acquire), 2);
+        let first = snapshots
+            .first()
+            .expect("at least one snapshot should exist");
+        assert!(!first.key.is_active);
+        for snapshot in snapshots.iter().skip(1) {
+            assert!(Arc::ptr_eq(first, snapshot));
+        }
     }
 
     #[test]

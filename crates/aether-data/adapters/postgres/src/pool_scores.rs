@@ -35,6 +35,91 @@ SELECT
 FROM pool_member_scores
 "#;
 
+const UPSERT_PRESERVING_NULLABLE_TIMESTAMPS_SQL: &str = r#"
+INSERT INTO pool_member_scores (
+  id, pool_kind, pool_id, member_kind, member_id, capability, scope_kind, scope_id,
+  score, hard_state, score_version, score_reason, last_ranked_at, last_scheduled_at,
+  last_success_at, last_failure_at, failure_count, last_probe_attempt_at,
+  last_probe_success_at, last_probe_failure_at, probe_failure_count, probe_status, updated_at
+) VALUES (
+  $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23
+)
+ON CONFLICT(id) DO UPDATE SET
+  pool_kind = EXCLUDED.pool_kind,
+  pool_id = EXCLUDED.pool_id,
+  member_kind = EXCLUDED.member_kind,
+  member_id = EXCLUDED.member_id,
+  capability = EXCLUDED.capability,
+  scope_kind = EXCLUDED.scope_kind,
+  scope_id = EXCLUDED.scope_id,
+  score = EXCLUDED.score,
+  hard_state = EXCLUDED.hard_state,
+  score_version = EXCLUDED.score_version,
+  score_reason = EXCLUDED.score_reason,
+  last_ranked_at = EXCLUDED.last_ranked_at,
+  last_scheduled_at = COALESCE(EXCLUDED.last_scheduled_at, pool_member_scores.last_scheduled_at),
+  last_success_at = COALESCE(EXCLUDED.last_success_at, pool_member_scores.last_success_at),
+  last_failure_at = COALESCE(EXCLUDED.last_failure_at, pool_member_scores.last_failure_at),
+  failure_count = EXCLUDED.failure_count,
+  last_probe_attempt_at = COALESCE(EXCLUDED.last_probe_attempt_at, pool_member_scores.last_probe_attempt_at),
+  last_probe_success_at = COALESCE(EXCLUDED.last_probe_success_at, pool_member_scores.last_probe_success_at),
+  last_probe_failure_at = COALESCE(EXCLUDED.last_probe_failure_at, pool_member_scores.last_probe_failure_at),
+  probe_failure_count = EXCLUDED.probe_failure_count,
+  probe_status = EXCLUDED.probe_status,
+  updated_at = EXCLUDED.updated_at
+"#;
+
+const UPSERT_OAUTH_RECOVERY_SQL: &str = r#"
+INSERT INTO pool_member_scores (
+  id, pool_kind, pool_id, member_kind, member_id, capability, scope_kind, scope_id,
+  score, hard_state, score_version, score_reason, last_ranked_at, last_scheduled_at,
+  last_success_at, last_failure_at, failure_count, last_probe_attempt_at,
+  last_probe_success_at, last_probe_failure_at, probe_failure_count, probe_status, updated_at
+) VALUES (
+  $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23
+)
+ON CONFLICT(id) DO UPDATE SET
+  pool_kind = EXCLUDED.pool_kind,
+  pool_id = EXCLUDED.pool_id,
+  member_kind = EXCLUDED.member_kind,
+  member_id = EXCLUDED.member_id,
+  capability = EXCLUDED.capability,
+  scope_kind = EXCLUDED.scope_kind,
+  scope_id = EXCLUDED.scope_id,
+  score = CASE WHEN pool_member_scores.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.score ELSE pool_member_scores.score END,
+  hard_state = CASE WHEN pool_member_scores.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.hard_state ELSE pool_member_scores.hard_state END,
+  score_version = CASE WHEN pool_member_scores.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.score_version ELSE pool_member_scores.score_version END,
+  score_reason = CASE WHEN pool_member_scores.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.score_reason ELSE pool_member_scores.score_reason END,
+  last_ranked_at = CASE WHEN pool_member_scores.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.last_ranked_at ELSE pool_member_scores.last_ranked_at END,
+  last_failure_at = CASE
+    WHEN pool_member_scores.last_failure_at IS NULL OR pool_member_scores.last_failure_at <= EXCLUDED.updated_at
+    THEN EXCLUDED.last_failure_at ELSE pool_member_scores.last_failure_at END,
+  failure_count = CASE
+    WHEN pool_member_scores.last_failure_at IS NULL OR pool_member_scores.last_failure_at <= EXCLUDED.updated_at
+    THEN EXCLUDED.failure_count ELSE pool_member_scores.failure_count END,
+  last_probe_failure_at = CASE
+    WHEN pool_member_scores.last_probe_failure_at IS NULL OR pool_member_scores.last_probe_failure_at <= EXCLUDED.updated_at
+    THEN EXCLUDED.last_probe_failure_at ELSE pool_member_scores.last_probe_failure_at END,
+  probe_failure_count = CASE
+    WHEN pool_member_scores.last_probe_failure_at IS NULL OR pool_member_scores.last_probe_failure_at <= EXCLUDED.updated_at
+    THEN EXCLUDED.probe_failure_count ELSE pool_member_scores.probe_failure_count END,
+  probe_status = CASE
+    WHEN (pool_member_scores.last_probe_attempt_at IS NOT NULL AND pool_member_scores.last_probe_attempt_at > EXCLUDED.updated_at)
+      OR (pool_member_scores.last_probe_success_at IS NOT NULL AND pool_member_scores.last_probe_success_at > EXCLUDED.updated_at)
+      OR (pool_member_scores.last_probe_failure_at IS NOT NULL AND pool_member_scores.last_probe_failure_at > EXCLUDED.updated_at)
+    THEN pool_member_scores.probe_status ELSE EXCLUDED.probe_status END,
+  updated_at = GREATEST(pool_member_scores.updated_at, EXCLUDED.updated_at)
+"#;
+
+fn pool_member_score_upsert_sql(mode: PoolMemberScoreUpsertMode) -> &'static str {
+    match mode {
+        PoolMemberScoreUpsertMode::PreserveExistingNullableTimestamps => {
+            UPSERT_PRESERVING_NULLABLE_TIMESTAMPS_SQL
+        }
+        PoolMemberScoreUpsertMode::OAuthRecovery => UPSERT_OAUTH_RECOVERY_SQL,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PostgresPoolMemberScoreRepository {
     pool: PgPool,
@@ -347,85 +432,67 @@ impl PoolScoreReadRepository for PostgresPoolMemberScoreRepository {
 
 #[async_trait]
 impl PoolMemberScoreWriteRepository for PostgresPoolMemberScoreRepository {
-    async fn upsert_pool_member_score(
+    async fn upsert_pool_member_score_with_mode(
         &self,
         score: UpsertPoolMemberScore,
+        mode: PoolMemberScoreUpsertMode,
     ) -> Result<StoredPoolMemberScore, DataLayerError> {
         score.validate()?;
         let stored = score.clone().into_stored();
-        sqlx::query(
-            r#"
-INSERT INTO pool_member_scores (
-  id, pool_kind, pool_id, member_kind, member_id, capability, scope_kind, scope_id,
-  score, hard_state, score_version, score_reason, last_ranked_at, last_scheduled_at,
-  last_success_at, last_failure_at, failure_count, last_probe_attempt_at,
-  last_probe_success_at, last_probe_failure_at, probe_failure_count, probe_status, updated_at
-) VALUES (
-  $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23
-)
-ON CONFLICT(id) DO UPDATE SET
-  pool_kind = EXCLUDED.pool_kind,
-  pool_id = EXCLUDED.pool_id,
-  member_kind = EXCLUDED.member_kind,
-  member_id = EXCLUDED.member_id,
-  capability = EXCLUDED.capability,
-  scope_kind = EXCLUDED.scope_kind,
-  scope_id = EXCLUDED.scope_id,
-  score = EXCLUDED.score,
-  hard_state = EXCLUDED.hard_state,
-  score_version = EXCLUDED.score_version,
-  score_reason = EXCLUDED.score_reason,
-  last_ranked_at = EXCLUDED.last_ranked_at,
-  last_scheduled_at = COALESCE(EXCLUDED.last_scheduled_at, pool_member_scores.last_scheduled_at),
-  last_success_at = COALESCE(EXCLUDED.last_success_at, pool_member_scores.last_success_at),
-  last_failure_at = COALESCE(EXCLUDED.last_failure_at, pool_member_scores.last_failure_at),
-  failure_count = EXCLUDED.failure_count,
-  last_probe_attempt_at = COALESCE(EXCLUDED.last_probe_attempt_at, pool_member_scores.last_probe_attempt_at),
-  last_probe_success_at = COALESCE(EXCLUDED.last_probe_success_at, pool_member_scores.last_probe_success_at),
-  last_probe_failure_at = COALESCE(EXCLUDED.last_probe_failure_at, pool_member_scores.last_probe_failure_at),
-  probe_failure_count = EXCLUDED.probe_failure_count,
-  probe_status = EXCLUDED.probe_status,
-  updated_at = EXCLUDED.updated_at
-"#,
-        )
-        .bind(stored.id.as_str())
-        .bind(stored.pool_kind.as_str())
-        .bind(stored.pool_id.as_str())
-        .bind(stored.member_kind.as_str())
-        .bind(stored.member_id.as_str())
-        .bind(stored.capability.as_str())
-        .bind(stored.scope_kind.as_str())
-        .bind(stored.scope_id.as_deref())
-        .bind(stored.score)
-        .bind(stored.hard_state.as_database())
-        .bind(i64_from_u64(stored.score_version, "pool score version")?)
-        .bind(&stored.score_reason)
-        .bind(i64_opt_from_u64(stored.last_ranked_at, "pool score last_ranked_at")?)
-        .bind(i64_opt_from_u64(stored.last_scheduled_at, "pool score last_scheduled_at")?)
-        .bind(i64_opt_from_u64(stored.last_success_at, "pool score last_success_at")?)
-        .bind(i64_opt_from_u64(stored.last_failure_at, "pool score last_failure_at")?)
-        .bind(i64_from_u64(stored.failure_count, "pool score failure_count")?)
-        .bind(i64_opt_from_u64(
-            stored.last_probe_attempt_at,
-            "pool score last_probe_attempt_at",
-        )?)
-        .bind(i64_opt_from_u64(
-            stored.last_probe_success_at,
-            "pool score last_probe_success_at",
-        )?)
-        .bind(i64_opt_from_u64(
-            stored.last_probe_failure_at,
-            "pool score last_probe_failure_at",
-        )?)
-        .bind(i64_from_u64(
-            stored.probe_failure_count,
-            "pool score probe_failure_count",
-        )?)
-        .bind(stored.probe_status.as_database())
-        .bind(i64_from_u64(stored.updated_at, "pool score updated_at")?)
-        .execute(&self.pool)
-        .await
-        .map_postgres_err()?;
+        sqlx::query(pool_member_score_upsert_sql(mode))
+            .bind(stored.id.as_str())
+            .bind(stored.pool_kind.as_str())
+            .bind(stored.pool_id.as_str())
+            .bind(stored.member_kind.as_str())
+            .bind(stored.member_id.as_str())
+            .bind(stored.capability.as_str())
+            .bind(stored.scope_kind.as_str())
+            .bind(stored.scope_id.as_deref())
+            .bind(stored.score)
+            .bind(stored.hard_state.as_database())
+            .bind(i64_from_u64(stored.score_version, "pool score version")?)
+            .bind(&stored.score_reason)
+            .bind(i64_opt_from_u64(
+                stored.last_ranked_at,
+                "pool score last_ranked_at",
+            )?)
+            .bind(i64_opt_from_u64(
+                stored.last_scheduled_at,
+                "pool score last_scheduled_at",
+            )?)
+            .bind(i64_opt_from_u64(
+                stored.last_success_at,
+                "pool score last_success_at",
+            )?)
+            .bind(i64_opt_from_u64(
+                stored.last_failure_at,
+                "pool score last_failure_at",
+            )?)
+            .bind(i64_from_u64(
+                stored.failure_count,
+                "pool score failure_count",
+            )?)
+            .bind(i64_opt_from_u64(
+                stored.last_probe_attempt_at,
+                "pool score last_probe_attempt_at",
+            )?)
+            .bind(i64_opt_from_u64(
+                stored.last_probe_success_at,
+                "pool score last_probe_success_at",
+            )?)
+            .bind(i64_opt_from_u64(
+                stored.last_probe_failure_at,
+                "pool score last_probe_failure_at",
+            )?)
+            .bind(i64_from_u64(
+                stored.probe_failure_count,
+                "pool score probe_failure_count",
+            )?)
+            .bind(stored.probe_status.as_database())
+            .bind(i64_from_u64(stored.updated_at, "pool score updated_at")?)
+            .execute(&self.pool)
+            .await
+            .map_postgres_err()?;
         Ok(stored)
     }
 
@@ -653,4 +720,62 @@ fn upsert_from_stored(score: StoredPoolMemberScore) -> UpsertPoolMemberScore {
 fn i64_from_usize(value: usize, field: &str) -> Result<i64, DataLayerError> {
     i64::try_from(value)
         .map_err(|_| DataLayerError::InvalidInput(format!("{field} exceeds signed 64-bit range")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn postgres_upsert_mode_selects_nullable_timestamp_semantics() {
+        let preserving = pool_member_score_upsert_sql(
+            PoolMemberScoreUpsertMode::PreserveExistingNullableTimestamps,
+        );
+        let recovering = pool_member_score_upsert_sql(PoolMemberScoreUpsertMode::OAuthRecovery);
+
+        for field in [
+            "last_scheduled_at",
+            "last_success_at",
+            "last_failure_at",
+            "last_probe_attempt_at",
+            "last_probe_success_at",
+            "last_probe_failure_at",
+        ] {
+            assert!(preserving.contains(&format!(
+                "{field} = COALESCE(EXCLUDED.{field}, pool_member_scores.{field})"
+            )));
+        }
+        for field in [
+            "last_scheduled_at",
+            "last_success_at",
+            "last_probe_attempt_at",
+            "last_probe_success_at",
+        ] {
+            assert!(!recovering.contains(&format!("\n  {field} =")));
+        }
+        for field in [
+            "score",
+            "hard_state",
+            "score_version",
+            "score_reason",
+            "last_ranked_at",
+        ] {
+            assert!(recovering.contains(&format!(
+                "{field} = CASE WHEN pool_member_scores.updated_at <= EXCLUDED.updated_at"
+            )));
+        }
+        assert!(recovering.contains(
+            "pool_member_scores.last_failure_at IS NULL OR pool_member_scores.last_failure_at <= EXCLUDED.updated_at"
+        ));
+        assert!(recovering.contains("failure_count = CASE"));
+        assert!(recovering.contains(
+            "pool_member_scores.last_probe_failure_at IS NULL OR pool_member_scores.last_probe_failure_at <= EXCLUDED.updated_at"
+        ));
+        assert!(recovering.contains("probe_failure_count = CASE"));
+        assert!(recovering.contains("pool_member_scores.last_probe_attempt_at IS NOT NULL"));
+        assert!(recovering
+            .contains("updated_at = GREATEST(pool_member_scores.updated_at, EXCLUDED.updated_at)"));
+        assert!(preserving.contains("$23"));
+        assert!(recovering.contains("$23"));
+    }
 }

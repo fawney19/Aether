@@ -5,7 +5,8 @@ use super::{
     AdminBillingRuleWriteInput, AdminPaymentOrderListQuery, AdminRedeemCodeBatchListQuery,
     AdminRedeemCodeListQuery, AdminWalletLedgerQuery, AdminWalletListQuery,
     AdminWalletRefundRequestListQuery, AnnouncementListQuery, AuditLogListQuery,
-    BackgroundTaskListQuery, BackgroundTaskSummary, BillingModelContextCacheKey, BillingPlanRecord,
+    BackgroundTaskListQuery, BackgroundTaskSummary, BillingModelContextCacheKey,
+    BillingModelContextCacheState, BillingModelContextInflightState, BillingPlanRecord,
     BillingPlanWriteInput, CompleteAdminWalletRefundInput, CreateAdminRedeemCodeBatchInput,
     CreateAdminRedeemCodeBatchResult, CreateAnnouncementRecord, CreateManualWalletRechargeInput,
     CreatePlanPurchaseOrderInput, CreatePlanPurchaseOrderOutcome, CreateWalletRechargeOrderInput,
@@ -57,38 +58,93 @@ fn normalize_optional_billing_context_cache_part(value: Option<&str>) -> Option<
         .map(ToOwned::to_owned)
 }
 
-enum BillingModelContextInflightRegistration {
-    Leader(u64),
-    Follower,
-    Bypass,
+enum BillingModelContextInflightRegistration<'a> {
+    Leader(BillingModelContextInflightGuard<'a>),
+    Follower(std::sync::Arc<BillingModelContextInflightState>),
+    Saturated,
 }
 
 struct BillingModelContextInflightGuard<'a> {
     state: &'a GatewayDataState,
     key: Option<BillingModelContextCacheKey>,
-    token: u64,
+    inflight_state: std::sync::Arc<BillingModelContextInflightState>,
+    admission: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl<'a> BillingModelContextInflightGuard<'a> {
-    fn new(state: &'a GatewayDataState, key: BillingModelContextCacheKey, token: u64) -> Self {
+    fn new(
+        state: &'a GatewayDataState,
+        key: BillingModelContextCacheKey,
+        inflight_state: std::sync::Arc<BillingModelContextInflightState>,
+        admission: tokio::sync::OwnedSemaphorePermit,
+    ) -> Self {
         Self {
             state,
             key: Some(key),
-            token,
+            inflight_state,
+            admission: Some(admission),
         }
     }
 
-    fn finish(&mut self) {
-        if let Some(key) = self.key.take() {
-            self.state
-                .finish_billing_model_context_inflight(&key, self.token);
+    fn epoch(&self) -> u64 {
+        self.inflight_state.epoch
+    }
+
+    fn finish(&mut self, error: Option<DataLayerError>) {
+        let removed = self.key.take().and_then(|key| {
+            self.state.finish_billing_model_context_inflight(
+                &key,
+                &self.inflight_state,
+                self.admission.take(),
+            )
+        });
+        self.admission.take();
+        if let Some(removed) = removed {
+            removed.complete(error.map_or(Ok(()), Err));
         }
     }
 }
 
 impl Drop for BillingModelContextInflightGuard<'_> {
     fn drop(&mut self) {
-        self.finish();
+        self.finish(None);
+    }
+}
+
+impl BillingModelContextInflightState {
+    fn complete(&self, result: Result<(), DataLayerError>) {
+        if self.completion.set(result).is_ok() {
+            self.notify.notify_waiters();
+        }
+    }
+
+    async fn wait(&self) -> Result<(), DataLayerError> {
+        loop {
+            if let Some(result) = self.completion.get() {
+                return result.clone();
+            }
+
+            let mut notified = Box::pin(self.notify.notified());
+            notified.as_mut().enable();
+            if let Some(result) = self.completion.get() {
+                return result.clone();
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Default for BillingModelContextCacheState {
+    fn default() -> Self {
+        Self {
+            entries: aether_cache::ExpiringMap::default(),
+            inflight: std::sync::Mutex::new(std::collections::HashMap::new()),
+            epoch: std::sync::atomic::AtomicU64::new(0),
+            mutation: std::sync::Mutex::new(()),
+            admission: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                GatewayDataState::BILLING_MODEL_CONTEXT_CACHE_MAX_INFLIGHT,
+            )),
+        }
     }
 }
 
@@ -98,6 +154,7 @@ impl GatewayDataState {
     const MAINTENANCE_POOL_PRESSURE_MAX_DEFER: Duration = Duration::from_secs(30);
     const BILLING_MODEL_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(30);
     const BILLING_MODEL_CONTEXT_CACHE_MAX_ENTRIES: usize = 4096;
+    const BILLING_MODEL_CONTEXT_CACHE_MAX_INFLIGHT: usize = 4096;
     #[cfg(not(test))]
     const BILLING_MODEL_CONTEXT_CACHE_INFLIGHT_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
     #[cfg(test)]
@@ -1143,6 +1200,63 @@ impl GatewayDataState {
         .await
     }
 
+    pub(crate) async fn upsert_first_byte_usage(
+        &self,
+        usage: UpsertUsageRecord,
+    ) -> Result<(), DataLayerError> {
+        crate::request_diagnostics::observe_db_operation(
+            "usage_first_byte_upsert",
+            self.database_pool_summary(),
+            async {
+                match &self.usage_writer {
+                    Some(repository) => repository.upsert_first_byte(usage).await,
+                    None => Ok(()),
+                }
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn upsert_first_byte_usage_many(
+        &self,
+        usages: Vec<UpsertUsageRecord>,
+    ) -> Result<(), DataLayerError> {
+        if usages.is_empty() {
+            return Ok(());
+        }
+        crate::request_diagnostics::observe_db_operation(
+            "usage_first_byte_upsert_batch",
+            self.database_pool_summary(),
+            async {
+                match &self.usage_writer {
+                    Some(repository) => repository.upsert_first_byte_many(usages).await,
+                    None => Ok(()),
+                }
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn upsert_pending_usage_many(
+        &self,
+        usages: Vec<UpsertUsageRecord>,
+    ) -> Result<(), DataLayerError> {
+        if usages.is_empty() {
+            return Ok(());
+        }
+        crate::request_diagnostics::observe_db_operation(
+            "usage_pending_upsert_batch",
+            self.database_pool_summary(),
+            async {
+                match &self.usage_writer {
+                    Some(repository) => repository.upsert_pending_many(usages).await,
+                    None => Ok(()),
+                }
+            },
+        )
+        .await
+    }
+
     #[allow(dead_code)]
     pub(crate) async fn rebuild_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
         match &self.usage_writer {
@@ -1832,54 +1946,52 @@ impl GatewayDataState {
             return Ok(value);
         }
         loop {
-            let notified = self.billing_model_context_cache.inflight_notify.notified();
             match self.register_billing_model_context_inflight(&key) {
-                BillingModelContextInflightRegistration::Bypass => {
-                    let load_epoch = self
-                        .billing_model_context_cache
-                        .epoch
-                        .load(std::sync::atomic::Ordering::Acquire);
-                    return self
-                        .load_billing_model_context_by_name(
-                            key,
-                            provider_id,
-                            provider_api_key_id,
-                            global_model_name,
-                            load_epoch,
-                        )
-                        .await;
+                BillingModelContextInflightRegistration::Saturated => {
+                    return Err(DataLayerError::TimedOut(format!(
+                        "billing model context cache admission saturated for {key:?}"
+                    )));
                 }
-                BillingModelContextInflightRegistration::Follower => {
-                    if timeout(
+                BillingModelContextInflightRegistration::Follower(inflight_state) => {
+                    match timeout(
                         Self::BILLING_MODEL_CONTEXT_CACHE_INFLIGHT_WAIT_TIMEOUT,
-                        notified,
+                        inflight_state.wait(),
                     )
                     .await
-                    .is_err()
                     {
-                        self.expire_billing_model_context_inflight(&key);
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => return Err(error),
+                        Err(_) => self.expire_billing_model_context_inflight(&key, &inflight_state),
                     }
                     if let Some(value) = self.cached_billing_model_context(&key) {
                         return Ok(value);
                     }
                     continue;
                 }
-                BillingModelContextInflightRegistration::Leader(token) => {
-                    let mut guard = BillingModelContextInflightGuard::new(self, key.clone(), token);
-                    let load_epoch = self
-                        .billing_model_context_cache
-                        .epoch
-                        .load(std::sync::atomic::Ordering::Acquire);
-                    let result = self
-                        .load_billing_model_context_by_name(
+                BillingModelContextInflightRegistration::Leader(mut guard) => {
+                    if let Some(value) = self.cached_billing_model_context(&key) {
+                        return Ok(value);
+                    }
+                    let load_epoch = guard.epoch();
+                    let result = match timeout(
+                        Self::BILLING_MODEL_CONTEXT_CACHE_INFLIGHT_WAIT_TIMEOUT,
+                        self.load_billing_model_context_by_name(
                             key,
                             provider_id,
                             provider_api_key_id,
                             global_model_name,
                             load_epoch,
-                        )
-                        .await;
-                    guard.finish();
+                            &guard.inflight_state,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(DataLayerError::TimedOut(
+                            "billing model context load timed out".to_string(),
+                        )),
+                    };
+                    guard.finish(result.as_ref().err().cloned());
                     return result;
                 }
             }
@@ -1901,54 +2013,52 @@ impl GatewayDataState {
             return Ok(value);
         }
         loop {
-            let notified = self.billing_model_context_cache.inflight_notify.notified();
             match self.register_billing_model_context_inflight(&key) {
-                BillingModelContextInflightRegistration::Bypass => {
-                    let load_epoch = self
-                        .billing_model_context_cache
-                        .epoch
-                        .load(std::sync::atomic::Ordering::Acquire);
-                    return self
-                        .load_billing_model_context_by_model_id(
-                            key,
-                            provider_id,
-                            provider_api_key_id,
-                            model_id,
-                            load_epoch,
-                        )
-                        .await;
+                BillingModelContextInflightRegistration::Saturated => {
+                    return Err(DataLayerError::TimedOut(format!(
+                        "billing model context cache admission saturated for {key:?}"
+                    )));
                 }
-                BillingModelContextInflightRegistration::Follower => {
-                    if timeout(
+                BillingModelContextInflightRegistration::Follower(inflight_state) => {
+                    match timeout(
                         Self::BILLING_MODEL_CONTEXT_CACHE_INFLIGHT_WAIT_TIMEOUT,
-                        notified,
+                        inflight_state.wait(),
                     )
                     .await
-                    .is_err()
                     {
-                        self.expire_billing_model_context_inflight(&key);
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => return Err(error),
+                        Err(_) => self.expire_billing_model_context_inflight(&key, &inflight_state),
                     }
                     if let Some(value) = self.cached_billing_model_context(&key) {
                         return Ok(value);
                     }
                     continue;
                 }
-                BillingModelContextInflightRegistration::Leader(token) => {
-                    let mut guard = BillingModelContextInflightGuard::new(self, key.clone(), token);
-                    let load_epoch = self
-                        .billing_model_context_cache
-                        .epoch
-                        .load(std::sync::atomic::Ordering::Acquire);
-                    let result = self
-                        .load_billing_model_context_by_model_id(
+                BillingModelContextInflightRegistration::Leader(mut guard) => {
+                    if let Some(value) = self.cached_billing_model_context(&key) {
+                        return Ok(value);
+                    }
+                    let load_epoch = guard.epoch();
+                    let result = match timeout(
+                        Self::BILLING_MODEL_CONTEXT_CACHE_INFLIGHT_WAIT_TIMEOUT,
+                        self.load_billing_model_context_by_model_id(
                             key,
                             provider_id,
                             provider_api_key_id,
                             model_id,
                             load_epoch,
-                        )
-                        .await;
-                    guard.finish();
+                            &guard.inflight_state,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(DataLayerError::TimedOut(
+                            "billing model context load timed out".to_string(),
+                        )),
+                    };
+                    guard.finish(result.as_ref().err().cloned());
                     return result;
                 }
             }
@@ -1962,6 +2072,7 @@ impl GatewayDataState {
         provider_api_key_id: Option<&str>,
         global_model_name: &str,
         load_epoch: u64,
+        load_flight: &std::sync::Arc<BillingModelContextInflightState>,
     ) -> Result<Option<StoredBillingModelContext>, DataLayerError> {
         crate::request_diagnostics::observe_db_operation(
             "billing_model_context",
@@ -1972,11 +2083,16 @@ impl GatewayDataState {
                         let value = repository
                             .find_model_context(provider_id, provider_api_key_id, global_model_name)
                             .await?;
-                        self.remember_billing_model_context(key, value.clone(), load_epoch);
+                        self.remember_billing_model_context(
+                            key,
+                            value.clone(),
+                            load_epoch,
+                            load_flight,
+                        );
                         Ok(value)
                     }
                     None => {
-                        self.remember_billing_model_context(key, None, load_epoch);
+                        self.remember_billing_model_context(key, None, load_epoch, load_flight);
                         Ok(None)
                     }
                 }
@@ -1992,6 +2108,7 @@ impl GatewayDataState {
         provider_api_key_id: Option<&str>,
         model_id: &str,
         load_epoch: u64,
+        load_flight: &std::sync::Arc<BillingModelContextInflightState>,
     ) -> Result<Option<StoredBillingModelContext>, DataLayerError> {
         crate::request_diagnostics::observe_db_operation(
             "billing_model_context",
@@ -2006,11 +2123,16 @@ impl GatewayDataState {
                                 model_id,
                             )
                             .await?;
-                        self.remember_billing_model_context(key, value.clone(), load_epoch);
+                        self.remember_billing_model_context(
+                            key,
+                            value.clone(),
+                            load_epoch,
+                            load_flight,
+                        );
                         Ok(value)
                     }
                     None => {
-                        self.remember_billing_model_context(key, None, load_epoch);
+                        self.remember_billing_model_context(key, None, load_epoch, load_flight);
                         Ok(None)
                     }
                 }
@@ -2022,44 +2144,91 @@ impl GatewayDataState {
     fn register_billing_model_context_inflight(
         &self,
         key: &BillingModelContextCacheKey,
-    ) -> BillingModelContextInflightRegistration {
-        match self.billing_model_context_cache.inflight.lock() {
-            Ok(mut inflight) => {
-                if inflight.contains_key(key) {
-                    return BillingModelContextInflightRegistration::Follower;
-                }
-                let token = self
-                    .billing_model_context_cache
-                    .next_inflight_token
-                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                inflight.insert(key.clone(), token);
-                BillingModelContextInflightRegistration::Leader(token)
-            }
-            Err(_) => BillingModelContextInflightRegistration::Bypass,
+    ) -> BillingModelContextInflightRegistration<'_> {
+        let mut inflight = self
+            .billing_model_context_cache
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(inflight_state) = inflight.get(key) {
+            return BillingModelContextInflightRegistration::Follower(std::sync::Arc::clone(
+                inflight_state,
+            ));
+        }
+        if inflight.len() >= Self::BILLING_MODEL_CONTEXT_CACHE_MAX_INFLIGHT {
+            return BillingModelContextInflightRegistration::Saturated;
+        }
+        let Ok(admission) =
+            std::sync::Arc::clone(&self.billing_model_context_cache.admission).try_acquire_owned()
+        else {
+            return BillingModelContextInflightRegistration::Saturated;
+        };
+        let inflight_state = std::sync::Arc::new(BillingModelContextInflightState {
+            epoch: self
+                .billing_model_context_cache
+                .epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            completion: std::sync::OnceLock::new(),
+            notify: tokio::sync::Notify::new(),
+        });
+        inflight.insert(key.clone(), std::sync::Arc::clone(&inflight_state));
+        BillingModelContextInflightRegistration::Leader(BillingModelContextInflightGuard::new(
+            self,
+            key.clone(),
+            inflight_state,
+            admission,
+        ))
+    }
+
+    fn finish_billing_model_context_inflight(
+        &self,
+        key: &BillingModelContextCacheKey,
+        inflight_state: &std::sync::Arc<BillingModelContextInflightState>,
+        admission: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Option<std::sync::Arc<BillingModelContextInflightState>> {
+        let mut inflight = self
+            .billing_model_context_cache
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(admission);
+        if inflight
+            .get(key)
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, inflight_state))
+        {
+            inflight.remove(key)
+        } else {
+            None
         }
     }
 
-    fn finish_billing_model_context_inflight(&self, key: &BillingModelContextCacheKey, token: u64) {
-        let mut removed = false;
-        if let Ok(mut inflight) = self.billing_model_context_cache.inflight.lock() {
-            if inflight.get(key).copied() == Some(token) {
-                inflight.remove(key);
-                removed = true;
+    fn expire_billing_model_context_inflight(
+        &self,
+        key: &BillingModelContextCacheKey,
+        inflight_state: &std::sync::Arc<BillingModelContextInflightState>,
+    ) {
+        let _mutation = self
+            .billing_model_context_cache
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let removed = {
+            let mut inflight = self
+                .billing_model_context_cache
+                .inflight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if inflight
+                .get(key)
+                .is_some_and(|current| std::sync::Arc::ptr_eq(current, inflight_state))
+            {
+                inflight.remove(key)
+            } else {
+                None
             }
-        }
-        if removed {
-            self.billing_model_context_cache
-                .inflight_notify
-                .notify_waiters();
-        }
-    }
-
-    fn expire_billing_model_context_inflight(&self, key: &BillingModelContextCacheKey) {
-        let mut removed = false;
-        if let Ok(mut inflight) = self.billing_model_context_cache.inflight.lock() {
-            removed = inflight.remove(key).is_some();
-        }
-        if removed {
+        };
+        drop(_mutation);
+        if let Some(removed) = removed {
             tracing::warn!(
                 event_name = "billing_model_context_cache_inflight_expired",
                 log_type = "ops",
@@ -2067,9 +2236,7 @@ impl GatewayDataState {
                 wait_timeout_ms = Self::BILLING_MODEL_CONTEXT_CACHE_INFLIGHT_WAIT_TIMEOUT.as_millis() as u64,
                 "gateway billing model context cache expired stale inflight load"
             );
-            self.billing_model_context_cache
-                .inflight_notify
-                .notify_waiters();
+            removed.complete(Ok(()));
         }
     }
 
@@ -2079,13 +2246,7 @@ impl GatewayDataState {
     ) -> Option<Option<StoredBillingModelContext>> {
         self.billing_model_context_cache
             .entries
-            .read()
-            .expect("billing model context cache lock")
-            .get(key)
-            .and_then(|(cached_at, value)| {
-                (cached_at.elapsed() <= Self::BILLING_MODEL_CONTEXT_CACHE_TTL)
-                    .then(|| value.clone())
-            })
+            .get_fresh(key, Self::BILLING_MODEL_CONTEXT_CACHE_TTL)
     }
 
     fn remember_billing_model_context(
@@ -2093,12 +2254,13 @@ impl GatewayDataState {
         key: BillingModelContextCacheKey,
         value: Option<StoredBillingModelContext>,
         load_epoch: u64,
+        load_flight: &std::sync::Arc<BillingModelContextInflightState>,
     ) {
-        let mut cache = self
+        let _mutation = self
             .billing_model_context_cache
-            .entries
-            .write()
-            .expect("billing model context cache lock");
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if load_epoch
             != self
                 .billing_model_context_cache
@@ -2107,44 +2269,53 @@ impl GatewayDataState {
         {
             return;
         }
-        cache.retain(|_, (cached_at, _)| {
-            cached_at.elapsed() <= Self::BILLING_MODEL_CONTEXT_CACHE_TTL
-        });
-        if cache.len() >= Self::BILLING_MODEL_CONTEXT_CACHE_MAX_ENTRIES {
-            if let Some(oldest_key) = cache
-                .iter()
-                .min_by_key(|(_, (cached_at, _))| *cached_at)
-                .map(|(key, _)| key.clone())
-            {
-                cache.remove(&oldest_key);
-            }
+        let inflight = self
+            .billing_model_context_cache
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !inflight
+            .get(&key)
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, load_flight))
+        {
+            return;
         }
-        cache.insert(key, (Instant::now(), value));
+        self.billing_model_context_cache.entries.insert(
+            key,
+            value,
+            Self::BILLING_MODEL_CONTEXT_CACHE_TTL,
+            Self::BILLING_MODEL_CONTEXT_CACHE_MAX_ENTRIES,
+        );
     }
 
     pub(super) fn clear_billing_model_context_cache(&self) {
+        let _mutation = self
+            .billing_model_context_cache
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.billing_model_context_cache
             .epoch
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        self.billing_model_context_cache
-            .entries
-            .write()
-            .expect("billing model context cache lock")
-            .clear();
-        let mut cleared_inflight = false;
-        if let Ok(mut inflight) = self.billing_model_context_cache.inflight.lock() {
-            cleared_inflight = !inflight.is_empty();
-            inflight.clear();
-        }
-        if cleared_inflight {
+        self.billing_model_context_cache.entries.clear();
+        let inflight_states = self
+            .billing_model_context_cache
+            .inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .map(|(_, state)| state)
+            .collect::<Vec<_>>();
+        drop(_mutation);
+        if !inflight_states.is_empty() {
             tracing::warn!(
                 event_name = "billing_model_context_cache_inflight_cleared",
                 log_type = "ops",
                 "gateway billing model context cache cleared in-flight loads"
             );
-            self.billing_model_context_cache
-                .inflight_notify
-                .notify_waiters();
+            for inflight_state in inflight_states {
+                inflight_state.complete(Ok(()));
+            }
         }
     }
 
@@ -2572,11 +2743,14 @@ mod tests {
     use aether_data_contracts::repository::global_models::{
         StoredAdminGlobalModel, StoredPublicGlobalModel, UpdateAdminGlobalModelRecord,
     };
+    use aether_data_contracts::DataLayerError;
     use async_trait::async_trait;
     use serde_json::json;
     use tokio::sync::Barrier;
 
-    use super::GatewayDataState;
+    use super::{
+        BillingModelContextCacheKey, BillingModelContextInflightRegistration, GatewayDataState,
+    };
 
     struct SlowBillingContextRepository {
         calls: AtomicUsize,
@@ -2588,6 +2762,13 @@ mod tests {
         context: Mutex<StoredBillingModelContext>,
         first_read: Barrier,
         release_first_read: Barrier,
+    }
+
+    struct ConcurrentBillingContextRepository {
+        calls: AtomicUsize,
+        context: StoredBillingModelContext,
+        entered: Barrier,
+        release: Barrier,
     }
 
     #[async_trait]
@@ -2628,6 +2809,21 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl BillingReadRepository for ConcurrentBillingContextRepository {
+        async fn find_model_context(
+            &self,
+            _provider_id: &str,
+            _provider_api_key_id: Option<&str>,
+            _global_model_name: &str,
+        ) -> Result<Option<StoredBillingModelContext>, DataLayerError> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            self.entered.wait().await;
+            self.release.wait().await;
+            Ok(Some(self.context.clone()))
+        }
+    }
+
     fn billing_context() -> StoredBillingModelContext {
         StoredBillingModelContext::new(
             "provider-1".to_string(),
@@ -2647,6 +2843,283 @@ mod tests {
             None,
         )
         .expect("billing context should build")
+    }
+
+    fn billing_cache_key(global_model_name: impl Into<String>) -> BillingModelContextCacheKey {
+        BillingModelContextCacheKey::ByGlobalModelName {
+            provider_id: "provider-1".to_string(),
+            provider_api_key_id: Some("key-1".to_string()),
+            global_model_name: global_model_name.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn billing_model_context_cancelled_leader_cannot_lose_follower_wakeup() {
+        let state = GatewayDataState::default();
+        let key = billing_cache_key("lost-wakeup");
+        let leader = match state.register_billing_model_context_inflight(&key) {
+            BillingModelContextInflightRegistration::Leader(guard) => guard,
+            _ => panic!("first registration should lead"),
+        };
+        let follower = match state.register_billing_model_context_inflight(&key) {
+            BillingModelContextInflightRegistration::Follower(inflight_state) => inflight_state,
+            _ => panic!("second registration should follow"),
+        };
+
+        // Complete before wait() is constructed or polled. A bare global
+        // notify_waiters() broadcast loses this ordering.
+        drop(leader);
+        tokio::time::timeout(Duration::from_millis(100), follower.wait())
+            .await
+            .expect("cancelled flight must release an unpolled follower")
+            .expect("leader cancellation should allow a retry");
+        assert!(matches!(
+            state.register_billing_model_context_inflight(&key),
+            BillingModelContextInflightRegistration::Leader(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn billing_model_context_failed_flight_fans_out_error() {
+        let state = GatewayDataState::default();
+        let key = billing_cache_key("failed-flight");
+        let mut leader = match state.register_billing_model_context_inflight(&key) {
+            BillingModelContextInflightRegistration::Leader(guard) => guard,
+            _ => panic!("first registration should lead"),
+        };
+        let followers = (0..2)
+            .map(
+                |_| match state.register_billing_model_context_inflight(&key) {
+                    BillingModelContextInflightRegistration::Follower(inflight_state) => {
+                        inflight_state
+                    }
+                    _ => panic!("same-key registration should follow"),
+                },
+            )
+            .collect::<Vec<_>>();
+
+        leader.finish(Some(DataLayerError::Sql(
+            "forced billing context load failure".to_string(),
+        )));
+        for follower in followers {
+            let error = tokio::time::timeout(Duration::from_millis(100), follower.wait())
+                .await
+                .expect("failed flight should release every follower")
+                .expect_err("follower should receive the leader failure");
+            assert_eq!(
+                error.to_string(),
+                "sql error: forced billing context load failure"
+            );
+        }
+        assert!(state
+            .billing_model_context_cache
+            .inflight
+            .lock()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn billing_model_context_clear_wakes_old_follower_without_removing_replacement() {
+        let state = GatewayDataState::default();
+        let key = billing_cache_key("clear-replacement");
+        let old_leader = match state.register_billing_model_context_inflight(&key) {
+            BillingModelContextInflightRegistration::Leader(guard) => guard,
+            _ => panic!("first registration should lead"),
+        };
+        let old_follower = match state.register_billing_model_context_inflight(&key) {
+            BillingModelContextInflightRegistration::Follower(inflight_state) => inflight_state,
+            _ => panic!("second registration should follow"),
+        };
+        let old_epoch = old_leader.epoch();
+
+        state.clear_billing_model_context_cache();
+        let replacement_leader = match state.register_billing_model_context_inflight(&key) {
+            BillingModelContextInflightRegistration::Leader(guard) => guard,
+            _ => panic!("clear should allow a replacement leader"),
+        };
+        let replacement_follower = match state.register_billing_model_context_inflight(&key) {
+            BillingModelContextInflightRegistration::Follower(inflight_state) => inflight_state,
+            _ => panic!("registration behind replacement should follow"),
+        };
+        assert_ne!(replacement_leader.epoch(), old_epoch);
+
+        drop(old_leader);
+        assert!(state
+            .billing_model_context_cache
+            .inflight
+            .lock()
+            .unwrap()
+            .get(&key)
+            .is_some_and(|current| std::sync::Arc::ptr_eq(
+                current,
+                &replacement_leader.inflight_state
+            )));
+        tokio::time::timeout(Duration::from_millis(100), old_follower.wait())
+            .await
+            .expect("clear should wake the invalidated flight")
+            .expect("clear should allow an immediate retry");
+
+        drop(replacement_leader);
+        tokio::time::timeout(Duration::from_millis(100), replacement_follower.wait())
+            .await
+            .expect("old guard must not strand the replacement follower")
+            .expect("replacement completion should succeed");
+    }
+
+    #[tokio::test]
+    async fn billing_model_context_timeout_expiration_allows_replacement() {
+        let state = GatewayDataState::default();
+        let key = billing_cache_key("timeout-replacement");
+        let old_leader = match state.register_billing_model_context_inflight(&key) {
+            BillingModelContextInflightRegistration::Leader(guard) => guard,
+            _ => panic!("first registration should lead"),
+        };
+        let old_follower = match state.register_billing_model_context_inflight(&key) {
+            BillingModelContextInflightRegistration::Follower(inflight_state) => inflight_state,
+            _ => panic!("second registration should follow"),
+        };
+
+        state.expire_billing_model_context_inflight(&key, &old_follower);
+        old_follower
+            .wait()
+            .await
+            .expect("expired flight should permit a retry");
+        let replacement_leader = match state.register_billing_model_context_inflight(&key) {
+            BillingModelContextInflightRegistration::Leader(guard) => guard,
+            _ => panic!("timeout should allow a replacement leader"),
+        };
+        drop(old_leader);
+        assert!(state
+            .billing_model_context_cache
+            .inflight
+            .lock()
+            .unwrap()
+            .get(&key)
+            .is_some_and(|current| std::sync::Arc::ptr_eq(
+                current,
+                &replacement_leader.inflight_state
+            )));
+    }
+
+    #[test]
+    fn billing_model_context_expired_leader_cannot_publish_over_replacement() {
+        let state = GatewayDataState::default();
+        let key = billing_cache_key("timeout-publication-replacement");
+        let old_leader = match state.register_billing_model_context_inflight(&key) {
+            BillingModelContextInflightRegistration::Leader(guard) => guard,
+            _ => panic!("first registration should lead"),
+        };
+        let old_flight = std::sync::Arc::clone(&old_leader.inflight_state);
+        let load_epoch = old_leader.epoch();
+        state.expire_billing_model_context_inflight(&key, &old_flight);
+        let replacement = match state.register_billing_model_context_inflight(&key) {
+            BillingModelContextInflightRegistration::Leader(guard) => guard,
+            _ => panic!("expiration should allow a replacement leader"),
+        };
+        assert_eq!(replacement.epoch(), load_epoch);
+
+        let mut fresh = billing_context();
+        fresh.default_price_per_request = Some(2.0);
+        state.remember_billing_model_context(
+            key.clone(),
+            Some(fresh),
+            replacement.epoch(),
+            &replacement.inflight_state,
+        );
+
+        let mut stale = billing_context();
+        stale.default_price_per_request = Some(1.0);
+        state.remember_billing_model_context(key.clone(), Some(stale), load_epoch, &old_flight);
+
+        let cached = state
+            .cached_billing_model_context(&key)
+            .expect("replacement should publish")
+            .expect("billing context should exist");
+        assert_eq!(cached.default_price_per_request, Some(2.0));
+    }
+
+    #[test]
+    fn billing_model_context_inflight_limit_rejects_only_new_keys() {
+        let state = GatewayDataState::default();
+        let mut leaders =
+            Vec::with_capacity(GatewayDataState::BILLING_MODEL_CONTEXT_CACHE_MAX_INFLIGHT);
+        for index in 0..GatewayDataState::BILLING_MODEL_CONTEXT_CACHE_MAX_INFLIGHT {
+            let key = billing_cache_key(format!("model-{index}"));
+            match state.register_billing_model_context_inflight(&key) {
+                BillingModelContextInflightRegistration::Leader(guard) => leaders.push(guard),
+                _ => panic!("unique key below the hard limit should lead"),
+            }
+        }
+
+        assert!(matches!(
+            state.register_billing_model_context_inflight(&billing_cache_key("overflow")),
+            BillingModelContextInflightRegistration::Saturated
+        ));
+        assert!(matches!(
+            state.register_billing_model_context_inflight(&billing_cache_key("model-0")),
+            BillingModelContextInflightRegistration::Follower(_)
+        ));
+        assert_eq!(
+            state
+                .billing_model_context_cache
+                .inflight
+                .lock()
+                .unwrap()
+                .len(),
+            GatewayDataState::BILLING_MODEL_CONTEXT_CACHE_MAX_INFLIGHT
+        );
+
+        drop(leaders);
+        assert!(state
+            .billing_model_context_cache
+            .inflight
+            .lock()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn billing_model_context_different_keys_load_concurrently() {
+        let repository = Arc::new(ConcurrentBillingContextRepository {
+            calls: AtomicUsize::new(0),
+            context: billing_context(),
+            entered: Barrier::new(3),
+            release: Barrier::new(3),
+        });
+        let state = Arc::new(GatewayDataState::with_billing_reader_for_tests(
+            repository.clone(),
+        ));
+        let task_a = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                state
+                    .find_billing_model_context("provider-1", Some("key-1"), "model-a")
+                    .await
+            })
+        };
+        let task_b = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                state
+                    .find_billing_model_context("provider-1", Some("key-1"), "model-b")
+                    .await
+            })
+        };
+
+        tokio::time::timeout(Duration::from_secs(1), repository.entered.wait())
+            .await
+            .expect("different cache keys should enter the repository concurrently");
+        assert_eq!(repository.calls.load(Ordering::Acquire), 2);
+        repository.release.wait().await;
+        task_a
+            .await
+            .expect("first lookup should join")
+            .expect("first lookup should succeed");
+        task_b
+            .await
+            .expect("second lookup should join")
+            .expect("second lookup should succeed");
     }
 
     #[tokio::test]

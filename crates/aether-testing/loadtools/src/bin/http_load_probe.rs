@@ -1,19 +1,23 @@
 use std::time::Duration;
 
-use aether_loadtools::{run_http_load_probe, HttpLoadProbeConfig};
+use aether_loadtools::{
+    run_http_load_probe_with_options, HttpLoadProbeConfig, HttpLoadProbeOptions,
+};
 use reqwest::Method;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = parse_args(std::env::args().skip(1).collect())?;
-    let result = run_http_load_probe(&config)
+    let (config, options) = parse_args(std::env::args().skip(1).collect())?;
+    let result = run_http_load_probe_with_options(&config, options)
         .await
         .map_err(std::io::Error::other)?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
 
-fn parse_args(args: Vec<String>) -> Result<HttpLoadProbeConfig, Box<dyn std::error::Error>> {
+fn parse_args(
+    args: Vec<String>,
+) -> Result<(HttpLoadProbeConfig, HttpLoadProbeOptions), Box<dyn std::error::Error>> {
     let mut url: Option<String> = None;
     let mut warmup_url: Option<String> = None;
     let mut total_requests: Option<usize> = None;
@@ -29,6 +33,7 @@ fn parse_args(args: Vec<String>) -> Result<HttpLoadProbeConfig, Box<dyn std::err
     let mut headers = std::collections::BTreeMap::new();
     let mut body: Option<Vec<u8>> = None;
     let mut response_mode = aether_loadtools::HttpLoadProbeResponseMode::HeadersOnly;
+    let mut require_sse_done = false;
     let mut http1_only = false;
     let mut http2_prior_knowledge = false;
 
@@ -73,6 +78,7 @@ fn parse_args(args: Vec<String>) -> Result<HttpLoadProbeConfig, Box<dyn std::err
             "--response-mode" => {
                 response_mode = parse_response_mode(&next_value(&mut iter, "--response-mode")?)?
             }
+            "--require-sse-done" => require_sse_done = true,
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -126,7 +132,7 @@ fn parse_args(args: Vec<String>) -> Result<HttpLoadProbeConfig, Box<dyn std::err
     config
         .validate()
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
-    Ok(config)
+    Ok((config, HttpLoadProbeOptions { require_sse_done }))
 }
 
 fn parse_header_arg(value: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
@@ -186,6 +192,6 @@ fn next_value(
 
 fn print_usage() {
     eprintln!(
-        "usage: cargo run -p aether-loadtools --bin http_load_probe -- --url <URL> --requests <N> --concurrency <N> [--warmup-url <URL>] [--warmup-connections N] [--method GET] [--timeout-ms 30000] [--connect-timeout-ms 10000] [--client-shards 1] [--pool-max-idle-per-host N] [--start-ramp-ms 0] [--first-body-hold-ms 0] [--http1-only | --http2-prior-knowledge] [-H 'Name: value'] [--body JSON | --body-file path] [--response-mode headers|first-body-byte|full]"
+        "usage: cargo run -p aether-loadtools --bin http_load_probe -- --url <URL> --requests <N> --concurrency <N> [--warmup-url <URL>] [--warmup-connections N] [--method GET] [--timeout-ms 30000] [--connect-timeout-ms 10000] [--client-shards 1] [--pool-max-idle-per-host N] [--start-ramp-ms 0] [--first-body-hold-ms 0] [--http1-only | --http2-prior-knowledge] [-H 'Name: value'] [--body JSON | --body-file path] [--response-mode headers|first-body-byte|full] [--require-sse-done]"
     );
 }

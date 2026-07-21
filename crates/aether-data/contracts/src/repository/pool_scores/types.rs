@@ -212,6 +212,15 @@ impl UpsertPoolMemberScore {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PoolMemberScoreUpsertMode {
+    #[default]
+    PreserveExistingNullableTimestamps,
+    /// Reset failures observed at or before `updated_at` while retaining successful and newer
+    /// scheduling/probe observations atomically with the upsert.
+    OAuthRecovery,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ListRankedPoolMembersQuery {
     pub pool_kind: String,
@@ -310,6 +319,18 @@ pub trait PoolMemberScoreWriteRepository: Send + Sync {
     async fn upsert_pool_member_score(
         &self,
         score: UpsertPoolMemberScore,
+    ) -> Result<StoredPoolMemberScore, crate::DataLayerError> {
+        self.upsert_pool_member_score_with_mode(
+            score,
+            PoolMemberScoreUpsertMode::PreserveExistingNullableTimestamps,
+        )
+        .await
+    }
+
+    async fn upsert_pool_member_score_with_mode(
+        &self,
+        score: UpsertPoolMemberScore,
+        mode: PoolMemberScoreUpsertMode,
     ) -> Result<StoredPoolMemberScore, crate::DataLayerError>;
 
     async fn mark_pool_member_probe_in_progress(

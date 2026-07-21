@@ -140,6 +140,15 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn reset_provider_catalog_key_error_count(
+        &self,
+        key_id: &str,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .reset_provider_catalog_key_error_count(key_id)
+            .await
+    }
+
     pub(crate) async fn create_provider_catalog_endpoint(
         &self,
         endpoint: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogEndpoint,
@@ -175,6 +184,139 @@ impl<'a> AdminAppState<'a> {
         GatewayError,
     > {
         self.app.update_provider_catalog_key(key).await
+    }
+
+    pub(crate) async fn compare_and_update_provider_catalog_key_adaptive_state(
+        &self,
+        update: &aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyAdaptiveStateUpdate,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .compare_and_update_provider_catalog_key_adaptive_state(update)
+            .await
+    }
+
+    pub(crate) async fn set_provider_catalog_key_learned_rpm_limit(
+        &self,
+        key_id: &str,
+        learned_rpm_limit: Option<u32>,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<
+        Option<aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey>,
+        GatewayError,
+    > {
+        use aether_data_contracts::repository::provider_catalog::{
+            ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
+        };
+
+        for _ in 0..4 {
+            let Some(current) = self
+                .read_provider_catalog_keys_by_ids(&[key_id.to_string()])
+                .await?
+                .into_iter()
+                .next()
+            else {
+                return Ok(None);
+            };
+            let expected = ProviderCatalogKeyAdaptiveState::from(&current);
+            if expected.learned_rpm_limit == learned_rpm_limit {
+                return Ok(Some(current));
+            }
+            let mut next = expected.clone();
+            next.learned_rpm_limit = learned_rpm_limit;
+            if self
+                .compare_and_update_provider_catalog_key_adaptive_state(
+                    &ProviderCatalogKeyAdaptiveStateUpdate {
+                        key_id: key_id.to_string(),
+                        expected,
+                        next,
+                        status_snapshot_patch: serde_json::json!({
+                            "learning_confidence": 0.0,
+                            "enforcement_active": false
+                        }),
+                        updated_at_unix_secs,
+                    },
+                )
+                .await?
+            {
+                return Ok(self
+                    .read_provider_catalog_keys_by_ids(&[key_id.to_string()])
+                    .await?
+                    .into_iter()
+                    .next());
+            }
+        }
+
+        Err(GatewayError::Internal(format!(
+            "provider key {key_id} adaptive state changed repeatedly while updating"
+        )))
+    }
+
+    pub(crate) async fn reset_provider_catalog_key_recovery_state(
+        &self,
+        key_id: &str,
+    ) -> Result<
+        Option<aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey>,
+        GatewayError,
+    > {
+        use aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyHealthStateUpdate;
+
+        let empty = serde_json::json!({});
+        let mut health_reset = false;
+        for _ in 0..4 {
+            let Some(current) = self
+                .read_provider_catalog_keys_by_ids(&[key_id.to_string()])
+                .await?
+                .into_iter()
+                .next()
+            else {
+                return Ok(None);
+            };
+            if current.health_by_format.as_ref() == Some(&empty)
+                && current.circuit_breaker_by_format.as_ref() == Some(&empty)
+            {
+                health_reset = true;
+                break;
+            }
+            if self
+                .app
+                .compare_and_update_provider_catalog_key_health_state(
+                    &ProviderCatalogKeyHealthStateUpdate {
+                        key_id: key_id.to_string(),
+                        expected_health_by_format: current.health_by_format,
+                        expected_circuit_breaker_by_format: current.circuit_breaker_by_format,
+                        health_by_format: Some(empty.clone()),
+                        circuit_breaker_by_format: Some(empty.clone()),
+                    },
+                )
+                .await?
+            {
+                health_reset = true;
+                break;
+            }
+        }
+        if !health_reset {
+            return Err(GatewayError::Internal(format!(
+                "provider key {key_id} health state changed repeatedly while resetting OAuth recovery state"
+            )));
+        }
+        if !self.reset_provider_catalog_key_error_count(key_id).await? {
+            return Ok(None);
+        }
+
+        Ok(self
+            .read_provider_catalog_keys_by_ids(&[key_id.to_string()])
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    pub(crate) async fn update_provider_catalog_key_status_snapshot(
+        &self,
+        update: &aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyStatusSnapshotUpdate,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .update_provider_catalog_key_status_snapshot(update)
+            .await
     }
 
     pub(crate) async fn update_provider_catalog_keys(
