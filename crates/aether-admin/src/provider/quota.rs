@@ -589,6 +589,7 @@ fn glm_usage_data(value: &serde_json::Value) -> &serde_json::Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlmCodingPlanBusinessErrorClass {
     CredentialInvalid,
+    QuotaBlocked,
     Other,
 }
 
@@ -601,18 +602,23 @@ pub struct GlmCodingPlanBusinessError {
 
 fn glm_usage_business_error(value: &serde_json::Value) -> Option<GlmCodingPlanBusinessError> {
     let object = value.as_object()?;
+    let nested_error = object.get("error").and_then(serde_json::Value::as_object);
+    let error_object = nested_error.unwrap_or(object);
     let success = object
         .get("success")
         .and_then(coerce_json_bool)
         .unwrap_or(true);
-    let code = object.get("code").and_then(coerce_json_i64);
-    if success && code.is_none_or(|value| value == 0 || value == 200) {
+    let code = error_object
+        .get("code")
+        .or_else(|| object.get("code"))
+        .and_then(coerce_json_i64);
+    if nested_error.is_none() && success && code.is_none_or(|value| value == 0 || value == 200) {
         return None;
     }
     let message = ["msg", "message", "error"]
         .iter()
         .find_map(|key| {
-            object
+            error_object
                 .get(*key)
                 .and_then(serde_json::Value::as_str)
                 .map(str::trim)
@@ -623,6 +629,7 @@ fn glm_usage_business_error(value: &serde_json::Value) -> Option<GlmCodingPlanBu
         .unwrap_or_else(|| "GLM Coding Plan returned a business error".to_string());
     let class = match code {
         Some(401 | 1000 | 1003) => GlmCodingPlanBusinessErrorClass::CredentialInvalid,
+        Some(1308 | 1309 | 1310 | 1313) => GlmCodingPlanBusinessErrorClass::QuotaBlocked,
         Some(_) | None => GlmCodingPlanBusinessErrorClass::Other,
     };
     Some(GlmCodingPlanBusinessError {
@@ -3387,16 +3394,8 @@ mod tests {
     fn classifies_glm_business_errors_without_conflating_authentication() {
         // Given
         let credential_invalid_codes = [json!(401), json!("401"), json!(1000), json!(1003)];
-        let other_codes = [
-            json!(1001),
-            json!(1005),
-            json!(1220),
-            json!(1308),
-            json!(1309),
-            json!(1310),
-            json!(1313),
-            json!(9999),
-        ];
+        let quota_blocked_codes = [json!(1308), json!(1309), json!(1310), json!(1313)];
+        let other_codes = [json!(1001), json!(1005), json!(1220), json!(9999)];
 
         // When / Then
         for code in credential_invalid_codes {
@@ -3409,6 +3408,14 @@ mod tests {
                 error.class,
                 GlmCodingPlanBusinessErrorClass::CredentialInvalid
             );
+        }
+        for code in quota_blocked_codes {
+            let error = super::glm_coding_plan_business_error(&json!({
+                "code": code,
+                "success": false
+            }))
+            .expect("business error should parse");
+            assert_eq!(error.class, GlmCodingPlanBusinessErrorClass::QuotaBlocked);
         }
         for code in other_codes {
             let error = super::glm_coding_plan_business_error(&json!({
@@ -3424,6 +3431,28 @@ mod tests {
         }))
         .expect("business error should parse");
         assert_eq!(error.class, GlmCodingPlanBusinessErrorClass::Other);
+    }
+
+    #[test]
+    fn parses_glm_nested_business_error_payload() {
+        // Given a real Anthropic-compatible GLM error envelope.
+        let payload = json!({
+            "type": "error",
+            "error": {
+                "type": "rate_limit_error",
+                "code": "1309",
+                "message": "GLM Coding Plan subscription expired"
+            }
+        });
+
+        // When the provider business error is parsed.
+        let error = super::glm_coding_plan_business_error(&payload)
+            .expect("nested GLM business error should parse");
+
+        // Then the upstream code and message survive the boundary.
+        assert_eq!(error.code, Some(1309));
+        assert_eq!(error.message, "GLM Coding Plan subscription expired");
+        assert_eq!(error.class, GlmCodingPlanBusinessErrorClass::QuotaBlocked);
     }
 
     #[test]

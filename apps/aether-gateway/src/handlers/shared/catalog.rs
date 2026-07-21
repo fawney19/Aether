@@ -1730,6 +1730,12 @@ fn build_glm_coding_plan_quota_status_snapshot(
 ) -> Option<Value> {
     let metadata = provider_quota_metadata_bucket(upstream_metadata, "glm_coding_plan")?;
     let observed_at_unix_secs = provider_quota_timestamp_unix_secs(metadata.get("updated_at"));
+    let explicitly_exhausted = metadata
+        .get("quota_exhausted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let upstream_error_code = metadata.get("quota_error_code").cloned();
+    let upstream_error_reason = provider_quota_metadata_string(metadata, &["quota_error_reason"]);
     let plan_type = provider_quota_metadata_string(metadata, &["plan_type", "level", "tier"])
         .or_else(|| {
             metadata
@@ -1786,23 +1792,23 @@ fn build_glm_coding_plan_quota_status_snapshot(
     .flatten()
     .collect::<Vec<_>>();
 
-    if windows.is_empty() && observed_at_unix_secs.is_none() {
+    if windows.is_empty() && observed_at_unix_secs.is_none() && !explicitly_exhausted {
         return None;
     }
 
     let usage_ratio = quota_windows_usage_ratio(&windows);
-    let exhausted = quota_windows_any_exhausted(&windows);
+    let exhausted = explicitly_exhausted || quota_windows_any_exhausted(&windows);
+    let reason = exhausted.then(|| {
+        upstream_error_reason.unwrap_or_else(|| "GLM Coding Plan 额度窗口已耗尽".to_string())
+    });
 
     Some(json!({
         "version": 2,
         "provider_type": "glm_coding_plan",
         "code": if exhausted { "exhausted" } else { "ok" },
         "label": if exhausted { Some("额度耗尽") } else { None::<&str> },
-        "reason": if exhausted {
-            Some("GLM Coding Plan 额度窗口已耗尽")
-        } else {
-            None::<&str>
-        },
+        "reason": reason,
+        "upstream_error_code": upstream_error_code,
         "freshness": "fresh",
         "source": source,
         "observed_at": observed_at_unix_secs,

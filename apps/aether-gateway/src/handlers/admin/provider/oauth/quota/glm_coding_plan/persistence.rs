@@ -66,6 +66,15 @@ pub(super) async fn persist_success_result(
             "metadata": metadata_update["glm_coding_plan"],
         })));
     };
+    let status = if quota_snapshot
+        .get("exhausted")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        "quota_exhausted"
+    } else {
+        "success"
+    };
     if !persist_provider_quota_refresh_state(
         state,
         &key.id,
@@ -81,7 +90,7 @@ pub(super) async fn persist_success_result(
     Ok(Some(json!({
         "key_id": key.id,
         "key_name": key.name,
-        "status": "success",
+        "status": status,
         "metadata": metadata_update["glm_coding_plan"],
         "quota_snapshot": quota_snapshot,
     })))

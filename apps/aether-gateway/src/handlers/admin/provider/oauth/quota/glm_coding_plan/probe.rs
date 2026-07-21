@@ -12,6 +12,7 @@ use aether_contracts::{ExecutionResult, ProxySnapshot};
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogEndpoint;
 use aether_provider_pool::build_glm_coding_plan_pool_quota_request_with_base_url;
 use chrono::{FixedOffset, TimeZone};
+use serde_json::json;
 
 use super::metadata::{merge_metadata_patch, push_probe_warning};
 use super::RefreshOutcome;
@@ -111,29 +112,48 @@ pub(super) fn handle_probe_result(
             return;
         }
     };
+    let body_json = result
+        .body
+        .as_ref()
+        .and_then(|body| body.json_body.as_ref());
+    if let Some(error) = body_json.and_then(glm_coding_plan_business_error) {
+        let message = error.message;
+        match error.class {
+            GlmCodingPlanBusinessErrorClass::CredentialInvalid => {
+                outcome.oauth_invalid_at_unix_secs = Some(now_unix_secs);
+                outcome.oauth_invalid_reason = Some(message.clone());
+            }
+            GlmCodingPlanBusinessErrorClass::QuotaBlocked => {
+                outcome
+                    .metadata
+                    .insert("quota_exhausted".to_string(), json!(true));
+                if let Some(code) = error.code {
+                    outcome
+                        .metadata
+                        .insert("quota_error_code".to_string(), json!(code));
+                }
+                outcome
+                    .metadata
+                    .insert("quota_error_reason".to_string(), json!(message.clone()));
+                outcome.parsed_probe_count += 1;
+            }
+            GlmCodingPlanBusinessErrorClass::Other if result.status_code != 200 => {
+                handle_http_error(kind, &result, now_unix_secs, outcome);
+                return;
+            }
+            GlmCodingPlanBusinessErrorClass::Other => {}
+        }
+        push_probe_warning(&mut outcome.metadata, kind, message);
+        return;
+    }
     if result.status_code != 200 {
         handle_http_error(kind, &result, now_unix_secs, outcome);
         return;
     }
-    let Some(body_json) = result
-        .body
-        .as_ref()
-        .and_then(|body| body.json_body.as_ref())
-    else {
+    let Some(body_json) = body_json else {
         push_probe_warning(&mut outcome.metadata, kind, "响应中未包含 JSON".to_string());
         return;
     };
-    if let Some(error) = glm_coding_plan_business_error(body_json) {
-        if matches!(
-            error.class,
-            GlmCodingPlanBusinessErrorClass::CredentialInvalid
-        ) {
-            outcome.oauth_invalid_at_unix_secs = Some(now_unix_secs);
-            outcome.oauth_invalid_reason = Some(error.message.clone());
-        }
-        push_probe_warning(&mut outcome.metadata, kind, error.message);
-        return;
-    }
     let parsed = match parser {
         GlmCodingPlanProbeParser::Usage { kind, window } => {
             parse_glm_coding_plan_usage_response(body_json, kind, window, now_unix_secs)
