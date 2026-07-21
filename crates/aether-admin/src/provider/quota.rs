@@ -586,7 +586,20 @@ fn glm_usage_data(value: &serde_json::Value) -> &serde_json::Value {
     value.get("data").unwrap_or(value)
 }
 
-fn glm_usage_business_error_message(value: &serde_json::Value) -> Option<String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlmCodingPlanBusinessErrorClass {
+    CredentialInvalid,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlmCodingPlanBusinessError {
+    pub code: Option<i64>,
+    pub message: String,
+    pub class: GlmCodingPlanBusinessErrorClass,
+}
+
+fn glm_usage_business_error(value: &serde_json::Value) -> Option<GlmCodingPlanBusinessError> {
     let object = value.as_object()?;
     let success = object
         .get("success")
@@ -596,7 +609,7 @@ fn glm_usage_business_error_message(value: &serde_json::Value) -> Option<String>
     if success && code.is_none_or(|value| value == 0 || value == 200) {
         return None;
     }
-    ["msg", "message", "error"]
+    let message = ["msg", "message", "error"]
         .iter()
         .find_map(|key| {
             object
@@ -607,6 +620,16 @@ fn glm_usage_business_error_message(value: &serde_json::Value) -> Option<String>
                 .map(ToOwned::to_owned)
         })
         .or_else(|| code.map(|value| format!("GLM Coding Plan returned code {value}")))
+        .unwrap_or_else(|| "GLM Coding Plan returned a business error".to_string());
+    let class = match code {
+        Some(401 | 1000 | 1003) => GlmCodingPlanBusinessErrorClass::CredentialInvalid,
+        Some(_) | None => GlmCodingPlanBusinessErrorClass::Other,
+    };
+    Some(GlmCodingPlanBusinessError {
+        code,
+        message,
+        class,
+    })
 }
 
 fn coerce_json_i64(value: &serde_json::Value) -> Option<i64> {
@@ -616,8 +639,10 @@ fn coerce_json_i64(value: &serde_json::Value) -> Option<i64> {
     value.as_str()?.trim().parse::<i64>().ok()
 }
 
-pub fn glm_coding_plan_business_error_message(value: &serde_json::Value) -> Option<String> {
-    glm_usage_business_error_message(value)
+pub fn glm_coding_plan_business_error(
+    value: &serde_json::Value,
+) -> Option<GlmCodingPlanBusinessError> {
+    glm_usage_business_error(value)
 }
 
 pub fn parse_glm_coding_plan_usage_response(
@@ -626,7 +651,7 @@ pub fn parse_glm_coding_plan_usage_response(
     usage_window: Option<&str>,
     updated_at_unix_secs: u64,
 ) -> Option<serde_json::Value> {
-    if glm_usage_business_error_message(value).is_some() {
+    if glm_usage_business_error(value).is_some() {
         return None;
     }
     let data = glm_usage_data(value);
@@ -810,7 +835,7 @@ pub fn parse_glm_coding_plan_quota_limit_response(
     value: &serde_json::Value,
     updated_at_unix_secs: u64,
 ) -> Option<serde_json::Value> {
-    if glm_usage_business_error_message(value).is_some() {
+    if glm_usage_business_error(value).is_some() {
         return None;
     }
     let data = glm_usage_data(value);
@@ -2431,8 +2456,9 @@ mod tests {
         parse_glm_coding_plan_usage_response, parse_windsurf_model_configs_response,
         parse_windsurf_rate_limit_response, parse_windsurf_user_status_response,
         provider_auto_remove_quota_exhausted_keys, quota_refresh_success_invalid_state,
-        should_auto_remove_structured_reason, OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX,
-        OAUTH_REFRESH_FAILED_PREFIX, OAUTH_REQUEST_FAILED_PREFIX,
+        should_auto_remove_structured_reason, GlmCodingPlanBusinessErrorClass,
+        OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
+        OAUTH_REQUEST_FAILED_PREFIX,
     };
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use serde_json::json;
@@ -3355,6 +3381,49 @@ mod tests {
             parse_glm_coding_plan_quota_limit_response(&payload, 1_234),
             None
         );
+    }
+
+    #[test]
+    fn classifies_glm_business_errors_without_conflating_authentication() {
+        // Given
+        let credential_invalid_codes = [json!(401), json!("401"), json!(1000), json!(1003)];
+        let other_codes = [
+            json!(1001),
+            json!(1005),
+            json!(1220),
+            json!(1308),
+            json!(1309),
+            json!(1310),
+            json!(1313),
+            json!(9999),
+        ];
+
+        // When / Then
+        for code in credential_invalid_codes {
+            let error = super::glm_coding_plan_business_error(&json!({
+                "code": code,
+                "success": false
+            }))
+            .expect("business error should parse");
+            assert_eq!(
+                error.class,
+                GlmCodingPlanBusinessErrorClass::CredentialInvalid
+            );
+        }
+        for code in other_codes {
+            let error = super::glm_coding_plan_business_error(&json!({
+                "code": code,
+                "success": false
+            }))
+            .expect("business error should parse");
+            assert_eq!(error.class, GlmCodingPlanBusinessErrorClass::Other);
+        }
+        let error = super::glm_coding_plan_business_error(&json!({
+            "msg": "unknown business failure",
+            "success": false
+        }))
+        .expect("business error should parse");
+        assert_eq!(error.class, GlmCodingPlanBusinessErrorClass::Other);
     }
 
     #[test]

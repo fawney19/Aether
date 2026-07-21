@@ -1,10 +1,7 @@
 mod metadata;
+mod persistence;
 mod probe;
 
-use super::shared::{
-    build_quota_snapshot_payload, persist_provider_quota_refresh_state,
-    quota_refresh_success_invalid_state,
-};
 use crate::handlers::admin::request::AdminAppState;
 use crate::GatewayError;
 use aether_admin::provider::quota as admin_provider_quota_pure;
@@ -17,6 +14,7 @@ use serde_json::json;
 use metadata::{
     key_write_failed_result, missing_key_result, transport_unavailable_result, unix_now,
 };
+use persistence::{persist_empty_probe_result, persist_success_result};
 
 const GLM_CODING_PLAN_5H_WINDOW_SECONDS: u64 = 5 * 60 * 60;
 const GLM_CODING_PLAN_WEEKLY_WINDOW_SECONDS: u64 = 7 * 24 * 60 * 60;
@@ -108,12 +106,11 @@ async fn refresh_one_key(
     }
 
     let now_unix_secs = unix_now();
-    let (prior_invalid_at, prior_invalid_reason) = quota_refresh_success_invalid_state(key);
     let mut outcome = RefreshOutcome {
         metadata: serde_json::Map::from_iter([("updated_at".to_string(), json!(now_unix_secs))]),
         parsed_probe_count: 0,
-        oauth_invalid_at_unix_secs: prior_invalid_at,
-        oauth_invalid_reason: prior_invalid_reason,
+        oauth_invalid_at_unix_secs: None,
+        oauth_invalid_reason: None,
     };
 
     let quota_result = probe::execute_kind(
@@ -197,79 +194,4 @@ async fn refresh_one_key(
     }
 
     Ok(RefreshOneKeyResult::Outcome(outcome))
-}
-
-async fn persist_empty_probe_result(
-    state: &AdminAppState<'_>,
-    key: &StoredProviderCatalogKey,
-    outcome: RefreshOutcome,
-) -> Result<Option<serde_json::Value>, GatewayError> {
-    if outcome.oauth_invalid_at_unix_secs.is_some()
-        && !persist_provider_quota_refresh_state(
-            state,
-            &key.id,
-            None,
-            outcome.oauth_invalid_at_unix_secs,
-            outcome.oauth_invalid_reason.clone(),
-            None,
-        )
-        .await?
-    {
-        return Ok(None);
-    }
-    let status = if outcome.oauth_invalid_at_unix_secs.is_some() {
-        "auth_invalid"
-    } else {
-        "no_metadata"
-    };
-    Ok(Some(json!({
-        "key_id": key.id,
-        "key_name": key.name,
-        "status": status,
-        "message": outcome
-            .oauth_invalid_reason
-            .unwrap_or_else(|| "响应中未包含可解析的额度信息".to_string()),
-        "metadata": outcome.metadata,
-    })))
-}
-
-async fn persist_success_result(
-    state: &AdminAppState<'_>,
-    key: &StoredProviderCatalogKey,
-    outcome: RefreshOutcome,
-) -> Result<Option<serde_json::Value>, GatewayError> {
-    let metadata_update = json!({ "glm_coding_plan": outcome.metadata });
-    let quota_snapshot = build_quota_snapshot_payload(
-        "glm_coding_plan",
-        key.status_snapshot.as_ref(),
-        Some(&metadata_update),
-    );
-    let Some(quota_snapshot) = quota_snapshot else {
-        return Ok(Some(json!({
-            "key_id": key.id,
-            "key_name": key.name,
-            "status": "no_metadata",
-            "message": "响应中未包含可解析的额度信息",
-            "metadata": metadata_update["glm_coding_plan"],
-        })));
-    };
-    if !persist_provider_quota_refresh_state(
-        state,
-        &key.id,
-        Some(&metadata_update),
-        outcome.oauth_invalid_at_unix_secs,
-        outcome.oauth_invalid_reason,
-        None,
-    )
-    .await?
-    {
-        return Ok(None);
-    }
-    Ok(Some(json!({
-        "key_id": key.id,
-        "key_name": key.name,
-        "status": "success",
-        "metadata": metadata_update["glm_coding_plan"],
-        "quota_snapshot": quota_snapshot,
-    })))
 }

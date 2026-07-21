@@ -58,15 +58,6 @@ pub(super) fn key_write_failed_result(key: &StoredProviderCatalogKey) -> serde_j
     })
 }
 
-pub(super) fn business_error_reason(message: &str) -> String {
-    let normalized = message.trim();
-    if normalized.is_empty() {
-        "GLM Coding Plan Token 无效".to_string()
-    } else {
-        normalized.to_string()
-    }
-}
-
 pub(super) fn unix_now() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

@@ -5,15 +5,15 @@ use super::super::shared::{
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::GatewayError;
 use aether_admin::provider::quota::{
-    glm_coding_plan_business_error_message, parse_glm_coding_plan_quota_limit_response,
-    parse_glm_coding_plan_usage_response,
+    glm_coding_plan_business_error, parse_glm_coding_plan_quota_limit_response,
+    parse_glm_coding_plan_usage_response, GlmCodingPlanBusinessErrorClass,
 };
 use aether_contracts::{ExecutionResult, ProxySnapshot};
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogEndpoint;
 use aether_provider_pool::build_glm_coding_plan_pool_quota_request_with_base_url;
 use chrono::{FixedOffset, TimeZone};
 
-use super::metadata::{business_error_reason, merge_metadata_patch, push_probe_warning};
+use super::metadata::{merge_metadata_patch, push_probe_warning};
 use super::RefreshOutcome;
 
 const GLM_MONITOR_TIMEZONE_OFFSET_SECS: i32 = 8 * 60 * 60;
@@ -123,10 +123,15 @@ pub(super) fn handle_probe_result(
         push_probe_warning(&mut outcome.metadata, kind, "响应中未包含 JSON".to_string());
         return;
     };
-    if let Some(message) = glm_coding_plan_business_error_message(body_json) {
-        outcome.oauth_invalid_at_unix_secs = Some(now_unix_secs);
-        outcome.oauth_invalid_reason = Some(business_error_reason(&message));
-        push_probe_warning(&mut outcome.metadata, kind, message);
+    if let Some(error) = glm_coding_plan_business_error(body_json) {
+        if matches!(
+            error.class,
+            GlmCodingPlanBusinessErrorClass::CredentialInvalid
+        ) {
+            outcome.oauth_invalid_at_unix_secs = Some(now_unix_secs);
+            outcome.oauth_invalid_reason = Some(error.message.clone());
+        }
+        push_probe_warning(&mut outcome.metadata, kind, error.message);
         return;
     }
     let parsed = match parser {
@@ -155,7 +160,7 @@ fn handle_http_error(
     outcome: &mut RefreshOutcome,
 ) {
     let err_msg = aether_admin::provider::quota::extract_execution_error_message(result);
-    if matches!(result.status_code, 401 | 403) {
+    if result.status_code == 401 {
         outcome.oauth_invalid_at_unix_secs = Some(now_unix_secs);
         outcome.oauth_invalid_reason = Some(
             err_msg
@@ -174,31 +179,4 @@ fn handle_http_error(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::usage_query_for_cycle_window;
-
-    #[test]
-    fn builds_usage_query_from_provider_cycle_in_beijing_time() {
-        let query =
-            usage_query_for_cycle_window(Some(1_782_372_879), 5 * 60 * 60, 1_782_355_388, false)
-                .expect("query should build");
-
-        assert_eq!(
-            query,
-            "startTime=2026-06-25+10%3A34%3A39&endTime=2026-06-25+10%3A43%3A08"
-        );
-    }
-
-    #[test]
-    fn builds_rolling_usage_query_only_when_fallback_is_allowed() {
-        assert!(usage_query_for_cycle_window(None, 5 * 60 * 60, 1_782_355_388, false).is_none());
-
-        let query = usage_query_for_cycle_window(None, 5 * 60 * 60, 1_782_355_388, true)
-            .expect("fallback query should build");
-
-        assert_eq!(
-            query,
-            "startTime=2026-06-25+05%3A43%3A08&endTime=2026-06-25+10%3A43%3A08"
-        );
-    }
-}
+mod tests;
