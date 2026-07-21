@@ -110,6 +110,7 @@ async fn gateway_executes_gemini_video_create_via_local_decision_gate_with_local
                 priority: 1,
                 api_formats: Some(vec!["gemini:video".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(false),
             model_is_active: true,

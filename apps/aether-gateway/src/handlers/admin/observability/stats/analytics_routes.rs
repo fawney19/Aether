@@ -259,6 +259,11 @@ pub(super) async fn maybe_build_local_admin_stats_analytics_response(
                     "has_format_conversion",
                 ),
                 slow_threshold_ms,
+                include_timeline: query_param_optional_bool(
+                    request_context.query_string(),
+                    "include_timeline",
+                )
+                .unwrap_or(true),
             })
             .await?;
         return Ok(Some(build_admin_stats_provider_performance_response(

@@ -761,33 +761,38 @@ pub(crate) fn spawn_account_self_check_worker(
     }
 
     let config = AccountSelfCheckWorkerConfig::from_env();
-    Some(tokio::spawn(async move {
-        let mut interval = tokio::time::interval(config.scan_interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        interval.tick().await;
-        let mut deferred_since = None;
-        loop {
+    Some(crate::task_runtime::spawn_singleton_worker(
+        state,
+        crate::task_runtime::TASK_KEY_ACCOUNT_SELF_CHECK,
+        move |state| async move {
+            let mut interval = tokio::time::interval(config.scan_interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await;
-            if state
-                .data
-                .should_defer_maintenance_for_database_pool_pressure(&mut deferred_since)
-            {
-                debug!(
-                    event_name = "maintenance_worker_deferred",
-                    log_type = "ops",
-                    worker = "account_self_check",
-                    "gateway account self-check deferred because database pool has no idle reserve"
-                );
-                continue;
+            let mut deferred_since = None;
+            loop {
+                interval.tick().await;
+                if state
+                    .data
+                    .should_defer_maintenance_for_database_pool_pressure(&mut deferred_since)
+                {
+                    debug!(
+                        event_name = "maintenance_worker_deferred",
+                        log_type = "ops",
+                        worker = "account_self_check",
+                        "gateway account self-check deferred because database pool has no idle reserve"
+                    );
+                    continue;
+                }
+                if let Err(err) = perform_account_self_check_once_with_config(&state, config).await
+                {
+                    warn!(
+                        error = ?err,
+                        "gateway account self-check worker tick failed"
+                    );
+                }
             }
-            if let Err(err) = perform_account_self_check_once_with_config(&state, config).await {
-                warn!(
-                    error = ?err,
-                    "gateway account self-check worker tick failed"
-                );
-            }
-        }
-    }))
+        },
+    ))
 }
 
 #[cfg(test)]

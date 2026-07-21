@@ -133,8 +133,15 @@ fn users_me_usage_effective_input_tokens(item: &StoredRequestUsageAudit) -> u64 
         .as_deref()
         .or(item.api_format.as_deref());
     let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
+    let cache_creation_tokens =
+        i64::try_from(users_me_usage_cache_creation_tokens(item)).unwrap_or(i64::MAX);
     let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
-    normalize_input_tokens_for_billing(api_format, input_tokens, cache_read_tokens) as u64
+    normalize_input_tokens_for_billing(
+        api_format,
+        input_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    ) as u64
 }
 
 fn users_me_usage_effective_unix_secs(item: &StoredRequestUsageAudit) -> u64 {
@@ -213,14 +220,7 @@ fn users_me_usage_api_format_defaults_to_non_stream(item: &StoredRequestUsageAud
     let Some(value) = api_format else {
         return false;
     };
-    matches!(
-        crate::ai_serving::normalize_api_format_alias(value).as_str(),
-        "openai:chat"
-            | "openai:responses"
-            | "openai:responses:compact"
-            | "openai:image"
-            | "claude:messages"
-    )
+    crate::ai_serving::api_format_defaults_to_non_stream(value)
 }
 
 fn users_me_usage_request_body_implies_default_non_stream(item: &StoredRequestUsageAudit) -> bool {
@@ -488,6 +488,7 @@ fn build_users_me_usage_record_payload(
         "cache_read_input_tokens": item.cache_read_input_tokens,
         "status_code": item.status_code,
         "error_message": item.error_message,
+        "request_type": item.request_type,
         "input_price_per_1m": input_price_per_1m,
         "output_price_per_1m": output_price_per_1m,
         "cache_creation_price_per_1m": cache_creation_price_per_1m,
@@ -505,8 +506,14 @@ fn build_users_me_usage_record_payload(
     if let Some(reasoning_effort) = item.provider_reasoning_effort() {
         payload["reasoning_effort"] = json!(reasoning_effort);
     }
+    if let Some(requested_reasoning_effort) = item.requested_reasoning_effort() {
+        payload["requested_reasoning_effort"] = json!(requested_reasoning_effort);
+    }
     if let Some(service_tier) = item.provider_service_tier() {
         payload["service_tier"] = json!(service_tier);
+    }
+    if let Some(actual_service_tier) = item.provider_actual_service_tier() {
+        payload["actual_service_tier"] = json!(actual_service_tier);
     }
     if include_actual_cost {
         payload["actual_cost"] = json!(round_to(item.actual_total_cost_usd, 6));
@@ -522,6 +529,7 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
     let mut payload = json!({
         "id": item.id,
         "status": item.status,
+        "request_type": item.request_type,
         "input_tokens": item.input_tokens,
         "effective_input_tokens": users_me_usage_effective_input_tokens(item),
         "output_tokens": item.output_tokens,
@@ -572,8 +580,14 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
     if let Some(reasoning_effort) = item.provider_reasoning_effort() {
         payload["reasoning_effort"] = json!(reasoning_effort);
     }
+    if let Some(requested_reasoning_effort) = item.requested_reasoning_effort() {
+        payload["requested_reasoning_effort"] = json!(requested_reasoning_effort);
+    }
     if let Some(service_tier) = item.provider_service_tier() {
         payload["service_tier"] = json!(service_tier);
+    }
+    if let Some(actual_service_tier) = item.provider_actual_service_tier() {
+        payload["actual_service_tier"] = json!(actual_service_tier);
     }
     payload
 }
@@ -1648,6 +1662,27 @@ mod tests {
     }
 
     #[test]
+    fn user_usage_payloads_expose_requested_and_provider_reasoning_mapping() {
+        let item = StoredRequestUsageAudit {
+            request_body: Some(json!({
+                "reasoning": { "effort": "xhigh" }
+            })),
+            provider_request_body: Some(json!({
+                "reasoning": { "effort": "max" }
+            })),
+            ..sample_usage("completed")
+        };
+
+        let record = build_users_me_usage_record_payload(&item, false, &BTreeMap::new(), false);
+        let active = build_users_me_usage_active_payload(&item);
+
+        assert_eq!(record["requested_reasoning_effort"], "xhigh");
+        assert_eq!(active["requested_reasoning_effort"], "xhigh");
+        assert_eq!(record["reasoning_effort"], "max");
+        assert_eq!(active["reasoning_effort"], "max");
+    }
+
+    #[test]
     fn user_usage_active_override_uses_terminal_candidate_latency() {
         let candidate = sample_candidate(
             RequestCandidateStatus::Success,
@@ -1831,6 +1866,27 @@ mod tests {
         assert_eq!(active_payload["upstream_is_stream"], true);
         assert_eq!(active_payload["client_requested_stream"], false);
         assert_eq!(active_payload["client_is_stream"], false);
+    }
+
+    #[test]
+    fn user_usage_stream_defaults_to_non_stream_for_openai_search() {
+        let item = StoredRequestUsageAudit {
+            is_stream: false,
+            api_format: Some("openai:search".to_string()),
+            request_body: Some(json!({
+                "id": "session-search-1",
+                "model": "gpt-5.6-sol",
+                "input": "current documentation"
+            })),
+            ..sample_usage("completed")
+        };
+
+        assert!(!users_me_usage_client_is_stream(&item));
+
+        let record_payload =
+            build_users_me_usage_record_payload(&item, false, &BTreeMap::new(), false);
+        assert_eq!(record_payload["client_requested_stream"], false);
+        assert_eq!(record_payload["client_is_stream"], false);
     }
 
     #[test]

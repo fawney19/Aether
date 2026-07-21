@@ -193,6 +193,27 @@
         </div>
       </div>
 
+      <div class="flex items-center h-full">
+        <div class="flex items-center space-x-2">
+          <Checkbox
+            id="cyber-continue-failover"
+            :checked="cyberContinueFailover"
+            @update:checked="$emit('update:cyberContinueFailover', $event)"
+          />
+          <div>
+            <Label
+              for="cyber-continue-failover"
+              class="cursor-pointer"
+            >
+              Cyber继续转移
+            </Label>
+            <p class="text-xs text-muted-foreground">
+              关闭时Cyber Policy错误直接返回客户端；开启后在响应内容开始前按普通错误继续故障转移，可能增加首字等待时间
+            </p>
+          </div>
+        </div>
+      </div>
+
       <div class="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4 border-t pt-5">
         <div class="flex items-center h-full">
           <div class="flex items-center space-x-2">
@@ -520,6 +541,7 @@ defineProps<{
   enableFormatConversion: boolean
   enableOpenaiImageSyncHeartbeat: boolean
   enableStandardTextSyncHeartbeat: boolean
+  cyberContinueFailover: boolean
   loading: boolean
   hasChanges: boolean
 }>()
@@ -548,5 +570,6 @@ defineEmits<{
   'update:enableFormatConversion': [value: boolean]
   'update:enableOpenaiImageSyncHeartbeat': [value: boolean]
   'update:enableStandardTextSyncHeartbeat': [value: boolean]
+  'update:cyberContinueFailover': [value: boolean]
 }>()
 </script>

@@ -2,7 +2,7 @@ use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdatePa
 use crate::handlers::admin::provider::write::normalize::{
     normalize_allow_auth_channel_mismatch_formats, normalize_api_format_json_object_keys,
     normalize_api_format_list, normalize_auth_type, normalize_auth_type_by_format,
-    normalize_max_probe_interval_minutes, validate_vertex_api_formats,
+    normalize_max_probe_interval_minutes, normalize_rate_multipliers, validate_vertex_api_formats,
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{
@@ -22,6 +22,27 @@ pub(crate) async fn build_admin_update_provider_key_record(
     state: &AdminAppState<'_>,
     provider: &StoredProviderCatalogProvider,
     existing: &StoredProviderCatalogKey,
+    patch: AdminProviderKeyUpdatePatch,
+) -> Result<StoredProviderCatalogKey, String> {
+    let existing_keys = state
+        .as_ref()
+        .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
+        .await
+        .map_err(|err| format!("{err:?}"))?;
+    build_admin_update_provider_key_record_with_existing_keys(
+        state,
+        provider,
+        existing,
+        &existing_keys,
+        patch,
+    )
+}
+
+pub(crate) fn build_admin_update_provider_key_record_with_existing_keys(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    existing: &StoredProviderCatalogKey,
+    existing_keys: &[StoredProviderCatalogKey],
     patch: AdminProviderKeyUpdatePatch,
 ) -> Result<StoredProviderCatalogKey, String> {
     let state = state.as_ref();
@@ -56,11 +77,6 @@ pub(crate) async fn build_admin_update_provider_key_record(
         .as_ref()
         .and_then(serde_json::Value::as_object)
         .cloned();
-
-    let existing_keys = state
-        .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
-        .await
-        .map_err(|err| format!("{err:?}"))?;
 
     match target_auth_type.as_str() {
         "api_key" | "bearer" => {
@@ -260,8 +276,7 @@ pub(crate) async fn build_admin_update_provider_key_record(
         updated.name = trimmed.to_string();
     }
     if fields.contains("rate_multipliers") {
-        updated.rate_multipliers =
-            normalize_api_format_json_object_keys(payload.rate_multipliers, "rate_multipliers")?;
+        updated.rate_multipliers = normalize_rate_multipliers(payload.rate_multipliers)?;
     }
     if let Some(internal_priority) = payload.internal_priority {
         updated.internal_priority = internal_priority;
@@ -308,7 +323,7 @@ pub(crate) async fn build_admin_update_provider_key_record(
     if let Some(auto_fetch_models) = payload.auto_fetch_models {
         updated.auto_fetch_models = auto_fetch_models;
     }
-    if auto_fetch_disabled {
+    if auto_fetch_disabled && !fields.contains("allowed_models") {
         updated.allowed_models = None;
     }
     if fields.contains("locked_models") {
@@ -347,6 +362,17 @@ pub(crate) async fn build_admin_update_provider_key_record(
         .ok()
         .map(|duration| duration.as_secs());
     Ok(updated)
+}
+
+pub(crate) fn admin_provider_key_update_requires_immediate_model_fetch(
+    existing: &StoredProviderCatalogKey,
+    updated: &StoredProviderCatalogKey,
+) -> bool {
+    let filters_changed = existing.model_include_patterns != updated.model_include_patterns
+        || existing.model_exclude_patterns != updated.model_exclude_patterns;
+    let locked_models_changed = existing.locked_models != updated.locked_models;
+    updated.auto_fetch_models
+        && (!existing.auto_fetch_models || filters_changed || locked_models_changed)
 }
 
 fn raw_secret_auth_type(value: &str) -> bool {

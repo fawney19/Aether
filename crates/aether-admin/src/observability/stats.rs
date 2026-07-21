@@ -1969,7 +1969,10 @@ pub fn build_api_key_leaderboard_items_from_summaries(
                 .cloned()
                 .unwrap_or_else(|| api_key_id.to_string())
         } else {
-            if snapshots_available {
+            // A missing snapshot represents an API key that may have been deleted. Only surface
+            // that historical identity when the caller explicitly includes inactive keys and is
+            // not asking us to prove that the key was non-admin.
+            if snapshots_available && (!include_inactive || exclude_admin) {
                 continue;
             }
             api_key_names
@@ -2050,10 +2053,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        build_api_key_leaderboard_items, build_user_leaderboard_items, AdminStatsUserMetadata,
+        build_api_key_leaderboard_items, build_api_key_leaderboard_items_from_summaries,
+        build_user_leaderboard_items, AdminStatsUserMetadata,
     };
     use aether_data::repository::auth::StoredAuthApiKeySnapshot;
-    use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
+    use aether_data_contracts::repository::usage::{
+        StoredRequestUsageAudit, StoredUsageLeaderboardSummary,
+    };
 
     fn sample_usage(api_key_name: Option<&str>) -> StoredRequestUsageAudit {
         StoredRequestUsageAudit::new(
@@ -2125,6 +2131,19 @@ mod tests {
         }
     }
 
+    fn sample_api_key_summary(
+        api_key_id: &str,
+        legacy_name: Option<&str>,
+    ) -> StoredUsageLeaderboardSummary {
+        StoredUsageLeaderboardSummary {
+            group_key: api_key_id.to_string(),
+            legacy_name: legacy_name.map(str::to_string),
+            request_count: 3,
+            total_tokens: 60,
+            total_cost_usd: 0.6,
+        }
+    }
+
     #[test]
     fn api_key_leaderboard_prefers_resolved_names_over_legacy_usage_names_when_snapshots_exist() {
         let leaderboard = build_api_key_leaderboard_items(
@@ -2152,6 +2171,50 @@ mod tests {
 
         assert_eq!(leaderboard.len(), 1);
         assert_eq!(leaderboard[0].name, "legacy-default");
+    }
+
+    #[test]
+    fn api_key_summary_leaderboard_includes_missing_snapshots_for_historical_view() {
+        let summaries = [
+            sample_api_key_summary("named-key", Some("legacy-named")),
+            sample_api_key_summary("legacy-key", Some("legacy-default")),
+            sample_api_key_summary("id-key", None),
+        ];
+        let leaderboard = build_api_key_leaderboard_items_from_summaries(
+            &summaries,
+            Some(&[]),
+            &BTreeMap::from([("named-key".to_string(), "resolved-name".to_string())]),
+            true,
+            false,
+        );
+
+        assert_eq!(leaderboard.len(), 3);
+        assert_eq!(leaderboard[0].name, "resolved-name");
+        assert_eq!(leaderboard[1].name, "legacy-default");
+        assert_eq!(leaderboard[2].name, "id-key");
+        assert!(leaderboard.iter().all(|item| item.requests == 3));
+    }
+
+    #[test]
+    fn api_key_summary_leaderboard_conservatively_filters_missing_snapshots() {
+        let summaries = [sample_api_key_summary(
+            "deleted-key",
+            Some("historical-name"),
+        )];
+
+        for (include_inactive, exclude_admin) in [(false, false), (false, true), (true, true)] {
+            let leaderboard = build_api_key_leaderboard_items_from_summaries(
+                &summaries,
+                Some(&[]),
+                &BTreeMap::new(),
+                include_inactive,
+                exclude_admin,
+            );
+            assert!(
+                leaderboard.is_empty(),
+                "include_inactive={include_inactive} exclude_admin={exclude_admin}"
+            );
+        }
     }
 
     #[test]
@@ -2222,6 +2285,6 @@ mod tests {
             build_user_leaderboard_items(&[item], &BTreeMap::new(), false, false, false);
 
         assert_eq!(leaderboard.len(), 1);
-        assert_eq!(leaderboard[0].tokens, 140);
+        assert_eq!(leaderboard[0].tokens, 120);
     }
 }

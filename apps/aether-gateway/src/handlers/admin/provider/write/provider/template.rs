@@ -1,11 +1,11 @@
 use super::endpoint::{
     build_admin_fixed_provider_endpoint_defaults, build_admin_fixed_provider_endpoint_record,
+    AdminFixedProviderEndpointDefaults,
 };
 use crate::handlers::admin::request::AdminAppState;
-use crate::provider_key_auth::provider_key_is_oauth_managed;
 use crate::GatewayError;
 use aether_data_contracts::repository::provider_catalog::{
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    StoredProviderCatalogEndpoint, StoredProviderCatalogProvider,
 };
 use aether_provider_transport::provider_types::{
     fixed_provider_template, FixedProviderEndpointTemplate, FixedProviderTemplate,
@@ -37,6 +37,30 @@ pub(crate) async fn reconcile_admin_fixed_provider_template_endpoints(
     state: &AdminAppState<'_>,
     provider: &StoredProviderCatalogProvider,
 ) -> Result<(), GatewayError> {
+    reconcile_admin_fixed_provider_template_endpoints_with_adoption_provider(
+        state, provider, provider,
+    )
+    .await
+}
+
+pub(crate) async fn reconcile_admin_fixed_provider_template_endpoints_after_update(
+    state: &AdminAppState<'_>,
+    previous_provider: &StoredProviderCatalogProvider,
+    updated_provider: &StoredProviderCatalogProvider,
+) -> Result<(), GatewayError> {
+    reconcile_admin_fixed_provider_template_endpoints_with_adoption_provider(
+        state,
+        updated_provider,
+        previous_provider,
+    )
+    .await
+}
+
+async fn reconcile_admin_fixed_provider_template_endpoints_with_adoption_provider(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    adoption_provider: &StoredProviderCatalogProvider,
+) -> Result<(), GatewayError> {
     let Some(template) = state.fixed_provider_template(&provider.provider_type) else {
         return Ok(());
     };
@@ -53,8 +77,9 @@ pub(crate) async fn reconcile_admin_fixed_provider_template_endpoints(
         match existing_endpoint {
             Some(existing_endpoint) => {
                 matched_endpoint_ids.insert(existing_endpoint.id.clone());
-                let updated = reconcile_fixed_provider_endpoint(
+                let updated = reconcile_fixed_provider_endpoint_with_adoption_provider(
                     provider,
+                    adoption_provider,
                     existing_endpoint,
                     template,
                     endpoint_template,
@@ -115,31 +140,6 @@ pub(crate) async fn reconcile_admin_fixed_provider_template_endpoints(
     Ok(())
 }
 
-pub(crate) async fn reconcile_admin_fixed_provider_template_keys(
-    state: &AdminAppState<'_>,
-    provider: &StoredProviderCatalogProvider,
-) -> Result<(), GatewayError> {
-    let Some(_) = state.fixed_provider_template(&provider.provider_type) else {
-        return Ok(());
-    };
-
-    let existing_keys = state
-        .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
-        .await?;
-    for existing_key in existing_keys {
-        let Some(updated_key) = reconcile_fixed_provider_key(provider, &existing_key) else {
-            continue;
-        };
-        let Some(_) = state.update_provider_catalog_key(&updated_key).await? else {
-            return Err(GatewayError::Internal(
-                "provider catalog key writer unavailable".to_string(),
-            ));
-        };
-    }
-
-    Ok(())
-}
-
 pub(crate) fn apply_admin_fixed_provider_endpoint_template_overrides(
     provider: &StoredProviderCatalogProvider,
     existing_endpoint: &StoredProviderCatalogEndpoint,
@@ -156,8 +156,14 @@ pub(crate) fn apply_admin_fixed_provider_endpoint_template_overrides(
 
     let defaults =
         build_admin_fixed_provider_endpoint_defaults(provider, template, endpoint_template)?;
-    let mut metadata = fixed_provider_endpoint_metadata(existing_endpoint)
-        .unwrap_or_else(|| managed_fixed_provider_endpoint_metadata(template, endpoint_template));
+    let mut metadata = fixed_provider_endpoint_metadata(existing_endpoint).unwrap_or_else(|| {
+        adopt_fixed_provider_endpoint_metadata(
+            existing_endpoint,
+            &defaults,
+            template,
+            endpoint_template,
+        )
+    });
     let mut overrides = metadata.overrides.clone();
 
     sync_override_if_changed(
@@ -250,8 +256,25 @@ pub(crate) fn apply_admin_fixed_provider_endpoint_template_overrides(
     Ok(())
 }
 
+#[cfg(test)]
 fn reconcile_fixed_provider_endpoint(
     provider: &StoredProviderCatalogProvider,
+    existing_endpoint: &StoredProviderCatalogEndpoint,
+    template: &FixedProviderTemplate,
+    endpoint_template: &FixedProviderEndpointTemplate,
+) -> Result<StoredProviderCatalogEndpoint, String> {
+    reconcile_fixed_provider_endpoint_with_adoption_provider(
+        provider,
+        provider,
+        existing_endpoint,
+        template,
+        endpoint_template,
+    )
+}
+
+fn reconcile_fixed_provider_endpoint_with_adoption_provider(
+    provider: &StoredProviderCatalogProvider,
+    adoption_provider: &StoredProviderCatalogProvider,
     existing_endpoint: &StoredProviderCatalogEndpoint,
     template: &FixedProviderTemplate,
     endpoint_template: &FixedProviderEndpointTemplate,
@@ -259,8 +282,22 @@ fn reconcile_fixed_provider_endpoint(
     let defaults =
         build_admin_fixed_provider_endpoint_defaults(provider, template, endpoint_template)?;
     let mut updated = existing_endpoint.clone();
-    let metadata = fixed_provider_endpoint_metadata(existing_endpoint)
-        .unwrap_or_else(|| managed_fixed_provider_endpoint_metadata(template, endpoint_template));
+    let metadata = match fixed_provider_endpoint_metadata(existing_endpoint) {
+        Some(metadata) => metadata,
+        None => {
+            let adoption_defaults = build_admin_fixed_provider_endpoint_defaults(
+                adoption_provider,
+                template,
+                endpoint_template,
+            )?;
+            adopt_fixed_provider_endpoint_metadata(
+                existing_endpoint,
+                &adoption_defaults,
+                template,
+                endpoint_template,
+            )
+        }
+    };
 
     updated.api_format = defaults.api_format.clone();
     updated.api_family = Some(defaults.api_family.clone());
@@ -455,6 +492,77 @@ fn managed_fixed_provider_endpoint_metadata(
     }
 }
 
+fn adopt_fixed_provider_endpoint_metadata(
+    existing_endpoint: &StoredProviderCatalogEndpoint,
+    defaults: &AdminFixedProviderEndpointDefaults,
+    template: &FixedProviderTemplate,
+    endpoint_template: &FixedProviderEndpointTemplate,
+) -> FixedProviderEndpointMetadata {
+    let mut metadata = managed_fixed_provider_endpoint_metadata(template, endpoint_template);
+    sync_override(
+        &mut metadata.overrides,
+        OVERRIDE_BASE_URL,
+        &existing_endpoint.base_url,
+        &defaults.base_url,
+    );
+    sync_override(
+        &mut metadata.overrides,
+        OVERRIDE_CUSTOM_PATH,
+        &existing_endpoint.custom_path,
+        &defaults.custom_path,
+    );
+    sync_override(
+        &mut metadata.overrides,
+        OVERRIDE_HEADER_RULES,
+        &existing_endpoint.header_rules,
+        &defaults.header_rules,
+    );
+    sync_override(
+        &mut metadata.overrides,
+        OVERRIDE_BODY_RULES,
+        &existing_endpoint.body_rules,
+        &defaults.body_rules,
+    );
+    sync_override(
+        &mut metadata.overrides,
+        OVERRIDE_MAX_RETRIES,
+        &existing_endpoint.max_retries,
+        &defaults.max_retries,
+    );
+    sync_override(
+        &mut metadata.overrides,
+        OVERRIDE_IS_ACTIVE,
+        &existing_endpoint.is_active,
+        &defaults.is_active,
+    );
+    sync_override(
+        &mut metadata.overrides,
+        OVERRIDE_PROXY,
+        &existing_endpoint.proxy,
+        &defaults.proxy,
+    );
+    sync_override(
+        &mut metadata.overrides,
+        OVERRIDE_FORMAT_ACCEPTANCE_CONFIG,
+        &existing_endpoint.format_acceptance_config,
+        &defaults.format_acceptance_config,
+    );
+
+    let existing_config = endpoint_config_without_metadata(existing_endpoint.config.as_ref());
+    for (key, desired) in fixed_provider_endpoint_config_defaults(endpoint_template) {
+        let Some(actual) = existing_config.get(&key) else {
+            continue;
+        };
+        sync_override(
+            &mut metadata.overrides,
+            &config_override_key(&key),
+            actual,
+            &desired,
+        );
+    }
+    metadata
+}
+
 fn upsert_fixed_provider_endpoint_metadata(
     endpoint: &mut StoredProviderCatalogEndpoint,
     metadata: &FixedProviderEndpointMetadata,
@@ -511,22 +619,6 @@ fn current_unix_secs() -> u64 {
         .ok()
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
-}
-
-fn reconcile_fixed_provider_key(
-    provider: &StoredProviderCatalogProvider,
-    existing_key: &StoredProviderCatalogKey,
-) -> Option<StoredProviderCatalogKey> {
-    if !provider_key_is_oauth_managed(existing_key, &provider.provider_type)
-        || existing_key.api_formats.is_none()
-    {
-        return None;
-    }
-
-    let mut updated = existing_key.clone();
-    updated.api_formats = None;
-    updated.updated_at_unix_secs = Some(current_unix_secs());
-    Some(updated)
 }
 
 fn sync_override<T>(overrides: &mut BTreeSet<String>, key: &str, actual: &T, desired: &T)
@@ -623,5 +715,69 @@ mod tests {
             reconcile_fixed_provider_endpoint(&provider, &updated, template, endpoint_template)
                 .expect("endpoint should reconcile");
         assert_eq!(reconciled.base_url, "http://127.0.0.1:18181/v1");
+    }
+
+    #[test]
+    fn fixed_provider_endpoint_reconcile_adopts_existing_customization() {
+        let provider = sample_codex_provider();
+        let template = fixed_provider_template("codex").expect("codex template should exist");
+        let endpoint_template = template
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.api_format == "openai:responses")
+            .expect("responses endpoint template should exist");
+
+        let mut existing = sample_codex_endpoint("http://127.0.0.1:18181/backend-api/codex");
+        existing.is_active = false;
+        existing.max_retries = Some(9);
+        existing.proxy = Some(serde_json::json!({"url": "http://proxy.internal:8080"}));
+        existing.config = Some(serde_json::json!({
+            "upstream_stream_policy": "force_non_stream",
+            "custom_transport_option": true
+        }));
+
+        let reconciled =
+            reconcile_fixed_provider_endpoint(&provider, &existing, template, endpoint_template)
+                .expect("endpoint should reconcile");
+        assert_eq!(
+            reconciled.base_url,
+            "http://127.0.0.1:18181/backend-api/codex"
+        );
+        assert!(!reconciled.is_active);
+        assert_eq!(reconciled.max_retries, Some(9));
+        assert_eq!(
+            reconciled.proxy,
+            Some(serde_json::json!({"url": "http://proxy.internal:8080"}))
+        );
+        assert_eq!(
+            reconciled
+                .config
+                .as_ref()
+                .and_then(|value| value.get("upstream_stream_policy")),
+            Some(&serde_json::json!("force_non_stream"))
+        );
+        assert_eq!(
+            reconciled
+                .config
+                .as_ref()
+                .and_then(|value| value.get("custom_transport_option")),
+            Some(&serde_json::json!(true))
+        );
+        let metadata = fixed_provider_endpoint_metadata(&reconciled)
+            .expect("fixed provider metadata should exist");
+        for key in [
+            "base_url",
+            "is_active",
+            "max_retries",
+            "proxy",
+            "config.upstream_stream_policy",
+        ] {
+            assert!(metadata.overrides.contains(key), "missing override {key}");
+        }
+
+        let second =
+            reconcile_fixed_provider_endpoint(&provider, &reconciled, template, endpoint_template)
+                .expect("endpoint should reconcile idempotently");
+        assert_eq!(second, reconciled);
     }
 }

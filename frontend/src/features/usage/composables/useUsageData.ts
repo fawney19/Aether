@@ -14,6 +14,12 @@ import { createDefaultStats } from '../types'
 import { log } from '@/utils/logger'
 import { getErrorStatus } from '@/types/api-error'
 import { isUsageProviderVisible, normalizeUsageProviderStats } from '../utils/providerStats'
+import {
+  mergeUsageRecordErrorMessage,
+  mergeUsageRecordFirstByteTimeMs,
+  mergeUsageRecordResponseTiming,
+  parseUsageTimestampMs,
+} from '../utils/recordSync'
 
 export interface UseUsageDataOptions {
   isAdminPage: Ref<boolean>
@@ -464,25 +470,6 @@ export function useUsageData(options: UseUsageDataOptions) {
     }
   }
 
-  function mergePositiveDurationMs(
-    existingValue: number | null | undefined,
-    nextValue: number | null | undefined
-  ): number | null | undefined {
-    const existingIsPositive = typeof existingValue === 'number' && Number.isFinite(existingValue) && existingValue > 0
-    const nextIsPositive = typeof nextValue === 'number' && Number.isFinite(nextValue) && nextValue > 0
-
-    if (existingIsPositive && nextIsPositive) {
-      return Math.max(existingValue, nextValue)
-    }
-    if (existingIsPositive) {
-      return existingValue
-    }
-    if (nextIsPositive) {
-      return nextValue
-    }
-    return existingValue ?? nextValue
-  }
-
   function mergeSparseRecordMetric(
     existingValue: number | null | undefined,
     nextValue: number | null | undefined
@@ -539,10 +526,18 @@ export function useUsageData(options: UseUsageDataOptions) {
       const hasNextStatus = typeof record.status === 'string' && record.status.length > 0
       const currentRank = hasExistingStatus ? (statusPriority[existing.status] ?? -1) : -1
       const nextRank = hasNextStatus ? (statusPriority[record.status] ?? -1) : -1
-      const statusProgressed = hasNextStatus && (
+      const existingUpdatedAtMs = parseUsageTimestampMs(existing.updated_at)
+      const nextUpdatedAtMs = parseUsageTimestampMs(record.updated_at)
+      const nextStatusSnapshotIsStale = existingUpdatedAtMs != null &&
+        nextUpdatedAtMs != null &&
+        nextUpdatedAtMs < existingUpdatedAtMs
+      const sameRankTerminalTransition = currentRank === 2 && nextRank === 2
+      const statusProgressed = hasNextStatus && !nextStatusSnapshotIsStale && (
         !hasExistingStatus ||
         nextRank > currentRank ||
-        (nextRank === currentRank && existing.status === record.status)
+        (nextRank === currentRank && (
+          existing.status === record.status || sameRankTerminalTransition
+        ))
       )
       const mergedStatus = statusProgressed ? record.status : existing.status
 
@@ -586,15 +581,31 @@ export function useUsageData(options: UseUsageDataOptions) {
           ? existing.client_requested_stream
           : undefined
       const clientIsStream = mergeBooleanTrueWins(existingClientIsStream, recordClientIsStream) ?? clientRequestedStream
+      const nextTimingIsAuthoritative = statusProgressed &&
+        (record.status === 'completed' || record.status === 'failed' || record.status === 'cancelled')
+      const responseTiming = mergeUsageRecordResponseTiming(
+        {
+          response_time_ms: existing.response_time_ms,
+          response_time_updated_at: existing.response_time_updated_at,
+        },
+        {
+          response_time_ms: record.response_time_ms,
+          response_time_updated_at: record.response_time_updated_at,
+        },
+        { preferNext: nextTimingIsAuthoritative },
+      )
 
       return {
         ...record,
         // 保留详情抽屉/活跃轮询已经拿到的完整指标，避免列表刷新用 0 或空值回退。
         status: mergedStatus,
-        provider: protectProvider ? existing.provider : (record.provider || existing.provider),
+        provider: statusProgressed
+          ? (protectProvider ? existing.provider : (record.provider || existing.provider))
+          : existing.provider,
         input_tokens: mergeSparseRecordMetric(existing.input_tokens, record.input_tokens) ?? record.input_tokens,
         effective_input_tokens: mergeSparseRecordMetric(existing.effective_input_tokens, record.effective_input_tokens) ?? record.effective_input_tokens,
         output_tokens: mergeSparseRecordMetric(existing.output_tokens, record.output_tokens) ?? record.output_tokens,
+        reasoning_tokens: mergeSparseRecordMetric(existing.reasoning_tokens, record.reasoning_tokens) ?? record.reasoning_tokens,
         total_tokens: mergeSparseRecordMetric(existing.total_tokens, record.total_tokens) ?? record.total_tokens,
         cache_creation_input_tokens: mergeSparseRecordMetric(existing.cache_creation_input_tokens, record.cache_creation_input_tokens) ?? record.cache_creation_input_tokens,
         cache_creation_ephemeral_5m_input_tokens:
@@ -610,13 +621,31 @@ export function useUsageData(options: UseUsageDataOptions) {
         cache_read_input_tokens: mergeSparseRecordMetric(existing.cache_read_input_tokens, record.cache_read_input_tokens) ?? record.cache_read_input_tokens,
         cost: mergeSparseRecordMetric(existing.cost, record.cost) ?? record.cost,
         actual_cost: mergeSparseRecordMetric(existing.actual_cost, record.actual_cost) ?? record.actual_cost,
-        response_time_ms: mergePositiveDurationMs(existing.response_time_ms, record.response_time_ms),
-        first_byte_time_ms: mergePositiveDurationMs(existing.first_byte_time_ms, record.first_byte_time_ms),
-        updated_at: record.updated_at ?? existing.updated_at,
-        response_time_updated_at: record.response_time_updated_at ?? existing.response_time_updated_at,
-        status_code: record.status_code ?? existing.status_code,
-        error_message: record.error_message ?? existing.error_message,
-        image_progress: record.image_progress ?? existing.image_progress,
+        response_time_ms: responseTiming.response_time_ms,
+        first_byte_time_ms: mergeUsageRecordFirstByteTimeMs(
+          existing.first_byte_time_ms,
+          record.first_byte_time_ms,
+        ),
+        updated_at: statusProgressed
+          ? (record.updated_at ?? existing.updated_at)
+          : existing.updated_at,
+        response_time_updated_at: responseTiming.response_time_updated_at,
+        // Status, code and error are one lifecycle snapshot. An accepted full
+        // list snapshot may clear an earlier candidate's 400/Cyber failure;
+        // a rejected stale status snapshot must not mutate either field.
+        status_code: statusProgressed
+          ? (record.status_code ?? undefined)
+          : existing.status_code,
+        error_message: statusProgressed
+          ? mergeUsageRecordErrorMessage(
+            existing.error_message,
+            record.error_message,
+            { authoritative: true },
+          )
+          : existing.error_message,
+        image_progress: statusProgressed
+          ? (record.image_progress ?? existing.image_progress)
+          : existing.image_progress,
         is_stream: upstreamIsStream,
         upstream_is_stream: upstreamIsStream,
         client_requested_stream: clientRequestedStream,
@@ -627,11 +656,50 @@ export function useUsageData(options: UseUsageDataOptions) {
         has_fallback: existing.has_fallback === true || record.has_fallback === true,
         has_retry: existing.has_retry === true || record.has_retry === true,
         api_key_name: record.api_key_name || existing.api_key_name,
-        provider_key_name: record.provider_key_name || existing.provider_key_name,
-        rate_multiplier: record.rate_multiplier ?? existing.rate_multiplier,
-        target_model: record.target_model ?? existing.target_model,
-        reasoning_effort: record.reasoning_effort ?? existing.reasoning_effort,
-        service_tier: record.service_tier ?? existing.service_tier
+        provider_key_name: statusProgressed
+          ? (record.provider_key_name || existing.provider_key_name)
+          : existing.provider_key_name,
+        rate_multiplier: statusProgressed
+          ? (record.rate_multiplier ?? existing.rate_multiplier)
+          : existing.rate_multiplier,
+        // Full list snapshots describe the final provider candidate. Missing/null means the
+        // final request did not map the model and must clear an earlier candidate's arrow.
+        target_model: statusProgressed
+          ? (typeof record.target_model === 'string' && record.target_model.trim()
+              ? record.target_model
+              : null)
+          : existing.target_model,
+        // Request type is client-request identity, not a provider-candidate fact. Preserve a
+        // known compact operation when a later sparse snapshot omits it.
+        request_type:
+          typeof record.request_type === 'string' && record.request_type.trim()
+            ? record.request_type
+            : existing.request_type,
+        requested_reasoning_effort:
+          typeof record.requested_reasoning_effort === 'string'
+            && record.requested_reasoning_effort.trim()
+            ? record.requested_reasoning_effort
+            : existing.requested_reasoning_effort,
+        // Provider reasoning belongs to the final candidate just like service_tier; do not
+        // retain a previous candidate's `max` when the final request has no reasoning field.
+        reasoning_effort: statusProgressed
+          ? (typeof record.reasoning_effort === 'string' && record.reasoning_effort.trim()
+              ? record.reasoning_effort
+              : null)
+          : existing.reasoning_effort,
+        // The list response is the authoritative snapshot of the final provider request. Do not
+        // carry a tier forward when this response has no tier; doing so can leave a stale Fast
+        // badge after the final upstream request falls back to Standard.
+        service_tier: statusProgressed
+          ? (typeof record.service_tier === 'string' && record.service_tier.trim()
+              ? record.service_tier
+              : null)
+          : existing.service_tier,
+        actual_service_tier: statusProgressed
+          ? (typeof record.actual_service_tier === 'string' && record.actual_service_tier.trim()
+              ? record.actual_service_tier
+              : null)
+          : existing.actual_service_tier
       }
     })
   }

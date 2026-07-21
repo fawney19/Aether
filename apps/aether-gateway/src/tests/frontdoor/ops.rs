@@ -70,6 +70,7 @@ async fn gateway_exposes_frontdoor_manifest_without_proxying_upstream() {
     assert!(owned_routes
         .iter()
         .any(|value| value == "/v1/responses/compact"));
+    assert!(owned_routes.iter().any(|value| value == "/v1/alpha/search"));
     assert!(owned_routes.iter().any(|value| value == "/health"));
     assert!(owned_routes.iter().any(|value| value == "/v1/health"));
     assert!(owned_routes.iter().any(|value| value == "/v1/providers"));

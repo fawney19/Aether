@@ -6,7 +6,7 @@ use crate::ai_serving::planner::report_context::{
     insert_provider_stream_event_api_format, LocalExecutionReportContextParts,
 };
 use crate::ai_serving::planner::{
-    build_ai_execution_decision_response, resolve_transport_request_gzip_policy,
+    build_ai_execution_decision_response, resolve_transport_request_encoding_policy,
     AiExecutionDecisionResponseParts,
 };
 use crate::ai_serving::transport::{
@@ -44,6 +44,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         candidate_id,
         ..
     } = attempt;
+    let upstream_is_stream = upstream_is_stream && eligible.candidate.supports_streaming;
     let payload_started_at = std::time::Instant::now();
     let Some(resolved) = resolve_local_openai_chat_candidate_payload_parts(
         state,
@@ -72,6 +73,14 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         payload_started_at.elapsed().as_millis() as u64,
     );
     let candidate = &eligible.candidate;
+    let upstream_is_stream =
+        crate::ai_serving::planner::common::resolve_upstream_is_stream_for_provider(
+            resolved.transport.endpoint.config.as_ref(),
+            resolved.transport.provider.provider_type.as_str(),
+            resolved.provider_api_format.as_str(),
+            upstream_is_stream,
+            false,
+        );
 
     let prompt_cache_key = resolved
         .provider_request_body
@@ -208,7 +217,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         "stream_candidate_report_context",
         report_context_started_at.elapsed().as_millis() as u64,
     );
-    let request_gzip = resolve_transport_request_gzip_policy(&transport);
+    let request_encoding = resolve_transport_request_encoding_policy(&transport);
 
     let decision_started_at = std::time::Instant::now();
     let mut decision = build_ai_execution_decision_response(AiExecutionDecisionResponseParts {
@@ -219,6 +228,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         request_id: trace_id.to_string(),
         candidate_id: candidate_id.clone(),
         provider_name: transport.provider.name.clone(),
+        provider_type: transport.provider.provider_type.clone(),
         provider_id: candidate.provider_id.clone(),
         endpoint_id: candidate.endpoint_id.clone(),
         key_id: candidate.key_id.clone(),
@@ -236,8 +246,8 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         provider_request_body: Some(provider_request_body),
         provider_request_body_base64: None,
         content_type: Some("application/json".to_string()),
-        content_encoding: None,
-        request_gzip,
+        content_encoding: request_encoding.content_encoding,
+        request_gzip: request_encoding.request_gzip,
         proxy,
         transport_profile,
         timeouts,
@@ -246,7 +256,11 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         report_context: Some(report_context),
         auth_context: input.auth_context.clone(),
     });
-    apply_provider_request_routing_policy_to_decision(input, &mut decision)?;
+    apply_provider_request_routing_policy_to_decision(
+        input,
+        &mut decision,
+        Some(transport.as_ref()),
+    )?;
     observe_gateway_stage_ms(
         "stream_candidate_decision_build",
         decision_started_at.elapsed().as_millis() as u64,

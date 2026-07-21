@@ -165,6 +165,7 @@ mod tests {
             global_model_id: format!("global-model-{id}"),
             global_model_name: "gpt-5".to_string(),
             selected_provider_model_name: "gpt-5".to_string(),
+            supports_streaming: true,
             mapping_matched_model: None,
         }
     }

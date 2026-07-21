@@ -7,7 +7,9 @@ use tracing::debug;
 use crate::provider_transport::GatewayProviderTransportSnapshot;
 use crate::AppState;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) const CYBER_CONTINUE_FAILOVER_CONFIG_KEY: &str = "cyber_continue_failover";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LocalFailoverPolicy {
     pub(crate) max_retries: Option<u64>,
     pub(crate) stop_status_codes: BTreeSet<u16>,
@@ -15,6 +17,21 @@ pub(crate) struct LocalFailoverPolicy {
     pub(crate) success_failover_patterns: Vec<LocalFailoverRegexRule>,
     pub(crate) error_stop_patterns: Vec<LocalFailoverRegexRule>,
     pub(crate) stop_cyber_policy_errors: bool,
+    pub(crate) retry_client_errors_by_default: bool,
+}
+
+impl Default for LocalFailoverPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: None,
+            stop_status_codes: BTreeSet::new(),
+            continue_status_codes: BTreeSet::new(),
+            success_failover_patterns: Vec::new(),
+            error_stop_patterns: Vec::new(),
+            stop_cyber_policy_errors: true,
+            retry_client_errors_by_default: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,14 +45,15 @@ pub(crate) async fn resolve_local_failover_policy(
     plan: &ExecutionPlan,
     _report_context: Option<&serde_json::Value>,
 ) -> LocalFailoverPolicy {
-    let transport = match state
+    let mut policy = match state
         .read_provider_transport_snapshot(&plan.provider_id, &plan.endpoint_id, &plan.key_id)
         .await
     {
-        Ok(Some(transport)) => transport,
-        Ok(None) | Err(_) => return LocalFailoverPolicy::default(),
+        Ok(Some(transport)) => local_failover_policy_from_transport(&transport),
+        Ok(None) | Err(_) => LocalFailoverPolicy::default(),
     };
-    let policy = local_failover_policy_from_transport(&transport);
+    let cyber_continue_failover = cyber_continue_failover_enabled(state).await;
+    policy.stop_cyber_policy_errors = !cyber_continue_failover;
     debug!(
         event_name = "local_failover_policy_loaded",
         log_type = "debug",
@@ -49,9 +67,21 @@ pub(crate) async fn resolve_local_failover_policy(
         continue_status_code_count = policy.continue_status_codes.len(),
         success_failover_pattern_count = policy.success_failover_patterns.len(),
         error_stop_pattern_count = policy.error_stop_patterns.len(),
+        cyber_continue_failover,
         "gateway loaded local failover policy from transport snapshot"
     );
     policy
+}
+
+pub(crate) async fn cyber_continue_failover_enabled(state: &AppState) -> bool {
+    state
+        .read_system_config_json_value(CYBER_CONTINUE_FAILOVER_CONFIG_KEY)
+        .await
+        .ok()
+        .flatten()
+        .as_ref()
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 pub(crate) fn local_failover_policy_from_transport(
@@ -81,10 +111,11 @@ pub(crate) fn local_failover_policy_from_transport(
 
     LocalFailoverPolicy {
         max_retries,
-        stop_cyber_policy_errors: codex_cyber_flag_passthrough_enabled(
-            &transport.provider.provider_type,
-            transport.provider.config.as_ref(),
-        ),
+        retry_client_errors_by_default:
+            crate::ai_serving::api_format_defaults_to_client_error_failover(
+                &transport.endpoint.api_format,
+            ),
+        stop_cyber_policy_errors: true,
         stop_status_codes: rules
             .map(|value| {
                 parse_status_code_set(
@@ -143,7 +174,11 @@ pub(crate) fn local_failover_policy_from_report_context(
         stop_cyber_policy_errors: object
             .get("stop_cyber_policy_errors")
             .and_then(Value::as_bool)
-            .unwrap_or(false),
+            .unwrap_or(true),
+        retry_client_errors_by_default: object
+            .get("retry_client_errors_by_default")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
     })
 }
 
@@ -178,6 +213,7 @@ fn local_failover_policy_to_value(policy: &LocalFailoverPolicy) -> Value {
         "success_failover_patterns": policy.success_failover_patterns.iter().map(local_failover_regex_rule_to_value).collect::<Vec<_>>(),
         "error_stop_patterns": policy.error_stop_patterns.iter().map(local_failover_regex_rule_to_value).collect::<Vec<_>>(),
         "stop_cyber_policy_errors": policy.stop_cyber_policy_errors,
+        "retry_client_errors_by_default": policy.retry_client_errors_by_default,
     })
 }
 
@@ -374,13 +410,29 @@ mod tests {
                     pattern: "validation".to_string(),
                     status_codes: [422].into_iter().collect(),
                 }],
-                stop_cyber_policy_errors: false,
+                stop_cyber_policy_errors: true,
+                retry_client_errors_by_default: true,
             })
         );
     }
 
     #[test]
-    fn codex_cyber_policy_passthrough_defaults_on_and_can_be_disabled() {
+    fn search_transport_disables_default_client_error_failover() {
+        let mut transport = sample_transport(None, None, None);
+        transport.endpoint.api_format = "openai:search".to_string();
+        let policy = local_failover_policy_from_transport(&transport);
+
+        assert!(!policy.retry_client_errors_by_default);
+        let report_context = append_local_failover_policy_to_value(json!({}), &transport);
+        assert_eq!(
+            local_failover_policy_from_report_context(Some(&report_context))
+                .map(|policy| policy.retry_client_errors_by_default),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn transport_policy_defaults_to_stopping_cyber_policy() {
         let mut transport = sample_transport(None, None, None);
         transport.provider.provider_type = "codex".to_string();
         assert!(local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
@@ -388,7 +440,7 @@ mod tests {
         transport.provider.config = Some(json!({
             "codex": {"pass_through_cyber_flag_interrupt": false}
         }));
-        assert!(!local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
+        assert!(local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
 
         transport.provider.config = Some(json!({
             "codex": {"passthrough_cyber_flag_interrupt": true}
@@ -396,6 +448,6 @@ mod tests {
         assert!(local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
 
         transport.provider.provider_type = "llm".to_string();
-        assert!(!local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
+        assert!(local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
     }
 }

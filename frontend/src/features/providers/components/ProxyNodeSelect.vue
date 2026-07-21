@@ -28,7 +28,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import {
   Select,
   SelectTrigger,
@@ -67,8 +67,10 @@ const nodeOptions = computed(() => {
 
 /** 供父组件调用：启用代理时懒加载节点列表 */
 function ensureLoaded() {
-  proxyNodesStore.ensureLoaded()
+  return proxyNodesStore.ensureLoaded()
 }
+
+onMounted(ensureLoaded)
 
 defineExpose({ ensureLoaded })
 </script>

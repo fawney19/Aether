@@ -1,8 +1,9 @@
 use super::{
-    hash_api_key, sample_endpoint, sample_key, sample_models_candidate_row, sample_provider,
-    unrestricted_models_snapshot, InMemoryAuthApiKeySnapshotRepository,
-    InMemoryMinimalCandidateSelectionReadRepository, InMemoryProviderCatalogReadRepository,
-    InMemoryRequestCandidateRepository, DEVELOPMENT_ENCRYPTION_KEY,
+    hash_api_key, run_frontdoor_async_test, sample_endpoint, sample_key,
+    sample_models_candidate_row, sample_provider, unrestricted_models_snapshot,
+    InMemoryAuthApiKeySnapshotRepository, InMemoryMinimalCandidateSelectionReadRepository,
+    InMemoryProviderCatalogReadRepository, InMemoryRequestCandidateRepository,
+    DEVELOPMENT_ENCRYPTION_KEY,
 };
 use crate::tests::{
     any, build_router, build_router_with_state, build_state_with_execution_runtime_override, json,
@@ -160,8 +161,15 @@ async fn gateway_returns_internal_gateway_plan_sync_proxy_public_action_without_
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_internal_gateway_execute_sync_locally() {
+#[test]
+fn gateway_handles_internal_gateway_execute_sync_locally() {
+    run_frontdoor_async_test(
+        "gateway_handles_internal_gateway_execute_sync_locally",
+        gateway_handles_internal_gateway_execute_sync_locally_impl(),
+    );
+}
+
+async fn gateway_handles_internal_gateway_execute_sync_locally_impl() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let fallback_probe = Router::new().route(

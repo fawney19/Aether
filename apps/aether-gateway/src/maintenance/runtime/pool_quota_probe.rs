@@ -1701,20 +1701,24 @@ pub(crate) fn spawn_pool_quota_probe_worker(
     }
 
     let config = PoolQuotaProbeWorkerConfig::from_env();
-    Some(tokio::spawn(async move {
-        let mut interval = tokio::time::interval(config.scan_interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        interval.tick().await;
-        loop {
+    Some(crate::task_runtime::spawn_singleton_worker(
+        state,
+        crate::task_runtime::TASK_KEY_POOL_QUOTA_PROBE,
+        move |state| async move {
+            let mut interval = tokio::time::interval(config.scan_interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await;
-            if let Err(err) = perform_pool_quota_probe_once_with_config(&state, config).await {
-                warn!(
-                    error = ?err,
-                    "gateway pool quota probe worker tick failed"
-                );
+            loop {
+                interval.tick().await;
+                if let Err(err) = perform_pool_quota_probe_once_with_config(&state, config).await {
+                    warn!(
+                        error = ?err,
+                        "gateway pool quota probe worker tick failed"
+                    );
+                }
             }
-        }
-    }))
+        },
+    ))
 }
 
 #[cfg(test)]

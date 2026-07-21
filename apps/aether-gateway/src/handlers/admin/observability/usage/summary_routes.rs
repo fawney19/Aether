@@ -305,6 +305,9 @@ pub(super) fn admin_usage_terminal_candidate_state_override(
     candidates: &[StoredRequestCandidate],
 ) -> Option<serde_json::Value> {
     let candidate = admin_usage_current_candidate(candidates)?;
+    if admin_usage_candidate_failure_is_retryable_transition(candidate) {
+        return None;
+    }
 
     let status = match candidate.status {
         RequestCandidateStatus::Success => "completed",
@@ -341,6 +344,30 @@ pub(super) fn admin_usage_terminal_candidate_state_override(
         payload["error_message"] = json!(error_message);
     }
     Some(payload)
+}
+
+fn admin_usage_candidate_failure_is_retryable_transition(
+    candidate: &StoredRequestCandidate,
+) -> bool {
+    if candidate.status != RequestCandidateStatus::Failed {
+        return false;
+    }
+    let Some(error_flow) = candidate
+        .extra_data
+        .as_ref()
+        .and_then(|value| value.get("error_flow"))
+    else {
+        return false;
+    };
+    let retryable = error_flow
+        .get("retryable")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let retry_next_candidate = error_flow
+        .get("decision")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value == "retry_next_candidate");
+    retryable && retry_next_candidate
 }
 
 pub(super) fn apply_admin_usage_state_override(
@@ -998,6 +1025,7 @@ mod tests {
     use aether_data_contracts::repository::candidates::{
         RequestCandidateStatus, StoredRequestCandidate,
     };
+    use serde_json::json;
 
     use super::admin_usage_terminal_candidate_state_override;
 
@@ -1073,6 +1101,29 @@ mod tests {
         streaming.finished_at_unix_ms = None;
 
         let payload = admin_usage_terminal_candidate_state_override(&[failed, streaming]);
+
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn admin_usage_active_override_ignores_retryable_candidate_failure() {
+        let mut failed = sample_candidate(
+            0,
+            RequestCandidateStatus::Failed,
+            Some(502),
+            Some(1_000),
+            Some("provider returned HTTP 200 without visible model output"),
+        );
+        failed.extra_data = Some(json!({
+            "error_flow": {
+                "decision": "retry_next_candidate",
+                "retryable": true,
+                "propagation": "suppressed",
+                "classification": "retry_upstream_failure"
+            }
+        }));
+
+        let payload = admin_usage_terminal_candidate_state_override(&[failed]);
 
         assert!(payload.is_none());
     }

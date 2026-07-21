@@ -277,6 +277,21 @@
             </div>
             <div>
               <Label
+                for="backup-user-agent"
+                class="block text-sm font-medium"
+              >
+                User-Agent
+              </Label>
+              <Input
+                id="backup-user-agent"
+                :model-value="backup.config.value.userAgent"
+                class="mt-1"
+                placeholder="rclone/v1.68.0"
+                @update:model-value="backup.config.value.userAgent = String($event)"
+              />
+            </div>
+            <div>
+              <Label
                 for="backup-prefix"
                 class="block text-sm font-medium"
               >

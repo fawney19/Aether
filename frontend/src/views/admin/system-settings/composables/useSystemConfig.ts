@@ -37,6 +37,8 @@ export interface SystemConfig {
   enable_openai_image_sync_heartbeat: boolean
   // 标准文本非流式心跳
   enable_standard_text_sync_heartbeat: boolean
+  // Cyber Policy 错误继续故障转移
+  cyber_continue_failover: boolean
   // 请求记录
   request_record_level: string
   max_request_body_size: number
@@ -93,6 +95,8 @@ const CONFIG_KEYS = [
   'enable_openai_image_sync_heartbeat',
   // 标准文本非流式心跳
   'enable_standard_text_sync_heartbeat',
+  // Cyber Policy 错误继续故障转移
+  'cyber_continue_failover',
   // 请求记录
   'request_record_level',
   'max_request_body_size',
@@ -151,10 +155,12 @@ function createDefaultConfig(): SystemConfig {
     enable_openai_image_sync_heartbeat: false,
     // 标准文本非流式心跳
     enable_standard_text_sync_heartbeat: false,
+    // Cyber Policy 错误继续故障转移
+    cyber_continue_failover: false,
     // 请求记录
-    request_record_level: 'basic',
-    max_request_body_size: 1048576,
-    max_response_body_size: 1048576,
+    request_record_level: 'full',
+    max_request_body_size: 5_242_880,
+    max_response_body_size: 5_242_880,
     sensitive_headers: ['authorization', 'x-api-key', 'api-key', 'cookie', 'set-cookie'],
     // 请求记录清理
     enable_auto_cleanup: true,
@@ -239,7 +245,9 @@ export function useSystemConfig() {
       systemConfig.value.enable_openai_image_sync_heartbeat !==
       originalConfig.value.enable_openai_image_sync_heartbeat ||
       systemConfig.value.enable_standard_text_sync_heartbeat !==
-      originalConfig.value.enable_standard_text_sync_heartbeat
+      originalConfig.value.enable_standard_text_sync_heartbeat ||
+      systemConfig.value.cyber_continue_failover !==
+      originalConfig.value.cyber_continue_failover
     )
   })
 
@@ -321,25 +329,13 @@ export function useSystemConfig() {
   async function loadSystemConfig() {
     systemConfigLoading.value = true
     try {
-      const results = await Promise.all(
-        CONFIG_KEYS.map(async (key) => {
-          try {
-            return {
-              key,
-              response: await adminApi.getSystemConfig(key),
-            }
-          } catch {
-            return null
-          }
-        })
-      )
+      const configs = await adminApi.getAllSystemConfigs({ cacheTtlMs: 30_000 })
+      const configsByKey = new Map(configs.map((config) => [config.key, config]))
 
       const nextConfig = createDefaultConfig()
-      for (const result of results) {
-        if (!result) {
-          continue
-        }
-        const { key, response } = result
+      for (const key of CONFIG_KEYS) {
+        const response = configsByKey.get(key)
+        if (!response) continue
         try {
           if (key === 'turnstile_secret_key') {
             nextConfig.turnstile_secret_key = ''
@@ -527,6 +523,11 @@ export function useSystemConfig() {
           value: systemConfig.value.enable_standard_text_sync_heartbeat,
           description: '标准文本非流式心跳开关：开启后外层 HTTP 状态固定为 200，上游失败写入响应体',
         },
+        {
+          key: 'cyber_continue_failover',
+          value: systemConfig.value.cyber_continue_failover,
+          description: 'Cyber继续转移开关：开启后在响应内容开始前将Cyber Policy错误按普通错误继续故障转移，可能增加首字等待时间',
+        },
       ]
       const turnstileSecret = systemConfig.value.turnstile_secret_key.trim()
       if (turnstileSecret) {
@@ -581,6 +582,8 @@ export function useSystemConfig() {
           systemConfig.value.enable_openai_image_sync_heartbeat
         originalConfig.value.enable_standard_text_sync_heartbeat =
           systemConfig.value.enable_standard_text_sync_heartbeat
+        originalConfig.value.cyber_continue_failover =
+          systemConfig.value.cyber_continue_failover
       }
       success('基础配置已保存')
     } catch (err) {

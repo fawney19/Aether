@@ -53,7 +53,9 @@ pub(super) async fn resolve_local_gemini_files_decision_input(
         state,
         auth_context,
         None,
+        decision.auth_endpoint_signature.as_deref(),
         Some(&explicit_required_capabilities),
+        &decision.model_directive_policy,
     )
     .await
     {

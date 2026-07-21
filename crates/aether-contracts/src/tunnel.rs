@@ -12,6 +12,7 @@ pub const TUNNEL_PROTOCOL_VERSION_HEADER: &str = "x-aether-tunnel-protocol-versi
 pub const TUNNEL_NODE_NAME_B64_HEADER: &str = "x-aether-tunnel-node-name-b64";
 pub const CURRENT_TUNNEL_PROTOCOL_VERSION: u8 = 3;
 pub const CURRENT_TUNNEL_PROTOCOL_VERSION_STR: &str = "3";
+pub const MAX_TUNNEL_RELAY_META_LEN: usize = 256 * 1024;
 
 pub mod flags {
     pub const END_STREAM: u8 = 0x01;
@@ -218,6 +219,63 @@ pub struct RequestMeta {
     pub http1_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_profile: Option<crate::ResolvedTransportProfile>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedTunnelRequestTimeouts {
+    pub first_byte_ms: u64,
+    pub response_body_ms: Option<u64>,
+}
+
+pub fn resolve_tunnel_request_timeouts(meta: &RequestMeta) -> ResolvedTunnelRequestTimeouts {
+    let legacy_timeout_ms = meta.timeout.saturating_mul(1_000);
+    let first_byte_ms = if meta.stream {
+        meta.stream_first_byte_timeout_ms
+            .unwrap_or(legacy_timeout_ms)
+    } else {
+        meta.request_timeout_ms
+            .or(meta.stream_first_byte_timeout_ms)
+            .unwrap_or(legacy_timeout_ms)
+    };
+    let response_body_ms = (!meta.stream).then_some(first_byte_ms);
+
+    ResolvedTunnelRequestTimeouts {
+        first_byte_ms: if meta.stream {
+            clamp_stream_first_byte_timeout_ms(first_byte_ms)
+        } else {
+            clamp_upstream_request_timeout_ms(first_byte_ms)
+        },
+        response_body_ms: response_body_ms.map(clamp_upstream_request_timeout_ms),
+    }
+}
+
+pub fn try_decode_tunnel_relay_request_meta(
+    buffer: &[u8],
+) -> Result<Option<(RequestMeta, usize)>, String> {
+    if buffer.len() < 4 {
+        return Ok(None);
+    }
+    let meta_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+    if meta_len > MAX_TUNNEL_RELAY_META_LEN {
+        return Err("relay metadata too large".to_string());
+    }
+    let meta_end = 4usize
+        .checked_add(meta_len)
+        .ok_or_else(|| "relay envelope length overflow".to_string())?;
+    if buffer.len() < meta_end {
+        return Ok(None);
+    }
+    let meta = serde_json::from_slice::<RequestMeta>(&buffer[4..meta_end])
+        .map_err(|error| format!("invalid relay metadata: {error}"))?;
+    Ok(Some((meta, meta_end)))
+}
+
+fn clamp_upstream_request_timeout_ms(timeout_ms: u64) -> u64 {
+    timeout_ms.clamp(1, crate::MAX_EXECUTION_REQUEST_TIMEOUT_MS)
+}
+
+fn clamp_stream_first_byte_timeout_ms(timeout_ms: u64) -> u64 {
+    timeout_ms.clamp(1, crate::MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_MS)
 }
 
 fn default_timeout() -> u64 {
@@ -461,12 +519,114 @@ fn compress_gzip(data: &[u8]) -> Result<Bytes, std::io::Error> {
 mod tests {
     use super::{
         compress_payload, decode_payload, encode_frame, encode_goaway_v3, encode_ping,
-        encode_reset_stream, encode_window_update, raw_payload, Frame, FrameHeader, GoAwayPayload,
-        MsgType, RequestMeta, ResetStreamPayload, WindowUpdatePayload,
-        CURRENT_TUNNEL_PROTOCOL_VERSION, CURRENT_TUNNEL_PROTOCOL_VERSION_STR, FLAG_GZIP_COMPRESSED,
+        encode_reset_stream, encode_window_update, raw_payload, resolve_tunnel_request_timeouts,
+        try_decode_tunnel_relay_request_meta, Frame, FrameHeader, GoAwayPayload, MsgType,
+        RequestMeta, ResetStreamPayload, WindowUpdatePayload, CURRENT_TUNNEL_PROTOCOL_VERSION,
+        CURRENT_TUNNEL_PROTOCOL_VERSION_STR, FLAG_GZIP_COMPRESSED, MAX_TUNNEL_RELAY_META_LEN,
         REQUEST_HEADERS, TUNNEL_PROTOCOL_VERSION_HEADER,
     };
     use bytes::Bytes;
+
+    fn request_meta(stream: bool) -> RequestMeta {
+        RequestMeta {
+            provider_id: None,
+            endpoint_id: None,
+            key_id: None,
+            method: "POST".to_string(),
+            url: "https://example.com/responses".to_string(),
+            headers: std::collections::HashMap::new(),
+            stream,
+            request_timeout_ms: None,
+            stream_first_byte_timeout_ms: None,
+            timeout: 60,
+            follow_redirects: None,
+            http1_only: false,
+            transport_profile: None,
+        }
+    }
+
+    #[test]
+    fn tunnel_request_timeouts_preserve_non_stream_total_timeout() {
+        let mut meta = request_meta(false);
+        meta.request_timeout_ms = Some(900_000);
+        meta.stream_first_byte_timeout_ms = Some(12_000);
+
+        let resolved = resolve_tunnel_request_timeouts(&meta);
+
+        assert_eq!(resolved.first_byte_ms, 900_000);
+        assert_eq!(resolved.response_body_ms, Some(900_000));
+    }
+
+    #[test]
+    fn tunnel_request_timeouts_keep_stream_body_unbounded() {
+        let mut meta = request_meta(true);
+        meta.request_timeout_ms = Some(900_000);
+        meta.stream_first_byte_timeout_ms = Some(12_000);
+
+        let resolved = resolve_tunnel_request_timeouts(&meta);
+
+        assert_eq!(resolved.first_byte_ms, 12_000);
+        assert_eq!(resolved.response_body_ms, None);
+    }
+
+    #[test]
+    fn tunnel_request_timeouts_keep_stream_first_byte_protocol_limit() {
+        let mut meta = request_meta(true);
+        meta.stream_first_byte_timeout_ms =
+            Some(crate::MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_MS + 1);
+
+        let resolved = resolve_tunnel_request_timeouts(&meta);
+
+        assert_eq!(
+            resolved.first_byte_ms,
+            crate::MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_MS
+        );
+        assert_eq!(resolved.response_body_ms, None);
+    }
+
+    #[test]
+    fn tunnel_request_timeouts_clamp_only_out_of_range_protocol_values() {
+        let mut meta = request_meta(false);
+        meta.request_timeout_ms = Some(crate::MAX_EXECUTION_REQUEST_TIMEOUT_MS + 1);
+
+        let resolved = resolve_tunnel_request_timeouts(&meta);
+
+        assert_eq!(
+            resolved.first_byte_ms,
+            crate::MAX_EXECUTION_REQUEST_TIMEOUT_MS
+        );
+        assert_eq!(
+            resolved.response_body_ms,
+            Some(crate::MAX_EXECUTION_REQUEST_TIMEOUT_MS)
+        );
+    }
+
+    #[test]
+    fn tunnel_relay_request_meta_decodes_from_a_partial_prefix() {
+        let meta = request_meta(false);
+        let encoded_meta = serde_json::to_vec(&meta).expect("meta should encode");
+        let mut envelope = Vec::new();
+        envelope.extend_from_slice(&(encoded_meta.len() as u32).to_be_bytes());
+        envelope.extend_from_slice(&encoded_meta);
+        envelope.extend_from_slice(b"request-body");
+
+        assert!(try_decode_tunnel_relay_request_meta(&envelope[..3])
+            .expect("partial prefix should be valid")
+            .is_none());
+        let (decoded, body_offset) = try_decode_tunnel_relay_request_meta(&envelope)
+            .expect("envelope should be valid")
+            .expect("metadata should be complete");
+
+        assert_eq!(decoded.request_timeout_ms, meta.request_timeout_ms);
+        assert_eq!(&envelope[body_offset..], b"request-body");
+    }
+
+    #[test]
+    fn tunnel_relay_request_meta_rejects_oversized_prefix() {
+        let oversized = (MAX_TUNNEL_RELAY_META_LEN as u32 + 1).to_be_bytes();
+
+        assert!(try_decode_tunnel_relay_request_meta(&oversized).is_err());
+    }
 
     #[test]
     fn request_meta_accepts_integer_timeout() {

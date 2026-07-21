@@ -104,6 +104,7 @@ fn is_known_admin_monitoring_api_format(value: &str) -> bool {
         "openai:chat"
             | "openai:responses"
             | "openai:responses:compact"
+            | "openai:search"
             | "openai:image"
             | "openai:video"
             | "openai:embedding"
@@ -490,6 +491,20 @@ mod tests {
             parsed.session_hash.as_deref(),
             Some("d35efdccd572e9c5430e17d663dfde4cce83ea7e6665ac332f565780c98b1dff")
         );
+    }
+
+    #[test]
+    fn parses_v2_scheduler_affinity_key_for_openai_search() {
+        let parsed = parse_admin_monitoring_scheduler_affinity_key(
+            "scheduler_affinity:v2:user-key-1:openai:search:gpt-5.6-sol:codex:sessionhash",
+        )
+        .expect("Search scheduler key should parse");
+
+        assert_eq!(parsed.affinity_key, "user-key-1");
+        assert_eq!(parsed.api_format, "openai:search");
+        assert_eq!(parsed.model_name, "gpt-5.6-sol");
+        assert_eq!(parsed.client_family.as_deref(), Some("codex"));
+        assert_eq!(parsed.session_hash.as_deref(), Some("sessionhash"));
     }
 
     #[test]

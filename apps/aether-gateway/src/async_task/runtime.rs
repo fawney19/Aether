@@ -144,34 +144,38 @@ pub(crate) fn spawn_video_task_poller(state: AppState) -> Option<JoinHandle<()>>
         return None;
     }
 
-    Some(tokio::spawn(async move {
-        let mut interval = tokio::time::interval(config.interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        interval.tick().await;
-        let mut deferred_since = None;
-        loop {
+    Some(crate::task_runtime::spawn_singleton_worker(
+        state,
+        crate::task_runtime::TASK_KEY_VIDEO_TASK_POLLER,
+        move |state| async move {
+            let mut interval = tokio::time::interval(config.interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await;
-            if state
-                .data
-                .should_defer_maintenance_for_database_pool_pressure(&mut deferred_since)
-            {
-                debug!(
-                    event_name = "video_task_poller_deferred",
-                    log_type = "event",
-                    "gateway video task poller deferred because database pool has no idle reserve"
-                );
-                continue;
+            let mut deferred_since = None;
+            loop {
+                interval.tick().await;
+                if state
+                    .data
+                    .should_defer_maintenance_for_database_pool_pressure(&mut deferred_since)
+                {
+                    debug!(
+                        event_name = "video_task_poller_deferred",
+                        log_type = "event",
+                        "gateway video task poller deferred because database pool has no idle reserve"
+                    );
+                    continue;
+                }
+                if let Err(err) = poll_video_tasks_once(&state, config.batch_size).await {
+                    warn!(
+                        event_name = "video_task_poller_tick_failed",
+                        log_type = "event",
+                        error = ?err,
+                        "gateway video task poller tick failed"
+                    );
+                }
             }
-            if let Err(err) = poll_video_tasks_once(&state, config.batch_size).await {
-                warn!(
-                    event_name = "video_task_poller_tick_failed",
-                    log_type = "event",
-                    error = ?err,
-                    "gateway video task poller tick failed"
-                );
-            }
-        }
-    }))
+        },
+    ))
 }
 
 async fn fetch_video_task_refresh_attempt(

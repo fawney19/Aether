@@ -23,6 +23,30 @@ use crate::constants::{
 };
 use crate::data::GatewayDataState;
 
+const PROVIDER_QUOTA_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_provider_quota_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(PROVIDER_QUOTA_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("provider quota test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 #[tokio::test]
 async fn gateway_refreshes_admin_provider_quota_locally_for_codex_with_trusted_admin_principal() {
     #[derive(Debug, Clone)]
@@ -46,7 +70,7 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_codex_with_trusted_a
         }),
     );
 
-    let seen_execution_runtime = Arc::new(Mutex::new(None::<SeenExecutionRuntimeRequest>));
+    let seen_execution_runtime = Arc::new(Mutex::new(Vec::<SeenExecutionRuntimeRequest>::new()));
     let seen_execution_runtime_clone = Arc::clone(&seen_execution_runtime);
     let execution_runtime = Router::new().route(
         "/v1/execute/sync",
@@ -59,21 +83,22 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_codex_with_trusted_a
                         .expect("body should read"),
                 )
                 .expect("plan should parse");
-                *seen_execution_runtime_inner
+                seen_execution_runtime_inner
                     .lock()
-                    .expect("mutex should lock") = Some(SeenExecutionRuntimeRequest {
-                    url: plan.url.clone(),
-                    authorization: plan
-                        .headers
-                        .get("authorization")
-                        .cloned()
-                        .unwrap_or_default(),
-                    provider_api_format: plan.provider_api_format.clone(),
-                    total_ms: plan
-                        .timeouts
-                        .as_ref()
-                        .and_then(|timeouts| timeouts.total_ms),
-                });
+                    .expect("mutex should lock")
+                    .push(SeenExecutionRuntimeRequest {
+                        url: plan.url.clone(),
+                        authorization: plan
+                            .headers
+                            .get("authorization")
+                            .cloned()
+                            .unwrap_or_default(),
+                        provider_api_format: plan.provider_api_format.clone(),
+                        total_ms: plan
+                            .timeouts
+                            .as_ref()
+                            .and_then(|timeouts| timeouts.total_ms),
+                    });
                 let result = aether_contracts::ExecutionResult {
                     request_id: plan.request_id,
                     candidate_id: None,
@@ -199,24 +224,24 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_codex_with_trusted_a
     );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
-    let seen_execution_runtime_request = seen_execution_runtime
+    let seen_execution_runtime_requests = seen_execution_runtime
         .lock()
         .expect("mutex should lock")
-        .clone()
-        .expect("execution runtime request should be captured");
+        .clone();
+    assert_eq!(seen_execution_runtime_requests.len(), 2);
     assert_eq!(
-        seen_execution_runtime_request.url,
+        seen_execution_runtime_requests[0].url,
         "https://chatgpt.com/backend-api/wham/usage"
     );
     assert_eq!(
-        seen_execution_runtime_request.authorization,
-        "Bearer sk-codex-123"
+        seen_execution_runtime_requests[1].url,
+        "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
     );
-    assert_eq!(
-        seen_execution_runtime_request.provider_api_format,
-        "openai:responses"
-    );
-    assert_eq!(seen_execution_runtime_request.total_ms, Some(30_000));
+    for request in seen_execution_runtime_requests {
+        assert_eq!(request.authorization, "Bearer sk-codex-123");
+        assert_eq!(request.provider_api_format, "openai:responses");
+        assert_eq!(request.total_ms, Some(30_000));
+    }
 
     let reloaded = provider_catalog_repository
         .list_keys_by_ids(&["key-codex-a".to_string()])
@@ -655,7 +680,10 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_requested_codex_keys
             .lock()
             .expect("mutex should lock")
             .clone(),
-        vec!["Bearer sk-codex-a".to_string()]
+        vec![
+            "Bearer sk-codex-a".to_string(),
+            "Bearer sk-codex-a".to_string(),
+        ]
     );
 
     let reloaded = provider_catalog_repository
@@ -1748,8 +1776,15 @@ async fn gateway_reports_codex_quota_runtime_failures_locally_without_falling_ba
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_trusted_admin_principal(
+#[test]
+fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_trusted_admin_principal() {
+    run_provider_quota_test(
+        "gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_trusted_admin_principal",
+        gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_trusted_admin_principal_inner,
+    );
+}
+
+async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_trusted_admin_principal_inner(
 ) {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeRequest {

@@ -1071,7 +1071,8 @@ import { useI18n } from '@/i18n'
 import AlertDialog from '@/components/common/AlertDialog.vue'
 import EndpointConditionEditor from './EndpointConditionEditor.vue'
 import ProxyNodeSelect from './ProxyNodeSelect.vue'
-import { getDefaultEndpointBaseUrl, getDefaultEndpointPath, normalizeEndpointApiFormat } from './endpoint-default-paths'
+import { getDefaultEndpointBaseUrl, getDefaultEndpointPath } from './endpoint-default-paths'
+import { fixedEndpointUpstreamStreamPolicy } from './endpoint-protocol-policy'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import {
   createEndpoint,
@@ -3432,20 +3433,26 @@ async function handleToggleFormatConversion(endpoint: ProviderEndpoint) {
 
 // 获取上游流式按钮的当前状态（优先使用编辑状态）
 function getCurrentUpstreamStreamPolicy(endpoint: ProviderEndpoint): string {
-  if (isUpstreamStreamPolicyLocked(endpoint)) return 'force_stream'
+  const fixedPolicy = getFixedUpstreamStreamPolicy(endpoint)
+  if (fixedPolicy) return fixedPolicy
   const state = endpointEditStates.value[endpoint.id]
   return state?.upstreamStreamPolicy ?? getEndpointUpstreamStreamPolicy(endpoint)
 }
 
+function getFixedUpstreamStreamPolicy(endpoint: ProviderEndpoint) {
+  return fixedEndpointUpstreamStreamPolicy(props.provider?.provider_type, endpoint.api_format)
+}
+
 function isUpstreamStreamPolicyLocked(endpoint: ProviderEndpoint): boolean {
-  return (props.provider?.provider_type || '').toLowerCase() === 'codex'
-    && normalizeEndpointApiFormat(endpoint.api_format) === 'openai:responses'
+  return getFixedUpstreamStreamPolicy(endpoint) !== null
 }
 
 // 获取上游流式按钮的样式类
 function getUpstreamStreamButtonClass(endpoint: ProviderEndpoint): string {
-  if (isUpstreamStreamPolicyLocked(endpoint)) {
-    return 'h-7 w-7 text-primary/70 cursor-not-allowed'
+  const fixedPolicy = getFixedUpstreamStreamPolicy(endpoint)
+  if (fixedPolicy) {
+    const color = fixedPolicy === 'force_stream' ? 'text-primary/70' : 'text-destructive/70'
+    return `h-7 w-7 ${color} cursor-not-allowed`
   }
   const policy = getCurrentUpstreamStreamPolicy(endpoint)
   const base = 'h-7 w-7'
@@ -3456,7 +3463,9 @@ function getUpstreamStreamButtonClass(endpoint: ProviderEndpoint): string {
 
 // 获取上游流式按钮的提示文字
 function getUpstreamStreamTooltip(endpoint: ProviderEndpoint): string {
-  if (isUpstreamStreamPolicyLocked(endpoint)) return legacyT('固定流式（Codex OpenAI Responses，已锁定）')
+  const fixedPolicy = getFixedUpstreamStreamPolicy(endpoint)
+  if (fixedPolicy === 'force_stream') return legacyT('Codex Responses 固定流式')
+  if (fixedPolicy === 'force_non_stream') return legacyT('OpenAI Search 固定非流式')
   const policy = getCurrentUpstreamStreamPolicy(endpoint)
   if (policy === 'force_stream') return legacyT('固定流式（点击切换为固定非流）')
   if (policy === 'force_non_stream') return legacyT('固定非流（点击切换为跟随请求）')

@@ -46,15 +46,21 @@ pub fn key_api_formats_without_entry(
     )
 }
 
-fn active_endpoint_api_formats(endpoints: &[StoredProviderCatalogEndpoint]) -> Vec<String> {
-    let mut formats = Vec::new();
-    for endpoint in endpoints.iter().filter(|endpoint| endpoint.is_active) {
+fn endpoint_api_format_sets(
+    endpoints: &[StoredProviderCatalogEndpoint],
+) -> (Vec<String>, Vec<String>) {
+    let mut all = Vec::new();
+    let mut active = Vec::new();
+    for endpoint in endpoints {
         let api_format = normalize_endpoint_api_format(&endpoint.api_format);
-        if !formats.iter().any(|existing| existing == &api_format) {
-            formats.push(api_format);
+        if !all.iter().any(|existing| existing == &api_format) {
+            all.push(api_format.clone());
+        }
+        if endpoint.is_active && !active.iter().any(|existing| existing == &api_format) {
+            active.push(api_format);
         }
     }
-    formats
+    (all, active)
 }
 
 fn configured_key_api_formats(key: &StoredProviderCatalogKey) -> Vec<String> {
@@ -82,31 +88,129 @@ pub fn endpoint_key_counts_by_format(
 ) -> (BTreeMap<String, usize>, BTreeMap<String, usize>) {
     let mut total = BTreeMap::new();
     let mut active = BTreeMap::new();
-    let inherited_api_formats = active_endpoint_api_formats(endpoints);
+    let (endpoint_api_formats, active_endpoint_api_formats) = endpoint_api_format_sets(endpoints);
 
     for key in keys {
-        if fixed_provider_key_inherits_api_formats(
+        let inherits_api_formats = fixed_provider_key_inherits_api_formats(
             provider_type,
             &key.auth_type,
             key.encrypted_auth_config.as_deref(),
-        ) {
-            for api_format in &inherited_api_formats {
-                *total.entry(api_format.clone()).or_insert(0) += 1;
-                if key.is_active {
-                    *active.entry(api_format.clone()).or_insert(0) += 1;
-                }
-            }
-            continue;
-        }
+        );
+        let has_unrestricted_api_format_scope = key
+            .api_formats
+            .as_ref()
+            .is_none_or(serde_json::Value::is_null);
+        let configured_api_formats = configured_key_api_formats(key);
 
-        for api_format in configured_key_api_formats(key) {
+        let candidate_api_formats = if inherits_api_formats {
+            &active_endpoint_api_formats
+        } else {
+            &endpoint_api_formats
+        };
+        for api_format in candidate_api_formats.iter().filter(|api_format| {
+            inherits_api_formats
+                || has_unrestricted_api_format_scope
+                || configured_api_formats.iter().any(|allowed| {
+                    aether_ai_formats::api_format_permission_covers(allowed, api_format)
+                })
+        }) {
             *total.entry(api_format.clone()).or_insert(0) += 1;
             if key.is_active {
-                *active.entry(api_format).or_insert(0) += 1;
+                *active.entry(api_format.clone()).or_insert(0) += 1;
             }
         }
     }
     (total, active)
+}
+
+#[cfg(test)]
+mod endpoint_key_count_tests {
+    use super::*;
+
+    fn sample_endpoint(id: &str, api_format: &str) -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            id.to_string(),
+            "provider-1".to_string(),
+            api_format.to_string(),
+            None,
+            None,
+            true,
+        )
+        .expect("endpoint should build")
+    }
+
+    fn sample_key(id: &str, api_format: Option<&str>) -> StoredProviderCatalogKey {
+        let mut key = StoredProviderCatalogKey::new(
+            id.to_string(),
+            "provider-1".to_string(),
+            id.to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.api_formats = api_format.map(|api_format| json!([api_format]));
+        key
+    }
+
+    #[test]
+    fn endpoint_counts_follow_one_way_format_permissions() {
+        let endpoints = vec![
+            sample_endpoint("responses", "openai:responses"),
+            sample_endpoint("search", "openai:search"),
+        ];
+        let mut empty_scope_key = sample_key("empty-scope-key", None);
+        empty_scope_key.api_formats = Some(json!([]));
+        let keys = vec![
+            sample_key("responses-key", Some("openai:responses")),
+            sample_key("search-key", Some("openai:search")),
+            sample_key("unrestricted-key", None),
+            empty_scope_key,
+        ];
+
+        let (total, active) = endpoint_key_counts_by_format("custom", &endpoints, &keys);
+
+        assert_eq!(total.get("openai:responses"), Some(&2));
+        assert_eq!(total.get("openai:search"), Some(&3));
+        assert_eq!(active, total);
+    }
+
+    #[test]
+    fn endpoint_counts_keep_scoped_keys_visible_on_inactive_endpoints() {
+        let mut endpoint = sample_endpoint("chat", "openai:chat");
+        endpoint.is_active = false;
+        let mut empty_scope_key = sample_key("empty-scope-key", None);
+        empty_scope_key.api_formats = Some(json!([]));
+        let keys = vec![
+            sample_key("chat-key", Some("openai:chat")),
+            sample_key("unrestricted-key", None),
+            empty_scope_key,
+        ];
+
+        let (total, active) = endpoint_key_counts_by_format("custom", &[endpoint], &keys);
+
+        assert_eq!(total.get("openai:chat"), Some(&2));
+        assert_eq!(active, total);
+    }
+
+    #[test]
+    fn inherited_endpoint_counts_only_include_active_formats() {
+        let responses_endpoint = sample_endpoint("responses", "openai:responses");
+        let mut search_endpoint = sample_endpoint("search", "openai:search");
+        search_endpoint.is_active = false;
+        let mut inherited_key = sample_key("codex-key", Some("legacy:mismatch"));
+        inherited_key.auth_type = "oauth".to_string();
+
+        let (total, active) = endpoint_key_counts_by_format(
+            "codex",
+            &[responses_endpoint, search_endpoint],
+            &[inherited_key],
+        );
+
+        assert_eq!(total.get("openai:responses"), Some(&1));
+        assert!(!total.contains_key("openai:search"));
+        assert_eq!(active, total);
+    }
 }
 
 fn masked_proxy_value(proxy: Option<&serde_json::Value>) -> serde_json::Value {

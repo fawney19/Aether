@@ -4,7 +4,8 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aether_runtime::{
-    BoundedQueueSender, MetricKind, MetricLabel, MetricSample, QueueSendError, QueueSnapshot,
+    bounded_queue, BoundedQueueSender, MetricKind, MetricLabel, MetricSample, QueueSendError,
+    QueueSnapshot,
 };
 use axum::extract::ws::Message;
 use bytes::Bytes;
@@ -23,6 +24,7 @@ const SOFT_AVOID_STREAM_PRESSURE_PERCENT: u64 = 85;
 const OUTBOUND_BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_STREAM_INITIAL_WINDOW_BYTES: u32 = 4 * 1024 * 1024;
 const DEFAULT_DRAIN_DEADLINE_MS: u64 = 30_000;
+const DEFAULT_NODE_STATUS_QUEUE_CAPACITY: usize = 1_024;
 const CONNECTION_WARMUP: Duration = Duration::from_secs(1);
 
 static STREAM_INITIAL_WINDOW_BYTES: LazyLock<u32> = LazyLock::new(|| {
@@ -39,6 +41,14 @@ static DRAIN_DEADLINE_MS: LazyLock<u64> = LazyLock::new(|| {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_DRAIN_DEADLINE_MS)
+});
+
+static NODE_STATUS_QUEUE_CAPACITY: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("AETHER_TUNNEL_NODE_STATUS_QUEUE_CAPACITY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_NODE_STATUS_QUEUE_CAPACITY)
 });
 
 static STREAM_MIN_WINDOW_UPDATE_BYTES: LazyLock<u32> = LazyLock::new(|| {
@@ -655,7 +665,7 @@ pub struct HubRouter {
     next_conn_id: AtomicU64,
     next_local_stream_id: AtomicU64,
     control_plane: ControlPlaneClient,
-    node_status_tx: mpsc::UnboundedSender<NodeStatusEvent>,
+    node_status_tx: BoundedQueueSender<NodeStatusEvent>,
     soft_avoid_selection_total: AtomicU64,
     selection_retry_total: AtomicU64,
     selection_unavailable_total: AtomicU64,
@@ -676,7 +686,8 @@ struct NodeStatusEvent {
 
 impl HubRouter {
     pub fn new(control_plane: ControlPlaneClient) -> Arc<Self> {
-        let (node_status_tx, mut node_status_rx) = mpsc::unbounded_channel::<NodeStatusEvent>();
+        let (node_status_tx, mut node_status_rx) =
+            bounded_queue::<NodeStatusEvent>(*NODE_STATUS_QUEUE_CAPACITY);
         let worker_control_plane = control_plane.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
@@ -797,14 +808,31 @@ impl HubRouter {
             conn_count,
             observed_at_unix_secs: current_unix_secs(),
         };
-        if let Err(error) = self.node_status_tx.send(event) {
-            warn!(
-                node_id = %error.0.node_id,
-                connected = error.0.connected,
-                conn_count = error.0.conn_count,
-                observed_at_unix_secs = error.0.observed_at_unix_secs,
-                "node status worker unavailable"
-            );
+        match self.node_status_tx.try_send(event) {
+            Ok(()) => {}
+            Err(QueueSendError::Full(event)) => {
+                let rejected_total = self.node_status_tx.snapshot().rejected_full_total;
+                if rejected_total.is_power_of_two() {
+                    warn!(
+                        node_id = %event.node_id,
+                        connected = event.connected,
+                        conn_count = event.conn_count,
+                        observed_at_unix_secs = event.observed_at_unix_secs,
+                        queue_capacity = self.node_status_tx.capacity(),
+                        rejected_total,
+                        "node status queue full; dropping stale status event"
+                    );
+                }
+            }
+            Err(QueueSendError::Closed(event)) => {
+                warn!(
+                    node_id = %event.node_id,
+                    connected = event.connected,
+                    conn_count = event.conn_count,
+                    observed_at_unix_secs = event.observed_at_unix_secs,
+                    "node status worker unavailable"
+                );
+            }
         }
     }
 
@@ -1592,6 +1620,7 @@ impl HubRouter {
     }
 
     pub fn stats(&self) -> HubStats {
+        let node_status_queue = self.node_status_tx.snapshot();
         let proxy_conns = self
             .proxy_conns_by_id
             .iter()
@@ -1716,6 +1745,12 @@ impl HubRouter {
             scheduler_selected_conn_total: self
                 .scheduler_selected_conn_total
                 .load(Ordering::Relaxed),
+            node_status_queue_capacity: node_status_queue.capacity,
+            node_status_queue_depth: node_status_queue.depth,
+            node_status_queue_high_watermark: node_status_queue.high_watermark,
+            node_status_queue_enqueued_total: node_status_queue.enqueued_total,
+            node_status_queue_rejected_full_total: node_status_queue.rejected_full_total,
+            node_status_queue_rejected_closed_total: node_status_queue.rejected_closed_total,
         }
     }
 }
@@ -1828,6 +1863,12 @@ pub struct HubStats {
     pub selection_retry_total: u64,
     pub selection_unavailable_total: u64,
     pub scheduler_selected_conn_total: u64,
+    pub node_status_queue_capacity: usize,
+    pub node_status_queue_depth: usize,
+    pub node_status_queue_high_watermark: usize,
+    pub node_status_queue_enqueued_total: u64,
+    pub node_status_queue_rejected_full_total: u64,
+    pub node_status_queue_rejected_closed_total: u64,
 }
 
 impl HubStats {
@@ -2038,6 +2079,16 @@ impl HubStats {
                 .with_labels(vec![MetricLabel::new("reason", reason.clone())]),
             );
         }
+
+        let node_status_queue = QueueSnapshot {
+            capacity: self.node_status_queue_capacity,
+            depth: self.node_status_queue_depth,
+            high_watermark: self.node_status_queue_high_watermark,
+            enqueued_total: self.node_status_queue_enqueued_total,
+            rejected_full_total: self.node_status_queue_rejected_full_total,
+            rejected_closed_total: self.node_status_queue_rejected_closed_total,
+        };
+        samples.extend(node_status_queue.to_metric_samples("tunnel_node_status"));
 
         samples
     }

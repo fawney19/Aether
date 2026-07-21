@@ -15,15 +15,20 @@ const AI_POST_ROUTE_PATTERNS: &[&str] = &[
     "/v1/messages/count_tokens",
     "/v1/responses",
     "/v1/responses/compact",
+    "/v1/alpha/search",
     "/v1/images/generations",
     "/v1/images/edits",
+    "/v1/interactions",
+    "/v1beta/interactions",
     "/v1internal:loadCodeAssist",
     "/v1internal:fetchAvailableModels",
+    "/v1internal:retrieveUserQuotaSummary",
     "/v1internal:fetchUserInfo",
     "/v1internal:fetchAdminControls",
     "/v1internal:setUserSettings",
     "/v1internal:listExperiments",
     "/v1internal:recordCodeAssistMetrics",
+    "/v1internal:writeTrajectoryAcls",
     "/v1internal:streamGenerateContent",
 ];
 
@@ -96,6 +101,12 @@ mod tests {
         for (api_format, family, kind, path) in [
             ("openai:embedding", "openai", "embedding", "/v1/embeddings"),
             (
+                "gemini:interactions",
+                "gemini",
+                "interactions",
+                "/v1/interactions",
+            ),
+            (
                 "gemini:embedding",
                 "gemini",
                 "embedding",
@@ -110,6 +121,7 @@ mod tests {
                 "/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding",
             ),
             ("openai:rerank", "openai", "rerank", "/v1/rerank"),
+            ("openai:search", "openai", "search", "/v1/alpha/search"),
             ("jina:rerank", "jina", "rerank", "/v1/rerank"),
         ] {
             assert_eq!(

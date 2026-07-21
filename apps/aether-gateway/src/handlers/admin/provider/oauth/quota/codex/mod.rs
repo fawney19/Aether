@@ -51,14 +51,6 @@ fn merge_codex_quota_metadata(
     serde_json::Value::Object(merged)
 }
 
-fn codex_reset_credits_available_count(metadata: &Map<String, Value>) -> Option<u64> {
-    metadata
-        .get("reset_credits")
-        .and_then(Value::as_object)
-        .and_then(|reset_credits| reset_credits.get("available_count"))
-        .and_then(aether_admin::provider::quota::coerce_json_u64)
-}
-
 fn truncate_codex_reset_credit_detail_error(message: impl Into<String>) -> String {
     let message = message.into();
     let mut sanitized = message.replace('\n', " ");
@@ -85,11 +77,7 @@ fn merge_codex_reset_credit_detail_metadata(
         .cloned()
         .unwrap_or_default();
 
-    let has_usage_available_count = reset_credits.contains_key("available_count");
     for (key, value) in detail_reset_credits {
-        if key == "available_count" && has_usage_available_count {
-            continue;
-        }
         reset_credits.insert(key.clone(), value.clone());
     }
     codex_metadata.insert("reset_credits".to_string(), Value::Object(reset_credits));
@@ -97,6 +85,7 @@ fn merge_codex_reset_credit_detail_metadata(
 
 fn mark_codex_reset_credit_detail_failed(
     codex_metadata: &mut Map<String, Value>,
+    updated_at_unix_secs: u64,
     detail_error: impl Into<String>,
 ) {
     let mut reset_credits = codex_metadata
@@ -104,6 +93,7 @@ fn mark_codex_reset_credit_detail_failed(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    reset_credits.insert("updated_at".to_string(), json!(updated_at_unix_secs));
     reset_credits.insert("detail_source".to_string(), json!("wham_readonly"));
     reset_credits.insert("detail_status".to_string(), json!("failed"));
     reset_credits.insert(
@@ -124,16 +114,11 @@ async fn enrich_codex_reset_credit_details(
     codex_metadata: &mut Map<String, Value>,
     now_unix_secs: u64,
 ) -> Result<(), GatewayError> {
-    let available_count = codex_reset_credits_available_count(codex_metadata).unwrap_or(0);
-    if available_count == 0 {
-        return Ok(());
-    }
-
     let request_spec = match build_codex_reset_credits_request_spec(transport, resolved_oauth_auth)
     {
         Ok(request_spec) => request_spec,
         Err(message) => {
-            mark_codex_reset_credit_detail_failed(codex_metadata, message);
+            mark_codex_reset_credit_detail_failed(codex_metadata, now_unix_secs, message);
             return Ok(());
         }
     };
@@ -146,6 +131,7 @@ async fn enrich_codex_reset_credit_details(
             ProviderQuotaExecutionOutcome::Failure(detail) => {
                 mark_codex_reset_credit_detail_failed(
                     codex_metadata,
+                    now_unix_secs,
                     format!("reset credit detail 请求执行失败: {detail}"),
                 );
                 return Ok(());
@@ -157,6 +143,7 @@ async fn enrich_codex_reset_credit_details(
             .unwrap_or_else(|| format!("HTTP {}", result.status_code));
         mark_codex_reset_credit_detail_failed(
             codex_metadata,
+            now_unix_secs,
             format!(
                 "reset credit detail 返回状态码 {}: {detail}",
                 result.status_code
@@ -170,7 +157,11 @@ async fn enrich_codex_reset_credit_details(
         .as_ref()
         .and_then(|body| body.json_body.as_ref())
     else {
-        mark_codex_reset_credit_detail_failed(codex_metadata, "无法解析 reset credit detail 响应");
+        mark_codex_reset_credit_detail_failed(
+            codex_metadata,
+            now_unix_secs,
+            "无法解析 reset credit detail 响应",
+        );
         return Ok(());
     };
     if let Some(detail_metadata) =
@@ -178,7 +169,11 @@ async fn enrich_codex_reset_credit_details(
     {
         merge_codex_reset_credit_detail_metadata(codex_metadata, &detail_metadata);
     } else {
-        mark_codex_reset_credit_detail_failed(codex_metadata, "reset credit detail 响应为空");
+        mark_codex_reset_credit_detail_failed(
+            codex_metadata,
+            now_unix_secs,
+            "reset credit detail 响应为空",
+        );
     }
 
     Ok(())
@@ -775,4 +770,53 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
         "refresh_failed_retained": refresh_failed_retained_count,
         "auto_removed_hard_banned": auto_removed_hard_banned_count,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_reset_credit_detail_count_overrides_usage_count() {
+        let mut metadata = json!({
+            "reset_credits": {
+                "available_count": 0,
+                "detail_source": "wham_usage"
+            }
+        })
+        .as_object()
+        .cloned()
+        .expect("metadata object");
+        let detail = json!({
+            "reset_credits": {
+                "available_count": 2,
+                "detail_source": "wham_readonly"
+            }
+        });
+
+        merge_codex_reset_credit_detail_metadata(&mut metadata, &detail);
+
+        assert_eq!(
+            metadata
+                .get("reset_credits")
+                .and_then(Value::as_object)
+                .and_then(|credits| credits.get("available_count")),
+            Some(&json!(2u64))
+        );
+    }
+
+    #[test]
+    fn codex_reset_credit_detail_failure_records_attempt_time() {
+        let mut metadata = Map::new();
+
+        mark_codex_reset_credit_detail_failed(&mut metadata, 1_777_000_000, "request failed");
+
+        assert_eq!(
+            metadata
+                .get("reset_credits")
+                .and_then(Value::as_object)
+                .and_then(|credits| credits.get("updated_at")),
+            Some(&json!(1_777_000_000u64))
+        );
+    }
 }

@@ -109,7 +109,10 @@ const QuotaProgressRows = defineComponent({
         : 'flex flex-col gap-1 min-w-[140px] max-w-[208px]',
     }, [
       h('div', { class: 'flex items-center justify-between text-[10px] leading-none' }, [
-        h('span', { class: 'text-muted-foreground font-medium shrink-0' }, item.label),
+        h('span', {
+          'data-testid': 'pool-quota-period-label',
+          class: 'text-muted-foreground font-medium shrink-0',
+        }, item.label),
         item.resetText
           ? h('span', {
             'data-testid': 'pool-quota-reset-text',

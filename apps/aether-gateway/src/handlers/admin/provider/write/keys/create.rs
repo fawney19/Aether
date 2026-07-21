@@ -2,7 +2,7 @@ use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyCreateRe
 use crate::handlers::admin::provider::write::normalize::{
     normalize_allow_auth_channel_mismatch_formats, normalize_api_format_json_object_keys,
     normalize_api_format_list, normalize_auth_type, normalize_auth_type_by_format,
-    normalize_max_probe_interval_minutes, validate_vertex_api_formats,
+    normalize_max_probe_interval_minutes, normalize_rate_multipliers, validate_vertex_api_formats,
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{
@@ -165,7 +165,7 @@ pub(crate) async fn build_admin_create_provider_key_record(
         },
         encrypted_api_key,
         encrypted_auth_config,
-        normalize_api_format_json_object_keys(payload.rate_multipliers, "rate_multipliers")?,
+        normalize_rate_multipliers(payload.rate_multipliers)?,
         None,
         normalize_string_list(payload.allowed_models).map(|value| json!(value)),
         None,

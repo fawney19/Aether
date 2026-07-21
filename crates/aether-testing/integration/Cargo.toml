@@ -1,0 +1,26 @@
+[package]
+name = "aether-integration-tests"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Gateway-backed integration scenarios and benchmark binaries"
+
+[dependencies]
+async-stream.workspace = true
+aether-contracts.workspace = true
+aether-data.workspace = true
+aether-data-contracts.workspace = true
+aether-gateway = { workspace = true, features = ["testkit"] }
+aether-runtime-state.workspace = true
+aether-testkit = { workspace = true, features = ["gateway", "postgres"] }
+axum.workspace = true
+futures-util.workspace = true
+http.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx = { workspace = true, features = ["postgres"] }
+tokio.workspace = true
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }

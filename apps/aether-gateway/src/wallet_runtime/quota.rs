@@ -1,9 +1,9 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::warn;
 
 use crate::data::GatewayDataState;
+use crate::AppState;
 
 const QUOTA_RESET_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
@@ -18,26 +18,31 @@ pub(crate) async fn reset_due_provider_quotas_once(
 }
 
 pub(crate) fn spawn_provider_quota_reset_worker(
-    data: Arc<GatewayDataState>,
+    app: AppState,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    if !data.has_provider_quota_writer() {
+    if !app.data.has_provider_quota_writer() {
         return None;
     }
 
-    Some(tokio::spawn(async move {
-        if let Err(err) = reset_due_provider_quotas_once(&data).await {
-            warn!(error = %err, "gateway provider quota reset startup failed");
-        }
-        let mut interval = tokio::time::interval(QUOTA_RESET_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        interval.tick().await;
-        loop {
-            interval.tick().await;
+    Some(crate::task_runtime::spawn_singleton_worker(
+        app,
+        crate::task_runtime::TASK_KEY_PROVIDER_QUOTA_RESET,
+        |app| async move {
+            let data = app.data;
             if let Err(err) = reset_due_provider_quotas_once(&data).await {
-                warn!(error = %err, "gateway provider quota reset tick failed");
+                warn!(error = %err, "gateway provider quota reset startup failed");
             }
-        }
-    }))
+            let mut interval = tokio::time::interval(QUOTA_RESET_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(err) = reset_due_provider_quotas_once(&data).await {
+                    warn!(error = %err, "gateway provider quota reset tick failed");
+                }
+            }
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -52,6 +57,7 @@ mod tests {
 
     use super::{reset_due_provider_quotas_once, spawn_provider_quota_reset_worker};
     use crate::data::GatewayDataState;
+    use crate::AppState;
 
     #[tokio::test]
     async fn resets_due_provider_quotas_from_runtime() {
@@ -98,10 +104,12 @@ mod tests {
             )
             .expect("quota should build"),
         ]));
-        let data = Arc::new(GatewayDataState::with_provider_quota_repository_for_tests(
-            repository.clone(),
-        ));
-        let handle = spawn_provider_quota_reset_worker(data).expect("worker should spawn");
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(GatewayDataState::with_provider_quota_repository_for_tests(
+                repository.clone(),
+            ));
+        let handle = spawn_provider_quota_reset_worker(state).expect("worker should spawn");
 
         let stored = tokio::time::timeout(Duration::from_secs(1), async {
             loop {

@@ -1,11 +1,19 @@
 import apiClient from './client'
 import type { ModelTestCapabilities } from './endpoints/types'
 import axios, { type AxiosRequestConfig } from 'axios'
-import { cachedRequest, buildCacheKey } from '@/utils/cache'
+import { cache, cachedRequest, buildCacheKey } from '@/utils/cache'
 import type { BillingSummary } from './auth'
 import type { ApiKeyInstallSession, InstallSessionTargetSystem, InstallTargetCli } from './me'
 
 const SYSTEM_DATA_IMPORT_TIMEOUT_MS = 10 * 60 * 1000
+const ALL_SYSTEM_CONFIGS_CACHE_KEY = 'admin:system:configs'
+
+export interface AdminSystemConfigItem {
+  key: string
+  value: unknown
+  description?: string
+  is_set?: boolean
+}
 
 export interface SystemDataImportOptions {
   onUploadProgress?: AxiosRequestConfig['onUploadProgress']
@@ -736,6 +744,10 @@ export interface QuotaUsageResponse {
   providers: QuotaUsageProvider[]
 }
 
+export interface AdminAnalyticsRequestOptions {
+  skipCache?: boolean
+}
+
 export interface PercentileItem {
   date: string
   p50_response_time_ms?: number | null
@@ -947,9 +959,17 @@ export const adminApi = {
 
   // 系统配置相关
   // 获取所有系统配置
-  async getAllSystemConfigs(): Promise<Array<{ key: string; value: unknown; description?: string }>> {
-    const response = await apiClient.get<Array<{ key: string; value: unknown; description?: string }>>('/api/admin/system/configs')
-    return response.data
+  async getAllSystemConfigs(
+    options: { cacheTtlMs?: number } = {},
+  ): Promise<AdminSystemConfigItem[]> {
+    return cachedRequest(
+      ALL_SYSTEM_CONFIGS_CACHE_KEY,
+      async () => {
+        const response = await apiClient.get<AdminSystemConfigItem[]>('/api/admin/system/configs')
+        return response.data
+      },
+      options.cacheTtlMs ?? 0,
+    )
   },
 
   // 获取特定系统配置
@@ -983,6 +1003,8 @@ export const adminApi = {
       { value, description },
       requestConfig,
     )
+    cache.delete(ALL_SYSTEM_CONFIGS_CACHE_KEY)
+    cache.delete(buildCacheKey('admin:system:config', { key }))
     return response.data
   },
 
@@ -991,6 +1013,8 @@ export const adminApi = {
     const response = await apiClient.delete<{ message: string }>(
       `/api/admin/system/configs/${key}`
     )
+    cache.delete(ALL_SYSTEM_CONFIGS_CACHE_KEY)
+    cache.delete(buildCacheKey('admin:system:config', { key }))
     return response.data
   },
 
@@ -1021,6 +1045,7 @@ export const adminApi = {
       data,
       { timeout: SYSTEM_DATA_IMPORT_TIMEOUT_MS, ...options }
     )
+    cache.clear()
     return response.data
   },
 
@@ -1053,6 +1078,7 @@ export const adminApi = {
       data,
       { timeout: SYSTEM_DATA_IMPORT_TIMEOUT_MS, ...options }
     )
+    cache.clear()
     return response.data
   },
 
@@ -1069,6 +1095,14 @@ export const adminApi = {
     const response = await apiClient.post<ProviderModelsQueryResponse>(
       '/api/admin/provider-query/models',
       { provider_id: providerId, api_key_id: apiKeyId, force_refresh: forceRefresh }
+    )
+    return response.data
+  },
+
+  async queryProviderModelsForKeys(providerId: string, apiKeyIds: string[], forceRefresh = false): Promise<ProviderModelsQueryResponse> {
+    const response = await apiClient.post<ProviderModelsQueryResponse>(
+      '/api/admin/provider-query/models',
+      { provider_id: providerId, api_key_ids: apiKeyIds, force_refresh: forceRefresh }
     )
     return response.data
   },
@@ -1380,13 +1414,16 @@ export const adminApi = {
     )
   },
 
-  async getPercentiles(params?: {
-    start_date?: string
-    end_date?: string
-    preset?: string
-    timezone?: string
-    tz_offset_minutes?: number
-  }): Promise<PercentileItem[]> {
+  async getPercentiles(
+    params?: {
+      start_date?: string
+      end_date?: string
+      preset?: string
+      timezone?: string
+      tz_offset_minutes?: number
+    },
+    options?: AdminAnalyticsRequestOptions
+  ): Promise<PercentileItem[]> {
     const cacheKey = buildCacheKey('admin:stats:performance:percentiles', params)
     return cachedRequest(
       cacheKey,
@@ -1396,26 +1433,30 @@ export const adminApi = {
         })
         return response.data
       },
-      20 * 1000
+      options?.skipCache ? 0 : 20 * 1000
     )
   },
 
-  async getProviderPerformance(params?: {
-    start_date?: string
-    end_date?: string
-    preset?: string
-    timezone?: string
-    tz_offset_minutes?: number
-    granularity?: 'day' | 'hour'
-    limit?: number
-    provider_id?: string
-    model?: string
-    api_format?: string
-    endpoint_kind?: string
-    is_stream?: boolean
-    has_format_conversion?: boolean
-    slow_threshold_ms?: number
-  }): Promise<ProviderPerformanceResponse> {
+  async getProviderPerformance(
+    params?: {
+      start_date?: string
+      end_date?: string
+      preset?: string
+      timezone?: string
+      tz_offset_minutes?: number
+      granularity?: 'day' | 'hour'
+      include_timeline?: boolean
+      limit?: number
+      provider_id?: string
+      model?: string
+      api_format?: string
+      endpoint_kind?: string
+      is_stream?: boolean
+      has_format_conversion?: boolean
+      slow_threshold_ms?: number
+    },
+    options?: AdminAnalyticsRequestOptions
+  ): Promise<ProviderPerformanceResponse> {
     const cacheKey = buildCacheKey('admin:stats:performance:providers', params)
     return cachedRequest(
       cacheKey,
@@ -1425,17 +1466,20 @@ export const adminApi = {
         })
         return response.data
       },
-      20 * 1000
+      options?.skipCache ? 0 : 20 * 1000
     )
   },
 
-  async getErrorDistribution(params?: {
-    start_date?: string
-    end_date?: string
-    preset?: string
-    timezone?: string
-    tz_offset_minutes?: number
-  }): Promise<ErrorDistributionResponse> {
+  async getErrorDistribution(
+    params?: {
+      start_date?: string
+      end_date?: string
+      preset?: string
+      timezone?: string
+      tz_offset_minutes?: number
+    },
+    options?: AdminAnalyticsRequestOptions
+  ): Promise<ErrorDistributionResponse> {
     const cacheKey = buildCacheKey('admin:stats:errors:distribution', params)
     return cachedRequest(
       cacheKey,
@@ -1445,7 +1489,7 @@ export const adminApi = {
         })
         return response.data
       },
-      20 * 1000
+      options?.skipCache ? 0 : 20 * 1000
     )
   },
 
@@ -1535,17 +1579,20 @@ export const adminApi = {
     return response.data
   },
 
-  async getTimeSeries(params?: {
-    start_date?: string
-    end_date?: string
-    preset?: string
-    granularity?: 'hour' | 'day' | 'week' | 'month'
-    timezone?: string
-    tz_offset_minutes?: number
-    user_id?: string
-    model?: string
-    provider_name?: string
-  }): Promise<Array<Record<string, unknown>>> {
+  async getTimeSeries(
+    params?: {
+      start_date?: string
+      end_date?: string
+      preset?: string
+      granularity?: 'hour' | 'day' | 'week' | 'month'
+      timezone?: string
+      tz_offset_minutes?: number
+      user_id?: string
+      model?: string
+      provider_name?: string
+    },
+    options?: AdminAnalyticsRequestOptions
+  ): Promise<Array<Record<string, unknown>>> {
     const cacheKey = buildCacheKey('admin:stats:time-series', params)
     return cachedRequest(
       cacheKey,
@@ -1553,7 +1600,7 @@ export const adminApi = {
         const response = await apiClient.get<Array<Record<string, unknown>>>('/api/admin/stats/time-series', { params })
         return response.data
       },
-      20 * 1000
+      options?.skipCache ? 0 : 20 * 1000
     )
   },
 

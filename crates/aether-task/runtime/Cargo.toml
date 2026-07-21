@@ -1,0 +1,16 @@
+[package]
+name = "aether-task-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared async task runtime primitives for Aether services"
+
+[dependencies]
+aether-task-core.workspace = true
+aether-runtime.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true

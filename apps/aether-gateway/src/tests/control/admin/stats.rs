@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aether_data::repository::auth::{
@@ -163,16 +164,18 @@ fn recent_unix_secs(minutes_ago: u64) -> i64 {
 }
 
 #[derive(Debug)]
-struct PartialListAuthApiKeyRepository {
+struct BulkMissAuthApiKeyRepository {
     lookup: InMemoryAuthApiKeySnapshotRepository,
+    single_lookup_calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
-impl AuthApiKeyReadRepository for PartialListAuthApiKeyRepository {
+impl AuthApiKeyReadRepository for BulkMissAuthApiKeyRepository {
     async fn find_api_key_snapshot(
         &self,
         key: AuthApiKeyLookupKey<'_>,
     ) -> Result<Option<StoredAuthApiKeySnapshot>, aether_data::DataLayerError> {
+        self.single_lookup_calls.fetch_add(1, Ordering::Relaxed);
         self.lookup.find_api_key_snapshot(key).await
     }
 
@@ -1009,6 +1012,26 @@ async fn gateway_handles_admin_stats_provider_performance_locally_with_trusted_a
         payload["timeline"][1]["avg_first_byte_time_ms"],
         serde_json::Value::Null
     );
+
+    let without_timeline_response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/stats/performance/providers?start_date=2024-03-21&end_date=2024-03-21&granularity=hour&limit=2&tz_offset_minutes=0&include_timeline=false"
+    )))
+    .send()
+    .await
+    .expect("request without timeline should succeed");
+    assert_eq!(without_timeline_response.status(), StatusCode::OK);
+    let without_timeline_payload: serde_json::Value = without_timeline_response
+        .json()
+        .await
+        .expect("json body without timeline should parse");
+    assert_eq!(without_timeline_payload["summary"], payload["summary"]);
+    assert_eq!(without_timeline_payload["providers"], payload["providers"]);
+    assert_eq!(
+        without_timeline_payload["timeline"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1379,7 +1402,7 @@ async fn gateway_handles_admin_stats_leaderboard_models_locally_with_trusted_adm
     assert_eq!(payload["metric"], "tokens");
     assert_eq!(payload["items"][0]["rank"], 1);
     assert_eq!(payload["items"][0]["id"], "gpt-5");
-    assert_eq!(payload["items"][0]["value"], 160);
+    assert_eq!(payload["items"][0]["value"], 150);
     assert_eq!(payload["items"][1]["id"], "claude-3-5-sonnet");
     assert_eq!(payload["items"][1]["value"], 100);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
@@ -1629,8 +1652,7 @@ async fn gateway_handles_admin_stats_leaderboard_api_keys_locally_without_auth_s
 }
 
 #[tokio::test]
-async fn gateway_handles_admin_stats_leaderboard_api_keys_with_auth_snapshot_single_lookup_fallback(
-) {
+async fn gateway_treats_admin_stats_leaderboard_api_key_bulk_snapshots_as_authoritative() {
     let (_upstream_url, upstream_hits, upstream_handle) =
         start_stats_upstream("/api/admin/stats/leaderboard/api-keys").await;
 
@@ -1648,11 +1670,13 @@ async fn gateway_handles_admin_stats_leaderboard_api_keys_with_auth_snapshot_sin
         0.3,
         DAY_1_UNIX_SECS,
     )]));
-    let auth_repository = Arc::new(PartialListAuthApiKeyRepository {
+    let single_lookup_calls = Arc::new(AtomicUsize::new(0));
+    let auth_repository = Arc::new(BulkMissAuthApiKeyRepository {
         lookup: InMemoryAuthApiKeySnapshotRepository::seed(vec![(
             None,
             sample_api_key_snapshot("key-1", "user-1", "fresh-key"),
         )]),
+        single_lookup_calls: Arc::clone(&single_lookup_calls),
     });
 
     let data_state = GatewayDataState::with_usage_reader_for_tests(usage_repository)
@@ -1666,7 +1690,7 @@ async fn gateway_handles_admin_stats_leaderboard_api_keys_with_auth_snapshot_sin
 
     let response = admin_request(
         reqwest::Client::new().get(format!(
-            "{gateway_url}/api/admin/stats/leaderboard/api-keys?start_date=2024-03-21&end_date=2024-03-21&metric=cost&order=desc&tz_offset_minutes=0"
+            "{gateway_url}/api/admin/stats/leaderboard/api-keys?start_date=2024-03-21&end_date=2024-03-21&metric=cost&order=desc&tz_offset_minutes=0&include_inactive=true"
         )),
     )
     .send()
@@ -1677,8 +1701,9 @@ async fn gateway_handles_admin_stats_leaderboard_api_keys_with_auth_snapshot_sin
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["total"], 1);
     assert_eq!(payload["items"][0]["id"], "key-1");
-    assert_eq!(payload["items"][0]["name"], "fresh-key");
+    assert_eq!(payload["items"][0]["name"], "legacy-key");
     assert_eq!(payload["items"][0]["value"], 0.3);
+    assert_eq!(single_lookup_calls.load(Ordering::Relaxed), 0);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

@@ -288,6 +288,18 @@ pub(super) fn classify_admin_observability_family_route(
             "admin:pool",
             false,
         ))
+    } else if method == http::Method::PATCH
+        && normalized_path_no_trailing.starts_with("/api/admin/pool/")
+        && normalized_path_no_trailing.ends_with("/keys/batch-update")
+        && normalized_path_no_trailing.matches('/').count() == 6
+    {
+        Some(classified(
+            "admin_proxy",
+            "pool_manage",
+            "batch_update_keys",
+            "admin:pool",
+            false,
+        ))
     } else if method == http::Method::POST
         && normalized_path_no_trailing.starts_with("/api/admin/pool/")
         && normalized_path_no_trailing.ends_with("/keys/resolve-selection")

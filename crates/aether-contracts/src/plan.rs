@@ -7,6 +7,11 @@ pub const EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER: &str = "x-aether-execution-
 pub const EXECUTION_REQUEST_HTTP1_ONLY_HEADER: &str = "x-aether-execution-http1-only";
 pub const EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER: &str =
     "x-aether-execution-accept-invalid-certs";
+pub const MAX_EXECUTION_REQUEST_TIMEOUT_SECS: u64 = 1_200;
+pub const MAX_EXECUTION_REQUEST_TIMEOUT_MS: u64 = MAX_EXECUTION_REQUEST_TIMEOUT_SECS * 1_000;
+pub const MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_SECS: u64 = 300;
+pub const MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_MS: u64 =
+    MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_SECS * 1_000;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -115,6 +120,7 @@ pub struct ExecutionPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_encoding: Option<String>,
     pub body: RequestBody,
+    /// Whether the upstream API uses a streaming response protocol.
     #[serde(default)]
     pub stream: bool,
     pub client_api_format: String,

@@ -71,6 +71,7 @@ mod tests {
                 priority: 1,
                 api_formats: Some(vec!["openai:chat".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: None,
             model_is_active: true,
@@ -98,6 +99,7 @@ mod tests {
             global_model_id: format!("global-model-{id}"),
             global_model_name: "gpt-5".to_string(),
             selected_provider_model_name: "gpt-5".to_string(),
+            supports_streaming: true,
             mapping_matched_model: None,
         }
     }
@@ -198,6 +200,7 @@ mod tests {
             super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
                 rows: vec![sample_row("1"), disallowed],
                 normalized_api_format: "openai:chat",
+                request_operation: None,
                 requested_model_name: "gpt-5",
                 resolved_global_model_name: "gpt-5",
                 require_streaming: false,
@@ -212,6 +215,28 @@ mod tests {
     }
 
     #[test]
+    fn enumeration_preserves_effective_streaming_capability() {
+        let mut row = sample_row("1");
+        row.model_supports_streaming = Some(false);
+
+        let candidates =
+            super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
+                rows: vec![row],
+                normalized_api_format: "openai:chat",
+                request_operation: None,
+                requested_model_name: "gpt-5",
+                resolved_global_model_name: "gpt-5",
+                require_streaming: false,
+                required_capabilities: None,
+                auth_constraints: None,
+            })
+            .expect("candidate selection should build");
+
+        assert_eq!(candidates.len(), 1);
+        assert!(!candidates[0].supports_streaming);
+    }
+
+    #[test]
     fn enumeration_preserves_theoretical_candidate_order_without_final_sorting() {
         let mut later_priority = sample_row("1");
         later_priority.provider_priority = 10;
@@ -222,6 +247,7 @@ mod tests {
             super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
                 rows: vec![later_priority, earlier_priority],
                 normalized_api_format: "openai:chat",
+                request_operation: None,
                 requested_model_name: "gpt-5",
                 resolved_global_model_name: "gpt-5",
                 require_streaming: false,
@@ -273,6 +299,7 @@ mod tests {
             super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
                 rows: vec![missing_capability, matching_capability],
                 normalized_api_format: "openai:chat",
+                request_operation: None,
                 requested_model_name: "gpt-5",
                 resolved_global_model_name: "gpt-5",
                 require_streaming: false,

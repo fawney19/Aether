@@ -65,7 +65,9 @@ pub(crate) async fn resolve_local_openai_chat_decision_input(
         state,
         auth_context.clone(),
         Some(requested_model.as_str()),
+        decision.auth_endpoint_signature.as_deref(),
         None,
+        &decision.model_directive_policy,
     )
     .await
     {

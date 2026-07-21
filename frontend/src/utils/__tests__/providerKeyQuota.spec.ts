@@ -43,6 +43,34 @@ describe('providerKeyQuota', () => {
     }, 'codex')).toBe('周剩余 90.0% | 5H剩余 80.0% | Spark5H剩余 60.0% | Spark周剩余 95.0%')
   })
 
+  it('uses actual Codex window durations and ignores zero placeholders', () => {
+    expect(getQuotaDisplayText({
+      status_snapshot: {
+        oauth: { code: 'valid' },
+        account: { code: 'ok', blocked: false },
+        quota: {
+          provider_type: 'codex',
+          code: 'ok',
+          exhausted: false,
+          windows: [
+            {
+              code: 'weekly',
+              label: '周',
+              window_minutes: 0,
+              remaining_ratio: 1,
+            },
+            {
+              code: '5h',
+              label: '5H',
+              window_minutes: 43_800,
+              remaining_ratio: 0.86,
+            },
+          ],
+        },
+      },
+    }, 'codex')).toBe('月剩余 86.0%')
+  })
+
   it('formats Grok account quota from structured quota windows', () => {
     expect(getQuotaDisplayText({
       status_snapshot: {

@@ -306,6 +306,7 @@ export interface PoolScoresQuery {
 
 export interface PoolKeySelectionRequest {
   search?: string
+  status?: PoolKeysQuery['status']
   quick_selectors?: string[]
 }
 
@@ -337,7 +338,75 @@ export interface PoolBatchAction {
     | 'delete'
     | 'clear_proxy'
     | 'set_proxy'
+    | 'update_settings'
   payload?: Record<string, unknown> | null
+}
+
+export interface PoolKeySharedSettingsPatch {
+  internal_priority?: number
+  rpm_limit?: number | null
+  concurrent_limit?: number | null
+  cache_ttl_minutes?: number
+  max_probe_interval_minutes?: number
+  is_active?: boolean
+  note?: string | null
+}
+
+export interface PoolKeyBatchUpdatePatch extends PoolKeySharedSettingsPatch {
+  api_formats?: string[]
+  auth_type_by_format?: Record<string, 'api_key' | 'bearer'> | null
+  allow_auth_channel_mismatch_formats?: string[] | null
+  rate_multipliers?: Record<string, number> | null
+  global_priority_by_format?: Record<string, number> | null
+  allowed_models?: AllowedModels
+  capabilities?: Record<string, boolean> | null
+  auto_fetch_models?: boolean
+  locked_models?: string[]
+  model_include_patterns?: string[]
+  model_exclude_patterns?: string[]
+  proxy?: ProxyConfig | null
+}
+
+export interface PoolKeyBatchUpdateRequest {
+  key_ids: string[]
+  patch: PoolKeyBatchUpdatePatch
+}
+
+export interface PoolKeyBatchModelSyncResult {
+  requested: number
+  attempted: number
+  succeeded: number
+  failed: number
+  skipped: number
+  error?: string
+}
+
+export interface PoolKeyBatchUpdateResponse {
+  affected: number
+  message: string
+  model_sync: PoolKeyBatchModelSyncResult | null
+}
+
+export interface PoolKeySettingsPatch extends PoolKeySharedSettingsPatch {
+  proxy_node_id?: string | null
+}
+
+export interface PoolBatchImportRequest {
+  keys: Array<{
+    name: string
+    api_key: string
+    auth_type: 'api_key' | 'bearer'
+    api_formats?: string[]
+    settings?: PoolKeySettingsPatch
+  }>
+  api_formats?: string[]
+  settings?: PoolKeySettingsPatch
+}
+
+export interface PoolBatchImportResult {
+  imported: number
+  skipped: number
+  errors: Array<{ index: number; reason: string }>
 }
 
 interface PoolReadOptions {
@@ -436,6 +505,30 @@ export async function batchActionPoolKeys(
 ): Promise<{ affected: number; message: string; task_id?: string }> {
   const response = await client.post(
     `/api/admin/pool/${providerId}/keys/batch-action`,
+    body,
+    { timeout: POOL_BATCH_ACTION_TIMEOUT_MS },
+  )
+  return response.data
+}
+
+export async function batchUpdatePoolKeys(
+  providerId: string,
+  body: PoolKeyBatchUpdateRequest,
+): Promise<PoolKeyBatchUpdateResponse> {
+  const response = await client.patch<PoolKeyBatchUpdateResponse>(
+    `/api/admin/pool/${providerId}/keys/batch-update`,
+    body,
+    { timeout: POOL_BATCH_ACTION_TIMEOUT_MS },
+  )
+  return response.data
+}
+
+export async function batchImportPoolKeys(
+  providerId: string,
+  body: PoolBatchImportRequest,
+): Promise<PoolBatchImportResult> {
+  const response = await client.post<PoolBatchImportResult>(
+    `/api/admin/pool/${providerId}/keys/batch-import`,
     body,
     { timeout: POOL_BATCH_ACTION_TIMEOUT_MS },
   )

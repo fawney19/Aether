@@ -35,6 +35,27 @@ use aether_data_contracts::repository::video_tasks::{
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
+fn run_frontdoor_async_test<F>(name: &'static str, future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("frontdoor test runtime should build")
+                .block_on(future);
+        })
+        .expect("large-stack frontdoor test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 fn hash_api_key(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
@@ -270,6 +291,7 @@ fn sample_models_candidate_row(
             priority: 1,
             api_formats: Some(vec![api_format.to_string()]),
             endpoint_ids: None,
+            operations: None,
         }]),
         model_supports_streaming: Some(true),
         model_is_active: true,

@@ -103,6 +103,12 @@ pub(crate) struct AdminProviderKeyUpdateRequest {
 pub(crate) type AdminProviderKeyUpdatePatch = AdminTypedObjectPatch<AdminProviderKeyUpdateRequest>;
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct AdminProviderKeyBatchUpdateRequest {
+    pub(crate) key_ids: Vec<String>,
+    pub(crate) patch: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct AdminProviderKeyBatchDeleteRequest {
     pub(crate) ids: Vec<String>,
 }

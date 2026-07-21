@@ -608,6 +608,7 @@ fn candidate_row(case: &RedactionFormatCase) -> StoredMinimalCandidateSelectionR
             priority: 1,
             api_formats: Some(vec![case.provider_format.api_format().to_string()]),
             endpoint_ids: Some(vec![format!("endpoint-{}", case.test_id)]),
+            operations: None,
         }]),
         model_supports_streaming: Some(true),
         model_is_active: true,

@@ -133,7 +133,7 @@ pub(crate) async fn resolve_request_candidate_required_capabilities(
     api_key_id: &str,
     requested_model: Option<&str>,
     explicit_required_capabilities: Option<&Value>,
-    enable_model_directives: bool,
+    model_directive_base_model: Option<&str>,
 ) -> Option<Value> {
     let mut merged = serde_json::Map::new();
 
@@ -146,7 +146,7 @@ pub(crate) async fn resolve_request_candidate_required_capabilities(
             select_requested_model_capabilities(
                 settings.as_ref(),
                 requested_model,
-                enable_model_directives,
+                model_directive_base_model,
             ),
         ),
         Err(error) => {
@@ -199,7 +199,7 @@ fn merge_capability_object(target: &mut serde_json::Map<String, Value>, source: 
 fn select_requested_model_capabilities<'a>(
     settings: Option<&'a Value>,
     requested_model: Option<&str>,
-    enable_model_directives: bool,
+    model_directive_base_model: Option<&str>,
 ) -> Option<&'a Value> {
     let requested_model = requested_model
         .map(str::trim)
@@ -207,10 +207,9 @@ fn select_requested_model_capabilities<'a>(
     let settings = settings?.as_object()?;
 
     find_model_capabilities(settings, requested_model).or_else(|| {
-        enable_model_directives
-            .then(|| crate::ai_serving::model_directive_base_model(requested_model))
-            .flatten()
-            .as_deref()
+        model_directive_base_model
+            .map(str::trim)
+            .filter(|base_model| !base_model.is_empty() && *base_model != requested_model)
             .and_then(|base_model| find_model_capabilities(settings, base_model))
     })
 }
@@ -924,7 +923,7 @@ mod tests {
     use super::{
         ensure_execution_request_candidate_slot, persist_available_local_candidate,
         record_report_request_candidate_status, resolve_request_candidate_required_capabilities,
-        SchedulerRequestCandidateStatusUpdate,
+        select_requested_model_capabilities, SchedulerRequestCandidateStatusUpdate,
     };
     use crate::data::GatewayDataState;
     use crate::AppState;
@@ -997,6 +996,7 @@ mod tests {
             global_model_id: "global-model-1".to_string(),
             global_model_name: "gpt-5".to_string(),
             selected_provider_model_name: "gpt-5".to_string(),
+            supports_streaming: true,
             mapping_matched_model: None,
         }
     }
@@ -1230,7 +1230,7 @@ mod tests {
             "api-key-1",
             Some("gpt-5"),
             Some(&explicit_required_capabilities),
-            false,
+            None,
         )
         .await
         .expect("required capabilities should resolve");
@@ -1238,6 +1238,48 @@ mod tests {
         assert_eq!(required_capabilities["cache_1h"], json!(false));
         assert_eq!(required_capabilities["context_1m"], json!(true));
         assert_eq!(required_capabilities["gemini_files"], json!(true));
+    }
+
+    #[test]
+    fn requested_model_capabilities_use_the_policy_resolved_base_model() {
+        let base_only = json!({
+            "deployment-alias": {
+                "context_1m": true
+            }
+        });
+        assert_eq!(
+            select_requested_model_capabilities(
+                Some(&base_only),
+                Some("deployment-alias-VendorFuture"),
+                Some("deployment-alias"),
+            ),
+            Some(&base_only["deployment-alias"])
+        );
+        assert_eq!(
+            select_requested_model_capabilities(
+                Some(&base_only),
+                Some("deployment-alias-VendorFuture"),
+                None,
+            ),
+            None
+        );
+
+        let exact_and_base = json!({
+            "deployment-alias-VendorFuture": {
+                "cache_1h": true
+            },
+            "deployment-alias": {
+                "context_1m": true
+            }
+        });
+        assert_eq!(
+            select_requested_model_capabilities(
+                Some(&exact_and_base),
+                Some("deployment-alias-VendorFuture"),
+                Some("deployment-alias"),
+            ),
+            Some(&exact_and_base["deployment-alias-VendorFuture"])
+        );
     }
 
     #[tokio::test]

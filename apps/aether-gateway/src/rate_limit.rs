@@ -508,6 +508,7 @@ mod tests {
             auth_context: Some(auth_context),
             admin_principal: None,
             local_auth_rejection: None,
+            model_directive_policy: Default::default(),
         }
     }
 

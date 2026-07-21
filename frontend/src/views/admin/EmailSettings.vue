@@ -742,7 +742,7 @@ async function handleResetTemplate() {
 
 async function loadEmailConfig() {
   try {
-    const configs = [
+    const configKeys = [
       // SMTP 邮件配置
       'smtp_host',
       'smtp_port',
@@ -756,19 +756,18 @@ async function loadEmailConfig() {
       'email_suffix_mode',
       'email_suffix_list',
     ]
+    const configs = await adminApi.getAllSystemConfigs({ cacheTtlMs: 30_000 })
+    const configsByKey = new Map(configs.map(config => [config.key, config]))
 
-    for (const key of configs) {
-      try {
-        const response = await adminApi.getSystemConfig(key)
-        // 特殊处理敏感字段：只记录是否已设置，不填充值
-        if (key === 'smtp_password') {
-          smtpPasswordIsSet.value = response.is_set === true
-          // 不设置 smtp_password 的值，保持为 null
-        } else if (response.value !== null && response.value !== undefined) {
-          (emailConfig.value as Record<string, unknown>)[key] = response.value
-        }
-      } catch {
-        // 配置不存在时使用默认值，无需处理
+    for (const key of configKeys) {
+      const response = configsByKey.get(key)
+      if (!response) continue
+      // 特殊处理敏感字段：只记录是否已设置，不填充值
+      if (key === 'smtp_password') {
+        smtpPasswordIsSet.value = response.is_set === true
+        // 不设置 smtp_password 的值，保持为 null
+      } else if (response.value !== null && response.value !== undefined) {
+        (emailConfig.value as Record<string, unknown>)[key] = response.value
       }
     }
   } catch (err) {

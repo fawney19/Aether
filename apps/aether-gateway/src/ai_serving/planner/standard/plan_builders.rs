@@ -146,6 +146,7 @@ pub(crate) fn build_standard_stream_plan_from_decision(
         &provider_request_headers,
         &provider_request_body_value,
     )?;
+    let stream = payload.upstream_is_stream;
     let plan = build_ai_execution_plan_from_decision(
         &mut payload,
         AiExecutionPlanFromDecisionParts {
@@ -155,7 +156,7 @@ pub(crate) fn build_standard_stream_plan_from_decision(
             headers: std::mem::take(&mut provider_request_headers),
             content_type,
             body: RequestBody::from_json(provider_request_body_value),
-            stream: true,
+            stream,
         },
     );
 

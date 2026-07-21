@@ -1,5 +1,6 @@
 import { ref, computed, watch } from 'vue'
 import type { ProviderSummaryQuery } from '@/api/endpoints'
+import { API_FORMAT_ORDER, formatApiFormat } from '@/api/endpoints/types/api-format'
 import { useI18n } from '@/i18n'
 
 export interface FilterOption {
@@ -25,18 +26,7 @@ export function useProviderFilters(
 
   const apiFormatFilters = computed<FilterOption[]>(() => [
     { value: 'all', label: legacyT('全部格式') },
-    { value: 'claude:messages', label: 'Claude Messages' },
-    { value: 'openai:chat', label: 'OpenAI Chat' },
-    { value: 'openai:responses', label: 'OpenAI Responses' },
-    { value: 'openai:responses:compact', label: 'OpenAI Responses Compact' },
-    { value: 'openai:embedding', label: 'OpenAI Embedding' },
-    { value: 'openai:rerank', label: 'OpenAI Rerank' },
-    { value: 'gemini:generate_content', label: 'Gemini Generate Content' },
-    { value: 'gemini:embedding', label: 'Gemini Embedding' },
-    { value: 'jina:embedding', label: 'Jina Embedding' },
-    { value: 'jina:rerank', label: 'Jina Rerank' },
-    { value: 'doubao:embedding', label: 'Doubao Embedding' },
-    { value: 'aliyun:multimodal_embedding', label: 'Aliyun Multimodal Embedding' },
+    ...API_FORMAT_ORDER.map(value => ({ value, label: formatApiFormat(value) })),
   ])
 
   const modelFilters = computed<FilterOption[]>(() => {

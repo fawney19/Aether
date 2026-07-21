@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, nextTick, onMounted, watch, onBeforeUnmount } from 'vue'
 import Card from '@/components/ui/card.vue'
 import Button from '@/components/ui/button.vue'
 import Badge from '@/components/ui/badge.vue'
@@ -34,6 +34,7 @@ import {
 import { log } from '@/utils/logger'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { formatClientFamily } from '@/features/usage/utils/clientFamily'
+import { observeNearViewportOnce } from '@/utils/nearViewport'
 
 // ==================== 缓存统计与亲和性列表 ====================
 
@@ -71,6 +72,12 @@ const { confirm: showConfirm } = useConfirm()
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 let skipNextKeywordWatch = false
 let countdownTimer: ReturnType<typeof setInterval> | null = null
+let stopAnalysisObserver: (() => void) | null = null
+let initialDataPromise: Promise<void> | null = null
+let analysisLoadRequested = false
+let isUnmounted = false
+
+const analysisSectionRef = ref<HTMLElement | null>(null)
 
 // ==================== TTL 分析 (使用 composable) ====================
 
@@ -521,6 +528,34 @@ async function refreshData() {
   ])
 }
 
+function requestAnalysisLoad() {
+  if (analysisLoadRequested) return
+  analysisLoadRequested = true
+
+  const waitForInitialData = initialDataPromise ?? Promise.resolve()
+  void waitForInitialData.then(() => {
+    if (!isUnmounted) {
+      return refreshAnalysis()
+    }
+  })
+}
+
+function setupAnalysisObserver() {
+  const target = analysisSectionRef.value
+  if (!target) {
+    requestAnalysisLoad()
+    return
+  }
+
+  const scrollRoot = target.closest('.app-shell__content')
+  stopAnalysisObserver = observeNearViewportOnce({
+    target,
+    root: scrollRoot,
+    rootMargin: '600px 0px',
+    onNearViewport: requestAnalysisLoad,
+  })
+}
+
 // ==================== 生命周期 ====================
 
 watch(tableKeyword, (value) => {
@@ -540,18 +575,25 @@ watch(tableKeyword, (value) => {
 
 onMounted(() => {
   document.addEventListener('visibilitychange', handleVisibilityChange)
-  fetchCacheStats()
-  fetchCacheConfig()
-  fetchAffinityList()
-  fetchModelMappingStats()
-  fetchRedisCacheCategories()
+  const initialLoad = refreshData()
+  initialDataPromise = initialLoad
+  void initialLoad.finally(() => {
+    if (initialDataPromise === initialLoad) {
+      initialDataPromise = null
+    }
+  })
   startCountdown()
-  refreshAnalysis()
+  void nextTick().then(() => {
+    if (!isUnmounted) setupAnalysisObserver()
+  })
 })
 
 onBeforeUnmount(() => {
+  isUnmounted = true
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
+  stopAnalysisObserver?.()
+  stopAnalysisObserver = null
   stopCountdown()
 })
 </script>
@@ -1342,7 +1384,10 @@ onBeforeUnmount(() => {
 
     <!-- TTL 分析区域 -->
     <Card class="overflow-hidden">
-      <div class="px-4 sm:px-6 py-3 sm:py-3.5 border-b border-border/60">
+      <div
+        ref="analysisSectionRef"
+        class="px-4 sm:px-6 py-3 sm:py-3.5 border-b border-border/60"
+      >
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4">
           <div class="flex items-center gap-3 shrink-0">
             <BarChart3 class="h-5 w-5 text-muted-foreground hidden sm:block" />

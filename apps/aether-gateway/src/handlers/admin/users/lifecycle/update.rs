@@ -150,6 +150,19 @@ pub(in super::super) async fn build_admin_update_user_response(
         },
         None => None,
     };
+    if existing_user.is_active
+        && crate::roles::is_full_admin_role(&existing_user.role)
+        && role
+            .as_deref()
+            .is_some_and(|role| !crate::roles::is_full_admin_role(role))
+        && state.count_active_admin_users().await? <= 1
+    {
+        return Ok((
+            http::StatusCode::BAD_REQUEST,
+            Json(json!({ "detail": "不能降级最后一个管理员账户" })),
+        )
+            .into_response());
+    }
     let effective_role = role.as_deref().unwrap_or(existing_user.role.as_str());
     let group_ids = if field_presence.contains("group_ids") {
         Some(normalize_admin_user_group_ids(payload.group_ids))

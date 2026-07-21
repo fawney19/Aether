@@ -25,6 +25,7 @@ pub(crate) struct GatewayControlDecision {
     pub(crate) auth_context: Option<GatewayControlAuthContext>,
     pub(crate) admin_principal: Option<GatewayAdminPrincipalContext>,
     pub(crate) local_auth_rejection: Option<GatewayLocalAuthRejection>,
+    pub(crate) model_directive_policy: crate::system_features::ModelDirectivePolicySnapshot,
 }
 
 impl GatewayControlDecision {
@@ -47,6 +48,7 @@ impl GatewayControlDecision {
             auth_context: None,
             admin_principal: None,
             local_auth_rejection: None,
+            model_directive_policy: Default::default(),
         }
     }
 
@@ -131,6 +133,7 @@ impl ClassifiedRoute {
             auth_context: None,
             admin_principal: None,
             local_auth_rejection: None,
+            model_directive_policy: Default::default(),
         }
     }
 }
@@ -146,6 +149,10 @@ pub(crate) async fn resolve_control_route(
         return Ok(None);
     };
     decision.public_query_string = uri.query().map(ToOwned::to_owned);
+    if decision.route_class.as_deref() == Some("ai_public") {
+        decision.model_directive_policy =
+            crate::system_features::ModelDirectivePolicySnapshot::load(state).await;
+    }
 
     match resolve_control_decision_auth(state, headers, uri, trace_id, decision).await? {
         ControlDecisionAuthResolution::Resolved(decision) => Ok(Some(decision)),
@@ -195,6 +202,15 @@ pub(super) fn detect_public_models_auth_signature(uri: &Uri, headers: &http::Hea
         });
     if has_gemini_key {
         return "gemini:generate_content".to_string();
+    }
+
+    let has_codex_client_version = uri.path() == "/v1/models"
+        && uri.query().is_some_and(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .any(|(key, value)| key == "client_version" && !value.trim().is_empty())
+        });
+    if has_codex_client_version {
+        return "openai:responses".to_string();
     }
 
     if uri.path().starts_with("/v1beta/models") {

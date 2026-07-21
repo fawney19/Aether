@@ -21,6 +21,39 @@ fn classifies_models_list_as_public_support_route() {
 }
 
 #[test]
+fn classifies_codex_models_list_with_responses_auth_signature() {
+    let headers = headers(&[("authorization", "Bearer sk-test")]);
+    let uri: Uri = "/v1/models?client_version=0.144.1"
+        .parse()
+        .expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::GET, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("public_support"));
+    assert_eq!(decision.route_family.as_deref(), Some("models"));
+    assert_eq!(decision.route_kind.as_deref(), Some("list"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("openai:responses")
+    );
+}
+
+#[test]
+fn empty_codex_client_version_keeps_standard_openai_models_signature() {
+    let headers = headers(&[("authorization", "Bearer sk-test")]);
+    let uri: Uri = "/v1/models?client_version="
+        .parse()
+        .expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::GET, &uri, &headers).expect("route should classify");
+
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("openai:chat")
+    );
+}
+
+#[test]
 fn classifies_v1beta_models_as_gemini_public_support_route() {
     let headers = headers(&[]);
     let uri: Uri = "/v1beta/models?pageSize=10"

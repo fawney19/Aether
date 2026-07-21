@@ -1,20 +1,23 @@
 <template>
   <input
+    ref="inputRef"
     type="checkbox"
     :class="checkboxClass"
     v-bind="$attrs"
     :checked="isChecked"
+    :aria-checked="indeterminate ? 'mixed' : isChecked"
     @change="handleChange"
   >
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watchEffect } from 'vue'
 import { cn } from '@/lib/utils'
 
 interface Props {
   modelValue?: boolean
   checked?: boolean
+  indeterminate?: boolean
   class?: string
 }
 
@@ -37,6 +40,14 @@ const isChecked = computed<boolean>(() => {
   }
   return props.modelValue ?? false
 })
+
+const inputRef = ref<HTMLInputElement | null>(null)
+
+watchEffect(() => {
+  if (inputRef.value) {
+    inputRef.value.indeterminate = props.indeterminate ?? false
+  }
+}, { flush: 'post' })
 
 function handleChange(event: Event) {
   const target = event.target as HTMLInputElement

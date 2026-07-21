@@ -150,6 +150,7 @@ async fn proxy_pii_redaction_local_openai_chat_runtime_masks_headers_and_restore
                 priority: 1,
                 api_formats: Some(vec!["openai:chat".to_string()]),
                 endpoint_ids: Some(vec!["endpoint-redaction-1".to_string()]),
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -454,6 +455,7 @@ async fn gateway_executes_openai_chat_sync_via_local_decision_gate_without_execu
                 priority: 1,
                 api_formats: Some(vec!["openai:chat".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -647,6 +649,7 @@ async fn gateway_executes_openai_chat_sync_via_local_decision_gate_without_execu
         priority: 1,
         api_formats: Some(vec!["openai:chat".to_string()]),
         endpoint_ids: None,
+        operations: None,
     }]);
     let candidate_selection_repository =
         Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
@@ -839,6 +842,7 @@ async fn gateway_executes_openai_chat_sync_with_regex_model_mapping_in_execution
                 priority: 1,
                 api_formats: Some(vec!["openai:chat".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1130,6 +1134,7 @@ async fn gateway_executes_openai_chat_sync_via_local_cross_format_gemini_candida
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1151,6 +1156,7 @@ async fn gateway_executes_openai_chat_sync_via_local_cross_format_gemini_candida
             priority: 2,
             api_formats: Some(vec!["gemini:generate_content".to_string()]),
             endpoint_ids: None,
+            operations: None,
         }]);
         row
     }
@@ -1698,6 +1704,7 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
                 priority: 1,
                 api_formats: Some(vec!["claude:messages".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -2102,6 +2109,7 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_gemini_cli_syn
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -2531,6 +2539,7 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_sync_fa
                 priority: 1,
                 api_formats: Some(vec!["claude:messages".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -2939,6 +2948,7 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_gemini_sync_fa
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -3387,6 +3397,7 @@ async fn gateway_executes_openai_chat_sync_with_custom_path_via_local_decision_g
                 priority: 1,
                 api_formats: Some(vec!["openai:chat".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,

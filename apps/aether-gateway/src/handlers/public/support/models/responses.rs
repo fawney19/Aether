@@ -89,6 +89,7 @@ pub(super) fn build_models_not_found_response(model_id: &str, api_format: &str) 
 
 pub(super) fn build_empty_models_list_response(api_format: &str) -> Response<Body> {
     match api_format {
+        "openai:responses" => Json(json!({ "models": [] })).into_response(),
         "claude:messages" => Json(json!({
             "data": [],
             "has_more": false,
@@ -99,6 +100,10 @@ pub(super) fn build_empty_models_list_response(api_format: &str) -> Response<Bod
         "gemini:generate_content" => Json(json!({ "models": [] })).into_response(),
         _ => Json(json!({ "object": "list", "data": [] })).into_response(),
     }
+}
+
+pub(super) fn build_codex_models_list_response(models: Vec<serde_json::Value>) -> Response<Body> {
+    Json(json!({ "models": models })).into_response()
 }
 
 pub(super) fn build_openai_models_list_response(

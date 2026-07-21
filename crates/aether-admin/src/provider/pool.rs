@@ -3,7 +3,7 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogProvider,
 };
 use chrono::{TimeZone, Utc};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::status as provider_status;
@@ -12,6 +12,8 @@ use super::status as provider_status;
 pub struct AdminPoolResolveSelectionRequest {
     #[serde(default)]
     pub search: String,
+    #[serde(default)]
+    pub status: Option<String>,
     #[serde(default)]
     pub quick_selectors: Vec<String>,
 }
@@ -32,6 +34,7 @@ pub enum AdminPoolBatchActionKind {
     Disable,
     ClearProxy,
     SetProxy,
+    UpdateSettings,
     RegenerateFingerprint,
     Delete,
 }
@@ -42,6 +45,7 @@ pub struct AdminPoolBatchActionPlan {
     pub action: AdminPoolBatchActionKind,
     pub action_label: &'static str,
     pub proxy_payload: Option<Value>,
+    pub settings_payload: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -60,6 +64,10 @@ pub struct AdminPoolBatchImportRequest {
     pub keys: Vec<AdminPoolBatchImportItem>,
     #[serde(default)]
     pub proxy_node_id: Option<String>,
+    #[serde(default)]
+    pub api_formats: Vec<String>,
+    #[serde(default)]
+    pub settings: Option<Value>,
 }
 
 #[derive(Debug, Default, Clone, serde::Deserialize)]
@@ -70,6 +78,10 @@ pub struct AdminPoolBatchImportItem {
     pub api_key: String,
     #[serde(default)]
     pub auth_type: String,
+    #[serde(default)]
+    pub api_formats: Vec<String>,
+    #[serde(default)]
+    pub settings: Option<Value>,
 }
 
 fn admin_pool_reason_indicates_ban(reason: &str) -> bool {
@@ -356,6 +368,137 @@ pub fn admin_pool_key_proxy_value(proxy_node_id: Option<&str>) -> Option<Value> 
         .map(|value| json!({ "node_id": value, "enabled": true }))
 }
 
+const ADMIN_POOL_KEY_SETTING_FIELDS: &[&str] = &[
+    "internal_priority",
+    "rpm_limit",
+    "concurrent_limit",
+    "cache_ttl_minutes",
+    "max_probe_interval_minutes",
+    "is_active",
+    "note",
+    "proxy_node_id",
+];
+
+fn admin_pool_settings_object(payload: &Value) -> Result<&Map<String, Value>, String> {
+    let settings = payload
+        .as_object()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "settings payload must be a non-empty object".to_string())?;
+    if let Some(field) = settings
+        .keys()
+        .find(|field| !ADMIN_POOL_KEY_SETTING_FIELDS.contains(&field.as_str()))
+    {
+        return Err(format!("Unsupported key setting: {field}"));
+    }
+    Ok(settings)
+}
+
+fn admin_pool_setting_i64(
+    settings: &Map<String, Value>,
+    field: &str,
+    min: i64,
+    max: i64,
+) -> Result<Option<i64>, String> {
+    let Some(value) = settings.get(field) else {
+        return Ok(None);
+    };
+    let number = value
+        .as_i64()
+        .ok_or_else(|| format!("{field} must be an integer"))?;
+    if !(min..=max).contains(&number) {
+        return Err(format!("{field} must be between {min} and {max}"));
+    }
+    Ok(Some(number))
+}
+
+pub fn validate_admin_pool_key_settings_payload(payload: &Value) -> Result<(), String> {
+    let settings = admin_pool_settings_object(payload)?;
+    admin_pool_setting_i64(settings, "internal_priority", 0, i32::MAX as i64)?;
+    if settings
+        .get("rpm_limit")
+        .is_some_and(|value| !value.is_null())
+    {
+        admin_pool_setting_i64(settings, "rpm_limit", 1, 10_000)?;
+    }
+    if settings
+        .get("concurrent_limit")
+        .is_some_and(|value| !value.is_null())
+    {
+        admin_pool_setting_i64(settings, "concurrent_limit", 0, i32::MAX as i64)?;
+    }
+    admin_pool_setting_i64(settings, "cache_ttl_minutes", 0, 60)?;
+    admin_pool_setting_i64(settings, "max_probe_interval_minutes", 0, 32)?;
+    if settings
+        .get("is_active")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err("is_active must be a boolean".to_string());
+    }
+    if settings
+        .get("note")
+        .is_some_and(|value| !value.is_null() && !value.is_string())
+    {
+        return Err("note must be a string or null".to_string());
+    }
+    if settings
+        .get("proxy_node_id")
+        .is_some_and(|value| !value.is_null() && !value.is_string())
+    {
+        return Err("proxy_node_id must be a string or null".to_string());
+    }
+    Ok(())
+}
+
+pub fn apply_admin_pool_key_settings(
+    key: &mut StoredProviderCatalogKey,
+    payload: &Value,
+) -> Result<(), String> {
+    validate_admin_pool_key_settings_payload(payload)?;
+    let settings = admin_pool_settings_object(payload)?;
+    if let Some(value) = admin_pool_setting_i64(settings, "internal_priority", 0, i32::MAX as i64)?
+    {
+        key.internal_priority = value as i32;
+    }
+    if let Some(value) = settings.get("rpm_limit") {
+        key.rpm_limit = if value.is_null() {
+            None
+        } else {
+            Some(value.as_u64().expect("validated rpm_limit") as u32)
+        };
+    }
+    if let Some(value) = settings.get("concurrent_limit") {
+        key.concurrent_limit = if value.is_null() || value.as_i64() == Some(0) {
+            None
+        } else {
+            Some(value.as_i64().expect("validated concurrent_limit") as i32)
+        };
+    }
+    if let Some(value) = admin_pool_setting_i64(settings, "cache_ttl_minutes", 0, 60)? {
+        key.cache_ttl_minutes = value as i32;
+    }
+    if let Some(value) = admin_pool_setting_i64(settings, "max_probe_interval_minutes", 0, 32)? {
+        key.max_probe_interval_minutes = value as i32;
+    }
+    if let Some(value) = settings.get("is_active").and_then(Value::as_bool) {
+        key.is_active = value;
+    }
+    if let Some(value) = settings.get("note") {
+        key.note = value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+    }
+    if let Some(value) = settings.get("proxy_node_id") {
+        key.proxy = if value.is_null() {
+            None
+        } else {
+            admin_pool_key_proxy_value(value.as_str())
+        };
+    }
+    Ok(())
+}
+
 pub fn build_admin_pool_batch_action_plan(
     payload: AdminPoolBatchActionRequest,
 ) -> Result<AdminPoolBatchActionPlan, String> {
@@ -365,6 +508,7 @@ pub fn build_admin_pool_batch_action_plan(
         "disable" => (AdminPoolBatchActionKind::Disable, "disabled"),
         "clear_proxy" => (AdminPoolBatchActionKind::ClearProxy, "proxy cleared"),
         "set_proxy" => (AdminPoolBatchActionKind::SetProxy, "proxy set"),
+        "update_settings" => (AdminPoolBatchActionKind::UpdateSettings, "settings updated"),
         "regenerate_fingerprint" => (
             AdminPoolBatchActionKind::RegenerateFingerprint,
             "fingerprint regenerated",
@@ -372,7 +516,7 @@ pub fn build_admin_pool_batch_action_plan(
         "delete" => (AdminPoolBatchActionKind::Delete, "deleted"),
         _ => {
             return Err(format!(
-                "Invalid action: {action}. Supported locally: enable, disable, clear_proxy, set_proxy, regenerate_fingerprint, delete"
+                "Invalid action: {action}. Supported locally: enable, disable, clear_proxy, set_proxy, update_settings, regenerate_fingerprint, delete"
             ));
         }
     };
@@ -389,9 +533,10 @@ pub fn build_admin_pool_batch_action_plan(
         return Err("key_ids should not be empty".to_string());
     }
 
+    let action_payload = payload.payload;
     let proxy_payload = if action_kind == AdminPoolBatchActionKind::SetProxy {
-        match payload.payload {
-            Some(Value::Object(map)) if !map.is_empty() => Some(Value::Object(map)),
+        match action_payload.as_ref() {
+            Some(Value::Object(map)) if !map.is_empty() => Some(Value::Object(map.clone())),
             _ => {
                 return Err(
                     "set_proxy action requires a non-empty payload with proxy config".to_string(),
@@ -401,12 +546,21 @@ pub fn build_admin_pool_batch_action_plan(
     } else {
         None
     };
+    let settings_payload = if action_kind == AdminPoolBatchActionKind::UpdateSettings {
+        let settings = action_payload
+            .ok_or_else(|| "update_settings action requires a settings payload".to_string())?;
+        validate_admin_pool_key_settings_payload(&settings)?;
+        Some(settings)
+    } else {
+        None
+    };
 
     Ok(AdminPoolBatchActionPlan {
         key_ids,
         action: action_kind,
         action_label,
         proxy_payload,
+        settings_payload,
     })
 }
 
@@ -492,7 +646,10 @@ pub fn build_admin_pool_selection_payload(keys: &[StoredProviderCatalogKey]) -> 
 mod tests {
     use super::{
         admin_pool_key_account_quota_exhausted, admin_pool_key_is_known_banned,
-        build_admin_pool_key_payload, AdminPoolKeyPayloadContext,
+        apply_admin_pool_key_settings, build_admin_pool_batch_action_plan,
+        build_admin_pool_batch_import_key_record, build_admin_pool_key_payload,
+        resolve_admin_pool_key_settings, validate_admin_pool_key_settings_payload,
+        AdminPoolBatchActionKind, AdminPoolBatchActionRequest, AdminPoolKeyPayloadContext,
     };
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use serde_json::json;
@@ -698,6 +855,108 @@ mod tests {
         assert_eq!(payload["scheduling_reason"], json!("available"));
         assert_eq!(payload["scheduling_label"], json!("可用"));
     }
+
+    #[test]
+    fn validates_and_applies_shared_key_settings() {
+        let settings = json!({
+            "internal_priority": 12,
+            "rpm_limit": 600,
+            "concurrent_limit": 8,
+            "cache_ttl_minutes": 10,
+            "max_probe_interval_minutes": 16,
+            "is_active": false,
+            "note": " imported ",
+            "proxy_node_id": "proxy-1"
+        });
+        let mut key = sample_key(None);
+
+        validate_admin_pool_key_settings_payload(&settings).expect("settings should validate");
+        apply_admin_pool_key_settings(&mut key, &settings).expect("settings should apply");
+
+        assert_eq!(key.internal_priority, 12);
+        assert_eq!(key.rpm_limit, Some(600));
+        assert_eq!(key.concurrent_limit, Some(8));
+        assert_eq!(key.cache_ttl_minutes, 10);
+        assert_eq!(key.max_probe_interval_minutes, 16);
+        assert!(!key.is_active);
+        assert_eq!(key.note.as_deref(), Some("imported"));
+        assert_eq!(
+            key.proxy,
+            Some(json!({ "node_id": "proxy-1", "enabled": true }))
+        );
+
+        assert!(validate_admin_pool_key_settings_payload(&json!({ "rpm_limit": 0 })).is_err());
+        assert!(validate_admin_pool_key_settings_payload(&json!({ "unknown": true })).is_err());
+    }
+
+    #[test]
+    fn builds_update_settings_action_plan() {
+        let settings = json!({ "rpm_limit": null, "proxy_node_id": "proxy-1" });
+        let plan = build_admin_pool_batch_action_plan(AdminPoolBatchActionRequest {
+            key_ids: vec![
+                "key-2".to_string(),
+                "key-1".to_string(),
+                "key-1".to_string(),
+            ],
+            action: "update_settings".to_string(),
+            payload: Some(settings.clone()),
+        })
+        .expect("action plan should build");
+
+        assert_eq!(plan.action, AdminPoolBatchActionKind::UpdateSettings);
+        assert_eq!(plan.key_ids, vec!["key-1", "key-2"]);
+        assert_eq!(plan.settings_payload, Some(settings));
+        assert!(plan.proxy_payload.is_none());
+    }
+
+    #[test]
+    fn batch_import_record_applies_shared_settings() {
+        let record = build_admin_pool_batch_import_key_record(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "1".to_string(),
+            "api_key".to_string(),
+            vec!["openai:chat".to_string()],
+            "encrypted".to_string(),
+            None,
+            Some(&json!({
+                "rpm_limit": 900,
+                "cache_ttl_minutes": 0,
+                "max_probe_interval_minutes": 4,
+                "is_active": false
+            })),
+            1_700_000_000,
+        )
+        .expect("record should build");
+
+        assert_eq!(record.name, "1");
+        assert_eq!(record.rpm_limit, Some(900));
+        assert_eq!(record.cache_ttl_minutes, 0);
+        assert_eq!(record.max_probe_interval_minutes, 4);
+        assert!(!record.is_active);
+    }
+
+    #[test]
+    fn batch_import_item_settings_override_shared_values() {
+        let resolved = resolve_admin_pool_key_settings(
+            Some(&json!({
+                "rpm_limit": 900,
+                "cache_ttl_minutes": 5,
+                "is_active": true
+            })),
+            Some(&json!({
+                "rpm_limit": 120,
+                "is_active": false
+            })),
+        )
+        .expect("item settings should override shared values")
+        .expect("resolved settings should exist");
+
+        assert_eq!(resolved["rpm_limit"], 120);
+        assert_eq!(resolved["cache_ttl_minutes"], 5);
+        assert_eq!(resolved["is_active"], false);
+        assert!(resolve_admin_pool_key_settings(None, Some(&json!([]))).is_err());
+    }
 }
 
 pub fn build_admin_pool_key_payload(
@@ -827,6 +1086,25 @@ pub fn build_admin_pool_overview_payload(
     json!({ "items": items })
 }
 
+pub fn resolve_admin_pool_key_settings(
+    shared: Option<&Value>,
+    overrides: Option<&Value>,
+) -> Result<Option<Value>, String> {
+    let mut resolved = Map::new();
+    for settings in [shared, overrides].into_iter().flatten() {
+        let Value::Object(values) = settings else {
+            return Err("settings payload must be an object".to_string());
+        };
+        resolved.extend(values.clone());
+    }
+    if resolved.is_empty() {
+        return Ok(None);
+    }
+    let resolved = Value::Object(resolved);
+    validate_admin_pool_key_settings_payload(&resolved)?;
+    Ok(Some(resolved))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_admin_pool_batch_import_key_record(
     id: String,
@@ -836,6 +1114,7 @@ pub fn build_admin_pool_batch_import_key_record(
     api_formats: Vec<String>,
     encrypted_api_key: String,
     proxy: Option<Value>,
+    settings: Option<&Value>,
     now_unix_secs: u64,
 ) -> Result<StoredProviderCatalogKey, String> {
     let mut record = StoredProviderCatalogKey::new(id, provider_id, name, auth_type, None, true)
@@ -859,6 +1138,9 @@ pub fn build_admin_pool_batch_import_key_record(
     record.total_response_time_ms = Some(0);
     record.health_by_format = Some(json!({}));
     record.circuit_breaker_by_format = Some(json!({}));
+    if let Some(settings) = settings {
+        apply_admin_pool_key_settings(&mut record, settings)?;
+    }
     record.created_at_unix_ms = Some(now_unix_secs);
     record.updated_at_unix_secs = Some(now_unix_secs);
     Ok(record)

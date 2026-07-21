@@ -1115,10 +1115,9 @@ fn normalize_api_format_alias(value: &str) -> String {
 
 fn auth_gate_api_format(auth_endpoint_signature: &str) -> String {
     let normalized = normalize_api_format_alias(auth_endpoint_signature);
-    if normalized == "antigravity:v1internal" {
-        "gemini:generate_content".to_string()
-    } else {
-        normalized
+    match normalized.as_str() {
+        "antigravity:v1internal" => "gemini:generate_content".to_string(),
+        _ => normalized,
     }
 }
 

@@ -56,7 +56,7 @@ pub fn api_format_matches_allowed_value(allowed_value: &str, api_format: &str) -
     if allowed_value.is_empty() || api_format.is_empty() {
         return false;
     }
-    crate::normalize_api_format(allowed_value) == crate::normalize_api_format(api_format)
+    aether_ai_formats::api_format_permission_covers(allowed_value, api_format)
 }
 
 pub fn auth_constraints_allow_model(
@@ -246,6 +246,18 @@ mod tests {
         ));
         assert!(api_format_matches_allowed_value(
             "openai:responses",
+            "openai:responses"
+        ));
+        assert!(api_format_matches_allowed_value(
+            "openai:responses",
+            "openai:search"
+        ));
+        assert!(api_format_matches_allowed_value(
+            "openai:search",
+            "openai:search"
+        ));
+        assert!(!api_format_matches_allowed_value(
+            "openai:search",
             "openai:responses"
         ));
         assert!(!api_format_matches_allowed_value(

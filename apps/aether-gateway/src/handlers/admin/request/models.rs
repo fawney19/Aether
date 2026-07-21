@@ -15,7 +15,7 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
-fn normalize_provider_model_mappings_api_formats(
+fn normalize_provider_model_mapping_scopes(
     value: Option<serde_json::Value>,
 ) -> Option<serde_json::Value> {
     let Some(mut value) = value else {
@@ -35,6 +35,9 @@ fn normalize_provider_model_mappings_api_formats(
         );
         normalize_provider_model_mapping_string_array_field(object, "endpoint_ids", |value| {
             value.trim().to_string()
+        });
+        normalize_provider_model_mapping_string_array_field(object, "operations", |value| {
+            value.trim().to_ascii_lowercase()
         });
     }
     Some(value)
@@ -155,7 +158,7 @@ impl<'a> AdminAppState<'a> {
             "price_per_request",
         )?;
         let tiered_pricing = normalize_json_object(payload.tiered_pricing, "tiered_pricing")?;
-        let provider_model_mappings = normalize_provider_model_mappings_api_formats(
+        let provider_model_mappings = normalize_provider_model_mapping_scopes(
             normalize_json_array(payload.provider_model_mappings, "provider_model_mappings")?,
         );
         let config = normalize_json_object(payload.config, "config")?;
@@ -241,7 +244,7 @@ impl<'a> AdminAppState<'a> {
             existing.tiered_pricing.clone()
         };
         let provider_model_mappings = if fields.contains("provider_model_mappings") {
-            normalize_provider_model_mappings_api_formats(normalize_json_array(
+            normalize_provider_model_mapping_scopes(normalize_json_array(
                 payload.provider_model_mappings,
                 "provider_model_mappings",
             )?)

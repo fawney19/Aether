@@ -560,6 +560,103 @@ async fn gateway_creates_admin_provider_endpoint_locally_with_trusted_admin_prin
 }
 
 #[tokio::test]
+async fn gateway_rejects_streaming_policy_for_search_endpoint_before_catalog_write() {
+    let mut create_provider = sample_provider("provider-search-create", "search-create", 10);
+    create_provider.provider_type = "custom".to_string();
+    let mut update_provider = sample_provider("provider-search-update", "search-update", 20);
+    update_provider.provider_type = "custom".to_string();
+    let mut existing_endpoint = sample_endpoint(
+        "endpoint-search-update",
+        "provider-search-update",
+        "openai:search",
+        "https://search.example/v1",
+    );
+    existing_endpoint.config = Some(json!({"marker": "kept"}));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![create_provider, update_provider],
+        vec![existing_endpoint],
+        vec![],
+    ));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!(
+            "{gateway_url}/api/admin/endpoints/providers/provider-search-create/endpoints"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-search-create",
+            "api_format": "openai:search",
+            "base_url": "https://search.example/v1",
+            "config": {"upstream_stream_policy": "force_stream"}
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(create_response.status(), StatusCode::BAD_REQUEST);
+    let create_payload: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(
+        create_payload["detail"],
+        "OpenAI Search 端点仅支持非流式上游请求"
+    );
+
+    let update_response = client
+        .put(format!(
+            "{gateway_url}/api/admin/endpoints/endpoint-search-update"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "config": {"upstreamStreamPolicy": true}
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(update_response.status(), StatusCode::BAD_REQUEST);
+    let update_payload: serde_json::Value = update_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(
+        update_payload["detail"],
+        "OpenAI Search 端点仅支持非流式上游请求"
+    );
+
+    let created = provider_catalog_repository
+        .list_endpoints_by_provider_ids(&["provider-search-create".to_string()])
+        .await
+        .expect("endpoints should read");
+    assert!(created.is_empty());
+    let unchanged = provider_catalog_repository
+        .list_endpoints_by_ids(&["endpoint-search-update".to_string()])
+        .await
+        .expect("endpoint should read");
+    assert_eq!(unchanged.len(), 1);
+    assert_eq!(unchanged[0].config, Some(json!({"marker": "kept"})));
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_updates_admin_provider_endpoint_locally_with_trusted_admin_principal() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);

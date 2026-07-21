@@ -38,6 +38,7 @@ pub(crate) const SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD: &str = "scheduler_affini
 pub(crate) const POOL_KEY_LEASE_KEY_REPORT_FIELD: &str = "pool_key_lease_key";
 pub(crate) const POOL_KEY_LEASE_OWNER_REPORT_FIELD: &str = "pool_key_lease_owner";
 pub(crate) const POOL_KEY_LEASE_TOKEN_REPORT_FIELD: &str = "pool_key_lease_token";
+pub(crate) const POOL_KEY_LEASE_FENCING_REPORT_FIELD: &str = "pool_key_lease_fencing_token";
 pub(crate) const POOL_KEY_LEASE_TTL_MS_REPORT_FIELD: &str = "pool_key_lease_ttl_ms";
 
 pub(crate) fn attempt_identity_from_report_context(
@@ -93,6 +94,10 @@ pub(crate) fn insert_pool_key_lease_report_context_fields(
         Value::String(lease.token.clone()),
     );
     extra_fields.insert(
+        POOL_KEY_LEASE_FENCING_REPORT_FIELD.to_string(),
+        Value::Number(lease.fencing_token.into()),
+    );
+    extra_fields.insert(
         POOL_KEY_LEASE_TTL_MS_REPORT_FIELD.to_string(),
         Value::Number(lease.ttl_ms.into()),
     );
@@ -119,11 +124,17 @@ fn pool_key_lease_from_report_context(report_context: Option<&Value>) -> Option<
         .get(POOL_KEY_LEASE_TTL_MS_REPORT_FIELD)
         .and_then(Value::as_u64)
         .filter(|value| *value > 0)?;
+    let fencing_token = report_context
+        .get(POOL_KEY_LEASE_FENCING_REPORT_FIELD)
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .unwrap_or(1);
 
     Some(RuntimeLockLease {
         key: key.to_string(),
         owner: owner.to_string(),
         token: token.to_string(),
+        fencing_token,
         ttl_ms,
     })
 }
@@ -485,6 +496,7 @@ mod tests {
             "pool_key_lease_key": "ap:provider-1:lease:key-1",
             "pool_key_lease_owner": "gateway-1",
             "pool_key_lease_token": "gateway-1:token-1",
+            "pool_key_lease_fencing_token": 7,
             "pool_key_lease_ttl_ms": 900000,
         })));
 
@@ -497,6 +509,7 @@ mod tests {
                     key: "ap:provider-1:lease:key-1".to_string(),
                     owner: "gateway-1".to_string(),
                     token: "gateway-1:token-1".to_string(),
+                    fencing_token: 7,
                     ttl_ms: 900000,
                 }),
                 scheduler_affinity_epoch: None,

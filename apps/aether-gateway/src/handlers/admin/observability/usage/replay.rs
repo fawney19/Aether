@@ -58,7 +58,9 @@ pub(super) async fn admin_usage_resolve_body_value(
         | Some(UsageBodyCaptureState::Unavailable)
         | Some(UsageBodyCaptureState::None) => return Ok(None),
         Some(UsageBodyCaptureState::Inline) | Some(UsageBodyCaptureState::Truncated) => {
-            return Ok(inline_body.cloned());
+            if inline_body.is_some() {
+                return Ok(inline_body.cloned());
+            }
         }
         Some(UsageBodyCaptureState::Reference) | None => {}
     }

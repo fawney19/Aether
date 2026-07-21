@@ -2,7 +2,8 @@ use super::DEFAULT_PROVIDER_QUERY_TEST_MESSAGE;
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::provider_transport::antigravity::{
     classify_local_antigravity_request_support, AntigravityEnvelopeRequestType,
-    AntigravityRequestSideSupport, AntigravityRequestSideUnsupportedReason,
+    AntigravityRequestAuthUnsupportedReason, AntigravityRequestSideSupport,
+    AntigravityRequestSideUnsupportedReason,
 };
 use crate::provider_transport::kiro::supports_local_kiro_request_transport_with_network;
 use serde_json::{json, Value};
@@ -32,6 +33,8 @@ pub(super) fn provider_query_standard_test_client_api_format(
     let normalized_api_format = crate::ai_serving::normalize_api_format_alias(provider_api_format);
     if normalized_api_format == "openai:responses:compact" {
         "openai:responses:compact"
+    } else if normalized_api_format == "openai:search" {
+        "openai:search"
     } else if crate::ai_serving::is_embedding_api_format(&normalized_api_format) {
         "openai:embedding"
     } else if crate::ai_serving::is_rerank_api_format(&normalized_api_format) {
@@ -70,6 +73,7 @@ pub(super) fn provider_query_standard_test_unsupported_reason(
         }
         "openai:responses"
         | "openai:responses:compact"
+        | "openai:search"
         | "claude:messages"
         | "openai:embedding"
         | "jina:embedding"
@@ -82,14 +86,14 @@ pub(super) fn provider_query_standard_test_unsupported_reason(
                 api_format,
             )
         }
-        "gemini:generate_content" | "gemini:embedding"
+        "gemini:generate_content" | "gemini:embedding" | "gemini:interactions"
             if crate::provider_transport::is_vertex_transport_context(transport) =>
         {
             aether_provider_transport::vertex::local_vertex_gemini_transport_unsupported_reason_with_network(
                 transport,
             )
         }
-        "gemini:generate_content" | "gemini:embedding" => {
+        "gemini:generate_content" | "gemini:embedding" | "gemini:interactions" => {
             crate::provider_transport::policy::local_gemini_transport_unsupported_reason_with_network(
                 transport,
                 api_format,
@@ -130,9 +134,21 @@ pub(super) fn provider_query_antigravity_unsupported_reason(
         AntigravityRequestSideUnsupportedReason::UnsupportedNetworkConfig => {
             "transport_network_config_unsupported"
         }
-        AntigravityRequestSideUnsupportedReason::UnsupportedAuth(_) => {
-            "transport_antigravity_auth_unsupported"
-        }
+        AntigravityRequestSideUnsupportedReason::UnsupportedAuth(
+            AntigravityRequestAuthUnsupportedReason::WrongProviderType,
+        ) => "transport_provider_type_unsupported",
+        AntigravityRequestSideUnsupportedReason::UnsupportedAuth(
+            AntigravityRequestAuthUnsupportedReason::MissingAuthConfig,
+        ) => "transport_antigravity_auth_config_missing",
+        AntigravityRequestSideUnsupportedReason::UnsupportedAuth(
+            AntigravityRequestAuthUnsupportedReason::InvalidAuthConfigJson,
+        ) => "transport_antigravity_auth_config_invalid",
+        AntigravityRequestSideUnsupportedReason::UnsupportedAuth(
+            AntigravityRequestAuthUnsupportedReason::ComplexDynamicAuthConfig,
+        ) => "transport_antigravity_auth_config_unsupported",
+        AntigravityRequestSideUnsupportedReason::UnsupportedAuth(
+            AntigravityRequestAuthUnsupportedReason::MissingProjectId,
+        ) => "transport_antigravity_project_id_missing",
         AntigravityRequestSideUnsupportedReason::UnsupportedEnvelope(_) => {
             "transport_antigravity_envelope_unsupported"
         }
@@ -248,8 +264,10 @@ pub(super) fn provider_query_test_adapter_for_provider_api_format(
         "openai:chat"
             | "openai:responses"
             | "openai:responses:compact"
+            | "openai:search"
             | "claude:messages"
             | "gemini:generate_content"
+            | "gemini:interactions"
             | "openai:embedding"
             | "gemini:embedding"
             | "jina:embedding"
@@ -351,6 +369,7 @@ pub(super) fn provider_query_transport_supports_model_test_execution(
         }
         "openai:responses"
         | "openai:responses:compact"
+        | "openai:search"
         | "openai:embedding"
         | "jina:embedding"
         | "doubao:embedding"
@@ -366,7 +385,7 @@ pub(super) fn provider_query_transport_supports_model_test_execution(
                 transport, api_format,
             )
         }
-        "gemini:generate_content" | "gemini:embedding" => {
+        "gemini:generate_content" | "gemini:embedding" | "gemini:interactions" => {
             if crate::provider_transport::is_vertex_transport_context(transport) {
                 aether_provider_transport::vertex::supports_local_vertex_gemini_transport_with_network(transport)
             } else {

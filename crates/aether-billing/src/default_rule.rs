@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::pricing::BillingModelPricingSnapshot;
+use crate::pricing::BillingPricingResolution;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VirtualBillingRule {
@@ -20,12 +20,12 @@ pub struct DefaultBillingRuleGenerator;
 
 impl DefaultBillingRuleGenerator {
     pub fn generate_for_pricing(
-        pricing: &BillingModelPricingSnapshot,
+        global_model_name: &str,
+        pricing: &BillingPricingResolution,
         task_type: &str,
     ) -> Option<VirtualBillingRule> {
-        let pricing_config = pricing.effective_tiered_pricing();
-        let tiers = pricing
-            .effective_tiered_pricing()
+        let pricing_config = pricing.tiered_pricing.as_ref();
+        let tiers = pricing_config
             .and_then(|value| value.get("tiers"))
             .and_then(Value::as_array)
             .cloned()
@@ -41,10 +41,7 @@ impl DefaultBillingRuleGenerator {
             || has_image_output_ranges
             || explicit_image_output_price_default.is_some();
 
-        if tiers.is_empty()
-            && pricing.effective_price_per_request().is_none()
-            && !has_image_output_pricing
-        {
+        if tiers.is_empty() && pricing.price_per_request.is_none() && !has_image_output_pricing {
             return None;
         }
 
@@ -55,7 +52,7 @@ impl DefaultBillingRuleGenerator {
             tier_value_with_fallback(&first_tier, "cache_creation_price_per_1m", 1.25);
         let base_cache_read_price =
             tier_value_with_fallback(&first_tier, "cache_read_price_per_1m", 0.1);
-        let base_request_price = pricing.effective_price_per_request().unwrap_or(0.0);
+        let base_request_price = pricing.price_per_request.unwrap_or(0.0);
 
         let mut variables = BTreeMap::new();
         variables.insert("input_price_per_1m".to_string(), json!(base_input_price));
@@ -237,7 +234,7 @@ impl DefaultBillingRuleGenerator {
 
         Some(VirtualBillingRule {
             id: "__default__".to_string(),
-            name: format!("Default rule for {}", pricing.global_model_name),
+            name: format!("Default rule for {global_model_name}"),
             task_type: normalize_task_type(task_type).to_string(),
             expression: "input_cost + output_cost + cache_creation_uncategorized_cost + cache_creation_ephemeral_5m_cost + cache_creation_ephemeral_1h_cost + cache_read_cost + image_output_cost + request_cost".to_string(),
             variables,

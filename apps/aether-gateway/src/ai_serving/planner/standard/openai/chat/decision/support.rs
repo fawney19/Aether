@@ -293,9 +293,11 @@ pub(crate) async fn build_lazy_local_openai_chat_candidate_attempt_source<'a>(
     );
     build_lazy_requested_model_execution_candidate_attempt_source_with_serving(
         planner_state,
+        &input.model_directive_policy,
         trace_id,
         "openai:chat",
         &input.requested_model,
+        None,
         require_streaming,
         &input.auth_snapshot,
         input.client_session_affinity.as_ref(),

@@ -652,7 +652,9 @@ pub(super) async fn extract_admin_provider_oauth_batch_error_detail(
     response: Response<Body>,
 ) -> String {
     let status = response.status();
-    let raw_body = to_bytes(response.into_body(), usize::MAX).await.ok();
+    let raw_body = to_bytes(response.into_body(), crate::MAX_ERROR_BODY_BYTES)
+        .await
+        .ok();
     if let Some(raw_body) = raw_body {
         if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw_body) {
             if let Some(detail) = value.get("detail").and_then(serde_json::Value::as_str) {

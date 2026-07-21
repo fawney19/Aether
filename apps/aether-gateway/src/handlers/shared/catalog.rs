@@ -38,7 +38,7 @@ pub(crate) fn provider_catalog_key_supports_format(
     }
     formats
         .iter()
-        .any(|candidate| crate::ai_serving::api_format_alias_matches(candidate, api_format))
+        .any(|candidate| crate::ai_serving::api_format_permission_covers(candidate, api_format))
 }
 
 pub(crate) fn decrypt_catalog_secret_with_fallbacks(
@@ -577,6 +577,44 @@ fn model_quota_window_snapshot(
     Some(Value::Object(window))
 }
 
+fn canonical_antigravity_model_label(model_name: &str) -> Option<&'static str> {
+    match model_name.trim() {
+        "claude-opus-4-6-thinking" => Some("Claude Opus 4.6 (Thinking)"),
+        "claude-sonnet-4-6" | "claude-sonnet-4-6-thinking" => Some("Claude Sonnet 4.6 (Thinking)"),
+        "gemini-3-flash-agent" => Some("Gemini 3.5 Flash (High)"),
+        "gemini-3.5-flash-low" => Some("Gemini 3.5 Flash (Medium)"),
+        "gemini-3.5-flash-extra-low" => Some("Gemini 3.5 Flash (Low)"),
+        "gemini-3.1-pro-high" | "gemini-pro-agent" => Some("Gemini 3.1 Pro (High)"),
+        "gemini-3.1-pro-low" => Some("Gemini 3.1 Pro (Low)"),
+        "gemini-3.1-flash-image" => Some("Gemini 3.1 Flash Image"),
+        "gemini-3.1-flash-lite" => Some("Gemini 3.1 Flash Lite"),
+        "gemini-3-flash" => Some("Gemini 3 Flash"),
+        "gemini-2.5-pro" => Some("Gemini 2.5 Pro"),
+        "gemini-2.5-flash-thinking" | "gemini-2.5-flash" | "gemini-2.5-flash-lite" => {
+            Some("Gemini 3.1 Flash Lite")
+        }
+        "gpt-oss-120b-medium" => Some("GPT-OSS 120B (Medium)"),
+        "tab_flash_lite_preview" => Some("Tab Flash Lite Preview"),
+        "tab_jump_flash_lite_preview" => Some("Tab Jump Flash Lite Preview"),
+        "models/proactive-observer" => Some("Proactive Observer"),
+        _ => None,
+    }
+}
+
+fn antigravity_model_quota_window_snapshot(
+    model_name: &str,
+    item: &Map<String, Value>,
+    observed_at_unix_secs: Option<u64>,
+) -> Option<Value> {
+    let mut window = model_quota_window_snapshot(model_name, item, observed_at_unix_secs)?;
+    if let Some(label) = canonical_antigravity_model_label(model_name) {
+        if let Some(window) = window.as_object_mut() {
+            window.insert("label".to_string(), json!(label));
+        }
+    }
+    Some(window)
+}
+
 fn provider_quota_metadata_string(
     metadata: &Map<String, Value>,
     fields: &[&str],
@@ -783,6 +821,50 @@ fn codex_default_window_minutes(code: &str) -> Option<u64> {
     }
 }
 
+fn codex_quota_period_identity(window_minutes: u64) -> (String, String) {
+    const MINUTES_PER_HOUR: u64 = 60;
+    const MINUTES_PER_DAY: u64 = 24 * MINUTES_PER_HOUR;
+    const MINUTES_PER_WEEK: u64 = 7 * MINUTES_PER_DAY;
+
+    if window_minutes == 5 * MINUTES_PER_HOUR {
+        return ("5h".to_string(), "5H".to_string());
+    }
+    if window_minutes == MINUTES_PER_WEEK {
+        return ("weekly".to_string(), "周".to_string());
+    }
+    if (28 * MINUTES_PER_DAY..=31 * MINUTES_PER_DAY).contains(&window_minutes) {
+        return ("monthly".to_string(), "月".to_string());
+    }
+
+    let label = if window_minutes.is_multiple_of(MINUTES_PER_WEEK) {
+        format!("{}周", window_minutes / MINUTES_PER_WEEK)
+    } else if window_minutes.is_multiple_of(MINUTES_PER_DAY) {
+        format!("{}天", window_minutes / MINUTES_PER_DAY)
+    } else if window_minutes.is_multiple_of(MINUTES_PER_HOUR) {
+        format!("{}H", window_minutes / MINUTES_PER_HOUR)
+    } else {
+        format!("{window_minutes}分钟")
+    };
+    (format!("window_{window_minutes}m"), label)
+}
+
+fn codex_quota_window_identity(
+    fallback_code: &str,
+    fallback_label: &str,
+    window_minutes: Option<u64>,
+) -> (String, String) {
+    let Some(window_minutes) = window_minutes else {
+        return (fallback_code.to_string(), fallback_label.to_string());
+    };
+    let is_spark = fallback_code.to_ascii_lowercase().starts_with("spark_");
+    let (code, label) = codex_quota_period_identity(window_minutes);
+    if is_spark {
+        (format!("spark_{code}"), format!("Spark {label}"))
+    } else {
+        (code, label)
+    }
+}
+
 fn codex_quota_window_snapshot(
     metadata: &Map<String, Value>,
     prefix: &str,
@@ -824,6 +906,10 @@ fn codex_quota_window_snapshot(
         .get(&window_minutes_key)
         .and_then(admin_provider_quota_pure::coerce_json_u64);
 
+    if explicit_window_minutes == Some(0) {
+        return None;
+    }
+
     if used_percent.is_none()
         && reset_at.is_none()
         && reset_seconds.is_none()
@@ -833,6 +919,7 @@ fn codex_quota_window_snapshot(
     }
 
     let window_minutes = explicit_window_minutes.or_else(|| codex_default_window_minutes(code));
+    let (code, label) = codex_quota_window_identity(code, label, window_minutes);
     let used_ratio = used_percent.map(|value| (value / 100.0).clamp(0.0, 1.0));
     let remaining_ratio = used_ratio.map(|value| (1.0 - value).max(0.0));
 
@@ -908,12 +995,16 @@ fn build_codex_quota_status_snapshot(
     let primary_windows = windows
         .iter()
         .filter(|window| {
-            window
+            let code = window
                 .get("code")
                 .and_then(Value::as_str)
-                .is_some_and(|code| {
-                    code.eq_ignore_ascii_case("weekly") || code.eq_ignore_ascii_case("5h")
-                })
+                .unwrap_or_default();
+            let scope = window
+                .get("scope")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            scope.eq_ignore_ascii_case("account")
+                && !code.to_ascii_lowercase().starts_with("spark_")
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -1481,7 +1572,7 @@ fn build_antigravity_quota_status_snapshot(
             models
                 .iter()
                 .filter_map(|(model_name, item)| {
-                    model_quota_window_snapshot(
+                    antigravity_model_quota_window_snapshot(
                         model_name,
                         item.as_object()?,
                         observed_at_unix_secs,
@@ -2218,6 +2309,29 @@ fn quota_snapshot_has_materialized_data(
         })
 }
 
+fn codex_upstream_metadata_is_at_least_as_fresh(
+    quota_snapshot: Option<&Map<String, Value>>,
+    upstream_metadata: Option<&Value>,
+) -> bool {
+    let Some(metadata) = provider_quota_metadata_bucket(upstream_metadata, "codex") else {
+        return false;
+    };
+    let Some(metadata_updated_at) = metadata
+        .get("updated_at")
+        .and_then(admin_provider_quota_pure::coerce_json_u64)
+    else {
+        return false;
+    };
+    let snapshot_updated_at = quota_snapshot.and_then(|quota| {
+        quota
+            .get("updated_at")
+            .or_else(|| quota.get("observed_at"))
+            .and_then(admin_provider_quota_pure::coerce_json_u64)
+    });
+
+    snapshot_updated_at.is_none_or(|updated_at| metadata_updated_at >= updated_at)
+}
+
 fn windsurf_quota_snapshot_has_stale_cooldown(quota_snapshot: &Map<String, Value>) -> bool {
     let code = quota_snapshot
         .get("code")
@@ -2285,8 +2399,15 @@ pub(crate) fn provider_key_status_snapshot_payload(
         .and_then(Value::as_object)
         .and_then(|snapshot| snapshot.get("quota"))
         .and_then(Value::as_object);
+    let refresh_codex_snapshot = provider_type.trim().eq_ignore_ascii_case("codex")
+        && codex_upstream_metadata_is_at_least_as_fresh(
+            quota_snapshot,
+            key.upstream_metadata.as_ref(),
+        );
 
-    let payload = if quota_snapshot_has_materialized_data(quota_snapshot, provider_type) {
+    let payload = if quota_snapshot_has_materialized_data(quota_snapshot, provider_type)
+        && !refresh_codex_snapshot
+    {
         status_snapshot
             .cloned()
             .unwrap_or_else(default_provider_key_status_snapshot)
@@ -2511,7 +2632,7 @@ pub(crate) fn build_admin_provider_key_response(
     let request_count = u64::from(key.request_count.unwrap_or(0));
     let success_count = u64::from(key.success_count.unwrap_or(0));
     let error_count = u64::from(key.error_count.unwrap_or(0));
-    let total_response_time_ms = f64::from(key.total_response_time_ms.unwrap_or(0));
+    let total_response_time_ms = key.total_response_time_ms.unwrap_or(0) as f64;
     let success_rate = if request_count > 0 {
         success_count as f64 / request_count as f64
     } else {
@@ -2894,6 +3015,25 @@ mod tests {
             None,
         )
         .expect("key transport should build")
+    }
+
+    #[test]
+    fn responses_key_scope_covers_search_in_one_direction() {
+        let mut responses_key = sample_catalog_key();
+        responses_key.api_formats = Some(json!(["openai:responses"]));
+        assert!(provider_catalog_key_supports_format(
+            &responses_key,
+            "codex",
+            "openai:search",
+        ));
+
+        let mut search_key = sample_catalog_key();
+        search_key.api_formats = Some(json!(["openai:search"]));
+        assert!(!provider_catalog_key_supports_format(
+            &search_key,
+            "codex",
+            "openai:responses",
+        ));
     }
 
     #[test]
@@ -3790,6 +3930,58 @@ mod tests {
     }
 
     #[test]
+    fn provider_key_status_snapshot_payload_restores_complete_codex_cache() {
+        let mut key = sample_catalog_key();
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "updated_at": 200u64,
+                "plan_type": "plus",
+                "primary_used_percent": 89.0,
+                "primary_reset_at": 1_900_000_000u64,
+                "spark_primary_used_percent": 40.0,
+                "spark_primary_reset_at": 1_900_100_000u64,
+                "reset_credits": {
+                    "available_count": 3,
+                    "updated_at": 200u64,
+                    "detail_status": "available",
+                    "credits": []
+                }
+            }
+        }));
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "updated_at": 200u64,
+                "windows": [{
+                    "code": "weekly",
+                    "used_ratio": 1.0,
+                    "reset_at": 1_900_000_000u64
+                }]
+            }
+        }));
+
+        let payload = provider_key_status_snapshot_payload(&key, "codex");
+        let windows = payload["quota"]["windows"]
+            .as_array()
+            .expect("quota windows should exist");
+
+        assert_eq!(payload.pointer("/quota/plan_type"), Some(&json!("plus")));
+        assert_eq!(
+            payload.pointer("/quota/reset_credits/available_count"),
+            Some(&json!(3u64))
+        );
+        assert!(windows.iter().any(|window| window["code"] == "spark_5h"));
+        assert_eq!(
+            windows
+                .iter()
+                .find(|window| window["code"] == "weekly")
+                .and_then(|window| window.get("used_ratio")),
+            Some(&json!(0.89))
+        );
+    }
+
+    #[test]
     fn sync_provider_key_quota_status_snapshot_preserves_codex_usage_state() {
         let current_status_snapshot = json!({
             "quota": {
@@ -3988,6 +4180,39 @@ mod tests {
     }
 
     #[test]
+    fn sync_provider_key_quota_status_snapshot_labels_actual_monthly_window() {
+        let upstream_metadata = json!({
+            "codex": {
+                "updated_at": 1_784_287_450u64,
+                "plan_type": "team",
+                "primary_used_percent": 14.0,
+                "primary_reset_at": 1_786_915_122u64,
+                "primary_window_minutes": 43_800u64,
+                "secondary_used_percent": 0.0,
+                "secondary_reset_after_seconds": 0u64,
+                "secondary_window_minutes": 0u64
+            }
+        });
+
+        let payload = sync_provider_key_quota_status_snapshot(
+            None,
+            "codex",
+            Some(&upstream_metadata),
+            "response_headers",
+        )
+        .expect("quota snapshot should sync");
+        let windows = payload["quota"]["windows"]
+            .as_array()
+            .expect("quota windows should exist");
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0]["code"], json!("monthly"));
+        assert_eq!(windows[0]["label"], json!("月"));
+        assert_eq!(windows[0]["window_minutes"], json!(43_800u64));
+        assert_eq!(windows[0]["remaining_ratio"], json!(0.86));
+    }
+
+    #[test]
     fn provider_key_status_snapshot_payload_backfills_thin_ok_snapshot_from_upstream_metadata() {
         let mut key = sample_catalog_key();
         key.upstream_metadata = Some(json!({
@@ -4046,6 +4271,77 @@ mod tests {
         assert_eq!(
             quota.get("windows").and_then(Value::as_array).map(Vec::len),
             Some(2usize)
+        );
+    }
+
+    #[test]
+    fn sync_provider_key_quota_status_snapshot_labels_antigravity_models_by_model_id() {
+        let upstream_metadata = json!({
+            "antigravity": {
+                "updated_at": 1_775_553_285u64,
+                "quota_by_model": {
+                    "gemini-3.5-flash-extra-low": {
+                        "display_name": "Gemini 3.5 Flash (Low)",
+                        "remaining_fraction": 1.0
+                    },
+                    "gemini-3.5-flash-low": {
+                        "display_name": "Gemini 3.5 Flash (Medium)",
+                        "remaining_fraction": 0.75
+                    },
+                    "gemini-3-flash-agent": {
+                        "display_name": "Gemini 3.5 Flash (High)",
+                        "remaining_fraction": 0.5
+                    },
+                    "gemini-2.5-flash": {
+                        "display_name": "Gemini 3.1 Flash Lite",
+                        "remaining_fraction": 0.4
+                    },
+                    "claude-sonnet-4-6": {
+                        "display_name": "Claude Sonnet 4.6 (Thinking)",
+                        "remaining_fraction": 0.3
+                    }
+                }
+            }
+        });
+
+        let payload = sync_provider_key_quota_status_snapshot(
+            None,
+            "antigravity",
+            Some(&upstream_metadata),
+            "refresh_api",
+        )
+        .expect("quota snapshot should sync");
+        let windows = payload["quota"]["windows"]
+            .as_array()
+            .expect("quota windows should exist");
+        let label_for_model = |model: &str| {
+            windows
+                .iter()
+                .filter_map(Value::as_object)
+                .find(|window| window.get("model") == Some(&json!(model)))
+                .and_then(|window| window.get("label"))
+                .cloned()
+        };
+
+        assert_eq!(
+            label_for_model("gemini-3.5-flash-extra-low"),
+            Some(json!("Gemini 3.5 Flash (Low)"))
+        );
+        assert_eq!(
+            label_for_model("gemini-3.5-flash-low"),
+            Some(json!("Gemini 3.5 Flash (Medium)"))
+        );
+        assert_eq!(
+            label_for_model("gemini-3-flash-agent"),
+            Some(json!("Gemini 3.5 Flash (High)"))
+        );
+        assert_eq!(
+            label_for_model("gemini-2.5-flash"),
+            Some(json!("Gemini 3.1 Flash Lite"))
+        );
+        assert_eq!(
+            label_for_model("claude-sonnet-4-6"),
+            Some(json!("Claude Sonnet 4.6 (Thinking)"))
         );
     }
 

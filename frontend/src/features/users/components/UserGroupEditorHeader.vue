@@ -1,7 +1,7 @@
 <template>
-  <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+  <div class="mb-4 flex items-start justify-between gap-3">
     <div class="min-w-0">
-      <h4 class="truncate text-base font-semibold text-foreground">
+      <h4 class="text-balance break-words text-base font-semibold text-foreground">
         {{ legacyT(editing ? '编辑分组' : '新建分组') }}
       </h4>
       <p class="text-xs text-muted-foreground">
@@ -15,7 +15,7 @@
       <Button
         variant="ghost"
         size="icon"
-        class="h-8 w-8"
+        class="h-10 w-10"
         :class="isDefault ? 'text-emerald-500 hover:text-emerald-500' : ''"
         :disabled="saving || isDefault"
         :title="legacyT(isDefault ? '默认注册组' : '设为默认注册组')"
@@ -26,7 +26,7 @@
       <Button
         variant="ghost"
         size="icon"
-        class="h-8 w-8"
+        class="h-10 w-10"
         :disabled="saving || isDefault"
         :title="legacyT('删除分组')"
         @click="$emit('delete')"

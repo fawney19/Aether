@@ -101,6 +101,7 @@ async fn gateway_executes_gemini_cli_stream_via_local_decision_gate_with_local_s
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -553,6 +554,7 @@ async fn gateway_executes_gemini_cli_stream_via_local_decision_gate_after_oauth_
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1108,6 +1110,7 @@ async fn gateway_executes_vertex_ai_gemini_cli_stream_via_local_decision_gate_wi
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1573,6 +1576,7 @@ async fn gateway_executes_antigravity_gemini_cli_stream_via_local_decision_gate_
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -2031,7 +2035,10 @@ async fn gateway_executes_antigravity_gemini_cli_stream_via_local_decision_gate_
         "trace-antigravity-cli-oauth-local-stream-123"
     );
     assert_eq!(seen_execution_runtime_request.model, "claude-sonnet-4-5");
-    assert_eq!(seen_execution_runtime_request.user_agent, "antigravity");
+    assert_eq!(
+        seen_execution_runtime_request.user_agent,
+        aether_provider_transport::antigravity::ANTIGRAVITY_REQUEST_USER_AGENT
+    );
     assert_eq!(seen_execution_runtime_request.request_type, "agent");
     assert_eq!(seen_execution_runtime_request.contents_len, 0);
     assert!((seen_execution_runtime_request.exact_temperature - 0.2).abs() < f64::EPSILON);

@@ -1,34 +1,49 @@
 [workspace]
 members = [
     "apps/aether-tunnel",
-    "crates/aether-ai-formats",
+    "crates/aether-ai/formats",
     "crates/aether-admin",
-    "crates/aether-ai-serving",
+    "crates/aether-admission-core",
+    "crates/aether-ai/serving",
     "crates/aether-pool-core",
-    "crates/aether-provider-pool",
+    "crates/aether-provider/core",
+    "crates/aether-provider/pool",
     "crates/aether-routing-core",
-    "crates/aether-data-contracts",
-    "crates/aether-data-query",
-    "crates/aether-data-schema",
+    "crates/aether-data/contracts",
+    "crates/aether-data/adapters/postgres",
+    "crates/aether-data/adapters/mysql",
+    "crates/aether-data/adapters/sqlite",
+    "crates/aether-data/query",
+    "crates/aether-data/schema",
     "crates/aether-dispatch-core",
     "crates/aether-cache",
     "crates/aether-billing",
     "crates/aether-wallet",
     "crates/aether-crypto",
     "crates/aether-contracts",
-    "crates/aether-data",
+    "crates/aether-data/runtime",
     "crates/aether-model-fetch",
     "crates/aether-oauth",
-    "crates/aether-provider-transport",
+    "crates/aether-provider/transport",
     "crates/aether-scheduler-core",
-    "crates/aether-runtime-state",
-    "crates/aether-task-runtime",
-    "crates/aether-usage-runtime",
+    "crates/aether-runtime/state",
+    "crates/aether-task/runtime",
+    "crates/aether-task/core",
+    "crates/aether-gateway/frontdoor",
+    "crates/aether-gateway/control",
+    "crates/aether-gateway/execution",
+    "crates/aether-gateway/workers",
+    "crates/aether-gateway/tunnel",
+    "crates/aether-testing/loadtools",
+    "crates/aether-testing/integration",
+    "crates/aether-usage/core",
+    "crates/aether-testing/support",
+    "crates/aether-usage/runtime",
     "crates/aether-video-tasks-core",
     "apps/aether-gateway",
     "crates/aether-http",
-    "crates/aether-runtime",
-    "crates/aether-testkit",
+    "crates/aether-runtime/base",
+    "crates/aether-testing/testkit",
 ]
 default-members = [
     "apps/aether-gateway",
@@ -42,33 +57,48 @@ repository = "https://github.com/fawney19/Aether.git"
 
 [workspace.dependencies]
 aether-admin = { path = "crates/aether-admin" }
-aether-ai-formats = { path = "crates/aether-ai-formats" }
-aether-ai-serving = { path = "crates/aether-ai-serving" }
+aether-admission-core = { path = "crates/aether-admission-core" }
+aether-ai-formats = { path = "crates/aether-ai/formats" }
+aether-ai-serving = { path = "crates/aether-ai/serving" }
 aether-pool-core = { path = "crates/aether-pool-core" }
-aether-provider-pool = { path = "crates/aether-provider-pool" }
+aether-provider-core = { path = "crates/aether-provider/core" }
+aether-provider-pool = { path = "crates/aether-provider/pool" }
 aether-routing-core = { path = "crates/aether-routing-core" }
-aether-data-contracts = { path = "crates/aether-data-contracts" }
-aether-data-query = { path = "crates/aether-data-query" }
-aether-data-schema = { path = "crates/aether-data-schema" }
+aether-data-contracts = { path = "crates/aether-data/contracts" }
+aether-data-postgres = { path = "crates/aether-data/adapters/postgres" }
+aether-data-mysql = { path = "crates/aether-data/adapters/mysql" }
+aether-data-sqlite = { path = "crates/aether-data/adapters/sqlite" }
+aether-data-query = { path = "crates/aether-data/query" }
+aether-data-schema = { path = "crates/aether-data/schema" }
 aether-dispatch-core = { path = "crates/aether-dispatch-core" }
 aether-cache = { path = "crates/aether-cache" }
 aether-billing = { path = "crates/aether-billing" }
 aether-wallet = { path = "crates/aether-wallet" }
 aether-crypto = { path = "crates/aether-crypto" }
 aether-contracts = { path = "crates/aether-contracts" }
-aether-data = { path = "crates/aether-data" }
+aether-data = { path = "crates/aether-data/runtime" }
 aether-model-fetch = { path = "crates/aether-model-fetch" }
 aether-oauth = { path = "crates/aether-oauth" }
-aether-provider-transport = { path = "crates/aether-provider-transport" }
+aether-provider-transport = { path = "crates/aether-provider/transport" }
 aether-scheduler-core = { path = "crates/aether-scheduler-core" }
-aether-runtime-state = { path = "crates/aether-runtime-state" }
-aether-task-runtime = { path = "crates/aether-task-runtime" }
-aether-usage-runtime = { path = "crates/aether-usage-runtime" }
+aether-runtime-state = { path = "crates/aether-runtime/state" }
+aether-task-runtime = { path = "crates/aether-task/runtime" }
+aether-task-core = { path = "crates/aether-task/core" }
+aether-gateway-frontdoor = { path = "crates/aether-gateway/frontdoor" }
+aether-gateway-control = { path = "crates/aether-gateway/control" }
+aether-gateway-execution = { path = "crates/aether-gateway/execution" }
+aether-gateway-workers = { path = "crates/aether-gateway/workers" }
+aether-gateway-tunnel = { path = "crates/aether-gateway/tunnel" }
+aether-loadtools = { path = "crates/aether-testing/loadtools" }
+aether-integration-tests = { path = "crates/aether-testing/integration" }
+aether-test-support = { path = "crates/aether-testing/support" }
+aether-usage-core = { path = "crates/aether-usage/core" }
+aether-usage-runtime = { path = "crates/aether-usage/runtime" }
 aether-video-tasks-core = { path = "crates/aether-video-tasks-core" }
 aether-gateway = { path = "apps/aether-gateway" }
 aether-http = { path = "crates/aether-http" }
-aether-runtime = { path = "crates/aether-runtime" }
-aether-testkit = { path = "crates/aether-testkit" }
+aether-runtime = { path = "crates/aether-runtime/base" }
+aether-testkit = { path = "crates/aether-testing/testkit" }
 aes = "0.8"
 aes-gcm = "0.10"
 async-stream = "0.3"
@@ -97,7 +127,7 @@ serde_path_to_error = "0.1"
 sha2 = "0.10"
 socket2 = "0.6"
 tar = "0.4"
-sqlx = { version = "0.8", default-features = false, features = ["postgres", "mysql", "sqlite", "runtime-tokio-rustls", "chrono"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "chrono"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["codec", "io-util"] }

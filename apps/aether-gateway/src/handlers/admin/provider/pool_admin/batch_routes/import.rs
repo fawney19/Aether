@@ -55,13 +55,6 @@ pub(super) async fn build_admin_pool_batch_import_response(
         }
     };
 
-    if payload.keys.len() > 500 {
-        return Ok(build_admin_pool_error_response(
-            http::StatusCode::BAD_REQUEST,
-            "keys length must be less than or equal to 500",
-        ));
-    }
-
     state
         .build_admin_pool_batch_import_response(&provider_id, payload)
         .await

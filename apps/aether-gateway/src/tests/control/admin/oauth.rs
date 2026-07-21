@@ -6086,6 +6086,9 @@ async fn gateway_manual_codex_oauth_refresh_reconciles_missing_fixed_endpoint_im
         .iter()
         .find(|endpoint| endpoint.api_format == "openai:responses")
         .expect("openai responses endpoint should be reconciled");
+    assert!(endpoints
+        .iter()
+        .any(|endpoint| endpoint.api_format == "openai:search"));
     assert_eq!(
         responses_endpoint.base_url,
         "https://chatgpt.com/backend-api/codex"

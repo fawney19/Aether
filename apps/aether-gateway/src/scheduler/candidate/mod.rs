@@ -116,6 +116,42 @@ pub(crate) async fn list_selectable_candidates_with_skip_reasons(
         client_session_affinity,
         now_unix_secs,
         enable_model_directives,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn list_selectable_candidates_with_skip_reasons_for_request_operation(
+    selection_row_source: &(impl MinimalCandidateSelectionRowSource + Sync),
+    runtime_state: &impl SchedulerRuntimeState,
+    api_format: &str,
+    global_model_name: &str,
+    require_streaming: bool,
+    required_capabilities: Option<&serde_json::Value>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    client_session_affinity: Option<&ClientSessionAffinity>,
+    now_unix_secs: u64,
+    enable_model_directives: bool,
+    request_operation: Option<&str>,
+) -> Result<
+    (
+        Vec<SchedulerMinimalCandidateSelectionCandidate>,
+        Vec<SchedulerSkippedCandidate>,
+    ),
+    GatewayError,
+> {
+    collect_selectable_candidates_with_skip_reasons(
+        selection_row_source,
+        runtime_state,
+        api_format,
+        global_model_name,
+        require_streaming,
+        required_capabilities,
+        auth_snapshot,
+        client_session_affinity,
+        now_unix_secs,
+        enable_model_directives,
+        request_operation,
     )
     .await
 }
@@ -237,6 +273,7 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
             client_session_affinity,
             now_unix_secs,
             false,
+            None,
         )
         .await?;
         all_attempts_blocked_by_auth_limit &=

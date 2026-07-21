@@ -1,15 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_data_contracts::repository::provider_catalog::{
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    ProviderCatalogUpstreamMetadataNamespaceUpdate, StoredProviderCatalogEndpoint,
+    StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use aether_model_fetch::{
-    apply_model_filters, fetch_models_from_transports, json_string_list, merge_upstream_metadata,
-    model_fetch_interval_minutes, model_fetch_startup_delay_seconds, model_fetch_startup_enabled,
-    preset_models_for_provider, selected_models_fetch_endpoints,
-    sync_provider_model_whitelist_associations, ModelFetchAssociationStore, ModelFetchRunSummary,
+    apply_model_filters, fetch_models_from_transports, json_string_list,
+    model_catalog_upstream_metadata, model_fetch_interval_minutes,
+    model_fetch_startup_delay_seconds, model_fetch_startup_enabled, preset_models_for_provider,
+    selected_models_fetch_endpoints, sync_provider_model_whitelist_associations,
+    upstream_metadata_namespace_updates, ModelFetchAssociationStore, ModelFetchRunSummary,
 };
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
@@ -32,31 +34,35 @@ pub(crate) fn spawn_model_fetch_worker(state: AppState) -> Option<tokio::task::J
         return None;
     }
 
-    Some(tokio::spawn(async move {
-        if model_fetch_startup_enabled() {
-            let startup_delay = model_fetch_startup_delay_seconds();
-            if startup_delay > 0 {
-                tokio::time::sleep(Duration::from_secs(startup_delay)).await;
+    Some(crate::task_runtime::spawn_singleton_worker(
+        state,
+        crate::task_runtime::TASK_KEY_MODEL_FETCH_WORKER,
+        |state| async move {
+            if model_fetch_startup_enabled() {
+                let startup_delay = model_fetch_startup_delay_seconds();
+                if startup_delay > 0 {
+                    tokio::time::sleep(Duration::from_secs(startup_delay)).await;
+                }
+                if let Err(err) = run_model_fetch_cycle(&state, "startup").await {
+                    warn!(error = ?err, "gateway model fetch startup failed");
+                }
+            } else {
+                info!("gateway model fetch startup disabled");
             }
-            if let Err(err) = run_model_fetch_cycle(&state, "startup").await {
-                warn!(error = ?err, "gateway model fetch startup failed");
-            }
-        } else {
-            info!("gateway model fetch startup disabled");
-        }
 
-        let mut interval = tokio::time::interval(Duration::from_secs(
-            model_fetch_interval_minutes().saturating_mul(60),
-        ));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        interval.tick().await;
-        loop {
+            let mut interval = tokio::time::interval(Duration::from_secs(
+                model_fetch_interval_minutes().saturating_mul(60),
+            ));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await;
-            if let Err(err) = run_model_fetch_cycle(&state, "tick").await {
-                warn!(error = ?err, "gateway model fetch tick failed");
+            loop {
+                interval.tick().await;
+                if let Err(err) = run_model_fetch_cycle(&state, "tick").await {
+                    warn!(error = ?err, "gateway model fetch tick failed");
+                }
             }
-        }
-    }))
+        },
+    ))
 }
 
 pub(crate) async fn perform_model_fetch_once(
@@ -70,7 +76,16 @@ pub(crate) async fn perform_model_fetch_for_key(
     provider_id: &str,
     key_id: &str,
 ) -> Result<ModelFetchRunSummary, GatewayError> {
-    perform_model_fetch_for_key_with_state(state, provider_id, key_id).await
+    let key_ids = BTreeSet::from([key_id.to_string()]);
+    perform_model_fetch_for_keys_with_state(state, provider_id, &key_ids).await
+}
+
+pub(crate) async fn perform_model_fetch_for_keys(
+    state: &AppState,
+    provider_id: &str,
+    key_ids: &BTreeSet<String>,
+) -> Result<ModelFetchRunSummary, GatewayError> {
+    perform_model_fetch_for_keys_with_state(state, provider_id, key_ids).await
 }
 
 async fn perform_model_fetch_once_with_state<S>(
@@ -83,22 +98,22 @@ where
     execute_fetch_targets(state, targets).await
 }
 
-async fn perform_model_fetch_for_key_with_state<S>(
+async fn perform_model_fetch_for_keys_with_state<S>(
     state: &S,
     provider_id: &str,
-    key_id: &str,
+    key_ids: &BTreeSet<String>,
 ) -> Result<ModelFetchRunSummary, GatewayError>
 where
     S: ModelFetchRuntimeState + ?Sized,
 {
-    let targets = collect_fetch_targets(state, Some(provider_id), Some(key_id)).await?;
+    let targets = collect_fetch_targets(state, Some(provider_id), Some(key_ids)).await?;
     execute_fetch_targets(state, targets).await
 }
 
 async fn collect_fetch_targets<S>(
     state: &S,
     provider_id_filter: Option<&str>,
-    key_id_filter: Option<&str>,
+    key_id_filter: Option<&BTreeSet<String>>,
 ) -> Result<Vec<SelectedFetchTarget>, GatewayError>
 where
     S: ModelFetchRuntimeState + ?Sized,
@@ -152,7 +167,7 @@ where
             .unwrap_or_default();
         let keys = keys_by_provider.remove(&provider.id).unwrap_or_default();
         for key in keys {
-            if key_id_filter.is_some_and(|key_id| key.id != key_id) {
+            if key_id_filter.is_some_and(|key_ids| !key_ids.contains(&key.id)) {
                 continue;
             }
             if !key.is_active || !key.auto_fetch_models {
@@ -239,8 +254,16 @@ async fn fetch_and_persist_key_models(
                 json_string_list(target.key.model_include_patterns.as_ref()),
                 json_string_list(target.key.model_exclude_patterns.as_ref()),
             );
-            persist_key_fetch_success(state, &target.key, now_unix_secs, &filtered_models, None)
-                .await?;
+            let upstream_metadata =
+                model_catalog_upstream_metadata(&target.provider.provider_type, &models);
+            persist_key_fetch_success(
+                state,
+                &target.key,
+                now_unix_secs,
+                &filtered_models,
+                upstream_metadata.as_ref(),
+            )
+            .await?;
             state
                 .write_upstream_models_cache(&target.provider.id, &target.key.id, &models)
                 .await;
@@ -328,7 +351,6 @@ async fn fetch_and_persist_key_models(
         json_string_list(target.key.model_include_patterns.as_ref()),
         json_string_list(target.key.model_exclude_patterns.as_ref()),
     );
-
     persist_key_fetch_success(
         state,
         &target.key,
@@ -352,11 +374,15 @@ async fn persist_key_fetch_failure(
     now_unix_secs: u64,
     error: String,
 ) -> Result<(), GatewayError> {
-    let mut updated = key.clone();
-    updated.last_models_fetch_at_unix_secs = Some(now_unix_secs);
-    updated.last_models_fetch_error = Some(error);
-    updated.updated_at_unix_secs = Some(now_unix_secs);
-    state.update_provider_catalog_key(&updated).await?;
+    state
+        .update_provider_catalog_key_model_fetch_state(
+            &key.id,
+            key.allowed_models.as_ref(),
+            Some(now_unix_secs),
+            Some(&error),
+            Some(now_unix_secs),
+        )
+        .await?;
     Ok(())
 }
 
@@ -367,22 +393,33 @@ async fn persist_key_fetch_success(
     allowed_models: &[String],
     upstream_metadata: Option<&Value>,
 ) -> Result<(), GatewayError> {
-    let mut updated = key.clone();
-    updated.allowed_models = if allowed_models.is_empty() {
+    let allowed_models = if allowed_models.is_empty() {
         None
     } else {
         Some(json!(allowed_models))
     };
-    if let Some(upstream_metadata) = upstream_metadata {
-        updated.upstream_metadata = Some(merge_upstream_metadata(
-            updated.upstream_metadata.as_ref(),
-            upstream_metadata,
-        ));
-    }
-    updated.last_models_fetch_at_unix_secs = Some(now_unix_secs);
-    updated.last_models_fetch_error = None;
-    updated.updated_at_unix_secs = Some(now_unix_secs);
-    state.update_provider_catalog_key(&updated).await?;
+    let upstream_metadata_updates = upstream_metadata
+        .map(|upstream_metadata| {
+            upstream_metadata_namespace_updates(key.upstream_metadata.as_ref(), upstream_metadata)
+                .into_iter()
+                .map(
+                    |(namespace, value)| ProviderCatalogUpstreamMetadataNamespaceUpdate {
+                        namespace,
+                        value,
+                    },
+                )
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    state
+        .update_provider_catalog_key_model_fetch_success(
+            &key.id,
+            allowed_models.as_ref(),
+            now_unix_secs,
+            &upstream_metadata_updates,
+            Some(now_unix_secs),
+        )
+        .await?;
     Ok(())
 }
 
@@ -402,7 +439,8 @@ mod tests {
         StoredAdminProviderModel, UpsertAdminProviderModelRecord,
     };
     use aether_data_contracts::repository::provider_catalog::{
-        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+        ProviderCatalogUpstreamMetadataNamespaceUpdate, StoredProviderCatalogEndpoint,
+        StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
     use aether_model_fetch::{
         build_models_fetch_execution_plan, ModelFetchAssociationStore, ModelFetchTransportRuntime,
@@ -428,6 +466,7 @@ mod tests {
         execution_results: Arc<Mutex<VecDeque<ExecutionResult>>>,
         executed_plans: Arc<Mutex<Vec<ExecutionPlan>>>,
         cached_models: Arc<Mutex<HashMap<(String, String), Vec<Value>>>>,
+        upstream_metadata_updates: Arc<Mutex<Vec<(String, String, Value, Option<u64>)>>>,
     }
 
     impl TestState {
@@ -446,6 +485,7 @@ mod tests {
                 execution_results: Arc::new(Mutex::new(VecDeque::from(execution_results))),
                 executed_plans: Arc::new(Mutex::new(Vec::new())),
                 cached_models: Arc::new(Mutex::new(HashMap::new())),
+                upstream_metadata_updates: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -615,15 +655,63 @@ mod tests {
             ))
         }
 
-        async fn update_provider_catalog_key(
+        async fn update_provider_catalog_key_model_fetch_state(
             &self,
-            key: &StoredProviderCatalogKey,
+            key_id: &str,
+            allowed_models: Option<&Value>,
+            last_models_fetch_at_unix_secs: Option<u64>,
+            last_models_fetch_error: Option<&str>,
+            updated_at_unix_secs: Option<u64>,
         ) -> Result<(), GatewayError> {
             let mut keys = self.keys.lock().expect("keys mutex");
-            let Some(slot) = keys.iter_mut().find(|item| item.id == key.id) else {
+            let Some(key) = keys.iter_mut().find(|item| item.id == key_id) else {
                 return Err(GatewayError::Internal("key not found".to_string()));
             };
-            *slot = key.clone();
+            key.allowed_models = allowed_models.cloned();
+            key.last_models_fetch_at_unix_secs = last_models_fetch_at_unix_secs;
+            key.last_models_fetch_error = last_models_fetch_error.map(str::to_string);
+            key.updated_at_unix_secs = updated_at_unix_secs;
+            Ok(())
+        }
+
+        async fn update_provider_catalog_key_model_fetch_success(
+            &self,
+            key_id: &str,
+            allowed_models: Option<&Value>,
+            last_models_fetch_at_unix_secs: u64,
+            upstream_metadata_updates: &[ProviderCatalogUpstreamMetadataNamespaceUpdate],
+            updated_at_unix_secs: Option<u64>,
+        ) -> Result<(), GatewayError> {
+            let mut keys = self.keys.lock().expect("keys mutex");
+            let Some(key) = keys.iter_mut().find(|key| key.id == key_id) else {
+                return Err(GatewayError::Internal("key not found".to_string()));
+            };
+            key.allowed_models = allowed_models.cloned();
+            key.last_models_fetch_at_unix_secs = Some(last_models_fetch_at_unix_secs);
+            key.last_models_fetch_error = None;
+            if !upstream_metadata_updates.is_empty() {
+                let metadata = key
+                    .upstream_metadata
+                    .get_or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .expect("upstream metadata object");
+                for update in upstream_metadata_updates {
+                    metadata.insert(update.namespace.clone(), update.value.clone());
+                }
+            }
+            key.updated_at_unix_secs = updated_at_unix_secs;
+            drop(keys);
+            self.upstream_metadata_updates
+                .lock()
+                .expect("metadata updates mutex")
+                .extend(upstream_metadata_updates.iter().map(|update| {
+                    (
+                        key_id.to_string(),
+                        update.namespace.clone(),
+                        update.value.clone(),
+                        updated_at_unix_secs,
+                    )
+                }));
             Ok(())
         }
 
@@ -815,12 +903,19 @@ mod tests {
     #[tokio::test]
     async fn model_fetch_uses_preset_models_without_endpoint() {
         let provider = sample_provider("provider-codex", "codex");
-        let key = sample_key(
+        let mut key = sample_key(
             "key-codex",
             "provider-codex",
             "api_key",
             &["openai:responses"],
         );
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "quota_by_model": {
+                    "gpt-5.6-sol": {"remaining_fraction": 0.75}
+                }
+            }
+        }));
         let state = TestState::new(vec![provider], vec![], vec![key], HashMap::new(), vec![]);
 
         let summary = perform_model_fetch_once_with_state(&state)
@@ -832,9 +927,47 @@ mod tests {
         let updated = state.key("key-codex");
         let allowed_models = updated
             .allowed_models
+            .as_ref()
             .and_then(|value| value.as_array().cloned())
             .expect("allowed_models should be set");
         assert!(allowed_models.iter().any(|model| model == "gpt-5.4"));
+        let upstream_metadata = updated
+            .upstream_metadata
+            .as_ref()
+            .expect("Codex model catalog should be persisted");
+        assert_eq!(
+            upstream_metadata["codex"]["quota_by_model"]["gpt-5.6-sol"]["remaining_fraction"],
+            0.75
+        );
+        assert_eq!(
+            upstream_metadata["codex_models"]["cards"]["gpt-5.6-sol"]["multi_agent_version"],
+            "v2"
+        );
+        let capabilities = crate::ai_serving::resolve_codex_responses_model_capabilities(
+            "gpt-5.6-sol",
+            "gpt-5.6-sol",
+            Some(upstream_metadata),
+        );
+        assert!(capabilities.use_responses_lite);
+        assert_eq!(
+            capabilities.default_reasoning_effort.as_deref(),
+            Some("low")
+        );
+        assert!(capabilities
+            .supported_reasoning_efforts
+            .iter()
+            .any(|effort| effort == "ultra"));
+        let metadata_updates = state
+            .upstream_metadata_updates
+            .lock()
+            .expect("metadata updates mutex");
+        assert_eq!(metadata_updates.len(), 1);
+        assert_eq!(metadata_updates[0].0, "key-codex");
+        assert_eq!(metadata_updates[0].1, "codex_models");
+        assert_eq!(
+            metadata_updates[0].2["cards"]["gpt-5.6-sol"]["multi_agent_version"],
+            "v2"
+        );
         assert!(state
             .cached_models
             .lock()

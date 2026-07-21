@@ -19,6 +19,7 @@ function createCodexKey(overrides: Partial<PoolStatsKeyInput> = {}): PoolStatsKe
         windows: [
           {
             code: '5h',
+            window_minutes: 300,
             usage: {
               request_count: 5,
               total_tokens: 2500,
@@ -27,10 +28,11 @@ function createCodexKey(overrides: Partial<PoolStatsKeyInput> = {}): PoolStatsKe
           },
           {
             code: 'weekly',
+            window_minutes: 10_080,
             usage: {
-              request_count: 0,
-              total_tokens: 0,
-              total_cost_usd: '0.00000000',
+              request_count: 8,
+              total_tokens: 5000,
+              total_cost_usd: '0.012',
             },
           },
         ],
@@ -54,9 +56,9 @@ describe('poolStatsDisplay', () => {
       total_cost_usd: '$0.0045',
     })
     expect(metricValues(display.groups[1].metrics)).toEqual({
-      request_count: '0',
-      total_tokens: '0',
-      total_cost_usd: '0',
+      request_count: '8',
+      total_tokens: '5K',
+      total_cost_usd: '$0.012',
     })
   })
 
@@ -65,7 +67,7 @@ describe('poolStatsDisplay', () => {
       createCodexKey({
         status_snapshot: {
           quota: {
-            windows: [{ code: '5h', usage: null }],
+            windows: [{ code: '5h', window_minutes: 300, usage: null }],
           },
         },
       }),
@@ -81,10 +83,48 @@ describe('poolStatsDisplay', () => {
       total_tokens: '—',
       total_cost_usd: '—',
     })
-    expect(metricValues(display.groups[1].metrics)).toEqual({
-      request_count: '—',
-      total_tokens: '—',
-      total_cost_usd: '—',
+    expect(display.groups).toHaveLength(1)
+  })
+
+  it('builds monthly stats from the actual quota window and ignores zero placeholders', () => {
+    const display = buildPoolStatsDisplay(
+      createCodexKey({
+        status_snapshot: {
+          quota: {
+            windows: [
+              {
+                code: 'monthly',
+                label: '月',
+                window_minutes: 43_800,
+                usage: {
+                  request_count: 12,
+                  total_tokens: 3456,
+                  total_cost_usd: '0.125',
+                },
+              },
+              {
+                code: 'weekly',
+                label: '周',
+                window_minutes: 0,
+                usage: {
+                  request_count: 99,
+                },
+              },
+            ],
+          },
+        },
+      }),
+      'codex',
+      'current_cycle',
+    )
+
+    expect(display.kind).toBe('codex_cycle')
+    if (display.kind !== 'codex_cycle') throw new Error('expected codex cycle display')
+    expect(display.groups.map(group => group.label)).toEqual(['月'])
+    expect(metricValues(display.groups[0].metrics)).toEqual({
+      request_count: '12',
+      total_tokens: '3.5K',
+      total_cost_usd: '$0.125',
     })
   })
 

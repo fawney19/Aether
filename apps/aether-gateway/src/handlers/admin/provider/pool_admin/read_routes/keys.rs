@@ -50,6 +50,8 @@ fn admin_pool_codex_default_window_minutes(code: &str) -> Option<u64> {
         Some(300)
     } else if code.eq_ignore_ascii_case("weekly") {
         Some(10_080)
+    } else if code.eq_ignore_ascii_case("monthly") {
+        Some(43_800)
     } else {
         None
     }
@@ -98,16 +100,27 @@ fn admin_pool_codex_cycle_usage_request(
     window: &serde_json::Map<String, serde_json::Value>,
     now_unix_secs: u64,
 ) -> Option<ProviderApiKeyWindowUsageRequest> {
+    let scope = window
+        .get("scope")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or("account");
+    if !scope.eq_ignore_ascii_case("account") {
+        return None;
+    }
     let window_code = window
         .get("code")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
-        .filter(|code| code.eq_ignore_ascii_case("5h") || code.eq_ignore_ascii_case("weekly"))?
+        .filter(|code| !code.is_empty() && !code.to_ascii_lowercase().starts_with("spark_"))?
         .to_ascii_lowercase();
     let reset_at = admin_pool_json_u64(window.get("reset_at"))?;
-    let window_seconds = admin_pool_json_u64(window.get("window_minutes"))
-        .or_else(|| admin_pool_codex_default_window_minutes(&window_code))?
-        .checked_mul(60)?;
+    let window_minutes = match admin_pool_json_u64(window.get("window_minutes")) {
+        Some(0) => return None,
+        Some(value) => value,
+        None => admin_pool_codex_default_window_minutes(&window_code)?,
+    };
+    let window_seconds = window_minutes.checked_mul(60)?;
     if reset_at <= now_unix_secs {
         return None;
     }
@@ -446,7 +459,7 @@ fn admin_pool_key_cost_exhausted(
         >= limit
 }
 
-fn admin_pool_key_visible_status_filter(
+pub(super) fn admin_pool_key_visible_status_filter(
     state: &AdminAppState<'_>,
     key: &StoredProviderCatalogKey,
     provider_type: &str,
@@ -641,17 +654,22 @@ pub(super) async fn build_admin_pool_list_keys_response(
             .collect::<Vec<_>>();
         (keys, total, preloaded_pool_scores_by_key_id)
     } else if !quick_selectors.is_empty() || sort_by_score {
+        let use_full_search = !quick_selectors.is_empty();
         let mut keys = state
             .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
             .await?
             .into_iter()
             .filter(|key| {
-                pool_selection::admin_pool_matches_search(
-                    state,
-                    key,
-                    &provider.provider_type,
-                    search.as_deref(),
-                )
+                if use_full_search {
+                    pool_selection::admin_pool_matches_search(
+                        state,
+                        key,
+                        &provider.provider_type,
+                        search.as_deref(),
+                    )
+                } else {
+                    pool_selection::admin_pool_matches_catalog_search(key, search.as_deref())
+                }
             })
             .filter(|key| {
                 quick_selectors.iter().all(|selector| {
@@ -786,6 +804,57 @@ mod tests {
             ),
             Some("expired")
         );
+    }
+
+    #[test]
+    fn codex_cycle_usage_request_uses_actual_monthly_window_boundaries() {
+        let key = sample_key("oauth");
+        let reset_at = 5_000_000u64;
+        let now = 3_000_000u64;
+        let window = json!({
+            "code": "monthly",
+            "label": "月",
+            "scope": "account",
+            "reset_at": reset_at,
+            "window_minutes": 43_800u64
+        });
+
+        let request = admin_pool_codex_cycle_usage_request(
+            &key,
+            window.as_object().expect("window should be object"),
+            now,
+        )
+        .expect("monthly usage request should build");
+
+        assert_eq!(request.window_code, "monthly");
+        assert_eq!(request.start_unix_secs, reset_at - 43_800 * 60);
+        assert_eq!(request.end_unix_secs, now);
+    }
+
+    #[test]
+    fn codex_cycle_usage_request_ignores_zero_and_spark_windows() {
+        let key = sample_key("oauth");
+        for window in [
+            json!({
+                "code": "weekly",
+                "scope": "account",
+                "reset_at": 5_000_000u64,
+                "window_minutes": 0
+            }),
+            json!({
+                "code": "spark_weekly",
+                "scope": "account",
+                "reset_at": 5_000_000u64,
+                "window_minutes": 10_080
+            }),
+        ] {
+            assert!(admin_pool_codex_cycle_usage_request(
+                &key,
+                window.as_object().expect("window should be object"),
+                3_000_000,
+            )
+            .is_none());
+        }
     }
 
     #[test]

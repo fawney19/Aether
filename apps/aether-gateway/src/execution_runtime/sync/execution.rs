@@ -105,6 +105,7 @@ const SYNC_EXECUTION_IDLE_LOG_INTERVAL: Duration = Duration::from_secs(60);
 const OPENAI_IMAGE_SYNC_JSON_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const OPENAI_IMAGE_SYNC_JSON_HEARTBEAT_BYTES: &[u8] = b"\n";
 const OPENAI_IMAGE_SYNC_PROGRESS_WRITE_INTERVAL: Duration = Duration::from_secs(5);
+const INVALID_GEMINI_PROVIDER_SUCCESS_MESSAGE: &str = "Provider returned HTTP 200 but the Gemini response did not contain visible model output; refusing to finalize it as a successful response.";
 
 #[derive(Debug)]
 struct SyncExecutionFailure {
@@ -628,13 +629,7 @@ fn invalid_gemini_provider_success_message(
     if status_code >= 400 {
         return None;
     }
-    let provider_api_format = report_context
-        .and_then(|value| value.get("provider_api_format"))
-        .and_then(Value::as_str)
-        .unwrap_or(plan.provider_api_format.as_str());
-    if crate::ai_serving::normalize_api_format_alias(provider_api_format)
-        != "gemini:generate_content"
-    {
+    if !provider_api_format_is_gemini_generate_content(plan, report_context) {
         return None;
     }
     let body_json = body_json?;
@@ -658,7 +653,53 @@ fn invalid_gemini_provider_success_message(
     if crate::ai_serving::gemini_generate_content_response_has_visible_output(body_json) {
         return None;
     }
-    Some("Provider returned HTTP 200 but the Gemini response did not contain visible model output; refusing to finalize it as a successful response.")
+    Some(INVALID_GEMINI_PROVIDER_SUCCESS_MESSAGE)
+}
+
+fn invalid_gemini_provider_stream_success_message(
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+    status_code: u16,
+    body_json: Option<&Value>,
+    body_bytes: &[u8],
+    has_body_bytes: bool,
+) -> Option<&'static str> {
+    if status_code >= 400 || body_json.is_some() || !has_body_bytes {
+        return None;
+    }
+    if !provider_api_format_is_gemini_generate_content(plan, report_context) {
+        return None;
+    }
+    let Some(body_json) = crate::ai_serving::aggregate_gemini_stream_sync_response(body_bytes)
+    else {
+        return Some(INVALID_GEMINI_PROVIDER_SUCCESS_MESSAGE);
+    };
+    if crate::ai_serving::gemini_generate_content_response_has_visible_output(&body_json) {
+        return None;
+    }
+    Some(INVALID_GEMINI_PROVIDER_SUCCESS_MESSAGE)
+}
+
+fn provider_api_format_is_gemini_generate_content(
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+) -> bool {
+    let provider_api_format = report_context
+        .and_then(|value| value.get("provider_api_format"))
+        .and_then(Value::as_str)
+        .unwrap_or(plan.provider_api_format.as_str());
+    crate::ai_serving::normalize_api_format_alias(provider_api_format) == "gemini:generate_content"
+}
+
+fn invalid_gemini_provider_success_execution_error(message: &str) -> ExecutionError {
+    ExecutionError {
+        kind: ExecutionErrorKind::Upstream5xx,
+        phase: ExecutionPhase::Finalize,
+        message: message.to_string(),
+        upstream_status: Some(StatusCode::OK.as_u16()),
+        retryable: true,
+        failover_recommended: true,
+    }
 }
 
 fn build_invalid_provider_success_body(
@@ -1493,7 +1534,12 @@ async fn openai_image_sync_json_heartbeat_final_bytes(
     result: Result<Option<Response<Body>>, GatewayError>,
 ) -> Vec<u8> {
     match result {
-        Ok(Some(response)) => match to_bytes(response.into_body(), usize::MAX).await {
+        Ok(Some(response)) => match to_bytes(
+            response.into_body(),
+            crate::headers::max_internal_buffered_body_bytes(),
+        )
+        .await
+        {
             Ok(bytes) if !bytes.is_empty() => bytes.to_vec(),
             Ok(_) => openai_image_sync_json_heartbeat_error_body("empty sync image response"),
             Err(err) => openai_image_sync_json_heartbeat_error_body(&err.to_string()),
@@ -2031,16 +2077,19 @@ async fn execute_execution_runtime_sync_impl(
             report_context.as_ref(),
             result.status_code,
             body_json.as_ref(),
-        ) {
+        )
+        .or_else(|| {
+            invalid_gemini_provider_stream_success_message(
+                &plan,
+                report_context.as_ref(),
+                result.status_code,
+                body_json.as_ref(),
+                &body_bytes,
+                body_base64.is_some(),
+            )
+        }) {
             result.status_code = StatusCode::BAD_GATEWAY.as_u16();
-            result.error = Some(ExecutionError {
-                kind: ExecutionErrorKind::Upstream5xx,
-                phase: ExecutionPhase::Finalize,
-                message: message.to_string(),
-                upstream_status: Some(StatusCode::OK.as_u16()),
-                retryable: false,
-                failover_recommended: false,
-            });
+            result.error = Some(invalid_gemini_provider_success_execution_error(message));
             if let Some(error_body) =
                 build_invalid_provider_success_body(&plan, report_context.as_ref(), message)
             {
@@ -2637,7 +2686,20 @@ async fn execute_execution_runtime_sync_impl(
         candidate_id,
     )?;
     if !usage_payload.report_kind.trim().is_empty() {
-        spawn_sync_report(state.clone(), usage_payload);
+        if status_code >= 400 {
+            let report_kind = usage_payload.report_kind.clone();
+            if let Err(err) = submit_sync_report(state, usage_payload).await {
+                warn!(
+                    event_name = "local_sync_error_report_submit_failed",
+                    log_type = "ops",
+                    trace_id = %trace_id,
+                    report_kind = %report_kind,
+                    "gateway failed to submit local sync error report before returning response: {err:?}"
+                );
+            }
+        } else {
+            spawn_sync_report(state.clone(), usage_payload);
+        }
     }
 
     Ok(Some(response))
@@ -2898,6 +2960,65 @@ mod tests {
         .expect("empty Gemini 200 response should be rejected from plan format");
 
         assert!(message.contains("visible model output"));
+    }
+
+    #[test]
+    fn invalid_gemini_provider_success_error_is_retryable_candidate_failure() {
+        let error = invalid_gemini_provider_success_execution_error(
+            INVALID_GEMINI_PROVIDER_SUCCESS_MESSAGE,
+        );
+
+        assert_eq!(error.kind, ExecutionErrorKind::Upstream5xx);
+        assert_eq!(error.phase, ExecutionPhase::Finalize);
+        assert_eq!(error.upstream_status, Some(StatusCode::OK.as_u16()));
+        assert!(error.retryable);
+        assert!(error.failover_recommended);
+    }
+
+    #[test]
+    fn invalid_gemini_provider_success_accepts_antigravity_chunks_with_visible_output() {
+        let plan = test_gemini_chat_plan();
+        let report_context = json!({
+            "has_envelope": true,
+            "envelope_name": "antigravity:v1internal",
+            "provider_api_format": "gemini:generate_content",
+        });
+        let body = json!({
+            "chunks": [{
+                "response": {
+                    "responseId": "resp_antigravity_chunks_123",
+                    "candidates": [{
+                        "content": {
+                            "parts": [{"text": "Hello Gemini"}],
+                            "role": "model"
+                        },
+                        "finishReason": "STOP",
+                        "index": 0
+                    }],
+                    "modelVersion": "gemini-3-flash-agent",
+                    "usageMetadata": {
+                        "promptTokenCount": 2,
+                        "candidatesTokenCount": 2,
+                        "totalTokenCount": 4
+                    }
+                },
+                "traceId": "trace-antigravity-chunks"
+            }],
+            "metadata": {
+                "stream": true,
+                "stored_chunks": 1,
+                "total_chunks": 1
+            }
+        });
+
+        let message = invalid_gemini_provider_success_message(
+            &plan,
+            Some(&report_context),
+            StatusCode::OK.as_u16(),
+            Some(&body),
+        );
+
+        assert!(message.is_none());
     }
 
     #[test]

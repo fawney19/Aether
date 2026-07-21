@@ -29,7 +29,7 @@ pub(crate) use self::admin_types::{
 pub use self::app::AppState;
 pub(crate) use self::app::{
     upstream_target_gate_auto_limit, upstream_target_gate_limit_from_env,
-    FrontdoorRuntimeGuardConfig,
+    FrontdoorRuntimeGuardConfig, REQUEST_BODY_BUFFER_PERMIT_BYTES,
 };
 pub(crate) use self::cache::{
     CachedProviderTransportSnapshot, AUTH_API_KEY_LAST_USED_MAX_ENTRIES,

@@ -373,13 +373,7 @@ pub fn preset_models_for_provider(provider_type: &str) -> Option<Vec<Value>> {
             preset_model("claude-sonnet-4-5-20250929", "anthropic", "Claude Sonnet 4.5", "claude:messages"),
             preset_model("claude-haiku-4-5-20251001", "anthropic", "Claude Haiku 4.5", "claude:messages"),
         ],
-        "codex" => vec![
-            preset_model("gpt-5.5", "openai", "GPT-5.5", "openai:responses"),
-            preset_model("gpt-5.4", "openai", "GPT-5.4", "openai:responses"),
-            preset_model("gpt-5.4-mini", "openai", "GPT-5.4 Mini", "openai:responses"),
-            preset_model("gpt-5.3-codex", "openai", "GPT-5.3 Codex", "openai:responses"),
-            preset_model("gpt-5.3-codex-spark", "openai", "GPT-5.3 Codex Spark", "openai:responses"),
-        ],
+        "codex" => aether_ai_formats::bundled_codex_model_cards().to_vec(),
         "grok" => vec![
             preset_model("grok-4.20-0309-non-reasoning", "xai", "Grok 4.20 0309 Non-Reasoning", "openai:chat"),
             preset_model("grok-4.20-0309", "xai", "Grok 4.20 0309", "openai:chat"),
@@ -449,6 +443,35 @@ pub fn merge_upstream_metadata(current: Option<&Value>, incoming: &Value) -> Val
     }
 
     Value::Object(merged)
+}
+
+pub fn model_catalog_upstream_metadata(
+    provider_type: &str,
+    cached_models: &[Value],
+) -> Option<Value> {
+    provider_type.trim().eq_ignore_ascii_case("codex").then(|| {
+        let cards = aether_ai_formats::effective_codex_model_cards(cached_models);
+        aether_ai_formats::build_codex_model_catalog_metadata(&cards)
+    })
+}
+
+pub fn upstream_metadata_namespace_updates(
+    current: Option<&Value>,
+    incoming: &Value,
+) -> Vec<(String, Value)> {
+    let Some(incoming) = incoming.as_object() else {
+        return Vec::new();
+    };
+    let merged = merge_upstream_metadata(current, &Value::Object(incoming.clone()));
+    incoming
+        .keys()
+        .filter_map(|namespace| {
+            merged
+                .get(namespace)
+                .cloned()
+                .map(|value| (namespace.clone(), value))
+        })
+        .collect()
 }
 
 pub fn apply_model_filters(
@@ -691,7 +714,8 @@ fn build_codex_models_url(base_url: &str) -> Option<String> {
     if !has_client_version {
         let separator = if url.contains('?') { '&' } else { '?' };
         url.push(separator);
-        url.push_str("client_version=0.128.0-alpha.1");
+        url.push_str("client_version=");
+        url.push_str(aether_ai_formats::CODEX_CLIENT_VERSION);
     }
     Some(url)
 }
@@ -1006,8 +1030,7 @@ mod tests {
                 "https://chatgpt.com/backend-api/codex"
             ),
             Some((
-                "https://chatgpt.com/backend-api/codex/models?client_version=0.128.0-alpha.1"
-                    .to_string(),
+                "https://chatgpt.com/backend-api/codex/models?client_version=0.144.1".to_string(),
                 "openai:responses".to_string()
             ))
         );
@@ -1136,6 +1159,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_models_response_preserves_gpt_5_6_model_card_capabilities() {
+        let card = json!({
+            "slug": "gpt-5.6-sol",
+            "default_reasoning_level": "low",
+            "supported_reasoning_levels": [
+                {"effort": "low"},
+                {"effort": "max"},
+                {"effort": "ultra"}
+            ],
+            "multi_agent_version": "v2",
+            "supports_image_detail_original": true,
+            "future_capability": {"mode": "preserve-me"}
+        });
+        let parsed = parse_models_response("openai:responses", &json!({"models": [card]}))
+            .expect("Codex model card should parse");
+
+        let cached = &parsed.cached_models[0];
+        assert_eq!(cached["id"], "gpt-5.6-sol");
+        assert_eq!(cached["default_reasoning_level"], "low");
+        assert_eq!(cached["supported_reasoning_levels"][2]["effort"], "ultra");
+        assert_eq!(cached["multi_agent_version"], "v2");
+        assert_eq!(cached["supports_image_detail_original"], true);
+        assert_eq!(cached["future_capability"]["mode"], "preserve-me");
+        assert_eq!(cached["api_formats"], json!(["openai:responses"]));
+    }
+
+    #[test]
     fn parse_models_response_page_reads_claude_pagination_state() {
         let parsed = parse_models_response_page(
             "claude:messages",
@@ -1243,13 +1293,71 @@ mod tests {
         assert_eq!(
             model_ids,
             vec![
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
                 "gpt-5.5",
                 "gpt-5.4",
                 "gpt-5.4-mini",
-                "gpt-5.3-codex",
-                "gpt-5.3-codex-spark",
+                "gpt-5.2",
+                "codex-auto-review",
             ]
         );
+        let sol = models
+            .iter()
+            .find(|model| model["id"] == "gpt-5.6-sol")
+            .expect("Sol preset");
+        assert_eq!(sol["default_reasoning_level"], "low");
+        assert_eq!(
+            sol["supported_reasoning_levels"]
+                .as_array()
+                .expect("reasoning levels")
+                .iter()
+                .filter_map(|level| level["effort"].as_str())
+                .collect::<Vec<_>>(),
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(sol["multi_agent_version"], "v2");
+        assert_eq!(sol["supports_image_detail_original"], true);
+        assert_eq!(sol["context_window"], 372_000);
+
+        for model_id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .expect("GPT-5.6 Codex preset");
+            assert_eq!(model["shell_type"], "shell_command");
+            assert_eq!(model["comp_hash"], "3000");
+            assert_eq!(model["experimental_supported_tools"], json!([]));
+            assert_eq!(model["tool_mode"], "code_mode_only");
+            assert_eq!(model["prefer_websockets"], true);
+            assert_eq!(model["reasoning_summary_format"], "experimental");
+            assert_eq!(model["truncation_policy"]["limit"], 10_000);
+            assert_eq!(model["minimal_client_version"], "0.144.0");
+            assert!(model.get("effective_context_window_percent").is_none());
+        }
+
+        let luna = models
+            .iter()
+            .find(|model| model["id"] == "gpt-5.6-luna")
+            .expect("Luna preset");
+        assert_eq!(luna["default_reasoning_level"], "medium");
+        assert_eq!(luna["multi_agent_version"], "v1");
+        assert!(!luna["supported_reasoning_levels"]
+            .as_array()
+            .expect("reasoning levels")
+            .iter()
+            .any(|level| level["effort"] == "ultra"));
+
+        let auto_review = models
+            .iter()
+            .find(|model| model["id"] == "codex-auto-review")
+            .expect("Codex auto review preset");
+        assert_eq!(auto_review["visibility"], "hide");
+        assert_eq!(auto_review["supported_in_api"], true);
+        assert_eq!(auto_review["default_reasoning_level"], "medium");
+        assert_eq!(auto_review["default_reasoning_summary"], "none");
+        assert_eq!(auto_review["use_responses_lite"], false);
     }
 
     #[test]

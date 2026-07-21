@@ -13,7 +13,9 @@ use crate::{usage::GatewaySyncReportRequest, AppState, GatewayError};
 pub(crate) use self::adaptation::{
     maybe_build_provider_private_stream_normalizer, ProviderPrivateStreamNormalizer,
 };
-pub(crate) use self::api::gemini_generate_content_response_has_visible_output;
+pub(crate) use self::api::{
+    gemini_generate_content_response_has_visible_output, CODEX_RESPONSES_LITE_HEADER,
+};
 pub(crate) use self::finalize::common::LocalCoreSyncFinalizeOutcome;
 pub(crate) use self::finalize::internal::{
     maybe_bridge_standard_sync_json_to_stream, maybe_build_stream_response_rewriter,
@@ -48,16 +50,17 @@ pub(crate) use self::planner::{
     build_standard_family_stream_plan_and_reports, build_standard_family_sync_attempt_source,
     build_standard_family_sync_plan_and_reports, build_standard_stream_plan_from_decision,
     build_standard_sync_plan_from_decision, candidate_auth_channel_skip_reason,
-    extract_pool_sticky_session_token, maybe_build_stream_decision_payload,
-    maybe_build_stream_plan_payload, maybe_build_sync_decision_payload,
-    maybe_build_sync_plan_payload, planner_is_matching_stream_request, provider_key_pool_score_id,
-    provider_key_pool_score_scope, read_candidate_transport_snapshot,
-    record_local_runtime_candidate_skip_reason,
-    set_local_openai_chat_execution_exhausted_diagnostic,
-    set_local_openai_image_execution_exhausted_diagnostic, CandidateFailureDiagnostic,
-    CandidateFailureDiagnosticKind, EligibleLocalExecutionCandidate, GatewayAuthApiKeySnapshot,
-    GatewayProviderTransportSnapshot, LocalExecutionAttemptSource, LocalExecutionCandidateKind,
-    LocalResolvedOAuthRequestAuth, PlannerAppState, SkippedLocalExecutionCandidate,
+    codex_model_capabilities_for_transport, extract_pool_sticky_session_token,
+    maybe_build_stream_decision_payload, maybe_build_stream_plan_payload,
+    maybe_build_sync_decision_payload, maybe_build_sync_plan_payload,
+    planner_is_matching_stream_request, provider_key_pool_score_id, provider_key_pool_score_scope,
+    read_candidate_transport_snapshot, record_local_runtime_candidate_skip_reason,
+    resolve_upstream_is_stream_for_provider, set_local_openai_chat_execution_exhausted_diagnostic,
+    set_local_openai_image_execution_exhausted_diagnostic, validate_final_openai_provider_request,
+    CandidateFailureDiagnostic, CandidateFailureDiagnosticKind, EligibleLocalExecutionCandidate,
+    GatewayAuthApiKeySnapshot, GatewayProviderTransportSnapshot, LocalExecutionAttemptSource,
+    LocalExecutionCandidateKind, LocalResolvedOAuthRequestAuth, PlannerAppState,
+    SkippedLocalExecutionCandidate,
 };
 pub(crate) use self::pure::*;
 pub(crate) use self::transport::{

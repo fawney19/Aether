@@ -1,7 +1,5 @@
 # Format Enum Mapping
 
-Last audited: 2026-06-03
-
 Status values used below:
 
 - `native`: same semantic value exists in the target format.
@@ -16,19 +14,19 @@ Provider-specific types: `OpenAiChatReasoningEffort` for Chat `reasoning_effort`
 | Source field | Source value | Target field | Target value | Status |
 | --- | --- | --- | --- | --- |
 | Chat `reasoning_effort` | `none` | Responses `reasoning.effort` | `none` | native |
-| Chat `reasoning_effort` | `minimal` | Responses `reasoning.effort` | `minimal` | native |
+| Chat `reasoning_effort` | `minimal` | Responses `reasoning.effort` | `minimal` | native when the target model supports it; blocked for GPT-5.6 |
 | Chat `reasoning_effort` | `low` | Responses `reasoning.effort` | `low` | native |
 | Chat `reasoning_effort` | `medium` | Responses `reasoning.effort` | `medium` | native |
 | Chat `reasoning_effort` | `high` | Responses `reasoning.effort` | `high` | native |
 | Chat `reasoning_effort` | `xhigh` | Responses `reasoning.effort` | `xhigh` | native |
-| Chat `reasoning_effort` | `max` | Responses `reasoning.effort` | none | blocked, invalid OpenAI enum |
+| Chat `reasoning_effort` | `max` | Responses `reasoning.effort` | `max` | native for GPT-5.6; blocked for models that do not publish `max` |
 | Responses `reasoning.effort` | `none` | Chat `reasoning_effort` | `none` | native |
-| Responses `reasoning.effort` | `minimal` | Chat `reasoning_effort` | `minimal` | native |
+| Responses `reasoning.effort` | `minimal` | Chat `reasoning_effort` | `minimal` | native when the target model supports it; blocked for GPT-5.6 |
 | Responses `reasoning.effort` | `low` | Chat `reasoning_effort` | `low` | native |
 | Responses `reasoning.effort` | `medium` | Chat `reasoning_effort` | `medium` | native |
 | Responses `reasoning.effort` | `high` | Chat `reasoning_effort` | `high` | native |
 | Responses `reasoning.effort` | `xhigh` | Chat `reasoning_effort` | `xhigh` | native |
-| Responses `reasoning.effort` | `max` | Chat `reasoning_effort` | none | blocked, invalid Responses enum |
+| Responses `reasoning.effort` | `max` | Chat `reasoning_effort` | `max` | native for GPT-5.6; blocked for models that do not publish `max` |
 | Responses `reasoning.summary` | any | Chat | none | blocked |
 | Responses `reasoning.budget_tokens` | any | Chat | none | blocked |
 
@@ -42,7 +40,9 @@ Internal model directive values:
 | `medium` | `medium` | `medium` | `medium` | `medium` | Budget maps to `2048`. |
 | `high` | `high` | `high` | `high` | `high` | Budget maps to `4096`. |
 | `xhigh` | `xhigh` | `xhigh` | `xhigh` | `high` | Budget maps to `8192`. |
-| `max` | `xhigh` | `xhigh` | `max` | `high` | Internal directive only; not accepted as raw OpenAI input. |
+| `max` | `max` for GPT-5.6 | `max` for GPT-5.6 | `max` | `high` | OpenAI emission is capability-gated by the resolved model. |
+
+GPT-5.6 (`gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`) publishes `none`, `low`, `medium`, `high`, `xhigh`, and `max`, and does not support `minimal`. Additional non-empty effort values advertised by a model are preserved verbatim across OpenAI Chat and Responses conversion. `ultra` is a Codex client preset that resolves to `max` before transmission and is not an OpenAI wire effort. Known effort capabilities are validated against the resolved provider model, so aliases mapped to GPT-5.6 receive the GPT-5.6 contract while concrete model families keep their published constraints.
 
 ## Tool Choice
 

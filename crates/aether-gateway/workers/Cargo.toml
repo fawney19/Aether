@@ -1,0 +1,16 @@
+[package]
+name = "aether-gateway-workers"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Gateway background worker coordination and lease supervision"
+
+[dependencies]
+aether-runtime-state.workspace = true
+aether-task-runtime.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+aether-test-support.workspace = true

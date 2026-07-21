@@ -631,38 +631,20 @@ async function loadBalances() {
   }
 }
 
-const LEGACY_API_FORMAT_MAP: Record<string, string> = {
-  CLAUDE: 'claude:messages',
-  CLAUDE_MESSAGES: 'claude:messages',
-  OPENAI: 'openai:chat',
-  OPENAI_RESPONSES: 'openai:responses',
-  OPENAI_RESPONSES_COMPACT: 'openai:responses:compact',
-  OPENAI_VIDEO: 'openai:video',
-  GEMINI: 'gemini:generate_content',
-  GEMINI_GENERATE_CONTENT: 'gemini:generate_content',
-  GEMINI_VIDEO: 'gemini:video',
-  GEMINI_FILES: 'gemini:files',
-}
-
 function normalizeApiFormatKey(value: string | null | undefined): string {
-  const raw = String(value || '').trim()
-  if (!raw) return ''
+  const normalized = normalizeApiFormatAlias(value)
+  if (!normalized) return ''
 
-  if (raw.includes(':')) {
-    const [family, kind] = raw.split(':', 2)
-    const familyNorm = family?.trim().toLowerCase()
-    const kindNorm = kind?.trim().toLowerCase()
-    if (familyNorm === 'claude' && ['chat', 'cli', 'messages'].includes(kindNorm)) {
+  if (normalized.includes(':')) {
+    const { family, kind } = parseApiFormat(normalized)
+    if (family === 'claude' && ['chat', 'cli', 'messages'].includes(kind)) {
       return 'claude:messages'
     }
-    if (familyNorm === 'gemini' && ['chat', 'cli', 'generate_content'].includes(kindNorm)) {
+    if (family === 'gemini' && ['chat', 'cli', 'generate_content'].includes(kind)) {
       return 'gemini:generate_content'
     }
-    if (familyNorm && kindNorm) return `${familyNorm}:${kindNorm}`
   }
-
-  const legacy = raw.toUpperCase().replace(/-/g, '_')
-  return LEGACY_API_FORMAT_MAP[legacy] || raw.toLowerCase()
+  return normalized
 }
 
 function normalizePriorityMap(

@@ -165,21 +165,28 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
             .map(|item| item.group_key.clone())
             .collect();
         let snapshots = if state.has_auth_api_key_data_reader() {
+            // The bulk result is authoritative here. Historical aggregates can contain many
+            // deleted key IDs, so retrying every missing ID as an individual lookup would turn a
+            // single leaderboard request into an unbounded N+1 query pattern.
             Some(
                 state
-                    .resolve_auth_api_key_snapshots_by_ids(&api_key_ids)
+                    .list_auth_api_key_snapshots_by_ids(&api_key_ids)
                     .await?,
             )
         } else {
             None
         };
-        let api_key_names = if state.has_auth_api_key_data_reader() {
-            state
-                .resolve_auth_api_key_names_by_ids(&api_key_ids)
-                .await?
-        } else {
-            std::collections::BTreeMap::new()
-        };
+        let api_key_names = snapshots
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|snapshot| {
+                snapshot
+                    .api_key_name
+                    .clone()
+                    .map(|name| (snapshot.api_key_id.clone(), name))
+            })
+            .collect();
         let mut leaderboard = build_api_key_leaderboard_items_from_summaries(
             &summaries,
             snapshots.as_deref(),

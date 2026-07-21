@@ -32,275 +32,298 @@
     </template>
 
     <form @submit.prevent="handleSubmit">
-      <div class="grid grid-cols-2 gap-0">
-        <!-- 左侧：基础设置 -->
-        <div class="pr-6 space-y-4">
-          <div class="flex items-center gap-2 pb-2 border-b border-border/60">
+      <div class="space-y-5">
+        <section class="space-y-4">
+          <div class="flex items-center gap-2 border-b border-border/60 pb-2">
             <span class="text-sm font-medium">基础设置</span>
           </div>
 
-          <div class="space-y-2">
-            <Label
-              for="form-name"
-              class="text-sm font-medium"
-            >密钥名称</Label>
-            <Input
-              id="form-name"
-              v-model="form.name"
-              type="text"
-              placeholder="例如: 用户A专用"
-              class="h-10"
-            />
-          </div>
-
-          <div class="space-y-2">
-            <Label
-              for="form-expires-at"
-              class="text-sm font-medium"
-            >有效期设置</Label>
-            <div class="flex items-center gap-2">
-              <div class="relative flex-1">
-                <Input
-                  id="form-expires-at"
-                  :model-value="form.expires_at || ''"
-                  type="date"
-                  :min="minExpiryDate"
-                  class="h-9 pr-8"
-                  :placeholder="form.expires_at ? '' : '永不过期'"
-                  @update:model-value="(v) => form.expires_at = v || undefined"
-                />
-                <button
-                  v-if="form.expires_at"
-                  type="button"
-                  class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                  title="清空（永不过期）"
-                  @click="clearExpiryDate"
-                >
-                  <X class="h-4 w-4" />
-                </button>
-              </div>
-              <label
-                class="flex items-center gap-1.5 border rounded-md px-2 py-1.5 bg-muted/50 cursor-pointer text-xs whitespace-nowrap"
-                :class="!form.expires_at ? 'opacity-50 cursor-not-allowed' : ''"
-              >
-                <input
-                  v-model="form.auto_delete_on_expiry"
-                  type="checkbox"
-                  class="h-3.5 w-3.5 rounded border-gray-300 cursor-pointer"
-                  :disabled="!form.expires_at"
-                >
-                到期删除
-              </label>
-            </div>
-            <p class="text-xs text-muted-foreground">
-              {{ form.expires_at ? '到期后' + (form.auto_delete_on_expiry ? '自动删除' : '仅禁用') + '（当天 23:59 失效）' : '留空表示永不过期' }}
-            </p>
-          </div>
-
-          <!-- 额度 -->
-          <div class="space-y-2">
-            <Label class="text-sm font-medium">额度</Label>
-            <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
-                <Input
-                  v-if="!isEditMode && !form.unlimited_balance"
-                  id="form-balance"
-                  :model-value="form.initial_balance_usd ?? ''"
-                  type="number"
-                  step="0.01"
-                  min="0.01"
-                  placeholder="初始额度 (USD)"
-                  class="h-10"
-                  @update:model-value="(v) => form.initial_balance_usd = parseNumberInput(v, { allowFloat: true, min: 0.01 })"
-                />
-                <span
-                  v-else
-                  class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
-                >{{ balanceDisplayText }}</span>
-              </div>
-              <Switch
-                :model-value="form.unlimited_balance ?? false"
-                class="shrink-0"
-                @update:model-value="(v) => form.unlimited_balance = v"
+          <div class="grid gap-4 md:grid-cols-2">
+            <div class="space-y-2 md:col-span-2">
+              <Label
+                for="form-name"
+                class="text-sm font-medium"
+              >密钥名称</Label>
+              <Input
+                id="form-name"
+                v-model="form.name"
+                type="text"
+                placeholder="例如: 用户A专用"
+                class="h-10"
               />
             </div>
-            <p
-              v-if="isEditMode"
-              class="text-xs text-muted-foreground"
-            >
-              {{ form.unlimited_balance ? '该 Key 当前使用独立无限额度。' : '该 Key 当前按独立钱包余额限制；增减金额请在列表页使用“资金”操作。' }}
-            </p>
-          </div>
 
-          <div class="space-y-2">
-            <Label
-              for="form-ip-rules"
-              class="text-sm font-medium"
-            >IP 限制</Label>
-            <Input
-              id="form-ip-rules"
-              v-model="form.ip_rules_text"
-              class="h-10"
-              placeholder="例如：203.0.113.10, 10.0.0.0/24, !10.0.0.13"
-            />
-            <p class="text-xs text-muted-foreground">
-              留空表示不限制；支持 IP、CIDR、IPv4 通配符、*，用 ! 前缀拒绝，多个规则用英文逗号分隔
-            </p>
-          </div>
+            <div class="space-y-2">
+              <Label class="text-sm font-medium">额度</Label>
+              <div class="flex items-center gap-3">
+                <div class="min-w-0 flex-1">
+                  <Input
+                    v-if="!isEditMode && !form.unlimited_balance"
+                    id="form-balance"
+                    :model-value="form.initial_balance_usd ?? ''"
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    placeholder="初始额度 (USD)"
+                    class="h-10"
+                    @update:model-value="(v) => form.initial_balance_usd = parseNumberInput(v, { allowFloat: true, min: 0.01 })"
+                  />
+                  <span
+                    v-else
+                    class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
+                  >{{ balanceDisplayText }}</span>
+                </div>
+                <Switch
+                  :model-value="form.unlimited_balance ?? false"
+                  class="shrink-0"
+                  @update:model-value="(v) => form.unlimited_balance = v"
+                />
+              </div>
+              <p
+                v-if="isEditMode"
+                class="text-xs text-muted-foreground"
+              >
+                {{ form.unlimited_balance ? '该 Key 当前使用独立无限额度。' : '该 Key 当前按独立钱包余额限制；增减金额请在列表页使用“资金”操作。' }}
+              </p>
+            </div>
 
-          <div class="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
+            <div class="space-y-2">
+              <Label
+                for="form-expires-at"
+                class="text-sm font-medium"
+              >有效期</Label>
+              <div class="flex items-center gap-2">
+                <div class="relative min-w-0 flex-1">
+                  <Input
+                    id="form-expires-at"
+                    :model-value="form.expires_at || ''"
+                    type="date"
+                    :min="minExpiryDate"
+                    class="h-10 pr-8"
+                    :placeholder="form.expires_at ? '' : '永不过期'"
+                    @update:model-value="(v) => form.expires_at = v || undefined"
+                  />
+                  <button
+                    v-if="form.expires_at"
+                    type="button"
+                    class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    title="清空（永不过期）"
+                    @click="clearExpiryDate"
+                  >
+                    <X class="h-4 w-4" />
+                  </button>
+                </div>
+                <label
+                  class="flex h-10 items-center gap-1.5 whitespace-nowrap rounded-md border bg-muted/50 px-2 text-xs cursor-pointer"
+                  :class="!form.expires_at ? 'opacity-50 cursor-not-allowed' : ''"
+                >
+                  <input
+                    v-model="form.auto_delete_on_expiry"
+                    type="checkbox"
+                    class="h-3.5 w-3.5 rounded border-gray-300 cursor-pointer"
+                    :disabled="!form.expires_at"
+                  >
+                  到期删除
+                </label>
+              </div>
+              <p class="text-xs text-muted-foreground">
+                {{ form.expires_at ? '到期后' + (form.auto_delete_on_expiry ? '自动删除' : '仅禁用') + '（当天 23:59 失效）' : '留空表示永不过期' }}
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section>
+          <div class="rounded-lg border border-border bg-muted/30 px-4 py-3">
             <div class="flex items-center justify-between gap-3">
               <Label class="text-sm font-medium">敏感信息保护</Label>
               <Switch v-model="form.chat_pii_redaction_enabled" />
             </div>
-            <div class="flex items-center justify-between gap-3">
+            <div
+              v-if="form.chat_pii_redaction_enabled"
+              class="mt-3 flex items-center justify-between gap-3 border-t border-border/60 pt-3"
+            >
               <Label class="text-sm font-medium">占位符说明</Label>
-              <Switch
-                v-model="form.chat_pii_redaction_placeholder_notice"
-                :disabled="!form.chat_pii_redaction_enabled"
-              />
+              <Switch v-model="form.chat_pii_redaction_placeholder_notice" />
             </div>
           </div>
-        </div>
+        </section>
 
-        <!-- 右侧：访问限制 -->
-        <div class="pl-6 space-y-4 border-l border-border">
-          <div class="flex items-center gap-2 pb-2 border-b border-border/60">
-            <span class="text-sm font-medium">访问限制</span>
-          </div>
-
-          <!-- 提供商 -->
-          <div class="space-y-2">
-            <Label class="text-sm font-medium">允许的提供商</Label>
-            <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
-                <MultiSelect
-                  v-model="form.allowed_providers"
-                  :options="providerOptions"
-                  :search-threshold="0"
-                  :disabled="form.provider_unrestricted"
-                  :placeholder="form.provider_unrestricted ? '不限制' : '未选择（全部禁用）'"
-                  empty-text="暂无可用提供商"
-                  no-results-text="未找到匹配的提供商"
-                  search-placeholder="搜索提供商名称..."
+        <Collapsible
+          v-model:open="accessRestrictionsExpanded"
+          class="rounded-lg border border-border"
+        >
+          <CollapsibleTrigger as-child>
+            <button
+              type="button"
+              class="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/50"
+            >
+              <span class="text-sm font-medium">访问限制</span>
+              <span class="flex items-center gap-1.5 text-xs text-muted-foreground">
+                {{ accessRestrictionsExpanded ? '收起' : '展开' }}
+                <ChevronDown
+                  class="h-4 w-4 transition-transform"
+                  :class="accessRestrictionsExpanded ? 'rotate-180' : ''"
                 />
-              </div>
-              <Switch
-                v-model="form.provider_unrestricted"
-                class="shrink-0"
-              />
-            </div>
-          </div>
+              </span>
+            </button>
+          </CollapsibleTrigger>
 
-          <!-- 端点 -->
-          <div class="space-y-2">
-            <Label class="text-sm font-medium">允许的端点</Label>
-            <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
-                <MultiSelect
-                  v-model="form.allowed_api_formats"
-                  :options="apiFormatOptions"
-                  :search-threshold="0"
-                  :disabled="form.api_format_unrestricted"
-                  :placeholder="form.api_format_unrestricted ? '不限制' : '未选择（全部禁用）'"
-                  empty-text="暂无可用端点"
-                  no-results-text="未找到匹配的端点"
-                  search-placeholder="搜索端点..."
-                />
+          <CollapsibleContent>
+            <div class="grid gap-y-4 border-t border-border px-4 py-4">
+              <!-- 提供商 -->
+              <div class="space-y-2">
+                <Label class="text-sm font-medium">允许的提供商</Label>
+                <div class="flex items-center gap-3">
+                  <div class="flex-1 min-w-0">
+                    <MultiSelect
+                      v-model="form.allowed_providers"
+                      :options="providerOptions"
+                      :search-threshold="0"
+                      teleport
+                      :disabled="form.provider_unrestricted"
+                      :placeholder="form.provider_unrestricted ? '不限制' : '未选择（全部禁用）'"
+                      empty-text="暂无可用提供商"
+                      no-results-text="未找到匹配的提供商"
+                      search-placeholder="搜索提供商名称..."
+                    />
+                  </div>
+                  <Switch
+                    v-model="form.provider_unrestricted"
+                    class="shrink-0"
+                  />
+                </div>
               </div>
-              <Switch
-                v-model="form.api_format_unrestricted"
-                class="shrink-0"
-              />
-            </div>
-          </div>
 
-          <!-- 模型 -->
-          <div class="space-y-2">
-            <Label class="text-sm font-medium">允许的模型</Label>
-            <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
-                <MultiSelect
-                  v-model="form.allowed_models"
-                  :options="modelOptions"
-                  :search-threshold="0"
-                  :disabled="form.model_unrestricted"
-                  :placeholder="form.model_unrestricted ? '不限制' : '未选择（全部禁用）'"
-                  empty-text="暂无可用模型"
-                  no-results-text="未找到匹配的模型"
-                  search-placeholder="输入模型名搜索..."
-                />
+              <!-- 端点 -->
+              <div class="space-y-2">
+                <Label class="text-sm font-medium">允许的端点</Label>
+                <div class="flex items-center gap-3">
+                  <div class="flex-1 min-w-0">
+                    <MultiSelect
+                      v-model="form.allowed_api_formats"
+                      :options="apiFormatOptions"
+                      :search-threshold="0"
+                      teleport
+                      :disabled="form.api_format_unrestricted"
+                      :placeholder="form.api_format_unrestricted ? '不限制' : '未选择（全部禁用）'"
+                      empty-text="暂无可用端点"
+                      no-results-text="未找到匹配的端点"
+                      search-placeholder="搜索端点..."
+                    />
+                  </div>
+                  <Switch
+                    v-model="form.api_format_unrestricted"
+                    class="shrink-0"
+                  />
+                </div>
               </div>
-              <Switch
-                v-model="form.model_unrestricted"
-                class="shrink-0"
-              />
-            </div>
-          </div>
 
-          <div class="space-y-2">
-            <Label
-              for="form-rate-limit"
-              class="text-sm font-medium"
-            >速率限制 (请求/分钟)</Label>
-            <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
+              <!-- 模型 -->
+              <div class="space-y-2">
+                <Label class="text-sm font-medium">允许的模型</Label>
+                <div class="flex items-center gap-3">
+                  <div class="flex-1 min-w-0">
+                    <MultiSelect
+                      v-model="form.allowed_models"
+                      :options="modelOptions"
+                      :search-threshold="0"
+                      teleport
+                      :disabled="form.model_unrestricted"
+                      :placeholder="form.model_unrestricted ? '不限制' : '未选择（全部禁用）'"
+                      empty-text="暂无可用模型"
+                      no-results-text="未找到匹配的模型"
+                      search-placeholder="输入模型名搜索..."
+                    />
+                  </div>
+                  <Switch
+                    v-model="form.model_unrestricted"
+                    class="shrink-0"
+                  />
+                </div>
+              </div>
+
+              <div class="space-y-2">
+                <Label
+                  for="form-rate-limit"
+                  class="text-sm font-medium"
+                >速率限制 (请求/分钟)</Label>
+                <div class="flex items-center gap-3">
+                  <div class="flex-1 min-w-0">
+                    <Input
+                      v-if="!form.rate_limit_inherited"
+                      id="form-rate-limit"
+                      :model-value="form.rate_limit ?? ''"
+                      type="number"
+                      min="0"
+                      max="10000"
+                      placeholder="0 = 不限速"
+                      class="h-10"
+                      @update:model-value="(v) => form.rate_limit = parseNumberInput(v, { min: 0, max: 10000 })"
+                    />
+                    <span
+                      v-else
+                      class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
+                    >跟随系统</span>
+                  </div>
+                  <Switch
+                    v-model="form.rate_limit_inherited"
+                    class="shrink-0"
+                  />
+                </div>
+              </div>
+
+              <div class="space-y-2">
+                <Label
+                  for="form-concurrent-limit"
+                  class="text-sm font-medium"
+                >并发限制</Label>
+                <div class="flex items-center gap-3">
+                  <div class="flex-1 min-w-0">
+                    <Input
+                      v-if="!form.concurrent_limit_inherited"
+                      id="form-concurrent-limit"
+                      :model-value="form.concurrent_limit ?? ''"
+                      type="number"
+                      min="0"
+                      max="10000"
+                      placeholder="0 = 不限制"
+                      class="h-10"
+                      @update:model-value="(v) => form.concurrent_limit = parseNumberInput(v, { min: 0, max: 10000 })"
+                    />
+                    <span
+                      v-else
+                      class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
+                    >不限制</span>
+                  </div>
+                  <Switch
+                    v-model="form.concurrent_limit_inherited"
+                    class="shrink-0"
+                  />
+                </div>
+                <p class="text-xs text-muted-foreground">
+                  留空表示不限制，填 0 也表示不限制并发
+                </p>
+              </div>
+
+              <div class="space-y-2">
+                <Label
+                  for="form-ip-rules"
+                  class="text-sm font-medium"
+                >IP 限制</Label>
                 <Input
-                  v-if="!form.rate_limit_inherited"
-                  id="form-rate-limit"
-                  :model-value="form.rate_limit ?? ''"
-                  type="number"
-                  min="0"
-                  max="10000"
-                  placeholder="0 = 不限速"
+                  id="form-ip-rules"
+                  v-model="form.ip_rules_text"
                   class="h-10"
-                  @update:model-value="(v) => form.rate_limit = parseNumberInput(v, { min: 0, max: 10000 })"
+                  placeholder="例如：203.0.113.10, 10.0.0.0/24"
                 />
-                <span
-                  v-else
-                  class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
-                >跟随系统</span>
+                <p class="text-xs text-muted-foreground">
+                  留空表示不限制；支持 IP、CIDR、IPv4 通配符、*，用 ! 前缀拒绝
+                </p>
               </div>
-              <Switch
-                v-model="form.rate_limit_inherited"
-                class="shrink-0"
-              />
             </div>
-          </div>
-
-          <div class="space-y-2">
-            <Label
-              for="form-concurrent-limit"
-              class="text-sm font-medium"
-            >并发限制</Label>
-            <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
-                <Input
-                  v-if="!form.concurrent_limit_inherited"
-                  id="form-concurrent-limit"
-                  :model-value="form.concurrent_limit ?? ''"
-                  type="number"
-                  min="0"
-                  max="10000"
-                  placeholder="0 = 不限制"
-                  class="h-10"
-                  @update:model-value="(v) => form.concurrent_limit = parseNumberInput(v, { min: 0, max: 10000 })"
-                />
-                <span
-                  v-else
-                  class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
-                >不限制</span>
-              </div>
-              <Switch
-                v-model="form.concurrent_limit_inherited"
-                class="shrink-0"
-              />
-            </div>
-            <p class="text-xs text-muted-foreground">
-              留空表示不限制，填 0 也表示不限制并发
-            </p>
-          </div>
-        </div>
+          </CollapsibleContent>
+        </Collapsible>
       </div>
     </form>
 
@@ -328,12 +351,15 @@
 import { ref, computed, watch } from 'vue'
 import {
   Dialog,
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
   Button,
   Input,
   Label,
   Switch,
 } from '@/components/ui'
-import { Plus, SquarePen, X } from 'lucide-vue-next'
+import { ChevronDown, Plus, SquarePen, X } from 'lucide-vue-next'
 import { useFormDialog } from '@/composables/useFormDialog'
 import { MultiSelect } from '@/components/common'
 import { getProvidersSummary } from '@/api/endpoints/providers'
@@ -399,6 +425,7 @@ const emit = defineEmits<{
 
 const isOpen = computed(() => props.open)
 const saving = ref(false)
+const accessRestrictionsExpanded = ref(false)
 
 // 选项数据
 const providers = ref<ProviderWithEndpointsSummary[]>([])
@@ -593,6 +620,7 @@ function setSaving(value: boolean) {
 // 监听打开状态，加载选项数据
 watch(isOpen, (val) => {
   if (val) {
+    accessRestrictionsExpanded.value = false
     loadAccessRestrictionOptions()
   }
 })

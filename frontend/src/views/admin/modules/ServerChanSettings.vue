@@ -154,16 +154,18 @@ onMounted(() => {
 
 async function loadConfig() {
   try {
-    const [moduleStatus, sendKey, template] = await Promise.all([
+    const [moduleStatus, configs] = await Promise.all([
       modulesApi.getStatus('server_chan_push'),
-      adminApi.getSystemConfig(CONFIG_KEYS.send_key),
-      adminApi.getSystemConfig(CONFIG_KEYS.template),
+      adminApi.getAllSystemConfigs({ cacheTtlMs: 30_000 }),
     ])
+    const configsByKey = new Map(configs.map(config => [config.key, config]))
+    const sendKey = configsByKey.get(CONFIG_KEYS.send_key)
+    const template = configsByKey.get(CONFIG_KEYS.template)
 
     enabled.value = moduleStatus.enabled === true
-    sendKeyIsSet.value = sendKey.is_set === true
+    sendKeyIsSet.value = sendKey?.is_set === true
     sendKeyInput.value = ''
-    templateInput.value = typeof template.value === 'string' ? template.value : ''
+    templateInput.value = typeof template?.value === 'string' ? template.value : ''
   } catch (err) {
     error(parseApiError(err, '加载 Server 酱推送配置失败'))
     log.error('加载 Server 酱推送配置失败:', err)

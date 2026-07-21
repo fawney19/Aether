@@ -71,6 +71,7 @@ pub(crate) fn build_passthrough_stream_plan_from_decision(
         .content_type
         .take()
         .or_else(|| provider_request_headers.get("content-type").cloned());
+    let stream = payload.upstream_is_stream;
     let plan = build_ai_execution_plan_from_decision(
         &mut payload,
         AiExecutionPlanFromDecisionParts {
@@ -84,7 +85,7 @@ pub(crate) fn build_passthrough_stream_plan_from_decision(
                 body_bytes_b64: None,
                 body_ref: None,
             },
-            stream: true,
+            stream,
         },
     );
 

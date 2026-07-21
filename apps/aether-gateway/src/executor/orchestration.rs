@@ -896,7 +896,7 @@ async fn standard_text_sync_heartbeat_response_body_bytes(
 ) -> Vec<u8> {
     let status_code = response.status().as_u16();
     let (parts, body) = response.into_parts();
-    match to_bytes(body, usize::MAX).await {
+    match to_bytes(body, crate::headers::max_internal_buffered_body_bytes()).await {
         Ok(bytes) => {
             let body = match standard_text_sync_heartbeat_restore_response_body(
                 redaction_slot,
@@ -1197,7 +1197,12 @@ async fn openai_image_sync_heartbeat_final_bytes(
 
 async fn openai_image_sync_heartbeat_response_body_bytes(response: Response<Body>) -> Vec<u8> {
     let status_code = response.status().as_u16();
-    match to_bytes(response.into_body(), usize::MAX).await {
+    match to_bytes(
+        response.into_body(),
+        crate::headers::max_internal_buffered_body_bytes(),
+    )
+    .await
+    {
         Ok(bytes) if status_code < 400 && !bytes.is_empty() => bytes.to_vec(),
         Ok(bytes) if status_code >= 400 => {
             openai_image_sync_heartbeat_error_body_from_response(status_code, bytes.as_ref())

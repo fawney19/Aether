@@ -455,6 +455,25 @@ fn classifies_admin_codex_reset_credit_consume_as_admin_proxy_route() {
 }
 
 #[test]
+fn admin_codex_reset_credit_consume_buffers_idempotency_key_body() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/admin/endpoints/keys/key-codex/codex-reset-credit/consume"
+        .parse()
+        .expect("uri should parse");
+    let decision = classify_control_route(&http::Method::POST, &uri, &headers)
+        .expect("decision should resolve");
+    let context = GatewayPublicRequestContext::from_request_parts(
+        "trace-codex-reset-credit-consume",
+        &http::Method::POST,
+        &uri,
+        &headers,
+        Some(decision),
+    );
+
+    assert!(local_proxy_route_requires_buffered_body(&context));
+}
+
+#[test]
 fn admin_refresh_provider_quota_buffers_request_body_for_key_selection() {
     let headers = headers(&[]);
     let uri: Uri = "/api/admin/endpoints/providers/provider-codex/refresh-quota"

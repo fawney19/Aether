@@ -257,7 +257,7 @@ fn valid_ipv4_wildcard_pattern(pattern: &str) -> bool {
             .all(|part| *part == "*" || part.parse::<u8>().is_ok())
 }
 
-fn ip_rule_pattern_matches(pattern: &str, remote_ip: IpAddr) -> bool {
+pub(crate) fn ip_rule_pattern_matches(pattern: &str, remote_ip: IpAddr) -> bool {
     if pattern == "*" {
         return true;
     }

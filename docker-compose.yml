@@ -32,6 +32,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    logging:
+      driver: local
+      options:
+        max-size: "100m"
+        max-file: "3"
+        compress: "true"
     restart: unless-stopped
 
   redis:

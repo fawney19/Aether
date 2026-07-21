@@ -1,4 +1,11 @@
-use std::{borrow::Cow, collections::BTreeMap, fmt, io::Read, net::SocketAddr, sync::LazyLock};
+use std::{
+    borrow::Cow,
+    collections::BTreeMap,
+    fmt,
+    io::Read,
+    net::{IpAddr, SocketAddr},
+    sync::LazyLock,
+};
 
 use crate::constants::*;
 use axum::body::Bytes;
@@ -8,6 +15,11 @@ use uuid::Uuid;
 
 const DEFAULT_MAX_REQUEST_BODY_MB: u64 = 64;
 const MAX_REQUEST_BODY_MB_ENV: &str = "AETHER_MAX_REQUEST_BODY_MB";
+const DEFAULT_MAX_REDACTED_SYNC_RESPONSE_BODY_MB: u64 = 64;
+const MAX_REDACTED_SYNC_RESPONSE_BODY_MB_ENV: &str = "AETHER_MAX_REDACTED_SYNC_RESPONSE_BODY_MB";
+const DEFAULT_MAX_INTERNAL_BUFFERED_BODY_MB: u64 = 128;
+const MAX_INTERNAL_BUFFERED_BODY_MB_ENV: &str = "AETHER_MAX_INTERNAL_BUFFERED_BODY_MB";
+const TRUSTED_PROXY_CIDRS_ENV: &str = "AETHER_TRUSTED_PROXY_CIDRS";
 
 /// Upper bound applied to a request body after Content-Encoding decoding, and to
 /// uncompressed bodies as-is. Guards against decompression bombs and oversized
@@ -21,8 +33,44 @@ static MAX_REQUEST_BODY_BYTES: LazyLock<u64> = LazyLock::new(|| {
         .saturating_mul(1024 * 1024)
 });
 
+static MAX_REDACTED_SYNC_RESPONSE_BODY_BYTES: LazyLock<u64> = LazyLock::new(|| {
+    std::env::var(MAX_REDACTED_SYNC_RESPONSE_BODY_MB_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_REDACTED_SYNC_RESPONSE_BODY_MB)
+        .saturating_mul(1024 * 1024)
+});
+
+static MAX_INTERNAL_BUFFERED_BODY_BYTES: LazyLock<u64> = LazyLock::new(|| {
+    std::env::var(MAX_INTERNAL_BUFFERED_BODY_MB_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_INTERNAL_BUFFERED_BODY_MB)
+        .saturating_mul(1024 * 1024)
+});
+
+static TRUSTED_PROXY_CIDRS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    std::env::var(TRUSTED_PROXY_CIDRS_ENV)
+        .unwrap_or_else(|_| "127.0.0.0/8,::1/128".to_string())
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && valid_ip_or_cidr(value))
+        .map(ToOwned::to_owned)
+        .collect()
+});
+
 pub(crate) fn max_request_body_bytes() -> u64 {
     *MAX_REQUEST_BODY_BYTES
+}
+
+pub(crate) fn max_redacted_sync_response_body_bytes() -> u64 {
+    *MAX_REDACTED_SYNC_RESPONSE_BODY_BYTES
+}
+
+pub(crate) fn max_internal_buffered_body_bytes() -> usize {
+    usize::try_from(*MAX_INTERNAL_BUFFERED_BODY_BYTES).unwrap_or(usize::MAX)
 }
 
 pub(crate) fn extract_or_generate_trace_id(headers: &http::HeaderMap) -> String {
@@ -60,11 +108,96 @@ pub(crate) fn request_origin_from_headers_and_remote_addr(
     headers: &http::HeaderMap,
     remote_addr: &SocketAddr,
 ) -> RequestOrigin {
-    let mut origin = request_origin_from_headers(headers);
-    if origin.client_ip.is_none() {
-        origin.client_ip = Some(remote_addr.ip().to_string());
+    RequestOrigin {
+        client_ip: Some(effective_client_ip(headers, remote_addr).to_string()),
+        user_agent: header_value_str(headers, http::header::USER_AGENT.as_str())
+            .map(|value| truncate_chars(value.as_str(), 1_000)),
     }
-    origin
+}
+
+pub(crate) fn effective_client_ip(headers: &http::HeaderMap, remote_addr: &SocketAddr) -> IpAddr {
+    let remote_ip = remote_addr.ip();
+    if !trusted_proxy_ip(remote_ip) {
+        return remote_ip;
+    }
+
+    if let Some(real_ip) =
+        header_value_str(headers, "x-real-ip").and_then(|value| value.parse::<IpAddr>().ok())
+    {
+        return real_ip;
+    }
+
+    let forwarded_ips = header_value_str(headers, "x-forwarded-for")
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|segment| segment.trim().parse::<IpAddr>().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    forwarded_ips
+        .iter()
+        .rev()
+        .copied()
+        .find(|ip| !trusted_proxy_ip(*ip))
+        .or_else(|| forwarded_ips.first().copied())
+        .unwrap_or(remote_ip)
+}
+
+fn trusted_proxy_ip(ip: IpAddr) -> bool {
+    TRUSTED_PROXY_CIDRS
+        .iter()
+        .any(|pattern| ip_or_cidr_matches(pattern, ip))
+}
+
+fn valid_ip_or_cidr(value: &str) -> bool {
+    if value.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    let Some((network, prefix)) = value.split_once('/') else {
+        return false;
+    };
+    let Ok(network) = network.trim().parse::<IpAddr>() else {
+        return false;
+    };
+    let Ok(prefix) = prefix.trim().parse::<u8>() else {
+        return false;
+    };
+    match network {
+        IpAddr::V4(_) => prefix <= 32,
+        IpAddr::V6(_) => prefix <= 128,
+    }
+}
+
+fn ip_or_cidr_matches(pattern: &str, ip: IpAddr) -> bool {
+    if let Ok(expected) = pattern.parse::<IpAddr>() {
+        return expected == ip;
+    }
+    let Some((network, prefix)) = pattern.split_once('/') else {
+        return false;
+    };
+    let Ok(prefix) = prefix.trim().parse::<u8>() else {
+        return false;
+    };
+    match (network.trim().parse::<IpAddr>(), ip) {
+        (Ok(IpAddr::V4(network)), IpAddr::V4(ip)) if prefix <= 32 => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            (u32::from(network) & mask) == (u32::from(ip) & mask)
+        }
+        (Ok(IpAddr::V6(network)), IpAddr::V6(ip)) if prefix <= 128 => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            (u128::from(network) & mask) == (u128::from(ip) & mask)
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn request_origin_from_parts(parts: &http::request::Parts) -> RequestOrigin {
@@ -467,7 +600,7 @@ pub(crate) fn header_equals(
 #[cfg(test)]
 mod tests {
     use super::{
-        decoded_request_body_bytes, normalize_request_body_headers_and_bytes,
+        decoded_request_body_bytes, effective_client_ip, normalize_request_body_headers_and_bytes,
         request_origin_from_headers, request_origin_from_headers_and_remote_addr,
         tls_fingerprint_from_headers, RequestBodyNormalizationError, RequestOrigin,
     };
@@ -501,6 +634,46 @@ mod tests {
                 client_ip: Some("203.0.113.8".to_string()),
                 user_agent: Some("Claude-Code/1.0".to_string()),
             }
+        );
+    }
+
+    #[test]
+    fn effective_client_ip_ignores_forwarded_headers_from_untrusted_peers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.4"));
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.8"));
+        let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 443);
+
+        assert_eq!(
+            effective_client_ip(&headers, &remote_addr),
+            remote_addr.ip()
+        );
+    }
+
+    #[test]
+    fn effective_client_ip_accepts_real_ip_from_trusted_loopback_proxy() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.4"));
+        let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+
+        assert_eq!(
+            effective_client_ip(&headers, &remote_addr),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4))
+        );
+    }
+
+    #[test]
+    fn effective_client_ip_walks_forwarded_chain_from_trusted_proxy() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.8, 127.0.0.2"),
+        );
+        let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+
+        assert_eq!(
+            effective_client_ip(&headers, &remote_addr),
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8))
         );
     }
 

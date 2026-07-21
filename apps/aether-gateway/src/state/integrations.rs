@@ -9,7 +9,8 @@ use aether_data_contracts::repository::global_models::{
     StoredAdminProviderModel, UpsertAdminProviderModelRecord,
 };
 use aether_data_contracts::repository::provider_catalog::{
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    ProviderCatalogUpstreamMetadataNamespaceUpdate, StoredProviderCatalogEndpoint,
+    StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use aether_data_contracts::repository::quota::StoredProviderQuotaSnapshot;
 use aether_model_fetch::{
@@ -319,11 +320,43 @@ impl ModelFetchRuntimeState for AppState {
         execution_runtime::execute_execution_runtime_sync_plan(self, None, plan).await
     }
 
-    async fn update_provider_catalog_key(
+    async fn update_provider_catalog_key_model_fetch_state(
         &self,
-        key: &StoredProviderCatalogKey,
+        key_id: &str,
+        allowed_models: Option<&Value>,
+        last_models_fetch_at_unix_secs: Option<u64>,
+        last_models_fetch_error: Option<&str>,
+        updated_at_unix_secs: Option<u64>,
     ) -> Result<(), GatewayError> {
-        AppState::update_provider_catalog_key(self, key).await?;
+        AppState::update_provider_catalog_key_model_fetch_state(
+            self,
+            key_id,
+            allowed_models,
+            last_models_fetch_at_unix_secs,
+            last_models_fetch_error,
+            updated_at_unix_secs,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn update_provider_catalog_key_model_fetch_success(
+        &self,
+        key_id: &str,
+        allowed_models: Option<&Value>,
+        last_models_fetch_at_unix_secs: u64,
+        upstream_metadata_updates: &[ProviderCatalogUpstreamMetadataNamespaceUpdate],
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<(), GatewayError> {
+        AppState::update_provider_catalog_key_model_fetch_success(
+            self,
+            key_id,
+            allowed_models,
+            last_models_fetch_at_unix_secs,
+            upstream_metadata_updates,
+            updated_at_unix_secs,
+        )
+        .await?;
         Ok(())
     }
 

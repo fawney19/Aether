@@ -661,7 +661,7 @@ fn admin_monitoring_snapshots_stay_app_local() {
         "monitoring/resilience/snapshot.rs should define AdminMonitoringResilienceSnapshot locally"
     );
 
-    let data_system = read_workspace_file("crates/aether-data/src/repository/system.rs");
+    let data_system = read_workspace_file("crates/aether-data/runtime/src/repository/system.rs");
     assert!(
         !data_system.contains("AdminMonitoringCacheSnapshot")
             && !data_system.contains("AdminMonitoringResilienceSnapshot"),

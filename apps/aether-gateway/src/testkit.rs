@@ -247,6 +247,7 @@ fn openai_chat_pressure_candidates(
                 priority: 1,
                 api_formats: Some(vec!["openai:chat".to_string()]),
                 endpoint_ids: Some(vec![pressure_endpoint_id(index)]),
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,

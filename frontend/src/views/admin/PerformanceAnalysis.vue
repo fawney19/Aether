@@ -1145,11 +1145,27 @@ async function loadLiveData(options: { silent?: boolean } = {}) {
     liveRefreshing.value = true
   }
 
+  function commitIfCurrent<T>(request: Promise<T>, commit: (value: T) => void): Promise<void> {
+    return request.then((value) => {
+      if (requestId !== liveRequestId) return
+      commit(value)
+      liveReady.value = true
+    })
+  }
+
   const results = await Promise.allSettled([
-    monitoringApi.getSystemStatus(),
-    monitoringApi.getResilienceStatus(),
-    monitoringApi.getCircuitHistory(8),
-    monitoringApi.getGatewayMetricsSummary(),
+    commitIfCurrent(monitoringApi.getSystemStatus(), (value) => {
+      systemStatus.value = value
+    }),
+    commitIfCurrent(monitoringApi.getResilienceStatus(), (value) => {
+      resilienceStatus.value = value
+    }),
+    commitIfCurrent(monitoringApi.getCircuitHistory(8), (value) => {
+      circuitHistory.value = value.items
+    }),
+    commitIfCurrent(monitoringApi.getGatewayMetricsSummary(), (value) => {
+      gatewayMetrics.value = value
+    }),
   ])
 
   if (requestId !== liveRequestId) {
@@ -1162,7 +1178,6 @@ async function loadLiveData(options: { silent?: boolean } = {}) {
   const [systemResult, resilienceResult, circuitResult, metricsResult] = results
 
   if (systemResult.status === 'fulfilled') {
-    systemStatus.value = systemResult.value
     successCount += 1
   } else {
     failedScopes.push('系统状态')
@@ -1170,7 +1185,6 @@ async function loadLiveData(options: { silent?: boolean } = {}) {
   }
 
   if (resilienceResult.status === 'fulfilled') {
-    resilienceStatus.value = resilienceResult.value
     successCount += 1
   } else {
     failedScopes.push('韧性状态')
@@ -1178,7 +1192,6 @@ async function loadLiveData(options: { silent?: boolean } = {}) {
   }
 
   if (circuitResult.status === 'fulfilled') {
-    circuitHistory.value = circuitResult.value.items
     successCount += 1
   } else {
     failedScopes.push('熔断历史')
@@ -1186,7 +1199,6 @@ async function loadLiveData(options: { silent?: boolean } = {}) {
   }
 
   if (metricsResult.status === 'fulfilled') {
-    gatewayMetrics.value = metricsResult.value
     successCount += 1
   } else {
     failedScopes.push('网关指标')

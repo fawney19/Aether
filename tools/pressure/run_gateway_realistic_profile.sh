@@ -7,12 +7,19 @@ set -euo pipefail
 #   realistic-stream: full-body streaming; use with mock upstream chunks/delay/payload set to realistic values.
 #   tps: no artificial hold; measures completed request throughput through auth + DB/Redis + usage/counter paths.
 #
+# Both profiles default PRESSURE_TIMEOUT_MS to 150000: about two minutes for a
+# typical LLM request plus a 30-second safety margin for admission and draining.
+# The standard TPS baseline is 30000 requests at 600 concurrency, a 29000 ms
+# ramp, and a 180000 ms post-load drain window. It uses one API key so the
+# result measures the production hot-key path. AETHER_API_KEY_LIST_FILE is an
+# optional multi-tenant fan-out extension, not the standard TPS baseline.
+#
 # Suggested mock upstream for realistic-stream:
-#   cargo run --release -p aether-testkit --bin mock_openai_upstream -- \
+#   cargo run --release -p aether-integration-tests --bin mock_openai_upstream -- \
 #     --bind 127.0.0.1:18181 --chunks 80 --first-byte-delay-ms 150 --chunk-delay-ms 50 --payload-bytes 128
 #
 # Suggested mock upstream for tps:
-#   cargo run --release -p aether-testkit --bin mock_openai_upstream -- \
+#   cargo run --release -p aether-integration-tests --bin mock_openai_upstream -- \
 #     --bind 127.0.0.1:18181 --chunks 8 --first-byte-delay-ms 20 --chunk-delay-ms 5 --payload-bytes 64
 #
 # Required auth:
@@ -21,6 +28,9 @@ set -euo pipefail
 #   AUTH_HEADER='Authorization: Bearer <aether-api-key>'
 # or:
 #   AETHER_API_KEY='<aether-api-key>'
+#
+# Optional multi-tenant fan-out auth:
+#   AETHER_API_KEY_LIST_FILE=/path/to/api-key-list
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/../.." && pwd)"
@@ -28,24 +38,24 @@ repo_root="$(cd -- "$script_dir/../.." && pwd)"
 PROFILE="${PRESSURE_PROFILE:-${1:-realistic-stream}}"
 PROFILE="$(printf '%s' "$PROFILE" | tr '[:upper:]' '[:lower:]')"
 
+default_timeout_ms=150000
+
 case "$PROFILE" in
   realistic-stream)
     default_requests=1000
     default_concurrency=1000
-    default_timeout_ms=300000
     default_start_ramp_ms=10000
     default_response_mode=full
     default_settle_after_ms=5000
     default_output=/tmp/aether_gateway_realistic_stream_1k.json
     ;;
   tps)
-    default_requests=20000
-    default_concurrency=500
-    default_timeout_ms=180000
-    default_start_ramp_ms=5000
+    default_requests=30000
+    default_concurrency=600
+    default_start_ramp_ms=29000
     default_response_mode=full
-    default_settle_after_ms=5000
-    default_output=/tmp/aether_gateway_tps_20k_c500.json
+    default_settle_after_ms=180000
+    default_output=/tmp/aether_gateway_tps_30k_c600_1krps.json
     ;;
   *)
     echo "unsupported PRESSURE_PROFILE=$PROFILE; expected realistic-stream or tps" >&2
@@ -108,7 +118,7 @@ case "$PRESSURE_CARGO_PROFILE" in
 esac
 
 args+=(
-  -p aether-testkit --bin gateway_pressure_probe --
+  -p aether-loadtools --bin gateway_pressure_probe --
   --url "$TARGET_URL"
   --metrics-url "$METRICS_URL"
   --requests "$PRESSURE_REQUESTS"

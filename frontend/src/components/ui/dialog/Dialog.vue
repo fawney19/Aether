@@ -22,7 +22,7 @@
         />
       </Transition>
 
-      <div class="relative flex h-full items-end justify-center overflow-hidden px-3 py-4 text-center sm:items-center sm:p-0 pointer-events-none">
+      <div class="relative flex h-full items-end justify-center overflow-hidden text-center sm:items-center sm:p-0 pointer-events-none">
         <!-- 对话框内容 -->
         <Transition
           enter-active-class="duration-300 ease-out"
@@ -34,7 +34,7 @@
         >
           <div
             v-if="isOpen"
-            class="relative flex max-h-[calc(100dvh-2rem)] w-full transform flex-col overflow-hidden rounded-lg border border-border bg-background text-left shadow-2xl transition-all pointer-events-auto sm:my-8 sm:w-full sm:max-h-[calc(100dvh-4rem)]"
+            class="relative flex max-h-[100dvh] w-full transform flex-col overflow-hidden rounded-t-xl border border-x-0 border-b-0 border-border bg-background text-left shadow-2xl transition-all pointer-events-auto sm:my-8 sm:w-full sm:max-h-[calc(100dvh-4rem)] sm:rounded-lg sm:border"
             :style="{ zIndex: contentZIndex }"
             :class="maxWidthClass"
             @click.stop
@@ -43,7 +43,7 @@
             <slot name="header">
               <div
                 v-if="title"
-                class="shrink-0 border-b border-border px-4 py-4 sm:px-6"
+                class="shrink-0 border-b border-border px-4 pb-3 pt-4 sm:px-6 sm:py-4"
               >
                 <div class="flex items-center gap-3">
                   <div
@@ -57,12 +57,12 @@
                     />
                   </div>
                   <div class="flex-1 min-w-0">
-                    <h3 class="text-lg font-semibold text-foreground leading-tight">
+                    <h3 class="text-balance text-base font-semibold leading-tight text-foreground sm:text-lg">
                       {{ title }}
                     </h3>
                     <p
                       v-if="description"
-                      class="text-xs text-muted-foreground"
+                      class="mt-0.5 text-pretty text-xs leading-4 text-muted-foreground"
                     >
                       {{ description }}
                     </p>
@@ -80,7 +80,7 @@
             <!-- Footer 区域：如果有 footer 插槽，自动添加样式 -->
             <div
               v-if="slots.footer"
-              class="shrink-0 border-t border-border bg-muted/10 px-4 py-4 sm:px-6 flex flex-row-reverse gap-3"
+              class="flex shrink-0 flex-col-reverse items-stretch gap-2 border-t border-border bg-background/95 px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur-sm [&>button]:w-full sm:flex-row-reverse sm:items-center sm:gap-3 sm:bg-muted/10 sm:px-6 sm:py-4 sm:[&>button]:w-auto"
             >
               <slot name="footer" />
             </div>

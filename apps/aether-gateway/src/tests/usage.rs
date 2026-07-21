@@ -101,6 +101,7 @@ pub(super) fn sample_local_openai_candidate_row() -> StoredMinimalCandidateSelec
             priority: 1,
             api_formats: Some(vec!["openai:chat".to_string()]),
             endpoint_ids: None,
+            operations: None,
         }]),
         model_supports_streaming: Some(true),
         model_is_active: true,

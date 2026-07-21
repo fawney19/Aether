@@ -1,238 +1,265 @@
 <template>
   <Dialog
     :model-value="modelValue"
-    title="账号批量操作"
+    :title="dialogTitle"
     :description="dialogDescription"
     size="3xl"
     persistent
     @update:model-value="emit('update:modelValue', $event)"
   >
     <div class="max-h-[calc(100dvh-13rem)] space-y-4 overflow-y-auto overscroll-contain pr-1 sm:max-h-[min(72vh,44rem)] sm:pr-2">
-      <div class="space-y-3 rounded-lg border bg-muted/20 px-3 py-2.5">
-        <div class="flex items-center justify-between gap-2">
-          <span class="text-xs font-medium text-foreground">快捷多选</span>
-          <Button
-            variant="ghost"
-            size="sm"
-            class="h-7 px-2 text-[11px]"
-            :disabled="loading || executing || !hasActiveFilters"
-            @click="clearFilters"
-          >
-            重置筛选
-          </Button>
-        </div>
-
-        <div class="flex flex-wrap gap-2">
-          <Button
-            v-for="option in QUICK_SELECT_OPTIONS"
-            :key="option.value"
+      <div class="space-y-2 rounded-lg border bg-muted/20 px-3 py-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="text-xs font-medium text-foreground">
+            操作范围
+          </div>
+          <Badge
             variant="outline"
-            size="sm"
-            class="h-8 px-2.5 text-[11px]"
-            :class="activeQuickSelectorSet.has(option.value) ? 'border-primary/70 bg-primary/10 text-primary' : ''"
-            :disabled="loading || executing"
-            @click="toggleQuickSelector(option.value)"
+            class="text-[11px]"
           >
-            {{ option.label }}
-          </Button>
+            {{ selectAllFiltered ? '全选筛选结果' : '表格手动多选' }}
+          </Badge>
         </div>
-
-        <div class="space-y-3 rounded-md border bg-background/80 px-3 py-3">
-          <div class="flex items-center gap-2">
-            <Input
-              :model-value="searchText"
-              placeholder="搜索账号名 / 套餐 / 额度 / 代理状态"
-              class="h-8 flex-1"
-              @update:model-value="(v) => searchText = String(v || '')"
-            />
-            <Button
-              variant="ghost"
-              size="icon"
-              class="h-8 w-8 shrink-0"
-              :disabled="loading || executing"
-              @click="loadKeysPage()"
-            >
-              <RefreshCw
-                class="h-3.5 w-3.5"
-                :class="loading ? 'animate-spin' : ''"
-              />
-            </Button>
-          </div>
-
-          <div class="flex flex-col gap-2 text-xs lg:flex-row lg:items-center lg:justify-between">
-            <div class="text-muted-foreground">
-              共 {{ filteredTotal }} 个匹配账号，当前页 {{ pageKeyRows.length }} 个，已选 {{ selectedCount }} 个
-            </div>
-            <div class="flex flex-wrap items-center gap-1">
-              <div class="mr-1 flex items-center gap-2">
-                <Checkbox
-                  :checked="isAllFilteredSelected"
-                  :indeterminate="isPartiallyFilteredSelected"
-                  :disabled="filteredTotal === 0 || loading || executing"
-                  @update:checked="toggleSelectFiltered"
-                />
-                <span class="text-muted-foreground">全选筛选结果</span>
-              </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                class="h-7 px-2 text-[11px]"
-                :disabled="pageKeyRows.length === 0 || loading || executing || selectAllFiltered"
-                @click="toggleSelectCurrentPage"
-              >
-                {{ isCurrentPageFullySelected ? '取消本页全选' : '本页全选' }}
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                class="h-7 px-2 text-[11px]"
-                :disabled="!canClearSelection || loading || executing"
-                @click="clearSelection"
-              >
-                清空选择
-              </Button>
-            </div>
-          </div>
+        <div class="text-sm text-foreground">
+          已选择 <span class="font-semibold tabular-nums">{{ selectedCount }}</span> 个账号
+        </div>
+        <div class="text-[11px] text-muted-foreground">
+          选择范围来自号池管理表格当前筛选条件
         </div>
       </div>
 
-      <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_19rem]">
-        <div class="min-w-0 space-y-3">
-          <div class="rounded-lg border lg:max-h-[420px] lg:overflow-y-auto">
-            <div
-              v-if="loading"
-              class="py-10 text-center text-sm text-muted-foreground"
-            >
-              正在加载账号列表...
-            </div>
-            <div
-              v-else-if="pageKeyRows.length === 0"
-              class="py-10 text-center text-sm text-muted-foreground"
-            >
-              无匹配账号
-            </div>
-            <label
-              v-for="row in pageKeyRows"
-              :key="row.key.key_id"
-              class="flex items-center gap-2.5 px-3 py-2 border-b last:border-b-0 cursor-pointer hover:bg-muted/30"
-            >
+      <div class="space-y-2 rounded-lg border bg-background px-3 py-3">
+        <div>
+          <div class="text-xs font-medium text-muted-foreground">
+            执行动作
+          </div>
+          <div class="mt-1 text-sm font-semibold text-foreground">
+            {{ selectedActionOption.label }}
+          </div>
+          <p class="mt-1 text-[11px] text-muted-foreground">
+            {{ selectedActionOption.hint }}
+          </p>
+        </div>
+
+        <div
+          v-if="selectedAction === 'set_proxy'"
+          class="space-y-2 border-t border-border/60 pt-3"
+        >
+          <div class="text-[11px] text-muted-foreground">
+            选择要绑定的代理节点
+          </div>
+          <ProxyNodeSelect
+            :model-value="proxyNodeIdForAction"
+            trigger-class="h-9"
+            @update:model-value="(v: string) => proxyNodeIdForAction = v"
+          />
+        </div>
+      </div>
+
+      <section
+        v-if="selectedAction === 'update_settings'"
+        class="space-y-3 rounded-lg border border-primary/25 bg-primary/5 p-3 sm:p-4"
+      >
+        <div class="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <h3 class="text-sm font-semibold">
+              更多设置
+            </h3>
+            <p class="text-[11px] text-muted-foreground">
+              仅更新已勾选字段，未勾选配置保持不变
+            </p>
+          </div>
+          <Badge
+            variant="outline"
+            class="tabular-nums"
+          >
+            已选 {{ selectedSettingsCount }} 项
+          </Badge>
+        </div>
+
+        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div class="space-y-2 rounded-md border bg-background p-3">
+            <div class="flex min-h-6 items-center gap-2">
               <Checkbox
-                :checked="selectAllFiltered || selectedIdSet.has(row.key.key_id)"
-                :disabled="executing || selectAllFiltered"
-                @update:checked="(checked) => toggleOne(row.key.key_id, checked === true)"
+                :checked="settingsSelection.internal_priority"
+                @update:checked="settingsSelection.internal_priority = $event === true"
               />
-              <div class="min-w-0 flex-1">
-                <div class="flex items-center gap-1.5">
-                  <span class="text-xs font-medium truncate">{{ row.key.key_name || '未命名' }}</span>
-                  <Badge
-                    variant="outline"
-                    class="text-[10px] px-1 py-0 h-4 shrink-0"
-                  >{{ row.authTypeLabel }}</Badge>
-                  <Badge
-                    v-if="row.statusBadgeLabel"
-                    variant="destructive"
-                    class="text-[10px] px-1 py-0 h-4 shrink-0"
-                    :title="row.statusBadgeTitle"
-                  >{{ row.statusBadgeLabel }}</Badge>
-                  <Badge
-                    v-if="row.key.oauth_plan_type"
-                    variant="outline"
-                    class="text-[10px] px-1 py-0 h-4 shrink-0"
-                  >{{ row.key.oauth_plan_type }}</Badge>
-                  <Badge
-                    v-if="row.oauthOrgBadge"
-                    variant="secondary"
-                    class="text-[10px] px-1 py-0 h-4 shrink-0"
-                    :title="row.oauthOrgBadge.title"
-                  >{{ row.oauthOrgBadge.label }}</Badge>
-                </div>
-                <div class="flex items-center gap-1.5 mt-0.5 text-[11px] text-muted-foreground flex-wrap">
-                  <span :class="row.key.is_active ? '' : 'text-destructive'">{{ row.key.is_active ? '启用' : '禁用' }}</span>
-                  <span v-if="row.quotaText">{{ row.quotaTextShort }}</span>
-                  <span v-if="row.key.proxy?.node_id">独立代理</span>
-                  <span
-                    v-if="row.lastUsedRelative"
-                    class="ml-auto shrink-0"
-                  >{{ row.lastUsedRelative }}</span>
-                </div>
-              </div>
-            </label>
-          </div>
-
-          <div
-            v-if="totalPages > 1"
-            class="flex items-center justify-between text-xs text-muted-foreground"
-          >
-            <span>第 {{ currentPage }} / {{ totalPages }} 页</span>
-            <div class="flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-7 w-7"
-                :disabled="currentPage <= 1"
-                @click="goToPage(1)"
-              >
-                <ChevronsLeft class="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-7 w-7"
-                :disabled="currentPage <= 1"
-                @click="goToPage(currentPage - 1)"
-              >
-                <ChevronLeft class="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-7 w-7"
-                :disabled="currentPage >= totalPages"
-                @click="goToPage(currentPage + 1)"
-              >
-                <ChevronRight class="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-7 w-7"
-                :disabled="currentPage >= totalPages"
-                @click="goToPage(totalPages)"
-              >
-                <ChevronsRight class="h-3.5 w-3.5" />
-              </Button>
+              <Label class="text-xs">优先级</Label>
             </div>
-          </div>
-        </div>
-
-        <div class="space-y-3 lg:sticky lg:top-1 lg:self-start">
-          <div class="space-y-2 rounded-lg border bg-background px-3 py-3">
-            <div class="text-xs font-medium text-foreground">
-              执行动作
-            </div>
-            <div class="text-[11px] text-muted-foreground">
-              代理节点（仅“配置代理”动作生效）
-            </div>
-            <ProxyNodeSelect
-              :model-value="proxyNodeIdForAction"
-              trigger-class="h-8"
-              @update:model-value="(v: string) => proxyNodeIdForAction = v"
+            <Input
+              v-model.number="settingsDraft.internal_priority"
+              type="number"
+              min="0"
+              class="h-9"
+              :disabled="!settingsSelection.internal_priority"
             />
-            <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
-              <Button
-                v-for="item in ACTION_OPTIONS"
-                :key="item.value"
-                class="h-8 w-full px-3 text-xs"
-                :variant="getActionButtonVariant(item)"
-                :disabled="!canExecuteSpecifiedAction(item.value)"
-                @click="confirmAndExecuteAction(item.value)"
+          </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.rpm_limit"
+                @update:checked="settingsSelection.rpm_limit = $event === true"
+              />
+              <Label class="text-xs">RPM 限制</Label>
+            </div>
+            <Input
+              :model-value="settingsDraft.rpm_limit ?? ''"
+              type="number"
+              min="1"
+              max="10000"
+              class="h-9"
+              placeholder="留空为自适应"
+              :disabled="!settingsSelection.rpm_limit"
+              @update:model-value="settingsDraft.rpm_limit = parseNullableNumberInput($event, { min: 1, max: 10000 })"
+            />
+          </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.concurrent_limit"
+                @update:checked="settingsSelection.concurrent_limit = $event === true"
+              />
+              <Label class="text-xs">并发请求上限</Label>
+            </div>
+            <Input
+              :model-value="settingsDraft.concurrent_limit ?? ''"
+              type="number"
+              min="0"
+              class="h-9"
+              placeholder="留空为不限制"
+              :disabled="!settingsSelection.concurrent_limit"
+              @update:model-value="settingsDraft.concurrent_limit = parseNullableNumberInput($event, { min: 0 })"
+            />
+          </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.cache_ttl_minutes"
+                @update:checked="settingsSelection.cache_ttl_minutes = $event === true"
+              />
+              <Label class="text-xs">缓存 TTL（分钟）</Label>
+            </div>
+            <Input
+              :model-value="settingsDraft.cache_ttl_minutes"
+              type="number"
+              min="0"
+              max="60"
+              class="h-9"
+              :disabled="!settingsSelection.cache_ttl_minutes"
+              @update:model-value="settingsDraft.cache_ttl_minutes = parseNumberInput($event, { min: 0, max: 60 }) ?? 5"
+            />
+          </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.max_probe_interval_minutes"
+                @update:checked="settingsSelection.max_probe_interval_minutes = $event === true"
+              />
+              <Label class="text-xs">熔断探测（分钟）</Label>
+            </div>
+            <Input
+              :model-value="settingsDraft.max_probe_interval_minutes"
+              type="number"
+              min="0"
+              max="32"
+              class="h-9"
+              :disabled="!settingsSelection.max_probe_interval_minutes"
+              @update:model-value="settingsDraft.max_probe_interval_minutes = parseNumberInput($event, { min: 0, max: 32 }) ?? 32"
+            />
+          </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.is_active"
+                @update:checked="settingsSelection.is_active = $event === true"
+              />
+              <Label class="text-xs">启用状态</Label>
+            </div>
+            <Select
+              v-model="settingsStatus"
+              :disabled="!settingsSelection.is_active"
+            >
+              <SelectTrigger class="h-9">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="enabled">
+                  启用
+                </SelectItem>
+                <SelectItem value="disabled">
+                  停用
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3 sm:col-span-2">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.proxy_node_id"
+                @update:checked="settingsSelection.proxy_node_id = $event === true"
+              />
+              <Label class="text-xs">账号代理</Label>
+            </div>
+            <div class="grid gap-2 sm:grid-cols-[9rem_minmax(0,1fr)]">
+              <Select
+                v-model="settingsDraft.proxy_mode"
+                :disabled="!settingsSelection.proxy_node_id"
               >
-                {{ item.label }}
-              </Button>
+                <SelectTrigger class="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="set">
+                    设置节点
+                  </SelectItem>
+                  <SelectItem value="clear">
+                    清除代理
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <ProxyNodeSelect
+                v-if="settingsDraft.proxy_mode === 'set'"
+                :model-value="settingsDraft.proxy_node_id"
+                trigger-class="h-9"
+                :class="!settingsSelection.proxy_node_id ? 'pointer-events-none opacity-50' : ''"
+                @update:model-value="(value: string) => settingsDraft.proxy_node_id = value"
+              />
+              <div
+                v-else
+                class="flex h-9 items-center rounded-md border bg-muted/30 px-3 text-xs text-muted-foreground"
+              >
+                回退到 Provider 默认代理
+              </div>
             </div>
           </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.note"
+                @update:checked="settingsSelection.note = $event === true"
+              />
+              <Label class="text-xs">备注</Label>
+            </div>
+            <Input
+              v-model="settingsDraft.note"
+              class="h-9"
+              placeholder="留空清除备注"
+              :disabled="!settingsSelection.note"
+            />
+          </div>
         </div>
-      </div>
+
+        <p class="min-h-5 text-xs text-destructive">
+          {{ settingsErrors[0] || '' }}
+        </p>
+      </section>
 
       <div
         v-if="executing && progressTotal > 0"
@@ -265,83 +292,63 @@
       >
         关闭
       </Button>
+      <Button
+        :variant="selectedActionOption.destructive ? 'destructive' : 'default'"
+        :disabled="!canExecuteSpecifiedAction(selectedAction)"
+        @click="confirmAndExecuteAction(selectedAction)"
+      >
+        {{ executeActionButtonLabel }}
+      </Button>
     </template>
   </Dialog>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { Dialog, Button, Input, Checkbox, Badge } from '@/components/ui'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
+import {
+  Badge,
+  Button,
+  Checkbox,
+  Dialog,
+  Input,
+  Label,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui'
 import ProxyNodeSelect from '@/features/providers/components/ProxyNodeSelect.vue'
-import { RefreshCw, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
 import { parseApiError } from '@/utils/errorParser'
 import {
-  listPoolKeys,
   batchActionPoolKeys,
   getPoolBatchDeleteTask,
   resolvePoolKeySelection,
   type PoolKeyDetail,
+  type PoolKeySelectionRequest,
   type PoolKeySelectionItem,
 } from '@/api/endpoints/pool'
 import { exportKey, refreshProviderQuota } from '@/api/endpoints/keys'
 import { refreshProviderOAuth } from '@/api/endpoints/provider_oauth'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
-import { getOAuthOrgBadge } from '@/utils/oauthIdentity'
 import {
   canExportOAuthCredential,
   canRefreshOAuthCredential,
-  getProviderAuthLabel,
 } from '@/utils/providerKeyAuth'
-import {
-  getAccountStatusDisplay,
-  getAccountStatusTitle,
-  getOAuthStatusDisplay,
-  getOAuthStatusTitle,
-} from '@/utils/providerKeyStatus'
-import { getQuotaDisplayText } from '@/utils/providerKeyQuota'
 import { runChunkedBatchAction } from '@/utils/batchAction'
-
-type QuickSelectorValue =
-  | 'banned'
-  | 'no_5h_limit'
-  | 'no_weekly_limit'
-  | 'plan_free'
-  | 'plan_team'
-  | 'oauth_invalid'
-  | 'proxy_unset'
-  | 'proxy_set'
-  | 'disabled'
-  | 'enabled'
-
-type BatchActionValue =
-  | 'export'
-  | 'delete'
-  | 'refresh_oauth'
-  | 'refresh_quota'
-  | 'clear_proxy'
-  | 'set_proxy'
-  | 'enable'
-  | 'disable'
-
-type BatchActionOption = {
-  value: BatchActionValue
-  label: string
-  hint: string
-  destructive?: boolean
-}
-
-type PageKeyRow = {
-  key: PoolKeyDetail
-  authTypeLabel: string
-  statusBadgeLabel: string | null
-  statusBadgeTitle: string
-  oauthOrgBadge: ReturnType<typeof getOAuthOrgBadge>
-  quotaText: string | null
-  quotaTextShort: string
-  lastUsedRelative: string
-}
+import { parseNullableNumberInput, parseNumberInput } from '@/utils/form'
+import {
+  buildPoolKeySettingsPatch,
+  createPoolKeyBatchSettingSelection,
+  createPoolKeyBatchSettingsDraft,
+  validatePoolKeyBatchSettings,
+} from '@/features/pool/utils/poolKeyBatchSettings'
+import {
+  POOL_BATCH_ACTION_OPTIONS,
+  type PoolBatchActionValue,
+} from '@/features/pool/utils/poolBatchActions'
 
 const props = defineProps<{
   modelValue: boolean
@@ -349,105 +356,64 @@ const props = defineProps<{
   providerName?: string
   providerType?: string
   batchConcurrency?: number | null
+  selectedKeys: PoolKeyDetail[]
+  selectAllFiltered: boolean
+  selectedCount: number
+  selectionFilters: PoolKeySelectionRequest
+  initialAction?: PoolBatchActionValue | null
 }>()
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
   changed: []
+  'edit-config': [keyIds: string[]]
 }>()
 
-const QUICK_SELECT_OPTIONS: Array<{ value: QuickSelectorValue; label: string }> = [
-  { value: 'banned', label: '账号异常' },
-  { value: 'oauth_invalid', label: 'Token 异常' },
-  { value: 'no_5h_limit', label: '无5H限额' },
-  { value: 'no_weekly_limit', label: '无周限额' },
-  { value: 'plan_free', label: '全部 Free' },
-  { value: 'plan_team', label: '全部 Team' },
-  { value: 'proxy_unset', label: '未配置代理' },
-  { value: 'proxy_set', label: '已配置独立代理' },
-  { value: 'disabled', label: '已禁用' },
-  { value: 'enabled', label: '已启用' },
-]
-
-const ACTION_OPTIONS: BatchActionOption[] = [
-  { value: 'refresh_quota', label: '刷新额度', hint: '调用额度刷新接口，适合核对最新配额状态。' },
-  { value: 'refresh_oauth', label: '刷新 OAuth', hint: '仅对 OAuth 账号有效，非 OAuth 账号会自动跳过。' },
-  { value: 'set_proxy', label: '配置代理', hint: '为选中账号绑定独立代理节点。' },
-  { value: 'clear_proxy', label: '清除代理', hint: '移除账号独立代理，回退到提供商默认代理。' },
-  { value: 'enable', label: '启用', hint: '批量启用账号，恢复可调度状态。' },
-  { value: 'disable', label: '禁用', hint: '批量禁用账号，保留数据但停止调度。' },
-  { value: 'export', label: '导出凭据', hint: '仅导出 OAuth 凭据，其他类型账号将被跳过。' },
-  { value: 'delete', label: '删除账号', hint: '永久删除账号数据，执行后不可恢复。', destructive: true },
-]
+const ACTION_OPTIONS = POOL_BATCH_ACTION_OPTIONS
 
 const { success, warning, error: showError } = useToast()
 const { confirm } = useConfirm()
 const proxyNodesStore = useProxyNodesStore()
 
-const loading = ref(false)
 const executing = ref(false)
-const pageKeys = ref<PoolKeyDetail[]>([])
-const filteredTotal = ref(0)
-const selectedKeyIds = ref<string[]>([])
-const knownKeysById = ref<Record<string, PoolKeyDetail>>({})
-const selectAllFiltered = ref(false)
-const searchText = ref('')
-const selectedAction = ref<BatchActionValue>('refresh_quota')
+const selectedAction = ref<PoolBatchActionValue>('refresh_quota')
 const proxyNodeIdForAction = ref('')
+const settingsSelection = reactive(createPoolKeyBatchSettingSelection())
+const settingsDraft = reactive(createPoolKeyBatchSettingsDraft())
+const settingsStatus = computed({
+  get: () => settingsDraft.is_active ? 'enabled' : 'disabled',
+  set: (value: string) => { settingsDraft.is_active = value === 'enabled' },
+})
 const lastResultMessage = ref('')
 const progressTotal = ref(0)
 const progressDone = ref(0)
 const progressLabel = ref('')
-const activeQuickSelectors = ref<QuickSelectorValue[]>([])
-const currentPage = ref(1)
-
-const PAGE_SIZE = 50
-const SEARCH_DEBOUNCE_MS = 250
-
-let loadRequestId = 0
-let searchDebounceTimer: number | null = null
-let suppressFilterWatch = false
 
 const dialogDescription = computed(() => {
   const name = (props.providerName || '').trim()
-  return name ? `${name} - 选择账号并批量执行动作` : '选择账号并批量执行动作'
+  return name ? `${name} - 对表格选择批量执行动作` : '对表格选择批量执行动作'
 })
 
-const selectedIdSet = computed(() => new Set(selectedKeyIds.value))
-const selectedCount = computed(() => (selectAllFiltered.value ? filteredTotal.value : selectedKeyIds.value.length))
-const totalPages = computed(() => Math.max(1, Math.ceil(filteredTotal.value / PAGE_SIZE)))
-const isAllFilteredSelected = computed(() => selectAllFiltered.value && filteredTotal.value > 0)
-const isPartiallyFilteredSelected = computed(() => !selectAllFiltered.value && selectedKeyIds.value.length > 0)
-const hasActiveFilters = computed(() => searchText.value.trim().length > 0 || activeQuickSelectors.value.length > 0)
-const pageKeyRows = computed<PageKeyRow[]>(() => pageKeys.value.map((key) => {
-  const statusBadgeLabel = getStatusBadgeLabel(key)
-  const quotaText = getQuotaText(key)
-
-  return {
-    key,
-    authTypeLabel: normalizeAuthTypeLabel(key),
-    statusBadgeLabel,
-    statusBadgeTitle: statusBadgeLabel ? getStatusBadgeTitle(key) : '',
-    oauthOrgBadge: getOAuthOrgBadge(key),
-    quotaText,
-    quotaTextShort: quotaText ? shortenQuota(quotaText) : '',
-    lastUsedRelative: key.last_used_at ? formatRelativeTime(key.last_used_at) : '',
+const selectedCount = computed(() => Math.max(0, Number(props.selectedCount || 0)))
+const selectAllFiltered = computed(() => props.selectAllFiltered)
+const settingsErrors = computed(() => validatePoolKeyBatchSettings(settingsSelection, settingsDraft))
+const selectedSettingsCount = computed(() => Object.values(settingsSelection).filter(Boolean).length)
+const selectedActionOption = computed(() => (
+  ACTION_OPTIONS.find(option => option.value === selectedAction.value)
+  || {
+    value: 'refresh_quota' as const,
+    label: '刷新额度',
+    hint: '调用额度刷新接口，适合核对最新配额状态。',
   }
-}))
-const selectedOnCurrentPageCount = computed(() => {
-  if (selectAllFiltered.value) return pageKeyRows.value.length
-  let count = 0
-  for (const row of pageKeyRows.value) {
-    if (selectedIdSet.value.has(row.key.key_id)) count += 1
-  }
-  return count
+))
+const dialogTitle = computed(() => `执行动作 · ${selectedActionOption.value.label}`)
+const executeActionButtonLabel = computed(() => {
+  if (executing.value) return '执行中...'
+  if (selectedAction.value === 'edit_config') return '编辑配置'
+  if (selectedAction.value === 'set_proxy') return '应用代理设置'
+  if (selectedAction.value === 'update_settings') return '应用更多设置'
+  return `执行${selectedActionOption.value.label}`
 })
-const isCurrentPageFullySelected = computed(() => {
-  if (selectAllFiltered.value || pageKeyRows.value.length === 0) return false
-  return selectedOnCurrentPageCount.value === pageKeyRows.value.length
-})
-const canClearSelection = computed(() => selectAllFiltered.value || selectedKeyIds.value.length > 0)
-const activeQuickSelectorSet = computed(() => new Set(activeQuickSelectors.value))
 
 function sanitizeFileNamePart(value: unknown, fallback: string): string {
   const sanitized = String(value || '')
@@ -481,240 +447,22 @@ function downloadJsonFile(data: unknown, filename: string): void {
   URL.revokeObjectURL(url)
 }
 
-function normalizeAuthTypeLabel(key: PoolKeyDetail | PoolKeySelectionItem): string {
-  return getProviderAuthLabel(key)
-}
-
-function getStatusBadgeLabel(key: PoolKeyDetail): string | null {
-  const account = getAccountStatusDisplay(key)
-  if (account.blocked && account.label) return compactStatusBadgeLabel(account.label)
-
-  const oauth = getOAuthStatusDisplay(key, 0)
-  if (oauth?.requiresReauth) return '续期失败'
-  if (oauth?.isInvalid) return '已失效'
-  if (oauth?.isExpired) return '已过期'
-  return null
-}
-
-function compactStatusBadgeLabel(label: string): string {
-  const normalized = label.trim()
-  const mapped: Record<string, string> = {
-    'Token 失效': '已失效',
-    'Token 过期': '已过期',
-    账号已封禁: '账号封禁',
-    工作区已停用: '工作区停用',
-    账号访问受限: '访问受限',
-  }
-  return Array.from(mapped[normalized] || normalized).slice(0, 5).join('')
-}
-
-function getStatusBadgeTitle(key: PoolKeyDetail): string {
-  const label = getStatusBadgeLabel(key)
-  if (!label) return ''
-
-  const accountTitle = getAccountStatusTitle(key)
-  if (accountTitle) return accountTitle
-
-  const oauthTitle = getOAuthStatusTitle(key, 0)
-  return oauthTitle || label
-}
-
-function formatRelativeTime(value: string): string {
-  const ts = new Date(value).getTime()
-  if (!Number.isFinite(ts)) return '-'
-  const diff = Date.now() - ts
-  if (diff < 60_000) return '刚刚'
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}分钟前`
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}小时前`
-  return `${Math.floor(diff / 86_400_000)}天前`
-}
-
-function getQuotaText(key: PoolKeyDetail): string | null {
-  return getQuotaDisplayText(key, props.providerType)
-}
-
-function shortenQuota(raw: string): string {
-  return raw.split('|').map((segment) => {
-    let value = segment.trim()
-    value = value.replace(/剩余\s*/g, '')
-    value = value.replace(/％/g, '%')
-    value = value.replace(/[（(]\s*(\d+)\s*天\s*(\d+)\s*小时.*?[）)]/g, ' $1d$2h')
-    value = value.replace(/[（(]\s*(\d+)\s*小时\s*(\d+)\s*分钟.*?[）)]/g, ' $1h$2m')
-    value = value.replace(/[（(]\s*(\d+)\s*小时.*?[）)]/g, ' $1h')
-    value = value.replace(/[（(]\s*(\d+)\s*分钟.*?[）)]/g, ' $1m')
-    value = value.replace(/[（(]\s*(\d+)\s*天.*?[）)]/g, ' $1d')
-    value = value.replace(/[（(].*?[）)]/g, '')
-    return value.trim()
-  }).join(' | ')
-}
-
-function clearSearchDebounce(): void {
-  if (searchDebounceTimer !== null) {
-    clearTimeout(searchDebounceTimer)
-    searchDebounceTimer = null
-  }
-}
-
-function rememberPageKeys(keys: PoolKeyDetail[]): void {
-  if (keys.length === 0) return
-  const next = { ...knownKeysById.value }
-  for (const key of keys) {
-    next[key.key_id] = key
-  }
-  knownKeysById.value = next
-}
-
-function resetSelection(clearKnown = false): void {
-  selectAllFiltered.value = false
-  selectedKeyIds.value = []
-  if (clearKnown) knownKeysById.value = {}
-}
-
-function buildSelectionFilters(): { search?: string; quick_selectors?: string[] } {
-  const search = searchText.value.trim()
-  const quickSelectors = activeQuickSelectors.value.map((value) => String(value))
-  return {
-    ...(search ? { search } : {}),
-    ...(quickSelectors.length > 0 ? { quick_selectors: quickSelectors } : {}),
-  }
-}
-
-async function loadKeysPage(): Promise<void> {
-  if (!props.providerId) {
-    pageKeys.value = []
-    filteredTotal.value = 0
-    resetSelection(true)
-    return
-  }
-
-  const requestId = ++loadRequestId
-  loading.value = true
-  const startedAt = performance.now()
-  let ok = false
-  try {
-    const res = await listPoolKeys(props.providerId, {
-      page: currentPage.value,
-      page_size: PAGE_SIZE,
-      status: 'all',
-      search: searchText.value.trim() || undefined,
-      quick_selectors: activeQuickSelectors.value,
-      search_scope: 'full',
-    })
-    if (requestId !== loadRequestId) return
-
-    pageKeys.value = Array.isArray(res.keys) ? res.keys : []
-    filteredTotal.value = Number(res.total || 0)
-    rememberPageKeys(pageKeys.value)
-    ok = true
-  } catch (err) {
-    if (requestId !== loadRequestId) return
-    pageKeys.value = []
-    filteredTotal.value = 0
-    showError(parseApiError(err, '加载账号列表失败'))
-  } finally {
-    if (requestId === loadRequestId) {
-      loading.value = false
-      // eslint-disable-next-line no-console
-      console.info('[PoolAccountBatchDialog] loadKeysPage timing', {
-        providerId: props.providerId,
-        page: currentPage.value,
-        pageSize: PAGE_SIZE,
-        search: searchText.value.trim(),
-        quickSelectors: activeQuickSelectors.value,
-        total: filteredTotal.value,
-        count: pageKeys.value.length,
-        ok,
-        durationMs: Math.round(performance.now() - startedAt),
-      })
-    }
-  }
-}
-
-function requestFilteredReload(debounceMs = 0): void {
-  if (!props.modelValue) return
-  clearSearchDebounce()
-  resetSelection()
-  lastResultMessage.value = ''
-  const run = () => {
-    searchDebounceTimer = null
-    currentPage.value = 1
-    void loadKeysPage()
-  }
-  if (debounceMs > 0) {
-    searchDebounceTimer = window.setTimeout(run, debounceMs)
-  } else {
-    run()
-  }
-}
-
-async function goToPage(page: number): Promise<void> {
-  const nextPage = Math.min(Math.max(1, page), totalPages.value)
-  currentPage.value = nextPage
-  await loadKeysPage()
-}
-
-function toggleOne(keyId: string, checked: boolean): void {
-  const set = new Set(selectedKeyIds.value)
-  if (checked) set.add(keyId)
-  else set.delete(keyId)
-  selectedKeyIds.value = [...set]
-}
-
-function toggleSelectFiltered(checked: boolean | 'indeterminate'): void {
-  selectAllFiltered.value = checked === true
-  if (selectAllFiltered.value) {
-    selectedKeyIds.value = []
-  }
-}
-
-function toggleSelectCurrentPage(): void {
-  if (selectAllFiltered.value || pageKeys.value.length === 0) return
-  const set = new Set(selectedKeyIds.value)
-  const pageIds = pageKeys.value.map((key) => key.key_id)
-  const shouldUnselect = pageIds.every((id) => set.has(id))
-  for (const id of pageIds) {
-    if (shouldUnselect) set.delete(id)
-    else set.add(id)
-  }
-  selectedKeyIds.value = [...set]
-}
-
-function clearSelection(): void {
-  resetSelection()
-}
-
-function clearFilters(): void {
-  if (!hasActiveFilters.value) return
-  clearSearchDebounce()
-  suppressFilterWatch = true
-  searchText.value = ''
-  activeQuickSelectors.value = []
-  suppressFilterWatch = false
-  requestFilteredReload()
-}
-
-function toggleQuickSelector(selector: QuickSelectorValue): void {
-  const idx = activeQuickSelectors.value.indexOf(selector)
-  if (idx >= 0) {
-    activeQuickSelectors.value.splice(idx, 1)
-  } else {
-    activeQuickSelectors.value.push(selector)
-  }
-  requestFilteredReload()
-}
-
-function canExecuteSpecifiedAction(action: BatchActionValue): boolean {
-  if (executing.value || loading.value || selectedCount.value === 0) return false
+function canExecuteSpecifiedAction(action: PoolBatchActionValue): boolean {
+  if (executing.value || selectedCount.value === 0) return false
   if (action === 'set_proxy') return Boolean(proxyNodeIdForAction.value)
+  if (action === 'update_settings') return settingsErrors.value.length === 0
   return true
 }
 
-function getActionButtonVariant(option: BatchActionOption): 'default' | 'destructive' | 'outline' {
-  if (option.destructive) return 'destructive'
-  return 'outline'
+function handleActionButtonClick(action: PoolBatchActionValue): void {
+  if (action === 'set_proxy' || action === 'update_settings') {
+    selectedAction.value = action
+    return
+  }
+  void confirmAndExecuteAction(action)
 }
 
-async function confirmAndExecuteAction(action: BatchActionValue): Promise<void> {
+async function confirmAndExecuteAction(action: PoolBatchActionValue): Promise<void> {
   selectedAction.value = action
   if (selectedCount.value === 0) {
     warning('请先选择账号')
@@ -724,7 +472,16 @@ async function confirmAndExecuteAction(action: BatchActionValue): Promise<void> 
     warning('请先选择代理节点')
     return
   }
+  if (action === 'update_settings' && settingsErrors.value.length > 0) {
+    warning(settingsErrors.value[0])
+    return
+  }
   if (!canExecuteSpecifiedAction(action)) return
+
+  if (action === 'edit_config') {
+    await openBatchEditor()
+    return
+  }
 
   const actionOption = ACTION_OPTIONS.find((item) => item.value === action)
   const actionLabel = actionOption?.label || '执行动作'
@@ -737,6 +494,31 @@ async function confirmAndExecuteAction(action: BatchActionValue): Promise<void> 
   })
   if (!confirmed) return
   await executeAction(action)
+}
+
+async function openBatchEditor(): Promise<void> {
+  if (executing.value || selectedCount.value === 0) return
+  executing.value = true
+  progressDone.value = 0
+  progressTotal.value = 0
+  progressLabel.value = selectAllFiltered.value ? '正在解析筛选结果...' : '正在准备批量编辑...'
+  try {
+    const selectedKeys = await resolveSelectedItems()
+    const keyIds = selectedKeys.map(key => key.key_id)
+    if (keyIds.length === 0) {
+      warning('未找到可编辑账号，请刷新列表重试')
+      return
+    }
+    emit('update:modelValue', false)
+    emit('edit-config', keyIds)
+  } catch (err) {
+    showError(parseApiError(err, '准备批量编辑失败'))
+  } finally {
+    executing.value = false
+    progressDone.value = 0
+    progressTotal.value = 0
+    progressLabel.value = ''
+  }
 }
 
 const DELETE_POLL_INTERVAL_MS = 2000
@@ -774,27 +556,34 @@ async function resolveSelectedItems(): Promise<PoolKeySelectionItem[]> {
 
   if (selectAllFiltered.value) {
     progressLabel.value = '正在解析筛选结果...'
-    const result = await resolvePoolKeySelection(props.providerId, buildSelectionFilters())
+    const result = await resolvePoolKeySelection(props.providerId, { ...props.selectionFilters })
     return Array.isArray(result.items) ? result.items : []
   }
 
-  return selectedKeyIds.value.map((keyId) => {
-    const key = knownKeysById.value[keyId]
+  const selectedKeys = [...new Map(
+    props.selectedKeys
+      .filter(key => Boolean(key.key_id))
+      .map(key => [key.key_id, key] as const),
+  ).values()]
+  return selectedKeys.map((key) => {
     return {
-      key_id: keyId,
-      key_name: key?.key_name || '',
-      auth_type: key?.auth_type || 'api_key',
-      credential_kind: key?.credential_kind,
-      runtime_auth_kind: key?.runtime_auth_kind,
-      oauth_managed: key?.oauth_managed,
-      can_refresh_oauth: key?.can_refresh_oauth,
-      can_export_oauth: key?.can_export_oauth,
-      can_edit_oauth: key?.can_edit_oauth,
+      key_id: key.key_id,
+      key_name: key.key_name || '',
+      auth_type: key.auth_type || 'api_key',
+      auth_type_by_format: key.auth_type_by_format,
+      allow_auth_channel_mismatch_formats: key.allow_auth_channel_mismatch_formats,
+      credential_kind: key.credential_kind,
+      runtime_auth_kind: key.runtime_auth_kind,
+      oauth_managed: key.oauth_managed,
+      oauth_header_auth: key.oauth_header_auth,
+      can_refresh_oauth: key.can_refresh_oauth,
+      can_export_oauth: key.can_export_oauth,
+      can_edit_oauth: key.can_edit_oauth,
     }
   })
 }
 
-async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
+async function executeAction(actionOverride?: PoolBatchActionValue): Promise<void> {
   if (executing.value) return
   if (actionOverride) {
     selectedAction.value = actionOverride
@@ -809,6 +598,10 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
     warning('请先选择代理节点')
     return
   }
+  if (selectedAction.value === 'update_settings' && settingsErrors.value.length > 0) {
+    warning(settingsErrors.value[0])
+    return
+  }
 
   executing.value = true
   let successCount = 0
@@ -817,7 +610,6 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
   let resolvedCount = 0
   const actionStartedAt = performance.now()
   let actionPhaseMs = 0
-  let reloadPhaseMs = 0
 
   const actionLabel = ACTION_OPTIONS.find((item) => item.value === selectedAction.value)?.label || '执行'
   progressDone.value = 0
@@ -930,7 +722,7 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
 
         progressDone.value = Math.min(i + BATCH_SIZE, targetIds.length)
       }
-    } else if (['enable', 'disable', 'clear_proxy', 'set_proxy'].includes(selectedAction.value)) {
+    } else if (['enable', 'disable', 'clear_proxy', 'set_proxy', 'update_settings'].includes(selectedAction.value)) {
       const targetIds = selectedKeys.map((key) => key.key_id)
       const BATCH_SIZE = 2000
       const totalBatches = Math.ceil(targetIds.length / BATCH_SIZE)
@@ -944,12 +736,14 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
 
         const payload = selectedAction.value === 'set_proxy'
           ? { node_id: proxyNodeIdForAction.value, enabled: true }
-          : undefined
+          : selectedAction.value === 'update_settings'
+            ? buildPoolKeySettingsPatch(settingsSelection, settingsDraft)
+            : undefined
 
         try {
           const result = await batchActionPoolKeys(props.providerId, {
             key_ids: batch,
-            action: selectedAction.value as 'enable' | 'disable' | 'clear_proxy' | 'set_proxy',
+            action: selectedAction.value as 'enable' | 'disable' | 'clear_proxy' | 'set_proxy' | 'update_settings',
             ...(payload ? { payload } : {}),
           })
           successCount += result.affected
@@ -997,15 +791,6 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
 
     actionPhaseMs = performance.now() - actionStartedAt
     if (selectedAction.value !== 'export') {
-      const reloadStartedAt = performance.now()
-      if (selectedAction.value === 'delete' && successCount > 0) {
-        resetSelection(true)
-      }
-      await loadKeysPage()
-      if (pageKeys.value.length === 0 && filteredTotal.value > 0 && currentPage.value > totalPages.value) {
-        await goToPage(totalPages.value)
-      }
-      reloadPhaseMs = performance.now() - reloadStartedAt
       emit('changed')
     }
   } catch (err) {
@@ -1021,7 +806,6 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
       failedCount,
       skippedCount,
       actionPhaseMs: Math.round(actionPhaseMs),
-      reloadPhaseMs: Math.round(reloadPhaseMs),
       totalMs: Math.round(performance.now() - actionStartedAt),
     })
     executing.value = false
@@ -1031,50 +815,24 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
   }
 }
 
-watch(searchText, () => {
-  if (suppressFilterWatch || !props.modelValue) return
-  requestFilteredReload(SEARCH_DEBOUNCE_MS)
-})
-
 watch(
   () => props.modelValue,
   (open) => {
-    if (!open) {
-      clearSearchDebounce()
-      return
-    }
-    suppressFilterWatch = true
-    searchText.value = ''
+    if (!open) return
+    const initialAction = props.initialAction || null
     lastResultMessage.value = ''
-    activeQuickSelectors.value = []
-    selectedAction.value = 'refresh_quota'
+    selectedAction.value = initialAction || 'refresh_quota'
     proxyNodeIdForAction.value = ''
-    resetSelection(true)
-    filteredTotal.value = 0
-    pageKeys.value = []
-    currentPage.value = 1
-    suppressFilterWatch = false
+    Object.assign(settingsSelection, createPoolKeyBatchSettingSelection())
+    Object.assign(settingsDraft, createPoolKeyBatchSettingsDraft())
     proxyNodesStore.ensureLoaded()
-    void loadKeysPage()
+    if (initialAction) {
+      void nextTick(() => {
+        if (!props.modelValue || props.initialAction !== initialAction) return
+        handleActionButtonClick(initialAction)
+      })
+    }
   },
+  { immediate: true },
 )
-
-watch(
-  () => props.providerId,
-  (newId, oldId) => {
-    if (!props.modelValue || !newId || newId === oldId) return
-    clearSearchDebounce()
-    suppressFilterWatch = true
-    resetSelection(true)
-    filteredTotal.value = 0
-    pageKeys.value = []
-    currentPage.value = 1
-    suppressFilterWatch = false
-    void loadKeysPage()
-  },
-)
-
-onBeforeUnmount(() => {
-  clearSearchDebounce()
-})
 </script>

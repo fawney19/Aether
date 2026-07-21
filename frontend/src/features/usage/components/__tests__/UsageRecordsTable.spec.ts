@@ -162,6 +162,14 @@ function mountUsageRecordsTable(records: UsageRecord[], overrides: Record<string
   return root
 }
 
+function expectServiceTierBadge(root: HTMLElement, label: string): HTMLElement {
+  const badge = [...root.querySelectorAll<HTMLElement>('span')]
+    .find(element => element.textContent?.trim() === label)
+
+  expect(badge).toBeDefined()
+  return badge as HTMLElement
+}
+
 afterEach(() => {
   for (const { app, root } of mountedApps.splice(0)) {
     app.unmount()
@@ -282,17 +290,194 @@ describe('UsageRecordsTable', () => {
   })
 
   it('shows reasoning effort next to the model name', () => {
-    const root = mountUsageRecordsTable([buildRecord({ reasoning_effort: 'xhigh' })])
+    const root = mountUsageRecordsTable([buildRecord({
+      requested_reasoning_effort: 'xhigh',
+      reasoning_effort: 'xhigh',
+      service_tier: 'priority',
+    })])
 
     expect(root.textContent).toContain('gpt-5')
     expect(root.textContent).toContain('xhigh')
+    const inlineLayout = root.querySelector('[data-usage-model-layout="inline"]')
+    expect(inlineLayout).not.toBeNull()
+    expect(inlineLayout?.querySelector('[data-usage-model-badge="reasoning"]')?.textContent?.trim())
+      .toBe('xhigh')
+    expect(inlineLayout?.querySelector('[data-usage-model-badge="fast"]')?.textContent?.trim())
+      .toBe('Fast')
   })
 
-  it('shows fast badge for priority service tier', () => {
-    const root = mountUsageRecordsTable([buildRecord({ service_tier: 'priority' })])
+  it('shows request reasoning effort while the record is pending', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      status: 'pending',
+      requested_reasoning_effort: 'max',
+      reasoning_effort: null,
+    })])
+
+    expect(root.querySelector('[data-usage-model-badge="reasoning"]')?.textContent?.trim())
+      .toBe('max')
+  })
+
+  it('marks Responses compaction while the record is pending', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      status: 'pending',
+      request_type: 'compact',
+    })])
+
+    expect(root.querySelector('[data-usage-model-badge="compact"]')?.textContent?.trim())
+      .toBe('会话压缩')
+  })
+
+  it('shows mapping, reasoning, Fast, and Cyber in the model area', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      model: 'gpt-5',
+      target_model: 'gpt-5.1',
+      requested_reasoning_effort: 'xhigh',
+      reasoning_effort: 'max',
+      service_tier: 'priority',
+      // A conflicting response-side value must not affect the Fast badge.
+      actual_service_tier: 'default',
+      status: 'failed',
+      status_code: 400,
+      error_message: 'This content was flagged for possible cybersecurity risk. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber',
+    })])
 
     expect(root.textContent).toContain('gpt-5')
-    expect(root.textContent).toContain('fast')
+    expect(root.textContent).toContain('gpt-5.1')
+    expect(root.textContent).toContain('xhigh -> max')
+    expect(root.textContent).toContain('Fast')
+    const reasoningBadge = root.querySelector<HTMLElement>('[data-usage-model-badge="reasoning"]')
+    const fastBadge = root.querySelector<HTMLElement>('[data-usage-model-badge="fast"]')
+    const cyberBadges = root.querySelectorAll<HTMLElement>('[data-usage-model-badge="cyber"]')
+    const cyberBadge = cyberBadges[0]
+    for (const badge of [reasoningBadge, fastBadge, cyberBadge]) {
+      expect(badge).not.toBeNull()
+      expect(badge?.classList.contains('h-4')).toBe(true)
+      expect(badge?.classList.contains('rounded-full')).toBe(true)
+      expect(badge?.classList.contains('px-1.5')).toBe(true)
+      expect(badge?.classList.contains('text-[10px]')).toBe(true)
+      expect(badge?.classList.contains('leading-4')).toBe(true)
+    }
+    expect(reasoningBadge?.classList.contains('border-primary/30')).toBe(true)
+    expect(reasoningBadge?.classList.contains('bg-primary/5')).toBe(true)
+    expect(reasoningBadge?.classList.contains('text-primary')).toBe(true)
+    expect(fastBadge?.getAttribute('variant')).toBe('outline-transparent')
+    expect(fastBadge?.classList.contains('border-amber-400/50')).toBe(false)
+    expect(fastBadge?.classList.contains('!bg-transparent')).toBe(false)
+    expect(fastBadge?.classList.contains('bg-amber-400/10')).toBe(false)
+    expect(fastBadge?.classList.contains('text-blue-500')).toBe(true)
+    expect(cyberBadge?.classList.contains('border-primary/30')).toBe(true)
+    expect(cyberBadge?.classList.contains('bg-primary/5')).toBe(true)
+    expect(cyberBadge?.classList.contains('text-rose-500')).toBe(true)
+    expect(cyberBadges.length).toBeGreaterThan(0)
+    expect([...cyberBadges].every(badge => badge.textContent?.trim() === 'Cyber')).toBe(true)
+    expect([...cyberBadges].every(badge => badge.title === '上游 Cyber Policy 拒绝')).toBe(true)
+
+    const inlineLayout = root.querySelector('[data-usage-model-layout="inline"]')
+    expect(inlineLayout).not.toBeNull()
+    const modelRow = inlineLayout?.firstElementChild
+    expect(modelRow?.textContent).toContain('gpt-5')
+    expect(modelRow?.textContent).toContain('->')
+    expect(modelRow?.textContent).toContain('gpt-5.1')
+    expect(modelRow?.querySelector('[data-usage-model-target]')?.classList.contains('basis-full')).toBe(true)
+    expect(modelRow?.querySelector('[data-usage-model-target]')?.classList.contains('order-last')).toBe(true)
+    expect(modelRow?.querySelector('[data-usage-model-badge="reasoning"]')?.textContent).toContain('xhigh -> max')
+    expect(modelRow?.querySelector('[data-usage-model-badge="fast"]')?.textContent).toContain('Fast')
+    expect(modelRow?.querySelector('[data-usage-model-badge="cyber"]')?.textContent).toContain('Cyber')
+  })
+
+  it('stacks three model badges even without a model mapping', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      model: 'gpt-5',
+      target_model: null,
+      requested_reasoning_effort: 'xhigh',
+      reasoning_effort: 'xhigh',
+      service_tier: 'priority',
+      status: 'failed',
+      status_code: 400,
+      error_message: 'This content was flagged for possible cybersecurity risk. https://chatgpt.com/cyber',
+    })])
+
+    const stackedLayout = root.querySelector('[data-usage-model-layout="stacked"]')
+    expect(stackedLayout?.textContent).toContain('gpt-5')
+    expect(stackedLayout?.textContent).toContain('xhigh')
+    expect(stackedLayout?.textContent).toContain('Fast')
+    expect(stackedLayout?.textContent).toContain('Cyber')
+  })
+
+  it.each(['priority', 'fast', ' Priority ', 'FAST'])(
+    'shows Fast from the final provider request tier %s',
+    (requested) => {
+      const root = mountUsageRecordsTable([buildRecord({
+        service_tier: requested,
+        actual_service_tier: 'default',
+      })])
+
+      const badge = expectServiceTierBadge(root, 'Fast')
+      expect(badge.getAttribute('title')).toBe([
+        '上游请求档位：Fast',
+        '计费档位：Fast',
+      ].join('\n'))
+      expect(badge.getAttribute('aria-label')).toBe(
+        '上游请求档位：Fast，计费档位：Fast',
+      )
+      expect(badge.textContent).not.toContain('→')
+      expect(badge.textContent).not.toContain('待确认')
+      expect(badge.textContent).not.toContain('未确认')
+    },
+  )
+
+  it.each(['default', 'flex', null])(
+    'ignores the response-side tier %s when the request tier is Fast',
+    (actualServiceTier) => {
+      const root = mountUsageRecordsTable([buildRecord({
+        service_tier: 'priority',
+        actual_service_tier: actualServiceTier,
+      })])
+
+      expectServiceTierBadge(root, 'Fast')
+      expect(root.textContent).not.toContain('Fast →')
+    },
+  )
+
+  it('does not infer Fast from a response-side priority tier', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      service_tier: 'default',
+      actual_service_tier: 'priority',
+    })])
+
+    expect(root.querySelector('[data-usage-model-badge="fast"]')).toBeNull()
+  })
+
+  it('does not infer Fast when only the response has a tier', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      service_tier: null,
+      actual_service_tier: 'priority',
+    })])
+
+    expect(root.querySelector('[data-usage-model-badge="fast"]')).toBeNull()
+  })
+
+  it.each(['pending', 'streaming'] as const)(
+    'keeps Fast stable while a priority request is %s',
+    (status) => {
+      const root = mountUsageRecordsTable([buildRecord({
+        service_tier: 'priority',
+        actual_service_tier: null,
+        status,
+      })])
+
+      expectServiceTierBadge(root, 'Fast')
+    },
+  )
+
+  it('keeps Fast stable for a completed request without a response tier', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      service_tier: 'priority',
+      actual_service_tier: null,
+      status: 'completed',
+    })])
+
+    expectServiceTierBadge(root, 'Fast')
   })
 
   it('offers embedding API formats in the usage record filter', () => {

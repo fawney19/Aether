@@ -6,12 +6,14 @@ export const API_FORMATS = {
   OPENAI: 'openai:chat',
   OPENAI_RESPONSES: 'openai:responses',
   OPENAI_RESPONSES_COMPACT: 'openai:responses:compact',
+  OPENAI_SEARCH: 'openai:search',
   OPENAI_IMAGE: 'openai:image',
   OPENAI_VIDEO: 'openai:video',
   OPENAI_EMBEDDING: 'openai:embedding',
   OPENAI_RERANK: 'openai:rerank',
   GEMINI: 'gemini:generate_content',
   GEMINI_GENERATE_CONTENT: 'gemini:generate_content',
+  GEMINI_INTERACTIONS: 'gemini:interactions',
   GEMINI_VIDEO: 'gemini:video',
   GEMINI_FILES: 'gemini:files',
   GEMINI_EMBEDDING: 'gemini:embedding',
@@ -29,11 +31,13 @@ export const API_FORMAT_LABELS: Record<string, string> = {
   [API_FORMATS.OPENAI]: 'OpenAI Chat',
   [API_FORMATS.OPENAI_RESPONSES]: 'OpenAI Responses',
   [API_FORMATS.OPENAI_RESPONSES_COMPACT]: 'OpenAI Responses Compact',
+  [API_FORMATS.OPENAI_SEARCH]: 'OpenAI Search',
   [API_FORMATS.OPENAI_IMAGE]: 'OpenAI Image',
   [API_FORMATS.OPENAI_VIDEO]: 'OpenAI Video',
   [API_FORMATS.OPENAI_EMBEDDING]: 'OpenAI Embedding',
   [API_FORMATS.OPENAI_RERANK]: 'OpenAI Rerank',
   [API_FORMATS.GEMINI_GENERATE_CONTENT]: 'Gemini Generate Content',
+  [API_FORMATS.GEMINI_INTERACTIONS]: 'Gemini Interactions',
   [API_FORMATS.GEMINI_VIDEO]: 'Gemini Video',
   [API_FORMATS.GEMINI_FILES]: 'Gemini Files',
   [API_FORMATS.GEMINI_EMBEDDING]: 'Gemini Embedding',
@@ -46,12 +50,14 @@ export const API_FORMAT_LABELS: Record<string, string> = {
   OPENAI: 'OpenAI Chat',
   OPENAI_RESPONSES: 'OpenAI Responses',
   OPENAI_RESPONSES_COMPACT: 'OpenAI Responses Compact',
+  OPENAI_SEARCH: 'OpenAI Search',
   OPENAI_IMAGE: 'OpenAI Image',
   OPENAI_VIDEO: 'OpenAI Video',
   OPENAI_EMBEDDING: 'OpenAI Embedding',
   OPENAI_RERANK: 'OpenAI Rerank',
   GEMINI: 'Gemini Generate Content',
   GEMINI_GENERATE_CONTENT: 'Gemini Generate Content',
+  GEMINI_INTERACTIONS: 'Gemini Interactions',
   GEMINI_VIDEO: 'Gemini Video',
   GEMINI_FILES: 'Gemini Files',
   GEMINI_EMBEDDING: 'Gemini Embedding',
@@ -66,12 +72,14 @@ export const API_FORMAT_SHORT: Record<string, string> = {
   [API_FORMATS.OPENAI]: 'O',
   [API_FORMATS.OPENAI_RESPONSES]: 'OR',
   [API_FORMATS.OPENAI_RESPONSES_COMPACT]: 'ORC',
+  [API_FORMATS.OPENAI_SEARCH]: 'OS',
   [API_FORMATS.OPENAI_IMAGE]: 'OI',
   [API_FORMATS.OPENAI_VIDEO]: 'OV',
   [API_FORMATS.OPENAI_EMBEDDING]: 'OE',
   [API_FORMATS.OPENAI_RERANK]: 'ORR',
   [API_FORMATS.CLAUDE_MESSAGES]: 'CM',
   [API_FORMATS.GEMINI_GENERATE_CONTENT]: 'G',
+  [API_FORMATS.GEMINI_INTERACTIONS]: 'GI',
   [API_FORMATS.GEMINI_VIDEO]: 'GV',
   [API_FORMATS.GEMINI_FILES]: 'GF',
   [API_FORMATS.GEMINI_EMBEDDING]: 'GE',
@@ -82,6 +90,7 @@ export const API_FORMAT_SHORT: Record<string, string> = {
   OPENAI: 'O',
   OPENAI_RESPONSES: 'OR',
   OPENAI_RESPONSES_COMPACT: 'ORC',
+  OPENAI_SEARCH: 'OS',
   OPENAI_IMAGE: 'OI',
   OPENAI_VIDEO: 'OV',
   OPENAI_EMBEDDING: 'OE',
@@ -90,6 +99,7 @@ export const API_FORMAT_SHORT: Record<string, string> = {
   CLAUDE_MESSAGES: 'CM',
   GEMINI: 'G',
   GEMINI_GENERATE_CONTENT: 'G',
+  GEMINI_INTERACTIONS: 'GI',
   GEMINI_VIDEO: 'GV',
   GEMINI_FILES: 'GF',
   GEMINI_EMBEDDING: 'GE',
@@ -104,12 +114,14 @@ export const API_FORMAT_ORDER: string[] = [
   API_FORMATS.OPENAI,
   API_FORMATS.OPENAI_RESPONSES,
   API_FORMATS.OPENAI_RESPONSES_COMPACT,
+  API_FORMATS.OPENAI_SEARCH,
   API_FORMATS.OPENAI_EMBEDDING,
   API_FORMATS.OPENAI_RERANK,
   API_FORMATS.OPENAI_IMAGE,
   API_FORMATS.OPENAI_VIDEO,
   API_FORMATS.CLAUDE_MESSAGES,
   API_FORMATS.GEMINI_GENERATE_CONTENT,
+  API_FORMATS.GEMINI_INTERACTIONS,
   API_FORMATS.GEMINI_EMBEDDING,
   API_FORMATS.GEMINI_VIDEO,
   API_FORMATS.GEMINI_FILES,
@@ -134,8 +146,10 @@ export const API_FORMAT_KIND_LABELS: Record<string, string> = {
   chat: 'Chat',
   responses: 'Responses',
   'responses:compact': 'Responses Compact',
+  search: 'Search',
   messages: 'Messages',
   generate_content: 'Generate Content',
+  interactions: 'Interactions',
   image: 'Image',
   video: 'Video',
   files: 'Files',
@@ -167,6 +181,9 @@ export function normalizeApiFormatAlias(format: string | null | undefined): stri
       return API_FORMATS.OPENAI_RESPONSES
     case 'OPENAI_RESPONSES_COMPACT':
       return API_FORMATS.OPENAI_RESPONSES_COMPACT
+    case 'OPENAI_SEARCH':
+    case 'SEARCH':
+      return API_FORMATS.OPENAI_SEARCH
     case 'OPENAI_IMAGE':
       return API_FORMATS.OPENAI_IMAGE
     case 'OPENAI_VIDEO':
@@ -178,6 +195,8 @@ export function normalizeApiFormatAlias(format: string | null | undefined): stri
     case 'GEMINI':
     case 'GEMINI_GENERATE_CONTENT':
       return API_FORMATS.GEMINI_GENERATE_CONTENT
+    case 'GEMINI_INTERACTIONS':
+      return API_FORMATS.GEMINI_INTERACTIONS
     case 'GEMINI_VIDEO':
       return API_FORMATS.GEMINI_VIDEO
     case 'GEMINI_FILES':
@@ -205,6 +224,20 @@ export function normalizeApiFormatAlias(format: string | null | undefined): stri
           return raw.toLowerCase()
       }
   }
+}
+
+export function apiFormatPermissionCovers(
+  allowedFormat: string | null | undefined,
+  requestedFormat: string | null | undefined,
+): boolean {
+  const allowed = normalizeApiFormatAlias(allowedFormat)
+  const requested = normalizeApiFormatAlias(requestedFormat)
+  return Boolean(allowed)
+    && Boolean(requested)
+    && (allowed === requested
+      || (allowed === API_FORMATS.OPENAI_RESPONSES
+        && (requested === API_FORMATS.OPENAI_RESPONSES_COMPACT
+          || requested === API_FORMATS.OPENAI_SEARCH)))
 }
 
 // 工具函数：按 family 分组并排序 API 格式数组
@@ -263,14 +296,16 @@ export function formatApiFormatShort(format: string | null | undefined): string 
 
 // 工具函数：按标准顺序排序 API 格式数组
 export function sortApiFormats(formats: string[]): string[] {
-  return [...formats].sort((a, b) => {
-    const aIdx = API_FORMAT_ORDER.indexOf(normalizeApiFormatAlias(a))
-    const bIdx = API_FORMAT_ORDER.indexOf(normalizeApiFormatAlias(b))
-    if (aIdx === -1 && bIdx === -1) return 0
-    if (aIdx === -1) return 1
-    if (bIdx === -1) return -1
-    return aIdx - bIdx
-  })
+  return [...formats].sort(compareApiFormats)
+}
+
+export function compareApiFormats(a: string, b: string): number {
+  const aIdx = API_FORMAT_ORDER.indexOf(normalizeApiFormatAlias(a))
+  const bIdx = API_FORMAT_ORDER.indexOf(normalizeApiFormatAlias(b))
+  if (aIdx === -1 && bIdx === -1) return 0
+  if (aIdx === -1) return 1
+  if (bIdx === -1) return -1
+  return aIdx - bIdx
 }
 
 // openai family 格式只支持 bearer（Authorization header），不允许覆盖认证方式

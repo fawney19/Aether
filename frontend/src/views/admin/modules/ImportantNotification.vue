@@ -532,42 +532,33 @@ onMounted(() => {
 
 async function loadConfig() {
   try {
-    const [
-      moduleStatus,
-      emailEnabled,
-      recipients,
-      defaultChannel,
-      items,
-      serverChanModuleStatus,
-      serverChanKey,
-      barkModuleStatus,
-      barkDeviceKey,
-      smtpHost,
-      smtpFromEmail,
-    ] = await Promise.all([
-      modulesApi.getStatus('important_notification'),
-      adminApi.getSystemConfig(CONFIG_KEYS.email_enabled),
-      adminApi.getSystemConfig(CONFIG_KEYS.email_recipients),
-      adminApi.getSystemConfig(CONFIG_KEYS.default_channel),
-      adminApi.getSystemConfig(CONFIG_KEYS.items),
-      modulesApi.getStatus('server_chan_push'),
-      adminApi.getSystemConfig(CONFIG_KEYS.server_chan_send_key),
-      modulesApi.getStatus('bark_push'),
-      adminApi.getSystemConfig(CONFIG_KEYS.bark_device_key),
-      adminApi.getSystemConfig('smtp_host'),
-      adminApi.getSystemConfig('smtp_from_email'),
+    const [moduleStatuses, configs] = await Promise.all([
+      modulesApi.getAllStatus(),
+      adminApi.getAllSystemConfigs({ cacheTtlMs: 30_000 }),
     ])
+    const moduleStatus = moduleStatuses.important_notification
+    const serverChanModuleStatus = moduleStatuses.server_chan_push
+    const barkModuleStatus = moduleStatuses.bark_push
+    const configsByKey = new Map(configs.map(config => [config.key, config]))
+    const emailEnabled = configsByKey.get(CONFIG_KEYS.email_enabled)
+    const recipients = configsByKey.get(CONFIG_KEYS.email_recipients)
+    const defaultChannel = configsByKey.get(CONFIG_KEYS.default_channel)
+    const items = configsByKey.get(CONFIG_KEYS.items)
+    const serverChanKey = configsByKey.get(CONFIG_KEYS.server_chan_send_key)
+    const barkDeviceKey = configsByKey.get(CONFIG_KEYS.bark_device_key)
+    const smtpHost = configsByKey.get('smtp_host')
+    const smtpFromEmail = configsByKey.get('smtp_from_email')
 
     config.value.enabled = moduleStatus.enabled === true
-    config.value.email_enabled = emailEnabled.value === true
-    config.value.email_recipients = normalizeRecipients(recipients.value)
-    config.value.default_channel = normalizeDefaultChannel(defaultChannel.value)
-    config.value.items = normalizeItems(items.value)
+    config.value.email_enabled = emailEnabled?.value === true
+    config.value.email_recipients = normalizeRecipients(recipients?.value)
+    config.value.default_channel = normalizeDefaultChannel(defaultChannel?.value)
+    config.value.items = normalizeItems(items?.value)
     serverChanStatus.value = serverChanModuleStatus
-    serverChanKeyIsSet.value = serverChanKey.is_set === true
+    serverChanKeyIsSet.value = serverChanKey?.is_set === true
     barkStatus.value = barkModuleStatus
-    barkKeyIsSet.value = barkDeviceKey.is_set === true
-    smtpConfigured.value = isNonEmptyString(smtpHost.value) && isNonEmptyString(smtpFromEmail.value)
+    barkKeyIsSet.value = barkDeviceKey?.is_set === true
+    smtpConfigured.value = isNonEmptyString(smtpHost?.value) && isNonEmptyString(smtpFromEmail?.value)
     if (!config.value.items.some(item => item.key === testItemKey.value)) {
       testItemKey.value = config.value.items[0]?.key || ''
     }

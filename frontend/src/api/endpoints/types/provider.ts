@@ -344,9 +344,16 @@ export interface CodexUpstreamMetadata {
 }
 
 export interface AntigravityModelQuota {
-  remaining_fraction: number  // 剩余比例 (0.0-1.0)
-  used_percent: number  // 已用百分比 (0.0-100.0)
-  reset_time?: string  // RFC3339
+  remaining_fraction?: number | string | null  // 剩余比例 (0.0-1.0)
+  used_percent?: number | string | null  // 已用百分比 (0.0-100.0)
+  remaining?: number | string | null
+  total?: number | string | null
+  reset_time?: string | null  // RFC3339
+  reset_at?: number | string | null
+  display_name?: string | null
+  model_id?: string | null
+  token_type?: string | null
+  is_exhausted?: boolean | null
 }
 
 export interface AntigravityUpstreamMetadata {
@@ -958,6 +965,7 @@ export interface ProviderModelMapping {
   priority: number  // 优先级（数字越小优先级越高）
   api_formats?: string[]  // 作用域（适用的 API 格式），为空表示对所有格式生效
   endpoint_ids?: string[]  // 作用域（适用的端点 ID），为空表示对所有端点生效
+  operations?: string[]  // 作用域（适用的请求操作），为空表示对该格式的全部操作生效
 }
 
 // 保留别名以保持向后兼容

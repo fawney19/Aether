@@ -24,7 +24,7 @@
         @update:sort-option="sortOption = $event"
         @open-groups="showUserGroupsDialog = true"
         @create-user="openCreateDialog"
-        @refresh="refreshUsers"
+        @refresh="handleManualRefresh"
       />
 
       <UserSelectionToolbar
@@ -138,7 +138,7 @@
       :format-rate-limit="formatRateLimitSimple"
       :format-concurrent-limit="formatConcurrentLimitSimple"
       :format-ip-rules="formatIpRules"
-      @close="showApiKeysDialog = false"
+      @close="closeApiKeysDialog"
       @create-key="openCreateUserApiKeyDialog"
       @edit-key="openEditUserApiKeyDialog"
       @toggle-lock="toggleLockApiKey"
@@ -189,7 +189,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useUsersStore } from '@/stores/users'
 import { useAuthStore } from '@/stores/auth'
 import {
@@ -231,6 +231,10 @@ import UserManagementList from '@/features/users/components/UserManagementList.v
 import UserPlanDialog from '@/features/users/components/UserPlanDialog.vue'
 import UserSelectionToolbar from '@/features/users/components/UserSelectionToolbar.vue'
 import UserSessionsDialog from '@/features/users/components/UserSessionsDialog.vue'
+import {
+  buildApiKeyRedactionFeatureSettingsPatch,
+  resolveApiKeyRedactionFormState,
+} from '@/features/users/apiKeyFeatureSettings'
 import type { UserManagementRow } from '@/features/users/components/user-management-types'
 import {
   USER_ROLE_FILTER_OPTIONS,
@@ -242,10 +246,6 @@ import {
 import WalletOpsDrawer from '@/features/wallet/components/WalletOpsDrawer.vue'
 import { parseApiError } from '@/utils/errorParser'
 import { formatTokens, formatRateLimitInheritable, formatRateLimitSimple, isRateLimitInherited, isRateLimitUnlimited } from '@/utils/format'
-import {
-  mergeChatPiiRedactionFeatureSettings,
-  readChatPiiRedactionFeatureSettings,
-} from '@/utils/featureSettings'
 import { log } from '@/utils/logger'
 import { useBatchSelection } from '@/composables/useBatchSelection'
 import { useI18n } from '@/i18n'
@@ -292,6 +292,7 @@ const userApiKeyForm = ref<UserApiKeyFormState>({
   rate_limit: undefined,
   concurrent_limit: undefined,
   ip_rules_text: '',
+  chat_pii_redaction_mode: 'inherit',
   chat_pii_redaction_enabled: false,
   chat_pii_redaction_placeholder_notice: true,
 })
@@ -325,7 +326,11 @@ const currentPage = ref(1)
 const pageSize = ref(20)
 const USERS_PAGE_CACHE_TTL_MS = 10 * 1000
 const USER_WALLETS_CACHE_TTL_MS = 10 * 1000
+const USERS_SEARCH_DEBOUNCE_MS = 300
 let userWalletsRequestId = 0
+let userApiKeysRequestId = 0
+let userApiKeyMutationRequestId = 0
+let usersSearchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
 const filteredUsers = computed(() => usersStore.users)
 
@@ -404,39 +409,72 @@ const userRows = computed<UserManagementRow[]>(() =>
   })
 )
 
-// Watch filter changes and reset to first page
-watch([searchQuery, filterRole, filterStatus, filterGroup, sortOption], () => {
+function resetUserListForFilterChange() {
   currentPage.value = 1
   resetBatchSelection()
+}
+
+function clearUsersSearchDebounce() {
+  if (usersSearchDebounceTimer) {
+    clearTimeout(usersSearchDebounceTimer)
+    usersSearchDebounceTimer = null
+  }
+}
+
+watch(searchQuery, () => {
+  resetUserListForFilterChange()
+  clearUsersSearchDebounce()
+  usersSearchDebounceTimer = setTimeout(() => {
+    usersSearchDebounceTimer = null
+    void refreshUsers()
+  }, USERS_SEARCH_DEBOUNCE_MS)
+})
+
+watch([filterRole, filterStatus, filterGroup, sortOption], () => {
+  resetUserListForFilterChange()
+  clearUsersSearchDebounce()
   void refreshUsers()
 })
 
 watch(paginatedUsers, (users) => rememberBatchPageUsers(users), { immediate: true })
 
 onMounted(() => {
-  void refreshUsers({ preferCache: true })
+  void refreshUsers({ preferCache: true }).then(() =>
+    loadUserWallets({ cacheTtlMs: USER_WALLETS_CACHE_TTL_MS })
+  )
+  void loadUserGroups()
+})
+
+onBeforeUnmount(() => {
+  clearUsersSearchDebounce()
+  userWalletsRequestId += 1
+  userApiKeysRequestId += 1
+  userApiKeyMutationRequestId += 1
 })
 
 async function refreshUsers(options: { preferCache?: boolean } = {}) {
   const cacheTtlMs = options.preferCache ? USERS_PAGE_CACHE_TTL_MS : 0
   const search = searchQuery.value.trim()
-  await Promise.all([
-    usersStore.fetchUsers({
-      cacheTtlMs,
-      search: search || undefined,
-      role: filterRole.value === 'all' ? undefined : filterRole.value,
-      is_active: filterStatus.value === 'all' ? undefined : filterStatus.value === 'active',
-      group_id: filterGroup.value === 'all' ? undefined : filterGroup.value,
-      sort_by: sortBy.value ?? undefined,
-      sort_order: sortBy.value ? sortOrder.value : undefined,
-      skip: (currentPage.value - 1) * pageSize.value,
-      limit: pageSize.value,
-    }),
-    loadUserGroups(),
-  ])
-  void loadUserWallets({
-    cacheTtlMs: options.preferCache ? USER_WALLETS_CACHE_TTL_MS : 0,
+  await usersStore.fetchUsers({
+    cacheTtlMs,
+    search: search || undefined,
+    role: filterRole.value === 'all' ? undefined : filterRole.value,
+    is_active: filterStatus.value === 'all' ? undefined : filterStatus.value === 'active',
+    group_id: filterGroup.value === 'all' ? undefined : filterGroup.value,
+    sort_by: sortBy.value ?? undefined,
+    sort_order: sortBy.value ? sortOrder.value : undefined,
+    skip: (currentPage.value - 1) * pageSize.value,
+    limit: pageSize.value,
   })
+}
+
+async function handleManualRefresh() {
+  clearUsersSearchDebounce()
+  await Promise.all([
+    refreshUsers(),
+    loadUserGroups(),
+    loadUserWallets(),
+  ])
 }
 
 function handleTableSort(payload: { key: string, direction: AdminUserSortOrder }): void {
@@ -469,7 +507,7 @@ async function loadUserGroups(): Promise<void> {
 }
 
 async function handleUserGroupsChanged(): Promise<void> {
-  await refreshUsers()
+  await Promise.all([refreshUsers(), loadUserGroups()])
 }
 
 function openUserBatchDialog(): void {
@@ -478,7 +516,7 @@ function openUserBatchDialog(): void {
 }
 
 async function handleUserBatchCompleted(_result: UserBatchActionResponse): Promise<void> {
-  await refreshUsers()
+  await Promise.all([refreshUsers(), loadUserWallets()])
   resetBatchSelection(true)
 }
 
@@ -740,7 +778,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
       success(legacyT('用户创建成功'))
     }
     closeUserFormDialog()
-    await refreshUsers()
+    await Promise.all([refreshUsers(), loadUserWallets()])
   } catch (err: unknown) {
     const title = data.id ? '更新用户失败' : '创建用户失败'
     error(localizedApiError(err, '未知错误'), legacyT(title))
@@ -750,9 +788,20 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
 }
 
 async function manageApiKeys(user: User) {
+  userApiKeyMutationRequestId += 1
+  creatingApiKey.value = false
   selectedUser.value = user
+  userApiKeys.value = []
   showApiKeysDialog.value = true
   await loadUserApiKeys(user.id)
+}
+
+function closeApiKeysDialog() {
+  userApiKeyMutationRequestId += 1
+  creatingApiKey.value = false
+  showApiKeysDialog.value = false
+  userApiKeys.value = []
+  userApiKeysRequestId += 1
 }
 
 async function manageUserSessions(user: User) {
@@ -833,21 +882,37 @@ async function grantPlanToSelectedUser() {
 }
 
 async function loadUserApiKeys(userId: string) {
+  const requestId = ++userApiKeysRequestId
   try {
-    userApiKeys.value = await usersStore.getUserApiKeys(userId)
+    const apiKeys = await usersStore.getUserApiKeys(userId)
+    if (
+      requestId !== userApiKeysRequestId
+      || selectedUser.value?.id !== userId
+      || !showApiKeysDialog.value
+    ) return
+    userApiKeys.value = apiKeys
   } catch (err) {
+    if (
+      requestId !== userApiKeysRequestId
+      || selectedUser.value?.id !== userId
+      || !showApiKeysDialog.value
+    ) return
     log.error('加载API Keys失败:', err)
     userApiKeys.value = []
   }
 }
 
 function openCreateUserApiKeyDialog() {
-  const redactionFeature = readChatPiiRedactionFeatureSettings(null)
+  const redactionFeature = resolveApiKeyRedactionFormState(
+    null,
+    selectedUser.value?.feature_settings,
+  )
   userApiKeyForm.value = {
     name: `Key-${new Date().toISOString().split('T')[0]}`,
     rate_limit: undefined,
     concurrent_limit: undefined,
     ip_rules_text: '',
+    chat_pii_redaction_mode: redactionFeature.mode,
     chat_pii_redaction_enabled: redactionFeature.enabled,
     chat_pii_redaction_placeholder_notice: redactionFeature.inject_model_instruction,
   }
@@ -856,13 +921,17 @@ function openCreateUserApiKeyDialog() {
 }
 
 function openEditUserApiKeyDialog(apiKey: ApiKey) {
-  const redactionFeature = readChatPiiRedactionFeatureSettings(apiKey.feature_settings)
+  const redactionFeature = resolveApiKeyRedactionFormState(
+    apiKey.feature_settings,
+    selectedUser.value?.feature_settings,
+  )
   editingUserApiKey.value = apiKey
   userApiKeyForm.value = {
     name: apiKey.name || '',
     rate_limit: apiKey.rate_limit ?? undefined,
     concurrent_limit: apiKey.concurrent_limit ?? undefined,
     ip_rules_text: apiKey.ip_rules?.join(', ') ?? '',
+    chat_pii_redaction_mode: redactionFeature.mode,
     chat_pii_redaction_enabled: redactionFeature.enabled,
     chat_pii_redaction_placeholder_notice: redactionFeature.inject_model_instruction,
   }
@@ -870,6 +939,10 @@ function openEditUserApiKeyDialog(apiKey: ApiKey) {
 }
 
 function closeUserApiKeyFormDialog() {
+  if (creatingApiKey.value) {
+    userApiKeyMutationRequestId += 1
+    creatingApiKey.value = false
+  }
   showUserApiKeyFormDialog.value = false
   editingUserApiKey.value = null
   userApiKeyForm.value = {
@@ -877,6 +950,7 @@ function closeUserApiKeyFormDialog() {
     rate_limit: undefined,
     concurrent_limit: undefined,
     ip_rules_text: '',
+    chat_pii_redaction_mode: 'inherit',
     chat_pii_redaction_enabled: false,
     chat_pii_redaction_placeholder_notice: true,
   }
@@ -889,42 +963,62 @@ async function submitUserApiKeyForm() {
     return
   }
 
+  const targetUserId = selectedUser.value.id
+  const editingApiKey = editingUserApiKey.value
+  const form = { ...userApiKeyForm.value }
+  const mutationRequestId = ++userApiKeyMutationRequestId
+  const mutationIsCurrent = () => (
+    mutationRequestId === userApiKeyMutationRequestId
+    && selectedUser.value?.id === targetUserId
+    && showApiKeysDialog.value
+  )
+
   creatingApiKey.value = true
   try {
-    const ipRules = parseIpRulesInput(userApiKeyForm.value.ip_rules_text)
-    if (editingUserApiKey.value) {
-      await usersStore.updateApiKey(selectedUser.value.id, editingUserApiKey.value.id, {
-        name: userApiKeyForm.value.name,
-        rate_limit: userApiKeyForm.value.rate_limit ?? 0,
-        concurrent_limit: userApiKeyForm.value.concurrent_limit,
+    const ipRules = parseIpRulesInput(form.ip_rules_text)
+    const featureSettingsPatch = buildApiKeyRedactionFeatureSettingsPatch({
+      isEditing: Boolean(editingApiKey),
+      currentFeatureSettings: editingApiKey?.feature_settings,
+      mode: form.chat_pii_redaction_mode,
+      value: {
+        enabled: form.chat_pii_redaction_enabled,
+        inject_model_instruction: form.chat_pii_redaction_placeholder_notice,
+      },
+    })
+    if (editingApiKey) {
+      await usersStore.updateApiKey(targetUserId, editingApiKey.id, {
+        name: form.name,
+        rate_limit: form.rate_limit ?? 0,
+        concurrent_limit: form.concurrent_limit,
         ip_rules: ipRules,
-        feature_settings: mergeChatPiiRedactionFeatureSettings(editingUserApiKey.value.feature_settings, {
-          enabled: userApiKeyForm.value.chat_pii_redaction_enabled,
-          inject_model_instruction: userApiKeyForm.value.chat_pii_redaction_placeholder_notice,
-        }),
+        ...featureSettingsPatch,
       })
+      if (!mutationIsCurrent()) return
       success(legacyT('API Key已更新'))
     } else {
-      const response = await usersStore.createApiKey(selectedUser.value.id, {
-        name: userApiKeyForm.value.name,
-        rate_limit: userApiKeyForm.value.rate_limit ?? 0,
-        concurrent_limit: userApiKeyForm.value.concurrent_limit,
+      const response = await usersStore.createApiKey(targetUserId, {
+        name: form.name,
+        rate_limit: form.rate_limit ?? 0,
+        concurrent_limit: form.concurrent_limit,
         ip_rules: ipRules,
-        feature_settings: mergeChatPiiRedactionFeatureSettings(null, {
-          enabled: userApiKeyForm.value.chat_pii_redaction_enabled,
-          inject_model_instruction: userApiKeyForm.value.chat_pii_redaction_placeholder_notice,
-        }),
+        ...featureSettingsPatch,
       })
+      if (!mutationIsCurrent()) return
       newApiKey.value = response.key || ''
       showNewApiKeyDialog.value = true
       success(legacyT('API Key创建成功'))
     }
-    await loadUserApiKeys(selectedUser.value.id)
+    await loadUserApiKeys(targetUserId)
+    if (!mutationIsCurrent()) return
     closeUserApiKeyFormDialog()
   } catch (err: unknown) {
-    error(localizedApiError(err, '未知错误'), legacyT(editingUserApiKey.value ? '更新 API Key 失败' : '创建 API Key 失败'))
+    if (mutationIsCurrent()) {
+      error(localizedApiError(err, '未知错误'), legacyT(editingApiKey ? '更新 API Key 失败' : '创建 API Key 失败'))
+    }
   } finally {
-    creatingApiKey.value = false
+    if (mutationRequestId === userApiKeyMutationRequestId) {
+      creatingApiKey.value = false
+    }
   }
 }
 

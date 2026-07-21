@@ -58,7 +58,8 @@ fn admin_provider_root_stays_thin() {
 
     let ops_mod = read_workspace_file("apps/aether-gateway/src/handlers/admin/provider/ops/mod.rs");
     assert!(
-        !ops_mod.contains("pub(crate) use self::providers::admin_provider_ops_local_action_response;"),
+        !ops_mod
+            .contains("pub(crate) use self::providers::admin_provider_ops_local_action_response;"),
         "handlers/admin/provider/ops/mod.rs should not re-export admin_provider_ops_local_action_response"
     );
 
@@ -120,7 +121,7 @@ fn admin_provider_oauth_complete_dispatch_remains_thin() {
 #[test]
 fn postgres_provider_cleanup_preserves_usage_history() {
     let postgres_provider_catalog =
-        read_workspace_file("crates/aether-data/src/repository/provider_catalog/postgres.rs");
+        read_workspace_file("crates/aether-data/adapters/postgres/src/provider_catalog.rs");
 
     for forbidden in [
         "UPDATE usage SET provider_id = NULL",
@@ -137,9 +138,9 @@ fn postgres_provider_cleanup_preserves_usage_history() {
 #[test]
 fn provider_cleanup_keeps_common_backends_in_sync() {
     for path in [
-        "crates/aether-data/src/repository/provider_catalog/postgres.rs",
-        "crates/aether-data/src/repository/provider_catalog/mysql.rs",
-        "crates/aether-data/src/repository/provider_catalog/sqlite.rs",
+        "crates/aether-data/adapters/postgres/src/provider_catalog.rs",
+        "crates/aether-data/adapters/mysql/src/provider_catalog.rs",
+        "crates/aether-data/adapters/sqlite/src/provider_catalog.rs",
     ] {
         let source = read_workspace_file(path);
         for required in [
@@ -370,7 +371,9 @@ fn admin_provider_ops_routes_directoryized() {
     }
 
     assert!(
-        routes_mod.contains("pub(crate) async fn maybe_build_local_admin_provider_ops_providers_response("),
+        routes_mod.contains(
+            "pub(crate) async fn maybe_build_local_admin_provider_ops_providers_response("
+        ),
         "handlers/admin/provider/ops/providers/routes/mod.rs should keep the provider ops entry seam"
     );
     for forbidden in [
@@ -386,7 +389,9 @@ fn admin_provider_ops_routes_directoryized() {
         );
     }
     assert!(
-        !workspace_file_exists("apps/aether-gateway/src/handlers/admin/provider/ops/providers/routes.rs"),
+        !workspace_file_exists(
+            "apps/aether-gateway/src/handlers/admin/provider/ops/providers/routes.rs"
+        ),
         "handlers/admin/provider/ops/providers/routes.rs should be removed once routes are directoryized"
     );
 
@@ -667,8 +672,10 @@ fn admin_provider_query_and_strategy_use_specific_local_owners() {
     let strategy_routes =
         read_workspace_file("apps/aether-gateway/src/handlers/admin/provider/strategy/routes.rs");
     assert!(
-        strategy_routes.contains("state\n        .maybe_build_admin_provider_strategy_route_response(")
-            || strategy_routes.contains("state.maybe_build_admin_provider_strategy_route_response("),
+        strategy_routes
+            .contains("state\n        .maybe_build_admin_provider_strategy_route_response(")
+            || strategy_routes
+                .contains("state.maybe_build_admin_provider_strategy_route_response("),
         "handlers/admin/provider/strategy/routes.rs should delegate to request/provider route owner"
     );
     assert!(
@@ -686,11 +693,15 @@ fn admin_provider_query_and_strategy_use_specific_local_owners() {
     );
 
     assert!(
-        workspace_file_exists("apps/aether-gateway/src/handlers/admin/provider/strategy/responses.rs"),
+        workspace_file_exists(
+            "apps/aether-gateway/src/handlers/admin/provider/strategy/responses.rs"
+        ),
         "handlers/admin/provider/strategy/responses.rs should own strategy route-level shared responses"
     );
     assert!(
-        !workspace_file_exists("apps/aether-gateway/src/handlers/admin/provider/strategy/shared.rs"),
+        !workspace_file_exists(
+            "apps/aether-gateway/src/handlers/admin/provider/strategy/shared.rs"
+        ),
         "handlers/admin/provider/strategy/shared.rs should be removed once the local shared hub is narrowed"
     );
 }
@@ -886,6 +897,7 @@ fn admin_provider_pool_admin_mod_stays_thin() {
         "#[path = \"batch_routes/import.rs\"]",
         "#[path = \"batch_routes/shared.rs\"]",
         "#[path = \"batch_routes/task_status.rs\"]",
+        "#[path = \"batch_routes/update.rs\"]",
         "#[path = \"read_routes/keys.rs\"]",
         "#[path = \"read_routes/overview.rs\"]",
         "#[path = \"read_routes/presets.rs\"]",
@@ -1181,7 +1193,7 @@ fn admin_provider_write_uses_specific_local_owners() {
     ] {
         assert!(
             endpoint_keys_mutations.contains(pattern),
-             "handlers/admin/provider/endpoint_keys/mutations/mod.rs should expose explicit mutation owner {pattern}"
+            "handlers/admin/provider/endpoint_keys/mutations/mod.rs should expose explicit mutation owner {pattern}"
         );
     }
 
@@ -1300,7 +1312,9 @@ fn admin_provider_ops_actions_mod_stays_thin() {
         );
     }
     assert!(
-        !workspace_file_exists("apps/aether-gateway/src/handlers/admin/provider/ops/providers/actions.rs"),
+        !workspace_file_exists(
+            "apps/aether-gateway/src/handlers/admin/provider/ops/providers/actions.rs"
+        ),
         "handlers/admin/provider/ops/providers/actions.rs should be removed once actions logic is directoryized"
     );
 
@@ -1812,7 +1826,8 @@ fn admin_provider_oauth_quota_mod_stays_thin() {
         "handlers/admin/provider/oauth/quota/shared.rs should delegate quota metadata provider detection to aether-provider-pool"
     );
     assert!(
-        !quota_shared.contains("[\"codex\", \"kiro\", \"antigravity\", \"gemini_cli\", \"chatgpt_web\"]"),
+        !quota_shared
+            .contains("[\"codex\", \"kiro\", \"antigravity\", \"gemini_cli\", \"chatgpt_web\"]"),
         "handlers/admin/provider/oauth/quota/shared.rs should not hardcode quota metadata provider list"
     );
 
@@ -1874,9 +1889,8 @@ fn admin_provider_oauth_quota_mod_stays_thin() {
         "apps/aether-gateway/src/handlers/admin/provider/oauth/quota/codex/invalid.rs",
     );
     assert!(
-        quota_codex_invalid.contains(
-            "use crate::handlers::admin::provider::shared::payloads::{"
-        ) || quota_codex_invalid.contains("use aether_admin::provider::quota"),
+        quota_codex_invalid.contains("use crate::handlers::admin::provider::shared::payloads::{")
+            || quota_codex_invalid.contains("use aether_admin::provider::quota"),
         "handlers/admin/provider/oauth/quota/codex/invalid.rs should either own codex invalid-state helpers locally or delegate to aether-admin"
     );
     let quota_codex_plan = read_workspace_file(
@@ -1950,7 +1964,8 @@ fn admin_provider_oauth_quota_mod_stays_thin() {
         "handlers/admin/provider/oauth/quota/antigravity.rs should import common quota helpers from shared.rs"
     );
     assert!(
-        quota_antigravity.contains("use aether_provider_pool::build_antigravity_pool_quota_request;"),
+        quota_antigravity
+            .contains("use aether_provider_pool::build_antigravity_pool_quota_request;"),
         "handlers/admin/provider/oauth/quota/antigravity.rs should delegate antigravity quota request construction to aether-provider-pool"
     );
     let quota_chatgpt_web = read_workspace_file(
@@ -2131,12 +2146,14 @@ fn admin_provider_oauth_dispatch_batch_mod_stays_thin() {
         "apps/aether-gateway/src/handlers/admin/provider/oauth/dispatch/batch/kiro_import.rs",
     );
     assert!(
-        batch_kiro_import.contains("pub(super) async fn execute_admin_provider_oauth_kiro_batch_import("),
+        batch_kiro_import
+            .contains("pub(super) async fn execute_admin_provider_oauth_kiro_batch_import("),
         "handlers/admin/provider/oauth/dispatch/batch/kiro_import.rs should own the kiro batch execution owner"
     );
     assert!(
         batch_kiro_import.contains("build_kiro_batch_import_key_name(")
-            || batch_kiro_import.contains("aether_admin::provider::oauth::build_kiro_batch_import_key_name"),
+            || batch_kiro_import
+                .contains("aether_admin::provider::oauth::build_kiro_batch_import_key_name"),
         "handlers/admin/provider/oauth/dispatch/batch/kiro_import.rs should either own or delegate the kiro key-name builder"
     );
     assert!(
@@ -2163,7 +2180,8 @@ fn admin_provider_oauth_dispatch_batch_mod_stays_thin() {
         "apps/aether-gateway/src/handlers/admin/provider/oauth/dispatch/batch/orchestration.rs",
     );
     assert!(
-        batch_orchestration.contains("pub(in super::super) async fn handle_admin_provider_oauth_batch_import("),
+        batch_orchestration
+            .contains("pub(in super::super) async fn handle_admin_provider_oauth_batch_import("),
         "handlers/admin/provider/oauth/dispatch/batch/orchestration.rs should own the direct batch import route"
     );
 
@@ -2334,7 +2352,9 @@ fn admin_provider_oauth_device_mod_stays_thin() {
     }
 
     assert!(
-        !workspace_file_exists("apps/aether-gateway/src/handlers/admin/provider/oauth/dispatch/device.rs"),
+        !workspace_file_exists(
+            "apps/aether-gateway/src/handlers/admin/provider/oauth/dispatch/device.rs"
+        ),
         "handlers/admin/provider/oauth/dispatch/device.rs should be removed once device dispatch is directoryized"
     );
 }

@@ -58,6 +58,15 @@ export function mergeChatPiiRedactionFeatureSettings(
   return Object.keys(settings).length > 0 ? settings : null
 }
 
+export function removeChatPiiRedactionFeatureSettings(
+  featureSettings: unknown,
+): FeatureSettingsMap | null {
+  if (!isRecord(featureSettings)) return null
+  const settings: FeatureSettingsMap = { ...featureSettings }
+  delete settings.chat_pii_redaction
+  return Object.keys(settings).length > 0 ? settings : null
+}
+
 export function readNotificationPushServiceFeatureSettings(
   featureSettings: unknown,
 ): NotificationPushServiceFeatureSettings {

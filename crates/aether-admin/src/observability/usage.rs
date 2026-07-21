@@ -951,14 +951,7 @@ fn admin_usage_api_format_defaults_to_non_stream(item: &StoredRequestUsageAudit)
     let Some(value) = api_format else {
         return false;
     };
-    matches!(
-        aether_ai_formats::normalize_api_format_alias(value).as_str(),
-        "openai:chat"
-            | "openai:responses"
-            | "openai:responses:compact"
-            | "openai:image"
-            | "claude:messages"
-    )
+    aether_ai_formats::api_format_defaults_to_non_stream(value)
 }
 
 fn admin_usage_request_body_implies_default_non_stream(item: &StoredRequestUsageAudit) -> bool {
@@ -1195,6 +1188,7 @@ fn admin_usage_active_request_json(
     let mut value = json!({
         "id": item.id,
         "status": item.status,
+        "request_type": item.request_type,
         "input_tokens": item.input_tokens,
         "effective_input_tokens": admin_usage_effective_input_tokens(item),
         "output_tokens": item.output_tokens,
@@ -1237,8 +1231,14 @@ fn admin_usage_active_request_json(
     if let Some(reasoning_effort) = item.provider_reasoning_effort() {
         value["reasoning_effort"] = json!(reasoning_effort);
     }
+    if let Some(requested_reasoning_effort) = item.requested_reasoning_effort() {
+        value["requested_reasoning_effort"] = json!(requested_reasoning_effort);
+    }
     if let Some(service_tier) = item.provider_service_tier() {
         value["service_tier"] = json!(service_tier);
+    }
+    if let Some(actual_service_tier) = item.provider_actual_service_tier() {
+        value["actual_service_tier"] = json!(actual_service_tier);
     }
     if let Some(image_progress) = image_progress {
         value["image_progress"] = image_progress.clone();
@@ -1301,6 +1301,7 @@ pub fn admin_usage_record_json(
         "response_time_ms": item.response_time_ms,
         "first_byte_time_ms": item.first_byte_time_ms,
         "created_at": unix_secs_to_rfc3339(item.created_at_unix_ms),
+        "updated_at": unix_secs_to_rfc3339(item.updated_at_unix_secs),
         "input_price_per_1m": input_price_per_1m,
         "output_price_per_1m": output_price_per_1m,
         "cache_creation_price_per_1m": cache_creation_price_per_1m,
@@ -1308,6 +1309,7 @@ pub fn admin_usage_record_json(
         "status_code": item.status_code,
         "error_message": item.error_message,
         "status": item.status,
+        "request_type": item.request_type,
         "has_fallback": admin_usage_has_fallback(item),
         "has_retry": false,
         "has_rectified": false,
@@ -1356,8 +1358,20 @@ pub fn admin_usage_record_json(
     if let Some(reasoning_effort) = item.provider_reasoning_effort() {
         object.insert("reasoning_effort".to_string(), json!(reasoning_effort));
     }
+    if let Some(requested_reasoning_effort) = item.requested_reasoning_effort() {
+        object.insert(
+            "requested_reasoning_effort".to_string(),
+            json!(requested_reasoning_effort),
+        );
+    }
     if let Some(service_tier) = item.provider_service_tier() {
         object.insert("service_tier".to_string(), json!(service_tier));
+    }
+    if let Some(actual_service_tier) = item.provider_actual_service_tier() {
+        object.insert(
+            "actual_service_tier".to_string(),
+            json!(actual_service_tier),
+        );
     }
     payload
 }
@@ -1403,8 +1417,15 @@ pub fn admin_usage_effective_input_tokens(item: &StoredRequestUsageAudit) -> u64
         .as_deref()
         .or(item.api_format.as_deref());
     let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
+    let cache_creation_tokens =
+        i64::try_from(admin_usage_cache_creation_tokens(item)).unwrap_or(i64::MAX);
     let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
-    normalize_input_tokens_for_billing(api_format, input_tokens, cache_read_tokens) as u64
+    normalize_input_tokens_for_billing(
+        api_format,
+        input_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    ) as u64
 }
 
 pub fn admin_usage_token_cache_hit_rate(total_input_context: u64, cache_read_tokens: u64) -> f64 {
@@ -2691,10 +2712,13 @@ mod tests {
     }
 
     #[test]
-    fn admin_usage_record_includes_provider_reasoning_effort() {
+    fn admin_usage_record_includes_requested_and_provider_reasoning_efforts() {
         let item = StoredRequestUsageAudit {
+            request_body: Some(json!({
+                "reasoning": { "effort": "xhigh" }
+            })),
             provider_request_body: Some(json!({
-                "reasoning": { "effort": "xhigh" },
+                "reasoning": { "effort": "max" },
                 "service_tier": "priority"
             })),
             ..sample_usage("completed", Some(200), None)
@@ -2710,10 +2734,14 @@ mod tests {
         );
         let active = admin_usage_active_request_json(&item, None, None, None);
 
-        assert_eq!(record["reasoning_effort"], "xhigh");
-        assert_eq!(active["reasoning_effort"], "xhigh");
+        assert_eq!(record["requested_reasoning_effort"], "xhigh");
+        assert_eq!(active["requested_reasoning_effort"], "xhigh");
+        assert_eq!(record["reasoning_effort"], "max");
+        assert_eq!(active["reasoning_effort"], "max");
         assert_eq!(record["service_tier"], "priority");
         assert_eq!(active["service_tier"], "priority");
+        assert!(record["updated_at"].is_string());
+        assert_eq!(record["updated_at"], active["updated_at"]);
     }
 
     #[test]
@@ -2789,6 +2817,33 @@ mod tests {
         );
         assert_eq!(record["is_stream"], true);
         assert_eq!(record["upstream_is_stream"], true);
+        assert_eq!(record["client_requested_stream"], false);
+        assert_eq!(record["client_is_stream"], false);
+    }
+
+    #[test]
+    fn client_requested_stream_defaults_to_non_stream_for_openai_search() {
+        let item = StoredRequestUsageAudit {
+            is_stream: true,
+            api_format: Some("openai:search".to_string()),
+            request_body: Some(json!({
+                "id": "session-search-1",
+                "model": "gpt-5.6-sol",
+                "input": "current documentation"
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        assert!(!admin_usage_client_is_stream(&item));
+
+        let record = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+        );
         assert_eq!(record["client_requested_stream"], false);
         assert_eq!(record["client_is_stream"], false);
     }
@@ -3428,7 +3483,7 @@ mod tests {
         assert_eq!(payload["cache_creation_input_tokens"], 20);
         assert_eq!(payload["cache_creation_ephemeral_5m_input_tokens"], 12);
         assert_eq!(payload["cache_creation_ephemeral_1h_input_tokens"], 8);
-        assert_eq!(payload["total_tokens"], 50);
+        assert_eq!(payload["total_tokens"], 40);
     }
 
     #[test]
@@ -3444,7 +3499,7 @@ mod tests {
             ..sample_usage("completed", Some(200), None)
         };
 
-        assert_eq!(admin_usage_total_tokens(&item), 140);
+        assert_eq!(admin_usage_total_tokens(&item), 120);
     }
 
     #[test]
@@ -3470,7 +3525,17 @@ mod tests {
                 "settlement_snapshot": {
                     "schema_version": "3.0",
                     "pricing_snapshot": {
-                        "pricing_source": "provider_override"
+                        "pricing_source": "provider_override",
+                        "tiered_pricing_source": "provider_override",
+                        "billing_processing_tier": "fast",
+                        "processing_tier_price_multiplier": 2.5,
+                        "tiered_pricing": {
+                            "tiers": [{
+                                "up_to": null,
+                                "input_price_per_1m": 7.5,
+                                "output_price_per_1m": 37.5
+                            }]
+                        }
                     }
                 },
                 "billing_snapshot": {
@@ -3510,6 +3575,21 @@ mod tests {
         assert_eq!(
             payload["settlement"]["settlement_snapshot"]["pricing_snapshot"]["pricing_source"],
             "provider_override"
+        );
+        assert_eq!(
+            payload["settlement"]["settlement_snapshot"]["pricing_snapshot"]
+                ["billing_processing_tier"],
+            "fast"
+        );
+        assert_eq!(
+            payload["settlement"]["settlement_snapshot"]["pricing_snapshot"]
+                ["processing_tier_price_multiplier"],
+            2.5
+        );
+        assert_eq!(
+            payload["settlement"]["settlement_snapshot"]["pricing_snapshot"]["tiered_pricing"]
+                ["tiers"][0]["input_price_per_1m"],
+            7.5
         );
         assert_eq!(
             payload["settlement"]["billing_dimensions"]["input_tokens"],

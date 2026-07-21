@@ -240,6 +240,29 @@ pub(crate) async fn enumerate_minimal_candidate_selection_with_required_capabili
     required_capabilities: Option<&serde_json::Value>,
     enable_model_directives: bool,
 ) -> Result<Vec<SchedulerMinimalCandidateSelectionCandidate>, DataLayerError> {
+    enumerate_minimal_candidate_selection_with_required_capabilities_for_request_operation(
+        state,
+        api_format,
+        requested_model_name,
+        require_streaming,
+        auth_snapshot,
+        required_capabilities,
+        enable_model_directives,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn enumerate_minimal_candidate_selection_with_required_capabilities_for_request_operation(
+    state: &(impl MinimalCandidateSelectionRowSource + Sync),
+    api_format: &str,
+    requested_model_name: &str,
+    require_streaming: bool,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    required_capabilities: Option<&serde_json::Value>,
+    enable_model_directives: bool,
+    request_operation: Option<&str>,
+) -> Result<Vec<SchedulerMinimalCandidateSelectionCandidate>, DataLayerError> {
     let normalized_api_format = normalize_api_format(api_format);
     if normalized_api_format.is_empty() {
         return Ok(Vec::new());
@@ -267,6 +290,7 @@ pub(crate) async fn enumerate_minimal_candidate_selection_with_required_capabili
         EnumerateMinimalCandidateSelectionInput {
             rows,
             normalized_api_format: &normalized_api_format,
+            request_operation,
             requested_model_name,
             resolved_global_model_name: resolved_global_model_name.as_str(),
             require_streaming,

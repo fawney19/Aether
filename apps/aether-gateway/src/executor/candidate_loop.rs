@@ -166,18 +166,31 @@ where
     type Error = GatewayError;
 
     async fn execute_attempt(&self, attempt: &T) -> Result<Option<Self::Response>, Self::Error> {
-        prewarm_direct_reqwest_candidate_client(attempt.execution_plan());
+        let plan = attempt.execution_plan();
+        let report_context = attempt.report_context();
+        if let Some(response) = execution_plan_balance_capacity_response(
+            self.state,
+            self.trace_id,
+            self.decision,
+            plan,
+            report_context.as_ref(),
+        )
+        .await?
+        {
+            return Ok(Some(response));
+        }
+        prewarm_direct_reqwest_candidate_client(plan);
         let _permit = acquire_upstream_execution_gate(self.state, self.trace_id).await?;
         let upstream_execution_gate_held_started_at = std::time::Instant::now();
         let mut response = execute_execution_runtime_sync(
             self.state,
             self.parts.uri.path(),
-            attempt.execution_plan().clone(),
+            plan.clone(),
             self.trace_id,
             self.decision,
             self.plan_kind,
             attempt.report_kind(),
-            attempt.report_context(),
+            report_context,
         )
         .await?;
         observe_gateway_stage_ms(
@@ -187,10 +200,7 @@ where
                 .as_millis() as u64,
         );
         if let Some(response) = response.as_mut() {
-            attach_redaction_execution_candidate(
-                response,
-                attempt.execution_plan().candidate_id.as_deref(),
-            );
+            attach_redaction_execution_candidate(response, plan.candidate_id.as_deref());
         }
         Ok(response)
     }
@@ -355,7 +365,14 @@ where
         };
         last_attempted = Some((attempt.execution_plan().clone(), attempt.report_context()));
         let execute_started_at = std::time::Instant::now();
-        let response = port.execute_attempt(&attempt).await?;
+        let response = match port.execute_attempt(&attempt).await {
+            Ok(response) => response,
+            Err(err) => {
+                let remaining = source.drain_execution_attempts().await?;
+                port.mark_unused_attempts(remaining).await?;
+                return Err(err);
+            }
+        };
         observe_gateway_stage_ms(
             "stream_candidate_execute",
             execute_started_at.elapsed().as_millis() as u64,
@@ -450,6 +467,17 @@ where
             candidate_index = candidate_index.as_str(),
             "candidate loop attempting stream execution candidate"
         );
+        if let Some(response) = execution_plan_balance_capacity_response(
+            self.state,
+            self.trace_id,
+            self.decision,
+            &plan,
+            report_context.as_ref(),
+        )
+        .await?
+        {
+            return Ok(Some(response));
+        }
         prewarm_direct_reqwest_candidate_client(&plan);
         let watchdog_plan = plan.clone();
         let watchdog_report_context = report_context.clone();
@@ -523,43 +551,89 @@ fn prewarm_direct_reqwest_candidate_client(plan: &aether_contracts::ExecutionPla
     );
 }
 
+async fn execution_plan_balance_capacity_response(
+    state: &AppState,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    plan: &aether_contracts::ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+) -> Result<Option<Response<Body>>, GatewayError> {
+    let rejection = match crate::control::execution_plan_balance_capacity_rejection(
+        state,
+        decision,
+        plan,
+        report_context,
+    )
+    .await
+    {
+        Ok(rejection) => rejection,
+        Err(err) => {
+            mark_unused_local_candidate(state, plan, report_context).await;
+            return Err(err);
+        }
+    };
+    let Some(rejection) = rejection else {
+        return Ok(None);
+    };
+    mark_unused_local_candidate(state, plan, report_context).await;
+    let mut response = crate::api::response::build_local_auth_rejection_response(
+        trace_id,
+        Some(decision),
+        &rejection,
+    )?;
+    attach_redaction_execution_candidate(&mut response, plan.candidate_id.as_deref());
+    Ok(Some(response))
+}
+
 pub(crate) async fn mark_unused_local_candidates<T>(state: &AppState, remaining: Vec<T>)
 where
     T: AiExecutionAttempt,
 {
     for plan_and_report in remaining {
         let report_context = plan_and_report.report_context();
-        let metadata =
-            local_execution_candidate_metadata_from_report_context(report_context.as_ref());
-        if let Some(lease) = metadata.pool_key_lease.as_ref() {
-            if let Err(err) =
-                release_admin_provider_pool_key_lease(state.runtime_state.as_ref(), lease).await
-            {
-                warn!(
-                    error = ?err,
-                    "gateway candidate loop: failed to release unused pool key lease"
-                );
-            }
-        }
-        if should_skip_unused_persistence_from_metadata(&metadata) {
-            continue;
-        }
-        record_local_request_candidate_status(
+        mark_unused_local_candidate(
             state,
             plan_and_report.execution_plan(),
             report_context.as_ref(),
-            SchedulerRequestCandidateStatusUpdate {
-                status: RequestCandidateStatus::Unused,
-                status_code: None,
-                error_type: None,
-                error_message: None,
-                latency_ms: None,
-                started_at_unix_ms: None,
-                finished_at_unix_ms: None,
-            },
         )
         .await;
     }
+}
+
+async fn mark_unused_local_candidate(
+    state: &AppState,
+    plan: &aether_contracts::ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+) {
+    let metadata = local_execution_candidate_metadata_from_report_context(report_context);
+    if let Some(lease) = metadata.pool_key_lease.as_ref() {
+        if let Err(err) =
+            release_admin_provider_pool_key_lease(state.runtime_state.as_ref(), lease).await
+        {
+            warn!(
+                error = ?err,
+                "gateway candidate loop: failed to release unused pool key lease"
+            );
+        }
+    }
+    if should_skip_unused_persistence_from_metadata(&metadata) {
+        return;
+    }
+    record_local_request_candidate_status(
+        state,
+        plan,
+        report_context,
+        SchedulerRequestCandidateStatusUpdate {
+            status: RequestCandidateStatus::Unused,
+            status_code: None,
+            error_type: None,
+            error_message: None,
+            latency_ms: None,
+            started_at_unix_ms: None,
+            finished_at_unix_ms: None,
+        },
+    )
+    .await;
 }
 
 fn should_skip_unused_persistence(report_context: Option<&serde_json::Value>) -> bool {

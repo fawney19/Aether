@@ -57,8 +57,8 @@ const TUNNEL_RELAY_PATH_PREFIX: &str = "/api/internal/tunnel/relay";
 const DEFAULT_TUNNEL_TIMEOUT_MS: u64 = 60_000;
 const DEFAULT_STREAM_FIRST_BYTE_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_NON_STREAM_TOTAL_TIMEOUT_MS: u64 = 300_000;
+const DEFAULT_CODEX_COMPACT_TOTAL_TIMEOUT_MS: u64 = 1_200_000;
 const MIN_TUNNEL_TIMEOUT_SECS: u64 = 1;
-const MAX_TUNNEL_TIMEOUT_SECS: u64 = 300;
 const DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV: &str = "AETHER_GATEWAY_DIRECT_REQWEST_H2_CLIENT_SHARDS";
 const DIRECT_REQWEST_CLIENT_SHARDS_ENV: &str = "AETHER_GATEWAY_DIRECT_REQWEST_CLIENT_SHARDS";
 const DIRECT_REQWEST_H2_TARGET_STREAMS_PER_CLIENT_ENV: &str =
@@ -512,8 +512,6 @@ pub(crate) fn format_hyper_error_chain(err: &dyn std::error::Error) -> String {
 
 #[derive(Debug, Error)]
 pub(crate) enum ExecutionRuntimeTransportError {
-    #[error("stream execution is not supported for this plan")]
-    StreamUnsupported,
     #[error("request body must contain json_body or body_bytes_b64")]
     RequestBodyRequired,
     #[error("request body base64 is invalid: {0}")]
@@ -681,10 +679,6 @@ impl DirectSyncExecutionRuntime {
         &self,
         plan: &ExecutionPlan,
     ) -> Result<DirectUpstreamStreamExecution, ExecutionRuntimeTransportError> {
-        if !plan.stream {
-            return Err(ExecutionRuntimeTransportError::StreamUnsupported);
-        }
-
         let build_body_started_at = Instant::now();
         let body_bytes = build_request_body(plan)?;
         observe_gateway_stage_ms(
@@ -835,6 +829,7 @@ fn build_stream_summary_report_context(plan: &ExecutionPlan) -> Value {
         "provider_api_format": plan.provider_api_format,
         "client_api_format": plan.client_api_format,
         "model": plan.model_name,
+        "upstream_is_stream": plan.stream,
     })
 }
 
@@ -2125,18 +2120,15 @@ pub(crate) fn build_request_body(
         Vec::new()
     };
 
-    if should_gzip_request_body(plan) && plan.body.json_body.is_some() {
-        body_bytes = gzip_bytes(&body_bytes)?;
+    if plan.body.json_body.is_some() {
+        body_bytes = match normalize_content_encoding(plan.content_encoding.as_deref()).as_deref() {
+            Some("gzip") => gzip_bytes(&body_bytes)?,
+            Some("zstd") => zstd_bytes(&body_bytes)?,
+            _ => body_bytes,
+        };
     }
 
     Ok(body_bytes)
-}
-
-fn should_gzip_request_body(plan: &ExecutionPlan) -> bool {
-    matches!(
-        normalize_content_encoding(plan.content_encoding.as_deref()).as_deref(),
-        Some("gzip")
-    )
 }
 
 fn normalize_content_encoding(value: Option<&str>) -> Option<String> {
@@ -2153,6 +2145,11 @@ fn gzip_bytes(body_bytes: &[u8]) -> Result<Vec<u8>, ExecutionRuntimeTransportErr
         .map_err(|err| ExecutionRuntimeTransportError::RelayError(err.to_string()))?;
     encoder
         .finish()
+        .map_err(|err| ExecutionRuntimeTransportError::RelayError(err.to_string()))
+}
+
+fn zstd_bytes(body_bytes: &[u8]) -> Result<Vec<u8>, ExecutionRuntimeTransportError> {
+    zstd::stream::encode_all(std::io::Cursor::new(body_bytes), 3)
         .map_err(|err| ExecutionRuntimeTransportError::RelayError(err.to_string()))
 }
 
@@ -2218,28 +2215,49 @@ fn resolve_tunnel_first_byte_timeout(plan: &ExecutionPlan) -> Option<Duration> {
     })
 }
 
-fn resolve_non_stream_total_timeout(plan: &ExecutionPlan) -> Option<Duration> {
-    if plan.stream {
+pub(crate) fn resolve_non_stream_total_timeout_for_request(
+    is_stream: bool,
+    provider_api_format: &str,
+    timeouts: Option<&aether_contracts::ExecutionTimeouts>,
+) -> Option<Duration> {
+    if is_stream {
         return None;
     }
-    let timeout_ms = plan
-        .timeouts
-        .as_ref()
+    let default_timeout_ms =
+        if crate::ai_serving::is_openai_responses_compact_format(provider_api_format) {
+            DEFAULT_CODEX_COMPACT_TOTAL_TIMEOUT_MS
+        } else {
+            DEFAULT_NON_STREAM_TOTAL_TIMEOUT_MS
+        };
+    let timeout_ms = timeouts
         .and_then(|timeouts| timeouts.total_ms)
-        .unwrap_or(DEFAULT_NON_STREAM_TOTAL_TIMEOUT_MS);
+        .unwrap_or(default_timeout_ms);
+    Some(Duration::from_millis(timeout_ms.max(1)))
+}
+
+fn resolve_non_stream_total_timeout(plan: &ExecutionPlan) -> Option<Duration> {
+    resolve_non_stream_total_timeout_for_request(
+        plan.stream,
+        &plan.provider_api_format,
+        plan.timeouts.as_ref(),
+    )
+}
+
+pub(crate) fn resolve_stream_first_byte_timeout_for_request(
+    is_stream: bool,
+    timeouts: Option<&aether_contracts::ExecutionTimeouts>,
+) -> Option<Duration> {
+    if !is_stream {
+        return None;
+    }
+    let timeout_ms = timeouts
+        .and_then(|timeouts| timeouts.first_byte_ms)
+        .unwrap_or(DEFAULT_STREAM_FIRST_BYTE_TIMEOUT_MS);
     Some(Duration::from_millis(timeout_ms.max(1)))
 }
 
 pub(crate) fn resolve_stream_first_byte_timeout(plan: &ExecutionPlan) -> Option<Duration> {
-    if !plan.stream {
-        return None;
-    }
-    let timeout_ms = plan
-        .timeouts
-        .as_ref()
-        .and_then(|timeouts| timeouts.first_byte_ms)
-        .unwrap_or(DEFAULT_STREAM_FIRST_BYTE_TIMEOUT_MS);
-    Some(Duration::from_millis(timeout_ms.max(1)))
+    resolve_stream_first_byte_timeout_for_request(plan.stream, plan.timeouts.as_ref())
 }
 
 pub(crate) async fn with_non_stream_total_timeout<T, F>(
@@ -2359,7 +2377,10 @@ fn resolve_tunnel_timeout_metadata(plan: &ExecutionPlan) -> TunnelTimeoutMetadat
 
 fn timeout_ms_to_secs(ms: u64) -> u64 {
     let secs = ms.div_ceil(1_000);
-    secs.clamp(MIN_TUNNEL_TIMEOUT_SECS, MAX_TUNNEL_TIMEOUT_SECS)
+    secs.clamp(
+        MIN_TUNNEL_TIMEOUT_SECS,
+        aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS,
+    )
 }
 
 fn resolve_tunnel_node_id(proxy: Option<&ProxySnapshot>) -> Option<String> {
@@ -3552,7 +3573,7 @@ pub(crate) fn build_request_headers(
     let mut out = HeaderMap::new();
     let normalized_content_encoding = normalize_content_encoding(content_encoding);
     if let Some(encoding) = normalized_content_encoding.as_deref() {
-        if encoding != "gzip" && !allow_passthrough_content_encoding {
+        if !matches!(encoding, "gzip" | "zstd") && !allow_passthrough_content_encoding {
             return Err(ExecutionRuntimeTransportError::UnsupportedContentEncoding(
                 encoding.to_string(),
             ));
@@ -3739,6 +3760,15 @@ pub(crate) fn build_execution_response_body(
         return Ok(None);
     }
 
+    if !stream && response_body_is_json(headers, decoded_body_bytes) {
+        let body_json: Value = serde_json::from_slice(decoded_body_bytes)
+            .map_err(ExecutionRuntimeTransportError::InvalidJson)?;
+        return Ok(Some(ResponseBody {
+            json_body: Some(body_json),
+            body_bytes_b64: None,
+        }));
+    }
+
     if let Some(body_json) = extract_provider_private_stream_error_body(None, decoded_body_bytes)
         .or_else(|| extract_provider_private_stream_error_body(None, body_bytes))
     {
@@ -3752,15 +3782,6 @@ pub(crate) fn build_execution_response_body(
         return Ok(Some(ResponseBody {
             json_body: None,
             body_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode(body_bytes)),
-        }));
-    }
-
-    if response_body_is_json(headers, decoded_body_bytes) {
-        let body_json: Value = serde_json::from_slice(decoded_body_bytes)
-            .map_err(ExecutionRuntimeTransportError::InvalidJson)?;
-        return Ok(Some(ResponseBody {
-            json_body: Some(body_json),
-            body_bytes_b64: None,
         }));
     }
 
@@ -4635,6 +4656,25 @@ mod tests {
             .expect("non-stream plans should have a default total timeout");
 
         assert_eq!(timeout, std::time::Duration::from_secs(300));
+    }
+
+    #[test]
+    fn codex_compact_uses_the_full_unary_timeout_by_default() {
+        let mut plan = tunnel_timeout_plan(false);
+        plan.provider_api_format = "openai:responses:compact".to_string();
+        plan.timeouts = None;
+
+        let timeout = resolve_non_stream_total_timeout(&plan)
+            .expect("Codex Compact should have a total timeout");
+        let meta = build_direct_tunnel_request_meta(
+            &plan,
+            &reqwest::header::HeaderMap::new(),
+            ExecutionTransportControls::default(),
+        );
+
+        assert_eq!(timeout, std::time::Duration::from_secs(1_200));
+        assert_eq!(meta.request_timeout_ms, Some(1_200_000));
+        assert_eq!(meta.timeout, 1_200);
     }
 
     #[test]
@@ -6323,13 +6363,21 @@ mod tests {
                     .and_then(|value| value.to_str().ok())
                     .unwrap_or_default()
                     .to_string();
-                let mut decoder = flate2::read::GzDecoder::new(body.as_ref());
-                let mut decoded = String::new();
-                decoder
-                    .read_to_string(&mut decoded)
-                    .expect("gzip body should decode");
+                let decoded = match header_encoding.as_str() {
+                    "gzip" => {
+                        let mut decoder = flate2::read::GzDecoder::new(body.as_ref());
+                        let mut decoded = Vec::new();
+                        decoder
+                            .read_to_end(&mut decoded)
+                            .expect("gzip body should decode");
+                        decoded
+                    }
+                    "zstd" => zstd::stream::decode_all(std::io::Cursor::new(body.as_ref()))
+                        .expect("zstd body should decode"),
+                    encoding => panic!("unexpected content encoding: {encoding}"),
+                };
                 let decoded_json: serde_json::Value =
-                    serde_json::from_str(&decoded).expect("decoded json should parse");
+                    serde_json::from_slice(&decoded).expect("decoded json should parse");
                 (
                     axum::http::StatusCode::OK,
                     Json(json!({
@@ -6346,45 +6394,47 @@ mod tests {
         });
 
         let execution_runtime = DirectSyncExecutionRuntime::new();
-        let result = execution_runtime
-            .execute_sync(&ExecutionPlan {
-                request_id: "req-gzip-1".into(),
-                candidate_id: Some("cand-1".into()),
-                provider_name: Some("openai".into()),
-                provider_id: "prov-1".into(),
-                endpoint_id: "ep-1".into(),
-                key_id: "key-1".into(),
-                method: "POST".into(),
-                url: format!("http://{addr}/chat"),
-                headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
-                content_type: Some("application/json".into()),
-                content_encoding: Some("gzip".into()),
-                body: RequestBody::from_json(json!({"model": "gpt-4.1"})),
-                stream: false,
-                client_api_format: "openai:chat".into(),
-                provider_api_format: "openai:chat".into(),
-                model_name: Some("gpt-4.1".into()),
-                proxy: None,
-                transport_profile: None,
-                timeouts: Some(ExecutionTimeouts {
-                    connect_ms: Some(5_000),
-                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
-                    ..ExecutionTimeouts::default()
-                }),
-            })
-            .await
-            .expect("gzip sync execution should succeed");
+        for encoding in ["gzip", "zstd"] {
+            let result = execution_runtime
+                .execute_sync(&ExecutionPlan {
+                    request_id: format!("req-{encoding}-1"),
+                    candidate_id: Some("cand-1".into()),
+                    provider_name: Some("openai".into()),
+                    provider_id: "prov-1".into(),
+                    endpoint_id: "ep-1".into(),
+                    key_id: "key-1".into(),
+                    method: "POST".into(),
+                    url: format!("http://{addr}/chat"),
+                    headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+                    content_type: Some("application/json".into()),
+                    content_encoding: Some(encoding.into()),
+                    body: RequestBody::from_json(json!({"model": "gpt-4.1"})),
+                    stream: false,
+                    client_api_format: "openai:chat".into(),
+                    provider_api_format: "openai:chat".into(),
+                    model_name: Some("gpt-4.1".into()),
+                    proxy: None,
+                    transport_profile: None,
+                    timeouts: Some(ExecutionTimeouts {
+                        connect_ms: Some(5_000),
+                        total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
+                        ..ExecutionTimeouts::default()
+                    }),
+                })
+                .await
+                .expect("compressed sync execution should succeed");
+
+            assert_eq!(result.status_code, 200);
+            assert_eq!(
+                result.body.and_then(|body| body.json_body),
+                Some(json!({
+                    "content_encoding": encoding,
+                    "body": {"model": "gpt-4.1"},
+                }))
+            );
+        }
 
         server.abort();
-
-        assert_eq!(result.status_code, 200);
-        assert_eq!(
-            result.body.and_then(|body| body.json_body),
-            Some(json!({
-                "content_encoding": "gzip",
-                "body": {"model": "gpt-4.1"},
-            }))
-        );
     }
 
     #[tokio::test]

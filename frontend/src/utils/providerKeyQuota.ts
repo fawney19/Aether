@@ -4,6 +4,7 @@ import type {
   QuotaWindowSnapshot,
 } from '@/api/endpoints/types/statusSnapshot'
 import type { UpstreamMetadata } from '@/api/endpoints/types/provider'
+import { getCodexQuotaWindowPresentation } from '@/utils/codexQuotaWindow'
 
 export interface ProviderKeyQuotaCarrier {
   account_quota?: string | null
@@ -222,15 +223,11 @@ function getGrokQuotaWindowLabel(window: QuotaWindowSnapshot): string {
 
 function getCodexQuotaText(quota: QuotaStatusSnapshot): string | null {
   const parts: string[] = []
-  for (const [label, code] of [
-    ['周', 'weekly'],
-    ['5H', '5h'],
-    ['Spark5H', 'spark_5h'],
-    ['Spark周', 'spark_weekly'],
-  ] as const) {
-    const remainingPercent = getQuotaWindowRemainingPercent(getQuotaWindow(quota, code))
-    if (remainingPercent == null) continue
-    parts.push(`${label}剩余 ${formatPercent(remainingPercent)}`)
+  for (const window of getQuotaWindows(quota)) {
+    const presentation = getCodexQuotaWindowPresentation(window)
+    const remainingPercent = getQuotaWindowRemainingPercent(window)
+    if (!presentation || remainingPercent == null) continue
+    parts.push(`${presentation.label}剩余 ${formatPercent(remainingPercent)}`)
   }
   if (parts.length > 0) return parts.join(' | ')
 

@@ -113,6 +113,7 @@ async fn gateway_executes_openai_responses_cross_format_upstream_stream_via_loca
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -586,6 +587,7 @@ async fn gateway_executes_openai_responses_cross_format_function_call_upstream_s
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1071,6 +1073,7 @@ async fn gateway_executes_openai_responses_antigravity_cross_format_upstream_str
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1520,7 +1523,10 @@ async fn gateway_executes_openai_responses_antigravity_cross_format_upstream_str
         seen_remote_execution_runtime_request.url,
         "https://antigravity.googleapis.com/v1internal:streamGenerateContent?alt=sse"
     );
-    assert_eq!(seen_remote_execution_runtime_request.accept, "*/*");
+    assert_eq!(
+        seen_remote_execution_runtime_request.accept,
+        "text/event-stream"
+    );
     assert_eq!(
         seen_remote_execution_runtime_request.authorization,
         "Bearer refreshed-antigravity-cli-access-token"
@@ -1555,7 +1561,7 @@ async fn gateway_executes_openai_responses_antigravity_cross_format_upstream_str
     );
     assert_eq!(
         seen_remote_execution_runtime_request.user_agent,
-        "antigravity"
+        aether_provider_transport::antigravity::ANTIGRAVITY_REQUEST_USER_AGENT
     );
     assert_eq!(seen_remote_execution_runtime_request.request_type, "agent");
     assert_eq!(seen_remote_execution_runtime_request.contents_len, 1);

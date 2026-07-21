@@ -194,13 +194,12 @@ fn row_exposes_global_model_for_models(
     false
 }
 
-pub(super) fn filter_rows_for_models(
+pub(super) fn filter_eligible_model_rows(
     rows: Vec<StoredMinimalCandidateSelectionRow>,
     auth_snapshot: Option<&crate::data::auth::GatewayAuthApiKeySnapshot>,
     api_format: &str,
 ) -> Vec<StoredMinimalCandidateSelectionRow> {
-    let mut filtered = rows
-        .into_iter()
+    rows.into_iter()
         .filter(|row| {
             auth_snapshot_allows_provider_for_models(
                 auth_snapshot,
@@ -211,7 +210,15 @@ pub(super) fn filter_rows_for_models(
         })
         .filter(|row| auth_snapshot_allows_model_for_models(auth_snapshot, &row.global_model_name))
         .filter(|row| row_exposes_global_model_for_models(row, api_format))
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+pub(super) fn filter_rows_for_models(
+    rows: Vec<StoredMinimalCandidateSelectionRow>,
+    auth_snapshot: Option<&crate::data::auth::GatewayAuthApiKeySnapshot>,
+    api_format: &str,
+) -> Vec<StoredMinimalCandidateSelectionRow> {
+    let mut filtered = filter_eligible_model_rows(rows, auth_snapshot, api_format);
     filtered.sort_by(|left, right| left.global_model_name.cmp(&right.global_model_name));
     let mut deduped = Vec::new();
     let mut last_model_name: Option<String> = None;

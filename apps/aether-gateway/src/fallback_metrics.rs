@@ -179,6 +179,7 @@ mod tests {
             auth_context: None,
             admin_principal: None,
             local_auth_rejection: None,
+            model_directive_policy: Default::default(),
         }
     }
 

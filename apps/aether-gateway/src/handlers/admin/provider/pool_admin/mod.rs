@@ -15,6 +15,8 @@ mod batch_import;
 mod batch_shared;
 #[path = "batch_routes/task_status.rs"]
 mod batch_task_status;
+#[path = "batch_routes/update.rs"]
+mod batch_update;
 pub(crate) mod payloads;
 #[path = "read_routes/keys.rs"]
 mod read_keys;
@@ -39,8 +41,9 @@ pub(crate) use self::support::{
     admin_pool_provider_id_from_path, admin_pool_provider_id_from_scores_path,
     parse_admin_pool_key_sort, parse_admin_pool_page, parse_admin_pool_page_size,
     parse_admin_pool_quick_selectors, parse_admin_pool_search, parse_admin_pool_status_filter,
-    AdminPoolKeySort, AdminPoolKeySortDirection, AdminPoolKeySortField,
-    AdminPoolResolveSelectionRequest, ADMIN_POOL_BANNED_KEY_CLEANUP_EMPTY_MESSAGE,
+    parse_admin_pool_status_value, AdminPoolKeySort, AdminPoolKeySortDirection,
+    AdminPoolKeySortField, AdminPoolResolveSelectionRequest,
+    ADMIN_POOL_BANNED_KEY_CLEANUP_EMPTY_MESSAGE,
     ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
     ADMIN_POOL_PROVIDER_CATALOG_WRITER_UNAVAILABLE_DETAIL,
 };
@@ -145,6 +148,16 @@ pub(crate) async fn maybe_build_local_admin_pool_response(
         Some("batch_action_keys") => {
             return Ok(Some(
                 batch_action::build_admin_pool_batch_action_response(
+                    state,
+                    request_context,
+                    request_body,
+                )
+                .await?,
+            ));
+        }
+        Some("batch_update_keys") => {
+            return Ok(Some(
+                batch_update::build_admin_pool_batch_update_response(
                     state,
                     request_context,
                     request_body,

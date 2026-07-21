@@ -31,6 +31,7 @@ const S3_BACKUP_CONFIG_KEYS: &[&str] = &[
     "backup_s3_scope",
     "backup_s3_endpoint",
     "backup_s3_region",
+    "backup_s3_user_agent",
     "backup_s3_bucket",
     "backup_s3_prefix",
     "backup_s3_access_key_id",

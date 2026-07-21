@@ -29,7 +29,10 @@
                 ? 'bg-primary/10 text-primary font-medium'
                 : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
             ]"
-            @pointerdown="emit('prefetch', item.href)"
+            @pointerenter="schedulePrefetch(item.href)"
+            @pointerleave="cancelScheduledPrefetch(item.href)"
+            @pointerdown="prefetchNow(item.href)"
+            @focus="prefetchNow(item.href)"
             @click="handleNavigate(item.href)"
           >
             <div class="flex items-center gap-2.5">
@@ -55,7 +58,7 @@
 </template>
 
 <script setup lang="ts">
-import type { Component } from 'vue'
+import { onBeforeUnmount, type Component } from 'vue'
 
 export interface NavigationItem {
   name: string
@@ -79,6 +82,36 @@ const emit = defineEmits<{
   (e: 'navigate', href: string): void
   (e: 'prefetch', href: string): void
 }>()
+
+const HOVER_PREFETCH_DELAY_MS = 100
+let scheduledPrefetchHref: string | null = null
+let scheduledPrefetchTimer: ReturnType<typeof setTimeout> | null = null
+
+function cancelScheduledPrefetch(href?: string) {
+  if (href && scheduledPrefetchHref !== href) return
+  if (scheduledPrefetchTimer) {
+    clearTimeout(scheduledPrefetchTimer)
+    scheduledPrefetchTimer = null
+  }
+  scheduledPrefetchHref = null
+}
+
+function schedulePrefetch(href: string) {
+  cancelScheduledPrefetch()
+  scheduledPrefetchHref = href
+  scheduledPrefetchTimer = setTimeout(() => {
+    scheduledPrefetchTimer = null
+    scheduledPrefetchHref = null
+    emit('prefetch', href)
+  }, HOVER_PREFETCH_DELAY_MS)
+}
+
+function prefetchNow(href: string) {
+  cancelScheduledPrefetch()
+  emit('prefetch', href)
+}
+
+onBeforeUnmount(() => cancelScheduledPrefetch())
 
 function isItemActive(href: string) {
   if (props.isActive) {

@@ -138,6 +138,7 @@ async fn gateway_executes_openai_chat_sync_upstream_stream_via_local_finalize_re
                 priority: 1,
                 api_formats: Some(vec!["openai:chat".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -637,6 +638,7 @@ async fn gateway_executes_openai_chat_cross_format_upstream_stream_via_local_fin
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1082,6 +1084,7 @@ async fn gateway_executes_openai_chat_cross_format_tool_use_upstream_stream_via_
                 priority: 1,
                 api_formats: Some(vec!["claude:messages".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1469,15 +1472,36 @@ async fn gateway_executes_openai_chat_cross_format_tool_use_upstream_stream_via_
 }
 
 #[test]
-fn gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_transport_unsupported() {
+fn gateway_executes_openai_chat_antigravity_cross_format_sync_via_local_finalize_response() {
     run_openai_chat_finalize_test(
-        "gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_transport_unsupported",
-        gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_transport_unsupported_impl,
+        "gateway_executes_openai_chat_antigravity_cross_format_sync_via_local_finalize_response",
+        gateway_executes_openai_chat_antigravity_cross_format_sync_via_local_finalize_response_impl,
     );
 }
 
-async fn gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_transport_unsupported_impl(
+async fn gateway_executes_openai_chat_antigravity_cross_format_sync_via_local_finalize_response_impl(
 ) {
+    use base64::Engine as _;
+
+    #[derive(Debug, Clone)]
+    struct SeenExecutionRuntimeSyncRequest {
+        trace_id: String,
+        url: String,
+        accept: String,
+        authorization: String,
+        x_client_name: String,
+        x_client_version: String,
+        x_vscode_sessionid: String,
+        x_goog_api_client: String,
+        project: String,
+        request_id: String,
+        model: String,
+        user_agent: String,
+        request_type: String,
+        contents_len: usize,
+        request_has_model: bool,
+    }
+
     fn hash_api_key(value: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(value.as_bytes());
@@ -1543,6 +1567,7 @@ async fn gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_tr
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1582,11 +1607,11 @@ async fn gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_tr
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://generativelanguage.googleapis.com".to_string(),
+            "https://antigravity.googleapis.com".to_string(),
             None,
             None,
             Some(2),
-            Some("/v1beta/models/claude-sonnet-4-5:generateContent".to_string()),
+            None,
             None,
             None,
             None,
@@ -1595,6 +1620,11 @@ async fn gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_tr
     }
 
     fn sample_provider_catalog_key() -> StoredProviderCatalogKey {
+        let encrypted_auth_config = encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"antigravity","project_id":"project-antigravity-chat-local-1","client_version":"1.2.3","session_id":"sess-antigravity-chat-local-123","access_token_import_temporary":true,"headers":{"Authorization":"Bearer imported-antigravity-chat-token"}}"#,
+        )
+        .expect("auth config should encrypt");
         StoredProviderCatalogKey::new(
             "key-openai-chat-antigravity-finalize-local-1".to_string(),
             "provider-openai-chat-antigravity-finalize-local-1".to_string(),
@@ -1606,12 +1636,9 @@ async fn gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_tr
         .expect("key should build")
         .with_transport_fields(
             Some(serde_json::json!(["gemini:generate_content"])),
-            encrypt_python_fernet_plaintext(
-                DEVELOPMENT_ENCRYPTION_KEY,
-                "sk-upstream-openai-chat-antigravity-finalize",
-            )
-            .expect("api key should encrypt"),
-            None,
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
+                .expect("api key should encrypt"),
+            Some(encrypted_auth_config),
             None,
             Some(serde_json::json!({"gemini:generate_content": 1})),
             None,
@@ -1632,6 +1659,8 @@ async fn gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_tr
     let plan_hits_clone = Arc::clone(&plan_hits);
     let public_hits = Arc::new(Mutex::new(0usize));
     let public_hits_clone = Arc::clone(&public_hits);
+    let seen_execution_runtime = Arc::new(Mutex::new(None::<SeenExecutionRuntimeSyncRequest>));
+    let seen_execution_runtime_clone = Arc::clone(&seen_execution_runtime);
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
     let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
 
@@ -1692,42 +1721,130 @@ async fn gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_tr
 
     let execution_runtime = Router::new().route(
         "/v1/execute/sync",
-        any(|_request: Request| async move {
-            Json(json!({
-                "request_id": "trace-openai-chat-antigravity-sync-123",
-                "status_code": 200,
-                "headers": {
-                    "content-type": "application/json"
-                },
-                "body": {
-                    "json_body": {
-                        "response": {
-                            "responseId": "resp-antigravity-chat-sync-123",
-                            "candidates": [{
-                                "content": {
-                                    "parts": [
-                                        {"text": "Need a tool."},
-                                        {"functionCall": {"name": "get_weather", "args": {"city": "SF"}}}
-                                    ],
-                                    "role": "model"
-                                },
-                                "finishReason": "STOP",
-                                "index": 0
-                            }],
-                            "modelVersion": "claude-sonnet-4-5",
-                            "usageMetadata": {
-                                "promptTokenCount": 2,
-                                "candidatesTokenCount": 3,
-                                "totalTokenCount": 5
-                            }
-                        },
-                        "responseId": "resp-antigravity-chat-sync-123"
+        any(move |request: Request| {
+            let seen_execution_runtime_inner = Arc::clone(&seen_execution_runtime_clone);
+            async move {
+                let (parts, body) = request.into_parts();
+                let raw_body = to_bytes(body, usize::MAX).await.expect("body should read");
+                let payload: serde_json::Value =
+                    serde_json::from_slice(&raw_body).expect("execution runtime payload should parse");
+                *seen_execution_runtime_inner.lock().expect("mutex should lock") =
+                    Some(SeenExecutionRuntimeSyncRequest {
+                        trace_id: parts
+                            .headers
+                            .get(TRACE_ID_HEADER)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string(),
+                        url: payload
+                            .get("url")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        accept: payload
+                            .get("headers")
+                            .and_then(|value| value.get("accept"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        authorization: payload
+                            .get("headers")
+                            .and_then(|value| value.get("authorization"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        x_client_name: payload
+                            .get("headers")
+                            .and_then(|value| value.get("x-client-name"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        x_client_version: payload
+                            .get("headers")
+                            .and_then(|value| value.get("x-client-version"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        x_vscode_sessionid: payload
+                            .get("headers")
+                            .and_then(|value| value.get("x-vscode-sessionid"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        x_goog_api_client: payload
+                            .get("headers")
+                            .and_then(|value| value.get("x-goog-api-client"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        project: payload
+                            .get("body")
+                            .and_then(|value| value.get("json_body"))
+                            .and_then(|value| value.get("project"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        request_id: payload
+                            .get("body")
+                            .and_then(|value| value.get("json_body"))
+                            .and_then(|value| value.get("requestId"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        model: payload
+                            .get("body")
+                            .and_then(|value| value.get("json_body"))
+                            .and_then(|value| value.get("model"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        user_agent: payload
+                            .get("body")
+                            .and_then(|value| value.get("json_body"))
+                            .and_then(|value| value.get("userAgent"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        request_type: payload
+                            .get("body")
+                            .and_then(|value| value.get("json_body"))
+                            .and_then(|value| value.get("requestType"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        contents_len: payload
+                            .get("body")
+                            .and_then(|value| value.get("json_body"))
+                            .and_then(|value| value.get("request"))
+                            .and_then(|value| value.get("contents"))
+                            .and_then(|value| value.as_array())
+                            .map(Vec::len)
+                            .unwrap_or_default(),
+                        request_has_model: payload
+                            .get("body")
+                            .and_then(|value| value.get("json_body"))
+                            .and_then(|value| value.get("request"))
+                            .and_then(|value| value.get("model"))
+                            .is_some(),
+                    });
+                Json(json!({
+                    "request_id": "trace-openai-chat-antigravity-sync-123",
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "text/event-stream"
+                    },
+                    "body": {
+                        "body_bytes_b64": base64::engine::general_purpose::STANDARD.encode(
+                            concat!(
+                                "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello Antigravity Chat\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"modelVersion\":\"claude-sonnet-4-5\",\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":3,\"totalTokenCount\":5}},\"responseId\":\"resp-antigravity-chat-sync-123\"}\n\n"
+                            )
+                        )
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 29
                     }
-                },
-                "telemetry": {
-                    "elapsed_ms": 29
-                }
-            }))
+                }))
+            }
         }),
     );
 
@@ -1779,31 +1896,84 @@ async fn gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_tr
         .await
         .expect("request should succeed");
     let elapsed = started_at.elapsed();
-
     let response_status = response.status();
-    let execution_path = response
-        .headers()
-        .get(EXECUTION_PATH_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-    let miss_reason = response
-        .headers()
-        .get(LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
     let response_body = response.text().await.expect("body should read");
+
+    assert_eq!(response_status, StatusCode::OK);
+    let response_json: serde_json::Value =
+        serde_json::from_str(&response_body).expect("body should parse");
     assert_eq!(
-        response_status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "unexpected gateway response: path={execution_path} miss={miss_reason} body={response_body}"
+        response_json,
+        json!({
+            "id": "resp-local-stream",
+            "object": "chat.completion",
+            "model": "claude-sonnet-4-5",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello Antigravity Chat"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 3,
+                "total_tokens": 5
+            }
+        })
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(3_500),
+        "response took unexpectedly long for local finalize path: elapsed={elapsed:?} finalize_hits={} report_hits={}",
+        *finalize_hits.lock().expect("mutex should lock"),
+        *report_hits.lock().expect("mutex should lock"),
+    );
+
+    let seen_execution_runtime_request = seen_execution_runtime
+        .lock()
+        .expect("mutex should lock")
+        .clone()
+        .expect("execution runtime request should be captured");
+    assert_eq!(
+        seen_execution_runtime_request.trace_id,
+        "trace-openai-chat-antigravity-sync-123"
     );
     assert_eq!(
-        execution_path, "local_execution_runtime_miss",
-        "unexpected execution path: miss={miss_reason} body={response_body}"
+        seen_execution_runtime_request.url,
+        "https://antigravity.googleapis.com/v1internal:streamGenerateContent?alt=sse"
     );
-    assert_eq!(miss_reason, "all_candidates_skipped");
+    assert_eq!(seen_execution_runtime_request.accept, "text/event-stream");
+    assert_eq!(
+        seen_execution_runtime_request.authorization,
+        "Bearer imported-antigravity-chat-token"
+    );
+    assert_eq!(seen_execution_runtime_request.x_client_name, "antigravity");
+    assert_eq!(seen_execution_runtime_request.x_client_version, "1.2.3");
+    assert_eq!(
+        seen_execution_runtime_request.x_vscode_sessionid,
+        "sess-antigravity-chat-local-123"
+    );
+    assert_eq!(
+        seen_execution_runtime_request.x_goog_api_client,
+        "gl-node/18.18.2 fire/0.8.6 grpc/1.10.x"
+    );
+    assert_eq!(
+        seen_execution_runtime_request.project,
+        "project-antigravity-chat-local-1"
+    );
+    assert_eq!(
+        seen_execution_runtime_request.request_id,
+        "trace-openai-chat-antigravity-sync-123"
+    );
+    assert_eq!(seen_execution_runtime_request.model, "claude-sonnet-4-5");
+    assert_eq!(
+        seen_execution_runtime_request.user_agent,
+        aether_provider_transport::antigravity::ANTIGRAVITY_REQUEST_USER_AGENT
+    );
+    assert_eq!(seen_execution_runtime_request.request_type, "agent");
+    assert_eq!(seen_execution_runtime_request.contents_len, 1);
+    assert!(!seen_execution_runtime_request.request_has_model);
 
     let mut stored_candidates = Vec::new();
     for _ in 0..50 {
@@ -1819,11 +1989,8 @@ async fn gateway_skips_openai_chat_antigravity_cross_format_sync_candidate_as_tr
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert_eq!(stored_candidates.len(), 1);
-    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Skipped);
-    assert_eq!(
-        stored_candidates[0].skip_reason.as_deref(),
-        Some("transport_provider_type_unsupported")
-    );
+    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Success);
+    assert_eq!(stored_candidates[0].skip_reason.as_deref(), None);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(*report_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*finalize_hits.lock().expect("mutex should lock"), 0);
@@ -1911,6 +2078,7 @@ async fn gateway_executes_openai_chat_cross_format_claude_upstream_sync_via_loca
                 priority: 1,
                 api_formats: Some(vec!["claude:messages".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -2270,6 +2438,7 @@ async fn gateway_executes_openai_chat_cross_format_gemini_upstream_sync_via_loca
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,

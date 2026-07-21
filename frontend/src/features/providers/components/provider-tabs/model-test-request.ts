@@ -1,4 +1,7 @@
-import { normalizeApiFormatAlias } from '@/api/endpoints/types/api-format'
+import {
+  apiFormatPermissionCovers,
+  normalizeApiFormatAlias,
+} from '@/api/endpoints/types/api-format'
 import type { ProviderModelMapping } from '@/api/endpoints/types'
 import type { TestModelRequest } from '@/api/endpoints/providers'
 import {
@@ -29,12 +32,18 @@ export type { ModelTestImagePreview } from './model-test-preview'
 
 const DEFAULT_MODEL_TEST_MESSAGE = 'Hello! This is a test message.'
 
+function buildModelTestSearchSessionId(): string {
+  const id = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  return `aether-model-test-${id}`
+}
+
 type ModelTestMappingSource = {
   provider_model_name: string
   provider_model_mappings?: ProviderModelMapping[] | null
 }
 
-type ModelTestMappingEndpoint = {
+export type ModelTestMappingEndpoint = {
   id: string
   api_format: string
 }
@@ -44,17 +53,19 @@ export type ModelTestMappedModelOption = {
   priority: number
 }
 
-function mappingApiFormatMatches(mapping: ProviderModelMapping, endpoint: ModelTestMappingEndpoint): boolean {
-  const apiFormats = normalizeModelTestStringList(mapping.api_formats)
-  if (apiFormats.length === 0) return true
+export function modelTestMappingScopeMatchesEndpoint(
+  apiFormats: string[] | null | undefined,
+  endpointIds: string[] | null | undefined,
+  endpoint: ModelTestMappingEndpoint,
+): boolean {
+  const normalizedApiFormats = normalizeModelTestStringList(apiFormats)
   const endpointFormat = normalizeApiFormatAlias(endpoint.api_format)
-  return apiFormats.some(format => normalizeApiFormatAlias(format) === endpointFormat)
-}
-
-function mappingEndpointMatches(mapping: ProviderModelMapping, endpoint: ModelTestMappingEndpoint): boolean {
-  const endpointIds = normalizeModelTestStringList(mapping.endpoint_ids)
-  if (endpointIds.length === 0) return true
-  return endpointIds.includes(endpoint.id)
+  const apiFormatMatches = normalizedApiFormats.length === 0
+    || normalizedApiFormats.some(format => apiFormatPermissionCovers(format, endpointFormat))
+  const normalizedEndpointIds = normalizeModelTestStringList(endpointIds)
+  const endpointMatches = normalizedEndpointIds.length === 0
+    || normalizedEndpointIds.includes(endpoint.id)
+  return apiFormatMatches && endpointMatches
 }
 
 export function listModelTestMappedModelOptions(
@@ -65,8 +76,11 @@ export function listModelTestMappedModelOptions(
 
   const matchedMappings = model.provider_model_mappings
     .filter(mapping => mapping.name.trim())
-    .filter(mapping => mappingApiFormatMatches(mapping, endpoint))
-    .filter(mapping => mappingEndpointMatches(mapping, endpoint))
+    .filter(mapping => modelTestMappingScopeMatchesEndpoint(
+      mapping.api_formats,
+      mapping.endpoint_ids,
+      endpoint,
+    ))
     .sort((left, right) => {
       const leftPriority = Number.isFinite(left.priority) ? left.priority : 1
       const rightPriority = Number.isFinite(right.priority) ? right.priority : 1
@@ -193,6 +207,26 @@ export function buildDefaultModelTestRequestBody(
       n: 1,
       size: '1024x1024',
       stream: true,
+    }, null, 2)
+  }
+
+  if (normalizedApiFormat === 'gemini:interactions') {
+    return JSON.stringify({
+      model: modelName,
+      input: DEFAULT_MODEL_TEST_MESSAGE,
+      stream: true,
+    }, null, 2)
+  }
+
+  if (normalizedApiFormat === 'openai:search') {
+    return JSON.stringify({
+      id: buildModelTestSearchSessionId(),
+      model: modelName,
+      input: DEFAULT_MODEL_TEST_MESSAGE,
+      commands: {
+        search_query: [{ q: DEFAULT_MODEL_TEST_MESSAGE }],
+      },
+      max_output_tokens: 256,
     }, null, 2)
   }
 

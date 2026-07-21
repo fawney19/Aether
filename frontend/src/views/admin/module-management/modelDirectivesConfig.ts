@@ -1,16 +1,51 @@
 export interface ReasoningApiFormatConfig {
+  [key: string]: unknown
   enabled: boolean
+  suffixes: string[]
   mappings: Record<string, unknown>
 }
 
+export interface ReasoningEffortConfig {
+  [key: string]: unknown
+  enabled: boolean
+  api_formats: Record<string, ReasoningApiFormatConfig>
+}
+
 export interface ModelDirectivesConfig {
-  reasoning_effort: {
-    enabled: boolean
-    api_formats: Record<string, ReasoningApiFormatConfig>
-  }
+  [key: string]: unknown
+  reasoning_effort: ReasoningEffortConfig
 }
 
 export const MODEL_DIRECTIVES_MODULE_NAME = 'model_directives'
+
+export const REASONING_EFFORTS = [
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const
+
+export type ReasoningEffort = typeof REASONING_EFFORTS[number]
+
+export const MODEL_DIRECTIVE_SUFFIXES = [...REASONING_EFFORTS, 'ultra', 'fast'] as const
+export type ModelDirectiveSuffix = typeof MODEL_DIRECTIVE_SUFFIXES[number]
+
+export const MODEL_DIRECTIVE_SUFFIX_METADATA: Readonly<
+  Record<ModelDirectiveSuffix, { label: string, description: string }>
+> = {
+  none: { label: 'none', description: '不启用推理' },
+  minimal: { label: 'minimal', description: '模型支持时使用最低推理投入' },
+  low: { label: 'low', description: '低推理投入' },
+  medium: { label: 'medium', description: '中等推理投入' },
+  high: { label: 'high', description: '高推理投入' },
+  xhigh: { label: 'xhigh', description: '超高推理投入' },
+  max: { label: 'max', description: '模型支持时使用最大推理投入' },
+  ultra: { label: 'ultra', description: 'Codex Ultra 预设，请求推理强度为 max' },
+  fast: { label: 'fast', description: 'Fast 服务层级' },
+}
 
 export const MODEL_DIRECTIVE_API_FORMATS = [
   {
@@ -29,6 +64,11 @@ export const MODEL_DIRECTIVE_API_FORMATS = [
     parameter: 'reasoning.effort',
   },
   {
+    key: 'openai:search',
+    label: 'OpenAI Search',
+    parameter: 'reasoning.effort',
+  },
+  {
     key: 'claude:messages',
     label: 'Claude Messages',
     parameter: 'output_config.effort + thinking',
@@ -40,45 +80,28 @@ export const MODEL_DIRECTIVE_API_FORMATS = [
   },
 ] as const
 
-export const DEFAULT_REASONING_SUFFIXES = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+const CROSS_PROVIDER_SUFFIXES: readonly ModelDirectiveSuffix[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]
 
-function defaultMappingsForApiFormat(apiFormat: string): Record<string, unknown> {
+export function defaultModelDirectiveSuffixesForApiFormat(
+  apiFormat: string,
+): readonly ModelDirectiveSuffix[] {
   switch (apiFormat) {
     case 'openai:chat':
-      return {
-        low: { reasoning_effort: 'low' },
-        medium: { reasoning_effort: 'medium' },
-        high: { reasoning_effort: 'high' },
-        xhigh: { reasoning_effort: 'xhigh' },
-        max: { reasoning_effort: 'xhigh' },
-      }
     case 'openai:responses':
     case 'openai:responses:compact':
-      return {
-        low: { reasoning: { effort: 'low' } },
-        medium: { reasoning: { effort: 'medium' } },
-        high: { reasoning: { effort: 'high' } },
-        xhigh: { reasoning: { effort: 'xhigh' } },
-        max: { reasoning: { effort: 'xhigh' } },
-      }
+    case 'openai:search':
+      return MODEL_DIRECTIVE_SUFFIXES
     case 'claude:messages':
-      return {
-        low: { thinking: { type: 'enabled', budget_tokens: 1024 } },
-        medium: { thinking: { type: 'enabled', budget_tokens: 4096 } },
-        high: { thinking: { type: 'enabled', budget_tokens: 8192 } },
-        xhigh: { thinking: { type: 'enabled', budget_tokens: 16384 } },
-        max: { thinking: { type: 'enabled', budget_tokens: 32768 } },
-      }
     case 'gemini:generate_content':
-      return {
-        low: { generationConfig: { thinkingConfig: { thinkingBudget: 1024 } } },
-        medium: { generationConfig: { thinkingConfig: { thinkingBudget: 4096 } } },
-        high: { generationConfig: { thinkingConfig: { thinkingBudget: 8192 } } },
-        xhigh: { generationConfig: { thinkingConfig: { thinkingBudget: 16384 } } },
-        max: { generationConfig: { thinkingConfig: { thinkingBudget: -1 } } },
-      }
+      return CROSS_PROVIDER_SUFFIXES
     default:
-      return {}
+      return []
   }
 }
 
@@ -91,7 +114,8 @@ export function createDefaultModelDirectivesConfig(): ModelDirectivesConfig {
           format.key,
           {
             enabled: true,
-            mappings: defaultMappingsForApiFormat(format.key),
+            suffixes: [...defaultModelDirectiveSuffixesForApiFormat(format.key)],
+            mappings: {},
           },
         ])
       ),
@@ -99,58 +123,123 @@ export function createDefaultModelDirectivesConfig(): ModelDirectivesConfig {
   }
 }
 
-function mappingsFromLegacySuffixes(apiFormat: string, value: unknown): Record<string, unknown> {
-  if (!Array.isArray(value)) return defaultMappingsForApiFormat(apiFormat)
-  const supported = new Set<string>(DEFAULT_REASONING_SUFFIXES)
-  const defaults = defaultMappingsForApiFormat(apiFormat)
-  return Object.fromEntries(value
-    .map((item) => String(item).trim().toLowerCase())
-    .filter((item, index, array) => supported.has(item) && array.indexOf(item) === index)
-    .map((suffix) => [suffix, defaults[suffix]])
-    .filter(([, mapping]) => mapping !== undefined))
+export function updateModelDirectiveMappingOverride(
+  mappings: Record<string, unknown>,
+  suffix: string,
+  override: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const nextMappings = { ...mappings }
+  if (override === undefined || Object.keys(override).length === 0) {
+    delete nextMappings[suffix]
+  } else {
+    nextMappings[suffix] = override
+  }
+  return nextMappings
 }
 
-function normalizeMappings(apiFormat: string, value: unknown, legacySuffixes: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return mappingsFromLegacySuffixes(apiFormat, legacySuffixes)
+export function updateModelDirectiveSuffixEnabled(
+  suffixes: string[],
+  suffix: string,
+  enabled: boolean,
+): string[] {
+  const normalized = suffixes
+    .map(item => normalizeDirectiveSuffix(item))
+    .filter((item): item is string => Boolean(item))
+  const next = new Set(normalized)
+  if (enabled) next.add(suffix)
+  else next.delete(suffix)
+
+  const known = MODEL_DIRECTIVE_SUFFIXES.filter(item => next.delete(item))
+  return [...known, ...next]
+}
+
+function normalizeMappings(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) {
+    return {}
   }
-  return { ...(value as Record<string, unknown>) }
+
+  const normalized: Record<string, unknown> = {}
+  for (const [rawSuffix, mapping] of Object.entries(value)) {
+    const suffix = normalizeDirectiveSuffix(rawSuffix)
+    if (!suffix) continue
+    normalized[suffix] = mapping
+  }
+  return normalized
+}
+
+function normalizeSuffixes(
+  apiFormat: string,
+  value: unknown,
+  configuredMappings: unknown,
+): string[] {
+  const source = Array.isArray(value)
+    ? value
+    : isRecord(configuredMappings)
+      ? Object.keys(configuredMappings)
+      : defaultModelDirectiveSuffixesForApiFormat(apiFormat)
+  const normalized = new Set(
+    source
+      .filter((item): item is string => typeof item === 'string')
+      .map(item => normalizeDirectiveSuffix(item))
+      .filter((item): item is string => Boolean(item)),
+  )
+
+  const known = MODEL_DIRECTIVE_SUFFIXES.filter(item => normalized.delete(item))
+  return [...known, ...normalized]
 }
 
 export function normalizeModelDirectivesConfig(value: unknown): ModelDirectivesConfig {
   const defaults = createDefaultModelDirectivesConfig()
-  if (!value || typeof value !== 'object') return defaults
+  if (!isRecord(value)) return defaults
 
-  const source = value as Partial<ModelDirectivesConfig>
-  const reasoning = source.reasoning_effort
+  const source = value
+  const reasoning = isRecord(source.reasoning_effort) ? source.reasoning_effort : {}
   const apiFormats: Record<string, ReasoningApiFormatConfig> = {
     ...defaults.reasoning_effort.api_formats,
   }
-  const sourceApiFormats = reasoning?.api_formats
-  if (sourceApiFormats && typeof sourceApiFormats === 'object') {
+  const sourceApiFormats = reasoning.api_formats
+  if (isRecord(sourceApiFormats)) {
     for (const [apiFormat, rawConfig] of Object.entries(sourceApiFormats)) {
       if (typeof rawConfig === 'boolean') {
         apiFormats[apiFormat] = {
           enabled: rawConfig,
-          mappings: defaultMappingsForApiFormat(apiFormat),
+          suffixes: [...defaultModelDirectiveSuffixesForApiFormat(apiFormat)],
+          mappings: {},
         }
-      } else if (rawConfig && typeof rawConfig === 'object') {
-        const value = rawConfig as Partial<ReasoningApiFormatConfig> & { suffixes?: unknown }
+      } else if (isRecord(rawConfig)) {
+        const preservedConfig = { ...rawConfig }
         apiFormats[apiFormat] = {
-          enabled: typeof value.enabled === 'boolean' ? value.enabled : true,
-          mappings: normalizeMappings(apiFormat, value.mappings, value.suffixes),
+          ...preservedConfig,
+          enabled: typeof rawConfig.enabled === 'boolean' ? rawConfig.enabled : true,
+          suffixes: normalizeSuffixes(apiFormat, rawConfig.suffixes, rawConfig.mappings),
+          mappings: normalizeMappings(rawConfig.mappings),
         }
       }
     }
   }
 
   return {
+    ...source,
     reasoning_effort: {
+      ...reasoning,
       enabled:
-        typeof reasoning?.enabled === 'boolean'
+        typeof reasoning.enabled === 'boolean'
           ? reasoning.enabled
           : defaults.reasoning_effort.enabled,
       api_formats: apiFormats,
     },
   }
+}
+
+function normalizeDirectiveSuffix(value: string): string | undefined {
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const normalized = trimmed.toLowerCase()
+  return MODEL_DIRECTIVE_SUFFIXES.some(item => item === normalized)
+    ? normalized
+    : trimmed
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }

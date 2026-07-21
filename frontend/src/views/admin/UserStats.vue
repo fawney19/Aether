@@ -367,10 +367,9 @@ watch([timeRange, metric], scheduleLeaderboardLoad, { deep: true })
 watch([timeRange, selectedUserId, compareUserId], scheduleUserPanelsLoad, { deep: true })
 
 onMounted(async () => {
-  await loadUsers()
   await Promise.all([
     loadLeaderboard(),
-    loadUserPanels()
+    loadUsers()
   ])
 })
 

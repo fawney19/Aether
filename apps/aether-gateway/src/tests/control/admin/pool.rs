@@ -1362,6 +1362,18 @@ async fn gateway_pool_list_overrides_stale_codex_cycle_usage_from_usage_facts() 
                         "total_tokens": 700,
                         "total_cost_usd": "0.70000000"
                     }
+                },
+                {
+                    "code": "monthly",
+                    "label": "月",
+                    "scope": "account",
+                    "reset_at": reset_at,
+                    "window_minutes": 43_800,
+                    "usage": {
+                        "request_count": 8,
+                        "total_tokens": 600,
+                        "total_cost_usd": "0.60000000"
+                    }
                 }
             ]
         }
@@ -1441,6 +1453,10 @@ async fn gateway_pool_list_overrides_stale_codex_cycle_usage_from_usage_facts() 
         .iter()
         .find(|window| window["code"] == json!("5h"))
         .expect("5h window should exist");
+    let monthly = windows
+        .iter()
+        .find(|window| window["code"] == json!("monthly"))
+        .expect("monthly window should exist");
 
     assert_eq!(weekly["usage"]["request_count"], json!(3));
     assert_eq!(weekly["usage"]["total_tokens"], json!(2_199));
@@ -1448,6 +1464,9 @@ async fn gateway_pool_list_overrides_stale_codex_cycle_usage_from_usage_facts() 
     assert_eq!(five_hour["usage"]["request_count"], json!(1));
     assert_eq!(five_hour["usage"]["total_tokens"], json!(200));
     assert_eq!(five_hour["usage"]["total_cost_usd"], json!("0.75000000"));
+    assert_eq!(monthly["usage"]["request_count"], json!(3));
+    assert_eq!(monthly["usage"]["total_tokens"], json!(2_199));
+    assert_eq!(monthly["usage"]["total_cost_usd"], json!("11.99000000"));
 }
 
 #[tokio::test]
@@ -3242,7 +3261,8 @@ async fn gateway_handles_admin_pool_resolve_selection_locally_with_trusted_admin
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!({
             "search": "alpha",
-            "quick_selectors": ["enabled", "proxy_set"]
+            "status": "available",
+            "quick_selectors": ["proxy_set"]
         }))
         .send()
         .await
@@ -3256,10 +3276,130 @@ async fn gateway_handles_admin_pool_resolve_selection_locally_with_trusted_admin
     assert_eq!(items[0]["key_id"], json!("key-openai-a"));
     assert_eq!(items[0]["key_name"], json!("alpha proxy"));
     assert_eq!(items[0]["auth_type"], json!("api_key"));
+
+    let invalid_status_response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/pool/provider-openai/keys/resolve-selection"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "status": "not-a-status"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(invalid_status_response.status(), StatusCode::BAD_REQUEST);
+    let invalid_status_payload: serde_json::Value = invalid_status_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert!(invalid_status_payload["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.starts_with("status must be one of:")));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_pool_resolve_selection_matches_list_search_scope_for_status() {
+    let provider = sample_provider("provider-search-scope", "openai", 10);
+    let mut key = sample_key(
+        "key-visible-name",
+        "provider-search-scope",
+        "openai:chat",
+        "sk-search-scope",
+    );
+    key.name = "visible account".to_string();
+    key.note = Some("hidden-note-match".to_string());
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            provider_catalog_repository,
+        ));
+
+    let all_list_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-search-scope/keys?page=1&page_size=50&search=hidden-note-match&status=all&sort_by=score",
+        None,
+    )
+    .await;
+    assert_eq!(all_list_response.status(), StatusCode::OK);
+    let all_list_payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(all_list_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    assert_eq!(all_list_payload["total"], json!(0));
+
+    let all_selection_response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-search-scope/keys/resolve-selection",
+        Some(json!({
+            "search": "hidden-note-match",
+            "status": "all"
+        })),
+    )
+    .await;
+    assert_eq!(all_selection_response.status(), StatusCode::OK);
+    let all_selection_payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(all_selection_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    assert_eq!(all_selection_payload["total"], json!(0));
+
+    let available_list_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-search-scope/keys?page=1&page_size=50&search=hidden-note-match&status=available",
+        None,
+    )
+    .await;
+    assert_eq!(available_list_response.status(), StatusCode::OK);
+    let available_list_payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(available_list_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    assert_eq!(available_list_payload["total"], json!(1));
+
+    let available_selection_response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-search-scope/keys/resolve-selection",
+        Some(json!({
+            "search": "hidden-note-match",
+            "status": "available"
+        })),
+    )
+    .await;
+    assert_eq!(available_selection_response.status(), StatusCode::OK);
+    let available_selection_payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(available_selection_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    assert_eq!(available_selection_payload["total"], json!(1));
+    assert_eq!(
+        available_selection_payload["items"][0]["key_id"],
+        json!("key-visible-name")
+    );
 }
 
 #[tokio::test]
@@ -3403,6 +3543,127 @@ async fn gateway_handles_admin_pool_batch_action_locally_with_trusted_admin_prin
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_batch_updates_shared_pool_key_configuration() {
+    let provider = sample_provider("provider-openai", "openai", 10).with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "pool_advanced": {
+                "enabled": true
+            }
+        })),
+    );
+    let mut first_key = sample_key("key-openai-a", "provider-openai", "openai:chat", "sk-a");
+    first_key.name = "alpha".to_string();
+    first_key.auto_fetch_models = true;
+    first_key.allowed_models = Some(json!(["legacy-model"]));
+    let mut second_key = sample_key("key-openai-b", "provider-openai", "openai:chat", "sk-b");
+    second_key.name = "beta".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![first_key, second_key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(Arc::clone(
+                &provider_catalog_repository,
+            )),
+        );
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::PATCH,
+        "/api/admin/pool/provider-openai/keys/batch-update",
+        Some(json!({
+            "key_ids": ["key-openai-b", "key-openai-a", "key-openai-a"],
+            "patch": {
+                "api_formats": ["openai:responses"],
+                "internal_priority": 7,
+                "rpm_limit": null,
+                "auto_fetch_models": false,
+                "allowed_models": ["gpt-5.6-sol", "gpt-5.6-luna"],
+                "locked_models": [],
+                "note": null
+            }
+        })),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    assert_eq!(payload["affected"], json!(2));
+    assert_eq!(payload["model_sync"], serde_json::Value::Null);
+
+    let stored = provider_catalog_repository
+        .list_keys_by_ids(&["key-openai-a".to_string(), "key-openai-b".to_string()])
+        .await
+        .expect("keys should load");
+    assert_eq!(stored.len(), 2);
+    for key in stored {
+        assert_eq!(key.api_formats, Some(json!(["openai:responses"])));
+        assert_eq!(key.internal_priority, 7);
+        assert_eq!(key.rpm_limit, None);
+        assert!(!key.auto_fetch_models);
+        assert_eq!(
+            key.allowed_models,
+            Some(json!(["gpt-5.6-sol", "gpt-5.6-luna"]))
+        );
+        assert_eq!(key.locked_models, None);
+        assert_eq!(key.note, None);
+    }
+}
+
+#[tokio::test]
+async fn gateway_rejects_pool_batch_update_before_writing_any_key() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut first_key = sample_key("key-openai-a", "provider-openai", "openai:chat", "sk-a");
+    first_key.internal_priority = 3;
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![first_key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(Arc::clone(
+                &provider_catalog_repository,
+            )),
+        );
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::PATCH,
+        "/api/admin/pool/provider-openai/keys/batch-update",
+        Some(json!({
+            "key_ids": ["key-openai-a", "key-missing"],
+            "patch": { "internal_priority": 9 }
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let stored = provider_catalog_repository
+        .list_keys_by_ids(&["key-openai-a".to_string()])
+        .await
+        .expect("key should load");
+    assert_eq!(stored[0].internal_priority, 3);
 }
 
 #[tokio::test]

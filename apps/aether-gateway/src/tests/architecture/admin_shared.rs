@@ -103,12 +103,15 @@ fn admin_wrapped_state_owns_api_key_and_proxy_capabilities() {
             "{path} should use AdminAppState encryption capability instead of raw state.app() encryption"
         );
         assert!(
-            !contents.contains("decrypt_catalog_secret_with_fallbacks(state.app().encryption_key(),"),
+            !contents
+                .contains("decrypt_catalog_secret_with_fallbacks(state.app().encryption_key(),"),
             "{path} should use AdminAppState decryption capability instead of raw state.app().encryption_key()"
         );
         assert!(
-            !contents.contains("resolve_transport_proxy_snapshot_with_tunnel_affinity(\n            state.app(),")
-                && !contents.contains("resolve_transport_proxy_snapshot_with_tunnel_affinity(state.app(),"),
+            !contents.contains(
+                "resolve_transport_proxy_snapshot_with_tunnel_affinity(\n            state.app(),"
+            ) && !contents
+                .contains("resolve_transport_proxy_snapshot_with_tunnel_affinity(state.app(),"),
             "{path} should use AdminAppState proxy capability instead of raw state.app() transport proxy resolution"
         );
     }
@@ -682,7 +685,8 @@ fn crate_root_exposes_real_admin_and_ai_serving_facades() {
 
     let ai_serving_api_mod = read_workspace_file("apps/aether-gateway/src/ai_serving/api.rs");
     assert!(
-        ai_serving_api_mod.contains("use crate::ai_serving::{is_json_request, GatewayControlDecision};"),
+        ai_serving_api_mod
+            .contains("use crate::ai_serving::{is_json_request, GatewayControlDecision};"),
         "ai_serving/api.rs should depend on the crate-facing ai_serving seam instead of deep internal modules"
     );
 }
@@ -695,7 +699,7 @@ fn gateway_ai_serving_api_module_delegates_pure_ownership_to_format_crate() {
         "ai_serving/api.rs should re-export pure ownership through aether_ai_formats::api"
     );
 
-    let format_crate_api = read_workspace_file("crates/aether-ai-formats/src/api.rs");
+    let format_crate_api = read_workspace_file("crates/aether-ai/formats/src/api.rs");
     for pattern in [
         "pub use crate::contracts::{",
         "pub use crate::provider_compat::kiro_stream::{",

@@ -40,7 +40,9 @@ use super::{
     LocalSameFormatProviderCandidateAttempt, LocalSameFormatProviderDecisionInput,
     LocalSameFormatProviderSpec,
 };
-use crate::ai_serving::planner::standard::same_format_provider_request_body_failure_extra_data;
+use crate::ai_serving::planner::standard::{
+    codex_model_capabilities_for_transport, same_format_provider_request_body_failure_extra_data,
+};
 
 pub(crate) fn resolve_same_format_provider_transport_unsupported_reason_for_trace(
     transport: &GatewayProviderTransportSnapshot,
@@ -51,6 +53,7 @@ pub(crate) fn resolve_same_format_provider_transport_unsupported_reason_for_trac
             "openai:chat" => "openai:chat",
             "openai:responses" => "openai:responses",
             "openai:responses:compact" => "openai:responses:compact",
+            "openai:search" => "openai:search",
             "openai:embedding" => "openai:embedding",
             "openai:rerank" => "openai:rerank",
             "claude:messages" => "claude:messages",
@@ -137,13 +140,26 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
     else {
         return Ok(None);
     };
-    let enable_model_directives =
-        crate::system_features::reasoning_model_directive_enabled_for_api_format_and_model(
-            state,
-            spec.api_format,
-            Some(&input.requested_model),
-        )
-        .await;
+    let model_directive_resolution = input
+        .model_directive_policy
+        .resolve_reasoning(spec.api_format, Some(&input.requested_model));
+    let model_directive_mapping =
+        match model_directive_resolution.mapping_patch_for_mapped_model(&prepared.mapped_model) {
+            Ok(mapping) => mapping,
+            Err(skip_reason) => {
+                mark_skipped_local_same_format_provider_candidate(
+                    state,
+                    input,
+                    trace_id,
+                    candidate,
+                    attempt.candidate_index,
+                    &attempt.candidate_id,
+                    skip_reason,
+                )
+                .await;
+                return Ok(None);
+            }
+        };
     let effective_headers = input.effective_headers(&parts.headers);
     let redaction = resolve_provider_chat_pii_redaction(
         state,
@@ -169,7 +185,7 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
             prepared.force_body_stream_field,
             prepared.kiro_auth.as_ref(),
             prepared.is_claude_code,
-            enable_model_directives,
+            false,
         )
     else {
         mark_skipped_local_same_format_provider_candidate_with_extra_data(
@@ -196,18 +212,11 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
     };
     let mut base_provider_request_body = base_provider_request.body;
     let mut compatibility_edits = base_provider_request.compatibility_edits;
-    if let Some(mapping) =
-        crate::system_features::reasoning_model_directive_mapping_for_api_format_and_model(
-            state,
-            spec.api_format,
-            Some(&input.requested_model),
-        )
-        .await
-    {
+    if let Some(mapping) = model_directive_mapping.as_ref() {
         let before_mapping = base_provider_request_body.clone();
         crate::ai_serving::apply_model_directive_mapping_patch(
             &mut base_provider_request_body,
-            &mapping,
+            mapping,
         );
         if before_mapping != base_provider_request_body {
             compatibility_edits.push(SameFormatProviderCompatibilityEdit {
@@ -228,6 +237,48 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
                 request_requires_body_stream_field(body_json, prepared.force_body_stream_field),
             );
         }
+    }
+
+    let source_model = body_json
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(input.requested_model.as_str());
+    let codex_model_capabilities = codex_model_capabilities_for_transport(
+        &transport,
+        prepared.provider_api_format.as_str(),
+        prepared.mapped_model.as_str(),
+        source_model,
+    );
+    if crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities(
+        &mut base_provider_request_body,
+        crate::ai_serving::OpenAiProviderRequestFinalization {
+            source_api_format: spec.api_format,
+            provider_api_format: prepared.provider_api_format.as_str(),
+            provider_type: transport.provider.provider_type.as_str(),
+            provider_model: prepared.mapped_model.as_str(),
+            source_model,
+            body_rules: transport.endpoint.body_rules.as_ref(),
+            upstream_is_stream: prepared.upstream_is_stream,
+            require_body_stream_field: request_requires_body_stream_field(
+                body_json,
+                prepared.force_body_stream_field,
+            ),
+        },
+        codex_model_capabilities.as_ref(),
+    )
+    .is_err()
+    {
+        mark_skipped_local_same_format_provider_candidate(
+            state,
+            input,
+            trace_id,
+            candidate,
+            attempt.candidate_index,
+            &attempt.candidate_id,
+            "provider_request_body_missing",
+        )
+        .await;
+        return Ok(None);
     }
 
     let antigravity_auth = if prepared.is_antigravity {
@@ -467,6 +518,28 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
         .await;
         return Ok(None);
     };
+    crate::ai_serving::apply_codex_openai_special_headers(
+        &mut provider_request_headers,
+        &provider_request_body,
+        effective_headers,
+        transport.provider.provider_type.as_str(),
+        prepared.provider_api_format.as_str(),
+        Some(trace_id),
+        transport.key.decrypted_auth_config.as_deref(),
+    );
+    let provider_model = provider_request_body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(prepared.mapped_model.as_str());
+    crate::ai_serving::apply_codex_openai_responses_lite_header_for_request_body_with_capabilities(
+        &mut provider_request_headers,
+        Some(&provider_request_body),
+        transport.provider.provider_type.as_str(),
+        prepared.provider_api_format.as_str(),
+        provider_model,
+        source_model,
+        codex_model_capabilities.as_ref(),
+    );
     request_identity_response_encoding_when_redacted(
         &mut provider_request_headers,
         redaction.redacted,

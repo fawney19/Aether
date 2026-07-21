@@ -160,6 +160,7 @@ function usageApiFormatDefaultsToNonStream(apiFormat: string): boolean {
     case 'openai:chat':
     case 'openai:responses':
     case 'openai:responses:compact':
+    case 'openai:search':
     case 'openai:image':
     case 'claude:messages':
       return true

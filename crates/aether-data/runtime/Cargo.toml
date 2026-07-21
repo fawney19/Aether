@@ -1,0 +1,38 @@
+[package]
+name = "aether-data"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runtime data-access facade and database backend composition for Aether"
+build = "build.rs"
+
+[features]
+default = ["postgres"]
+postgres = ["dep:aether-data-postgres", "sqlx/postgres"]
+mysql = ["dep:aether-data-mysql", "sqlx/mysql"]
+sqlite = ["dep:aether-data-sqlite", "sqlx/sqlite"]
+all-drivers = ["postgres", "mysql", "sqlite"]
+
+[dependencies]
+aether-ai-formats.workspace = true
+aether-data-contracts.workspace = true
+aether-data-postgres = { workspace = true, optional = true }
+aether-data-mysql = { workspace = true, optional = true }
+aether-data-sqlite = { workspace = true, optional = true }
+aether-cache.workspace = true
+aether-wallet.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+futures-util.workspace = true
+flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx = { workspace = true, features = ["migrate", "macros"] }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true

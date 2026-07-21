@@ -1,23 +1,50 @@
 use aether_ai_serving::AiRequestGzipPolicy;
 use serde_json::Value;
 
-use crate::ai_serving::is_openai_responses_family_format;
+use crate::ai_serving::{normalize_api_format_alias, parse_codex_auth_identity};
 
 use super::state::GatewayProviderTransportSnapshot;
 
-const DEFAULT_CODEX_REQUEST_GZIP_MIN_BYTES: usize = 64 * 1024;
-
-pub(crate) fn resolve_transport_request_gzip_policy(
-    transport: &GatewayProviderTransportSnapshot,
-) -> Option<AiRequestGzipPolicy> {
-    transport_request_gzip_policy_from_config(transport.endpoint.config.as_ref())
-        .or_else(|| transport_request_gzip_policy_from_config(transport.provider.config.as_ref()))
-        .or_else(|| default_transport_request_gzip_policy(transport))
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TransportRequestEncodingPolicy {
+    pub content_encoding: Option<String>,
+    pub request_gzip: Option<AiRequestGzipPolicy>,
 }
 
-fn default_transport_request_gzip_policy(
+pub(crate) fn resolve_transport_request_encoding_policy(
     transport: &GatewayProviderTransportSnapshot,
-) -> Option<AiRequestGzipPolicy> {
+) -> TransportRequestEncodingPolicy {
+    if transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("codex")
+        && normalize_api_format_alias(transport.endpoint.api_format.as_str())
+            == "openai:responses:compact"
+    {
+        return TransportRequestEncodingPolicy::default();
+    }
+
+    let request_gzip = transport_request_gzip_policy_from_config(
+        transport.endpoint.config.as_ref(),
+    )
+    .or_else(|| transport_request_gzip_policy_from_config(transport.provider.config.as_ref()));
+    if request_gzip.is_some() {
+        return TransportRequestEncodingPolicy {
+            content_encoding: None,
+            request_gzip,
+        };
+    }
+
+    TransportRequestEncodingPolicy {
+        content_encoding: default_transport_request_content_encoding(transport),
+        request_gzip: None,
+    }
+}
+
+fn default_transport_request_content_encoding(
+    transport: &GatewayProviderTransportSnapshot,
+) -> Option<String> {
     if !transport
         .provider
         .provider_type
@@ -26,19 +53,24 @@ fn default_transport_request_gzip_policy(
     {
         return None;
     }
-    if !is_codex_request_gzip_endpoint_api_format(transport.endpoint.api_format.as_str()) {
+    if !is_codex_request_compression_api_format(transport.endpoint.api_format.as_str()) {
+        return None;
+    }
+    let auth_type =
+        crate::ai_serving::transport::auth::resolve_local_auth_type_for_transport_format(transport);
+    let uses_codex_backend = auth_type == "oauth"
+        || (auth_type == "bearer"
+            && parse_codex_auth_identity(transport.key.decrypted_auth_config.as_deref())
+                .uses_codex_backend);
+    if !uses_codex_backend {
         return None;
     }
 
-    Some(AiRequestGzipPolicy {
-        enabled: Some(true),
-        min_bytes: Some(DEFAULT_CODEX_REQUEST_GZIP_MIN_BYTES),
-    })
+    Some("zstd".to_string())
 }
 
-fn is_codex_request_gzip_endpoint_api_format(api_format: &str) -> bool {
-    is_openai_responses_family_format(api_format)
-        || api_format.trim().eq_ignore_ascii_case("openai:image")
+fn is_codex_request_compression_api_format(api_format: &str) -> bool {
+    normalize_api_format_alias(api_format) == "openai:responses"
 }
 
 fn transport_request_gzip_policy_from_config(
@@ -216,6 +248,16 @@ mod tests {
         }
     }
 
+    fn resolved_gzip_policy(
+        transport: &GatewayProviderTransportSnapshot,
+    ) -> Option<AiRequestGzipPolicy> {
+        resolve_transport_request_encoding_policy(transport).request_gzip
+    }
+
+    fn resolved_content_encoding(transport: &GatewayProviderTransportSnapshot) -> Option<String> {
+        resolve_transport_request_encoding_policy(transport).content_encoding
+    }
+
     #[test]
     fn endpoint_request_gzip_policy_overrides_provider_policy() {
         let transport = sample_transport(
@@ -226,7 +268,7 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_transport_request_gzip_policy(&transport),
+            resolved_gzip_policy(&transport),
             Some(AiRequestGzipPolicy {
                 enabled: Some(true),
                 min_bytes: Some(1024),
@@ -244,7 +286,7 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_transport_request_gzip_policy(&transport),
+            resolved_gzip_policy(&transport),
             Some(AiRequestGzipPolicy {
                 enabled: Some(false),
                 min_bytes: None,
@@ -265,7 +307,7 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_transport_request_gzip_policy(&transport),
+            resolved_gzip_policy(&transport),
             Some(AiRequestGzipPolicy {
                 enabled: Some(true),
                 min_bytes: Some(4096),
@@ -283,7 +325,7 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_transport_request_gzip_policy(&transport),
+            resolved_gzip_policy(&transport),
             Some(AiRequestGzipPolicy {
                 enabled: Some(true),
                 min_bytes: Some(1),
@@ -292,35 +334,73 @@ mod tests {
     }
 
     #[test]
-    fn codex_responses_endpoint_gets_default_request_gzip_policy() {
-        let transport = sample_transport("codex", "openai:responses", None, None);
+    fn codex_responses_endpoint_uses_zstd_without_a_size_threshold() {
+        let mut transport = sample_transport("codex", "openai:responses", None, None);
+        transport.key.auth_type = "oauth".to_string();
 
         assert_eq!(
-            resolve_transport_request_gzip_policy(&transport),
-            Some(AiRequestGzipPolicy {
-                enabled: Some(true),
-                min_bytes: Some(DEFAULT_CODEX_REQUEST_GZIP_MIN_BYTES),
-            })
+            resolved_content_encoding(&transport).as_deref(),
+            Some("zstd")
         );
+        assert_eq!(resolved_gzip_policy(&transport), None);
     }
 
     #[test]
-    fn codex_image_endpoint_gets_default_request_gzip_policy() {
-        let transport = sample_transport("codex", "openai:image", None, None);
+    fn codex_responses_api_key_auth_does_not_enable_default_compression() {
+        let transport = sample_transport("codex", "openai:responses", None, None);
+
+        assert_eq!(resolved_content_encoding(&transport), None);
+        assert_eq!(resolved_gzip_policy(&transport), None);
+    }
+
+    #[test]
+    fn codex_responses_bearer_auth_uses_identity_metadata_for_backend_compression() {
+        let mut transport = sample_transport("codex", "openai:responses", None, None);
+        transport.key.auth_type = "bearer".to_string();
+        transport.key.decrypted_auth_config =
+            Some(r#"{"provider_type":"codex","account_id":"account-1"}"#.to_string());
 
         assert_eq!(
-            resolve_transport_request_gzip_policy(&transport),
-            Some(AiRequestGzipPolicy {
-                enabled: Some(true),
-                min_bytes: Some(DEFAULT_CODEX_REQUEST_GZIP_MIN_BYTES),
-            })
+            resolved_content_encoding(&transport).as_deref(),
+            Some("zstd")
         );
+        assert_eq!(resolved_gzip_policy(&transport), None);
+    }
+
+    #[test]
+    fn codex_image_endpoint_does_not_get_responses_request_gzip_policy() {
+        let transport = sample_transport("codex", "openai:image", None, None);
+
+        assert_eq!(resolved_content_encoding(&transport), None);
+        assert_eq!(resolved_gzip_policy(&transport), None);
+    }
+
+    #[test]
+    fn codex_compact_endpoint_does_not_get_default_request_gzip_policy() {
+        let transport = sample_transport("codex", "openai:responses:compact", None, None);
+
+        assert_eq!(resolved_content_encoding(&transport), None);
+        assert_eq!(resolved_gzip_policy(&transport), None);
+    }
+
+    #[test]
+    fn codex_compact_endpoint_rejects_an_explicit_request_gzip_policy() {
+        let transport = sample_transport(
+            "codex",
+            "openai:responses:compact",
+            None,
+            Some(json!({"request_gzip": {"enabled": true, "min_bytes": 2048}})),
+        );
+
+        assert_eq!(resolved_gzip_policy(&transport), None);
+        assert_eq!(resolved_content_encoding(&transport), None);
     }
 
     #[test]
     fn non_codex_endpoint_does_not_get_default_request_gzip_policy() {
         let transport = sample_transport("openai", "openai:responses", None, None);
 
-        assert_eq!(resolve_transport_request_gzip_policy(&transport), None);
+        assert_eq!(resolved_content_encoding(&transport), None);
+        assert_eq!(resolved_gzip_policy(&transport), None);
     }
 }

@@ -1,0 +1,30 @@
+[package]
+name = "aether-loadtools"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Standalone HTTP load probes and runtime benchmark tools"
+
+[dependencies]
+aether-http.workspace = true
+aether-runtime.workspace = true
+aether-runtime-state.workspace = true
+aether-test-support.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+http.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sysinfo = "0.32"
+libc = "0.2"
+tokio.workspace = true
+
+[[bin]]
+name = "http_load_probe"
+path = "src/bin/http_load_probe.rs"
+
+[[bin]]
+name = "gateway_pressure_probe"
+path = "src/bin/gateway_pressure_probe.rs"

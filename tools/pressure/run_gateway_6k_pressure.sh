@@ -45,7 +45,7 @@ case "$PRESSURE_CARGO_PROFILE" in
 esac
 
 args+=(
-  -p aether-testkit --bin gateway_pressure_probe --
+  -p aether-loadtools --bin gateway_pressure_probe --
   --url "$TARGET_URL"
   --metrics-url "$METRICS_URL"
   --requests "$PRESSURE_REQUESTS"

@@ -24,10 +24,15 @@ aether-billing.workspace = true
 aether-cache.workspace = true
 aether-contracts.workspace = true
 aether-crypto.workspace = true
-aether-data.workspace = true
+aether-data = { workspace = true, features = ["all-drivers"] }
 aether-data-contracts.workspace = true
 aether-dispatch-core.workspace = true
+aether-gateway-frontdoor.workspace = true
+aether-gateway-control.workspace = true
+aether-gateway-execution.workspace = true
 aether-http.workspace = true
+aether-gateway-workers.workspace = true
+aether-gateway-tunnel.workspace = true
 aether-model-fetch.workspace = true
 aether-oauth.workspace = true
 aether-pool-core.workspace = true
@@ -74,7 +79,7 @@ sha1 = "0.10"
 sha2 = { workspace = true, features = ["oid"] }
 socket2.workspace = true
 tar.workspace = true
-sqlx.workspace = true
+sqlx = { workspace = true, features = ["postgres", "mysql", "sqlite", "migrate"] }
 sysinfo = "0.32"
 thiserror.workspace = true
 tokio.workspace = true
@@ -94,5 +99,5 @@ tikv-jemallocator = { version = "0.6", optional = true }
 tikv-jemalloc-sys = { version = "0.6", optional = true }
 
 [dev-dependencies]
-aether-testkit.workspace = true
+aether-test-support.workspace = true
 tracing-subscriber.workspace = true

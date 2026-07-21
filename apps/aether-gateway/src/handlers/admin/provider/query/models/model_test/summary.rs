@@ -120,6 +120,10 @@ fn provider_query_endpoint_route_payload(
             ("Gemini API", "gemini_native", "generateContent", "")
         }
         "gemini:generate_content" => ("Gemini native", "gemini_native", "generateContent", ""),
+        "gemini:interactions" if is_gemini_api => {
+            ("Gemini API", "gemini_native", "interactions", "")
+        }
+        "gemini:interactions" => ("Gemini native", "gemini_native", "interactions", ""),
         "openai:embedding" if is_vertex && is_openai_compat => (
             "Vertex AI OpenAI-compatible",
             "openai_compatible",

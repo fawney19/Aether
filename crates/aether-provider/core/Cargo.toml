@@ -1,0 +1,11 @@
+[package]
+name = "aether-provider-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure provider catalog, capability, and health contracts for Aether"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true

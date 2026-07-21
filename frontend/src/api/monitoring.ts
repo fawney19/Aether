@@ -332,10 +332,22 @@ export interface GatewayUsageRuntimeMetrics {
   workerProcessFailuresTotal: number | null
   workerReadFailuresTotal: number | null
   workerReclaimFailuresTotal: number | null
+  terminalSubmissionLimit: number | null
+  terminalSubmissionInFlight: number | null
+  terminalSubmissionMaxInFlight: number | null
+  terminalSubmissionRejectedTotal: number | null
   terminalEnqueueInFlight: number | null
   terminalEnqueueDeferredTotal: number | null
+  terminalEnqueueDeferredDirectWriteTotal: number | null
+  terminalEnqueueDeferredDroppedTotal: number | null
   terminalEnqueueDeferredRetryTotal: number | null
   terminalEnqueueFailedTotal: number | null
+  terminalDirectFallbackLimit: number | null
+  terminalDirectFallbackInFlight: number | null
+  terminalDirectFallbackMaxInFlight: number | null
+  terminalDirectFallbackSucceededTotal: number | null
+  terminalDirectFallbackFailedTotal: number | null
+  terminalDirectFallbackRejectedTotal: number | null
   lifecycleEnqueueInFlight: number | null
   lifecycleEnqueueDeferredTotal: number | null
   lifecycleEnqueueDeferredDroppedTotal: number | null
@@ -673,10 +685,22 @@ function buildUsageRuntimeMetrics(samples: PrometheusSample[]): GatewayUsageRunt
     workerProcessFailuresTotal: findMetricValueNumber(samples, 'usage_runtime_queue_worker_process_failures_total'),
     workerReadFailuresTotal: findMetricValueNumber(samples, 'usage_runtime_queue_worker_read_failures_total'),
     workerReclaimFailuresTotal: findMetricValueNumber(samples, 'usage_runtime_queue_worker_reclaim_failures_total'),
+    terminalSubmissionLimit: findMetricValueNumber(samples, 'usage_runtime_terminal_submission_limit'),
+    terminalSubmissionInFlight: findMetricValueNumber(samples, 'usage_runtime_terminal_submission_in_flight'),
+    terminalSubmissionMaxInFlight: findMetricValueNumber(samples, 'usage_runtime_terminal_submission_max_in_flight'),
+    terminalSubmissionRejectedTotal: findMetricValueNumber(samples, 'usage_runtime_terminal_submission_rejected_total'),
     terminalEnqueueInFlight: findMetricValueNumber(samples, 'usage_runtime_terminal_enqueue_in_flight'),
     terminalEnqueueDeferredTotal: findMetricValueNumber(samples, 'usage_runtime_terminal_enqueue_deferred_total'),
+    terminalEnqueueDeferredDirectWriteTotal: findMetricValueNumber(samples, 'usage_runtime_terminal_enqueue_deferred_direct_write_total'),
+    terminalEnqueueDeferredDroppedTotal: findMetricValueNumber(samples, 'usage_runtime_terminal_enqueue_deferred_dropped_total'),
     terminalEnqueueDeferredRetryTotal: findMetricValueNumber(samples, 'usage_runtime_terminal_enqueue_deferred_retry_total'),
     terminalEnqueueFailedTotal: findMetricValueNumber(samples, 'usage_runtime_terminal_enqueue_failed_total'),
+    terminalDirectFallbackLimit: findMetricValueNumber(samples, 'usage_runtime_terminal_direct_fallback_limit'),
+    terminalDirectFallbackInFlight: findMetricValueNumber(samples, 'usage_runtime_terminal_direct_fallback_in_flight'),
+    terminalDirectFallbackMaxInFlight: findMetricValueNumber(samples, 'usage_runtime_terminal_direct_fallback_max_in_flight'),
+    terminalDirectFallbackSucceededTotal: findMetricValueNumber(samples, 'usage_runtime_terminal_direct_fallback_succeeded_total'),
+    terminalDirectFallbackFailedTotal: findMetricValueNumber(samples, 'usage_runtime_terminal_direct_fallback_failed_total'),
+    terminalDirectFallbackRejectedTotal: findMetricValueNumber(samples, 'usage_runtime_terminal_direct_fallback_rejected_total'),
     lifecycleEnqueueInFlight: findMetricValueNumber(samples, 'usage_runtime_lifecycle_enqueue_in_flight'),
     lifecycleEnqueueDeferredTotal: findMetricValueNumber(samples, 'usage_runtime_lifecycle_enqueue_deferred_total'),
     lifecycleEnqueueDeferredDroppedTotal: findMetricValueNumber(samples, 'usage_runtime_lifecycle_enqueue_deferred_dropped_total'),

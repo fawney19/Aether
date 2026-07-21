@@ -13,10 +13,12 @@ pub use config::{
 pub use logic::{
     aggregate_models_for_cache, apply_model_filters, build_models_fetch_url,
     deepseek_anthropic_models_fetch_uses_openai_auth, endpoint_supports_rust_models_fetch,
-    extract_error_message, json_string_list, merge_upstream_metadata, parse_models_response,
-    parse_models_response_page, parse_windsurf_model_configs_response, preset_models_for_provider,
+    extract_error_message, json_string_list, merge_upstream_metadata,
+    model_catalog_upstream_metadata, parse_models_response, parse_models_response_page,
+    parse_windsurf_model_configs_response, preset_models_for_provider,
     provider_type_uses_preset_models, select_models_fetch_endpoint,
-    selected_models_fetch_endpoints, ModelFetchRunSummary, ModelsFetchPage, ModelsFetchSuccess,
+    selected_models_fetch_endpoints, upstream_metadata_namespace_updates, ModelFetchRunSummary,
+    ModelsFetchPage, ModelsFetchSuccess,
 };
 pub use strategy::{
     fetch_models_from_transports, ModelFetchStrategy, ModelFetchStrategyKind, ModelsFetchOutcome,

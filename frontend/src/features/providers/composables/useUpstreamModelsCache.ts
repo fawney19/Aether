@@ -5,7 +5,7 @@
  */
 import { ref } from 'vue'
 import { isAxiosError } from 'axios'
-import { adminApi } from '@/api/admin'
+import { adminApi, type ProviderModelsQueryResponse } from '@/api/admin'
 import { parseUpstreamModelError } from '@/utils/errorParser'
 import type { UpstreamModel } from '@/api/endpoints/types'
 
@@ -15,6 +15,8 @@ type FetchResult = { models: UpstreamModel[]; error?: string; warning?: string; 
 
 // 进行中的请求（用于去重并发请求）
 const pendingRequests = new Map<string, Promise<FetchResult>>()
+const activeRequestIds = new Map<string, number>()
+let nextRequestId = 0
 
 // 请求状态
 const loadingMap = ref<Map<string, boolean>>(new Map())
@@ -24,6 +26,57 @@ const loadingMap = ref<Map<string, boolean>>(new Map())
  */
 function getRequestKey(providerId: string, apiKeyId?: string): string {
   return apiKeyId ? `${providerId}:${apiKeyId}` : providerId
+}
+
+function getBatchRequestKey(providerId: string, apiKeyIds: string[]): string {
+  return `${providerId}:batch:${JSON.stringify([...new Set(apiKeyIds)].sort())}`
+}
+
+function providerModelsFetchResult(response: ProviderModelsQueryResponse): FetchResult {
+  if (response.success && response.data?.models) {
+    const partialWarning = response.data.warning ?? response.data.error
+    return {
+      models: response.data.models,
+      warning: partialWarning ? parseUpstreamModelError(partialWarning) : undefined,
+      fromCache: response.data.from_cache,
+    }
+  }
+  const rawError = response.data?.error || response.data?.warning || '获取上游模型失败'
+  return { models: [], error: parseUpstreamModelError(rawError) }
+}
+
+function fetchProviderModels(
+  requestKey: string,
+  forceRefresh: boolean,
+  request: () => Promise<ProviderModelsQueryResponse>,
+): Promise<FetchResult> {
+  if (!forceRefresh && pendingRequests.has(requestKey)) {
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    return pendingRequests.get(requestKey)!
+  }
+
+  const requestId = ++nextRequestId
+  activeRequestIds.set(requestKey, requestId)
+  loadingMap.value.set(requestKey, true)
+  const requestPromise = (async (): Promise<FetchResult> => {
+    try {
+      return providerModelsFetchResult(await request())
+    } catch (err: unknown) {
+      const rawError = isAxiosError(err)
+        ? (err.response?.data?.detail ?? err.message)
+        : (err instanceof Error ? err.message : String(err))
+      return { models: [], error: parseUpstreamModelError(rawError || '获取上游模型失败') }
+    } finally {
+      if (activeRequestIds.get(requestKey) === requestId) {
+        loadingMap.value.set(requestKey, false)
+        pendingRequests.delete(requestKey)
+        activeRequestIds.delete(requestKey)
+      }
+    }
+  })()
+
+  pendingRequests.set(requestKey, requestPromise)
+  return requestPromise
 }
 
 export function useUpstreamModelsCache() {
@@ -40,41 +93,32 @@ export function useUpstreamModelsCache() {
     forceRefresh = false
   ): Promise<FetchResult> {
     const requestKey = getRequestKey(providerId, apiKeyId)
+    return fetchProviderModels(
+      requestKey,
+      forceRefresh,
+      () => adminApi.queryProviderModels(providerId, apiKeyId, forceRefresh),
+    )
+  }
 
-    // 强制刷新时不复用进行中的请求
-    if (!forceRefresh && pendingRequests.has(requestKey)) {
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      return pendingRequests.get(requestKey)!
+  async function fetchModelsForKeys(
+    providerId: string,
+    apiKeyIds: string[],
+    forceRefresh = false
+  ): Promise<FetchResult> {
+    const normalizedKeyIds = [...new Set(apiKeyIds.map(id => id.trim()).filter(Boolean))].sort()
+    if (normalizedKeyIds.length === 0) {
+      return { models: [], error: '请先选择账号' }
     }
-
-    // 创建新请求
-    const requestPromise = (async (): Promise<FetchResult> => {
-      try {
-        loadingMap.value.set(requestKey, true)
-        const response = await adminApi.queryProviderModels(providerId, apiKeyId, forceRefresh)
-
-        if (response.success && response.data?.models) {
-          const partialWarning = response.data.warning ?? response.data.error
-          return {
-            models: response.data.models,
-            warning: partialWarning ? parseUpstreamModelError(partialWarning) : undefined,
-            fromCache: response.data.from_cache
-          }
-        } else {
-          const rawError = response.data?.error || response.data?.warning || '获取上游模型失败'
-          return { models: [], error: parseUpstreamModelError(rawError) }
-        }
-      } catch (err: unknown) {
-        const rawError = isAxiosError(err) ? (err.response?.data?.detail ?? err.message) : (err instanceof Error ? err.message : String(err))
-        return { models: [], error: parseUpstreamModelError(rawError || '获取上游模型失败') }
-      } finally {
-        loadingMap.value.set(requestKey, false)
-        pendingRequests.delete(requestKey)
-      }
-    })()
-
-    pendingRequests.set(requestKey, requestPromise)
-    return requestPromise
+    const requestKey = getBatchRequestKey(providerId, normalizedKeyIds)
+    return fetchProviderModels(
+      requestKey,
+      forceRefresh,
+      () => adminApi.queryProviderModelsForKeys(
+          providerId,
+          normalizedKeyIds,
+          forceRefresh,
+        ),
+    )
   }
 
   /**
@@ -87,6 +131,7 @@ export function useUpstreamModelsCache() {
 
   return {
     fetchModels,
+    fetchModelsForKeys,
     isLoading,
     loadingMap
   }

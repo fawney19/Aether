@@ -12,7 +12,9 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use serde_json::{json, Map, Value};
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 impl<'a> AdminAppState<'a> {
     pub(crate) async fn clear_admin_provider_pool_cooldown(&self, provider_id: &str, key_id: &str) {
@@ -105,9 +107,9 @@ impl<'a> AdminAppState<'a> {
         let existing_keys = self
             .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
             .await?;
-        let api_formats =
+        let available_api_formats =
             admin_provider_pool_pure::admin_pool_resolved_api_formats(&endpoints, &existing_keys);
-        if api_formats.is_empty() {
+        if available_api_formats.is_empty() {
             return Ok((
                 http::StatusCode::BAD_REQUEST,
                 Json(json!({ "detail": "Provider 没有可用 endpoint 或现有 key，无法推断 api_formats" })),
@@ -115,8 +117,74 @@ impl<'a> AdminAppState<'a> {
                 .into_response());
         }
 
-        let proxy =
-            admin_provider_pool_pure::admin_pool_key_proxy_value(payload.proxy_node_id.as_deref());
+        let requested_api_formats = payload
+            .api_formats
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let available_api_format_set = available_api_formats
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let api_formats = if requested_api_formats.is_empty() {
+            available_api_formats.clone()
+        } else {
+            if let Some(unsupported) = requested_api_formats
+                .iter()
+                .find(|value| !available_api_format_set.contains(*value))
+            {
+                return Ok((
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": format!("Provider 不支持 api_format: {unsupported}") })),
+                )
+                    .into_response());
+            }
+            requested_api_formats
+        };
+
+        let mut settings_map = match payload.settings {
+            Some(Value::Object(map)) => map,
+            Some(_) => {
+                return Ok((
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": "settings payload must be an object" })),
+                )
+                    .into_response());
+            }
+            None => Map::new(),
+        };
+        if let Some(proxy_node_id) = payload.proxy_node_id {
+            settings_map
+                .entry("proxy_node_id".to_string())
+                .or_insert(Value::String(proxy_node_id));
+        }
+        let shared_settings = (!settings_map.is_empty()).then_some(Value::Object(settings_map));
+        if let Some(settings) = shared_settings.as_ref() {
+            if let Err(detail) =
+                admin_provider_pool_pure::validate_admin_pool_key_settings_payload(settings)
+            {
+                return Ok((
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": detail })),
+                )
+                    .into_response());
+            }
+        }
+
+        let mut known_names = existing_keys
+            .iter()
+            .map(|key| key.name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect::<BTreeSet<_>>();
+        let mut known_api_keys = existing_keys
+            .iter()
+            .filter_map(|key| key.encrypted_api_key.as_deref())
+            .filter_map(|ciphertext| self.decrypt_catalog_secret_with_fallbacks(ciphertext))
+            .filter(|value| value != "__placeholder__")
+            .collect::<BTreeSet<_>>();
         let mut imported = 0usize;
         let skipped = 0usize;
         let mut errors = Vec::new();
@@ -136,6 +204,79 @@ impl<'a> AdminAppState<'a> {
                 continue;
             }
 
+            let name = item.name.trim();
+            if name.is_empty() {
+                errors.push(json!({
+                    "index": index,
+                    "reason": "name is empty",
+                }));
+                continue;
+            }
+            if known_names.contains(name) {
+                errors.push(json!({
+                    "index": index,
+                    "reason": "该名称已存在于当前 Provider 或本次导入中",
+                }));
+                continue;
+            }
+
+            let auth_type = item.auth_type.trim().to_ascii_lowercase();
+            let auth_type = if auth_type.is_empty() {
+                "api_key".to_string()
+            } else {
+                auth_type
+            };
+            if !matches!(auth_type.as_str(), "api_key" | "bearer") {
+                errors.push(json!({
+                    "index": index,
+                    "reason": "auth_type must be api_key or bearer",
+                }));
+                continue;
+            }
+            let requested_item_api_formats = item
+                .api_formats
+                .iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let item_api_formats = if requested_item_api_formats.is_empty() {
+                api_formats.clone()
+            } else {
+                if let Some(unsupported) = requested_item_api_formats
+                    .iter()
+                    .find(|value| !available_api_format_set.contains(*value))
+                {
+                    errors.push(json!({
+                        "index": index,
+                        "reason": format!("Provider 不支持 api_format: {unsupported}"),
+                    }));
+                    continue;
+                }
+                requested_item_api_formats
+            };
+            let item_settings = match admin_provider_pool_pure::resolve_admin_pool_key_settings(
+                shared_settings.as_ref(),
+                item.settings.as_ref(),
+            ) {
+                Ok(value) => value,
+                Err(detail) => {
+                    errors.push(json!({
+                        "index": index,
+                        "reason": detail,
+                    }));
+                    continue;
+                }
+            };
+            if known_api_keys.contains(api_key) {
+                errors.push(json!({
+                    "index": index,
+                    "reason": "该 API Key 已存在于当前 Provider 或本次导入中",
+                }));
+                continue;
+            }
+
             let Some(encrypted_api_key) = self.encrypt_catalog_secret_with_fallbacks(api_key)
             else {
                 errors.push(json!({
@@ -144,26 +285,15 @@ impl<'a> AdminAppState<'a> {
                 }));
                 continue;
             };
-
-            let auth_type = item.auth_type.trim().to_ascii_lowercase();
-            let auth_type = if auth_type.is_empty() {
-                "api_key".to_string()
-            } else {
-                auth_type
-            };
-            let name = item.name.trim();
             let record = match admin_provider_pool_pure::build_admin_pool_batch_import_key_record(
                 uuid::Uuid::new_v4().to_string(),
                 provider.id.clone(),
-                if name.is_empty() {
-                    format!("imported-{index}")
-                } else {
-                    name.to_string()
-                },
+                name.to_string(),
                 auth_type,
-                api_formats.clone(),
+                item_api_formats,
                 encrypted_api_key,
-                proxy.clone(),
+                None,
+                item_settings.as_ref(),
                 now_unix_secs,
             ) {
                 Ok(value) => value,
@@ -175,7 +305,6 @@ impl<'a> AdminAppState<'a> {
                     continue;
                 }
             };
-
             let Some(_) = self.create_provider_catalog_key(&record).await? else {
                 return Ok((
                     http::StatusCode::SERVICE_UNAVAILABLE,
@@ -185,6 +314,8 @@ impl<'a> AdminAppState<'a> {
                 )
                     .into_response());
             };
+            known_names.insert(name.to_string());
+            known_api_keys.insert(api_key.to_string());
             imported += 1;
         }
 
@@ -466,23 +597,32 @@ impl<'a> AdminAppState<'a> {
             .into_response());
         }
 
-        let mut affected = 0usize;
+        let mut updated_keys = Vec::with_capacity(keys.len());
         for mut key in keys {
             match plan.action {
                 AdminPoolBatchActionKind::Enable => key.is_active = true,
                 AdminPoolBatchActionKind::Disable => key.is_active = false,
                 AdminPoolBatchActionKind::ClearProxy => key.proxy = None,
                 AdminPoolBatchActionKind::SetProxy => key.proxy = plan.proxy_payload.clone(),
+                AdminPoolBatchActionKind::UpdateSettings => {
+                    if let Some(settings) = plan.settings_payload.as_ref() {
+                        admin_provider_pool_pure::apply_admin_pool_key_settings(&mut key, settings)
+                            .map_err(GatewayError::Internal)?;
+                    }
+                }
                 AdminPoolBatchActionKind::RegenerateFingerprint => {
                     key.fingerprint =
                         Some(aether_provider_transport::claude_code::generate_random_fingerprint())
                 }
                 AdminPoolBatchActionKind::Delete => unreachable!(),
             }
-            if self.update_provider_catalog_key(&key).await?.is_some() {
-                affected = affected.saturating_add(1);
-            }
+            updated_keys.push(key);
         }
+        let affected = self
+            .update_provider_catalog_keys(&updated_keys)
+            .await?
+            .map(|keys| keys.len())
+            .unwrap_or(0);
 
         Ok(Json(
             admin_provider_pool_pure::build_admin_pool_batch_action_result_payload(
@@ -490,6 +630,198 @@ impl<'a> AdminAppState<'a> {
                 plan.action_label,
             ),
         )
+        .into_response())
+    }
+
+    pub(crate) async fn build_admin_pool_batch_update_response(
+        &self,
+        provider_id: &str,
+        payload: crate::handlers::admin::provider::shared::payloads::AdminProviderKeyBatchUpdateRequest,
+    ) -> Result<Response<Body>, GatewayError> {
+        use crate::handlers::admin::provider::pool_admin::admin_provider_pool_config;
+        use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdatePatch;
+        use crate::handlers::admin::provider::write::keys::{
+            admin_provider_key_update_requires_immediate_model_fetch,
+            build_admin_update_provider_key_record_with_existing_keys,
+            parse_admin_provider_key_batch_update_patch,
+        };
+        use crate::maintenance::ensure_provider_key_pool_scores_for_keys;
+        use crate::model_fetch::perform_model_fetch_for_keys;
+
+        let Some(provider) = self
+            .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id.to_string()))
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok((
+                http::StatusCode::NOT_FOUND,
+                Json(json!({ "detail": format!("Provider {provider_id} 不存在") })),
+            )
+                .into_response());
+        };
+
+        let requested_key_ids = payload
+            .key_ids
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<BTreeSet<_>>();
+        if requested_key_ids.is_empty() {
+            return Ok((
+                http::StatusCode::BAD_REQUEST,
+                Json(json!({ "detail": "key_ids 不能为空" })),
+            )
+                .into_response());
+        }
+
+        let patch = match parse_admin_provider_key_batch_update_patch(payload.patch) {
+            Ok(patch) => patch,
+            Err(detail) => {
+                return Ok((
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": detail })),
+                )
+                    .into_response());
+            }
+        };
+
+        let provider_ids = vec![provider.id.clone()];
+        let existing_keys = self
+            .list_provider_catalog_keys_by_provider_ids(&provider_ids)
+            .await?;
+        let keys_by_id = existing_keys
+            .iter()
+            .map(|key| (key.id.clone(), key))
+            .collect::<BTreeMap<_, _>>();
+        let missing_key_ids = requested_key_ids
+            .iter()
+            .filter(|key_id| !keys_by_id.contains_key(*key_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_key_ids.is_empty() {
+            return Ok((
+                http::StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "detail": format!(
+                        "以下密钥不存在或不属于当前 Provider: {}",
+                        missing_key_ids.join(", ")
+                    )
+                })),
+            )
+                .into_response());
+        }
+
+        let mut staged_updates = Vec::with_capacity(requested_key_ids.len());
+        for key_id in &requested_key_ids {
+            let existing = keys_by_id
+                .get(key_id)
+                .expect("validated provider key should exist");
+            let typed_patch = AdminProviderKeyUpdatePatch::from_object(patch.clone())
+                .expect("validated batch patch should remain parseable");
+            let updated = match build_admin_update_provider_key_record_with_existing_keys(
+                self,
+                &provider,
+                existing,
+                &existing_keys,
+                typed_patch,
+            ) {
+                Ok(updated) => updated,
+                Err(detail) => {
+                    return Ok((
+                        http::StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "detail": format!("密钥 {} 配置无效: {detail}", existing.name)
+                        })),
+                    )
+                        .into_response());
+                }
+            };
+            staged_updates.push(((*existing).clone(), updated));
+        }
+
+        let model_fetch_key_ids = staged_updates
+            .iter()
+            .filter(|(existing, updated)| {
+                admin_provider_key_update_requires_immediate_model_fetch(existing, updated)
+            })
+            .map(|(_, updated)| updated.id.clone())
+            .collect::<BTreeSet<_>>();
+
+        let staged_records = staged_updates
+            .into_iter()
+            .map(|(_, updated)| updated)
+            .collect::<Vec<_>>();
+        let Some(updated_keys) = self.update_provider_catalog_keys(&staged_records).await? else {
+            return Ok((
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "detail": "Provider 密钥写入能力不可用" })),
+            )
+                .into_response());
+        };
+
+        let endpoints = self
+            .list_provider_catalog_endpoints_by_provider_ids(&provider_ids)
+            .await?;
+        if let Some(pool_config) = admin_provider_pool_config(&provider) {
+            let now_unix_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            let score_ensure_budget =
+                (pool_config.score_fallback_scan_limit as usize).clamp(1, 50_000);
+            if let Err(err) = ensure_provider_key_pool_scores_for_keys(
+                self.as_ref(),
+                &provider,
+                &pool_config,
+                &endpoints,
+                &updated_keys,
+                now_unix_secs,
+                score_ensure_budget,
+            )
+            .await
+            {
+                tracing::debug!(
+                    provider_id = %provider.id,
+                    updated_keys = updated_keys.len(),
+                    error = ?err,
+                    "gateway admin provider key batch update: failed to seed pool score rows"
+                );
+            }
+        }
+
+        let model_sync = if model_fetch_key_ids.is_empty() {
+            serde_json::Value::Null
+        } else {
+            let requested = model_fetch_key_ids.len();
+            match perform_model_fetch_for_keys(self.as_ref(), &provider.id, &model_fetch_key_ids)
+                .await
+            {
+                Ok(summary) => json!({
+                    "requested": requested,
+                    "attempted": summary.attempted,
+                    "succeeded": summary.succeeded,
+                    "failed": summary.failed,
+                    "skipped": summary.skipped,
+                }),
+                Err(err) => json!({
+                    "requested": requested,
+                    "attempted": 0,
+                    "succeeded": 0,
+                    "failed": requested,
+                    "skipped": 0,
+                    "error": err.into_message(),
+                }),
+            }
+        };
+
+        let affected = updated_keys.len();
+        Ok(Json(json!({
+            "affected": affected,
+            "message": format!("已更新 {affected} 个密钥"),
+            "model_sync": model_sync,
+        }))
         .into_response())
     }
 }

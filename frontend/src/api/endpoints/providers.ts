@@ -42,6 +42,8 @@ export interface ProviderSummaryPageResponse {
   items: ProviderWithEndpointsSummary[]
 }
 
+type ProviderSummaryResponse = ProviderSummaryPageResponse | ProviderWithEndpointsSummary[]
+
 function normalizeProviderSummary(
   provider: ProviderWithEndpointsSummary,
 ): ProviderWithEndpointsSummary {
@@ -62,16 +64,26 @@ export async function getProvidersSummary(
   return cachedRequest(
     cacheKey,
     async () => {
-      const response = await client.get<ProviderSummaryPageResponse>(
+      const response = await client.get<ProviderSummaryResponse>(
         '/api/admin/providers/summary',
         {
           params,
           timeout: options.timeout,
         },
       )
+      const data = response.data
+      if (Array.isArray(data)) {
+        return {
+          total: data.length,
+          page: params.page ?? 1,
+          page_size: params.page_size ?? data.length,
+          items: data.map(normalizeProviderSummary),
+        }
+      }
+
       return {
-        ...response.data,
-        items: response.data.items.map(normalizeProviderSummary),
+        ...data,
+        items: (data.items ?? []).map(normalizeProviderSummary),
       }
     },
     cacheTtlMs,
@@ -371,6 +383,84 @@ export interface ProviderMappingPreviewResponse {
   truncated_models: number
 }
 
+function mappingPreviewRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function mappingPreviewString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback
+}
+
+function mappingPreviewCount(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : fallback
+}
+
+function normalizeProviderMappingPreview(
+  value: unknown,
+  providerId: string,
+): ProviderMappingPreviewResponse {
+  const source = mappingPreviewRecord(value)
+  const rawKeys = Array.isArray(source.keys) ? source.keys : []
+  const keys = rawKeys.map((rawKey) => {
+    const key = mappingPreviewRecord(rawKey)
+    const rawGlobalModels = Array.isArray(key.matching_global_models)
+      ? key.matching_global_models
+      : []
+
+    return {
+      key_id: mappingPreviewString(key.key_id),
+      key_name: mappingPreviewString(key.key_name),
+      masked_key: mappingPreviewString(key.masked_key, '***'),
+      is_active: key.is_active === true,
+      allowed_models: Array.isArray(key.allowed_models)
+        ? key.allowed_models.filter((item): item is string => typeof item === 'string')
+        : [],
+      matching_global_models: rawGlobalModels.map((rawGlobalModel) => {
+        const globalModel = mappingPreviewRecord(rawGlobalModel)
+        const rawMatchedModels = Array.isArray(globalModel.matched_models)
+          ? globalModel.matched_models
+          : []
+
+        return {
+          global_model_id: mappingPreviewString(globalModel.global_model_id),
+          global_model_name: mappingPreviewString(globalModel.global_model_name),
+          display_name: mappingPreviewString(
+            globalModel.display_name,
+            mappingPreviewString(globalModel.global_model_name),
+          ),
+          is_active: globalModel.is_active === true,
+          matched_models: rawMatchedModels.map((rawMatchedModel) => {
+            const matchedModel = mappingPreviewRecord(rawMatchedModel)
+            return {
+              allowed_model: mappingPreviewString(matchedModel.allowed_model),
+              mapping_pattern: mappingPreviewString(matchedModel.mapping_pattern),
+            }
+          }),
+        }
+      }),
+    }
+  })
+  const inferredMatches = keys.reduce(
+    (total, key) => total + key.matching_global_models.length,
+    0,
+  )
+
+  return {
+    provider_id: mappingPreviewString(source.provider_id, providerId),
+    provider_name: mappingPreviewString(source.provider_name),
+    keys,
+    total_keys: mappingPreviewCount(source.total_keys, keys.length),
+    total_matches: mappingPreviewCount(source.total_matches, inferredMatches),
+    truncated: source.truncated === true,
+    truncated_keys: mappingPreviewCount(source.truncated_keys, 0),
+    truncated_models: mappingPreviewCount(source.truncated_models, 0),
+  }
+}
+
 /**
  * 获取 Provider 映射预览
  */
@@ -379,6 +469,6 @@ export async function getProviderMappingPreview(
 ): Promise<ProviderMappingPreviewResponse> {
   return dedupedRequest(`providers:mapping-preview:${providerId}`, async () => {
     const response = await client.get<ProviderMappingPreviewResponse>(`/api/admin/providers/${providerId}/mapping-preview`)
-    return response.data
+    return normalizeProviderMappingPreview(response.data, providerId)
   })
 }

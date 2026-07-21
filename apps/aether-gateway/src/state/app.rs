@@ -2,15 +2,16 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aether_data::repository::users::StoredUserGroup;
 use aether_data_contracts::repository::billing::UserDailyQuotaAvailabilityRecord;
 use aether_data_contracts::repository::quota::StoredProviderQuotaSnapshot;
+use aether_data_contracts::repository::usage::UsageCounterHealthSnapshot;
 use aether_runtime::ConcurrencyGate;
 use aether_runtime_state::{RuntimeSemaphore, RuntimeState};
 use dashmap::DashMap;
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock, Semaphore};
 
 use super::super::async_task::{VideoTaskPollerConfig, VideoTaskService};
 use super::super::cache::{
@@ -36,6 +37,11 @@ const DEFAULT_REQUEST_BODY_READ_TIMEOUT_MS: u64 = 120_000;
 const MIN_REQUEST_BODY_READ_TIMEOUT_MS: u64 = 1_000;
 const MAX_REQUEST_BODY_READ_TIMEOUT_MS: u64 = 600_000;
 const REQUEST_BODY_READ_TIMEOUT_MS_ENV: &str = "AETHER_GATEWAY_REQUEST_BODY_READ_TIMEOUT_MS";
+const DEFAULT_REQUEST_BODY_BUFFER_BUDGET_MB: usize = 256;
+const MIN_REQUEST_BODY_BUFFER_BUDGET_MB: usize = 64;
+const MAX_REQUEST_BODY_BUFFER_BUDGET_MB: usize = 16 * 1024;
+const REQUEST_BODY_BUFFER_BUDGET_MB_ENV: &str = "AETHER_GATEWAY_REQUEST_BODY_BUFFER_BUDGET_MB";
+pub(crate) const REQUEST_BODY_BUFFER_PERMIT_BYTES: usize = 64 * 1024;
 
 const DEFAULT_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS: u64 = 30_000;
 const MIN_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS: u64 = 500;
@@ -90,6 +96,8 @@ impl std::fmt::Debug for TestExecutionRuntimeSyncOverride {
 #[derive(Debug, Clone)]
 pub(crate) struct FrontdoorRuntimeGuardConfig {
     pub(crate) request_body_read_timeout: Duration,
+    pub(crate) request_body_buffer_budget_bytes: usize,
+    pub(crate) request_body_buffer_budget_permits: usize,
     pub(crate) local_execution_planning_timeout: Duration,
     pub(crate) internal_gate_queue_budget: Duration,
     pub(crate) auth_capacity_cache_ttl: Duration,
@@ -98,6 +106,8 @@ pub(crate) struct FrontdoorRuntimeGuardConfig {
     pub(crate) upstream_execution_gate_limit: Option<usize>,
     pub(crate) upstream_target_gate_limit: Option<usize>,
 }
+
+pub(crate) const METRIC_SNAPSHOT_TTL: Duration = Duration::from_secs(2);
 
 impl FrontdoorRuntimeGuardConfig {
     pub(crate) fn from_env() -> Self {
@@ -108,6 +118,8 @@ impl FrontdoorRuntimeGuardConfig {
                 MIN_REQUEST_BODY_READ_TIMEOUT_MS,
                 MAX_REQUEST_BODY_READ_TIMEOUT_MS,
             ),
+            request_body_buffer_budget_bytes: request_body_buffer_budget_bytes_from_env(),
+            request_body_buffer_budget_permits: request_body_buffer_budget_permits_from_env(),
             local_execution_planning_timeout: env_duration_ms(
                 LOCAL_EXECUTION_PLANNING_TIMEOUT_MS_ENV,
                 DEFAULT_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS,
@@ -140,6 +152,8 @@ impl FrontdoorRuntimeGuardConfig {
     ) -> Self {
         Self {
             request_body_read_timeout,
+            request_body_buffer_budget_bytes: DEFAULT_REQUEST_BODY_BUFFER_BUDGET_MB * 1024 * 1024,
+            request_body_buffer_budget_permits: DEFAULT_REQUEST_BODY_BUFFER_BUDGET_MB * 16,
             local_execution_planning_timeout,
             internal_gate_queue_budget: Duration::from_millis(
                 DEFAULT_INTERNAL_GATE_QUEUE_BUDGET_MS,
@@ -151,6 +165,27 @@ impl FrontdoorRuntimeGuardConfig {
             upstream_target_gate_limit: Some(DEFAULT_UPSTREAM_TARGET_GATE_LIMIT),
         }
     }
+}
+
+fn request_body_buffer_budget_mb_from_env() -> usize {
+    std::env::var(REQUEST_BODY_BUFFER_BUDGET_MB_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_REQUEST_BODY_BUFFER_BUDGET_MB)
+        .clamp(
+            MIN_REQUEST_BODY_BUFFER_BUDGET_MB,
+            MAX_REQUEST_BODY_BUFFER_BUDGET_MB,
+        )
+}
+
+fn request_body_buffer_budget_bytes_from_env() -> usize {
+    request_body_buffer_budget_mb_from_env().saturating_mul(1024 * 1024)
+}
+
+fn request_body_buffer_budget_permits_from_env() -> usize {
+    request_body_buffer_budget_bytes_from_env().saturating_add(REQUEST_BODY_BUFFER_PERMIT_BYTES - 1)
+        / REQUEST_BODY_BUFFER_PERMIT_BYTES
 }
 
 fn env_duration_ms(key: &str, default_ms: u64, min_ms: u64, max_ms: u64) -> Duration {
@@ -332,11 +367,14 @@ pub struct AppState {
     #[cfg(test)]
     pub(crate) execution_runtime_sync_override: Option<TestExecutionRuntimeSyncOverride>,
     pub(crate) data: Arc<GatewayDataState>,
+    pub(crate) background_data: Arc<GatewayDataState>,
+    pub(crate) background_data_isolated: bool,
     pub(crate) runtime_state: Arc<RuntimeState>,
     pub(crate) usage_runtime: Arc<usage::UsageRuntime>,
     pub(crate) video_tasks: Arc<VideoTaskService>,
     pub(crate) video_task_poller: Option<VideoTaskPollerConfig>,
     pub(crate) frontdoor_runtime_guards: Arc<FrontdoorRuntimeGuardConfig>,
+    pub(crate) request_body_buffer_budget: Arc<Semaphore>,
     pub(crate) request_gate: Option<Arc<ConcurrencyGate>>,
     pub(crate) auth_snapshot_load_gate: Option<Arc<ConcurrencyGate>>,
     pub(crate) candidate_planning_gate: Option<Arc<ConcurrencyGate>>,
@@ -344,8 +382,11 @@ pub struct AppState {
     pub(crate) upstream_target_admission: Arc<crate::upstream_admission::UpstreamTargetAdmission>,
     pub(crate) distributed_request_gate: Option<Arc<RuntimeSemaphore>>,
     pub(crate) client: reqwest::Client,
+    pub(crate) owner_forward_client: reqwest::Client,
     pub(crate) auth_context_cache: Arc<AuthContextCache>,
     pub(crate) auth_snapshot_cache: Arc<AuthSnapshotCache>,
+    pub(crate) admin_security_blacklist_cache: Arc<ValueCache<String, bool>>,
+    pub(crate) admin_security_whitelist_cache: Arc<ValueCache<String, Vec<String>>>,
     pub(crate) user_model_capability_settings_cache: Arc<JsonValueCache<String>>,
     pub(crate) user_feature_settings_cache: Arc<JsonValueCache<String>>,
     pub(crate) auth_api_key_force_capabilities_cache:
@@ -376,6 +417,13 @@ pub struct AppState {
     pub(crate) usage_counter_flush_metrics: Arc<UsageCounterFlushRuntimeMetrics>,
     pub(crate) task_supervisor_metrics: TaskSupervisorMetrics,
     pub(crate) process_resource_monitor: Arc<crate::process_metrics::GatewayProcessResourceMonitor>,
+    pub(crate) metric_snapshot:
+        Arc<TokioRwLock<Option<(Instant, Vec<aether_runtime::MetricSample>)>>>,
+    pub(crate) metric_snapshot_refresh: Arc<TokioMutex<()>>,
+    pub(crate) usage_counter_exact_health_metric_snapshot:
+        Arc<TokioRwLock<Option<(Instant, UsageCounterHealthSnapshot)>>>,
+    pub(crate) usage_counter_exact_health_metric_last_attempt: Arc<StdMutex<Option<Instant>>>,
+    pub(crate) usage_counter_exact_health_metric_refresh: Arc<TokioMutex<()>>,
     pub(crate) request_candidate_queue: Option<Arc<RequestCandidateQueueRuntime>>,
     pub(crate) frontdoor_cors: Option<Arc<FrontdoorCorsConfig>>,
     pub(crate) frontdoor_user_rpm: Arc<FrontdoorUserRpmLimiter>,

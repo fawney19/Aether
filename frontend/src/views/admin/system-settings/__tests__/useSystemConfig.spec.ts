@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { getSystemConfigMock, updateSystemConfigMock } = vi.hoisted(() => ({
-  getSystemConfigMock: vi.fn(),
+const { getAllSystemConfigsMock, updateSystemConfigMock } = vi.hoisted(() => ({
+  getAllSystemConfigsMock: vi.fn(),
   updateSystemConfigMock: vi.fn(),
 }))
 
 vi.mock('@/api/admin', () => ({
   adminApi: {
-    getSystemConfig: getSystemConfigMock,
+    getAllSystemConfigs: getAllSystemConfigsMock,
     updateSystemConfig: updateSystemConfigMock,
     getSystemVersion: vi.fn(),
   },
@@ -34,40 +34,33 @@ vi.mock('@/utils/logger', () => ({
 
 import { useSystemConfig } from '../composables/useSystemConfig'
 
-interface DeferredConfigResponse {
-  resolve: (value: { key: string, value: unknown, is_set?: boolean }) => void
-}
-
 describe('useSystemConfig', () => {
   beforeEach(() => {
-    getSystemConfigMock.mockReset()
+    getAllSystemConfigsMock.mockReset()
     updateSystemConfigMock.mockReset()
   })
 
-  it('loads config keys in parallel and keeps change detection disabled until the baseline is ready', async () => {
-    const pending = new Map<string, DeferredConfigResponse>()
-    getSystemConfigMock.mockImplementation((key: string) => new Promise((resolve) => {
-      pending.set(key, { resolve })
+  it('loads config keys in one request and keeps change detection disabled until the baseline is ready', async () => {
+    let resolveConfigs: ((value: Array<{ key: string, value: unknown, is_set?: boolean }>) => void) | null = null
+    getAllSystemConfigsMock.mockImplementation(() => new Promise((resolve) => {
+      resolveConfigs = resolve
     }))
 
     const state = useSystemConfig()
     const loadPromise = state.loadSystemConfig()
 
-    expect(getSystemConfigMock.mock.calls.map(([key]) => key)).toContain('request_record_level')
-    expect(getSystemConfigMock.mock.calls.map(([key]) => key)).toContain('proxy_node_metrics_cleanup_batch_size')
-    expect(getSystemConfigMock.mock.calls.map(([key]) => key)).toContain('enable_standard_text_sync_heartbeat')
+    expect(getAllSystemConfigsMock).toHaveBeenCalledTimes(1)
+    expect(getAllSystemConfigsMock).toHaveBeenCalledWith({ cacheTtlMs: 30_000 })
 
     state.systemConfig.value.request_record_level = 'headers'
     expect(state.systemConfigLoading.value).toBe(true)
     expect(state.hasLogConfigChanges.value).toBe(false)
 
-    for (const [key, deferred] of pending) {
-      deferred.resolve({
-        key,
-        value: key === 'request_record_level' ? 'basic' : undefined,
-        is_set: false,
-      })
-    }
+    resolveConfigs?.([
+      { key: 'request_record_level', value: 'basic' },
+      { key: 'proxy_node_metrics_cleanup_batch_size', value: 5000 },
+      { key: 'enable_standard_text_sync_heartbeat', value: false },
+    ])
     await loadPromise
 
     expect(state.systemConfigLoading.value).toBe(false)
@@ -79,11 +72,9 @@ describe('useSystemConfig', () => {
   })
 
   it('loads and saves the standard text sync heartbeat flag as a basic config item', async () => {
-    getSystemConfigMock.mockImplementation(async (key: string) => ({
-      key,
-      value: key === 'enable_standard_text_sync_heartbeat' ? false : undefined,
-      is_set: key === 'enable_standard_text_sync_heartbeat',
-    }))
+    getAllSystemConfigsMock.mockResolvedValue([
+      { key: 'enable_standard_text_sync_heartbeat', value: false },
+    ])
     updateSystemConfigMock.mockResolvedValue({})
 
     const state = useSystemConfig()
@@ -101,5 +92,37 @@ describe('useSystemConfig', () => {
       '标准文本非流式心跳开关：开启后外层 HTTP 状态固定为 200，上游失败写入响应体'
     )
     expect(state.hasBasicConfigChanges.value).toBe(false)
+  })
+
+  it('keeps Cyber failover disabled by default and saves the enabled state', async () => {
+    getAllSystemConfigsMock.mockResolvedValue([])
+    updateSystemConfigMock.mockResolvedValue({})
+
+    const state = useSystemConfig()
+    await state.loadSystemConfig()
+
+    expect(state.systemConfig.value.cyber_continue_failover).toBe(false)
+    state.systemConfig.value.cyber_continue_failover = true
+    expect(state.hasBasicConfigChanges.value).toBe(true)
+
+    await state.saveBasicConfig()
+
+    expect(updateSystemConfigMock).toHaveBeenCalledWith(
+      'cyber_continue_failover',
+      true,
+      'Cyber继续转移开关：开启后在响应内容开始前将Cyber Policy错误按普通错误继续故障转移，可能增加首字等待时间'
+    )
+    expect(state.hasBasicConfigChanges.value).toBe(false)
+  })
+
+  it('uses backend-compatible defaults when config rows have not been persisted yet', async () => {
+    getAllSystemConfigsMock.mockResolvedValue([])
+
+    const state = useSystemConfig()
+    await state.loadSystemConfig()
+
+    expect(state.systemConfig.value.request_record_level).toBe('full')
+    expect(state.systemConfig.value.max_request_body_size).toBe(5_242_880)
+    expect(state.systemConfig.value.max_response_body_size).toBe(5_242_880)
   })
 })

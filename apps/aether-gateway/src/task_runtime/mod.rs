@@ -9,6 +9,7 @@ use aether_runtime::task::spawn_named;
 use aether_task_runtime::{RetryPolicy, TaskDefinition, TaskKind};
 pub(crate) use aether_task_runtime::{TaskSupervisor, TaskSupervisorMetrics};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
 use tracing::warn;
 use uuid::Uuid;
@@ -26,12 +27,15 @@ pub(crate) const TASK_KEY_MODEL_FETCH_WORKER: &str = "model.fetch.worker";
 pub(crate) const TASK_KEY_PROVIDER_QUOTA_RESET: &str = "provider.quota.reset.worker";
 pub(crate) const TASK_KEY_ACCOUNT_SELF_CHECK: &str = "account.self_check.worker";
 pub(crate) const TASK_KEY_POOL_SCORE_REBUILD: &str = "pool.score.rebuild.worker";
+pub(crate) const TASK_KEY_POOL_QUOTA_PROBE: &str = "pool.quota.probe.worker";
 pub(crate) const TASK_KEY_POOL_MONITOR: &str = "pool.monitor.worker";
 pub(crate) const TASK_KEY_AUDIT_CLEANUP: &str = "maintenance.audit.cleanup";
 pub(crate) const TASK_KEY_DB_MAINTENANCE: &str = "maintenance.database";
 pub(crate) const TASK_KEY_PENDING_CLEANUP: &str = "maintenance.pending.cleanup";
 pub(crate) const TASK_KEY_REQUEST_CANDIDATE_CLEANUP: &str = "maintenance.request.candidate.cleanup";
 pub(crate) const TASK_KEY_GEMINI_FILES_CLEANUP: &str = "maintenance.gemini.files.cleanup";
+pub(crate) const TASK_KEY_FIXED_PROVIDER_RECONCILIATION: &str =
+    "maintenance.provider.fixed_template.reconcile";
 pub(crate) const TASK_KEY_OAUTH_TOKEN_REFRESH: &str = "maintenance.oauth.token.refresh";
 pub(crate) const TASK_KEY_PROXY_NODE_STALE_CLEANUP: &str = "maintenance.proxy.node.stale.cleanup";
 pub(crate) const TASK_KEY_PROXY_NODE_METRICS_CLEANUP: &str =
@@ -49,6 +53,59 @@ pub(crate) const TASK_KEY_PROVIDER_BALANCE_REFRESH: &str = "provider.ops.balance
 const PROVIDER_DELETE_LOCK_TTL_SECS: u64 = 60 * 60 * 6;
 
 const RETRY_ONCE: RetryPolicy = RetryPolicy { max_attempts: 1 };
+const RETRY_THREE: RetryPolicy = RetryPolicy { max_attempts: 3 };
+const BACKGROUND_TASK_RUN_ID_MAX_BYTES: usize = 64;
+const WORKER_BOOT_RUN_ID_HASH_HEX_BYTES: usize = 20;
+
+fn build_worker_boot_run_id(task_key: &str, instance_id: &str) -> String {
+    let full_run_id = format!("boot:{task_key}:{instance_id}");
+    if full_run_id.len() <= BACKGROUND_TASK_RUN_ID_MAX_BYTES {
+        return full_run_id;
+    }
+
+    let digest_hex = format!("{:x}", Sha256::digest(full_run_id.as_bytes()));
+    let suffix = &digest_hex[..WORKER_BOOT_RUN_ID_HASH_HEX_BYTES];
+    let mut prefix_bytes = BACKGROUND_TASK_RUN_ID_MAX_BYTES - 1 - WORKER_BOOT_RUN_ID_HASH_HEX_BYTES;
+    while !full_run_id.is_char_boundary(prefix_bytes) {
+        prefix_bytes -= 1;
+    }
+
+    format!("{}~{suffix}", &full_run_id[..prefix_bytes])
+}
+
+pub(crate) fn spawn_singleton_worker<F, Fut>(
+    app: AppState,
+    task_key: &'static str,
+    worker: F,
+) -> JoinHandle<()>
+where
+    F: Fn(AppState) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    spawn_singleton_worker_with_context(app, task_key, move |app, _context| worker(app))
+}
+
+pub(crate) fn spawn_singleton_worker_with_context<F, Fut>(
+    app: AppState,
+    task_key: &'static str,
+    worker: F,
+) -> JoinHandle<()>
+where
+    F: Fn(AppState, aether_gateway_workers::SingletonWorkerContext) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let runtime_state = app.runtime_state.clone();
+    let metrics = app.task_supervisor_metrics.clone();
+    let owner = app.tunnel.local_instance_id().to_string();
+    aether_gateway_workers::spawn_singleton_worker_with_context(
+        runtime_state,
+        metrics,
+        owner,
+        task_key,
+        aether_gateway_workers::SingletonWorkerConfig::default(),
+        move |context| worker(app.clone(), context),
+    )
+}
 
 const TASK_DEFINITIONS: &[TaskDefinition] = &[
     TaskDefinition::new(
@@ -140,6 +197,14 @@ const TASK_DEFINITIONS: &[TaskDefinition] = &[
         RETRY_ONCE,
     ),
     TaskDefinition::new(
+        TASK_KEY_POOL_QUOTA_PROBE,
+        TaskKind::Scheduled,
+        "interval",
+        true,
+        true,
+        RETRY_ONCE,
+    ),
+    TaskDefinition::new(
         TASK_KEY_POOL_MONITOR,
         TaskKind::Scheduled,
         "interval",
@@ -186,6 +251,14 @@ const TASK_DEFINITIONS: &[TaskDefinition] = &[
         true,
         true,
         RETRY_ONCE,
+    ),
+    TaskDefinition::new(
+        TASK_KEY_FIXED_PROVIDER_RECONCILIATION,
+        TaskKind::FireAndForget,
+        "startup",
+        true,
+        false,
+        RETRY_THREE,
     ),
     TaskDefinition::new(
         TASK_KEY_OAUTH_TOKEN_REFRESH,
@@ -437,7 +510,7 @@ pub(crate) fn spawn_record_worker_boot(
 ) -> JoinHandle<()> {
     spawn_named("task-runtime-record-worker-boot", async move {
         let now = now_unix_secs();
-        let run_id = format!("boot:{}:{}", task_key, app.tunnel.local_instance_id());
+        let run_id = build_worker_boot_run_id(task_key, app.tunnel.local_instance_id());
         let run = UpsertBackgroundTaskRun {
             id: run_id.clone(),
             task_key: task_key.to_string(),
@@ -707,4 +780,57 @@ pub(crate) async fn submit_provider_delete_task(
     });
 
     Ok(Some(task_id))
+}
+
+#[cfg(test)]
+mod worker_boot_run_id_tests {
+    use super::{build_worker_boot_run_id, BACKGROUND_TASK_RUN_ID_MAX_BYTES};
+
+    #[test]
+    fn worker_boot_run_id_preserves_short_legacy_format() {
+        assert_eq!(
+            build_worker_boot_run_id("usage.queue.worker", "gateway-1"),
+            "boot:usage.queue.worker:gateway-1"
+        );
+    }
+
+    #[test]
+    fn worker_boot_run_id_preserves_exact_database_limit() {
+        let task_key = "task";
+        let instance_id = "i".repeat(BACKGROUND_TASK_RUN_ID_MAX_BYTES - "boot:task:".len());
+        let run_id = build_worker_boot_run_id(task_key, &instance_id);
+
+        assert_eq!(run_id.len(), BACKGROUND_TASK_RUN_ID_MAX_BYTES);
+        assert_eq!(run_id, format!("boot:{task_key}:{instance_id}"));
+    }
+
+    #[test]
+    fn worker_boot_run_id_compacts_oversized_values_deterministically() {
+        let instance_id = "gateway-instance-".repeat(8);
+        let first = build_worker_boot_run_id("usage.queue.worker", &instance_id);
+        let second = build_worker_boot_run_id("usage.queue.worker", &instance_id);
+
+        assert!(first.len() <= BACKGROUND_TASK_RUN_ID_MAX_BYTES);
+        assert_eq!(first, second);
+        assert!(first.starts_with("boot:usage.queue.worker:"));
+        assert!(first.contains('~'));
+    }
+
+    #[test]
+    fn worker_boot_run_id_hash_distinguishes_shared_long_prefixes() {
+        let shared_prefix = "gateway-instance-with-a-very-long-shared-prefix-".repeat(2);
+        let first = build_worker_boot_run_id("usage.queue.worker", &format!("{shared_prefix}a"));
+        let second = build_worker_boot_run_id("usage.queue.worker", &format!("{shared_prefix}b"));
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn worker_boot_run_id_handles_unicode_at_truncation_boundary() {
+        let run_id = build_worker_boot_run_id("usage.queue.worker", &"网关实例".repeat(16));
+
+        assert!(run_id.len() <= BACKGROUND_TASK_RUN_ID_MAX_BYTES);
+        assert!(run_id.is_char_boundary(run_id.len()));
+        assert!(run_id.starts_with("boot:usage.queue.worker:"));
+    }
 }

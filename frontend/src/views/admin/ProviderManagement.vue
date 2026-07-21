@@ -221,6 +221,7 @@
   />
 
   <ProviderDetailDrawer
+    v-if="providerDrawerOpen"
     :open="providerDrawerOpen"
     :provider-id="selectedProviderId"
     :initial-provider="selectedProvider"
@@ -239,7 +240,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
 import Card from '@/components/ui/card.vue'
 import Table from '@/components/ui/table.vue'
 import TableHeader from '@/components/ui/table-header.vue'
@@ -251,7 +252,6 @@ import TableFilterMenu from '@/components/ui/table-filter-menu.vue'
 import Pagination from '@/components/ui/pagination.vue'
 import { ProviderFormDialog, PriorityManagementDialog, ProviderAuthDialog } from '@/features/providers/components'
 import ProviderBatchActionDialog from '@/features/providers/components/ProviderBatchActionDialog.vue'
-import ProviderDetailDrawer from '@/features/providers/components/ProviderDetailDrawer.vue'
 import ProviderTableHeader from '@/features/providers/components/ProviderTableHeader.vue'
 import ProviderTableRow from '@/features/providers/components/ProviderTableRow.vue'
 import ProviderMobileCard from '@/features/providers/components/ProviderMobileCard.vue'
@@ -274,6 +274,10 @@ import {
 import { adminApi } from '@/api/admin'
 import { parseApiError } from '@/utils/errorParser'
 import { useI18n } from '@/i18n'
+
+const ProviderDetailDrawer = defineAsyncComponent(
+  () => import('@/features/providers/components/ProviderDetailDrawer.vue'),
+)
 
 interface ProviderDeleteProgressState {
   providerId: string

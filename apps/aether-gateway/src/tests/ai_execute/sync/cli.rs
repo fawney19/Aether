@@ -141,6 +141,7 @@ async fn gateway_executes_openai_responses_sync_via_local_decision_gate_with_loc
                 priority: 1,
                 api_formats: Some(vec!["openai:responses".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -650,6 +651,7 @@ async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_respons
                 priority: 1,
                 api_formats: Some(vec!["openai:responses".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1042,6 +1044,7 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
                 priority: 1,
                 api_formats: Some(vec!["openai:responses".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1412,6 +1415,7 @@ async fn gateway_returns_openai_responses_error_for_local_sync_failure_impl() {
                 priority: 1,
                 api_formats: Some(vec!["openai:responses".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1725,6 +1729,7 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_cl
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -2131,6 +2136,7 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_claude_sy
                 priority: 1,
                 api_formats: Some(vec!["claude:messages".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -2516,6 +2522,7 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_claude_ch
                 priority: 1,
                 api_formats: Some(vec!["claude:messages".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -2904,6 +2911,7 @@ async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_ch
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -3223,6 +3231,9 @@ async fn gateway_executes_codex_cli_sync_via_local_decision_gate_after_oauth_ref
         model: String,
         authorization: String,
         x_client_request_id: String,
+        session_id: String,
+        thread_id: String,
+        prompt_cache_key: String,
         stream_present: bool,
         plan_stream: bool,
     }
@@ -3298,6 +3309,7 @@ async fn gateway_executes_codex_cli_sync_via_local_decision_gate_after_oauth_ref
                 priority: 1,
                 api_formats: Some(vec!["openai:responses".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -3509,6 +3521,25 @@ async fn gateway_executes_codex_cli_sync_via_local_decision_gate_after_oauth_ref
                         .and_then(|value| value.as_str())
                         .unwrap_or_default()
                         .to_string(),
+                    session_id: payload
+                        .get("headers")
+                        .and_then(|value| value.get("session-id"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    thread_id: payload
+                        .get("headers")
+                        .and_then(|value| value.get("thread-id"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    prompt_cache_key: payload
+                        .get("body")
+                        .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("prompt_cache_key"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                     stream_present: payload
                         .get("body")
                         .and_then(|value| value.get("json_body"))
@@ -3646,7 +3677,16 @@ async fn gateway_executes_codex_cli_sync_via_local_decision_gate_after_oauth_ref
     );
     assert_eq!(
         seen_execution_runtime_request.x_client_request_id,
-        "trace-codex-cli-local-123"
+        seen_execution_runtime_request.thread_id
+    );
+    assert_eq!(
+        seen_execution_runtime_request.session_id,
+        seen_execution_runtime_request.thread_id
+    );
+    assert!(seen_execution_runtime_request.prompt_cache_key.is_empty());
+    assert_ne!(
+        seen_execution_runtime_request.thread_id,
+        seen_execution_runtime_request.trace_id
     );
     assert!(seen_execution_runtime_request.stream_present);
     assert!(seen_execution_runtime_request.plan_stream);

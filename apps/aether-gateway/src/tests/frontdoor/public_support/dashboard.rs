@@ -191,7 +191,7 @@ async fn gateway_handles_dashboard_stats_locally_without_proxying_upstream() {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["today"]["requests"], 1);
-    assert_eq!(payload["today"]["tokens"], 160);
+    assert_eq!(payload["today"]["tokens"], 150);
     assert_eq!(payload["api_keys"]["total"], 2);
     assert_eq!(payload["api_keys"]["active"], 1);
     assert_eq!(payload["stats"][3]["subValue"], json!("输入 240 / 输出 60"));
@@ -646,7 +646,7 @@ async fn gateway_handles_admin_dashboard_stats_locally_without_proxying_upstream
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["today"]["requests"], 2);
-    assert_eq!(payload["today"]["tokens"], 17_450);
+    assert_eq!(payload["today"]["tokens"], 16_250);
     assert_eq!(payload["today"]["cost"], json!(2.5));
     assert_eq!(payload["cost_stats"]["cost_savings"], json!(0.025));
     let stats = payload["stats"].as_array().expect("stats should be array");
@@ -664,10 +664,10 @@ async fn gateway_handles_admin_dashboard_stats_locally_without_proxying_upstream
         .iter()
         .find(|item| item["name"] == json!("今日 Token"))
         .expect("today token stats card should exist");
-    assert_eq!(today_token_stats["value"], json!("17.4K"));
+    assert_eq!(today_token_stats["value"], json!("16.2K"));
     assert_eq!(
         today_token_stats["subValue"],
-        json!("输入 12.1K / 输出 3.1K · 写缓存 1.25K / 读缓存 1K")
+        json!("输入 10.9K / 输出 3.1K · 写缓存 1.25K / 读缓存 1K")
     );
     assert_eq!(payload["users"]["total"], 2);
     assert_eq!(payload["users"]["active"], 1);

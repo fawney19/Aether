@@ -66,6 +66,7 @@ fn sample_decision() -> crate::control::GatewayControlDecision {
         auth_context: None,
         admin_principal: None,
         local_auth_rejection: None,
+        model_directive_policy: Default::default(),
     }
 }
 
@@ -309,15 +310,15 @@ fn gateway_exposes_request_concurrency_metrics() {
 }
 
 async fn gateway_exposes_request_concurrency_metrics_impl() {
-    let gateway = build_router_with_state(
-        AppState::new()
-            .expect("gateway state should build")
-            .with_request_concurrency_limit(3)
-            .with_distributed_request_concurrency_gate(memory_runtime_semaphore(
-                "gateway_requests_distributed",
-                5,
-            )),
-    );
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_request_concurrency_limit(3)
+        .with_distributed_request_concurrency_gate(memory_runtime_semaphore(
+            "gateway_requests_distributed",
+            5,
+        ));
+    assert!(state.prewarm_metric_snapshot().await);
+    let gateway = build_router_with_state(state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::new()
@@ -436,6 +437,7 @@ async fn gateway_exposes_fallback_metrics_impl() {
         Some(EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS),
         GatewayFallbackReason::LocalExecutionPathRequired,
     );
+    assert!(state.prewarm_metric_snapshot().await);
     let gateway = build_router_with_state(state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 

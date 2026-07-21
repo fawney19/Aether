@@ -1,6 +1,7 @@
 use crate::ai_serving::{AiExecutionDecision, AiExecutionPlanPayload, GatewayControlDecision};
 use crate::{AppState, GatewayError};
 
+mod antigravity;
 mod candidate_affinity_cache;
 mod candidate_materialization;
 mod candidate_metadata;
@@ -33,6 +34,7 @@ pub(crate) use self::candidate_resolution::{
     candidate_auth_channel_skip_reason, read_candidate_transport_snapshot,
     EligibleLocalExecutionCandidate, LocalExecutionCandidateKind, SkippedLocalExecutionCandidate,
 };
+pub(crate) use self::common::resolve_upstream_is_stream_for_provider;
 pub(crate) use self::passthrough::{
     build_local_same_format_stream_attempt_source, build_local_same_format_stream_plan_and_reports,
     build_local_same_format_sync_attempt_source, build_local_same_format_sync_plan_and_reports,
@@ -47,7 +49,7 @@ pub(crate) use self::plan_builders::{
 pub(crate) use self::pool_scores::{
     build_provider_key_pool_score_upsert, provider_key_pool_score_id, provider_key_pool_score_scope,
 };
-pub(crate) use self::request_gzip::resolve_transport_request_gzip_policy;
+pub(crate) use self::request_gzip::resolve_transport_request_encoding_policy;
 pub(crate) use self::route::is_matching_stream_request as planner_is_matching_stream_request;
 pub(crate) use self::runtime_miss::{
     apply_local_runtime_candidate_terminal_reason, record_local_runtime_candidate_skip_reason,
@@ -78,7 +80,8 @@ pub(crate) use self::standard::{
     build_local_stream_plan_and_reports as build_standard_family_stream_plan_and_reports,
     build_local_sync_attempt_source as build_standard_family_sync_attempt_source,
     build_local_sync_plan_and_reports as build_standard_family_sync_plan_and_reports,
-    set_local_openai_chat_execution_exhausted_diagnostic,
+    codex_model_capabilities_for_transport, set_local_openai_chat_execution_exhausted_diagnostic,
+    validate_final_openai_provider_request,
 };
 pub(crate) use self::state::{
     GatewayAuthApiKeySnapshot, GatewayProviderTransportSnapshot, LocalResolvedOAuthRequestAuth,

@@ -182,20 +182,20 @@
                 <!-- 核心信息网格 -->
                 <div class="info-grid">
                   <div
-                    v-if="currentAttempt.started_at"
+                    v-if="currentAttemptTimeRange"
                     class="info-item"
                   >
                     <span class="info-label">时间范围</span>
                     <span class="info-value mono time-range-value">
-                      {{ formatTime(currentAttempt.started_at) }}
+                      {{ formatTime(currentAttemptTimeRange.startIso) }}
                       <span class="time-arrow-container">
                         <span
-                          v-if="currentAttempt.finished_at"
+                          v-if="currentAttemptTimeRange.endIso"
                           class="time-duration"
-                        >+{{ formatDuration(currentAttempt.started_at, currentAttempt.finished_at) }}</span>
+                        >+{{ currentAttemptTimeRange.durationLabel }}</span>
                         <span class="time-arrow">→</span>
                       </span>
-                      {{ currentAttempt.finished_at ? formatTime(currentAttempt.finished_at) : '进行中' }}
+                      {{ currentAttemptTimeRange.endIso ? formatTime(currentAttemptTimeRange.endIso) : '进行中' }}
                     </span>
                   </div>
                   <div
@@ -462,7 +462,7 @@
                   </span>
                 </div>
 
-                <!-- 错误信息：真实上游响应合并在此处展示 -->
+                <!-- 错误信息：将实际上游响应头和响应体作为同一个对象展示 -->
                 <div
                   v-if="currentAttempt.status === 'failed' && currentAttemptRequestError"
                   class="error-block"
@@ -485,12 +485,24 @@
                   </div>
                   <div
                     v-if="currentAttemptRequestError.upstreamResponse"
-                    class="error-json"
+                    class="error-json error-upstream-response-json"
                   >
                     <JsonContentPanel
                       :data="currentAttemptRequestError.upstreamResponse"
                       :is-dark="isDark"
-                      empty-message="无上游响应信息"
+                      title="上游响应"
+                      empty-message="无上游响应"
+                    />
+                  </div>
+                  <div
+                    v-if="currentAttemptRequestError.diagnostic"
+                    class="error-json error-diagnostic-json"
+                  >
+                    <JsonContentPanel
+                      :data="currentAttemptRequestError.diagnostic"
+                      :is-dark="isDark"
+                      title="失败诊断"
+                      empty-message="无失败诊断信息"
                     />
                   </div>
                 </div>
@@ -568,6 +580,12 @@ interface NodeGroup {
   hasConversion: boolean  // 组内是否有格式转换候选
   providerApiFormat: string | null  // 提供商 API 格式（如 openai:responses）
   isPoolGroup?: boolean
+}
+
+interface AttemptTimeRange {
+  startIso: string
+  endIso?: string
+  durationLabel?: string
 }
 
 // 用量数据类型
@@ -1060,6 +1078,10 @@ const currentAttempt = computed(() => {
   return selectedGroup.value.allAttempts[selectedAttemptIndex.value] || selectedGroup.value.primary
 })
 
+const currentAttemptTimeRange = computed<AttemptTimeRange | null>(() => {
+  return resolveAttemptTimeRange(currentAttempt.value)
+})
+
 const currentAttemptDisplayStatus = computed(() => getDisplayStatus(currentAttempt.value))
 
 watch(currentAttempt, (attempt) => {
@@ -1217,7 +1239,7 @@ const normalizeUpstreamResponseDisplay = (value: unknown): Record<string, unknow
   const raw = extractObject(value)
   if (!raw) return null
   const statusCode = readNumberField(raw, 'status_code') ?? readNumberField(raw, 'statusCode')
-  const headers = raw.headers
+  const headers = raw.headers ?? raw.header
   const body = raw.body
   const bodyRef = readStringField(raw, 'body_ref') ?? readStringField(raw, 'bodyRef')
   const bodyState = readStringField(raw, 'body_state') ?? readStringField(raw, 'bodyState')
@@ -1617,6 +1639,7 @@ const currentAttemptRequestError = computed<{
   message: string
   statusCode?: number
   upstreamResponse: Record<string, unknown> | null
+  diagnostic: Record<string, unknown> | null
 } | null>(() => {
   const attempt = currentAttempt.value
   if (!attempt || attempt.status !== 'failed') return null
@@ -1657,10 +1680,20 @@ const currentAttemptRequestError = computed<{
         rawMessage,
       )
     : null
-  const upstreamResponseWithDiagnostic = diagnostic
-    ? { ...(upstreamResponseDisplay ?? {}), diagnostic }
-    : upstreamResponseDisplay
-  if (!message && statusCode == null && !upstreamResponseWithDiagnostic) return null
+  const upstreamResponseData: Record<string, unknown> = {}
+  const responseHeader = upstreamResponseDisplay?.headers
+  const responseBody = upstreamResponseDisplay?.body
+  if (hasRenderableValue(responseHeader)) upstreamResponseData.header = responseHeader
+  if (hasRenderableValue(responseBody)) upstreamResponseData.body = responseBody
+  const response = Object.keys(upstreamResponseData).length > 0
+    ? upstreamResponseData
+    : null
+  if (
+    !message
+    && statusCode == null
+    && !response
+    && !diagnostic
+  ) return null
   const showMessage = shouldShowAttemptMessageWithUpstreamResponse(
     rawMessage || fallbackType,
     upstreamResponseDisplay,
@@ -1669,7 +1702,8 @@ const currentAttemptRequestError = computed<{
   return {
     message: showMessage ? (message || '未知错误') : '',
     statusCode,
-    upstreamResponse: upstreamResponseWithDiagnostic,
+    upstreamResponse: response,
+    diagnostic,
   }
 })
 
@@ -2189,6 +2223,68 @@ onBeforeUnmount(() => {
 
 defineExpose({ refresh: () => loadTrace(true) })
 
+const TERMINAL_TIME_RANGE_STATUSES = new Set([
+  'success',
+  'failed',
+  'cancelled',
+  'stream_interrupted',
+])
+
+const parseTimestampMs = (value?: string | null): number | null => {
+  if (!value) return null
+  const timestamp = new Date(value).getTime()
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+const normalizeLatencyMs = (value?: number | null): number | null => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null
+  return Math.round(value)
+}
+
+const formatDurationMs = (durationMs: number): string => {
+  const safeDurationMs = Math.max(0, Math.round(durationMs))
+  if (safeDurationMs >= 1000) {
+    return `${(safeDurationMs / 1000).toFixed(2)}s`
+  }
+  return `${safeDurationMs}ms`
+}
+
+const resolveAttemptTimeRange = (attempt: CandidateRecord | null | undefined): AttemptTimeRange | null => {
+  if (!attempt?.started_at) return null
+
+  const startMs = parseTimestampMs(attempt.started_at)
+  if (startMs == null) {
+    return {
+      startIso: attempt.started_at,
+      endIso: attempt.finished_at,
+      durationLabel: attempt.finished_at ? formatDuration(attempt.started_at, attempt.finished_at) : undefined,
+    }
+  }
+
+  const rawEndMs = parseTimestampMs(attempt.finished_at)
+  const latencyMs = normalizeLatencyMs(attempt.latency_ms)
+  let endMs = rawEndMs
+
+  if (
+    latencyMs != null &&
+    latencyMs > 0 &&
+    (endMs == null || endMs <= startMs) &&
+    (attempt.finished_at || TERMINAL_TIME_RANGE_STATUSES.has(attempt.status))
+  ) {
+    endMs = startMs + latencyMs
+  }
+
+  if (endMs == null) {
+    return { startIso: attempt.started_at }
+  }
+
+  return {
+    startIso: attempt.started_at,
+    endIso: new Date(endMs).toISOString(),
+    durationLabel: formatDurationMs(endMs - startMs),
+  }
+}
+
 // 格式化时间（详细）
 const formatTime = (dateStr: string) => {
   const date = new Date(dateStr)
@@ -2206,11 +2302,7 @@ const formatTime = (dateStr: string) => {
 const formatDuration = (startStr: string, endStr: string): string => {
   const start = new Date(startStr).getTime()
   const end = new Date(endStr).getTime()
-  const durationMs = end - start
-  if (durationMs >= 1000) {
-    return `${(durationMs / 1000).toFixed(2)}s`
-  }
-  return `${durationMs}ms`
+  return formatDurationMs(end - start)
 }
 
 // 获取状态标签

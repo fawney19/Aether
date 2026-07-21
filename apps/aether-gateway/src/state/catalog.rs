@@ -662,6 +662,21 @@ impl AppState {
         Ok(updated)
     }
 
+    pub(crate) async fn update_provider_catalog_keys(
+        &self,
+        keys: &[provider_catalog::StoredProviderCatalogKey],
+    ) -> Result<Option<Vec<provider_catalog::StoredProviderCatalogKey>>, GatewayError> {
+        let updated = self
+            .data
+            .update_provider_catalog_keys(keys)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if updated.as_ref().is_some_and(|keys| !keys.is_empty()) {
+            self.invalidate_provider_routing_caches();
+        }
+        Ok(updated)
+    }
+
     pub(crate) async fn update_provider_catalog_key_runtime_state(
         &self,
         key: &provider_catalog::StoredProviderCatalogKey,
@@ -711,6 +726,79 @@ impl AppState {
             .update_provider_catalog_key_upstream_metadata(
                 key_id,
                 upstream_metadata,
+                updated_at_unix_secs,
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if updated {
+            self.invalidate_provider_routing_caches();
+        }
+        Ok(updated)
+    }
+
+    pub(crate) async fn upsert_provider_catalog_key_upstream_metadata_namespace(
+        &self,
+        key_id: &str,
+        namespace: &str,
+        value: &serde_json::Value,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<bool, GatewayError> {
+        let updated = self
+            .data
+            .upsert_provider_catalog_key_upstream_metadata_namespace(
+                key_id,
+                namespace,
+                value,
+                updated_at_unix_secs,
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if updated {
+            self.invalidate_provider_routing_caches();
+        }
+        Ok(updated)
+    }
+
+    pub(crate) async fn update_provider_catalog_key_model_fetch_state(
+        &self,
+        key_id: &str,
+        allowed_models: Option<&serde_json::Value>,
+        last_models_fetch_at_unix_secs: Option<u64>,
+        last_models_fetch_error: Option<&str>,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<bool, GatewayError> {
+        let updated = self
+            .data
+            .update_provider_catalog_key_model_fetch_state(
+                key_id,
+                allowed_models,
+                last_models_fetch_at_unix_secs,
+                last_models_fetch_error,
+                updated_at_unix_secs,
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if updated {
+            self.invalidate_provider_routing_caches();
+        }
+        Ok(updated)
+    }
+
+    pub(crate) async fn update_provider_catalog_key_model_fetch_success(
+        &self,
+        key_id: &str,
+        allowed_models: Option<&serde_json::Value>,
+        last_models_fetch_at_unix_secs: u64,
+        upstream_metadata_updates: &[provider_catalog::ProviderCatalogUpstreamMetadataNamespaceUpdate],
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<bool, GatewayError> {
+        let updated = self
+            .data
+            .update_provider_catalog_key_model_fetch_success(
+                key_id,
+                allowed_models,
+                last_models_fetch_at_unix_secs,
+                upstream_metadata_updates,
                 updated_at_unix_secs,
             )
             .await
@@ -1331,6 +1419,7 @@ mod tests {
         let ttl = Duration::from_secs(300);
         let cache_key = CandidatePageCacheKey::new(
             "gpt-5",
+            None,
             "openai:chat",
             true,
             &sample_auth_snapshot(),
@@ -1341,6 +1430,7 @@ mod tests {
             "fixed_order",
             true,
             None,
+            "",
         );
         state.candidate_page_cache.insert(
             cache_key.clone(),

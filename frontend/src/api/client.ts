@@ -2,14 +2,29 @@ import axios, { getAdapter } from 'axios'
 import type { AxiosInstance, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig, AxiosAdapter } from 'axios'
 import { NETWORK_CONFIG, AUTH_CONFIG } from '@/config/constants'
 import { isDemoMode } from '@/config/demo'
-import { handleMockRequest, setMockUserToken } from '@/mocks'
 import { getClientDeviceId } from '@/utils/deviceId'
 import { CrossTabRefreshCoordinator } from '@/utils/crossTabRefresh'
 import { log } from '@/utils/logger'
+import { cache } from '@/utils/cache'
 
 // 在开发环境下使用代理,生产环境使用环境变量
 const API_BASE_URL = import.meta.env.VITE_API_URL || ''
 export const AUTH_STATE_CHANGE_EVENT = 'aether-auth-state-change'
+
+type MockRuntime = typeof import('@/mocks')
+
+let mockRuntimePromise: Promise<MockRuntime> | null = null
+let currentMockUserToken: string | null = null
+
+function loadMockRuntime(): Promise<MockRuntime> {
+  if (!mockRuntimePromise) {
+    mockRuntimePromise = import('@/mocks').catch((error) => {
+      mockRuntimePromise = null
+      throw error
+    })
+  }
+  return mockRuntimePromise
+}
 
 /**
  * 判断请求是否为公共端点
@@ -53,7 +68,9 @@ function createDemoAdapter(defaultAdapter: AxiosAdapter) {
   return async (config: InternalAxiosRequestConfig): Promise<AxiosResponse> => {
     if (isDemoMode()) {
       try {
-        const mockResponse = await handleMockRequest({
+        const mockRuntime = await loadMockRuntime()
+        mockRuntime.setMockUserToken(currentMockUserToken)
+        const mockResponse = await mockRuntime.handleMockRequest({
           method: config.method?.toUpperCase(),
           url: config.url,
           data: config.data,
@@ -290,30 +307,33 @@ class ApiClient {
   }
 
   private syncTokenState(token: string | null): void {
-    this.token = token
-    if (isDemoMode()) {
-      setMockUserToken(token)
+    if (this.token !== token) {
+      cache.clear()
     }
+    this.token = token
+    currentMockUserToken = token
   }
 
   setToken(token: string): void {
+    if (this.token === token) {
+      cache.clear()
+    }
     this.syncTokenState(token)
     localStorage.setItem('access_token', token)
   }
 
   getToken(): string | null {
     if (!this.token) {
-      this.token = localStorage.getItem('access_token')
-      // 页面刷新时，从 localStorage 恢复 token 到 mock handler
-      if (this.token && isDemoMode()) {
-        setMockUserToken(this.token)
-      }
+      this.syncTokenState(localStorage.getItem('access_token'))
     }
     return this.token
   }
 
   clearAuth(): void {
     const hadAuth = this.token !== null || localStorage.getItem('access_token') !== null
+    if (hadAuth && this.token === null) {
+      cache.clear()
+    }
     this.syncTokenState(null)
     localStorage.removeItem('access_token')
     // 同标签页内清理认证状态时不会触发 storage 事件，这里主动广播一次。

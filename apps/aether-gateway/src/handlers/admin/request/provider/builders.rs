@@ -1,5 +1,26 @@
 use super::*;
 
+fn validate_admin_endpoint_stream_policy(
+    api_format: &str,
+    config: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    if !crate::ai_serving::api_format_alias_matches(api_format, "openai:search") {
+        return Ok(());
+    }
+    let requested = config
+        .and_then(serde_json::Value::as_object)
+        .and_then(|config| {
+            config
+                .get("upstream_stream_policy")
+                .or_else(|| config.get("upstreamStreamPolicy"))
+                .or_else(|| config.get("upstream_stream"))
+        });
+    if requested.is_some_and(crate::handlers::public::admin_requested_force_stream) {
+        return Err("OpenAI Search 端点仅支持非流式上游请求".to_string());
+    }
+    Ok(())
+}
+
 impl<'a> AdminAppState<'a> {
     pub(crate) async fn build_admin_keys_grouped_by_format_payload(
         &self,
@@ -232,6 +253,7 @@ impl<'a> AdminAppState<'a> {
         let (normalized_api_format, api_family, endpoint_kind) =
             admin_endpoint_signature_parts(&payload.api_format)
                 .ok_or_else(|| format!("无效的 api_format: {}", payload.api_format))?;
+        validate_admin_endpoint_stream_policy(normalized_api_format, payload.config.as_ref())?;
         let base_url = normalize_admin_base_url(&payload.base_url)?;
 
         let existing_endpoints = self
@@ -337,6 +359,13 @@ impl<'a> AdminAppState<'a> {
                 &update_fields,
             )?;
 
+        if fields.contains("config") {
+            validate_admin_endpoint_stream_policy(
+                existing_endpoint.api_format.as_str(),
+                updated.config.as_ref(),
+            )?;
+        }
+
         if provider_type == "codex"
             && crate::ai_serving::is_openai_responses_format(&existing_endpoint.api_format)
         {
@@ -387,5 +416,42 @@ impl<'a> AdminAppState<'a> {
             .map(|duration| duration.as_secs());
 
         Ok(updated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::validate_admin_endpoint_stream_policy;
+
+    #[test]
+    fn search_endpoint_rejects_explicit_streaming_policy_for_all_config_keys() {
+        for (api_format, key, value) in [
+            (
+                "openai:search",
+                "upstream_stream_policy",
+                json!("force_stream"),
+            ),
+            ("openai:search", "upstreamStreamPolicy", json!(true)),
+            ("/v1/alpha/search", "upstream_stream", json!("sse")),
+        ] {
+            let config = json!({(key): value});
+            assert!(validate_admin_endpoint_stream_policy(api_format, Some(&config),).is_err());
+        }
+    }
+
+    #[test]
+    fn search_endpoint_accepts_non_streaming_and_unrelated_config() {
+        assert!(validate_admin_endpoint_stream_policy(
+            "openai:search",
+            Some(&json!({"upstream_stream_policy": "force_non_stream"})),
+        )
+        .is_ok());
+        assert!(validate_admin_endpoint_stream_policy(
+            "openai:responses",
+            Some(&json!({"upstream_stream_policy": "force_stream"})),
+        )
+        .is_ok());
     }
 }

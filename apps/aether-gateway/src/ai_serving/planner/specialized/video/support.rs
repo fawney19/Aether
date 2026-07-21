@@ -62,7 +62,9 @@ pub(super) async fn resolve_local_video_create_decision_input(
         state,
         auth_context,
         Some(requested_model.as_str()),
+        decision.auth_endpoint_signature.as_deref(),
         None,
+        &decision.model_directive_policy,
     )
     .await
     {
@@ -130,6 +132,7 @@ pub(super) async fn list_local_video_create_candidate_attempts(
             Some(&input.auth_snapshot),
             input.client_session_affinity.as_ref(),
             current_unix_secs(),
+            false,
         )
         .await
     {
@@ -186,6 +189,7 @@ pub(super) async fn build_local_video_create_candidate_attempt_source<'a>(
             Some(&input.auth_snapshot),
             input.client_session_affinity.as_ref(),
             current_unix_secs(),
+            false,
         )
         .await
     {

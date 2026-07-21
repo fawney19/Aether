@@ -60,6 +60,19 @@ pub(super) fn admin_pool_matches_search(
     admin_provider_pool_pure::admin_pool_matches_search(key, search, oauth_plan_type.as_deref())
 }
 
+pub(super) fn admin_pool_matches_catalog_search(
+    key: &StoredProviderCatalogKey,
+    search: Option<&str>,
+) -> bool {
+    let Some(search) = search else {
+        return true;
+    };
+    let search = admin_pool_normalize_text(search);
+    search.is_empty()
+        || admin_pool_normalize_text(&key.name).contains(&search)
+        || admin_pool_normalize_text(&key.id).contains(&search)
+}
+
 pub(super) fn admin_pool_key_is_known_banned(key: &StoredProviderCatalogKey) -> bool {
     admin_provider_pool_pure::admin_pool_key_is_known_banned(key)
 }

@@ -24,7 +24,7 @@ use crate::ai_serving::{
     ai_local_execution_contract_for_formats, extract_pool_sticky_session_token,
     resolve_local_decision_execution_runtime_auth_context, GatewayControlDecision, PlannerAppState,
 };
-use crate::client_session_affinity::client_session_affinity_from_parts;
+use crate::client_session_affinity::client_session_affinity_from_api_request;
 use crate::clock::current_unix_secs;
 use crate::{AppState, GatewayError};
 
@@ -60,7 +60,9 @@ pub(crate) async fn resolve_local_same_format_provider_decision_input(
         state,
         auth_context,
         Some(requested_model.as_str()),
+        decision.auth_endpoint_signature.as_deref(),
         None,
+        &decision.model_directive_policy,
     )
     .await
     {
@@ -79,7 +81,11 @@ pub(crate) async fn resolve_local_same_format_provider_decision_input(
 
     let mut input = build_local_requested_model_decision_input(resolved_input, requested_model);
     input.request_auth_channel = decision.request_auth_channel.clone();
-    input.client_session_affinity = client_session_affinity_from_parts(parts, Some(body_json));
+    input.client_session_affinity = client_session_affinity_from_api_request(
+        spec_metadata.api_format,
+        &parts.headers,
+        Some(body_json),
+    );
     if let Err(err) = attach_routing_policy_to_local_requested_model_input(
         state,
         parts,
@@ -115,15 +121,22 @@ pub(crate) async fn materialize_local_same_format_provider_candidate_attempts(
         input.required_capabilities.as_ref(),
         LocalCandidatePersistencePolicyKind::SameFormatProviderDecision,
     );
+    let model_directive_resolution = input
+        .model_directive_policy
+        .resolve_reasoning(spec_metadata.api_format, Some(&input.requested_model));
+    let routing_model = model_directive_resolution
+        .base_model()
+        .unwrap_or(&input.requested_model);
     let (candidates, preselection_skipped) = planner_state
         .list_selectable_candidates_with_skip_reasons(
             spec_metadata.api_format,
-            &input.requested_model,
+            routing_model,
             spec_metadata.require_streaming,
             input.required_capabilities.as_ref(),
             Some(&input.auth_snapshot),
             input.client_session_affinity.as_ref(),
             current_unix_secs(),
+            false,
         )
         .await?;
     let outcome = materialize_local_execution_candidates_with_serving(
@@ -212,15 +225,22 @@ pub(crate) async fn build_local_same_format_provider_candidate_attempt_source<'a
         input.required_capabilities.as_ref(),
         LocalCandidatePersistencePolicyKind::SameFormatProviderDecision,
     );
+    let model_directive_resolution = input
+        .model_directive_policy
+        .resolve_reasoning(spec_metadata.api_format, Some(&input.requested_model));
+    let routing_model = model_directive_resolution
+        .base_model()
+        .unwrap_or(&input.requested_model);
     let (candidates, preselection_skipped) = planner_state
         .list_selectable_candidates_with_skip_reasons(
             spec_metadata.api_format,
-            &input.requested_model,
+            routing_model,
             spec_metadata.require_streaming,
             input.required_capabilities.as_ref(),
             Some(&input.auth_snapshot),
             input.client_session_affinity.as_ref(),
             current_unix_secs(),
+            false,
         )
         .await?;
 

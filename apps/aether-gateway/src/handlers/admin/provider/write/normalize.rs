@@ -44,6 +44,31 @@ pub(crate) fn normalize_api_format_json_object_keys(
     Ok(Some(serde_json::Value::Object(normalized)))
 }
 
+pub(crate) fn normalize_rate_multipliers(
+    value: Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(value) = normalize_json_like_object(value, "rate_multipliers")? else {
+        return Ok(None);
+    };
+    let serde_json::Value::Object(map) = value else {
+        return Ok(Some(value));
+    };
+    let mut normalized = serde_json::Map::new();
+    for (key, value) in map {
+        let canonical = crate::ai_serving::normalize_api_format_alias(&key);
+        let multiplier = value
+            .as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .ok_or_else(|| format!("rate_multipliers.{canonical} 必须是大于或等于 0 的有限数值"))?;
+        normalized.insert(canonical, serde_json::Value::from(multiplier));
+    }
+    if normalized.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::Value::Object(normalized)))
+    }
+}
+
 pub(crate) fn normalize_auth_type_by_format(
     value: Option<serde_json::Value>,
     field_name: &str,
@@ -214,7 +239,7 @@ mod tests {
         normalize_allow_auth_channel_mismatch_formats, normalize_api_format_json_object_keys,
         normalize_api_format_list, normalize_auth_type, normalize_auth_type_by_format,
         normalize_chat_pii_redaction_config, normalize_pool_advanced_config,
-        normalize_provider_type_input, validate_vertex_api_formats,
+        normalize_provider_type_input, normalize_rate_multipliers, validate_vertex_api_formats,
     };
     use serde_json::json;
 
@@ -224,6 +249,21 @@ mod tests {
             normalize_pool_advanced_config(Some(json!({}))).expect("empty object should normalize"),
             Some(json!({}))
         );
+    }
+
+    #[test]
+    fn rate_multipliers_require_non_negative_finite_numbers() {
+        assert_eq!(
+            normalize_rate_multipliers(Some(json!({" OPENAI:RESPONSES ": 1.25})))
+                .expect("valid multiplier should normalize"),
+            Some(json!({"openai:responses": 1.25}))
+        );
+        for value in [
+            json!({"openai:responses": -0.1}),
+            json!({"openai:responses": "1.0"}),
+        ] {
+            assert!(normalize_rate_multipliers(Some(value)).is_err());
+        }
     }
 
     #[test]

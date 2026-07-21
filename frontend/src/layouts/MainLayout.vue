@@ -191,7 +191,9 @@
                       :class="isNavActive(item.href)
                         ? 'bg-[#cc785c]/10 dark:bg-[#cc785c]/20 text-[#cc785c] dark:text-[#d4a27f]'
                         : 'text-[#666663] dark:text-muted-foreground hover:bg-black/5 dark:hover:bg-white/5 hover:text-[#191919] dark:hover:text-white'"
+                      @pointerenter="prefetchNavigationItem(item.href)"
                       @pointerdown="prefetchNavigationItem(item.href)"
+                      @focus="prefetchNavigationItem(item.href)"
                       @click="mobileMenuOpen = false"
                     >
                       <component
@@ -420,7 +422,7 @@ import {
 } from 'lucide-vue-next'
 
 import GithubIcon from '@/components/icons/GithubIcon.vue'
-import { prefetchAdminNavigationTarget } from '@/utils/adminNavigationPrefetch'
+import { prefetchNavigationTarget } from '@/utils/adminNavigationPrefetch'
 import { sanitizeMarkdown } from '@/utils/sanitize'
 import { useI18n, type MessageKey } from '@/i18n'
 import { buildBreadcrumbs, buildNavigation } from './main-layout/navigation'
@@ -1113,7 +1115,7 @@ function isNavActive(href: string) {
 }
 
 function prefetchNavigationItem(href: string) {
-  prefetchAdminNavigationTarget(href)
+  prefetchNavigationTarget(router, href)
 }
 
 const navigation = computed(() => {

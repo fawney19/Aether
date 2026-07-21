@@ -1427,6 +1427,7 @@ const { legacyT } = useI18n()
 const route = useRoute()
 
 const activeTab = ref<WalletManagementTab>('ledger')
+const activeTabLoadPromises = new Map<WalletManagementTab, Promise<void>>()
 
 const loadingLedger = ref(false)
 const loadingRefunds = ref(false)
@@ -1596,23 +1597,46 @@ watch(
 )
 
 onMounted(async () => {
-  await Promise.all([
-    loadWalletMetaMap(),
-    loadLedger(),
-    loadRefunds(),
-    loadOrders(),
-    loadCallbacks(),
-    loadRedeemCodeBatches(),
-  ])
+  await loadActiveTab()
+})
+
+watch(activeTab, () => {
+  void loadActiveTab()
 })
 
 function isValidTab(tab: unknown): tab is WalletManagementTab {
   return tab === 'ledger' || tab === 'refunds' || tab === 'orders' || tab === 'callbacks' || tab === 'redeem_codes'
 }
 
+function loadActiveTab(): Promise<void> {
+  const tab = activeTab.value
+  const existing = activeTabLoadPromises.get(tab)
+  if (existing) return existing
+
+  const request = (async () => {
+    switch (tab) {
+      case 'refunds':
+        return loadRefunds()
+      case 'orders':
+        await Promise.all([loadOrders(), loadWalletMetaMap()])
+        return
+      case 'callbacks':
+        return loadCallbacks()
+      case 'redeem_codes':
+        return loadRedeemCodeBatches()
+      default:
+        return loadLedger()
+    }
+  })().finally(() => {
+    if (activeTabLoadPromises.get(tab) === request) activeTabLoadPromises.delete(tab)
+  })
+  activeTabLoadPromises.set(tab, request)
+  return request
+}
+
 async function loadWalletMetaMap() {
   try {
-    const wallets = await adminWalletApi.listAllWallets()
+    const wallets = await adminWalletApi.listAllWallets(undefined, { cacheTtlMs: 30_000 })
     walletMetaMap.value = wallets.reduce<Record<string, { ownerName: string; ownerType: 'user' | 'api_key' }>>(
       (acc, wallet) => {
         const ownerName =

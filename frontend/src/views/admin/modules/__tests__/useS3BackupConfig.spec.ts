@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { getSystemConfigMock, updateSystemConfigMock, runS3BackupMock, errorMock, successMock } =
+const { getAllSystemConfigsMock, updateSystemConfigMock, runS3BackupMock, errorMock, successMock } =
   vi.hoisted(() => ({
-    getSystemConfigMock: vi.fn(),
+    getAllSystemConfigsMock: vi.fn(),
     updateSystemConfigMock: vi.fn(),
     runS3BackupMock: vi.fn(),
     errorMock: vi.fn(),
@@ -11,7 +11,7 @@ const { getSystemConfigMock, updateSystemConfigMock, runS3BackupMock, errorMock,
 
 vi.mock('@/api/admin', () => ({
   adminApi: {
-    getSystemConfig: getSystemConfigMock,
+    getAllSystemConfigs: getAllSystemConfigsMock,
     updateSystemConfig: updateSystemConfigMock,
     runS3Backup: runS3BackupMock,
   },
@@ -28,7 +28,7 @@ import { useS3BackupConfig } from '../composables/useS3BackupConfig'
 
 describe('useS3BackupConfig', () => {
   beforeEach(() => {
-    getSystemConfigMock.mockReset()
+    getAllSystemConfigsMock.mockReset()
     updateSystemConfigMock.mockReset()
     runS3BackupMock.mockReset()
     errorMock.mockReset()
@@ -36,15 +36,10 @@ describe('useS3BackupConfig', () => {
   })
 
   it('loads write-only secret as configured without exposing the value', async () => {
-    getSystemConfigMock.mockImplementation(async (key: string) => {
-      if (key === 'backup_s3_secret_access_key') {
-        return { key, value: null, is_set: true }
-      }
-      if (key === 'backup_s3_scope') {
-        return { key, value: 'data' }
-      }
-      return { key, value: null }
-    })
+    getAllSystemConfigsMock.mockResolvedValue([
+      { key: 'backup_s3_secret_access_key', value: null, is_set: true },
+      { key: 'backup_s3_scope', value: 'data' },
+    ])
 
     const backup = useS3BackupConfig()
     await backup.loadS3BackupConfig()
@@ -55,12 +50,9 @@ describe('useS3BackupConfig', () => {
   })
 
   it('keeps an existing secret when saving with an empty secret field', async () => {
-    getSystemConfigMock.mockImplementation(async (key: string) => {
-      if (key === 'backup_s3_secret_access_key') {
-        return { key, value: null, is_set: true }
-      }
-      return { key, value: null }
-    })
+    getAllSystemConfigsMock.mockResolvedValue([
+      { key: 'backup_s3_secret_access_key', value: null, is_set: true },
+    ])
     updateSystemConfigMock.mockResolvedValue({})
 
     const backup = useS3BackupConfig()
@@ -76,15 +68,10 @@ describe('useS3BackupConfig', () => {
 
   it('reloads server state when saving fails before writing a new secret', async () => {
     let loadRound = 0
-    getSystemConfigMock.mockImplementation(async (key: string) => {
-      if (key === 'backup_s3_secret_access_key') {
-        return { key, value: null, is_set: false }
-      }
-      if (key === 'backup_s3_bucket') {
-        return { key, value: loadRound === 0 ? 'old-bucket' : 'server-bucket' }
-      }
-      return { key, value: null }
-    })
+    getAllSystemConfigsMock.mockImplementation(async () => [
+      { key: 'backup_s3_secret_access_key', value: null, is_set: false },
+      { key: 'backup_s3_bucket', value: loadRound === 0 ? 'old-bucket' : 'server-bucket' },
+    ])
     updateSystemConfigMock.mockImplementation(async (key: string) => {
       if (key === 'backup_s3_bucket') {
         loadRound += 1

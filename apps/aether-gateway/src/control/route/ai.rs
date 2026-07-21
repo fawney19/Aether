@@ -54,6 +54,14 @@ pub(super) fn classify_ai_public_route(
                 true,
             ))
         }
+    } else if method == http::Method::POST && normalized_path == "/v1/alpha/search" {
+        Some(classified(
+            "ai_public",
+            "openai",
+            "search",
+            "openai:search",
+            true,
+        ))
     } else if method == http::Method::POST
         && matches!(
             normalized_path,
@@ -95,6 +103,17 @@ pub(super) fn classify_ai_public_route(
             "openai",
             "video",
             "openai:video",
+            true,
+        ))
+    } else if method == http::Method::POST
+        && matches!(normalized_path, "/v1/interactions" | "/v1beta/interactions")
+    {
+        Some(classified_with_request_auth_channel(
+            "ai_public",
+            "gemini",
+            "interactions",
+            "api_key",
+            "gemini:interactions",
             true,
         ))
     } else if method == http::Method::POST && is_gemini_models_route(normalized_path) {
@@ -182,11 +201,13 @@ fn classify_antigravity_v1internal_route(
     let (route_kind, execution_runtime_candidate) = match action {
         "loadCodeAssist" => ("load_code_assist", false),
         "fetchAvailableModels" => ("fetch_available_models", false),
+        "retrieveUserQuotaSummary" => ("retrieve_user_quota_summary", false),
         "fetchUserInfo" => ("fetch_user_info", false),
         "fetchAdminControls" => ("fetch_admin_controls", false),
         "setUserSettings" => ("set_user_settings", false),
         "listExperiments" => ("list_experiments", false),
         "recordCodeAssistMetrics" => ("record_code_assist_metrics", false),
+        "writeTrajectoryAcls" => ("write_trajectory_acls", false),
         "streamGenerateContent" => ("stream_generate_content", true),
         _ => return None,
     };

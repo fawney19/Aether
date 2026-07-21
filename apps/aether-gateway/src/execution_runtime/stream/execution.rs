@@ -98,11 +98,12 @@ use crate::execution_runtime::{
 use crate::execution_runtime::{MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES};
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
-    apply_local_execution_effect, build_local_error_flow_metadata, trace_upstream_response_body,
-    with_error_flow_report_context, with_upstream_response_report_context,
-    LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
-    LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
-    LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
+    apply_local_execution_effect, build_local_error_flow_metadata, cyber_continue_failover_enabled,
+    trace_upstream_response_body, with_error_flow_report_context,
+    with_upstream_response_report_context, LocalAdaptiveRateLimitEffect,
+    LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
+    LocalExecutionEffectContext, LocalHealthFailureEffect, LocalHealthSuccessEffect,
+    LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
 };
 use crate::provider_pool_demand::{
     acquire_provider_pool_in_flight_guard, ProviderPoolInFlightGuard,
@@ -131,6 +132,7 @@ const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const SSE_KEEPALIVE_BYTES: &[u8] = b": aether-keepalive\n\n";
 const SSE_CONTROL_FILTER_MAX_BUFFER_BYTES: usize = 1024 * 1024;
 const SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES: usize = 1024 * 1024;
+const PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES: usize = SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES;
 const STREAM_IDLE_LOG_INTERVAL: Duration = Duration::from_secs(60);
 const STREAM_IDLE_LOG_INTERVAL_MS: u64 = 60_000;
 const REWRITTEN_STREAM_PREFETCH_TIMEOUT: Duration = Duration::from_millis(750);
@@ -139,6 +141,78 @@ const MAX_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY: usize = 1024;
 const DIRECT_PASSTHROUGH_CHANNEL_CAPACITY_ENV: &str =
     "AETHER_GATEWAY_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY";
 const DIRECT_PASSTHROUGH_MODE_ENV: &str = "AETHER_GATEWAY_DIRECT_PASSTHROUGH_MODE";
+
+/// Retains the incomplete tail needed to recognize provider error events split across transport
+/// chunks without retaining an unbounded copy of the stream.
+#[derive(Default)]
+struct ProviderStreamErrorInspection {
+    buffered: Vec<u8>,
+}
+
+impl ProviderStreamErrorInspection {
+    fn observe(&mut self, report_context: Option<&Value>, chunk: &[u8]) -> Option<Value> {
+        if chunk.is_empty() {
+            return None;
+        }
+        if let Some(error_body) = extract_provider_private_stream_error_body(report_context, chunk)
+        {
+            return Some(error_body);
+        }
+
+        self.append_rolling(chunk);
+        let error_body = extract_provider_private_stream_error_body(report_context, &self.buffered);
+        if error_body.is_none() {
+            self.trim_completed_sse_events();
+        }
+        error_body
+    }
+
+    fn append_rolling(&mut self, chunk: &[u8]) {
+        if chunk.len() >= PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES {
+            self.buffered.clear();
+            self.buffered.extend_from_slice(
+                &chunk[chunk.len() - PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES..],
+            );
+            return;
+        }
+
+        let overflow = self
+            .buffered
+            .len()
+            .saturating_add(chunk.len())
+            .saturating_sub(PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES);
+        if overflow > 0 {
+            self.buffered.drain(..overflow);
+        }
+        self.buffered.extend_from_slice(chunk);
+    }
+
+    fn trim_completed_sse_events(&mut self) {
+        let Ok(text) = std::str::from_utf8(&self.buffered) else {
+            return;
+        };
+        if !text.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("event:") || line.starts_with("data:") || line.starts_with(':')
+        }) {
+            return;
+        }
+
+        let lf_end = self
+            .buffered
+            .windows(2)
+            .rposition(|window| window == b"\n\n")
+            .map(|index| index + 2);
+        let crlf_end = self
+            .buffered
+            .windows(4)
+            .rposition(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4);
+        if let Some(event_end) = lf_end.into_iter().chain(crlf_end).max() {
+            self.buffered.drain(..event_end);
+        }
+    }
+}
 
 struct StageElapsedGuard {
     stage: &'static str,
@@ -851,6 +925,9 @@ fn merge_stream_terminal_summary(
     if current_summary.model.is_none() {
         current_summary.model = observed.model;
     }
+    if observed.provider_actual_service_tier.is_some() {
+        current_summary.provider_actual_service_tier = observed.provider_actual_service_tier;
+    }
     current_summary.observed_finish |= observed.observed_finish;
     current_summary.unknown_event_count = current_summary
         .unknown_event_count
@@ -1045,6 +1122,7 @@ fn should_use_direct_sse_passthrough(
         plan.client_api_format.as_str(),
         false,
         false,
+        false,
     )
 }
 
@@ -1189,6 +1267,7 @@ struct DirectPassthroughFinalizerCore {
     stream_usage_report_context: Option<Value>,
     stream_usage_observer: Option<StreamingStandardTerminalObserver>,
     stream_usage_observer_buffered: Vec<u8>,
+    provider_error_inspection: ProviderStreamErrorInspection,
     provider_buffered_body: Vec<u8>,
     buffered_body: Vec<u8>,
     provider_body_truncated: bool,
@@ -1315,10 +1394,10 @@ impl DirectPassthroughFinalizer {
                 chunk.as_ref(),
             );
         }
-        if let Some(error_body_json) = extract_provider_private_stream_error_body(
-            core.stream_usage_report_context.as_ref(),
-            chunk.as_ref(),
-        ) {
+        if let Some(error_body_json) = core
+            .provider_error_inspection
+            .observe(core.stream_usage_report_context.as_ref(), chunk.as_ref())
+        {
             let error_status_code =
                 resolve_local_sync_error_status_code(core.status_code, &error_body_json);
             core.terminal_failure = Some(build_stream_failure_from_provider_error_body(
@@ -1483,6 +1562,7 @@ impl DirectPassthroughFinalizerCore {
             stream_usage_report_context,
             stream_usage_observer: _,
             stream_usage_observer_buffered: _,
+            provider_error_inspection: _,
             provider_buffered_body,
             buffered_body,
             provider_body_truncated,
@@ -2204,6 +2284,7 @@ async fn execute_stream_from_direct_passthrough(
             stream_usage_report_context,
             stream_usage_observer,
             stream_usage_observer_buffered: Vec::new(),
+            provider_error_inspection: ProviderStreamErrorInspection::default(),
             provider_buffered_body: Vec::new(),
             buffered_body: Vec::new(),
             provider_body_truncated: false,
@@ -2283,6 +2364,7 @@ async fn execute_stream_from_direct_passthrough(
             .as_ref()
             .map(|_| StreamingStandardTerminalObserver::default());
         let mut stream_usage_observer_buffered = Vec::new();
+        let mut provider_error_inspection = ProviderStreamErrorInspection::default();
         let mut provider_buffered_body = Vec::new();
         let mut buffered_body = Vec::new();
         let mut provider_body_truncated = false;
@@ -2455,7 +2537,7 @@ async fn execute_stream_from_direct_passthrough(
                     provider_chunk.as_ref(),
                 );
             }
-            let provider_private_error_body_json = extract_provider_private_stream_error_body(
+            let provider_private_error_body_json = provider_error_inspection.observe(
                 stream_usage_report_context.as_ref(),
                 provider_chunk.as_ref(),
             );
@@ -3994,8 +4076,13 @@ fn should_skip_direct_finalize_prefetch(
     client_api_format: &str,
     has_private_stream_normalizer: bool,
     has_local_stream_rewriter: bool,
+    force_prefetch: bool,
 ) -> bool {
     if direct_stream_finalize_kind.is_none() {
+        return false;
+    }
+
+    if force_prefetch {
         return false;
     }
 
@@ -4021,6 +4108,36 @@ fn should_skip_direct_finalize_prefetch(
     }
 
     !(content_type.contains("json") || content_type.ends_with("+json"))
+}
+
+fn prefetched_openai_responses_body_has_output_boundary(body: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return true;
+    };
+    for line in text.lines() {
+        let Some(data) = line.trim().strip_prefix("data:").map(str::trim) else {
+            continue;
+        };
+        if data.is_empty() {
+            continue;
+        }
+        if data == "[DONE]" {
+            return true;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        let event_type = event.get("type").and_then(Value::as_str).map(str::trim);
+        if !event_type.is_some_and(|event_type| {
+            matches!(
+                event_type,
+                "response.created" | "response.in_progress" | "response.queued"
+            )
+        }) {
+            return true;
+        }
+    }
+    false
 }
 
 fn should_probe_success_failover_before_stream(headers: &BTreeMap<String, String>) -> bool {
@@ -4497,6 +4614,9 @@ async fn execute_stream_from_frame_stream(
         headers.insert("content-type".to_string(), "text/event-stream".to_string());
     }
     let upstream_content_type = upstream_headers.get("content-type").map(String::as_str);
+    let prefetch_for_cyber_failover =
+        is_openai_responses_family_format(plan.provider_api_format.as_str())
+            && cyber_continue_failover_enabled(state).await;
     let skip_direct_finalize_prefetch = should_skip_direct_finalize_prefetch(
         direct_stream_finalize_kind.as_deref(),
         upstream_content_type,
@@ -4504,6 +4624,7 @@ async fn execute_stream_from_frame_stream(
         plan.client_api_format.as_str(),
         private_stream_normalizer.is_some(),
         local_stream_rewriter.is_some(),
+        prefetch_for_cyber_failover,
     );
     let limit_direct_finalize_prefetch =
         should_limit_direct_finalize_prefetch(plan_kind, local_stream_rewriter.is_some());
@@ -4850,7 +4971,12 @@ async fn execute_stream_from_frame_stream(
                         prefetched_chunks.push(Bytes::from(rewritten_chunk));
                     }
 
-                    if matches!(inspection, StreamPrefetchInspection::NonError) {
+                    if matches!(inspection, StreamPrefetchInspection::NonError)
+                        && (!prefetch_for_cyber_failover
+                            || prefetched_openai_responses_body_has_output_boundary(
+                                &prefetched_inspection_body,
+                            ))
+                    {
                         break;
                     }
                 }
@@ -5004,6 +5130,7 @@ async fn execute_stream_from_frame_stream(
             .filter(|_| !sync_json_stream_bridge_active_for_report)
             .map(|_| StreamingStandardTerminalObserver::default());
         let mut stream_usage_observer_buffered = Vec::new();
+        let mut provider_error_inspection = ProviderStreamErrorInspection::default();
         append_stream_capture_bytes(
             &mut provider_buffered_body,
             &provider_prefetched_body_for_report,
@@ -5165,6 +5292,16 @@ async fn execute_stream_from_frame_stream(
             let replay_chunk = normalized_prefetched_chunk
                 .as_deref()
                 .unwrap_or(provider_prefetched_body_for_report.as_slice());
+            if let Some(error_body_json) = provider_error_inspection
+                .observe(stream_usage_report_context.as_ref(), replay_chunk)
+            {
+                let error_status_code =
+                    resolve_local_sync_error_status_code(status_code, &error_body_json);
+                terminal_failure = Some(build_stream_failure_from_provider_error_body(
+                    error_status_code,
+                    &error_body_json,
+                ));
+            }
             if let (Some(observer), Some(report_context)) = (
                 stream_usage_observer.as_mut(),
                 stream_usage_report_context.as_ref(),
@@ -5252,16 +5389,12 @@ async fn execute_stream_from_frame_stream(
                             telemetry.as_ref(),
                             &mut usage_stream_telemetry,
                         ) {
-                            let usage_data = state_for_report.data.as_ref().clone();
-                            state_for_report
-                                .usage_runtime
-                                .record_stream_started_direct(
-                                    &usage_data,
-                                    &lifecycle_seed_for_report,
-                                    status_code,
-                                    usage_stream_telemetry.as_ref(),
-                                )
-                                .await;
+                            state_for_report.usage_runtime.record_stream_started(
+                                state_for_report.data.as_ref(),
+                                &lifecycle_seed_for_report,
+                                status_code,
+                                usage_stream_telemetry.as_ref(),
+                            );
                         }
                         let first_data_after = usage_stream_telemetry
                             .as_ref()
@@ -5344,11 +5477,8 @@ async fn execute_stream_from_frame_stream(
                         } else {
                             chunk
                         };
-                        let provider_private_error_body_json =
-                            extract_provider_private_stream_error_body(
-                                stream_usage_report_context.as_ref(),
-                                &normalized_chunk,
-                            );
+                        let provider_private_error_body_json = provider_error_inspection
+                            .observe(stream_usage_report_context.as_ref(), &normalized_chunk);
                         if let (Some(observer), Some(report_context)) = (
                             stream_usage_observer.as_mut(),
                             stream_usage_report_context.as_ref(),
@@ -5460,33 +5590,16 @@ async fn execute_stream_from_frame_stream(
                             &usage_frame_telemetry,
                         );
                         if should_refresh_stream_usage {
-                            if usage_frame_telemetry.ttfb_ms.is_some() {
-                                let usage_data = state_for_report.data.as_ref().clone();
-                                state_for_report
-                                    .usage_runtime
-                                    .record_stream_started_direct(
-                                        &usage_data,
-                                        &lifecycle_seed_for_report,
-                                        status_code,
-                                        Some(&usage_frame_telemetry),
-                                    )
-                                    .await;
-                            } else {
-                                state_for_report.usage_runtime.record_stream_started(
-                                    state_for_report.data.as_ref(),
-                                    &lifecycle_seed_for_report,
-                                    status_code,
-                                    Some(&usage_frame_telemetry),
-                                );
-                            }
+                            // The first Data frame records the live streaming transition. Later
+                            // telemetry frames only refine the terminal accumulator; persisting
+                            // every elapsed-time update would create one usage task per frame.
                             usage_stream_telemetry = Some(usage_frame_telemetry);
                         }
                         telemetry = Some(frame_telemetry);
                     }
                     StreamFramePayload::Eof { summary } => {
-                        if summary.is_some() {
-                            stream_terminal_summary = summary;
-                        }
+                        stream_terminal_summary =
+                            merge_stream_terminal_summary(stream_terminal_summary.take(), summary);
                         break;
                     }
                     StreamFramePayload::Error { error } => {
@@ -5526,11 +5639,8 @@ async fn execute_stream_from_frame_stream(
         {
             match normalizer.finish() {
                 Ok(normalized_chunk) if !normalized_chunk.is_empty() => {
-                    let provider_private_error_body_json =
-                        extract_provider_private_stream_error_body(
-                            stream_usage_report_context.as_ref(),
-                            &normalized_chunk,
-                        );
+                    let provider_private_error_body_json = provider_error_inspection
+                        .observe(stream_usage_report_context.as_ref(), &normalized_chunk);
                     if let (Some(observer), Some(report_context)) = (
                         stream_usage_observer.as_mut(),
                         stream_usage_report_context.as_ref(),
@@ -6126,13 +6236,13 @@ mod tests {
         ensure_stream_terminal_summary_for_missing_observed_finish,
         execute_execution_runtime_stream, execute_stream_from_frame_stream,
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary, merge_stream_terminal_summary,
-        parse_direct_passthrough_mode, should_limit_direct_finalize_prefetch,
-        should_probe_success_failover_before_stream, should_skip_direct_finalize_prefetch,
-        stream_chunk_contains_sse_done, stream_requires_observed_terminal_event,
-        stream_terminal_summary_missing_observed_finish,
+        parse_direct_passthrough_mode, prefetched_openai_responses_body_has_output_boundary,
+        should_limit_direct_finalize_prefetch, should_probe_success_failover_before_stream,
+        should_skip_direct_finalize_prefetch, stream_chunk_contains_sse_done,
+        stream_requires_observed_terminal_event, stream_terminal_summary_missing_observed_finish,
         stream_terminal_summary_missing_observed_finish_with_requirement,
         stream_terminal_summary_represents_failure_with_requirement,
-        ClientVisibleStreamCompletionTracker, DirectPassthroughMode,
+        ClientVisibleStreamCompletionTracker, DirectPassthroughMode, ProviderStreamErrorInspection,
     };
     use crate::control::GatewayControlDecision;
     use crate::stage_metrics::RequestStageTrace;
@@ -6188,6 +6298,20 @@ mod tests {
     fn provider_catalog_stop_429_for_plan(
         plan: &ExecutionPlan,
     ) -> InMemoryProviderCatalogReadRepository {
+        provider_catalog_for_plan(
+            plan,
+            Some(json!({
+                "failover_rules": {
+                    "stop_status_codes": [429]
+                }
+            })),
+        )
+    }
+
+    fn provider_catalog_for_plan(
+        plan: &ExecutionPlan,
+        provider_config: Option<Value>,
+    ) -> InMemoryProviderCatalogReadRepository {
         let provider_type = plan.provider_name.as_deref().unwrap_or("custom");
         let provider = StoredProviderCatalogProvider::new(
             plan.provider_id.clone(),
@@ -6205,11 +6329,7 @@ mod tests {
             None,
             None,
             None,
-            Some(json!({
-                "failover_rules": {
-                    "stop_status_codes": [429]
-                }
-            })),
+            provider_config,
         );
         let endpoint = StoredProviderCatalogEndpoint::new(
             plan.endpoint_id.clone(),
@@ -6254,6 +6374,118 @@ mod tests {
         .expect("key transport should build");
 
         InMemoryProviderCatalogReadRepository::seed(vec![provider], vec![endpoint], vec![key])
+    }
+
+    fn codex_cyber_policy_plan(request_id: &str) -> ExecutionPlan {
+        ExecutionPlan {
+            request_id: request_id.to_string(),
+            candidate_id: Some(format!("candidate-{request_id}")),
+            provider_name: Some("codex".to_string()),
+            provider_id: format!("provider-{request_id}"),
+            endpoint_id: format!("endpoint-{request_id}"),
+            key_id: format!("key-{request_id}"),
+            method: "POST".to_string(),
+            url: "https://chatgpt.com/backend-api/codex/responses".to_string(),
+            headers: BTreeMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                ("accept".to_string(), "text/event-stream".to_string()),
+            ]),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "gpt-5.5",
+                "input": [],
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        }
+    }
+
+    async fn execute_prefetched_codex_cyber_policy_failure(
+        continue_failover: bool,
+    ) -> Option<axum::http::Response<Body>> {
+        let request_id = if continue_failover {
+            "req-cyber-policy-retry"
+        } else {
+            "req-cyber-policy-stop"
+        };
+        let plan = codex_cyber_policy_plan(request_id);
+        let provider_catalog = provider_catalog_for_plan(&plan, None);
+        let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
+            Arc::new(provider_catalog),
+            "development-key",
+        );
+        let data_state = if continue_failover {
+            data_state.with_system_config_values_for_tests([(
+                crate::orchestration::CYBER_CONTINUE_FAILOVER_CONFIG_KEY.to_string(),
+                json!(true),
+            )])
+        } else {
+            data_state
+        };
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data_state);
+        let upstream_setup = "event: response.created\ndata: {\"type\":\"response.created\"}\n\n";
+        let upstream_error = "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"invalid_request\",\"message\":\"cyber policy rejected the request\",\"code\":\"cyber_policy_violation\",\"param\":\"input\"}}}\n\n";
+        let frame_stream = stream! {
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Headers,
+                payload: StreamFramePayload::Headers {
+                    status_code: 200,
+                    headers: BTreeMap::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )]),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: None,
+                    text: Some(upstream_setup.to_string()),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: None,
+                    text: Some(upstream_error.to_string()),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame::eof()));
+        }
+        .boxed();
+
+        execute_stream_from_frame_stream(
+            &state,
+            plan,
+            &format!("trace-{request_id}"),
+            &test_decision(),
+            "openai_responses_stream",
+            Some("openai_responses_stream_success".to_string()),
+            Some(json!({
+                "request_id": request_id,
+                "candidate_id": format!("candidate-{request_id}"),
+                "candidate_index": 0,
+                "retry_index": 0,
+                "provider_api_format": "openai:responses",
+                "client_api_format": "openai:responses"
+            })),
+            crate::clock::current_unix_ms(),
+            Instant::now(),
+            RequestStageTrace::from_env(),
+            frame_stream,
+            None,
+        )
+        .await
+        .expect("execution should succeed")
     }
 
     fn test_decision() -> GatewayControlDecision {
@@ -6302,6 +6534,70 @@ mod tests {
             .observe_chunk(b"data: {\"type\":\"response.completed\",\"response\":{}}\r\n\r\n"));
     }
 
+    #[test]
+    fn provider_error_inspection_detects_response_failed_at_every_chunk_boundary() {
+        let body = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"invalid_request\",\"message\":\"cyber policy rejected the request\",\"code\":\"cyber_policy_violation\",\"param\":\"input\"}}}\n\n",
+        )
+        .as_bytes();
+
+        for split in 1..body.len() {
+            let mut inspection = ProviderStreamErrorInspection::default();
+            let detected = inspection
+                .observe(None, &body[..split])
+                .or_else(|| inspection.observe(None, &body[split..]))
+                .unwrap_or_else(|| panic!("response.failed was missed at byte split {split}"));
+
+            assert_eq!(
+                detected.pointer("/error/code"),
+                Some(&json!("cyber_policy_violation")),
+                "string provider code changed at byte split {split}"
+            );
+            assert_eq!(
+                detected.pointer("/error/param"),
+                Some(&json!("input")),
+                "provider error fields changed at byte split {split}"
+            );
+        }
+
+        let mut inspection = ProviderStreamErrorInspection::default();
+        let mut detected = None;
+        for byte in body.chunks(1) {
+            if let Some(error_body) = inspection.observe(None, byte) {
+                detected = Some(error_body);
+                break;
+            }
+        }
+        let detected = detected.expect("byte-wise response.failed stream should be detected");
+        assert_eq!(
+            detected.pointer("/error/code"),
+            Some(&json!("cyber_policy_violation"))
+        );
+        assert_eq!(detected.pointer("/error/param"), Some(&json!("input")));
+    }
+
+    #[tokio::test]
+    async fn prefetched_codex_cyber_policy_violation_stops_failover_by_default() {
+        let response = execute_prefetched_codex_cyber_policy_failure(false)
+            .await
+            .expect("default Codex cyber policy handling should return the provider error");
+
+        assert_eq!(response.status().as_u16(), 200);
+    }
+
+    #[tokio::test]
+    async fn prefetched_codex_cyber_policy_violation_retries_when_system_setting_is_enabled() {
+        assert!(
+            execute_prefetched_codex_cyber_policy_failure(true)
+                .await
+                .is_none(),
+            "enabling cyber failover should retry the next candidate"
+        );
+    }
+
     fn tunnel_proxy_snapshot(base_url: String) -> aether_contracts::ProxySnapshot {
         aether_contracts::ProxySnapshot {
             enabled: Some(true),
@@ -6339,12 +6635,14 @@ mod tests {
             Some(ExecutionStreamTerminalSummary {
                 standardized_usage: Some(runtime_usage),
                 model: Some("gpt-5.5".to_string()),
+                provider_actual_service_tier: Some("priority".to_string()),
                 unknown_event_count: 1,
                 ..ExecutionStreamTerminalSummary::default()
             }),
             Some(ExecutionStreamTerminalSummary {
                 standardized_usage: Some(observed_usage),
                 response_id: Some("resp_123".to_string()),
+                provider_actual_service_tier: Some("default".to_string()),
                 observed_finish: true,
                 unknown_event_count: 2,
                 ..ExecutionStreamTerminalSummary::default()
@@ -6359,6 +6657,10 @@ mod tests {
         assert_eq!(usage.output_tokens, 137);
         assert_eq!(merged.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(merged.response_id.as_deref(), Some("resp_123"));
+        assert_eq!(
+            merged.provider_actual_service_tier.as_deref(),
+            Some("default")
+        );
         assert!(merged.observed_finish);
         assert_eq!(merged.unknown_event_count, 3);
     }
@@ -7189,6 +7491,7 @@ mod tests {
             "claude:messages",
             false,
             false,
+            false,
         ));
     }
 
@@ -7199,6 +7502,7 @@ mod tests {
             None,
             "claude:messages",
             "claude:messages",
+            false,
             false,
             false,
         ));
@@ -7213,6 +7517,7 @@ mod tests {
             "claude:messages",
             false,
             false,
+            false,
         ));
     }
 
@@ -7225,6 +7530,30 @@ mod tests {
             "claude:messages",
             false,
             true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn cyber_failover_setting_forces_prefetch_for_event_streams() {
+        assert!(!should_skip_direct_finalize_prefetch(
+            Some("openai_responses_sync_finalize"),
+            Some("text/event-stream"),
+            "openai:responses",
+            "openai:responses",
+            false,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn cyber_prefetch_waits_through_response_setup_until_output() {
+        assert!(!prefetched_openai_responses_body_has_output_boundary(
+            b"event: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+        ));
+        assert!(prefetched_openai_responses_body_has_output_boundary(
+            b"event: response.created\ndata: {\"type\":\"response.created\"}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n"
         ));
     }
 

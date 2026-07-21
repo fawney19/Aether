@@ -1,11 +1,12 @@
 use axum::body::Bytes;
 
+use crate::ai_serving::is_json_request;
 use crate::ai_serving::{
     endpoint_config_forces_upstream_stream_policy as endpoint_config_forces_upstream_stream_policy_impl,
     enforce_request_body_stream_field as enforce_request_body_stream_field_impl,
     force_upstream_streaming_for_provider as force_upstream_streaming_for_provider_impl,
-    is_json_request, parse_direct_request_body as parse_direct_request_body_impl,
-    resolve_upstream_is_stream_from_endpoint_config as resolve_upstream_is_stream_from_endpoint_config_impl,
+    parse_direct_request_body as parse_direct_request_body_impl,
+    resolve_format_upstream_is_stream_for_provider as resolve_upstream_is_stream_for_provider_impl,
 };
 pub(crate) use crate::ai_serving::{
     CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CHAT_SYNC_PLAN_KIND, CLAUDE_CLI_STREAM_PLAN_KIND,
@@ -20,9 +21,10 @@ pub(crate) use crate::ai_serving::{
     OPENAI_EMBEDDING_SYNC_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND,
     OPENAI_RERANK_SYNC_PLAN_KIND, OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND,
     OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND, OPENAI_RESPONSES_STREAM_PLAN_KIND,
-    OPENAI_RESPONSES_SYNC_PLAN_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_CONTENT_PLAN_KIND, OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND, OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
+    OPENAI_RESPONSES_SYNC_PLAN_KIND, OPENAI_SEARCH_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,
+    OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
 
 pub(crate) use aether_ai_serving::AiRequestedModelFamily as RequestedModelFamily;
@@ -54,10 +56,10 @@ pub(crate) fn resolve_upstream_is_stream_for_provider(
     client_is_stream: bool,
     hard_requires_streaming: bool,
 ) -> bool {
-    let hard_requires_streaming = hard_requires_streaming
-        || force_upstream_streaming_for_provider(provider_type, provider_api_format);
-    resolve_upstream_is_stream_from_endpoint_config_impl(
+    resolve_upstream_is_stream_for_provider_impl(
         endpoint_config,
+        provider_type,
+        provider_api_format,
         client_is_stream,
         hard_requires_streaming,
     )
@@ -177,6 +179,27 @@ mod tests {
             "openai:responses",
             true,
             false,
+        ));
+        assert!(!resolve_upstream_is_stream_for_provider(
+            Some(&json!({"upstream_stream_policy": "force_stream"})),
+            "codex",
+            "openai:image",
+            true,
+            true,
+        ));
+        assert!(!resolve_upstream_is_stream_for_provider(
+            Some(&json!({"upstream_stream_policy": "force_stream"})),
+            "codex",
+            "openai:responses:compact",
+            true,
+            true,
+        ));
+        assert!(!resolve_upstream_is_stream_for_provider(
+            Some(&json!({"upstream_stream_policy": "force_stream"})),
+            "custom",
+            "openai:responses:compact",
+            true,
+            true,
         ));
     }
 

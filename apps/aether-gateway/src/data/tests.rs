@@ -54,7 +54,7 @@ fn disabled_gateway_data_state_has_no_backends() {
 
 #[test]
 fn maintenance_pool_pressure_keeps_idle_reserve_for_foreground_work() {
-    let pressured = aether_data::DatabasePoolSummary {
+    let pool_can_still_grow = aether_data::DatabasePoolSummary {
         driver: DatabaseDriver::Postgres,
         checked_out: 6,
         pool_size: 6,
@@ -62,7 +62,9 @@ fn maintenance_pool_pressure_keeps_idle_reserve_for_foreground_work() {
         max_connections: 20,
         usage_rate: 30.0,
     };
-    assert!(GatewayDataState::database_pool_summary_under_maintenance_pressure(&pressured));
+    assert!(
+        !GatewayDataState::database_pool_summary_under_maintenance_pressure(&pool_can_still_grow)
+    );
 
     let reserve_idle_left = aether_data::DatabasePoolSummary {
         driver: DatabaseDriver::Postgres,
@@ -588,6 +590,7 @@ fn sample_minimal_candidate_selection_row(
             priority: 1,
             api_formats: Some(vec!["openai:chat".to_string()]),
             endpoint_ids: None,
+            operations: None,
         }]),
         model_supports_streaming: None,
         model_is_active: true,
@@ -905,6 +908,7 @@ async fn data_state_reads_minimal_candidate_selection_with_auth_filters() {
         enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
             rows,
             normalized_api_format: "openai:chat",
+            request_operation: None,
             requested_model_name: "gpt-4.1",
             resolved_global_model_name: "gpt-4.1",
             require_streaming: false,

@@ -4,19 +4,19 @@
  */
 
 import api from './client'
+import {
+  resolveModelsDevTieredPricing,
+  type ModelsDevCost,
+} from './models-dev-pricing'
+import type { TieredPricingConfig } from './endpoints/types'
+
+export type { ModelsDevCost, ModelsDevCostTier, ModelsDevTokenCost } from './models-dev-pricing'
 
 // 缓存配置
 const CACHE_KEY = 'models_dev_cache'
 const CACHE_DURATION = 15 * 60 * 1000 // 15 分钟
 
 // Models.dev API 数据结构
-export interface ModelsDevCost {
-  input?: number
-  output?: number
-  reasoning?: number
-  cache_read?: number
-}
-
 export interface ModelsDevLimit {
   context?: number
   output?: number
@@ -36,8 +36,21 @@ export interface ModelsDevModel {
   last_updated?: string
   input?: string[] // 输入模态: text, image, audio, video, pdf
   output?: string[] // 输出模态: text, image, audio
+  modalities?: {
+    input?: string[]
+    output?: string[]
+  }
   open_weights?: boolean
   cost?: ModelsDevCost
+  experimental?: {
+    modes?: Record<string, {
+      cost?: ModelsDevCost
+      provider?: {
+        body?: Record<string, unknown>
+        headers?: Record<string, string>
+      }
+    }>
+  }
   limit?: ModelsDevLimit
   deprecated?: boolean
 }
@@ -64,6 +77,7 @@ export interface ModelsDevModelItem {
   family?: string
   inputPrice?: number
   outputPrice?: number
+  tieredPricing?: TieredPricingConfig
   contextLimit?: number
   outputLimit?: number
   supportsVision?: boolean
@@ -165,17 +179,27 @@ export async function getModelsDevList(officialOnly: boolean = true): Promise<Mo
       if (!provider.models) continue
 
       for (const [modelId, model] of Object.entries(provider.models)) {
+        const inputModalities = model.modalities?.input ?? model.input
+        const outputModalities = model.modalities?.output ?? model.output
+        const tieredPricing = resolveModelsDevTieredPricing(
+          providerId,
+          modelId,
+          model.cost,
+          model.experimental?.modes,
+        )
+        const basePricingTier = tieredPricing?.tiers[0]
         items.push({
           providerId,
           providerName: provider.name,
           modelId,
           modelName: model.name || modelId,
           family: model.family,
-          inputPrice: model.cost?.input,
-          outputPrice: model.cost?.output,
+          inputPrice: basePricingTier?.input_price_per_1m ?? model.cost?.input,
+          outputPrice: basePricingTier?.output_price_per_1m ?? model.cost?.output,
+          tieredPricing: tieredPricing ?? undefined,
           contextLimit: model.limit?.context,
           outputLimit: model.limit?.output,
-          supportsVision: model.input?.includes('image'),
+          supportsVision: inputModalities?.includes('image'),
           supportsToolCall: model.tool_call,
           supportsReasoning: model.reasoning,
           supportsStructuredOutput: model.structured_output,
@@ -190,8 +214,8 @@ export async function getModelsDevList(officialOnly: boolean = true): Promise<Mo
           // display_metadata 相关字段
           knowledgeCutoff: model.knowledge,
           releaseDate: model.release_date,
-          inputModalities: model.input,
-          outputModalities: model.output,
+          inputModalities,
+          outputModalities,
         })
       }
     }

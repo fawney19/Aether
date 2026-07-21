@@ -132,6 +132,7 @@ mod tests {
             scope,
             endpoint: "https://example.com".to_string(),
             region: "auto".to_string(),
+            user_agent: "rclone/v1.68.0".to_string(),
             bucket: "aether-backups".to_string(),
             prefix: "prod/".to_string(),
             access_key_id: "test-access-key".to_string(),

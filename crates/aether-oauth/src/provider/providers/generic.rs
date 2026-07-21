@@ -461,6 +461,7 @@ fn enrich_generic_identity(
             "plan_type",
             "user_id",
             "account_name",
+            "is_fedramp",
         ] {
             if !auth_config.contains_key(field) {
                 if let Some(value) = object.get(field).cloned() {
@@ -505,6 +506,9 @@ fn enrich_generic_identity(
                     auth_config
                         .entry("organizations".to_string())
                         .or_insert(value);
+                }
+                if let Some(value) = auth.get("chatgpt_account_is_fedramp").cloned() {
+                    auth_config.entry("is_fedramp".to_string()).or_insert(value);
                 }
             }
             if let Some(profile) = claims
@@ -599,11 +603,12 @@ fn decode_jwt_claims(token: &str) -> Option<serde_json::Map<String, Value>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{template_for_provider_type, GenericProviderOAuthAdapter};
+    use super::{enrich_generic_identity, template_for_provider_type, GenericProviderOAuthAdapter};
     use crate::network::{OAuthHttpExecutor, OAuthHttpRequest, OAuthHttpResponse};
     use crate::provider::ProviderOAuthAdapter;
     use crate::provider::{ProviderOAuthAccount, ProviderOAuthTransportContext};
     use async_trait::async_trait;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -621,6 +626,26 @@ mod tests {
             .expect("codex template should exist");
         assert_eq!(adapter.provider_type(), "codex");
         assert!(adapter.capabilities().supports_refresh_token_import);
+    }
+
+    #[test]
+    fn codex_identity_extracts_fedramp_workspace_claim() {
+        let claims = json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct-fedramp",
+                "chatgpt_account_is_fedramp": true
+            }
+        });
+        let token = format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims should encode"))
+        );
+        let mut auth_config = serde_json::Map::new();
+
+        enrich_generic_identity("codex", &mut auth_config, &json!({"access_token": token}));
+
+        assert_eq!(auth_config.get("account_id"), Some(&json!("acct-fedramp")));
+        assert_eq!(auth_config.get("is_fedramp"), Some(&json!(true)));
     }
 
     #[derive(Debug, Clone)]

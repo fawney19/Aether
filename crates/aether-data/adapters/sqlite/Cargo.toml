@@ -1,0 +1,24 @@
+[package]
+name = "aether-data-sqlite"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SQLite repositories, pools, and migrations for Aether"
+
+[dependencies]
+aether-ai-formats.workspace = true
+aether-data-contracts.workspace = true
+aether-data-query.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+flate2.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio-rustls", "chrono", "migrate", "macros"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

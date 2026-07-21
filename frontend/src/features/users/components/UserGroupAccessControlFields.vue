@@ -1,6 +1,6 @@
 <template>
   <div class="space-y-4 border-t border-border/60 pt-5">
-    <div class="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1 border-b border-border/60 pb-2">
+    <div class="flex items-center justify-between gap-2 border-b border-border/60 pb-2">
       <span class="text-sm font-medium">{{ legacyT('组权限') }}</span>
       <span class="flex items-center gap-1 text-[11px] text-muted-foreground">
         {{ legacyT('组权限叠加，Key 可再收窄') }}
@@ -9,11 +9,11 @@
             <TooltipTrigger as-child>
               <button
                 type="button"
-                class="inline-flex h-4 w-4 items-center justify-center rounded-full border border-border/70 bg-muted/40 text-muted-foreground outline-none transition-colors hover:border-primary/50 hover:text-primary focus-visible:border-primary/60 focus-visible:text-primary"
+                class="inline-flex h-10 w-10 items-center justify-center rounded-full text-muted-foreground outline-none transition-colors hover:bg-muted/60 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
                 :title="helpText"
                 :aria-label="legacyT('查看组权限合并规则')"
               >
-                <Info class="h-3 w-3" />
+                <Info class="h-4 w-4" />
               </button>
             </TooltipTrigger>
             <TooltipContent class="max-w-72 text-xs leading-5">
@@ -27,11 +27,14 @@
     <div class="space-y-2">
       <Label class="text-sm font-medium">{{ legacyT('允许的提供商') }}</Label>
       <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <div class="flex w-full items-center sm:w-auto sm:shrink-0">
+        <div class="flex min-h-10 w-full items-center gap-2 sm:w-auto sm:shrink-0">
           <Switch
             :model-value="form.allowed_providers_mode === 'unrestricted'"
             @update:model-value="setProvidersUnrestricted"
           />
+          <span class="text-xs text-muted-foreground sm:sr-only">
+            {{ legacyT(form.allowed_providers_mode === 'unrestricted' ? '不限制' : '选择提供商') }}
+          </span>
         </div>
         <div class="min-w-0 flex-1">
           <MultiSelect
@@ -50,11 +53,14 @@
     <div class="space-y-2">
       <Label class="text-sm font-medium">{{ legacyT('允许的端点') }}</Label>
       <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <div class="flex w-full items-center sm:w-auto sm:shrink-0">
+        <div class="flex min-h-10 w-full items-center gap-2 sm:w-auto sm:shrink-0">
           <Switch
             :model-value="form.allowed_api_formats_mode === 'unrestricted'"
             @update:model-value="setApiFormatsUnrestricted"
           />
+          <span class="text-xs text-muted-foreground sm:sr-only">
+            {{ legacyT(form.allowed_api_formats_mode === 'unrestricted' ? '不限制' : '选择端点') }}
+          </span>
         </div>
         <div class="min-w-0 flex-1">
           <MultiSelect
@@ -73,11 +79,14 @@
     <div class="space-y-2">
       <Label class="text-sm font-medium">{{ legacyT('允许的模型') }}</Label>
       <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <div class="flex w-full items-center sm:w-auto sm:shrink-0">
+        <div class="flex min-h-10 w-full items-center gap-2 sm:w-auto sm:shrink-0">
           <Switch
             :model-value="form.allowed_models_mode === 'unrestricted'"
             @update:model-value="setModelsUnrestricted"
           />
+          <span class="text-xs text-muted-foreground sm:sr-only">
+            {{ legacyT(form.allowed_models_mode === 'unrestricted' ? '不限制' : '选择模型') }}
+          </span>
         </div>
         <div class="min-w-0 flex-1">
           <MultiSelect
@@ -96,11 +105,14 @@
     <div class="space-y-2">
       <Label class="text-sm font-medium">{{ legacyT('速率限制 (请求/分钟)') }}</Label>
       <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <div class="flex w-full items-center sm:w-auto sm:shrink-0">
+        <div class="flex min-h-10 w-full items-center gap-2 sm:w-auto sm:shrink-0">
           <Switch
             :model-value="form.rate_limit_mode === 'system'"
             @update:model-value="setSystemRateLimit"
           />
+          <span class="text-xs text-muted-foreground sm:sr-only">
+            {{ legacyT(form.rate_limit_mode === 'system' ? '系统默认' : '自定义') }}
+          </span>
         </div>
         <div class="min-w-0 flex-1">
           <Input

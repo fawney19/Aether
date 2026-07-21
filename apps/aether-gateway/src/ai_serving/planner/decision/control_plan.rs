@@ -8,9 +8,10 @@ use crate::ai_serving::planner::common::{
     OPENAI_EMBEDDING_SYNC_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND,
     OPENAI_RERANK_SYNC_PLAN_KIND, OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND,
     OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND, OPENAI_RESPONSES_STREAM_PLAN_KIND,
-    OPENAI_RESPONSES_SYNC_PLAN_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_CONTENT_PLAN_KIND, OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND, OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
+    OPENAI_RESPONSES_SYNC_PLAN_KIND, OPENAI_SEARCH_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,
+    OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
 use crate::ai_serving::planner::plan_builders::{
     build_gemini_stream_plan_from_decision, build_gemini_sync_plan_from_decision,
@@ -100,7 +101,9 @@ fn build_sync_plan_payload_from_decision(
         OPENAI_RESPONSES_SYNC_PLAN_KIND => {
             build_openai_responses_sync_plan_from_decision(parts, body_json, payload, false)?
         }
-        OPENAI_IMAGE_SYNC_PLAN_KIND => build_passthrough_sync_plan_from_decision(parts, payload)?,
+        OPENAI_IMAGE_SYNC_PLAN_KIND | OPENAI_SEARCH_SYNC_PLAN_KIND => {
+            build_passthrough_sync_plan_from_decision(parts, payload)?
+        }
         OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND => {
             build_openai_responses_sync_plan_from_decision(parts, body_json, payload, true)?
         }

@@ -812,12 +812,12 @@ function handleLanguageChange(value: string) {
 }
 
 onMounted(async () => {
-  await loadProfile()
+  const profilePromise = loadProfile()
   await Promise.all([
     loadPreferences(),
     loadSessions(),
-    loadOAuthBindings(),
     loadEmailConfigured(),
+    profilePromise.then(() => loadOAuthBindings()),
   ])
 })
 

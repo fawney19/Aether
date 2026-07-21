@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   API_FORMATS,
+  apiFormatPermissionCovers,
   formatApiFormat,
   formatApiFormatShort,
   groupApiFormats,
@@ -14,9 +15,12 @@ describe('api format display helpers', () => {
     expect(normalizeApiFormatAlias('CLAUDE_MESSAGES')).toBe(API_FORMATS.CLAUDE_MESSAGES)
     expect(normalizeApiFormatAlias('OPENAI_RESPONSES')).toBe(API_FORMATS.OPENAI_RESPONSES)
     expect(normalizeApiFormatAlias('OPENAI_RESPONSES_COMPACT')).toBe(API_FORMATS.OPENAI_RESPONSES_COMPACT)
+    expect(normalizeApiFormatAlias('OPENAI_SEARCH')).toBe(API_FORMATS.OPENAI_SEARCH)
+    expect(normalizeApiFormatAlias('SEARCH')).toBe(API_FORMATS.OPENAI_SEARCH)
     expect(normalizeApiFormatAlias('GEMINI_GENERATE_CONTENT')).toBe(API_FORMATS.GEMINI_GENERATE_CONTENT)
     expect(normalizeApiFormatAlias('OPENAI_EMBEDDING')).toBe(API_FORMATS.OPENAI_EMBEDDING)
     expect(normalizeApiFormatAlias('OPENAI_RERANK')).toBe(API_FORMATS.OPENAI_RERANK)
+    expect(normalizeApiFormatAlias('GEMINI_INTERACTIONS')).toBe(API_FORMATS.GEMINI_INTERACTIONS)
     expect(normalizeApiFormatAlias('GEMINI_EMBEDDING')).toBe(API_FORMATS.GEMINI_EMBEDDING)
     expect(normalizeApiFormatAlias('JINA_EMBEDDING')).toBe(API_FORMATS.JINA_EMBEDDING)
     expect(normalizeApiFormatAlias('JINA_RERANK')).toBe(API_FORMATS.JINA_RERANK)
@@ -32,7 +36,30 @@ describe('api format display helpers', () => {
     expect(formatApiFormatShort(API_FORMATS.JINA_RERANK)).toBe('JR')
   })
 
+  it('formats OpenAI Search as a first-class api format', () => {
+    expect(formatApiFormat(API_FORMATS.OPENAI_SEARCH)).toBe('OpenAI Search')
+    expect(formatApiFormatShort(API_FORMATS.OPENAI_SEARCH)).toBe('OS')
+    expect(sortApiFormats([
+      API_FORMATS.OPENAI_EMBEDDING,
+      API_FORMATS.OPENAI_SEARCH,
+      API_FORMATS.OPENAI_RESPONSES,
+    ])).toEqual([
+      API_FORMATS.OPENAI_RESPONSES,
+      API_FORMATS.OPENAI_SEARCH,
+      API_FORMATS.OPENAI_EMBEDDING,
+    ])
+  })
+
+  it('applies Responses companion permissions in one direction', () => {
+    expect(apiFormatPermissionCovers('OPENAI_RESPONSES', 'openai:search')).toBe(true)
+    expect(apiFormatPermissionCovers('OPENAI_RESPONSES', 'openai:responses:compact')).toBe(true)
+    expect(apiFormatPermissionCovers('openai:search', 'openai:responses')).toBe(false)
+    expect(apiFormatPermissionCovers('openai:responses:compact', 'openai:responses')).toBe(false)
+  })
+
   it('formats embedding api format ids distinctly from chat formats', () => {
+    expect(formatApiFormat(API_FORMATS.GEMINI_INTERACTIONS)).toBe('Gemini Interactions')
+    expect(formatApiFormatShort(API_FORMATS.GEMINI_INTERACTIONS)).toBe('GI')
     expect(formatApiFormat(API_FORMATS.OPENAI_EMBEDDING)).toBe('OpenAI Embedding')
     expect(formatApiFormat(API_FORMATS.GEMINI_EMBEDDING)).toBe('Gemini Embedding')
     expect(formatApiFormat(API_FORMATS.JINA_EMBEDDING)).toBe('Jina Embedding')
@@ -73,6 +100,7 @@ describe('api format display helpers', () => {
       API_FORMATS.OPENAI_RESPONSES,
       API_FORMATS.OPENAI_EMBEDDING,
       API_FORMATS.OPENAI_RERANK,
+      API_FORMATS.GEMINI_INTERACTIONS,
       API_FORMATS.GEMINI_EMBEDDING,
       API_FORMATS.JINA_EMBEDDING,
       API_FORMATS.JINA_RERANK,
@@ -82,6 +110,7 @@ describe('api format display helpers', () => {
       API_FORMATS.OPENAI_RESPONSES,
       API_FORMATS.OPENAI_EMBEDDING,
       API_FORMATS.OPENAI_RERANK,
+      API_FORMATS.GEMINI_INTERACTIONS,
       API_FORMATS.GEMINI_EMBEDDING,
       API_FORMATS.JINA_EMBEDDING,
       API_FORMATS.JINA_RERANK,
@@ -97,12 +126,14 @@ describe('api format display helpers', () => {
       API_FORMATS.OPENAI_EMBEDDING,
       API_FORMATS.OPENAI_RERANK,
       API_FORMATS.GEMINI_GENERATE_CONTENT,
+      API_FORMATS.GEMINI_INTERACTIONS,
       API_FORMATS.OPENAI,
     ])).toEqual([
       API_FORMATS.OPENAI,
       API_FORMATS.OPENAI_EMBEDDING,
       API_FORMATS.OPENAI_RERANK,
       API_FORMATS.GEMINI_GENERATE_CONTENT,
+      API_FORMATS.GEMINI_INTERACTIONS,
       API_FORMATS.GEMINI_EMBEDDING,
     ])
   })

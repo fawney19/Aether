@@ -10,7 +10,9 @@ use aether_data::repository::proxy_nodes::{
     ProxyNodeTunnelStatusMutation, StoredProxyFleetMetricsBucket, StoredProxyNode,
     StoredProxyNodeEvent, StoredProxyNodeMetricsBucket,
 };
-use aether_data_contracts::repository::usage::UsageCounterHealthSnapshot;
+use aether_data_contracts::repository::usage::{
+    UsageCounterHealthSnapshot, UsageCounterPendingHealthSnapshot,
+};
 use aether_http::{build_http_client, HttpClientConfig};
 use aether_runtime::{
     service_up_sample, AdmissionPermit, ConcurrencyGate, ConcurrencySnapshot, MetricKind,
@@ -22,8 +24,10 @@ use aether_runtime_state::{
 };
 use aether_scheduler_core::PROVIDER_KEY_RPM_WINDOW_SECS;
 use dashmap::DashMap;
+use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
 use tracing::warn;
 
+use super::app::METRIC_SNAPSHOT_TTL;
 use super::{
     AppState, FrontdoorCorsConfig, FrontdoorRuntimeGuardConfig, LocalExecutionRuntimeMissDiagnostic,
 };
@@ -51,10 +55,12 @@ use super::super::{provider_transport, usage};
 use crate::maintenance::spawn_account_self_check_worker;
 use crate::maintenance::spawn_audit_cleanup_worker;
 use crate::maintenance::spawn_db_maintenance_worker;
+use crate::maintenance::spawn_fixed_provider_reconciliation_task;
 use crate::maintenance::spawn_gemini_file_mapping_cleanup_worker;
 use crate::maintenance::spawn_oauth_token_refresh_worker;
 use crate::maintenance::spawn_pending_cleanup_worker;
 use crate::maintenance::spawn_pool_monitor_worker;
+use crate::maintenance::spawn_pool_quota_probe_worker;
 use crate::maintenance::spawn_pool_score_rebuild_worker;
 use crate::maintenance::spawn_provider_checkin_worker;
 use crate::maintenance::spawn_provider_quota_alert_worker;
@@ -81,10 +87,21 @@ const AUTH_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &[
 ];
 const FRONTDOOR_RPM_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &["rate_limit_per_minute"];
 const CHAT_PII_REDACTION_SYSTEM_CONFIG_PREFIX: &str = "module.chat_pii_redaction.";
+const METRIC_SNAPSHOT_REFRESH_TIMEOUT: Duration = Duration::from_secs(4);
+const METRIC_SNAPSHOT_PREWARM_TIMEOUT: Duration = Duration::from_secs(12);
+// Dependency collection runs behind the stale-while-revalidate snapshot and on the isolated
+// background pool, so this budget does not extend the HTTP scrape latency. Keep enough headroom
+// for a short executor or host scheduling pause at the 10k-stream fan-in point while remaining
+// below the outer snapshot refresh deadline.
 const POSTGRES_OBSERVABILITY_METRICS_TIMEOUT: Duration = Duration::from_secs(2);
-const POSTGRES_ACTIVITY_GROUP_METRICS_TIMEOUT: Duration = Duration::from_millis(500);
+const POSTGRES_ACTIVITY_GROUP_METRICS_TIMEOUT: Duration = Duration::from_secs(2);
 const POSTGRES_ACTIVITY_GROUP_METRICS_LIMIT: i64 = 8;
-const REDIS_RUNTIME_METRICS_TIMEOUT: Duration = Duration::from_millis(500);
+const REDIS_RUNTIME_METRICS_TIMEOUT: Duration = Duration::from_secs(2);
+const DISTRIBUTED_CONCURRENCY_METRICS_TIMEOUT: Duration = Duration::from_millis(500);
+const USAGE_QUEUE_HEALTH_METRICS_TIMEOUT: Duration = Duration::from_secs(2);
+const USAGE_COUNTER_HEALTH_METRICS_TIMEOUT: Duration = Duration::from_secs(2);
+const USAGE_COUNTER_EXACT_HEALTH_METRICS_TIMEOUT: Duration = Duration::from_secs(10);
+const USAGE_COUNTER_EXACT_HEALTH_METRICS_TTL: Duration = Duration::from_secs(5 * 60);
 
 fn system_config_key_affects_scheduler(key: &str) -> bool {
     let key = key.trim();
@@ -192,6 +209,31 @@ impl AppState {
     }
 
     pub(crate) fn replace_data_state(&mut self, data: Arc<GatewayDataState>) {
+        self.background_data = Arc::new(
+            (*data)
+                .clone()
+                .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
+        );
+        self.background_data_isolated = false;
+        self.replace_foreground_data_state(data);
+    }
+
+    fn replace_data_states(
+        &mut self,
+        data: Arc<GatewayDataState>,
+        background_data: Arc<GatewayDataState>,
+        background_data_isolated: bool,
+    ) {
+        self.background_data = Arc::new(
+            (*background_data)
+                .clone()
+                .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
+        );
+        self.background_data_isolated = background_data_isolated;
+        self.replace_foreground_data_state(data);
+    }
+
+    fn replace_foreground_data_state(&mut self, data: Arc<GatewayDataState>) {
         self.clear_provider_transport_snapshot_cache();
         self.invalidate_scheduler_affinity_cache();
         self.invalidate_auth_context_cache();
@@ -250,6 +292,11 @@ impl AppState {
             http2_adaptive_window: true,
             ..HttpClientConfig::default()
         })?;
+        let owner_forward_client = build_http_client(&HttpClientConfig {
+            connect_timeout_ms: Some(10_000),
+            http2_adaptive_window: true,
+            ..HttpClientConfig::default()
+        })?;
         let frontdoor_runtime_guards = Arc::new(FrontdoorRuntimeGuardConfig::from_env());
         Ok(Self {
             #[cfg(test)]
@@ -259,6 +306,8 @@ impl AppState {
             #[cfg(test)]
             execution_runtime_sync_override: None,
             data: Arc::clone(&data),
+            background_data: Arc::clone(&data),
+            background_data_isolated: false,
             runtime_state: runtime_state.clone(),
             usage_runtime: Arc::new(usage::UsageRuntime::disabled()),
             video_tasks: Arc::new(VideoTaskService::new(
@@ -266,6 +315,9 @@ impl AppState {
             )),
             video_task_poller: None,
             frontdoor_runtime_guards: Arc::clone(&frontdoor_runtime_guards),
+            request_body_buffer_budget: Arc::new(tokio::sync::Semaphore::new(
+                frontdoor_runtime_guards.request_body_buffer_budget_permits,
+            )),
             request_gate: None,
             auth_snapshot_load_gate: frontdoor_runtime_guards
                 .auth_snapshot_load_gate_limit
@@ -284,8 +336,11 @@ impl AppState {
             ),
             distributed_request_gate: None,
             client,
+            owner_forward_client,
             auth_context_cache: Arc::new(AuthContextCache::default()),
             auth_snapshot_cache: Arc::new(AuthSnapshotCache::default()),
+            admin_security_blacklist_cache: Arc::new(ValueCache::default()),
+            admin_security_whitelist_cache: Arc::new(ValueCache::default()),
             user_model_capability_settings_cache: Arc::new(JsonValueCache::default()),
             user_feature_settings_cache: Arc::new(JsonValueCache::default()),
             auth_api_key_force_capabilities_cache: Arc::new(JsonValueCache::default()),
@@ -318,6 +373,11 @@ impl AppState {
             process_resource_monitor: Arc::new(
                 crate::process_metrics::GatewayProcessResourceMonitor::new(),
             ),
+            metric_snapshot: Arc::new(TokioRwLock::new(None)),
+            metric_snapshot_refresh: Arc::new(TokioMutex::new(())),
+            usage_counter_exact_health_metric_snapshot: Arc::new(TokioRwLock::new(None)),
+            usage_counter_exact_health_metric_last_attempt: Arc::new(StdMutex::new(None)),
+            usage_counter_exact_health_metric_refresh: Arc::new(TokioMutex::new(())),
             request_candidate_queue: None,
             frontdoor_cors: None,
             frontdoor_user_rpm: Arc::new(FrontdoorUserRpmLimiter::new(
@@ -392,10 +452,37 @@ impl AppState {
     }
 
     pub fn with_data_config(
-        mut self,
+        self,
         config: GatewayDataConfig,
     ) -> Result<Self, aether_data::DataLayerError> {
-        self.replace_data_state(Arc::new(GatewayDataState::from_config(config)?));
+        self.with_data_config_and_background_isolation(config, true)
+    }
+
+    pub fn with_data_config_and_background_isolation(
+        mut self,
+        config: GatewayDataConfig,
+        isolate_background: bool,
+    ) -> Result<Self, aether_data::DataLayerError> {
+        let (foreground_config, background_config) = if isolate_background {
+            config.split_runtime_pools()
+        } else {
+            (config, None)
+        };
+        let auth_load_limit = database_bounded_auth_load_limit(
+            self.frontdoor_runtime_guards.auth_snapshot_load_gate_limit,
+            foreground_config
+                .database()
+                .map(|database| database.pool.max_connections),
+        );
+        self.auth_snapshot_load_gate = auth_load_limit
+            .map(|limit| Arc::new(ConcurrencyGate::new("gateway_auth_snapshot_load", limit)));
+        let background_data_isolated = background_config.is_some();
+        let foreground_data = Arc::new(GatewayDataState::from_config(foreground_config)?);
+        let background_data = match background_config {
+            Some(config) => Arc::new(GatewayDataState::from_config(config)?),
+            None => foreground_data.clone(),
+        };
+        self.replace_data_states(foreground_data, background_data, background_data_isolated);
         Ok(self)
     }
 
@@ -453,6 +540,14 @@ impl AppState {
         self.data.prepare_database_for_startup().await
     }
 
+    pub async fn warm_database_pools(&self) -> Result<(), aether_data::DataLayerError> {
+        self.data.warm_database_pool().await?;
+        if self.background_data_isolated {
+            self.background_data.warm_database_pool().await?;
+        }
+        Ok(())
+    }
+
     pub async fn pending_database_backfills(
         &self,
     ) -> Result<
@@ -480,8 +575,15 @@ impl AppState {
 
     pub fn with_runtime_state(mut self, runtime_state: Arc<RuntimeState>) -> Self {
         self.runtime_state = runtime_state;
+        self.admin_security_blacklist_cache.clear();
+        self.admin_security_whitelist_cache.clear();
         self.data = Arc::new(
             (*self.data)
+                .clone()
+                .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
+        );
+        self.background_data = Arc::new(
+            (*self.background_data)
                 .clone()
                 .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
         );
@@ -503,13 +605,21 @@ impl AppState {
                 );
                 None
             } else {
-                self.data
+                self.request_candidate_queue_data_state()
                     .request_candidate_writer()
                     .map(|writer| RequestCandidateQueueRuntime::spawn(writer, config))
             }
         } else {
             None
         };
+    }
+
+    fn request_candidate_queue_data_state(&self) -> &Arc<GatewayDataState> {
+        if self.background_data_isolated {
+            &self.background_data
+        } else {
+            &self.data
+        }
     }
 
     pub fn with_distributed_request_concurrency_gate(mut self, gate: RuntimeSemaphore) -> Self {
@@ -709,6 +819,7 @@ impl AppState {
         self.data.clear_minimal_candidate_selection_cache();
         self.data.clear_routing_group_cache();
         self.data.clear_provider_catalog_cache();
+        self.auth_request_cost_upper_bound_cache.clear();
         self.routing_group_selection_cache.clear();
         self.candidate_row_page_cache.clear();
         self.candidate_page_cache.clear();
@@ -1061,7 +1172,208 @@ impl AppState {
     }
 
     pub(crate) async fn metric_samples(&self) -> Vec<MetricSample> {
+        let now = std::time::Instant::now();
+        let snapshot = self.metric_snapshot.read().await.clone();
+        let needs_refresh = snapshot.as_ref().is_none_or(|(created_at, _)| {
+            now.saturating_duration_since(*created_at) >= METRIC_SNAPSHOT_TTL
+        });
+        if needs_refresh {
+            self.spawn_metric_snapshot_refresh();
+        }
+        snapshot
+            .map(|(_, samples)| samples)
+            .unwrap_or_else(|| vec![service_up_sample("aether-gateway")])
+    }
+
+    pub async fn prewarm_metric_snapshot(&self) -> bool {
+        match tokio::time::timeout(METRIC_SNAPSHOT_PREWARM_TIMEOUT, async {
+            let _refresh_guard = self.metric_snapshot_refresh.lock().await;
+            let _exact_health_guard = self.usage_counter_exact_health_metric_refresh.lock().await;
+            self.mark_usage_counter_exact_health_metric_attempt();
+            self.refresh_usage_counter_exact_health_metric_snapshot()
+                .await;
+            self.collect_and_store_metric_snapshot().await;
+        })
+        .await
+        {
+            Ok(()) => true,
+            Err(_) => {
+                warn!(
+                    timeout_ms = METRIC_SNAPSHOT_PREWARM_TIMEOUT.as_millis() as u64,
+                    "gateway metric snapshot prewarm timed out; startup will continue"
+                );
+                false
+            }
+        }
+    }
+
+    fn spawn_metric_snapshot_refresh(&self) {
+        let Ok(refresh_guard) = Arc::clone(&self.metric_snapshot_refresh).try_lock_owned() else {
+            return;
+        };
+        let state = self.clone();
+        tokio::spawn(async move {
+            let _refresh_guard = refresh_guard;
+            let now = std::time::Instant::now();
+            if state
+                .metric_snapshot
+                .read()
+                .await
+                .as_ref()
+                .is_some_and(|(created_at, _)| {
+                    now.saturating_duration_since(*created_at) < METRIC_SNAPSHOT_TTL
+                })
+            {
+                return;
+            }
+            if tokio::time::timeout(
+                METRIC_SNAPSHOT_REFRESH_TIMEOUT,
+                state.collect_and_store_metric_snapshot(),
+            )
+            .await
+            .is_err()
+            {
+                warn!(
+                    timeout_ms = METRIC_SNAPSHOT_REFRESH_TIMEOUT.as_millis() as u64,
+                    "gateway metric snapshot background refresh timed out; retaining stale snapshot"
+                );
+            }
+        });
+    }
+
+    async fn collect_and_store_metric_snapshot(&self) {
+        let samples = self.collect_metric_samples().await;
+        *self.metric_snapshot.write().await = Some((std::time::Instant::now(), samples));
+    }
+
+    fn mark_usage_counter_exact_health_metric_attempt(&self) {
+        *self
+            .usage_counter_exact_health_metric_last_attempt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(std::time::Instant::now());
+    }
+
+    fn usage_counter_exact_health_metric_refresh_is_due(&self) -> bool {
+        let last_attempt = *self
+            .usage_counter_exact_health_metric_last_attempt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        last_attempt.is_none_or(|last_attempt| {
+            std::time::Instant::now().saturating_duration_since(last_attempt)
+                >= USAGE_COUNTER_EXACT_HEALTH_METRICS_TTL
+        })
+    }
+
+    fn spawn_usage_counter_exact_health_metric_refresh(&self) {
+        if !self.usage_counter_exact_health_metric_refresh_is_due() {
+            return;
+        }
+        let Ok(refresh_guard) =
+            Arc::clone(&self.usage_counter_exact_health_metric_refresh).try_lock_owned()
+        else {
+            return;
+        };
+        self.mark_usage_counter_exact_health_metric_attempt();
+        let state = self.clone();
+        tokio::spawn(async move {
+            let _refresh_guard = refresh_guard;
+            state
+                .refresh_usage_counter_exact_health_metric_snapshot()
+                .await;
+        });
+    }
+
+    async fn refresh_usage_counter_exact_health_metric_snapshot(&self) -> bool {
+        match tokio::time::timeout(
+            USAGE_COUNTER_EXACT_HEALTH_METRICS_TIMEOUT,
+            self.background_data.read_usage_counter_health(),
+        )
+        .await
+        {
+            Ok(Ok(snapshot)) => {
+                *self
+                    .usage_counter_exact_health_metric_snapshot
+                    .write()
+                    .await = Some((std::time::Instant::now(), snapshot));
+                true
+            }
+            Ok(Err(err)) => {
+                warn!(
+                    error = %err,
+                    "usage counter exact health metric refresh failed; retaining cached exact metrics"
+                );
+                false
+            }
+            Err(_) => {
+                warn!(
+                    timeout_ms = USAGE_COUNTER_EXACT_HEALTH_METRICS_TIMEOUT.as_millis() as u64,
+                    "usage counter exact health metric refresh timed out; retaining cached exact metrics"
+                );
+                false
+            }
+        }
+    }
+
+    async fn usage_counter_exact_health_metric_samples(&self) -> Vec<MetricSample> {
+        if self.usage_counter_exact_health_metric_refresh_is_due() {
+            self.spawn_usage_counter_exact_health_metric_refresh();
+        }
+        self.usage_counter_exact_health_metric_snapshot
+            .read()
+            .await
+            .as_ref()
+            .map(|(created_at, snapshot)| {
+                usage_counter_exact_health_metric_samples(
+                    snapshot,
+                    std::time::Instant::now()
+                        .saturating_duration_since(*created_at)
+                        .as_secs(),
+                )
+            })
+            .unwrap_or_else(|| {
+                vec![MetricSample::new(
+                    "usage_counter_exact_health_unavailable",
+                    "Whether the low-frequency exact usage counter health snapshot is unavailable.",
+                    MetricKind::Gauge,
+                    1,
+                )]
+            })
+    }
+
+    async fn collect_metric_samples(&self) -> Vec<MetricSample> {
         let mut samples = vec![service_up_sample("aether-gateway")];
+        let request_body_buffer_budget_bytes = self
+            .frontdoor_runtime_guards
+            .request_body_buffer_budget_bytes;
+        let request_body_buffer_available_bytes = self
+            .request_body_buffer_budget
+            .available_permits()
+            .saturating_mul(super::REQUEST_BODY_BUFFER_PERMIT_BYTES)
+            .min(request_body_buffer_budget_bytes);
+        samples.extend([
+            MetricSample::new(
+                "request_body_buffer_budget_bytes",
+                "Configured weighted request body buffering budget in bytes.",
+                MetricKind::Gauge,
+                u64::try_from(request_body_buffer_budget_bytes).unwrap_or(u64::MAX),
+            ),
+            MetricSample::new(
+                "request_body_buffer_available_bytes",
+                "Currently available weighted request body buffering budget in bytes.",
+                MetricKind::Gauge,
+                u64::try_from(request_body_buffer_available_bytes).unwrap_or(u64::MAX),
+            ),
+            MetricSample::new(
+                "request_body_buffer_in_use_bytes",
+                "Currently reserved weighted request body buffering budget in bytes.",
+                MetricKind::Gauge,
+                u64::try_from(
+                    request_body_buffer_budget_bytes
+                        .saturating_sub(request_body_buffer_available_bytes),
+                )
+                .unwrap_or(u64::MAX),
+            ),
+        ]);
         if let Some(snapshot) = self.request_concurrency_snapshot() {
             samples.extend(snapshot.to_metric_samples("gateway_requests"));
         }
@@ -1074,98 +1386,115 @@ impl AppState {
         if let Some(snapshot) = self.upstream_execution_concurrency_snapshot() {
             samples.extend(snapshot.to_metric_samples("gateway_upstream_execution"));
         }
-        if let Some(gate) = self.distributed_request_gate.as_ref() {
-            match gate.snapshot().await {
-                Ok(snapshot) => {
-                    samples.extend(snapshot.to_metric_samples("gateway_requests_distributed"));
-                }
-                Err(_) => samples.push(
-                    MetricSample::new(
-                        "concurrency_unavailable",
-                        "Whether the distributed concurrency gate is currently unavailable.",
-                        MetricKind::Gauge,
-                        1,
-                    )
-                    .with_labels(vec![MetricLabel::new(
-                        "gate",
-                        "gateway_requests_distributed",
-                    )]),
-                ),
-            }
-        }
         if let Some(summary) = self.data.database_pool_summary() {
             samples.extend(database_pool_metric_samples(&summary));
         }
-        match tokio::time::timeout(
-            POSTGRES_OBSERVABILITY_METRICS_TIMEOUT,
-            self.data.postgres_observability_snapshot(),
-        )
-        .await
-        {
-            Ok(Ok(snapshot)) => {
-                samples.extend(postgres_observability_metric_samples(snapshot.as_ref()))
-            }
-            Ok(Err(_)) | Err(_) => {
-                samples.extend(postgres_observability_unavailable_metric_samples())
+        samples.push(MetricSample::new(
+            "background_database_pool_isolated",
+            "Whether background workers use a database pool isolated from foreground traffic.",
+            MetricKind::Gauge,
+            u64::from(self.background_data_isolated),
+        ));
+        if self.background_data_isolated {
+            if let Some(summary) = self.background_data.database_pool_summary() {
+                samples.extend(background_database_pool_metric_samples(&summary));
             }
         }
-        match tokio::time::timeout(
-            POSTGRES_ACTIVITY_GROUP_METRICS_TIMEOUT,
-            self.data
-                .postgres_activity_groups(POSTGRES_ACTIVITY_GROUP_METRICS_LIMIT),
-        )
-        .await
-        {
-            Ok(Ok(groups)) => samples.extend(postgres_activity_group_metric_samples(&groups)),
-            Ok(Err(_)) | Err(_) => {
-                samples.extend(postgres_activity_group_unavailable_metric_samples())
+        let distributed_request_metrics = async {
+            let Some(gate) = self.distributed_request_gate.as_ref() else {
+                return Vec::new();
+            };
+            match tokio::time::timeout(DISTRIBUTED_CONCURRENCY_METRICS_TIMEOUT, gate.snapshot())
+                .await
+            {
+                Ok(Ok(snapshot)) => snapshot.to_metric_samples("gateway_requests_distributed"),
+                Ok(Err(_)) | Err(_) => vec![MetricSample::new(
+                    "concurrency_unavailable",
+                    "Whether the distributed concurrency gate is currently unavailable.",
+                    MetricKind::Gauge,
+                    1,
+                )
+                .with_labels(vec![MetricLabel::new(
+                    "gate",
+                    "gateway_requests_distributed",
+                )])],
             }
-        }
-        match tokio::time::timeout(
-            REDIS_RUNTIME_METRICS_TIMEOUT,
-            self.runtime_state.redis_diagnostics(),
-        )
-        .await
-        {
-            Ok(Ok(snapshot)) => {
-                samples.extend(redis_runtime_metric_samples(snapshot.as_ref(), false))
+        };
+        let postgres_observability_metrics = async {
+            match tokio::time::timeout(
+                POSTGRES_OBSERVABILITY_METRICS_TIMEOUT,
+                self.background_data.postgres_observability_snapshot(),
+            )
+            .await
+            {
+                Ok(Ok(snapshot)) => postgres_observability_metric_samples(snapshot.as_ref()),
+                Ok(Err(_)) | Err(_) => postgres_observability_unavailable_metric_samples(),
             }
-            Ok(Err(_)) | Err(_) => samples.extend(redis_runtime_metric_samples(
-                None,
-                self.runtime_state.is_redis(),
-            )),
-        }
+        };
+        let postgres_activity_group_metrics = async {
+            match tokio::time::timeout(
+                POSTGRES_ACTIVITY_GROUP_METRICS_TIMEOUT,
+                self.background_data
+                    .postgres_activity_groups(POSTGRES_ACTIVITY_GROUP_METRICS_LIMIT),
+            )
+            .await
+            {
+                Ok(Ok(groups)) => postgres_activity_group_metric_samples(&groups),
+                Ok(Err(_)) | Err(_) => postgres_activity_group_unavailable_metric_samples(),
+            }
+        };
+        let redis_runtime_metrics = async {
+            match tokio::time::timeout(
+                REDIS_RUNTIME_METRICS_TIMEOUT,
+                self.runtime_state.redis_diagnostics(),
+            )
+            .await
+            {
+                Ok(Ok(snapshot)) => redis_runtime_metric_samples(snapshot.as_ref(), false),
+                Ok(Err(_)) | Err(_) => {
+                    redis_runtime_metric_samples(None, self.runtime_state.is_redis())
+                }
+            }
+        };
+        let usage_queue_health_metrics = usage_queue_health_metric_samples_with_timeout(
+            USAGE_QUEUE_HEALTH_METRICS_TIMEOUT,
+            self.usage_runtime
+                .queue_health_snapshot(self.background_data.as_ref()),
+        );
+        let usage_counter_pending_health_metrics =
+            usage_counter_pending_health_metric_samples_with_timeout(
+                USAGE_COUNTER_HEALTH_METRICS_TIMEOUT,
+                self.background_data.read_usage_counter_pending_health(),
+                crate::clock::current_unix_secs(),
+            );
+        let (
+            distributed_request_metrics,
+            postgres_observability_metrics,
+            postgres_activity_group_metrics,
+            redis_runtime_metrics,
+            usage_queue_health_metrics,
+            usage_counter_pending_health_metrics,
+        ) = tokio::join!(
+            distributed_request_metrics,
+            postgres_observability_metrics,
+            postgres_activity_group_metrics,
+            redis_runtime_metrics,
+            usage_queue_health_metrics,
+            usage_counter_pending_health_metrics,
+        );
+        samples.extend(distributed_request_metrics);
+        samples.extend(postgres_observability_metrics);
+        samples.extend(postgres_activity_group_metrics);
+        samples.extend(redis_runtime_metrics);
+        samples.extend(usage_queue_health_metrics);
+        samples.extend(usage_counter_pending_health_metrics);
         if let Some(queue) = self.request_candidate_queue.as_ref() {
             samples.extend(queue.metric_samples());
         }
         samples.extend(usage_runtime_metric_samples(
             &self.usage_runtime.metrics_snapshot(),
         ));
-        match self
-            .usage_runtime
-            .queue_health_snapshot(self.data.as_ref())
-            .await
-        {
-            Ok(snapshot) => samples.extend(usage_queue_health_metric_samples(&snapshot)),
-            Err(_) => samples.push(MetricSample::new(
-                "usage_queue_health_unavailable",
-                "Whether usage runtime queue health could not be read for this scrape.",
-                MetricKind::Gauge,
-                1,
-            )),
-        }
-        match self.data.read_usage_counter_health().await {
-            Ok(snapshot) => samples.extend(usage_counter_health_metric_samples(
-                &snapshot,
-                crate::clock::current_unix_secs(),
-            )),
-            Err(_) => samples.push(MetricSample::new(
-                "usage_counter_health_unavailable",
-                "Whether usage counter outbox health could not be read for this scrape.",
-                MetricKind::Gauge,
-                1,
-            )),
-        }
+        samples.extend(self.usage_counter_exact_health_metric_samples().await);
         samples.extend(self.usage_counter_flush_metrics.metric_samples());
         samples.extend(task_supervisor_metric_samples(
             &self.task_supervisor_metrics.snapshot(),
@@ -1436,18 +1765,25 @@ impl AppState {
         Ok(self)
     }
 
+    fn background_worker_state(&self) -> Self {
+        let mut state = self.clone();
+        state.data = self.background_data.clone();
+        state
+    }
+
     pub fn spawn_background_tasks(&self) -> crate::task_runtime::TaskSupervisor {
+        let background_state = self.background_worker_state();
         let mut supervisor =
             crate::task_runtime::TaskSupervisor::with_metrics(self.task_supervisor_metrics.clone());
         let record_boot = |task_key: &'static str| {
-            if !self.has_background_task_data_writer() {
+            if !background_state.has_background_task_data_writer() {
                 return;
             }
             let Some(definition) = crate::task_runtime::task_definition(task_key) else {
                 return;
             };
             std::mem::drop(crate::task_runtime::spawn_record_worker_boot(
-                self.clone(),
+                background_state.clone(),
                 task_key,
                 crate::task_runtime::background_task_kind(definition.kind),
                 definition.trigger,
@@ -1456,10 +1792,17 @@ impl AppState {
 
         if let Some(handle) = self
             .usage_runtime
-            .spawn_worker_supervisor(self.data.clone())
+            .spawn_worker_supervisor(background_state.data.clone())
         {
             supervisor.supervise_handle(crate::task_runtime::TASK_KEY_USAGE_QUEUE_WORKER, handle);
             record_boot(crate::task_runtime::TASK_KEY_USAGE_QUEUE_WORKER);
+        }
+
+        if let Some(handle) = spawn_fixed_provider_reconciliation_task(background_state.clone()) {
+            // This is a bounded startup reconciliation, not a long-running worker. Dropping a
+            // Tokio JoinHandle detaches it; supervising it as a worker would incorrectly count
+            // its successful completion as an unexpected background-task exit.
+            std::mem::drop(handle);
         }
 
         let mut supervise_worker =
@@ -1473,101 +1816,118 @@ impl AppState {
         supervise_worker(
             crate::task_runtime::TASK_KEY_USAGE_COUNTER_FLUSH,
             spawn_usage_counter_flush_worker(
-                self.data.clone(),
+                background_state.clone(),
                 self.usage_counter_flush_metrics.clone(),
             ),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_PROVIDER_QUOTA_RESET,
-            crate::wallet_runtime::spawn_provider_quota_reset_worker(self.data.clone()),
+            crate::wallet_runtime::spawn_provider_quota_reset_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_AUDIT_CLEANUP,
-            spawn_audit_cleanup_worker(self.data.clone()),
+            spawn_audit_cleanup_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_DB_MAINTENANCE,
-            spawn_db_maintenance_worker(self.data.clone()),
+            spawn_db_maintenance_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_WALLET_DAILY_USAGE_AGG,
-            spawn_wallet_daily_usage_aggregation_worker(self.data.clone()),
+            spawn_wallet_daily_usage_aggregation_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_STATS_DAILY_AGG,
-            spawn_stats_aggregation_worker(self.data.clone()),
+            spawn_stats_aggregation_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_USAGE_CLEANUP,
-            spawn_usage_cleanup_worker(self.data.clone()),
+            spawn_usage_cleanup_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_POOL_MONITOR,
-            spawn_pool_monitor_worker(self.data.clone()),
+            spawn_pool_monitor_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_ACCOUNT_SELF_CHECK,
-            spawn_account_self_check_worker(self.clone()),
+            spawn_account_self_check_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_POOL_SCORE_REBUILD,
-            spawn_pool_score_rebuild_worker(self.clone()),
+            spawn_pool_score_rebuild_worker(background_state.clone()),
+        );
+        supervise_worker(
+            crate::task_runtime::TASK_KEY_POOL_QUOTA_PROBE,
+            spawn_pool_quota_probe_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_STATS_HOURLY_AGG,
-            spawn_stats_hourly_aggregation_worker(self.data.clone()),
+            spawn_stats_hourly_aggregation_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_PENDING_CLEANUP,
-            spawn_pending_cleanup_worker(self.data.clone()),
+            spawn_pending_cleanup_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_PROXY_NODE_STALE_CLEANUP,
-            spawn_proxy_node_stale_cleanup_worker(self.data.clone()),
+            spawn_proxy_node_stale_cleanup_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_PROXY_NODE_METRICS_CLEANUP,
-            spawn_proxy_node_metrics_cleanup_worker(self.data.clone()),
+            spawn_proxy_node_metrics_cleanup_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_PROXY_UPGRADE_ROLLOUT,
-            spawn_proxy_upgrade_rollout_worker(self.clone()),
+            spawn_proxy_upgrade_rollout_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_PROVIDER_CHECKIN,
-            spawn_provider_checkin_worker(self.clone()),
+            spawn_provider_checkin_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_PROVIDER_QUOTA_ALERT,
-            spawn_provider_quota_alert_worker(self.clone()),
+            spawn_provider_quota_alert_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_OAUTH_TOKEN_REFRESH,
-            spawn_oauth_token_refresh_worker(self.clone()),
+            spawn_oauth_token_refresh_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_REQUEST_CANDIDATE_CLEANUP,
-            spawn_request_candidate_cleanup_worker(self.data.clone()),
+            spawn_request_candidate_cleanup_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_GEMINI_FILES_CLEANUP,
-            spawn_gemini_file_mapping_cleanup_worker(self.data.clone()),
+            spawn_gemini_file_mapping_cleanup_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_MODEL_FETCH_WORKER,
-            spawn_model_fetch_worker(self.clone()),
+            spawn_model_fetch_worker(background_state.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_VIDEO_TASK_POLLER,
-            spawn_video_task_poller(self.clone()),
+            spawn_video_task_poller(background_state.clone()),
         );
         supervise_worker(
             crate::backup::worker::S3_BACKUP_WORKER_TASK_KEY,
-            crate::backup::worker::spawn_s3_backup_worker(self.clone()),
+            crate::backup::worker::spawn_s3_backup_worker(background_state.clone()),
         );
 
         supervisor
     }
+}
+
+fn database_bounded_auth_load_limit(
+    configured_limit: Option<usize>,
+    database_max_connections: Option<u32>,
+) -> Option<usize> {
+    configured_limit.map(|configured_limit| {
+        let Some(database_max_connections) = database_max_connections else {
+            return configured_limit.max(1);
+        };
+        let database_limit = (database_max_connections as usize / 2).max(1);
+        configured_limit.max(1).min(database_limit)
+    })
 }
 
 fn task_supervisor_metric_samples(
@@ -1689,6 +2049,33 @@ fn task_supervisor_metric_samples(
                 MetricKind::Counter,
                 task_unexpected_exits_total,
             )
+            .with_labels(labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "gateway_background_task_singleton_lease_contention_total",
+                "Total singleton lease acquisition attempts blocked by another owner by task key.",
+                MetricKind::Counter,
+                task.singleton_lease_contention_total,
+            )
+            .with_labels(labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "gateway_background_task_singleton_lease_lost_total",
+                "Total singleton leases lost while a gateway background task was running by task key.",
+                MetricKind::Counter,
+                task.singleton_lease_lost_total,
+            )
+            .with_labels(labels.clone()),
+        );
+        samples.push(
+            MetricSample::new(
+                "gateway_background_task_singleton_lease_error_total",
+                "Total singleton lease backend errors observed by gateway background task key.",
+                MetricKind::Counter,
+                task.singleton_lease_error_total,
+            )
             .with_labels(labels),
         );
     }
@@ -1707,6 +2094,12 @@ fn database_pool_metric_samples(summary: &aether_data::DatabasePoolSummary) -> V
         GatewayDataState::database_pool_summary_under_maintenance_pressure(summary);
 
     vec![
+        MetricSample::new(
+            "usage_counter_exact_health_unavailable",
+            "Whether the low-frequency exact usage counter health snapshot is unavailable.",
+            MetricKind::Gauge,
+            0,
+        ),
         MetricSample::new(
             "database_pool_checked_out_connections",
             "Number of database connections currently checked out from the gateway pool.",
@@ -1754,6 +2147,48 @@ fn database_pool_metric_samples(summary: &aether_data::DatabasePoolSummary) -> V
             "Whether maintenance workers should currently defer for foreground database pool capacity.",
             MetricKind::Gauge,
             u64::from(under_maintenance_pressure),
+        )
+        .with_labels(labels),
+    ]
+}
+
+fn background_database_pool_metric_samples(
+    summary: &aether_data::DatabasePoolSummary,
+) -> Vec<MetricSample> {
+    let labels = vec![MetricLabel::new("driver", summary.driver.to_string())];
+    let usage_basis_points = if summary.usage_rate.is_finite() && summary.usage_rate > 0.0 {
+        (summary.usage_rate * 100.0).round() as u64
+    } else {
+        0
+    };
+
+    vec![
+        MetricSample::new(
+            "background_database_pool_checked_out_connections",
+            "Number of database connections checked out from the isolated background pool.",
+            MetricKind::Gauge,
+            summary.checked_out as u64,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "background_database_pool_idle_connections",
+            "Number of idle database connections in the isolated background pool.",
+            MetricKind::Gauge,
+            summary.idle as u64,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "background_database_pool_max_connections",
+            "Configured maximum connections for the isolated background database pool.",
+            MetricKind::Gauge,
+            summary.max_connections as u64,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "background_database_pool_usage_basis_points",
+            "Background database pool usage rate in basis points, where 10000 means 100 percent.",
+            MetricKind::Gauge,
+            usage_basis_points,
         )
         .with_labels(labels),
     ]
@@ -2541,6 +2976,30 @@ fn usage_runtime_metric_samples(
             u64::from(snapshot.retry_deferred_lifecycle_events),
         ),
         MetricSample::new(
+            "usage_runtime_terminal_submission_limit",
+            "Maximum concurrent end-to-end terminal usage submissions.",
+            MetricKind::Gauge,
+            snapshot.terminal_submission_limit as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_submission_in_flight",
+            "Current end-to-end terminal usage submissions in flight.",
+            MetricKind::Gauge,
+            snapshot.terminal_submission_in_flight as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_submission_max_in_flight",
+            "Maximum observed concurrent end-to-end terminal usage submissions.",
+            MetricKind::Gauge,
+            snapshot.terminal_submission_max_in_flight as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_submission_rejected_total",
+            "Total terminal usage submissions rejected by bounded ingress admission.",
+            MetricKind::Counter,
+            snapshot.terminal_submission_rejected_total,
+        ),
+        MetricSample::new(
             "usage_runtime_terminal_enqueue_in_flight",
             "Current terminal usage enqueue operations in flight.",
             MetricKind::Gauge,
@@ -2548,9 +3007,21 @@ fn usage_runtime_metric_samples(
         ),
         MetricSample::new(
             "usage_runtime_terminal_enqueue_deferred_total",
-            "Total terminal usage enqueue operations deferred by circuit or in-flight limits.",
+            "Total terminal usage enqueue operations deferred after Redis failure, circuit open, or in-flight saturation.",
             MetricKind::Counter,
             snapshot.terminal_enqueue_deferred_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_deferred_direct_write_total",
+            "Total deferred terminal usage events persisted through bounded direct database fallback.",
+            MetricKind::Counter,
+            snapshot.terminal_enqueue_deferred_direct_write_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_deferred_dropped_total",
+            "Total deferred terminal usage events dropped after all bounded fallback capacity was exhausted.",
+            MetricKind::Counter,
+            snapshot.terminal_enqueue_deferred_dropped_total,
         ),
         MetricSample::new(
             "usage_runtime_terminal_enqueue_deferred_retry_total",
@@ -2563,6 +3034,42 @@ fn usage_runtime_metric_samples(
             "Total terminal usage enqueue failures that opened the terminal enqueue circuit.",
             MetricKind::Counter,
             snapshot.terminal_enqueue_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_direct_fallback_limit",
+            "Maximum concurrent terminal direct database fallback operations.",
+            MetricKind::Gauge,
+            snapshot.terminal_direct_fallback_limit as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_direct_fallback_in_flight",
+            "Current terminal direct database fallback operations in flight.",
+            MetricKind::Gauge,
+            snapshot.terminal_direct_fallback_in_flight as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_direct_fallback_max_in_flight",
+            "Maximum observed concurrent terminal direct database fallback operations.",
+            MetricKind::Gauge,
+            snapshot.terminal_direct_fallback_max_in_flight as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_direct_fallback_succeeded_total",
+            "Total terminal events persisted through direct database fallback.",
+            MetricKind::Counter,
+            snapshot.terminal_direct_fallback_succeeded_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_direct_fallback_failed_total",
+            "Total terminal direct database fallback operations that failed.",
+            MetricKind::Counter,
+            snapshot.terminal_direct_fallback_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_direct_fallback_rejected_total",
+            "Total terminal direct database fallback operations rejected because the writer was unavailable, pressured, or saturated.",
+            MetricKind::Counter,
+            snapshot.terminal_direct_fallback_rejected_total,
         ),
         MetricSample::new(
             "usage_runtime_lifecycle_enqueue_in_flight",
@@ -2596,9 +3103,33 @@ fn usage_runtime_metric_samples(
         ),
         MetricSample::new(
             "usage_runtime_enqueue_retry_scheduled_total",
-            "Total usage events scheduled into the local enqueue retry dispatcher.",
+            "Total usage events scheduled into the local enqueue dispatcher, including primary terminal events and retries.",
             MetricKind::Counter,
             snapshot.enqueue_retry_scheduled_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_enqueue_retry_recovered_total",
+            "Total usage events successfully appended by the local enqueue dispatcher.",
+            MetricKind::Counter,
+            snapshot.enqueue_retry_recovered_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_enqueue_retry_pending",
+            "Current usage events waiting or retrying in the local enqueue dispatcher.",
+            MetricKind::Gauge,
+            snapshot.enqueue_retry_pending,
+        ),
+        MetricSample::new(
+            "usage_runtime_enqueue_retry_failed_total",
+            "Total Redis queue append attempts failed inside the local enqueue dispatcher.",
+            MetricKind::Counter,
+            snapshot.enqueue_retry_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_enqueue_retry_closed_or_unavailable_total",
+            "Total usage events rejected because the local enqueue dispatcher was full, closed, or unavailable.",
+            MetricKind::Counter,
+            snapshot.enqueue_retry_closed_or_unavailable_total,
         ),
     ]
 }
@@ -2670,8 +3201,26 @@ fn usage_queue_health_metric_samples(
     ]
 }
 
-fn usage_counter_health_metric_samples(
-    snapshot: &UsageCounterHealthSnapshot,
+async fn usage_queue_health_metric_samples_with_timeout<F, E>(
+    timeout: Duration,
+    future: F,
+) -> Vec<MetricSample>
+where
+    F: std::future::Future<Output = Result<usage::UsageQueueHealthSnapshot, E>>,
+{
+    match tokio::time::timeout(timeout, future).await {
+        Ok(Ok(snapshot)) => usage_queue_health_metric_samples(&snapshot),
+        Ok(Err(_)) | Err(_) => vec![MetricSample::new(
+            "usage_queue_health_unavailable",
+            "Whether usage runtime queue health could not be read for this scrape.",
+            MetricKind::Gauge,
+            1,
+        )],
+    }
+}
+
+fn usage_counter_pending_health_metric_samples(
+    snapshot: &UsageCounterPendingHealthSnapshot,
     now_unix_secs: u64,
 ) -> Vec<MetricSample> {
     let oldest_pending_age_secs = snapshot
@@ -2693,12 +3242,6 @@ fn usage_counter_health_metric_samples(
             snapshot.pending_rows,
         ),
         MetricSample::new(
-            "usage_counter_outbox_processed_rows",
-            "Number of usage counter outbox rows already processed.",
-            MetricKind::Gauge,
-            snapshot.processed_rows,
-        ),
-        MetricSample::new(
             "usage_counter_outbox_oldest_pending_age_seconds",
             "Age of the oldest pending usage counter outbox row in seconds.",
             MetricKind::Gauge,
@@ -2713,12 +3256,6 @@ fn usage_counter_health_metric_samples(
                 .filter(|_| snapshot.pending_rows > 0)
                 .unwrap_or_default(),
         ),
-        MetricSample::new(
-            "usage_counter_outbox_latest_processed_at_unix_secs",
-            "Unix timestamp of the latest processed usage counter outbox row.",
-            MetricKind::Gauge,
-            snapshot.latest_processed_at_unix_secs.unwrap_or_default(),
-        ),
     ];
     for (kind, pending_rows) in &snapshot.pending_by_kind {
         samples.push(
@@ -2732,6 +3269,51 @@ fn usage_counter_health_metric_samples(
         );
     }
     samples
+}
+
+fn usage_counter_exact_health_metric_samples(
+    snapshot: &UsageCounterHealthSnapshot,
+    snapshot_age_secs: u64,
+) -> Vec<MetricSample> {
+    vec![
+        MetricSample::new(
+            "usage_counter_outbox_processed_rows",
+            "Number of usage counter outbox rows already processed, refreshed at low frequency.",
+            MetricKind::Gauge,
+            snapshot.processed_rows,
+        ),
+        MetricSample::new(
+            "usage_counter_outbox_latest_processed_at_unix_secs",
+            "Unix timestamp of the latest processed usage counter outbox row, refreshed at low frequency.",
+            MetricKind::Gauge,
+            snapshot.latest_processed_at_unix_secs.unwrap_or_default(),
+        ),
+        MetricSample::new(
+            "usage_counter_exact_health_snapshot_age_seconds",
+            "Age in seconds of the low-frequency exact usage counter health snapshot.",
+            MetricKind::Gauge,
+            snapshot_age_secs,
+        ),
+    ]
+}
+
+async fn usage_counter_pending_health_metric_samples_with_timeout<F, E>(
+    timeout: Duration,
+    future: F,
+    now_unix_secs: u64,
+) -> Vec<MetricSample>
+where
+    F: std::future::Future<Output = Result<UsageCounterPendingHealthSnapshot, E>>,
+{
+    match tokio::time::timeout(timeout, future).await {
+        Ok(Ok(snapshot)) => usage_counter_pending_health_metric_samples(&snapshot, now_unix_secs),
+        Ok(Err(_)) | Err(_) => vec![MetricSample::new(
+            "usage_counter_health_unavailable",
+            "Whether usage counter outbox health could not be read for this scrape.",
+            MetricKind::Gauge,
+            1,
+        )],
+    }
 }
 
 fn should_preserve_runtime_miss_diagnostic(
@@ -2753,12 +3335,55 @@ fn runtime_miss_diagnostic_has_candidate_signal(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
+    use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
+    use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
+    use aether_data_contracts::repository::usage::UsageCounterPendingHealthSnapshot;
     use serde_json::json;
 
-    use super::AppState;
+    use super::{
+        database_bounded_auth_load_limit, usage_counter_pending_health_metric_samples_with_timeout,
+        usage_queue_health_metric_samples_with_timeout, AppState, MetricKind, MetricSample,
+        METRIC_SNAPSHOT_TTL,
+    };
     use crate::cache::SchedulerAffinityTarget;
-    use crate::data::GatewayDataState;
+    use crate::data::{GatewayDataConfig, GatewayDataState};
+
+    #[test]
+    fn auth_load_gate_reserves_half_of_foreground_database_pool() {
+        assert_eq!(
+            database_bounded_auth_load_limit(Some(192), Some(92)),
+            Some(46)
+        );
+        assert_eq!(database_bounded_auth_load_limit(Some(4), Some(92)), Some(4));
+        assert_eq!(database_bounded_auth_load_limit(Some(64), Some(1)), Some(1));
+        assert_eq!(database_bounded_auth_load_limit(None, Some(92)), None);
+        assert_eq!(database_bounded_auth_load_limit(Some(64), None), Some(64));
+    }
+
+    #[tokio::test]
+    async fn runtime_pool_can_disable_background_isolation() {
+        let config = GatewayDataConfig::from_database_config(
+            SqlDatabaseConfig::new(
+                DatabaseDriver::Postgres,
+                "postgres://localhost/aether",
+                SqlPoolConfig {
+                    min_connections: 4,
+                    max_connections: 20,
+                    ..SqlPoolConfig::default()
+                },
+            )
+            .expect("database config should be valid"),
+        );
+
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_config_and_background_isolation(config, false)
+            .expect("data state should build");
+
+        assert!(!state.background_data_isolated);
+    }
 
     #[tokio::test]
     async fn system_config_reads_use_short_lived_cache_until_app_invalidation() {
@@ -2924,6 +3549,7 @@ mod tests {
     #[tokio::test]
     async fn metric_samples_include_auth_snapshot_load_gate() {
         let state = AppState::new().expect("app state should build");
+        assert!(state.prewarm_metric_snapshot().await);
         let samples = state.metric_samples().await;
 
         assert!(samples.iter().any(|sample| {
@@ -2933,6 +3559,231 @@ mod tests {
                     .iter()
                     .any(|label| label.key == "gate" && label.value == "gateway_auth_snapshot_load")
         }));
+    }
+
+    #[tokio::test]
+    async fn metric_samples_include_request_body_buffer_budget_usage() {
+        let state = AppState::new().expect("app state should build");
+        let _permit = Arc::clone(&state.request_body_buffer_budget)
+            .acquire_many_owned(2)
+            .await
+            .expect("request body budget should be open");
+        assert!(state.prewarm_metric_snapshot().await);
+        let samples = state.metric_samples().await;
+
+        assert!(samples.iter().any(|sample| {
+            sample.name == "request_body_buffer_in_use_bytes"
+                && sample.value
+                    == u64::try_from(2 * crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES)
+                        .unwrap_or(u64::MAX)
+        }));
+    }
+
+    #[tokio::test]
+    async fn metric_samples_reuse_recent_snapshot() {
+        let state = AppState::new().expect("app state should build");
+        assert!(state.prewarm_metric_snapshot().await);
+        let first = state.metric_samples().await;
+        let _permit = Arc::clone(&state.request_body_buffer_budget)
+            .acquire_many_owned(2)
+            .await
+            .expect("request body budget should be open");
+        let second = state.metric_samples().await;
+
+        assert_eq!(first, second);
+        assert!(state.metric_snapshot.read().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn metric_snapshot_prewarm_populates_low_frequency_exact_counter_metrics() {
+        let state = AppState::new().expect("app state should build");
+
+        assert!(state.prewarm_metric_snapshot().await);
+        assert!(state
+            .usage_counter_exact_health_metric_snapshot
+            .read()
+            .await
+            .is_some());
+        let samples = state.metric_samples().await;
+        assert!(samples
+            .iter()
+            .any(|sample| sample.name == "usage_counter_outbox_processed_rows"));
+        assert!(samples
+            .iter()
+            .any(|sample| sample.name == "usage_counter_outbox_latest_processed_at_unix_secs"));
+        assert!(samples
+            .iter()
+            .any(|sample| sample.name == "usage_counter_exact_health_snapshot_age_seconds"));
+    }
+
+    #[tokio::test]
+    async fn stale_metric_samples_return_immediately_while_background_refreshes() {
+        let state = AppState::new().expect("app state should build");
+        let stale_sample = MetricSample::new(
+            "stale_metric_snapshot_test",
+            "Test-only stale metric snapshot marker.",
+            MetricKind::Gauge,
+            1,
+        );
+        let stale_created_at = std::time::Instant::now()
+            .checked_sub(METRIC_SNAPSHOT_TTL + Duration::from_millis(1))
+            .expect("stale timestamp should be representable");
+        *state.metric_snapshot.write().await = Some((stale_created_at, vec![stale_sample.clone()]));
+
+        let returned = tokio::time::timeout(Duration::from_millis(100), state.metric_samples())
+            .await
+            .expect("stale scrape should return without awaiting refresh I/O");
+        assert_eq!(returned, vec![stale_sample]);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let refreshed =
+                    state
+                        .metric_snapshot
+                        .read()
+                        .await
+                        .as_ref()
+                        .is_some_and(|(_, samples)| {
+                            samples
+                                .iter()
+                                .all(|sample| sample.name != "stale_metric_snapshot_test")
+                        });
+                if refreshed {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background metric refresh should replace the stale snapshot");
+    }
+
+    #[tokio::test]
+    async fn metric_samples_fail_open_while_initial_snapshot_refresh_is_in_progress() {
+        let state = AppState::new().expect("app state should build");
+        let _refresh_guard = state.metric_snapshot_refresh.lock().await;
+
+        let samples = tokio::time::timeout(Duration::from_millis(100), state.metric_samples())
+            .await
+            .expect("contending scrape should not wait for the initial refresh");
+
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].name, "service_up");
+        assert_eq!(samples[0].value, 1);
+        assert!(state.metric_snapshot.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn usage_queue_health_metrics_timeout_fails_open() {
+        let samples = tokio::time::timeout(
+            Duration::from_millis(100),
+            usage_queue_health_metric_samples_with_timeout(
+                Duration::from_millis(1),
+                std::future::pending::<Result<crate::usage::UsageQueueHealthSnapshot, ()>>(),
+            ),
+        )
+        .await
+        .expect("metrics timeout wrapper should remain bounded");
+
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].name, "usage_queue_health_unavailable");
+        assert_eq!(samples[0].value, 1);
+    }
+
+    #[tokio::test]
+    async fn usage_counter_health_metrics_timeout_fails_open() {
+        let samples = tokio::time::timeout(
+            Duration::from_millis(100),
+            usage_counter_pending_health_metric_samples_with_timeout(
+                Duration::from_millis(1),
+                std::future::pending::<Result<UsageCounterPendingHealthSnapshot, ()>>(),
+                1_000,
+            ),
+        )
+        .await
+        .expect("metrics timeout wrapper should remain bounded");
+
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].name, "usage_counter_health_unavailable");
+        assert_eq!(samples[0].value, 1);
+    }
+
+    #[test]
+    fn background_worker_state_uses_isolated_data_pool() {
+        let mut state = AppState::new().expect("app state should build");
+        let foreground = Arc::new(GatewayDataState::disabled());
+        let background = Arc::new(GatewayDataState::disabled());
+        state.replace_data_states(foreground, background.clone(), true);
+
+        let worker_state = state.background_worker_state();
+
+        assert!(Arc::ptr_eq(&worker_state.data, &state.background_data));
+        assert!(!Arc::ptr_eq(&worker_state.data, &state.data));
+        assert!(worker_state.data.has_usage_worker_queue());
+        assert!(state.background_data_isolated);
+    }
+
+    #[test]
+    fn request_candidate_queue_writer_uses_background_data_only_when_isolated() {
+        let foreground_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let background_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let foreground = Arc::new(
+            GatewayDataState::with_request_candidate_repository_for_tests(foreground_repository),
+        );
+        let background = Arc::new(
+            GatewayDataState::with_request_candidate_repository_for_tests(background_repository),
+        );
+        let mut state = AppState::new().expect("app state should build");
+
+        state.replace_data_states(foreground, background, true);
+
+        let selected = state.request_candidate_queue_data_state();
+        assert!(Arc::ptr_eq(selected, &state.background_data));
+        assert!(!Arc::ptr_eq(selected, &state.data));
+        let selected_writer = selected
+            .request_candidate_writer()
+            .expect("isolated background writer should exist");
+        let background_writer = state
+            .background_data
+            .request_candidate_writer()
+            .expect("background writer should exist");
+        let foreground_writer = state
+            .data
+            .request_candidate_writer()
+            .expect("foreground writer should exist");
+        assert!(Arc::ptr_eq(&selected_writer, &background_writer));
+        assert!(!Arc::ptr_eq(&selected_writer, &foreground_writer));
+
+        let shared_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        state.replace_data_state(Arc::new(
+            GatewayDataState::with_request_candidate_repository_for_tests(shared_repository),
+        ));
+
+        let selected = state.request_candidate_queue_data_state();
+        assert!(Arc::ptr_eq(selected, &state.data));
+        assert!(!state.background_data_isolated);
+        let selected_writer = selected
+            .request_candidate_writer()
+            .expect("shared writer should exist");
+        let foreground_writer = state
+            .data
+            .request_candidate_writer()
+            .expect("shared foreground writer should exist");
+        assert!(Arc::ptr_eq(&selected_writer, &foreground_writer));
+    }
+
+    #[test]
+    fn replacing_shared_data_state_preserves_background_usage_queue() {
+        let mut state = AppState::new().expect("app state should build");
+
+        state.replace_data_state(Arc::new(GatewayDataState::disabled()));
+
+        assert!(state.data.has_usage_worker_queue());
+        assert!(state.background_data.has_usage_worker_queue());
+        assert!(state
+            .background_worker_state()
+            .data
+            .has_usage_worker_queue());
     }
 
     #[test]

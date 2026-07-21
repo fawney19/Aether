@@ -78,6 +78,11 @@ describe('usage status helpers', () => {
       status: 'streaming',
       first_byte_time_ms: 320,
     }))).toBe('streaming')
+
+    expect(resolveDisplayRequestStatus(buildUsageRecord({
+      status: 'streaming',
+      first_byte_time_ms: 0,
+    }))).toBe('streaming')
   })
 
   it('treats active lifecycle records with failure signals as failed for display', () => {
@@ -196,6 +201,14 @@ describe('usage status helpers', () => {
       client_requested_stream: undefined,
       client_is_stream: undefined,
     }))).toBe('标准->流式')
+
+    expect(formatUsageStreamLabel(buildUsageRecord({
+      api_format: 'openai:search',
+      is_stream: false,
+      upstream_is_stream: false,
+      client_requested_stream: undefined,
+      client_is_stream: undefined,
+    }))).toBe('标准')
 
     expect(formatUsageStreamLabel(buildUsageRecord({
       api_format: 'claude:messages',

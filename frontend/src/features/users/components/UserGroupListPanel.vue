@@ -1,11 +1,11 @@
 <template>
-  <div class="rounded-xl border border-border/70 bg-muted/20 p-3">
-    <div class="mb-3 flex items-center justify-between gap-2">
+  <div class="rounded-lg border border-border/70 bg-muted/20 p-2.5 sm:rounded-xl sm:p-3">
+    <div class="mb-2 flex items-center justify-between gap-2 sm:mb-3">
       <Label class="text-sm font-semibold">{{ legacyT('分组') }}</Label>
       <Button
         variant="ghost"
         size="icon"
-        class="h-8 w-8"
+        class="h-10 w-10"
         :title="legacyT('新建分组')"
         @click="$emit('create')"
       >
@@ -27,7 +27,7 @@
     </div>
     <div
       v-else
-      class="max-h-60 space-y-1.5 overflow-y-auto lg:max-h-none lg:overflow-visible"
+      class="flex snap-x snap-mandatory gap-2 overflow-x-auto overscroll-x-contain pb-1 lg:block lg:max-h-none lg:space-y-1.5 lg:overflow-visible lg:pb-0"
     >
       <button
         v-for="group in groups"
@@ -48,7 +48,7 @@
             </Badge>
           </span>
         </span>
-        <ChevronRight class="h-4 w-4 shrink-0 text-muted-foreground" />
+        <ChevronRight class="hidden h-4 w-4 shrink-0 text-muted-foreground lg:block" />
       </button>
     </div>
   </div>
@@ -76,7 +76,7 @@ const { legacyT } = useI18n()
 
 function groupButtonClass(groupId: string): string {
   return cn(
-    'flex w-full items-center gap-2 rounded-lg border px-3 py-2 transition-colors',
+    'flex min-h-10 w-auto min-w-[8.5rem] shrink-0 snap-start items-center gap-2 rounded-lg border px-3 py-2 transition-colors lg:w-full lg:min-w-0',
     props.selectedGroupId === groupId
       ? 'border-primary/50 bg-primary/10'
       : 'border-transparent hover:border-border hover:bg-background',

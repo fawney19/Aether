@@ -7,7 +7,7 @@
     persistent
     @update:model-value="handleDialogUpdate"
   >
-    <div class="grid gap-4 lg:min-h-[560px] lg:grid-cols-[17rem_minmax(0,1fr)]">
+    <div class="grid gap-3 lg:min-h-[560px] lg:grid-cols-[17rem_minmax(0,1fr)] lg:gap-4">
       <UserGroupListPanel
         :loading="loading"
         :groups="groups"
@@ -16,7 +16,7 @@
         @select="selectGroup"
       />
 
-      <div class="min-w-0 rounded-xl border border-border/70 bg-background p-3 sm:p-4">
+      <div class="min-w-0 bg-background sm:rounded-xl sm:border sm:border-border/70 sm:p-4">
         <UserGroupEditorHeader
           :editing="Boolean(editingGroupId)"
           :is-default="Boolean(selectedGroup?.is_default)"

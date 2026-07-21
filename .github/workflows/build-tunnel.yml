@@ -131,6 +131,7 @@ jobs:
             aether-tunnel-*.tar.gz
             aether-tunnel-*.zip
           if-no-files-found: error
+          retention-days: 1
 
   release:
     needs: build

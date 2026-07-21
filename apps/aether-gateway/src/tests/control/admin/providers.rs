@@ -832,7 +832,7 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
             "is_active": false,
             "concurrent_limit": 8,
             "max_retries": 6,
-            "request_timeout": 55.0,
+            "request_timeout": aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS,
             "stream_first_byte_timeout": 11.0,
             "enable_format_conversion": false,
             "config": {
@@ -860,7 +860,10 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
     assert_eq!(payload["enable_format_conversion"], false);
     assert_eq!(payload["is_active"], false);
     assert_eq!(payload["max_retries"], 6);
-    assert_eq!(payload["request_timeout"], 55.0);
+    assert_eq!(
+        payload["request_timeout"].as_f64(),
+        Some(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS as f64)
+    );
     assert_eq!(payload["stream_first_byte_timeout"], 11.0);
     assert_eq!(payload["proxy"], json!({"url": "https://proxy.example"}));
     assert_eq!(payload["claude_code_advanced"], json!({"pool_size": 2}));
@@ -869,6 +872,21 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
     assert_eq!(payload["chat_pii_redaction"], json!({"enabled": true}));
     assert_eq!(payload["ops_configured"], true);
     assert_eq!(payload["ops_architecture_id"], "cubence");
+
+    let invalid_timeout_response = reqwest::Client::new()
+        .patch(format!("{gateway_url}/api/admin/providers/provider-openai"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "request_timeout":
+                aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS + 1
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(invalid_timeout_response.status(), StatusCode::BAD_REQUEST);
 
     let disable_response = reqwest::Client::new()
         .patch(format!("{gateway_url}/api/admin/providers/provider-openai"))
@@ -924,6 +942,10 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
         .iter()
         .find(|provider| provider.id == "provider-openai")
         .expect("provider should exist");
+    assert_eq!(
+        updated_provider.request_timeout_secs,
+        Some(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS as f64)
+    );
     assert_eq!(
         updated_provider
             .config
@@ -1000,6 +1022,7 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
             "website": "codex.example",
             "keep_priority_on_conversion": true,
             "max_retries": 7,
+            "request_timeout": aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS,
             "config": {"chat_pii_redaction": {"enabled": true}},
             "pool_advanced": {},
             "failover_rules": {"strategy": "ordered"},
@@ -1034,6 +1057,10 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
     assert_eq!(created.website.as_deref(), Some("https://codex.example"));
     assert!(created.enable_format_conversion);
     assert_eq!(created.max_retries, Some(7));
+    assert_eq!(
+        created.request_timeout_secs,
+        Some(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS as f64)
+    );
     assert_eq!(created.keep_priority_on_conversion, true);
     assert_eq!(
         created
@@ -1080,7 +1107,7 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
         .list_endpoints_by_provider_ids(std::slice::from_ref(&created.id))
         .await
         .expect("endpoints should list");
-    assert_eq!(endpoints.len(), 3);
+    assert_eq!(endpoints.len(), 4);
     let responses_endpoint = endpoints
         .iter()
         .find(|endpoint| endpoint.api_format == "openai:responses")
@@ -1089,6 +1116,10 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
         .iter()
         .find(|endpoint| endpoint.api_format == "openai:responses:compact")
         .expect("compact endpoint should exist");
+    let search_endpoint = endpoints
+        .iter()
+        .find(|endpoint| endpoint.api_format == "openai:search")
+        .expect("search endpoint should exist");
     let image_endpoint = endpoints
         .iter()
         .find(|endpoint| endpoint.api_format == "openai:image")
@@ -1102,11 +1133,16 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
         "https://chatgpt.com/backend-api/codex"
     );
     assert_eq!(
+        search_endpoint.base_url,
+        "https://chatgpt.com/backend-api/codex"
+    );
+    assert_eq!(
         image_endpoint.base_url,
         "https://chatgpt.com/backend-api/codex"
     );
     assert_eq!(responses_endpoint.max_retries, Some(7));
     assert_eq!(compact_endpoint.max_retries, Some(7));
+    assert_eq!(search_endpoint.max_retries, Some(7));
     assert_eq!(image_endpoint.max_retries, Some(7));
     assert_eq!(
         responses_endpoint
@@ -1117,15 +1153,24 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
         Some("force_stream")
     );
     assert_eq!(
+        search_endpoint
+            .config
+            .as_ref()
+            .and_then(|value| value.get("upstream_stream_policy"))
+            .and_then(serde_json::Value::as_str),
+        None
+    );
+    assert_eq!(
         image_endpoint
             .config
             .as_ref()
             .and_then(|value| value.get("upstream_stream_policy"))
             .and_then(serde_json::Value::as_str),
-        Some("force_stream")
+        None
     );
     assert!(responses_endpoint.body_rules.is_none());
     assert!(compact_endpoint.body_rules.is_none());
+    assert!(search_endpoint.body_rules.is_none());
     assert!(image_endpoint.body_rules.is_none());
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -1216,7 +1261,7 @@ async fn gateway_updates_fixed_provider_and_reconciles_template_managed_endpoint
         .list_endpoints_by_provider_ids(&["provider-codex".to_string()])
         .await
         .expect("endpoints should list");
-    assert_eq!(endpoints.len(), 3);
+    assert_eq!(endpoints.len(), 4);
     let responses_endpoint = endpoints
         .iter()
         .find(|endpoint| endpoint.api_format == "openai:responses")
@@ -1225,6 +1270,10 @@ async fn gateway_updates_fixed_provider_and_reconciles_template_managed_endpoint
         .iter()
         .find(|endpoint| endpoint.api_format == "openai:responses:compact")
         .expect("compact endpoint should exist");
+    let search_endpoint = endpoints
+        .iter()
+        .find(|endpoint| endpoint.api_format == "openai:search")
+        .expect("search endpoint should exist");
     let image_endpoint = endpoints
         .iter()
         .find(|endpoint| endpoint.api_format == "openai:image")
@@ -1232,6 +1281,7 @@ async fn gateway_updates_fixed_provider_and_reconciles_template_managed_endpoint
 
     assert_eq!(responses_endpoint.max_retries, Some(9));
     assert_eq!(compact_endpoint.max_retries, Some(9));
+    assert_eq!(search_endpoint.max_retries, Some(9));
     assert_eq!(image_endpoint.max_retries, Some(9));
     assert_eq!(
         responses_endpoint
@@ -1243,19 +1293,36 @@ async fn gateway_updates_fixed_provider_and_reconciles_template_managed_endpoint
         Some(true)
     );
     assert_eq!(
+        search_endpoint
+            .config
+            .as_ref()
+            .and_then(|value| value.get("_aether_fixed_provider_template"))
+            .and_then(|value| value.get("managed"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        search_endpoint
+            .config
+            .as_ref()
+            .and_then(|value| value.get("upstream_stream_policy"))
+            .and_then(serde_json::Value::as_str),
+        None
+    );
+    assert_eq!(
         image_endpoint
             .config
             .as_ref()
             .and_then(|value| value.get("upstream_stream_policy"))
             .and_then(serde_json::Value::as_str),
-        Some("force_stream")
+        None
     );
     let keys = provider_catalog_repository
         .list_keys_by_provider_ids(&["provider-codex".to_string()])
         .await
         .expect("keys should list");
     assert_eq!(keys.len(), 1);
-    assert!(keys[0].api_formats.is_none());
+    assert_eq!(keys[0].api_formats, Some(json!(["openai:responses"])));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

@@ -255,12 +255,25 @@ fn admin_pool_quota_window_reset_seconds(
 
 fn admin_pool_codex_quota_part_from_window(
     quota_snapshot: &serde_json::Map<String, serde_json::Value>,
-    window_code: &str,
-    label: &str,
+    window: &serde_json::Map<String, serde_json::Value>,
     now_unix_secs: u64,
     show_reset_without_consumption: bool,
 ) -> Option<String> {
-    let window = admin_pool_quota_window(quota_snapshot, window_code)?;
+    if admin_pool_json_to_u64(window.get("window_minutes")) == Some(0) {
+        return None;
+    }
+    let label = window
+        .get("label")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .or_else(|| {
+            window
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|code| !code.is_empty())
+        })?;
     let used_percent = admin_pool_quota_window_used_percent(window)?;
     let reset_seconds =
         admin_pool_quota_window_reset_seconds(quota_snapshot, window, now_unix_secs);
@@ -294,23 +307,35 @@ fn admin_pool_build_codex_account_quota_from_snapshot(
         .and_then(admin_provider_quota_pure::coerce_json_bool)
         .unwrap_or(false);
 
-    if let Some(part) = admin_pool_codex_quota_part_from_window(
-        quota_snapshot,
-        "weekly",
-        "周",
-        now_unix_secs,
-        exhausted,
-    ) {
-        parts.push(part);
-    }
-    if let Some(part) = admin_pool_codex_quota_part_from_window(
-        quota_snapshot,
-        "5h",
-        "5H",
-        now_unix_secs,
-        exhausted,
-    ) {
-        parts.push(part);
+    if let Some(windows) = quota_snapshot
+        .get("windows")
+        .and_then(serde_json::Value::as_array)
+    {
+        for window in windows.iter().filter_map(serde_json::Value::as_object) {
+            let code = window
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            let scope = window
+                .get("scope")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .unwrap_or("account");
+            if !scope.eq_ignore_ascii_case("account")
+                || code.to_ascii_lowercase().starts_with("spark_")
+            {
+                continue;
+            }
+            if let Some(part) = admin_pool_codex_quota_part_from_window(
+                quota_snapshot,
+                window,
+                now_unix_secs,
+                exhausted,
+            ) {
+                parts.push(part);
+            }
+        }
     }
 
     if !parts.is_empty() {
@@ -345,6 +370,25 @@ fn admin_pool_current_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn admin_pool_is_regular_codex_cycle_window(
+    window: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    let code = window
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let scope = window
+        .get("scope")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or("account");
+    !code.is_empty()
+        && scope.eq_ignore_ascii_case("account")
+        && !code.to_ascii_lowercase().starts_with("spark_")
+        && admin_pool_json_to_u64(window.get("window_minutes")) != Some(0)
+}
+
 fn admin_pool_prune_expired_codex_window_usage_at(
     status_snapshot: &mut serde_json::Value,
     now_unix_secs: u64,
@@ -362,12 +406,7 @@ fn admin_pool_prune_expired_codex_window_usage_at(
         .iter_mut()
         .filter_map(serde_json::Value::as_object_mut)
     {
-        let code = window
-            .get("code")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default();
-        if !code.eq_ignore_ascii_case("5h") && !code.eq_ignore_ascii_case("weekly") {
+        if !admin_pool_is_regular_codex_cycle_window(window) {
             continue;
         }
         let Some(reset_at) = admin_pool_json_to_u64(window.get("reset_at")) else {
@@ -1405,7 +1444,9 @@ mod tests {
             "quota": {
                 "windows": [
                     {
-                        "code": "5h",
+                        "code": "monthly",
+                        "scope": "account",
+                        "window_minutes": 43_800,
                         "reset_at": 1,
                         "usage": {
                             "request_count": 7,
@@ -1449,6 +1490,31 @@ mod tests {
         assert_eq!(usage["request_count"], json!(3));
         assert_eq!(usage["total_tokens"], json!(375));
         assert_eq!(usage["total_cost_usd"], json!("0.60000000"));
+    }
+
+    #[test]
+    fn codex_monthly_quota_is_rendered_from_actual_snapshot_window() {
+        let quota_snapshot = json!({
+            "provider_type": "codex",
+            "code": "ok",
+            "exhausted": false,
+            "windows": [
+                {
+                    "code": "monthly",
+                    "label": "月",
+                    "scope": "account",
+                    "used_ratio": 0.14,
+                    "remaining_ratio": 0.86,
+                    "window_minutes": 43_800
+                }
+            ]
+        });
+        let quota_snapshot = quota_snapshot.as_object().unwrap();
+
+        assert_eq!(
+            admin_pool_build_account_quota("codex", Some(quota_snapshot)),
+            Some("月剩余 86.0%".to_string())
+        );
     }
 
     #[test]

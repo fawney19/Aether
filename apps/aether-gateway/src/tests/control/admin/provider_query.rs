@@ -559,7 +559,7 @@ async fn gateway_handles_admin_provider_query_models_falls_back_to_codex_preset_
                     .expect("mutex should lock") += 1;
                 assert_eq!(
                     plan.url,
-                    "https://chatgpt.com/backend-api/codex/models?client_version=0.128.0-alpha.1"
+                    "https://chatgpt.com/backend-api/codex/models?client_version=0.144.1"
                 );
                 Json(json!({
                     "request_id": "req-provider-query-codex-invalidated",
@@ -625,6 +625,11 @@ async fn gateway_handles_admin_provider_query_models_falls_back_to_codex_preset_
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["success"], json!(true));
     assert_eq!(payload["data"]["error"], serde_json::Value::Null);
+    let warning = payload["data"]["warning"]
+        .as_str()
+        .expect("Codex fallback warning should be present");
+    assert!(warning.contains("Codex 动态模型目录不可用"));
+    assert!(warning.contains("invalidated"));
     let model_ids = payload["data"]["models"]
         .as_array()
         .expect("models should be an array")
@@ -634,11 +639,14 @@ async fn gateway_handles_admin_provider_query_models_falls_back_to_codex_preset_
     assert_eq!(
         model_ids,
         vec![
-            "gpt-5.3-codex",
-            "gpt-5.3-codex-spark",
+            "codex-auto-review",
+            "gpt-5.2",
             "gpt-5.4",
             "gpt-5.4-mini",
             "gpt-5.5",
+            "gpt-5.6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
         ]
     );
     assert_eq!(
@@ -2392,6 +2400,188 @@ async fn gateway_streams_codex_openai_responses_upstream_for_admin_pool_model_te
 }
 
 #[test]
+fn gateway_executes_codex_search_admin_pool_model_test_with_search_contract() {
+    run_provider_query_test(
+        "gateway_executes_codex_search_admin_pool_model_test_with_search_contract",
+        gateway_executes_codex_search_admin_pool_model_test_with_search_contract_impl,
+    );
+}
+
+async fn gateway_executes_codex_search_admin_pool_model_test_with_search_contract_impl() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-codex-search");
+            assert_eq!(plan.endpoint_id, "endpoint-codex-search");
+            assert_eq!(plan.key_id, "key-codex-search");
+            assert_eq!(plan.client_api_format, "openai:search");
+            assert_eq!(plan.provider_api_format, "openai:search");
+            assert_eq!(
+                plan.url,
+                "https://chatgpt.com/backend-api/codex/alpha/search"
+            );
+            assert_eq!(plan.model_name.as_deref(), Some("gpt-5.6-sol"));
+            assert!(!plan.stream, "Codex Search is a synchronous JSON protocol");
+            assert_eq!(
+                plan.timeouts
+                    .as_ref()
+                    .and_then(|timeouts| timeouts.total_ms),
+                Some(900_000)
+            );
+            assert_eq!(
+                plan.headers.get("authorization").map(String::as_str),
+                Some("Bearer codex-search-access-token")
+            );
+            assert_eq!(
+                plan.headers.get("chatgpt-account-id").map(String::as_str),
+                Some("account-search-admin")
+            );
+            assert_eq!(
+                plan.headers.get("x-openai-fedramp").map(String::as_str),
+                Some("true")
+            );
+            assert_eq!(
+                plan.headers.get("originator").map(String::as_str),
+                Some("codex_cli_rs")
+            );
+            assert!(plan
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.starts_with("codex_cli_rs/")));
+            assert!(!plan.headers.contains_key("openai-beta"));
+            assert!(!plan
+                .headers
+                .contains_key("x-openai-internal-codex-responses-lite"));
+            assert_ne!(
+                plan.headers.get("accept").map(String::as_str),
+                Some("text/event-stream")
+            );
+
+            let body = plan.body.json_body.as_ref().expect("search json body");
+            assert_eq!(
+                body["id"],
+                json!("aether-model-test-provider-query-search-trace")
+            );
+            assert_eq!(body["model"], json!("gpt-5.6-sol"));
+            assert_eq!(body["input"], json!("find current OpenAI documentation"));
+            assert_eq!(
+                body["commands"]["search_query"][0]["q"],
+                json!("OpenAI Codex Search")
+            );
+            assert!(body.get("stream").is_none());
+            assert!(body.get("store").is_none());
+            assert!(body.get("service_tier").is_none());
+            assert!(body.get("unknown_field").is_none());
+
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "output": "search result"
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 21
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-codex-search", "Codex Search", 10);
+    provider.provider_type = "codex".to_string();
+    provider.request_timeout_secs = Some(900.0);
+    let mut endpoint = sample_endpoint(
+        "endpoint-codex-search",
+        "provider-codex-search",
+        "openai:search",
+        "https://chatgpt.com/backend-api/codex",
+    );
+    endpoint.config = Some(json!({"upstream_stream_policy": "force_stream"}));
+    let mut key = sample_key(
+        "key-codex-search",
+        "provider-codex-search",
+        "openai:search",
+        "codex-search-access-token",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        aether_crypto::encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"codex","account_id":"account-search-admin","is_fedramp":true}"#,
+        )
+        .expect("auth config should encrypt"),
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![key],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-query/test-model-failover"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-codex-search",
+            "mode": "pool",
+            "model": "gpt-5.6-sol",
+            "failover_models": ["gpt-5.6-sol"],
+            "api_format": "openai:search",
+            "endpoint_id": "endpoint-codex-search",
+            "request_id": "provider-query-search-trace",
+            "request_body": {
+                "model": "gpt-5.6-sol",
+                "input": "find current OpenAI documentation",
+                "commands": {
+                    "search_query": [{"q": "OpenAI Codex Search"}]
+                },
+                "max_output_tokens": 256,
+                "stream": true,
+                "store": false,
+                "service_tier": "priority",
+                "unknown_field": true
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true), "payload={payload}");
+    assert_eq!(
+        payload["attempts"][0]["request_body"]["id"],
+        json!("aether-model-test-provider-query-search-trace")
+    );
+    assert_eq!(
+        payload["attempts"][0]["response_body"]["output"],
+        json!("search result")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[test]
 fn gateway_routes_grok_responses_admin_pool_model_test_through_grok_runtime() {
     run_provider_query_test(
         "gateway_routes_grok_responses_admin_pool_model_test_through_grok_runtime",
@@ -3837,13 +4027,12 @@ async fn gateway_handles_openai_responses_test_model_locally_impl() {
                     .and_then(|value| value.as_str()),
                 Some(prompt)
             );
-            assert_eq!(
-                plan.body
-                    .json_body
-                    .as_ref()
-                    .and_then(|body| body.get("instructions")),
-                Some(&json!(""))
-            );
+            assert!(plan
+                .body
+                .json_body
+                .as_ref()
+                .and_then(|body| body.get("instructions"))
+                .is_none());
             assert_eq!(
                 plan.body
                     .json_body
@@ -3856,7 +4045,7 @@ async fn gateway_handles_openai_responses_test_model_locally_impl() {
                 .json_body
                 .as_ref()
                 .and_then(|body| body.get("prompt_cache_key"))
-                .is_some());
+                .is_none());
             Json(json!({
                 "request_id": plan.request_id,
                 "candidate_id": plan.candidate_id,
@@ -3960,8 +4149,8 @@ async fn gateway_handles_openai_image_test_model_locally_impl() {
             assert_eq!(plan.client_api_format, "openai:image");
             assert_eq!(plan.provider_api_format, "openai:image");
             assert_eq!(plan.model_name.as_deref(), Some("gpt-image-1"));
-            assert_eq!(plan.url, "https://api.openai.example/v1/responses");
-            assert!(plan.stream);
+            assert_eq!(plan.url, "https://api.openai.example/v1/images/generations");
+            assert!(!plan.stream);
             assert_eq!(
                 plan.headers.get("authorization").map(String::as_str),
                 Some("Bearer sk-test-image")
@@ -3971,38 +4160,42 @@ async fn gateway_handles_openai_image_test_model_locally_impl() {
                     .json_body
                     .as_ref()
                     .and_then(|body| body.get("model")),
-                Some(&json!(crate::ai_serving::CODEX_OPENAI_IMAGE_INTERNAL_MODEL))
+                Some(&json!("gpt-image-1"))
             );
             assert_eq!(
                 plan.body
                     .json_body
                     .as_ref()
-                    .and_then(|body| body.get("input"))
-                    .and_then(|input| input.as_array())
-                    .and_then(|items| items.first())
-                    .and_then(|item| item.get("content"))
+                    .and_then(|body| body.get("prompt"))
                     .and_then(|value| value.as_str()),
                 Some("Draw a small blue square")
             );
+            assert!(plan
+                .body
+                .json_body
+                .as_ref()
+                .is_some_and(|body| body.get("stream").is_none()));
             Json(json!({
                 "request_id": plan.request_id,
                 "candidate_id": plan.candidate_id,
                 "status_code": 200,
                 "headers": {
-                    "content-type": "text/event-stream"
+                    "content-type": "application/json"
                 },
                 "body": {
-                    "body_bytes_b64": base64::engine::general_purpose::STANDARD.encode(
-                        concat!(
-                            "event: response.created\n",
-                            "data: {\"type\":\"response.created\",\"response\":{\"created_at\":1776839946}}\n\n",
-                            "event: response.output_item.done\n",
-                            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"image_generation_call\",\"output_format\":\"png\",\"revised_prompt\":\"revised prompt\",\"result\":\"aGVsbG8=\"}}\n\n",
-                            "event: response.completed\n",
-                            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_img_123\",\"model\":\"gpt-image-1\",\"status\":\"completed\",\"tool_usage\":{\"image_gen\":{\"input_tokens\":171,\"output_tokens\":1372,\"total_tokens\":1543}}}}\n\n"
-                        )
-                        .as_bytes()
-                    )
+                    "json_body": {
+                        "created": 1776839946,
+                        "model": "gpt-image-1",
+                        "data": [{
+                            "b64_json": "aGVsbG8=",
+                            "revised_prompt": "revised prompt"
+                        }],
+                        "usage": {
+                            "input_tokens": 171,
+                            "output_tokens": 1372,
+                            "total_tokens": 1543
+                        }
+                    }
                 },
                 "telemetry": {
                     "elapsed_ms": 19
@@ -4125,7 +4318,7 @@ async fn gateway_reports_transport_unsupported_reason_for_non_kiro_provider_impl
     assert_eq!(
         payload["error"],
         json!(
-            "Rust local provider-query model test cannot execute endpoint format gemini:generate_content (transport_antigravity_auth_unsupported)"
+            "Rust local provider-query model test cannot execute endpoint format gemini:generate_content (transport_antigravity_auth_config_missing)"
         )
     );
 
@@ -4299,6 +4492,204 @@ async fn gateway_handles_antigravity_endpoint_test_model_locally_impl() {
     assert_eq!(
         payload["data"]["response"]["choices"][0]["message"]["content"],
         json!("Hello from Antigravity EndpointTest")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[test]
+fn gateway_hydrates_antigravity_project_id_from_load_code_assist_for_test_model() {
+    run_provider_query_test(
+        "gateway_hydrates_antigravity_project_id_from_load_code_assist_for_test_model",
+        gateway_hydrates_antigravity_project_id_from_load_code_assist_for_test_model_impl,
+    );
+}
+
+async fn gateway_hydrates_antigravity_project_id_from_load_code_assist_for_test_model_impl() {
+    let seen_urls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen_urls_clone = Arc::clone(&seen_urls);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let seen_urls_inner = Arc::clone(&seen_urls_clone);
+            async move {
+                seen_urls_inner
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(plan.url.clone());
+                if plan.url == "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+                {
+                    assert_eq!(plan.model_name.as_deref(), Some("loadCodeAssist"));
+                    assert_eq!(
+                        plan.headers.get("authorization").map(String::as_str),
+                        Some("Bearer cached-antigravity-token")
+                    );
+                    assert_eq!(
+                        plan.body.json_body.as_ref().and_then(|body| body
+                            .get("metadata")
+                            .and_then(|metadata| metadata.get("pluginType"))),
+                        Some(&json!("GEMINI"))
+                    );
+                    return Json(json!({
+                        "request_id": plan.request_id,
+                        "candidate_id": plan.candidate_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "cloudaicompanionProject": {
+                                    "id": "project-from-antigravity-load-code-assist"
+                                },
+                                "currentTier": {
+                                    "id": "free"
+                                }
+                            }
+                        }
+                    }));
+                }
+
+                assert_eq!(
+                    plan.url,
+                    "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent"
+                );
+                assert_eq!(plan.provider_id, "provider-antigravity");
+                assert_eq!(plan.endpoint_id, "endpoint-antigravity-gemini");
+                assert_eq!(plan.key_id, "key-antigravity-gemini");
+                assert_eq!(plan.provider_api_format, "gemini:generate_content");
+                assert!(!plan.stream);
+                assert_eq!(
+                    plan.body.json_body.as_ref().unwrap()["project"],
+                    json!("project-from-antigravity-load-code-assist")
+                );
+                assert_eq!(
+                    plan.body.json_body.as_ref().unwrap()["requestType"],
+                    json!("endpoint_test")
+                );
+                assert_eq!(
+                    plan.body.json_body.as_ref().unwrap()["model"],
+                    json!("gemini-3.1-flash-lite")
+                );
+                Json(json!({
+                    "request_id": plan.request_id,
+                    "candidate_id": plan.candidate_id,
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {
+                            "response": {
+                                "candidates": [{
+                                    "content": {
+                                        "parts": [
+                                            {"text": "Hello from hydrated Antigravity"}
+                                        ],
+                                        "role": "model"
+                                    },
+                                    "finishReason": "STOP",
+                                    "index": 0
+                                }],
+                                "modelVersion": "gemini-3.1-flash-lite",
+                                "usageMetadata": {
+                                    "promptTokenCount": 2,
+                                    "candidatesTokenCount": 4,
+                                    "totalTokenCount": 6
+                                }
+                            },
+                            "responseId": "resp-antigravity-hydrated-test-123"
+                        }
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 23
+                    }
+                }))
+            }
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-antigravity", "Antigravity", 10);
+    provider.provider_type = "antigravity".to_string();
+    let mut key = sample_key(
+        "key-antigravity-gemini",
+        "provider-antigravity",
+        "gemini:generate_content",
+        "cached-antigravity-token",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        aether_crypto::encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"antigravity","refresh_token":"rt-antigravity-123"}"#,
+        )
+        .expect("auth config should encrypt"),
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-antigravity-gemini",
+            "provider-antigravity",
+            "gemini:generate_content",
+            "https://daily-cloudcode-pa.googleapis.com",
+        )],
+        vec![key],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(Arc::clone(
+                    &provider_catalog_repository,
+                ))
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-antigravity",
+            "model": "gemini-3.1-flash-lite",
+            "api_format": "gemini:generate_content",
+            "message": "Say hello"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(
+        payload["data"]["response"]["choices"][0]["message"]["content"],
+        json!("Hello from hydrated Antigravity")
+    );
+    assert_eq!(
+        *seen_urls.lock().expect("mutex should lock"),
+        vec![
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist".to_string(),
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent".to_string(),
+        ]
+    );
+    let reloaded = provider_catalog_repository
+        .list_keys_by_ids(&["key-antigravity-gemini".to_string()])
+        .await
+        .expect("key should reload");
+    assert_eq!(
+        reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("antigravity"))
+            .and_then(|metadata| metadata.get("project_id")),
+        Some(&json!("project-from-antigravity-load-code-assist"))
     );
 
     gateway_handle.abort();

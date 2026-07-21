@@ -1,34 +1,15 @@
 import type { EndpointHealthDetail } from '@/api/endpoints'
+import { compareApiFormats } from '@/api/endpoints/types/api-format'
 import { defaultLocale, translateLegacyText, type Locale } from '@/i18n/messages'
 
 // 端点状态枚举
 export type EndpointStatus = 'disabled' | 'no_keys' | 'keys_disabled' | 'available'
 
-const ENDPOINT_SORT_ORDER = [
-  'claude:messages',
-  'openai:chat',
-  'openai:responses',
-  'openai:responses:compact',
-  'openai:embedding',
-  'openai:rerank',
-  'gemini:generate_content',
-  'gemini:embedding',
-  'openai:video',
-  'gemini:video',
-  'gemini:files',
-  'jina:embedding',
-  'jina:rerank',
-  'doubao:embedding',
-  'aliyun:multimodal_embedding',
-]
-
 /**
  * 端点排序
  */
 export function sortEndpoints<T extends { api_format: string }>(endpoints: T[]): T[] {
-  return [...endpoints].sort((a, b) => {
-    return ENDPOINT_SORT_ORDER.indexOf(a.api_format) - ENDPOINT_SORT_ORDER.indexOf(b.api_format)
-  })
+  return [...endpoints].sort((a, b) => compareApiFormats(a.api_format, b.api_format))
 }
 
 /**

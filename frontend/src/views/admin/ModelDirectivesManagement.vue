@@ -1,8 +1,8 @@
 <template>
   <PageContainer>
     <PageHeader
-      title="模型后缀参数"
-      description="允许通过模型名后缀覆盖推理参数"
+      title="模型参数指令"
+      description="统一管理模型名后缀对应的参数映射"
     >
       <template #actions>
         <Button
@@ -28,7 +28,6 @@
           :config="modelDirectivesConfig"
           :loading="loading || saving"
           @save="saveConfig"
-          @update:config="modelDirectivesConfig = $event"
         />
       </Card>
     </div>
@@ -65,27 +64,27 @@ async function loadConfig() {
     const normalized = normalizeModelDirectivesConfig(response.value)
     modelDirectivesConfig.value = normalized
   } catch (err) {
-    error('获取模型后缀参数配置失败')
-    log.error('获取模型后缀参数配置失败:', err)
+    error('获取模型参数指令配置失败')
+    log.error('获取模型参数指令配置失败:', err)
   } finally {
     loading.value = false
   }
 }
 
-async function saveConfig() {
+async function saveConfig(nextConfig: ModelDirectivesConfig) {
   saving.value = true
   try {
-    const normalized = normalizeModelDirectivesConfig(modelDirectivesConfig.value)
-    modelDirectivesConfig.value = normalized
+    const normalized = normalizeModelDirectivesConfig(nextConfig)
     await adminApi.updateSystemConfig(
       'model_directives',
       normalized,
-      '模型后缀参数配置'
+      '模型参数指令配置'
     )
-    success('模型后缀参数配置已保存')
+    modelDirectivesConfig.value = normalized
+    success('模型参数指令配置已保存')
   } catch (err) {
-    error(getErrorMessage(err, '保存模型后缀参数配置失败'))
-    log.error('保存模型后缀参数配置失败:', err)
+    error(getErrorMessage(err, '保存模型参数指令配置失败'))
+    log.error('保存模型参数指令配置失败:', err)
   } finally {
     saving.value = false
   }

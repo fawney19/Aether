@@ -6,6 +6,7 @@ description = "Tunnel agent for Aether"
 
 [dependencies]
 aether-contracts.workspace = true
+aether-gateway-tunnel.workspace = true
 aether-http.workspace = true
 aether-runtime.workspace = true
 aether-runtime-state.workspace = true

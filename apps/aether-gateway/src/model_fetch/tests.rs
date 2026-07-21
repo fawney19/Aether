@@ -311,6 +311,89 @@ async fn gateway_model_fetch_updates_key_and_syncs_provider_model_whitelist_asso
 }
 
 #[tokio::test]
+async fn codex_preset_model_fetch_associates_the_api_supported_review_model() {
+    let provider = StoredProviderCatalogProvider::new(
+        "provider-codex".to_string(),
+        "codex".to_string(),
+        Some("https://chatgpt.com".to_string()),
+        "codex".to_string(),
+    )
+    .expect("provider should build")
+    .with_transport_fields(true, false, true, None, None, None, None, None, None);
+    let mut key = sample_key("provider-codex", "key-codex");
+    key.locked_models = None;
+    key.model_include_patterns = None;
+    key.model_exclude_patterns = None;
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let global_model_repository = Arc::new(
+        InMemoryGlobalModelReadRepository::seed(Vec::new()).with_admin_global_models(vec![
+            sample_global_model(
+                "global-model-codex-auto-review",
+                "codex-auto-review",
+                &["codex-auto-review"],
+            ),
+        ]),
+    );
+    let data_state = crate::data::GatewayDataState::disabled()
+        .attach_provider_catalog_repository_for_tests(Arc::clone(&provider_catalog_repository))
+        .with_global_model_repository_for_tests(Arc::clone(&global_model_repository))
+        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(data_state);
+
+    let summary = perform_model_fetch_once(&state)
+        .await
+        .expect("Codex preset model fetch should succeed");
+    assert_eq!(
+        summary,
+        ModelFetchRunSummary {
+            attempted: 1,
+            succeeded: 1,
+            failed: 0,
+            skipped: 0,
+        }
+    );
+
+    let updated_key = provider_catalog_repository
+        .list_keys_by_ids(&["key-codex".to_string()])
+        .await
+        .expect("keys should load")
+        .into_iter()
+        .next()
+        .expect("updated key should exist");
+    assert!(updated_key
+        .allowed_models
+        .as_ref()
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|models| models.iter().any(|model| model == "codex-auto-review")));
+    assert!(updated_key
+        .upstream_metadata
+        .as_ref()
+        .is_some_and(|metadata| {
+            metadata["codex_models"]["cards"]["codex-auto-review"]["supported_in_api"] == true
+        }));
+
+    let provider_models = global_model_repository
+        .list_admin_provider_models(&AdminProviderModelListQuery {
+            provider_id: "provider-codex".to_string(),
+            is_active: None,
+            offset: 0,
+            limit: 10_000,
+        })
+        .await
+        .expect("provider models should load");
+    assert!(provider_models.iter().any(|model| {
+        model.provider_model_name == "codex-auto-review"
+            && model.global_model_id == "global-model-codex-auto-review"
+    }));
+}
+
+#[tokio::test]
 async fn gateway_model_fetch_updates_key_and_syncs_provider_model_whitelist_associations_without_execution_runtime_override(
 ) {
     #[derive(Debug, Clone, PartialEq, Eq)]

@@ -116,7 +116,7 @@ pub(super) async fn run_proxy_upgrade_rollout_once(state: &AppState) -> Result<(
     for probe in probes {
         match state
             .tunnel
-            .probe_node_url(&probe.node_id, &probe.url, probe.timeout_secs)
+            .probe_node_url_routed(state, &probe.node_id, &probe.url, probe.timeout_secs)
             .await
         {
             Ok(status) if (200..300).contains(&status) => {

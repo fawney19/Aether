@@ -2,9 +2,19 @@
   <div class="px-4 sm:px-6 py-3 sm:py-3.5 border-b border-border/60">
     <div class="flex flex-col gap-3 xl:hidden">
       <div class="min-w-0">
-        <h3 class="text-base font-semibold">
-          {{ legacyT('号池管理') }}
-        </h3>
+        <div class="flex min-w-0 items-center gap-2">
+          <h3 class="text-base font-semibold">
+            {{ legacyT('号池管理') }}
+          </h3>
+          <span
+            v-if="selectedCount > 0"
+            class="shrink-0 text-xs font-medium tabular-nums text-primary"
+            aria-live="polite"
+            data-testid="pool-selected-count-mobile"
+          >
+            {{ selectedCountLabel }}
+          </span>
+        </div>
         <p
           v-if="metaText"
           class="mt-1 text-xs text-muted-foreground"
@@ -76,12 +86,9 @@
           class="min-w-0 flex-1 flex justify-center"
         >
           <Button
-            v-if="action.key !== 'providerProxy' && action.key !== 'refresh'"
             variant="ghost"
             size="icon"
             class="h-8 w-8 shrink-0"
-            :class="action.key === 'toggleProvider' ? providerToggleButtonClass : ''"
-            :disabled="action.key === 'toggleProvider' ? togglingProviderStatus : false"
             :title="action.title"
             @click="emit(action.event)"
           >
@@ -90,20 +97,61 @@
               class="w-3.5 h-3.5"
             />
           </Button>
+        </div>
 
-          <ProviderProxyPopover
-            v-else-if="action.key === 'providerProxy'"
-            :open="providerProxyMobileOpen"
-            :node-id="providerProxyNodeId"
-            :saving="savingProviderProxy"
-            :title="providerProxyButtonTitle"
-            @update:open="emit('update:providerProxyMobileOpen', $event)"
-            @select="emit('selectProviderProxy', $event)"
-            @clear="emit('clearProviderProxy')"
-          />
+        <div class="min-w-0 flex-1 flex justify-center">
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-8 w-8 shrink-0"
+            :class="isAllFilteredSelected ? 'bg-primary/10 text-primary' : ''"
+            :disabled="selectionDisabled"
+            :aria-pressed="isAllFilteredSelected"
+            :title="legacyT(isAllFilteredSelected ? '取消全选' : '全选')"
+            data-testid="pool-select-all-mobile"
+            @click="emit('toggleSelectAll')"
+          >
+            <SquareCheckBig class="h-3.5 w-3.5" />
+          </Button>
+        </div>
 
+        <div class="min-w-0 flex-1 flex justify-center">
+          <DropdownMenu :modal="false">
+            <DropdownMenuTrigger
+              as-child
+              :disabled="batchActionsDisabled"
+            >
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8 shrink-0"
+                :disabled="batchActionsDisabled"
+                :title="legacyT('选择执行动作')"
+                :aria-label="legacyT('选择执行动作')"
+                data-testid="pool-batch-actions-mobile"
+              >
+                <ListChecks class="h-3.5 w-3.5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              class="w-48"
+            >
+              <DropdownMenuItem
+                v-for="action in POOL_BATCH_ACTION_OPTIONS"
+                :key="`mobile-${action.value}`"
+                :class="action.destructive ? 'text-destructive focus:text-destructive' : ''"
+                :data-testid="`pool-batch-action-${action.value}-mobile`"
+                @select="emit('batchAction', action.value)"
+              >
+                {{ legacyT(action.label) }}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+
+        <div class="min-w-0 flex-1 flex justify-center">
           <RefreshButton
-            v-else
             :loading="refreshLoading"
             :title="refreshTitle"
             @click="emit('refresh')"
@@ -193,36 +241,12 @@
         />
 
         <Button
-          v-if="hasSelectedProvider"
-          variant="ghost"
-          size="icon"
-          class="h-8 w-8"
-          :title="legacyT('添加账号')"
-          @click="emit('import')"
-        >
-          <Upload class="w-3.5 h-3.5" />
-        </Button>
-
-        <ProviderProxyPopover
-          v-if="hasSelectedProvider"
-          :open="providerProxyDesktopOpen"
-          :node-id="providerProxyNodeId"
-          :saving="savingProviderProxy"
-          :title="providerProxyButtonTitle"
-          @update:open="emit('update:providerProxyDesktopOpen', $event)"
-          @select="emit('selectProviderProxy', $event)"
-          @clear="emit('clearProviderProxy')"
-        />
-
-        <Button
-          v-for="action in desktopPostProxyActions"
+          v-for="action in desktopActions"
           v-show="hasSelectedProvider"
           :key="action.key"
           variant="ghost"
           size="icon"
           class="h-8 w-8"
-          :class="action.key === 'toggleProvider' ? providerToggleButtonClass : ''"
-          :disabled="action.key === 'toggleProvider' ? togglingProviderStatus : false"
           :data-testid="action.key === 'demandMetrics' ? 'pool-demand-metrics-button' : undefined"
           :title="action.title"
           @click="emit(action.event)"
@@ -232,6 +256,57 @@
             class="w-3.5 h-3.5"
           />
         </Button>
+
+        <Button
+          v-if="hasSelectedProvider"
+          variant="ghost"
+          size="icon"
+          class="h-8 w-8"
+          :class="isAllFilteredSelected ? 'bg-primary/10 text-primary' : ''"
+          :disabled="selectionDisabled"
+          :aria-pressed="isAllFilteredSelected"
+          :title="legacyT(isAllFilteredSelected ? '取消全选' : '全选')"
+          data-testid="pool-select-all-desktop"
+          @click="emit('toggleSelectAll')"
+        >
+          <SquareCheckBig class="h-3.5 w-3.5" />
+        </Button>
+
+        <DropdownMenu
+          v-if="hasSelectedProvider"
+          :modal="false"
+        >
+          <DropdownMenuTrigger
+            as-child
+            :disabled="batchActionsDisabled"
+          >
+            <Button
+              variant="ghost"
+              size="icon"
+              class="h-8 w-8"
+              :disabled="batchActionsDisabled"
+              :title="legacyT('选择执行动作')"
+              :aria-label="legacyT('选择执行动作')"
+              data-testid="pool-batch-actions-desktop"
+            >
+              <ListChecks class="h-3.5 w-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            class="w-48"
+          >
+            <DropdownMenuItem
+              v-for="action in POOL_BATCH_ACTION_OPTIONS"
+              :key="`desktop-${action.value}`"
+              :class="action.destructive ? 'text-destructive focus:text-destructive' : ''"
+              :data-testid="`pool-batch-action-${action.value}-desktop`"
+              @select="emit('batchAction', action.value)"
+            >
+              {{ legacyT(action.label) }}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
 
         <RefreshButton
           :loading="refreshLoading"
@@ -248,17 +323,19 @@ import { computed } from 'vue'
 import {
   Activity,
   ChevronDown,
-  Edit,
-  Plug,
-  Power,
+  Eye,
+  ListChecks,
   Search,
   Settings2,
   SlidersHorizontal,
-  Upload,
-  Users,
+  SquareCheckBig,
 } from 'lucide-vue-next'
 import {
   Button,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
   Input,
   Select,
   SelectContent,
@@ -267,31 +344,24 @@ import {
   SelectValue,
 } from '@/components/ui'
 import RefreshButton from '@/components/ui/refresh-button.vue'
-import ProviderProxyPopover from '@/features/pool/components/ProviderProxyPopover.vue'
 import { useI18n } from '@/i18n'
 import type { PoolOverviewItem } from '@/api/endpoints/pool'
+import {
+  POOL_BATCH_ACTION_OPTIONS,
+  type PoolBatchActionValue,
+} from '@/features/pool/utils/poolBatchActions'
 
 type HeaderActionEvent =
-  | 'import'
   | 'scheduling'
-  | 'accountBatch'
-  | 'editProvider'
-  | 'editEndpoint'
+  | 'viewProvider'
   | 'demandMetrics'
   | 'advanced'
-  | 'toggleProvider'
 
 type HeaderActionKey =
-  | 'import'
-  | 'providerProxy'
   | 'scheduling'
-  | 'accountBatch'
-  | 'editProvider'
-  | 'editEndpoint'
+  | 'viewProvider'
   | 'demandMetrics'
   | 'advanced'
-  | 'toggleProvider'
-  | 'refresh'
 
 interface HeaderAction {
   key: HeaderActionKey
@@ -308,41 +378,30 @@ const props = withDefaults(defineProps<{
   statusOptions: Array<{ value: string, label: string }>
   search: string
   metaText?: string
-  providerProxyNodeId?: string | null
-  providerProxyMobileOpen: boolean
-  providerProxyDesktopOpen: boolean
-  providerProxyButtonTitle: string
-  savingProviderProxy: boolean
   poolSchedulingLabel: string
   showAdaptiveHotPoolMetricsButton: boolean
-  providerToggleButtonTitle: string
-  providerToggleButtonClass?: string
-  togglingProviderStatus: boolean
+  selectedCount?: number
+  isAllFilteredSelected: boolean
+  selectionDisabled: boolean
+  batchActionsDisabled: boolean
   refreshLoading: boolean
   refreshTitle: string
 }>(), {
   metaText: '',
-  providerProxyNodeId: null,
-  providerToggleButtonClass: '',
+  selectedCount: 0,
 })
 
 const emit = defineEmits<{
   'update:providerId': [value: string]
   'update:status': [value: string]
   'update:search': [value: string]
-  'update:providerProxyMobileOpen': [value: boolean]
-  'update:providerProxyDesktopOpen': [value: boolean]
-  import: []
   scheduling: []
-  accountBatch: []
-  editProvider: []
-  editEndpoint: []
+  viewProvider: []
   demandMetrics: []
   advanced: []
-  toggleProvider: []
+  toggleSelectAll: []
+  batchAction: [action: PoolBatchActionValue]
   refresh: []
-  selectProviderProxy: [nodeId: string]
-  clearProviderProxy: []
 }>()
 
 const { legacyT } = useI18n()
@@ -364,38 +423,31 @@ const searchModel = computed({
 
 const hasSelectedProvider = computed(() => Boolean(props.providerId))
 
-const mobileActions = computed(() => {
-  const actions: Array<HeaderAction | { key: 'providerProxy' | 'refresh' }> = [
-    { key: 'import', title: legacyT('添加账号'), event: 'import', icon: Upload },
-    { key: 'providerProxy' },
+const selectedCountLabel = computed(() => legacyT(`已选 ${Math.max(0, props.selectedCount)} 个`))
+
+const mobileActions = computed<HeaderAction[]>(() => {
+  const actions: HeaderAction[] = [
+    { key: 'viewProvider', title: legacyT('查看详情'), event: 'viewProvider', icon: Eye },
     { key: 'scheduling', title: legacyT('号池调度'), event: 'scheduling', icon: SlidersHorizontal },
-    { key: 'accountBatch', title: legacyT('账号批量操作'), event: 'accountBatch', icon: Users },
-    { key: 'editProvider', title: legacyT('编辑提供商'), event: 'editProvider', icon: Edit },
-    { key: 'editEndpoint', title: legacyT('编辑端点'), event: 'editEndpoint', icon: Plug },
   ]
   if (props.showAdaptiveHotPoolMetricsButton) {
     actions.push({ key: 'demandMetrics', title: legacyT('查看自适应热池指标'), event: 'demandMetrics', icon: Activity })
   }
   actions.push(
     { key: 'advanced', title: legacyT('高级设置'), event: 'advanced', icon: Settings2 },
-    { key: 'toggleProvider', title: props.providerToggleButtonTitle, event: 'toggleProvider', icon: Power },
-    { key: 'refresh' },
   )
   return actions
 })
 
-const desktopPostProxyActions = computed<HeaderAction[]>(() => {
+const desktopActions = computed<HeaderAction[]>(() => {
   const actions: HeaderAction[] = [
-    { key: 'editProvider', title: legacyT('编辑提供商'), event: 'editProvider', icon: Edit },
-    { key: 'editEndpoint', title: legacyT('编辑端点'), event: 'editEndpoint', icon: Plug },
+    { key: 'viewProvider', title: legacyT('查看详情'), event: 'viewProvider', icon: Eye },
   ]
   if (props.showAdaptiveHotPoolMetricsButton) {
     actions.push({ key: 'demandMetrics', title: legacyT('查看自适应热池指标'), event: 'demandMetrics', icon: Activity })
   }
   actions.push(
     { key: 'advanced', title: legacyT('高级设置'), event: 'advanced', icon: Settings2 },
-    { key: 'accountBatch', title: legacyT('账号'), event: 'accountBatch', icon: Users },
-    { key: 'toggleProvider', title: props.providerToggleButtonTitle, event: 'toggleProvider', icon: Power },
   )
   return actions
 })

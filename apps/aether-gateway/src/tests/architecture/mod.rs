@@ -119,6 +119,23 @@ pub(super) fn workspace_file_exists(root_relative_path: &str) -> bool {
         .exists()
 }
 
+pub(super) fn workspace_files_with_extension(
+    root_relative_path: &str,
+    extension: &str,
+) -> Vec<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(root_relative_path);
+    let mut files = fs::read_dir(root)
+        .expect("workspace directory should be readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some(extension))
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+
 pub(super) fn collect_workspace_rust_files(root_relative_path: &str) -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -179,3 +196,4 @@ mod ai_serving;
 mod runtime_and_security;
 mod sql_and_data;
 mod usage;
+mod workspace_tiers;

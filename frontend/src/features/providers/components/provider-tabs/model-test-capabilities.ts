@@ -1,4 +1,7 @@
-import { normalizeApiFormatAlias } from '@/api/endpoints/types/api-format'
+import {
+  apiFormatPermissionCovers,
+  normalizeApiFormatAlias,
+} from '@/api/endpoints/types/api-format'
 import type { ModelTestCapabilities, OpenAiImageModelTestCapability } from '@/api/endpoints/types'
 
 export type ModelTestEndpointSource = {
@@ -71,7 +74,7 @@ export function modelTestKeySupportsEndpoint(
   const keyFormats = normalizeModelTestStringList(key.api_formats)
   if (keyFormats.length === 0) return true
 
-  return keyFormats.some(format => normalizeApiFormatAlias(format) === endpointFormat)
+  return keyFormats.some(format => apiFormatPermissionCovers(format, endpointFormat))
 }
 
 export function isModelTestableEndpoint(

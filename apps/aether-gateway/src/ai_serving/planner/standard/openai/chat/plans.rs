@@ -31,11 +31,12 @@ pub(super) fn openai_chat_upstream_is_stream_for_candidate(
         crate::ai_serving::transport::kiro::is_kiro_claude_messages_transport(
             transport,
             provider_api_format,
-        ) || openai_chat_gemini_cli_client_stream_requires_upstream_streaming(
-            transport,
-            provider_api_format,
-            client_is_stream,
-        );
+        ) || openai_chat_antigravity_requires_upstream_streaming(transport, provider_api_format)
+            || openai_chat_gemini_cli_client_stream_requires_upstream_streaming(
+                transport,
+                provider_api_format,
+                client_is_stream,
+            );
     resolve_upstream_is_stream_for_provider(
         transport.endpoint.config.as_ref(),
         transport.provider.provider_type.as_str(),
@@ -43,6 +44,15 @@ pub(super) fn openai_chat_upstream_is_stream_for_candidate(
         client_is_stream,
         hard_requires_streaming,
     )
+}
+
+fn openai_chat_antigravity_requires_upstream_streaming(
+    transport: &GatewayProviderTransportSnapshot,
+    provider_api_format: &str,
+) -> bool {
+    crate::ai_serving::transport::antigravity::is_antigravity_provider_transport(transport)
+        && crate::ai_serving::normalize_api_format_alias(provider_api_format)
+            == "gemini:generate_content"
 }
 
 fn openai_chat_gemini_cli_client_stream_requires_upstream_streaming(
@@ -199,6 +209,26 @@ mod tests {
             &gemini_cli,
             "gemini:generate_content",
             false,
+        ));
+    }
+
+    #[test]
+    fn openai_chat_policy_resolver_preserves_antigravity_streaming_envelope() {
+        let antigravity = sample_transport(
+            "antigravity",
+            "gemini:generate_content",
+            Some(json!({"upstream_stream_policy": "force_non_stream"})),
+        );
+
+        assert!(openai_chat_upstream_is_stream_for_candidate(
+            &antigravity,
+            "gemini:generate_content",
+            false,
+        ));
+        assert!(openai_chat_upstream_is_stream_for_candidate(
+            &antigravity,
+            "gemini:generate_content",
+            true,
         ));
     }
 }

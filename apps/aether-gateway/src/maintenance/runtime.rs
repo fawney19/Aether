@@ -16,6 +16,8 @@ mod cleanup_runs;
 mod config;
 #[path = "runtime/db_maintenance.rs"]
 mod db_maintenance;
+#[path = "runtime/fixed_provider_reconciliation.rs"]
+mod fixed_provider_reconciliation;
 #[path = "runtime/oauth_token_refresh.rs"]
 mod oauth_token_refresh;
 #[path = "runtime/pending_cleanup.rs"]
@@ -71,6 +73,9 @@ pub(crate) use cleanup_runs::{
 };
 use config::*;
 use db_maintenance::*;
+pub(crate) use fixed_provider_reconciliation::{
+    perform_fixed_provider_reconciliation_once, spawn_fixed_provider_reconciliation_task,
+};
 pub(crate) use oauth_token_refresh::{
     perform_oauth_token_refresh_once, OAuthTokenRefreshRunSummary,
 };

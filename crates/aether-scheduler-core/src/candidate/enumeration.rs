@@ -27,6 +27,7 @@ fn enumerate_minimal_candidate_selection_inner(
     let EnumerateMinimalCandidateSelectionInput {
         rows,
         normalized_api_format,
+        request_operation,
         requested_model_name,
         resolved_global_model_name,
         require_streaming,
@@ -63,16 +64,18 @@ fn enumerate_minimal_candidate_selection_inner(
             continue;
         }
         let Some((selected_provider_model_name, mapping_matched_model)) =
-            crate::resolve_provider_model_name_with_model_directives(
+            crate::resolve_provider_model_name_with_model_directives_and_request_operation(
                 &row,
                 requested_model_name,
                 normalized_api_format,
                 enable_model_directives,
+                request_operation,
             )
         else {
             continue;
         };
 
+        let supports_streaming = row.supports_streaming();
         candidates.push(SchedulerMinimalCandidateSelectionCandidate {
             provider_id: row.provider_id,
             provider_name: row.provider_name,
@@ -93,6 +96,7 @@ fn enumerate_minimal_candidate_selection_inner(
             global_model_id: row.global_model_id,
             global_model_name: row.global_model_name,
             selected_provider_model_name,
+            supports_streaming,
             mapping_matched_model,
         });
     }

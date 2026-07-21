@@ -1,5 +1,6 @@
 use crate::image_capabilities::{
-    openai_image_normalize_options_for_provider, openai_image_provider_max_generation_count,
+    openai_image_normalize_options_for_provider,
+    openai_image_provider_max_generation_count_for_model,
 };
 use serde_json::{json, Value};
 
@@ -24,16 +25,21 @@ impl AdminProviderOpenAiImageTestCapability {
 
 pub(crate) fn admin_provider_openai_image_test_capability(
     provider_type: &str,
+    provider_model: Option<&str>,
 ) -> AdminProviderOpenAiImageTestCapability {
     AdminProviderOpenAiImageTestCapability {
-        max_generation_count: openai_image_provider_max_generation_count(provider_type),
+        max_generation_count: openai_image_provider_max_generation_count_for_model(
+            provider_type,
+            provider_model,
+        ),
     }
 }
 
 pub(crate) fn admin_provider_openai_image_normalize_options(
     provider_type: &str,
+    provider_model: Option<&str>,
 ) -> crate::ai_serving::OpenAiImageNormalizeOptions {
-    openai_image_normalize_options_for_provider(provider_type)
+    openai_image_normalize_options_for_provider(provider_type, provider_model)
 }
 
 pub(crate) fn admin_provider_model_test_capabilities_payload(
@@ -47,7 +53,7 @@ pub(crate) fn admin_provider_model_test_capabilities_payload(
         provider_type.eq_ignore_ascii_case("grok") && model_id == GROK_IMAGE_EDIT_MODEL_ID;
     let openai_image = if supports_image_generation {
         Some(json!({
-            "max_generation_count": admin_provider_openai_image_test_capability(provider_type).max_generation_count,
+            "max_generation_count": admin_provider_openai_image_test_capability(provider_type, Some(model_id)).max_generation_count,
             "supports_generation": !is_grok_image_edit,
             "supports_edit": is_grok_image_edit,
         }))
@@ -103,6 +109,13 @@ mod tests {
         let payload = admin_provider_model_test_capabilities_payload("openai", "gpt-5.5", false);
 
         assert!(payload["openai:image"].is_null());
+    }
+
+    #[test]
+    fn dall_e_3_reports_its_model_specific_generation_limit() {
+        let payload = admin_provider_model_test_capabilities_payload("openai", "dall-e-3", true);
+
+        assert_eq!(payload["openai:image"]["max_generation_count"], 1);
     }
 
     #[test]

@@ -20,7 +20,7 @@ use http::StatusCode;
 use serde_json::json;
 
 use super::super::{
-    build_router_with_state, issue_test_admin_access_token, start_server, AppState,
+    build_router_with_state, hash_api_key, issue_test_admin_access_token, start_server, AppState,
 };
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
@@ -1114,6 +1114,36 @@ async fn gateway_handles_admin_user_batch_actions_locally() {
         "不能降级最后一个管理员账户"
     );
 
+    let last_admin_audit_demotion_response = client
+        .post(format!("{gateway_url}/api/admin/users/batch-action"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "selection": {
+                "user_ids": ["user-1"]
+            },
+            "action": "update_role",
+            "payload": {
+                "role": "audit_admin"
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(last_admin_audit_demotion_response.status(), StatusCode::OK);
+    let last_admin_audit_demotion_payload: serde_json::Value = last_admin_audit_demotion_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(last_admin_audit_demotion_payload["success"], 0);
+    assert_eq!(last_admin_audit_demotion_payload["failed"], 1);
+    assert_eq!(
+        last_admin_audit_demotion_payload["failures"][0]["reason"],
+        "不能降级最后一个管理员账户"
+    );
+
     let detail_response = client
         .get(format!("{gateway_url}/api/admin/users/user-1"))
         .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
@@ -1297,6 +1327,40 @@ async fn gateway_handles_admin_user_detail_routes_locally_with_trusted_admin_pri
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_rejects_demoting_the_last_active_admin() {
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_auth_users_for_tests([sample_admin_user_with_role(
+                "admin-1",
+                "admin",
+                "admin@example.com",
+                "admin",
+            )]),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    for role in ["user", "audit_admin"] {
+        let response = client
+            .put(format!("{gateway_url}/api/admin/users/admin-1"))
+            .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+            .json(&json!({ "role": role }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload: serde_json::Value = response.json().await.expect("json body should parse");
+        assert_eq!(payload["detail"], "不能降级最后一个管理员账户");
+    }
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]
@@ -1606,6 +1670,230 @@ async fn gateway_handles_admin_user_api_key_routes_locally_with_trusted_admin_pr
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn admin_created_user_keys_inherit_owner_group_policy() {
+    let mut admin_snapshot = sample_admin_api_key_snapshot("admin-user", "admin-seed-key");
+    admin_snapshot.user_role = "admin".to_string();
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![
+        (Some(hash_api_key("sk-admin-seed")), admin_snapshot),
+        (
+            Some(hash_api_key("sk-target-seed")),
+            sample_admin_api_key_snapshot("target-user", "target-seed-key"),
+        ),
+    ]));
+    let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
+        sample_admin_user_with_role("admin-user", "admin", "admin@example.com", "admin"),
+        sample_admin_user_with_role("target-user", "user", "target@example.com", "target"),
+    ]));
+
+    let admin_group = user_repository
+        .create_user_group(UpsertUserGroupRecord {
+            name: "Admin OpenAI".to_string(),
+            description: None,
+            priority: 10,
+            allowed_providers: Some(vec!["openai".to_string()]),
+            allowed_providers_mode: "specific".to_string(),
+            allowed_api_formats: Some(vec!["openai:responses".to_string()]),
+            allowed_api_formats_mode: "specific".to_string(),
+            allowed_models: Some(vec!["gpt-5.4".to_string()]),
+            allowed_models_mode: "specific".to_string(),
+            rate_limit: Some(100),
+            rate_limit_mode: "custom".to_string(),
+        })
+        .await
+        .expect("admin group should create")
+        .expect("admin group should exist");
+    user_repository
+        .add_user_to_group(&admin_group.id, "admin-user")
+        .await
+        .expect("admin group membership should create");
+
+    let target_group = user_repository
+        .create_user_group(UpsertUserGroupRecord {
+            name: "Target Claude".to_string(),
+            description: None,
+            priority: 10,
+            allowed_providers: Some(vec!["anthropic".to_string()]),
+            allowed_providers_mode: "specific".to_string(),
+            allowed_api_formats: Some(vec!["claude:messages".to_string()]),
+            allowed_api_formats_mode: "specific".to_string(),
+            allowed_models: Some(vec!["claude-sonnet-4-5".to_string()]),
+            allowed_models_mode: "specific".to_string(),
+            rate_limit: Some(30),
+            rate_limit_mode: "custom".to_string(),
+        })
+        .await
+        .expect("target group should create")
+        .expect("target group should exist");
+    user_repository
+        .add_user_to_group(&target_group.id, "target-user")
+        .await
+        .expect("target group membership should create");
+    user_repository
+        .update_user_feature_settings(
+            "admin-user",
+            Some(json!({"chat_pii_redaction": {"enabled": false}})),
+        )
+        .await
+        .expect("admin feature settings should update");
+    user_repository
+        .update_user_feature_settings(
+            "target-user",
+            Some(json!({"chat_pii_redaction": {"enabled": true}})),
+        )
+        .await
+        .expect("target feature settings should update");
+
+    let data_state = GatewayDataState::with_auth_api_key_repository_for_tests(auth_repository)
+        .with_user_reader(user_repository);
+    let app_state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(data_state);
+    let inspection_state = app_state.clone();
+    let gateway = build_router_with_state(app_state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/users/target-user/api-keys"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "admin-session")
+        .json(&json!({"name": "target-key"}))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("response should parse");
+    let plaintext_key = payload["key"].as_str().expect("plaintext key should exist");
+    let api_key_id = payload["id"].as_str().expect("key id should exist");
+
+    let resolved = inspection_state
+        .read_cached_auth_api_key_snapshot_by_key_hash(
+            &hash_api_key(plaintext_key),
+            chrono::Utc::now().timestamp().max(0) as u64,
+        )
+        .await
+        .expect("created key snapshot should resolve")
+        .expect("created key snapshot should exist");
+    assert_eq!(resolved.user_id, "target-user");
+    assert_eq!(
+        resolved.effective_allowed_providers(),
+        Some(&["anthropic".to_string()][..])
+    );
+    assert_eq!(
+        resolved.effective_allowed_api_formats(),
+        Some(&["claude:messages".to_string()][..])
+    );
+    assert_eq!(
+        resolved.effective_allowed_models(),
+        Some(&["claude-sonnet-4-5".to_string()][..])
+    );
+    assert_eq!(resolved.user_rate_limit, Some(30));
+
+    inspection_state
+        .update_user_group(
+            &target_group.id,
+            UpsertUserGroupRecord {
+                name: "Target Gemini".to_string(),
+                description: None,
+                priority: 10,
+                allowed_providers: Some(vec!["google".to_string()]),
+                allowed_providers_mode: "specific".to_string(),
+                allowed_api_formats: Some(vec!["gemini:generate-content".to_string()]),
+                allowed_api_formats_mode: "specific".to_string(),
+                allowed_models: Some(vec!["gemini-2.5-pro".to_string()]),
+                allowed_models_mode: "specific".to_string(),
+                rate_limit: Some(15),
+                rate_limit_mode: "custom".to_string(),
+            },
+        )
+        .await
+        .expect("target group should update")
+        .expect("target group should still exist");
+    let updated = inspection_state
+        .read_cached_auth_api_key_snapshot_by_key_hash(
+            &hash_api_key(plaintext_key),
+            chrono::Utc::now().timestamp().max(0) as u64,
+        )
+        .await
+        .expect("created key snapshot should refresh")
+        .expect("created key snapshot should still exist");
+    assert_eq!(updated.user_id, "target-user");
+    assert_eq!(
+        updated.effective_allowed_providers(),
+        Some(&["google".to_string()][..])
+    );
+    assert_eq!(
+        updated.effective_allowed_api_formats(),
+        Some(&["gemini:generate-content".to_string()][..])
+    );
+    assert_eq!(
+        updated.effective_allowed_models(),
+        Some(&["gemini-2.5-pro".to_string()][..])
+    );
+    assert_eq!(updated.user_rate_limit, Some(15));
+
+    let target_features = inspection_state
+        .read_user_feature_settings("target-user")
+        .await
+        .expect("target feature settings should resolve");
+    let key_features = inspection_state
+        .read_auth_api_key_feature_settings("target-user", api_key_id, false)
+        .await
+        .expect("key feature settings should resolve");
+    assert_eq!(
+        target_features,
+        Some(json!({"chat_pii_redaction": {"enabled": true}}))
+    );
+    assert_eq!(
+        key_features, None,
+        "an omitted key override must inherit target settings"
+    );
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/users/admin-user/api-keys"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "admin-session")
+        .json(&json!({"name": "admin-user-key"}))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("response should parse");
+    let plaintext_key = payload["key"].as_str().expect("plaintext key should exist");
+
+    let resolved = inspection_state
+        .read_cached_auth_api_key_snapshot_by_key_hash(
+            &hash_api_key(plaintext_key),
+            chrono::Utc::now().timestamp().max(0) as u64,
+        )
+        .await
+        .expect("admin-owned user key snapshot should resolve")
+        .expect("admin-owned user key snapshot should exist");
+    assert_eq!(resolved.user_id, "admin-user");
+    assert!(!resolved.api_key_is_standalone);
+    assert_eq!(
+        resolved.effective_allowed_providers(),
+        Some(&["openai".to_string()][..])
+    );
+    assert_eq!(
+        resolved.effective_allowed_api_formats(),
+        Some(&["openai:responses".to_string()][..])
+    );
+    assert_eq!(
+        resolved.effective_allowed_models(),
+        Some(&["gpt-5.4".to_string()][..])
+    );
+    assert_eq!(resolved.user_rate_limit, Some(100));
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]

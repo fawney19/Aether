@@ -2,7 +2,7 @@ use super::{
     any, build_router_with_state, build_state_with_execution_runtime_override, json,
     run_stream_cli_test, start_server, to_bytes, Arc, Body, Bytes, HeaderName, HeaderValue,
     Infallible, Json, Mutex, Request, Response, Router, StatusCode,
-    EXECUTION_PATH_EXECUTION_RUNTIME_STREAM, EXECUTION_PATH_HEADER, TRACE_ID_HEADER,
+    EXECUTION_PATH_EXECUTION_RUNTIME_SYNC, EXECUTION_PATH_HEADER, TRACE_ID_HEADER,
 };
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::auth::{
@@ -23,33 +23,37 @@ use aether_data_contracts::repository::provider_catalog::{
 use sha2::{Digest, Sha256};
 
 #[test]
-fn gateway_executes_openai_responses_compact_stream_via_local_decision_gate_with_local_stream_decision(
-) {
+fn gateway_executes_openai_responses_compact_as_unary_request() {
     run_stream_cli_test(
-        "gateway_executes_openai_responses_compact_stream_via_local_decision_gate_with_local_stream_decision",
-        gateway_executes_openai_responses_compact_stream_via_local_decision_gate_with_local_stream_decision_impl,
+        "gateway_executes_openai_responses_compact_as_unary_request",
+        gateway_executes_openai_responses_compact_as_unary_request_impl,
     );
 }
 
-async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gate_with_local_stream_decision_impl(
-) {
+async fn gateway_executes_openai_responses_compact_as_unary_request_impl() {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeStreamRequest {
         trace_id: String,
         url: String,
         model: String,
+        content_encoding: String,
         stream: bool,
         accept: String,
+        turn_state: String,
         authorization: String,
+        chatgpt_account_id: String,
+        fedramp: String,
+        responses_lite: String,
+        session_id: String,
+        thread_id: String,
+        x_client_request_id_present: bool,
         endpoint_tag: String,
         conditional_header: String,
         renamed_header: String,
         dropped_header_present: bool,
-        metadata_mode: String,
-        metadata_source: String,
-        metadata_origin: String,
         instructions: String,
         store_present: bool,
+        body: serde_json::Value,
         proxy_node_id: String,
         transport_profile_id: String,
     }
@@ -71,7 +75,7 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
             false,
             Some(serde_json::json!(["openai"])),
             Some(serde_json::json!(["openai:responses:compact"])),
-            Some(serde_json::json!(["gpt-5"])),
+            Some(serde_json::json!(["gpt-5.6-sol"])),
             api_key_id.to_string(),
             Some("default".to_string()),
             true,
@@ -82,7 +86,7 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
             Some(4_102_444_800_i64),
             Some(serde_json::json!(["openai"])),
             Some(serde_json::json!(["openai:responses:compact"])),
-            Some(serde_json::json!(["gpt-5"])),
+            Some(serde_json::json!(["gpt-5.6-sol"])),
         )
         .expect("auth snapshot should build")
     }
@@ -91,7 +95,7 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
         StoredMinimalCandidateSelectionRow {
             provider_id: "provider-openai-compact-local-1".to_string(),
             provider_name: "openai".to_string(),
-            provider_type: "custom".to_string(),
+            provider_type: "codex".to_string(),
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-openai-compact-local-1".to_string(),
@@ -101,7 +105,7 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
             endpoint_is_active: true,
             key_id: "key-openai-compact-local-1".to_string(),
             key_name: "prod".to_string(),
-            key_auth_type: "bearer".to_string(),
+            key_auth_type: "oauth".to_string(),
             key_is_active: true,
             key_api_formats: Some(vec!["openai:responses:compact".to_string()]),
             key_allowed_models: None,
@@ -110,15 +114,16 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
             key_global_priority_by_format: Some(serde_json::json!({"openai:responses:compact": 1})),
             model_id: "model-openai-compact-local-1".to_string(),
             global_model_id: "global-model-openai-compact-local-1".to_string(),
-            global_model_name: "gpt-5".to_string(),
+            global_model_name: "gpt-5.6-sol".to_string(),
             global_model_mappings: None,
             global_model_supports_streaming: Some(true),
-            model_provider_model_name: "gpt-5-upstream".to_string(),
+            model_provider_model_name: "deployment-production".to_string(),
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
-                name: "gpt-5-upstream".to_string(),
+                name: "deployment-production".to_string(),
                 priority: 1,
                 api_formats: Some(vec!["openai:responses:compact".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -131,7 +136,7 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
             "provider-openai-compact-local-1".to_string(),
             "openai".to_string(),
             Some("https://example.com".to_string()),
-            "custom".to_string(),
+            "codex".to_string(),
         )
         .expect("provider should build")
         .with_transport_fields(
@@ -161,15 +166,12 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
             "https://api.openai.example".to_string(),
             Some(serde_json::json!([
                 {"action":"set","key":"x-endpoint-tag","value":"openai-compact-local"},
-                {"action":"set","key":"x-conditional-tag","value":"header-condition-hit","condition":{"path":"instructions","op":"exists","source":"current"}},
+                {"action":"set","key":"x-conditional-tag","value":"header-condition-hit","condition":{"path":"reasoning","op":"exists","source":"current"}},
                 {"action":"rename","from":"x-client-rename","to":"x-upstream-rename"},
                 {"action":"drop","key":"x-drop-me"}
             ])),
             Some(serde_json::json!([
-                {"action":"set","path":"instructions","value":"You are GPT-5.","condition":{"path":"instructions","op":"not_exists","source":"current"}},
-                {"action":"set","path":"metadata.mode","value":"safe","condition":{"path":"metadata.mode","op":"not_exists","source":"current"}},
-                {"action":"rename","from":"metadata.client","to":"metadata.source"},
-                {"action":"set","path":"metadata.origin","value":"from-original","condition":{"path":"metadata.client","op":"exists","source":"original"}},
+                {"action":"set","path":"instructions","value":"Use the configured tools.","condition":{"path":"instructions","op":"not_exists","source":"current"}},
                 {"action":"drop","path":"store"}
             ])),
             Some(2),
@@ -186,7 +188,7 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
             "key-openai-compact-local-1".to_string(),
             "provider-openai-compact-local-1".to_string(),
             "prod".to_string(),
-            "bearer".to_string(),
+            "oauth".to_string(),
             None,
             true,
         )
@@ -198,7 +200,13 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
                 "sk-upstream-openai-compact",
             )
             .expect("api key should encrypt"),
-            None,
+            Some(
+                encrypt_python_fernet_plaintext(
+                    DEVELOPMENT_ENCRYPTION_KEY,
+                    r#"{"account_id":"acc-compact-local-123","is_fedramp":true}"#,
+                )
+                .expect("auth config should encrypt"),
+            ),
             None,
             Some(serde_json::json!({"openai:responses:compact": 1})),
             None,
@@ -242,7 +250,7 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
             }),
         )
         .route(
-            "/api/internal/gateway/decision-stream",
+            "/api/internal/gateway/decision-sync",
             any(move |_request: Request| {
                 let decision_hits_inner = Arc::clone(&decision_hits_clone);
                 async move {
@@ -252,7 +260,7 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
             }),
         )
         .route(
-            "/api/internal/gateway/plan-stream",
+            "/api/internal/gateway/plan-sync",
             any(move |_request: Request| {
                 let plan_hits_inner = Arc::clone(&plan_hits_clone);
                 async move {
@@ -262,7 +270,7 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
             }),
         )
         .route(
-            "/api/internal/gateway/report-stream",
+            "/api/internal/gateway/report-sync",
             any(move |request: Request| {
                 let seen_report_inner = Arc::clone(&seen_report_clone);
                 async move {
@@ -299,135 +307,166 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
         );
 
     let execution_runtime = Router::new().route(
-        "/v1/execute/stream",
+        "/v1/execute/sync",
         any(move |request: Request| {
             let seen_execution_runtime_inner = Arc::clone(&seen_execution_runtime_clone);
             async move {
                 let (parts, body) = request.into_parts();
                 let raw_body = to_bytes(body, usize::MAX).await.expect("body should read");
-                let payload: serde_json::Value =
-                    serde_json::from_slice(&raw_body).expect("execution runtime payload should parse");
-                *seen_execution_runtime_inner.lock().expect("mutex should lock") =
-                    Some(SeenExecutionRuntimeStreamRequest {
-                        trace_id: parts
-                            .headers
-                            .get(TRACE_ID_HEADER)
-                            .and_then(|value| value.to_str().ok())
-                            .unwrap_or_default()
-                            .to_string(),
-                        url: payload
-                            .get("url")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        model: payload
-                            .get("body")
-                            .and_then(|value| value.get("json_body"))
-                            .and_then(|value| value.get("model"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        stream: payload
-                            .get("stream")
-                            .and_then(|value| value.as_bool())
-                            .unwrap_or(false),
-                        accept: payload
-                            .get("headers")
-                            .and_then(|value| value.get("accept"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        authorization: payload
-                            .get("headers")
-                            .and_then(|value| value.get("authorization"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        endpoint_tag: payload
-                            .get("headers")
-                            .and_then(|value| value.get("x-endpoint-tag"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        conditional_header: payload
-                            .get("headers")
-                            .and_then(|value| value.get("x-conditional-tag"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        renamed_header: payload
-                            .get("headers")
-                            .and_then(|value| value.get("x-upstream-rename"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        dropped_header_present: payload
-                            .get("headers")
-                            .and_then(|value| value.get("x-drop-me"))
-                            .is_some(),
-                        metadata_mode: payload
-                            .get("body")
-                            .and_then(|value| value.get("json_body"))
-                            .and_then(|value| value.get("metadata"))
-                            .and_then(|value| value.get("mode"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        metadata_source: payload
-                            .get("body")
-                            .and_then(|value| value.get("json_body"))
-                            .and_then(|value| value.get("metadata"))
-                            .and_then(|value| value.get("source"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        metadata_origin: payload
-                            .get("body")
-                            .and_then(|value| value.get("json_body"))
-                            .and_then(|value| value.get("metadata"))
-                            .and_then(|value| value.get("origin"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        instructions: payload
-                            .get("body")
-                            .and_then(|value| value.get("json_body"))
-                            .and_then(|value| value.get("instructions"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        store_present: payload
-                            .get("body")
-                            .and_then(|value| value.get("json_body"))
-                            .and_then(|value| value.get("store"))
-                            .is_some(),
-                        proxy_node_id: payload
-                            .get("proxy")
-                            .and_then(|value| value.get("node_id"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        transport_profile_id: payload
-                            .get("transport_profile").and_then(|value| value.get("profile_id"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                    });
-                let stream = concat!(
-                    "{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
-                    "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"event: response.completed\\ndata: {\\\"type\\\":\\\"response.completed\\\",\\\"response\\\":{\\\"id\\\":\\\"resp-compact-local-123\\\",\\\"object\\\":\\\"response\\\",\\\"model\\\":\\\"gpt-5-upstream\\\",\\\"output\\\":[]}}\\n\\n\"}}\n",
-                    "{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"elapsed_ms\":41,\"ttfb_ms\":11}}}\n",
-                    "{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n"
-                );
-                let mut response = Response::builder()
-                    .status(StatusCode::OK)
-                    .body(Body::from(stream))
-                    .expect("response should build");
-                response.headers_mut().insert(
-                    http::header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/x-ndjson"),
-                );
-                response
+                let payload: serde_json::Value = serde_json::from_slice(&raw_body)
+                    .expect("execution runtime payload should parse");
+                *seen_execution_runtime_inner
+                    .lock()
+                    .expect("mutex should lock") = Some(SeenExecutionRuntimeStreamRequest {
+                    trace_id: parts
+                        .headers
+                        .get(TRACE_ID_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string(),
+                    url: payload
+                        .get("url")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    model: payload
+                        .get("body")
+                        .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("model"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    content_encoding: payload
+                        .get("content_encoding")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    stream: payload
+                        .get("stream")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false),
+                    accept: payload
+                        .get("headers")
+                        .and_then(|value| value.get("accept"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    turn_state: payload
+                        .get("headers")
+                        .and_then(|value| value.get("x-codex-turn-state"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    authorization: payload
+                        .get("headers")
+                        .and_then(|value| value.get("authorization"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    chatgpt_account_id: payload
+                        .get("headers")
+                        .and_then(|value| value.get("chatgpt-account-id"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    fedramp: payload
+                        .get("headers")
+                        .and_then(|value| value.get("x-openai-fedramp"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    responses_lite: payload
+                        .get("headers")
+                        .and_then(|value| value.get("x-openai-internal-codex-responses-lite"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    session_id: payload
+                        .get("headers")
+                        .and_then(|value| value.get("session-id"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    thread_id: payload
+                        .get("headers")
+                        .and_then(|value| value.get("thread-id"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    x_client_request_id_present: payload
+                        .get("headers")
+                        .and_then(|value| value.get("x-client-request-id"))
+                        .is_some(),
+                    endpoint_tag: payload
+                        .get("headers")
+                        .and_then(|value| value.get("x-endpoint-tag"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    conditional_header: payload
+                        .get("headers")
+                        .and_then(|value| value.get("x-conditional-tag"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    renamed_header: payload
+                        .get("headers")
+                        .and_then(|value| value.get("x-upstream-rename"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    dropped_header_present: payload
+                        .get("headers")
+                        .and_then(|value| value.get("x-drop-me"))
+                        .is_some(),
+                    instructions: payload
+                        .get("body")
+                        .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("instructions"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    store_present: payload
+                        .get("body")
+                        .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("store"))
+                        .is_some(),
+                    body: payload
+                        .get("body")
+                        .and_then(|value| value.get("json_body"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                    proxy_node_id: payload
+                        .get("proxy")
+                        .and_then(|value| value.get("node_id"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    transport_profile_id: payload
+                        .get("transport_profile")
+                        .and_then(|value| value.get("profile_id"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                });
+                Json(json!({
+                    "request_id": "trace-openai-compact-local-123",
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json",
+                        "x-codex-turn-state": "turn-state-compact-123"
+                    },
+                    "body": {
+                        "json_body": {
+                            "output": [{
+                                "type": "compaction",
+                                "id": "cmp-compact-local-123",
+                                "encrypted_content": "encrypted-compact-history"
+                            }]
+                        }
+                    },
+                    "telemetry": {"elapsed_ms": 41, "ttfb_ms": 11}
+                }))
             }
         }),
     );
@@ -474,23 +513,40 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
         )
         .header("x-client-rename", "rename-openai-compact")
         .header("x-drop-me", "drop-openai-compact")
+        .header("x-codex-turn-state", "turn-state-inbound-123")
+        .header("session-id", "session-compact-local-123")
+        .header("thread-id", "thread-compact-local-123")
         .header(TRACE_ID_HEADER, "trace-openai-compact-local-123")
-        .body("{\"model\":\"gpt-5\",\"input\":\"hello\",\"stream\":true,\"metadata\":{\"client\":\"desktop-openai-compact\"},\"store\":false}")
+        .body(r#"{"model":"gpt-5.6-sol","input":"hello","client_metadata":{"origin":"codex"},"include":["reasoning.encrypted_content"],"store":false,"stream":true,"stream_options":{"reasoning_summary_delivery":"sequential_cutoff"},"tool_choice":"auto","parallel_tool_calls":true,"reasoning":{"effort":"high"},"text":{"verbosity":"medium"},"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"prompt_cache_key":"session:compact-e2e"}"#)
         .send()
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
+    if response.status() != StatusCode::OK {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response.text().await.expect("error body should read");
+        panic!("Compact request failed: status={status}, headers={headers:?}, body={body}");
+    }
+    assert_eq!(
+        response
+            .headers()
+            .get("x-codex-turn-state")
+            .and_then(|value| value.to_str().ok()),
+        Some("turn-state-compact-123")
+    );
     assert_eq!(
         response
             .headers()
             .get(EXECUTION_PATH_HEADER)
             .and_then(|value| value.to_str().ok()),
-        Some(EXECUTION_PATH_EXECUTION_RUNTIME_STREAM)
+        Some(EXECUTION_PATH_EXECUTION_RUNTIME_SYNC)
     );
-    let body = response.text().await.expect("body should read");
-    assert!(body.contains("event: response.completed"));
-    assert!(body.contains("\"model\":\"gpt-5-upstream\""));
+    let body: serde_json::Value = response.json().await.expect("body should parse");
+    assert_eq!(
+        body["output"][0]["encrypted_content"],
+        "encrypted-compact-history"
+    );
 
     let seen_execution_runtime_request = seen_execution_runtime
         .lock()
@@ -505,13 +561,36 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
         seen_execution_runtime_request.url,
         "https://api.openai.example/custom/v1/responses/compact"
     );
-    assert_eq!(seen_execution_runtime_request.model, "gpt-5-upstream");
-    assert!(seen_execution_runtime_request.stream);
-    assert_eq!(seen_execution_runtime_request.accept, "text/event-stream");
+    assert_eq!(
+        seen_execution_runtime_request.model,
+        "deployment-production"
+    );
+    assert!(seen_execution_runtime_request.content_encoding.is_empty());
+    assert!(!seen_execution_runtime_request.stream);
+    assert_ne!(seen_execution_runtime_request.accept, "text/event-stream");
+    assert_eq!(
+        seen_execution_runtime_request.turn_state,
+        "turn-state-inbound-123"
+    );
     assert_eq!(
         seen_execution_runtime_request.authorization,
         "Bearer sk-upstream-openai-compact"
     );
+    assert_eq!(
+        seen_execution_runtime_request.chatgpt_account_id,
+        "acc-compact-local-123"
+    );
+    assert_eq!(seen_execution_runtime_request.fedramp, "true");
+    assert_eq!(seen_execution_runtime_request.responses_lite, "true");
+    assert_eq!(
+        seen_execution_runtime_request.session_id,
+        "session-compact-local-123"
+    );
+    assert_eq!(
+        seen_execution_runtime_request.thread_id,
+        "thread-compact-local-123"
+    );
+    assert!(!seen_execution_runtime_request.x_client_request_id_present);
     assert_eq!(
         seen_execution_runtime_request.endpoint_tag,
         "openai-compact-local"
@@ -525,20 +604,62 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
         "rename-openai-compact"
     );
     assert!(!seen_execution_runtime_request.dropped_header_present);
-    assert_eq!(
-        seen_execution_runtime_request.instructions,
-        "You are GPT-5."
-    );
-    assert_eq!(seen_execution_runtime_request.metadata_mode, "safe");
-    assert_eq!(
-        seen_execution_runtime_request.metadata_source,
-        "desktop-openai-compact"
-    );
-    assert_eq!(
-        seen_execution_runtime_request.metadata_origin,
-        "from-original"
-    );
+    assert!(seen_execution_runtime_request.instructions.is_empty());
     assert!(!seen_execution_runtime_request.store_present);
+    for field in [
+        "client_metadata",
+        "include",
+        "store",
+        "stream",
+        "stream_options",
+        "tool_choice",
+    ] {
+        assert!(
+            seen_execution_runtime_request.body.get(field).is_none(),
+            "Compact request must omit {field}"
+        );
+    }
+    assert_eq!(
+        seen_execution_runtime_request.body["parallel_tool_calls"],
+        json!(false)
+    );
+    assert_eq!(
+        seen_execution_runtime_request.body["reasoning"]["effort"],
+        json!("high")
+    );
+    assert_eq!(
+        seen_execution_runtime_request.body["text"]["verbosity"],
+        json!("medium")
+    );
+    assert_eq!(
+        seen_execution_runtime_request.body["reasoning"]["context"],
+        json!("all_turns")
+    );
+    assert_eq!(
+        seen_execution_runtime_request.body["input"][0]["type"],
+        json!("additional_tools")
+    );
+    assert_eq!(
+        seen_execution_runtime_request.body["input"][0]["tools"][0]["name"],
+        json!("lookup")
+    );
+    assert_eq!(
+        seen_execution_runtime_request.body["input"][1]["role"],
+        json!("developer")
+    );
+    assert_eq!(
+        seen_execution_runtime_request.body["input"][1]["content"][0]["text"],
+        json!("Use the configured tools.")
+    );
+    assert_eq!(
+        seen_execution_runtime_request.body["input"][2]["content"][0]["text"],
+        json!("hello")
+    );
+    assert_eq!(
+        seen_execution_runtime_request.body["prompt_cache_key"],
+        // Compact omits client_metadata, but keeps the same deterministic Codex cache identity.
+        json!("f3eb8726-b7b2-56c5-90b5-8789d628c8cf")
+    );
     assert_eq!(
         seen_execution_runtime_request.proxy_node_id,
         "proxy-node-openai-compact-local"
@@ -558,7 +679,7 @@ async fn gateway_executes_openai_responses_compact_stream_via_local_decision_gat
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(
         !*seen_report.lock().expect("mutex should lock"),
-        "report-stream should stay local when request candidate persistence is available"
+        "report-sync should stay local when request candidate persistence is available"
     );
 
     assert_eq!(*decision_hits.lock().expect("mutex should lock"), 0);

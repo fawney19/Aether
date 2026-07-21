@@ -29,8 +29,8 @@ fn ai_serving_target_structure_removes_legacy_pipeline_boundary() {
     let mut violations = Vec::new();
     for root in [
         "apps/aether-gateway/src",
-        "crates/aether-ai-serving/src",
-        "crates/aether-ai-formats/src",
+        "crates/aether-ai/serving/src",
+        "crates/aether-ai/formats/src",
     ] {
         for file in collect_workspace_rust_files(root) {
             let relative = file
@@ -75,7 +75,7 @@ fn ai_serving_target_structure_removes_legacy_pipeline_boundary() {
 
 #[test]
 fn ai_serving_crate_owns_attempt_loop_without_gateway_runtime_deps() {
-    let serving_manifest = read_workspace_file("crates/aether-ai-serving/Cargo.toml");
+    let serving_manifest = read_workspace_file("crates/aether-ai/serving/Cargo.toml");
     for forbidden in ["axum", "sqlx", "redis", "aether-gateway"] {
         assert!(
             !serving_manifest.contains(forbidden),
@@ -84,7 +84,7 @@ fn ai_serving_crate_owns_attempt_loop_without_gateway_runtime_deps() {
     }
 
     let mut violations = Vec::new();
-    for file in collect_workspace_rust_files("crates/aether-ai-serving/src") {
+    for file in collect_workspace_rust_files("crates/aether-ai/serving/src") {
         let source = std::fs::read_to_string(&file).expect("source file should be readable");
         let hits = ["AppState", "axum::", "sqlx::", "redis::"]
             .iter()
@@ -101,7 +101,7 @@ fn ai_serving_crate_owns_attempt_loop_without_gateway_runtime_deps() {
         violations.join("\n")
     );
 
-    let serving_attempt_loop = read_workspace_file("crates/aether-ai-serving/src/attempt_loop.rs");
+    let serving_attempt_loop = read_workspace_file("crates/aether-ai/serving/src/attempt_loop.rs");
     for pattern in [
         "pub trait AiExecutionAttempt",
         "pub trait AiAttemptLoopPort",
@@ -129,7 +129,7 @@ fn ai_serving_crate_owns_attempt_loop_without_gateway_runtime_deps() {
     }
 
     let serving_decision_path =
-        read_workspace_file("crates/aether-ai-serving/src/decision_path.rs");
+        read_workspace_file("crates/aether-ai/serving/src/decision_path.rs");
     for pattern in [
         "pub enum AiSyncDecisionStep",
         "pub enum AiStreamDecisionStep",
@@ -168,7 +168,7 @@ fn ai_serving_crate_owns_attempt_loop_without_gateway_runtime_deps() {
         );
     }
 
-    let serving_plan_payload = read_workspace_file("crates/aether-ai-serving/src/plan_payload.rs");
+    let serving_plan_payload = read_workspace_file("crates/aether-ai/serving/src/plan_payload.rs");
     for pattern in [
         "pub fn build_ai_sync_execution_plan_payload",
         "pub fn build_ai_stream_execution_plan_payload",
@@ -204,7 +204,7 @@ fn ai_serving_crate_owns_attempt_loop_without_gateway_runtime_deps() {
         );
     }
 
-    let serving_attempt_plan = read_workspace_file("crates/aether-ai-serving/src/attempt_plan.rs");
+    let serving_attempt_plan = read_workspace_file("crates/aether-ai/serving/src/attempt_plan.rs");
     for pattern in [
         "pub fn build_ai_execution_decision_from_plan",
         "pub fn infer_ai_upstream_base_url",
@@ -238,7 +238,7 @@ fn ai_serving_crate_owns_attempt_loop_without_gateway_runtime_deps() {
     }
 
     let serving_candidate_materialization =
-        read_workspace_file("crates/aether-ai-serving/src/candidate_materialization.rs");
+        read_workspace_file("crates/aether-ai/serving/src/candidate_materialization.rs");
     for pattern in [
         "pub trait AiCandidateMaterializationPort",
         "pub async fn run_ai_candidate_materialization",
@@ -270,7 +270,7 @@ fn ai_serving_crate_owns_attempt_loop_without_gateway_runtime_deps() {
     }
 
     let serving_candidate_preselection =
-        read_workspace_file("crates/aether-ai-serving/src/candidate_preselection.rs");
+        read_workspace_file("crates/aether-ai/serving/src/candidate_preselection.rs");
     for pattern in [
         "pub trait AiCandidatePreselectionPort",
         "pub async fn run_ai_candidate_preselection",
@@ -290,7 +290,7 @@ fn ai_serving_crate_owns_attempt_loop_without_gateway_runtime_deps() {
     }
 
     let serving_candidate_ranking =
-        read_workspace_file("crates/aether-ai-serving/src/candidate_ranking.rs");
+        read_workspace_file("crates/aether-ai/serving/src/candidate_ranking.rs");
     for pattern in [
         "pub trait AiCandidateRankingPort",
         "pub async fn run_ai_candidate_ranking",
@@ -312,7 +312,7 @@ fn ai_serving_crate_owns_attempt_loop_without_gateway_runtime_deps() {
     }
 
     let serving_candidate_resolution =
-        read_workspace_file("crates/aether-ai-serving/src/candidate_resolution.rs");
+        read_workspace_file("crates/aether-ai/serving/src/candidate_resolution.rs");
     for pattern in [
         "pub trait AiCandidateResolutionPort",
         "pub async fn run_ai_candidate_resolution",
@@ -370,7 +370,7 @@ fn ai_serving_crate_owns_attempt_loop_without_gateway_runtime_deps() {
     }
 
     let provider_transport_conversion =
-        read_workspace_file("crates/aether-provider-transport/src/conversion.rs");
+        read_workspace_file("crates/aether-provider/transport/src/conversion.rs");
     for pattern in [
         "pub struct CandidateTransportPolicyFacts",
         "pub fn candidate_common_transport_skip_reason(",
@@ -445,7 +445,7 @@ fn ai_serving_crate_owns_attempt_loop_without_gateway_runtime_deps() {
     }
 
     let serving_execution_path =
-        read_workspace_file("crates/aether-ai-serving/src/execution_path.rs");
+        read_workspace_file("crates/aether-ai/serving/src/execution_path.rs");
     for pattern in [
         "pub enum AiSyncExecutionStep",
         "pub enum AiStreamExecutionStep",
@@ -488,7 +488,7 @@ fn ai_serving_crate_owns_attempt_loop_without_gateway_runtime_deps() {
 
 #[test]
 fn ai_serving_internal_dtos_use_ai_execution_names() {
-    let serving_dto = read_workspace_file("crates/aether-ai-serving/src/dto.rs");
+    let serving_dto = read_workspace_file("crates/aether-ai/serving/src/dto.rs");
     for expected in [
         "pub struct AiExecutionDecision",
         "pub struct AiExecutionPlanPayload",
@@ -525,8 +525,8 @@ fn ai_serving_internal_dtos_use_ai_execution_names() {
         "apps/aether-gateway/src/ai_serving",
         "apps/aether-gateway/src/executor",
         "apps/aether-gateway/src/execution_runtime",
-        "crates/aether-ai-serving/src",
-        "crates/aether-ai-formats/src",
+        "crates/aether-ai/serving/src",
+        "crates/aether-ai/formats/src",
     ] {
         for file in collect_workspace_rust_files(root) {
             let relative = file
@@ -560,7 +560,7 @@ fn ai_serving_internal_dtos_use_ai_execution_names() {
 
 #[test]
 fn ai_format_crate_stays_free_of_gateway_runtime_deps() {
-    for manifest_path in ["crates/aether-ai-formats/Cargo.toml"] {
+    for manifest_path in ["crates/aether-ai/formats/Cargo.toml"] {
         let manifest = read_workspace_file(manifest_path);
         for forbidden in [
             "axum",
@@ -578,7 +578,7 @@ fn ai_format_crate_stays_free_of_gateway_runtime_deps() {
     }
 
     let mut violations = Vec::new();
-    for root in ["crates/aether-ai-formats/src"] {
+    for root in ["crates/aether-ai/formats/src"] {
         for file in collect_workspace_rust_files(root) {
             let source = std::fs::read_to_string(&file).expect("source file should be readable");
             let hits = [
@@ -608,7 +608,7 @@ fn ai_format_crate_stays_free_of_gateway_runtime_deps() {
 
 #[test]
 fn aether_runtime_stays_free_of_ai_serving_policy() {
-    let runtime_manifest = read_workspace_file("crates/aether-runtime/Cargo.toml");
+    let runtime_manifest = read_workspace_file("crates/aether-runtime/base/Cargo.toml");
     for forbidden in [
         "aether-ai-serving",
         "aether-ai-formats",
@@ -622,7 +622,7 @@ fn aether_runtime_stays_free_of_ai_serving_policy() {
     }
 
     let mut violations = Vec::new();
-    for file in collect_workspace_rust_files("crates/aether-runtime/src") {
+    for file in collect_workspace_rust_files("crates/aether-runtime/base/src") {
         let source = std::fs::read_to_string(&file).expect("source file should be readable");
         let hits = [
             "aether_ai_serving",
@@ -824,7 +824,7 @@ fn ai_serving_routes_control_and_execution_deps_through_facades() {
         );
     }
 
-    let serving_attempt_plan = read_workspace_file("crates/aether-ai-serving/src/attempt_plan.rs");
+    let serving_attempt_plan = read_workspace_file("crates/aether-ai/serving/src/attempt_plan.rs");
     for pattern in [
         "pub fn take_ai_decision_plan_core(",
         "pub fn take_ai_upstream_auth_pair(",
@@ -871,13 +871,15 @@ fn ai_serving_routes_control_and_execution_deps_through_facades() {
     let gateway_finalize_common =
         read_workspace_file("apps/aether-gateway/src/ai_serving/finalize/common.rs");
     assert!(
-        gateway_finalize_common
-            .contains("prepare_local_success_response_parts as prepare_local_success_response_parts_impl"),
+        gateway_finalize_common.contains(
+            "prepare_local_success_response_parts as prepare_local_success_response_parts_impl"
+        ),
         "finalize/common.rs should delegate success response-part normalization to the format crate"
     );
     assert!(
-        gateway_finalize_common
-            .contains("build_local_success_background_report as build_local_success_background_report_impl"),
+        gateway_finalize_common.contains(
+            "build_local_success_background_report as build_local_success_background_report_impl"
+        ),
         "finalize/common.rs should delegate pure success background-report construction to the format crate"
     );
     assert!(
@@ -1009,7 +1011,7 @@ fn ai_serving_routes_provider_transport_deps_through_facade() {
         "ai_serving/runtime should stay removed after facade cleanup"
     );
     assert!(
-        !workspace_file_exists("crates/aether-ai-formats/src/transport.rs"),
+        !workspace_file_exists("crates/aether-ai/formats/src/transport.rs"),
         "aether-ai-formats should not expose a provider transport bridge"
     );
 
@@ -1384,7 +1386,7 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
         );
     }
 
-    let serving_lib = read_workspace_file("crates/aether-ai-serving/src/lib.rs");
+    let serving_lib = read_workspace_file("crates/aether-ai/serving/src/lib.rs");
     for forbidden in ["pub mod pool_scheduler;", "pub mod pool_scores;"] {
         assert!(
             !serving_lib.contains(forbidden),
@@ -1392,7 +1394,7 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
         );
     }
 
-    let provider_pool_lib = read_workspace_file("crates/aether-provider-pool/src/lib.rs");
+    let provider_pool_lib = read_workspace_file("crates/aether-provider/pool/src/lib.rs");
     for pattern in [
         "mod capability;",
         "mod plan;",
@@ -1410,7 +1412,7 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
         );
     }
 
-    let provider_pool_provider = read_workspace_file("crates/aether-provider-pool/src/provider.rs");
+    let provider_pool_provider = read_workspace_file("crates/aether-provider/pool/src/provider.rs");
     for pattern in [
         "pub trait ProviderPoolAdapter",
         "ProviderPoolMemberInput",
@@ -1423,7 +1425,7 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
         );
     }
 
-    let provider_pool_service = read_workspace_file("crates/aether-provider-pool/src/service.rs");
+    let provider_pool_service = read_workspace_file("crates/aether-provider/pool/src/service.rs");
     for pattern in [
         "pub struct ProviderPoolService",
         "with_builtin_adapters",
@@ -1449,7 +1451,7 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
     );
 
     let provider_pool_providers =
-        read_workspace_file("crates/aether-provider-pool/src/providers/mod.rs");
+        read_workspace_file("crates/aether-provider/pool/src/providers/mod.rs");
     for pattern in [
         "pub mod default;",
         "pub mod unsupported;",
@@ -1466,15 +1468,15 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
     }
     for (path, patterns) in [
         (
-            "crates/aether-provider-pool/src/providers/default.rs",
+            "crates/aether-provider/pool/src/providers/default.rs",
             vec!["DefaultProviderPoolAdapter"],
         ),
         (
-            "crates/aether-provider-pool/src/providers/antigravity.rs",
+            "crates/aether-provider/pool/src/providers/antigravity.rs",
             vec!["AntigravityProviderPoolAdapter"],
         ),
         (
-            "crates/aether-provider-pool/src/providers/codex.rs",
+            "crates/aether-provider/pool/src/providers/codex.rs",
             vec![
                 "CodexProviderPoolAdapter",
                 "recent_refresh",
@@ -1482,7 +1484,7 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
             ],
         ),
         (
-            "crates/aether-provider-pool/src/providers/gemini_cli.rs",
+            "crates/aether-provider/pool/src/providers/gemini_cli.rs",
             vec![
                 "GeminiCliProviderPoolAdapter",
                 "build_gemini_cli_pool_quota_request",
@@ -1490,11 +1492,11 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
             ],
         ),
         (
-            "crates/aether-provider-pool/src/providers/kiro.rs",
+            "crates/aether-provider/pool/src/providers/kiro.rs",
             vec!["KiroProviderPoolAdapter", "quota_exhausted_from_bucket"],
         ),
         (
-            "crates/aether-provider-pool/src/providers/chatgpt_web.rs",
+            "crates/aether-provider/pool/src/providers/chatgpt_web.rs",
             vec![
                 "ChatGptWebProviderPoolAdapter",
                 "build_chatgpt_web_pool_quota_request",
@@ -1504,7 +1506,7 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
             ],
         ),
         (
-            "crates/aether-provider-pool/src/providers/unsupported.rs",
+            "crates/aether-provider/pool/src/providers/unsupported.rs",
             vec![
                 "UnsupportedQuotaProviderPoolAdapter",
                 "CLAUDE_CODE_PROVIDER_POOL_ADAPTER",
@@ -1521,7 +1523,7 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
         }
     }
 
-    let provider_pool_plan = read_workspace_file("crates/aether-provider-pool/src/plan.rs");
+    let provider_pool_plan = read_workspace_file("crates/aether-provider/pool/src/plan.rs");
     for pattern in ["normalize_provider_plan_tier", "derive_plan_tier"] {
         assert!(
             provider_pool_plan.contains(pattern),
@@ -1529,7 +1531,7 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
         );
     }
 
-    let provider_pool_quota = read_workspace_file("crates/aether-provider-pool/src/quota.rs");
+    let provider_pool_quota = read_workspace_file("crates/aether-provider/pool/src/quota.rs");
     for pattern in [
         "provider_pool_key_account_quota_exhausted",
         "provider_pool_member_quota_snapshot",
@@ -1544,7 +1546,7 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
         );
     }
 
-    let provider_pool_presets = read_workspace_file("crates/aether-provider-pool/src/presets.rs");
+    let provider_pool_presets = read_workspace_file("crates/aether-provider/pool/src/presets.rs");
     for pattern in [
         "normalize_provider_scheduling_presets",
         "build_admin_pool_scheduling_presets_payload",
@@ -1561,7 +1563,7 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
         "plan_priority_score(",
     ] {
         let mut violations = Vec::new();
-        for file in collect_workspace_rust_files("crates/aether-provider-pool/src") {
+        for file in collect_workspace_rust_files("crates/aether-provider/pool/src") {
             let source = std::fs::read_to_string(&file).expect("source file should be readable");
             if source.contains(forbidden) {
                 violations.push(file.display().to_string());
@@ -1578,7 +1580,7 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
 #[test]
 fn ai_serving_candidate_preparation_owns_shared_auth_and_mapped_model_resolution() {
     let serving_candidate_preparation =
-        read_workspace_file("crates/aether-ai-serving/src/candidate_preparation.rs");
+        read_workspace_file("crates/aether-ai/serving/src/candidate_preparation.rs");
     for pattern in [
         "pub struct AiPreparedHeaderAuthenticatedCandidate",
         "pub fn prepare_ai_header_authenticated_candidate(",
@@ -1592,7 +1594,7 @@ fn ai_serving_candidate_preparation_owns_shared_auth_and_mapped_model_resolution
         );
     }
 
-    let serving_lib = read_workspace_file("crates/aether-ai-serving/src/lib.rs");
+    let serving_lib = read_workspace_file("crates/aether-ai/serving/src/lib.rs");
     for pattern in [
         "pub mod candidate_preparation;",
         "prepare_ai_header_authenticated_candidate",
@@ -1690,7 +1692,7 @@ fn ai_serving_candidate_materialization_owns_affinity_and_candidate_runtime_pers
     );
 
     let serving_candidate_persistence =
-        read_workspace_file("crates/aether-ai-serving/src/candidate_persistence.rs");
+        read_workspace_file("crates/aether-ai/serving/src/candidate_persistence.rs");
     for pattern in [
         "pub trait AiAvailableCandidatePersistencePort",
         "pub async fn run_ai_available_candidate_persistence",
@@ -1837,7 +1839,7 @@ fn ai_serving_materialization_policy_owns_local_candidate_persistence_modes() {
     );
 
     let serving_candidate_persistence_policy =
-        read_workspace_file("crates/aether-ai-serving/src/candidate_persistence_policy.rs");
+        read_workspace_file("crates/aether-ai/serving/src/candidate_persistence_policy.rs");
     for pattern in [
         "pub enum AiCandidatePersistencePolicyKind {",
         "pub struct AiCandidatePersistencePolicySpec {",
@@ -1913,9 +1915,9 @@ fn ai_serving_candidate_metadata_owns_local_execution_candidate_extra_data_shape
     let candidate_metadata =
         read_workspace_file("apps/aether-gateway/src/ai_serving/planner/candidate_metadata.rs");
     let serving_ranking_metadata =
-        read_workspace_file("crates/aether-ai-serving/src/ranking_metadata.rs");
+        read_workspace_file("crates/aether-ai/serving/src/ranking_metadata.rs");
     let serving_candidate_metadata =
-        read_workspace_file("crates/aether-ai-serving/src/candidate_metadata.rs");
+        read_workspace_file("crates/aether-ai/serving/src/candidate_metadata.rs");
     for pattern in [
         "pub struct AiCandidateMetadataParts<'a> {",
         "pub fn build_ai_candidate_metadata(",
@@ -2015,7 +2017,7 @@ fn ai_serving_runtime_miss_owns_local_execution_miss_state_machine() {
         "planner/mod.rs should wire runtime_miss helper module"
     );
 
-    let serving_runtime_miss = read_workspace_file("crates/aether-ai-serving/src/runtime_miss.rs");
+    let serving_runtime_miss = read_workspace_file("crates/aether-ai/serving/src/runtime_miss.rs");
     for pattern in [
         "pub trait AiRuntimeMissDiagnosticPort",
         "pub trait AiRuntimeMissDiagnosticFields",
@@ -2264,7 +2266,7 @@ fn ai_serving_video_routes_request_preparation_through_request_payload_seams() {
     }
 
     let provider_transport_video =
-        read_workspace_file("crates/aether-provider-transport/src/video/mod.rs");
+        read_workspace_file("crates/aether-provider/transport/src/video/mod.rs");
     for pattern in [
         "pub enum ProviderVideoCreateFamily",
         "pub fn video_create_transport_unsupported_reason(",
@@ -2339,7 +2341,7 @@ fn ai_serving_files_routes_request_preparation_through_request_payload_seams() {
     }
 
     let provider_transport_files =
-        read_workspace_file("crates/aether-provider-transport/src/gemini_files/mod.rs");
+        read_workspace_file("crates/aether-provider/transport/src/gemini_files/mod.rs");
     for pattern in [
         "pub fn gemini_files_transport_unsupported_reason(",
         "pub fn resolve_gemini_files_auth(",
@@ -2409,7 +2411,7 @@ fn ai_serving_image_routes_split_surface_normalization_and_transport_policy() {
     }
 
     let surface_image =
-        read_workspace_file("crates/aether-ai-formats/src/formats/openai/image/request.rs");
+        read_workspace_file("crates/aether-ai/formats/src/formats/openai/image/request.rs");
     for pattern in [
         "pub enum OpenAiImageOperation",
         "pub fn is_openai_image_stream_request(",
@@ -2425,7 +2427,7 @@ fn ai_serving_image_routes_split_surface_normalization_and_transport_policy() {
     }
 
     let provider_transport_image =
-        read_workspace_file("crates/aether-provider-transport/src/openai_image/mod.rs");
+        read_workspace_file("crates/aether-provider/transport/src/openai_image/mod.rs");
     for pattern in [
         "pub fn openai_image_transport_unsupported_reason(",
         "pub fn resolve_openai_image_auth(",
@@ -2605,7 +2607,7 @@ fn ai_serving_payload_metadata_owns_local_execution_decision_response_shape() {
         "gateway payload_metadata.rs should be removed after serving extraction"
     );
 
-    let decision_payload = read_workspace_file("crates/aether-ai-serving/src/decision_payload.rs");
+    let decision_payload = read_workspace_file("crates/aether-ai/serving/src/decision_payload.rs");
     for pattern in [
         "pub struct AiExecutionDecisionResponseParts {",
         "pub fn build_ai_execution_decision_response(",
@@ -2651,7 +2653,7 @@ fn ai_serving_owns_pure_planner_diagnostics_and_execution_labels() {
     }
 
     let serving_failure_diagnostic =
-        read_workspace_file("crates/aether-ai-serving/src/failure_diagnostic.rs");
+        read_workspace_file("crates/aether-ai/serving/src/failure_diagnostic.rs");
     for pattern in [
         "pub enum CandidateFailureDiagnosticKind {",
         "pub struct CandidateFailureDiagnostic {",
@@ -2667,7 +2669,7 @@ fn ai_serving_owns_pure_planner_diagnostics_and_execution_labels() {
     }
 
     let serving_request_body_diagnostics =
-        read_workspace_file("crates/aether-ai-serving/src/request_body_diagnostics.rs");
+        read_workspace_file("crates/aether-ai/serving/src/request_body_diagnostics.rs");
     for pattern in [
         "pub fn request_body_build_failure_extra_data(",
         "pub fn same_format_provider_request_body_failure_extra_data(",
@@ -2692,7 +2694,7 @@ fn ai_serving_owns_pure_planner_diagnostics_and_execution_labels() {
         "gateway standard planner should consume request-body diagnostics from aether-ai-serving"
     );
 
-    let serving_dto = read_workspace_file("crates/aether-ai-serving/src/dto.rs");
+    let serving_dto = read_workspace_file("crates/aether-ai/serving/src/dto.rs");
     for pattern in ["pub enum ExecutionStrategy", "pub enum ConversionMode"] {
         assert!(
             serving_dto.contains(pattern),
@@ -2726,7 +2728,7 @@ fn ai_serving_report_context_owns_local_execution_context_shape() {
     );
 
     let serving_report_context =
-        read_workspace_file("crates/aether-ai-serving/src/report_context.rs");
+        read_workspace_file("crates/aether-ai/serving/src/report_context.rs");
     for pattern in [
         "pub struct AiExecutionReportContextParts<'a> {",
         "pub fn build_ai_execution_report_context(",
@@ -2878,7 +2880,7 @@ fn ai_serving_standard_attempts_consume_eligible_local_candidates_without_transp
     }
 
     let provider_transport_standard =
-        read_workspace_file("crates/aether-provider-transport/src/standard/mod.rs");
+        read_workspace_file("crates/aether-provider/transport/src/standard/mod.rs");
     for pattern in [
         "pub struct StandardProviderRequestHeadersInput",
         "pub struct StandardProviderRequestHeaders",
@@ -2898,7 +2900,7 @@ fn ai_serving_standard_attempts_consume_eligible_local_candidates_without_transp
     }
 
     let provider_transport_request_url =
-        read_workspace_file("crates/aether-provider-transport/src/request_url/mod.rs");
+        read_workspace_file("crates/aether-provider/transport/src/request_url/mod.rs");
     assert!(
         provider_transport_request_url.contains("pub fn build_kiro_cross_format_upstream_url("),
         "provider-transport request_url.rs should own Kiro cross-format URL hook"
@@ -2960,7 +2962,7 @@ fn ai_serving_standard_plan_builders_delegate_fallback_transport_policy() {
     }
 
     let provider_transport_standard =
-        read_workspace_file("crates/aether-provider-transport/src/standard/mod.rs");
+        read_workspace_file("crates/aether-provider/transport/src/standard/mod.rs");
     for pattern in [
         "pub enum StandardPlanFallbackAcceptPolicy",
         "pub struct StandardPlanFallbackHeadersInput",
@@ -3063,7 +3065,7 @@ fn ai_serving_spec_metadata_owns_family_requested_model_and_plan_builder_routing
 
     let spec_metadata =
         read_workspace_file("apps/aether-gateway/src/ai_serving/planner/spec_metadata.rs");
-    let serving_surface_spec = read_workspace_file("crates/aether-ai-serving/src/surface_spec.rs");
+    let serving_surface_spec = read_workspace_file("crates/aether-ai/serving/src/surface_spec.rs");
     for pattern in [
         "pub enum AiRequestedModelFamily {",
         "pub struct AiExecutionSurfaceSpecMetadata {",
@@ -3228,7 +3230,7 @@ fn ai_serving_same_format_provider_request_policy_owns_provider_type_behavior() 
         "apps/aether-gateway/src/ai_serving/planner/passthrough/provider/family/request/policy.rs",
     );
     let provider_transport_policy =
-        read_workspace_file("crates/aether-provider-transport/src/same_format_provider/mod.rs");
+        read_workspace_file("crates/aether-provider/transport/src/same_format_provider/mod.rs");
     for pattern in [
         "pub struct SameFormatProviderRequestBehavior {",
         "pub struct SameFormatProviderRequestBodyInput",
@@ -3314,7 +3316,7 @@ fn ai_serving_decision_inputs_share_authenticated_input_helper() {
     );
 
     let serving_decision_input =
-        read_workspace_file("crates/aether-ai-serving/src/decision_input.rs");
+        read_workspace_file("crates/aether-ai/serving/src/decision_input.rs");
     for pattern in [
         "pub trait AiAuthenticatedDecisionInputPort",
         "pub async fn run_ai_authenticated_decision_input",
@@ -3488,7 +3490,8 @@ fn ai_serving_leaf_planner_owners_route_contract_specs_through_gateway_seams() {
         "apps/aether-gateway/src/ai_serving/planner/specialized/video/support.rs",
     );
     assert!(
-        specialized_video_support.contains("use super::{LocalVideoCreateFamily, LocalVideoCreateSpec};"),
+        specialized_video_support
+            .contains("use super::{LocalVideoCreateFamily, LocalVideoCreateSpec};"),
         "planner/specialized/video/support.rs should use local video seams for LocalVideoCreate* types"
     );
 }
@@ -3496,10 +3499,10 @@ fn ai_serving_leaf_planner_owners_route_contract_specs_through_gateway_seams() {
 #[test]
 fn ai_serving_m5_moves_contracts_and_route_logic_into_format_crate() {
     for path in [
-        "crates/aether-ai-formats/src/contracts/actions.rs",
-        "crates/aether-ai-formats/src/contracts/plan_kinds.rs",
-        "crates/aether-ai-formats/src/contracts/report_kinds.rs",
-        "crates/aether-ai-formats/src/formats/shared/routing.rs",
+        "crates/aether-ai/formats/src/contracts/actions.rs",
+        "crates/aether-ai/formats/src/contracts/plan_kinds.rs",
+        "crates/aether-ai/formats/src/contracts/report_kinds.rs",
+        "crates/aether-ai/formats/src/formats/shared/routing.rs",
     ] {
         assert!(
             workspace_file_exists(path),
@@ -3561,7 +3564,7 @@ fn ai_serving_m5_moves_contracts_and_route_logic_into_format_crate() {
     }
 
     let surface_route =
-        read_workspace_file("crates/aether-ai-formats/src/formats/shared/routing.rs");
+        read_workspace_file("crates/aether-ai/formats/src/formats/shared/routing.rs");
     for pattern in [
         "pub fn is_matching_stream_http_request(",
         "is_openai_image_stream_request(parts, body_json, body_base64)",
@@ -3614,12 +3617,12 @@ fn ai_serving_m5_moves_contracts_and_route_logic_into_format_crate() {
 #[test]
 fn ai_serving_m5_moves_kiro_stream_helpers_into_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/provider_compat/kiro_stream.rs"),
-        "crates/aether-ai-formats/src/provider_compat/kiro_stream.rs should exist after kiro helper extraction"
+        workspace_file_exists("crates/aether-ai/formats/src/provider_compat/kiro_stream.rs"),
+        "crates/aether-ai/formats/src/provider_compat/kiro_stream.rs should exist after kiro helper extraction"
     );
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/provider_compat/kiro_stream/state.rs"),
-        "crates/aether-ai-formats/src/provider_compat/kiro_stream/state.rs should own the Kiro stream state machine"
+        workspace_file_exists("crates/aether-ai/formats/src/provider_compat/kiro_stream/state.rs"),
+        "crates/aether-ai/formats/src/provider_compat/kiro_stream/state.rs should own the Kiro stream state machine"
     );
 
     for path in [
@@ -3633,7 +3636,7 @@ fn ai_serving_m5_moves_kiro_stream_helpers_into_format_crate() {
         );
     }
 
-    let surface_api = read_workspace_file("crates/aether-ai-formats/src/api.rs");
+    let surface_api = read_workspace_file("crates/aether-ai/formats/src/api.rs");
     assert!(
         surface_api.contains("KiroToClaudeCliStreamState"),
         "aether-ai-formats api should export KiroToClaudeCliStreamState"
@@ -3670,7 +3673,7 @@ fn ai_serving_m5_moves_kiro_stream_helpers_into_format_crate() {
 #[test]
 fn ai_serving_private_envelope_stream_normalizer_is_owned_by_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/provider_compat/private_envelope.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/provider_compat/private_envelope.rs"),
         "surface private envelope adapter should exist"
     );
     assert!(
@@ -3687,7 +3690,7 @@ fn ai_serving_private_envelope_stream_normalizer_is_owned_by_format_crate() {
     );
 
     let surface_private_envelope =
-        read_workspace_file("crates/aether-ai-formats/src/provider_compat/private_envelope.rs");
+        read_workspace_file("crates/aether-ai/formats/src/provider_compat/private_envelope.rs");
     for expected in [
         "pub struct ProviderPrivateStreamNormalizer",
         "pub fn maybe_build_provider_private_stream_normalizer",
@@ -3810,11 +3813,11 @@ fn ai_serving_error_body_is_owned_by_format_finalize_module() {
         "ai_serving/conversion/error.rs should stay removed"
     );
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/shared/error_body.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/shared/error_body.rs"),
         "format error response-body helpers should live under finalize/error_body.rs"
     );
     assert!(
-        !workspace_file_exists("crates/aether-ai-formats/src/formats/conversion/error.rs"),
+        !workspace_file_exists("crates/aether-ai/formats/src/formats/conversion/error.rs"),
         "aether-ai-formats should not keep error response-body helpers under conversion"
     );
 
@@ -3839,7 +3842,7 @@ fn ai_serving_error_body_is_owned_by_format_finalize_module() {
 #[test]
 fn ai_serving_conversion_request_is_owned_by_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/conversion/request.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/conversion/request.rs"),
         "request conversion should live in aether-ai-formats"
     );
     assert!(
@@ -3864,7 +3867,7 @@ fn ai_serving_conversion_request_is_owned_by_format_crate() {
         "gateway ai_serving/mod.rs should not keep request re-export shell after root-seam consolidation"
     );
 
-    let surface_api = read_workspace_file("crates/aether-ai-formats/src/api.rs");
+    let surface_api = read_workspace_file("crates/aether-ai/formats/src/api.rs");
     assert!(
         surface_api.contains("pub use aether_ai_formats::formats::conversion::request::{"),
         "format API facade should re-export request conversion directly from aether-ai-formats"
@@ -3874,7 +3877,7 @@ fn ai_serving_conversion_request_is_owned_by_format_crate() {
 #[test]
 fn ai_serving_conversion_response_is_owned_by_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/conversion/response.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/conversion/response.rs"),
         "response conversion should live in aether-ai-formats"
     );
     assert!(
@@ -3899,7 +3902,7 @@ fn ai_serving_conversion_response_is_owned_by_format_crate() {
         "gateway ai_serving/mod.rs should not keep response re-export shell after root-seam consolidation"
     );
 
-    let surface_api = read_workspace_file("crates/aether-ai-formats/src/api.rs");
+    let surface_api = read_workspace_file("crates/aether-ai/formats/src/api.rs");
     assert!(
         surface_api.contains("pub use aether_ai_formats::formats::conversion::response::{"),
         "format API facade should re-export response conversion directly from aether-ai-formats"
@@ -3909,17 +3912,17 @@ fn ai_serving_conversion_response_is_owned_by_format_crate() {
 #[test]
 fn ai_format_crate_owns_conversion_and_surface_facade() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/conversion"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/conversion"),
         "aether-ai-formats should own the conversion directory"
     );
 
-    let surface_lib = read_workspace_file("crates/aether-ai-formats/src/lib.rs");
+    let surface_lib = read_workspace_file("crates/aether-ai/formats/src/lib.rs");
     assert!(
         surface_lib.contains("pub mod protocol;"),
         "aether-ai-formats lib.rs should expose the protocol module"
     );
 
-    let surface_api = read_workspace_file("crates/aether-ai-formats/src/api.rs");
+    let surface_api = read_workspace_file("crates/aether-ai/formats/src/api.rs");
     for pattern in [
         "pub use aether_ai_formats::{",
         "pub use aether_ai_formats::formats::conversion::request::{",
@@ -4003,12 +4006,12 @@ fn ai_serving_finalize_standard_sync_response_converters_are_owned_by_format_cra
 #[test]
 fn ai_serving_finalize_stream_engine_is_owned_by_format_crate() {
     for path in [
-        "crates/aether-ai-formats/src/formats/shared/sse.rs",
-        "crates/aether-ai-formats/src/formats/shared/stream_core/common.rs",
-        "crates/aether-ai-formats/src/formats/shared/stream_core/format_matrix.rs",
-        "crates/aether-ai-formats/src/formats/openai/chat/stream.rs",
-        "crates/aether-ai-formats/src/formats/claude/messages/stream.rs",
-        "crates/aether-ai-formats/src/formats/gemini/generate_content/stream.rs",
+        "crates/aether-ai/formats/src/formats/shared/sse.rs",
+        "crates/aether-ai/formats/src/formats/shared/stream_core/common.rs",
+        "crates/aether-ai/formats/src/formats/shared/stream_core/format_matrix.rs",
+        "crates/aether-ai/formats/src/formats/openai/chat/stream.rs",
+        "crates/aether-ai/formats/src/formats/claude/messages/stream.rs",
+        "crates/aether-ai/formats/src/formats/gemini/generate_content/stream.rs",
     ] {
         assert!(
             workspace_file_exists(path),
@@ -4044,7 +4047,7 @@ fn ai_serving_finalize_stream_engine_is_owned_by_format_crate() {
     }
 
     let surface_format_matrix = read_workspace_file(
-        "crates/aether-ai-formats/src/formats/shared/stream_core/format_matrix.rs",
+        "crates/aether-ai/formats/src/formats/shared/stream_core/format_matrix.rs",
     );
     for pattern in [
         "pub struct StreamingStandardFormatMatrix",
@@ -4068,16 +4071,16 @@ fn ai_serving_finalize_stream_engine_is_owned_by_format_crate() {
 #[test]
 fn ai_serving_finalize_standard_sync_products_are_owned_by_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/shared/sync_products.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/shared/sync_products.rs"),
         "finalize sync_products should live in aether-ai-formats"
     );
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/shared/sync_to_stream.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/shared/sync_to_stream.rs"),
         "finalize sync-to-stream bridge should live in aether-ai-formats"
     );
 
     let surface_sync_products =
-        read_workspace_file("crates/aether-ai-formats/src/formats/shared/sync_products.rs");
+        read_workspace_file("crates/aether-ai/formats/src/formats/shared/sync_products.rs");
     for expected in [
         "pub fn maybe_build_standard_cross_format_sync_product_from_normalized_payload(",
         "pub fn maybe_build_standard_same_format_sync_body_from_normalized_payload(",
@@ -4167,9 +4170,8 @@ fn ai_serving_finalize_standard_sync_products_are_owned_by_format_crate() {
         "apps/aether-gateway/src/ai_serving/finalize/internal/sync_finalize.rs",
     );
     assert!(
-        gateway_internal_sync.contains(
-            "maybe_build_standard_sync_finalize_product_from_normalized_payload"
-        ),
+        gateway_internal_sync
+            .contains("maybe_build_standard_sync_finalize_product_from_normalized_payload"),
         "gateway internal/sync_finalize.rs should delegate normalized standard sync finalize dispatch to aether-ai-formats"
     );
     assert!(
@@ -4204,7 +4206,7 @@ fn ai_serving_finalize_standard_sync_products_are_owned_by_format_crate() {
     }
 
     let surface_openai_image_stream =
-        read_workspace_file("crates/aether-ai-formats/src/formats/openai/image/stream.rs");
+        read_workspace_file("crates/aether-ai/formats/src/formats/openai/image/stream.rs");
     for expected in [
         "pub fn maybe_build_openai_image_sync_finalize_product(",
         "pub struct OpenAiImageSyncFinalizeProduct",
@@ -4219,7 +4221,7 @@ fn ai_serving_finalize_standard_sync_products_are_owned_by_format_crate() {
     }
 
     let surface_sync_to_stream =
-        read_workspace_file("crates/aether-ai-formats/src/formats/shared/sync_to_stream.rs");
+        read_workspace_file("crates/aether-ai/formats/src/formats/shared/sync_to_stream.rs");
     for expected in [
         "pub fn maybe_bridge_standard_sync_json_to_stream(",
         "pub struct SyncToStreamBridgeOutcome",
@@ -4256,11 +4258,11 @@ fn ai_serving_finalize_standard_sync_products_are_owned_by_format_crate() {
 #[test]
 fn ai_serving_finalize_stream_rewrite_matrix_is_owned_by_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/shared/stream_rewrite.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/shared/stream_rewrite.rs"),
         "finalize stream rewrite matrix should live in aether-ai-formats"
     );
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/openai/image/stream.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/openai/image/stream.rs"),
         "OpenAI image stream rewrite state should live in aether-ai-formats"
     );
 
@@ -4309,7 +4311,7 @@ fn ai_serving_finalize_stream_rewrite_matrix_is_owned_by_format_crate() {
 #[test]
 fn ai_serving_planner_common_parser_is_owned_by_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/shared/request.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/shared/request.rs"),
         "planner/common pure parser should exist in aether-ai-formats"
     );
 
@@ -4325,8 +4327,9 @@ fn ai_serving_planner_common_parser_is_owned_by_format_crate() {
         "gateway planner/common.rs should delegate body parsing through the ai_serving root seam"
     );
     assert!(
-        gateway_common_runtime
-            .contains("force_upstream_streaming_for_provider as force_upstream_streaming_for_provider_impl"),
+        gateway_common_runtime.contains(
+            "force_upstream_streaming_for_provider as force_upstream_streaming_for_provider_impl"
+        ),
         "gateway planner/common.rs should delegate upstream streaming policy through the ai_serving root seam"
     );
     for forbidden in [
@@ -4404,7 +4407,8 @@ fn ai_serving_planner_common_parser_is_owned_by_format_crate() {
     );
     assert!(
         openai_chat_diagnostic.contains("set_local_runtime_miss_diagnostic_reason(")
-            || openai_chat_diagnostic.contains("set_local_runtime_candidate_evaluation_diagnostic("),
+            || openai_chat_diagnostic
+                .contains("set_local_runtime_candidate_evaluation_diagnostic("),
         "openai chat diagnostic.rs should delegate miss diagnostic handling through planner/runtime_miss.rs"
     );
     assert!(
@@ -4415,7 +4419,7 @@ fn ai_serving_planner_common_parser_is_owned_by_format_crate() {
 
 #[test]
 fn ai_serving_root_owns_shared_gemini_request_path_parser() {
-    let serving_surface_spec = read_workspace_file("crates/aether-ai-serving/src/surface_spec.rs");
+    let serving_surface_spec = read_workspace_file("crates/aether-ai/serving/src/surface_spec.rs");
     assert!(
         serving_surface_spec.contains("pub fn extract_ai_gemini_model_from_path("),
         "aether-ai-serving should own shared gemini request-path parsing"
@@ -4423,9 +4427,8 @@ fn ai_serving_root_owns_shared_gemini_request_path_parser() {
 
     let ai_serving_mod = read_workspace_file("apps/aether-gateway/src/ai_serving/mod.rs");
     assert!(
-        ai_serving_mod.contains(
-            "extract_ai_gemini_model_from_path as extract_gemini_model_from_path"
-        ),
+        ai_serving_mod
+            .contains("extract_ai_gemini_model_from_path as extract_gemini_model_from_path"),
         "ai_serving/mod.rs should expose shared gemini request-path parsing through the serving seam"
     );
 
@@ -4452,7 +4455,7 @@ fn ai_serving_root_owns_shared_gemini_request_path_parser() {
 #[test]
 fn ai_serving_planner_standard_normalize_is_owned_by_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/shared/standard_normalize.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/shared/standard_normalize.rs"),
         "planner/standard/normalize should live in aether-ai-formats"
     );
 
@@ -4515,7 +4518,7 @@ fn ai_serving_planner_standard_normalize_is_owned_by_format_crate() {
 #[test]
 fn ai_serving_openai_helpers_are_owned_by_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/openai/shared.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/openai/shared.rs"),
         "planner/openai helper owner should exist in aether-ai-formats"
     );
 
@@ -4548,17 +4551,17 @@ fn ai_serving_openai_helpers_are_owned_by_format_crate() {
 #[test]
 fn ai_serving_standard_matrix_delegates_format_conversion_to_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/shared/request_matrix.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/shared/request_matrix.rs"),
         "planner/matrix facade should live in aether-ai-formats"
     );
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/shared/standard_matrix.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/shared/standard_matrix.rs"),
         "format standard request-body planner should live in aether-ai-formats"
     );
     for path in [
-        "crates/aether-ai-formats/src/protocol/canonical.rs",
-        "crates/aether-ai-formats/src/formats/matrix.rs",
-        "crates/aether-ai-formats/src/formats/registry.rs",
+        "crates/aether-ai/formats/src/protocol/canonical.rs",
+        "crates/aether-ai/formats/src/formats/matrix.rs",
+        "crates/aether-ai/formats/src/formats/registry.rs",
     ] {
         assert!(
             workspace_file_exists(path),
@@ -4566,7 +4569,7 @@ fn ai_serving_standard_matrix_delegates_format_conversion_to_format_crate() {
         );
     }
     let surface_matrix =
-        read_workspace_file("crates/aether-ai-formats/src/formats/shared/standard_matrix.rs");
+        read_workspace_file("crates/aether-ai/formats/src/formats/shared/standard_matrix.rs");
     assert!(
         surface_matrix.contains("use aether_ai_formats::formats::registry::{")
             && surface_matrix.contains("convert_request")
@@ -4618,26 +4621,26 @@ fn ai_serving_standard_matrix_delegates_format_conversion_to_format_crate() {
 #[test]
 fn ai_serving_standard_family_specs_are_owned_by_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/shared/family.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/shared/family.rs"),
         "planner/standard/family pure spec owner should live in aether-ai-formats"
     );
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/claude/messages/chat_spec.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/claude/messages/chat_spec.rs"),
         "planner/standard/claude/chat pure spec resolver should live in aether-ai-formats"
     );
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/claude/messages/cli_spec.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/claude/messages/cli_spec.rs"),
         "planner/standard/claude/cli pure spec resolver should live in aether-ai-formats"
     );
     assert!(
         workspace_file_exists(
-            "crates/aether-ai-formats/src/formats/gemini/generate_content/chat_spec.rs"
+            "crates/aether-ai/formats/src/formats/gemini/generate_content/chat_spec.rs"
         ),
         "planner/standard/gemini/chat pure spec resolver should live in aether-ai-formats"
     );
     assert!(
         workspace_file_exists(
-            "crates/aether-ai-formats/src/formats/gemini/generate_content/cli_spec.rs"
+            "crates/aether-ai/formats/src/formats/gemini/generate_content/cli_spec.rs"
         ),
         "planner/standard/gemini/cli pure spec resolver should live in aether-ai-formats"
     );
@@ -4705,7 +4708,7 @@ fn ai_serving_standard_family_specs_are_owned_by_format_crate() {
 #[test]
 fn ai_serving_same_format_provider_specs_are_owned_by_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/shared/passthrough.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/shared/passthrough.rs"),
         "planner/passthrough/provider pure spec owner should live in aether-ai-formats"
     );
 
@@ -4756,7 +4759,7 @@ fn ai_serving_same_format_provider_specs_are_owned_by_format_crate() {
 #[test]
 fn ai_serving_passthrough_provider_specs_are_owned_by_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/shared/passthrough.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/shared/passthrough.rs"),
         "planner/passthrough/provider pure spec owner should live in aether-ai-formats"
     );
 
@@ -4801,7 +4804,7 @@ fn ai_serving_passthrough_provider_specs_are_owned_by_format_crate() {
 #[test]
 fn ai_serving_specialized_files_specs_are_owned_by_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/gemini/files/spec.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/gemini/files/spec.rs"),
         "planner/specialized/files pure spec owner should live in aether-ai-formats"
     );
 
@@ -4831,12 +4834,12 @@ fn ai_serving_specialized_files_specs_are_owned_by_format_crate() {
 #[test]
 fn ai_serving_specialized_video_specs_are_owned_by_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/shared/video.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/shared/video.rs"),
         "planner/specialized/video shared spec seam should live in aether-ai-formats"
     );
     for path in [
-        "crates/aether-ai-formats/src/formats/openai/video/spec.rs",
-        "crates/aether-ai-formats/src/formats/gemini/video/spec.rs",
+        "crates/aether-ai/formats/src/formats/openai/video/spec.rs",
+        "crates/aether-ai/formats/src/formats/gemini/video/spec.rs",
     ] {
         assert!(
             workspace_file_exists(path),
@@ -4868,7 +4871,7 @@ fn ai_serving_specialized_video_specs_are_owned_by_format_crate() {
 #[test]
 fn ai_serving_openai_responses_specs_are_owned_by_format_crate() {
     assert!(
-        workspace_file_exists("crates/aether-ai-formats/src/formats/openai/responses/spec.rs"),
+        workspace_file_exists("crates/aether-ai/formats/src/formats/openai/responses/spec.rs"),
         "planner/standard/openai_responses pure spec owner should live in aether-ai-formats"
     );
 
@@ -4908,9 +4911,9 @@ fn ai_serving_openai_responses_specs_are_owned_by_format_crate() {
 #[test]
 fn ai_serving_legacy_api_format_names_stay_out_of_primary_paths() {
     for path in [
-        "crates/aether-ai-formats/src/contracts/plan_kinds.rs",
-        "crates/aether-ai-formats/src/formats/shared/routing.rs",
-        "crates/aether-ai-formats/src/formats/openai/responses/spec.rs",
+        "crates/aether-ai/formats/src/contracts/plan_kinds.rs",
+        "crates/aether-ai/formats/src/formats/shared/routing.rs",
+        "crates/aether-ai/formats/src/formats/openai/responses/spec.rs",
         "apps/aether-gateway/src/ai_serving/planner/decision/control_plan.rs",
         "apps/aether-gateway/src/execution_runtime/fallback.rs",
     ] {
@@ -4934,7 +4937,7 @@ fn ai_serving_legacy_api_format_names_stay_out_of_primary_paths() {
         }
     }
 
-    let registry = read_workspace_file("crates/aether-ai-formats/src/formats/registry.rs");
+    let registry = read_workspace_file("crates/aether-ai/formats/src/formats/registry.rs");
     let implementation = registry
         .split("#[cfg(test)]")
         .next()
@@ -4969,12 +4972,12 @@ fn retired_api_format_occurrences_are_whitelisted() {
         "apps/aether-gateway/src/handlers/admin/provider/write/normalize.rs",
         "apps/aether-gateway/src/handlers/admin/request/system/import.rs",
         "apps/aether-gateway/src/tests/control/admin/system_import.rs",
-        "crates/aether-ai-formats/src/formats/id.rs",
-        "crates/aether-ai-formats/src/formats/matrix.rs",
-        "crates/aether-ai-formats/src/formats/registry.rs",
-        "crates/aether-data/src/migrate.rs",
-        "crates/aether-data/src/lifecycle/migrate/tests.rs",
-        "crates/aether-usage-runtime/src/report.rs",
+        "crates/aether-ai/formats/src/formats/id.rs",
+        "crates/aether-ai/formats/src/formats/matrix.rs",
+        "crates/aether-ai/formats/src/formats/registry.rs",
+        "crates/aether-data/runtime/src/migrate.rs",
+        "crates/aether-data/runtime/src/lifecycle/migrate/tests.rs",
+        "crates/aether-usage/runtime/src/report.rs",
         "frontend/src/api/endpoints/types/__tests__/api-format.spec.ts",
     ];
     let allowed = allowed_paths

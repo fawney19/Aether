@@ -73,15 +73,16 @@ impl AppState {
 
         let ttl = self.frontdoor_runtime_guards.auth_capacity_cache_ttl;
         if ttl.is_zero() {
-            return self.find_wallet(lookup).await;
+            return self
+                .read_wallet_snapshot_for_auth_uncached(user_id, api_key_id, api_key_is_standalone)
+                .await;
         }
 
         self.auth_wallet_snapshot_cache
-            .get_or_load(
-                cache_key,
-                ttl,
-                || async move { self.find_wallet(lookup).await },
-            )
+            .get_or_load(cache_key, ttl, || async move {
+                let _permit = self.acquire_auth_snapshot_load_gate().await?;
+                self.find_wallet(lookup).await
+            })
             .await
     }
 
@@ -117,6 +118,7 @@ impl AppState {
             return Ok(None);
         };
 
+        let _permit = self.acquire_auth_snapshot_load_gate().await?;
         self.find_wallet(lookup).await
     }
 

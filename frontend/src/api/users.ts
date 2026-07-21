@@ -374,7 +374,10 @@ export const usersApi = {
 
   async listUserGroups(): Promise<ListUserGroupsResponse> {
     const response = await apiClient.get<ListUserGroupsResponse>('/api/admin/user-groups')
-    return response.data
+    return {
+      ...response.data,
+      items: Array.isArray(response.data?.items) ? response.data.items : [],
+    }
   },
 
   async createUserGroup(payload: UpsertUserGroupRequest): Promise<UserGroup> {
@@ -417,8 +420,9 @@ export const usersApi = {
   },
 
   async getUserApiKeys(userId: string): Promise<ApiKey[]> {
-    const response = await apiClient.get<{ api_keys: ApiKey[] }>(`/api/admin/users/${userId}/api-keys`)
-    return response.data.api_keys
+    const response = await apiClient.get<{ api_keys?: ApiKey[] } | ApiKey[]>(`/api/admin/users/${userId}/api-keys`)
+    if (Array.isArray(response.data)) return response.data
+    return Array.isArray(response.data?.api_keys) ? response.data.api_keys : []
   },
 
   async getUserSessions(userId: string): Promise<SessionRecord[]> {

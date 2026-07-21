@@ -702,9 +702,11 @@ pub(crate) async fn build_lazy_requested_model_execution_candidate_attempt_sourc
     G,
 >(
     state: PlannerAppState<'a>,
+    model_directive_policy: &crate::system_features::ModelDirectivePolicySnapshot,
     trace_id: &str,
     client_api_format: &str,
     requested_model: &str,
+    request_operation: Option<&str>,
     require_streaming: bool,
     auth_snapshot: &GatewayAuthApiKeySnapshot,
     client_session_affinity: Option<&ClientSessionAffinity>,
@@ -730,8 +732,10 @@ where
     let record_runtime_miss_diagnostic = persistence_policy.skipped.record_runtime_miss_diagnostic;
     let page_cursor = LocalCandidatePreselectionPageCursor::new(
         state,
+        model_directive_policy,
         client_api_format,
         requested_model,
+        request_operation,
         require_streaming,
         required_capabilities,
         auth_snapshot,
@@ -1139,6 +1143,7 @@ async fn resolve_priority_candidate_page_with_cache(
 
     let key = CandidateResolvedPageCacheKey::new(
         &cursor.requested_model,
+        cursor.page_cursor.resolved_page_cache_request_operation(),
         &cursor.client_api_format,
         true,
         &cursor.auth_snapshot,
@@ -1151,6 +1156,9 @@ async fn resolve_priority_candidate_page_with_cache(
             .page_cursor
             .resolved_page_cache_use_api_format_alias_match(),
         cursor.client_session_affinity.as_ref(),
+        cursor
+            .page_cursor
+            .resolved_page_cache_model_directive_policy_hash(),
         cursor.resolution_mode,
     );
     let page_candidates_for_fallback = page_candidates.clone();
@@ -1949,6 +1957,7 @@ mod tests {
             global_model_id: "global-model-1".to_string(),
             global_model_name: "gpt-5".to_string(),
             selected_provider_model_name: "gpt-5".to_string(),
+            supports_streaming: true,
             mapping_matched_model: None,
         }
     }
@@ -2177,10 +2186,14 @@ mod tests {
     async fn resolved_candidate_page_cache_requires_fixed_order_or_explicit_affinity() {
         let app = AppState::new().expect("state should build");
         let auth_snapshot = sample_auth_snapshot();
+        let model_directive_policy =
+            crate::system_features::ModelDirectivePolicySnapshot::default();
         let mut page_cursor = LocalCandidatePreselectionPageCursor::new(
             PlannerAppState::new(&app),
+            &model_directive_policy,
             "openai:chat",
             "gpt-5",
+            None,
             true,
             None,
             &auth_snapshot,
@@ -2233,8 +2246,10 @@ mod tests {
 
         let mut page_cursor = LocalCandidatePreselectionPageCursor::new(
             PlannerAppState::new(&app),
+            &model_directive_policy,
             "openai:chat",
             "gpt-5",
+            None,
             true,
             None,
             &auth_snapshot,
@@ -2269,8 +2284,10 @@ mod tests {
             );
         let mut page_cursor = LocalCandidatePreselectionPageCursor::new(
             PlannerAppState::new(&fixed_order_app),
+            &model_directive_policy,
             "openai:chat",
             "gpt-5",
+            None,
             true,
             None,
             &auth_snapshot,

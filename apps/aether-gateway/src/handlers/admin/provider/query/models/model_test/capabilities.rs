@@ -9,16 +9,19 @@ pub(super) struct ProviderQueryOpenAiImageTestCapability(AdminProviderOpenAiImag
 
 pub(super) fn provider_query_openai_image_test_capability(
     provider_type: &str,
+    provider_model: Option<&str>,
 ) -> ProviderQueryOpenAiImageTestCapability {
     ProviderQueryOpenAiImageTestCapability(admin_provider_openai_image_test_capability(
         provider_type,
+        provider_model,
     ))
 }
 
 pub(super) fn provider_query_openai_image_normalize_options(
     provider_type: &str,
+    provider_model: Option<&str>,
 ) -> crate::ai_serving::OpenAiImageNormalizeOptions {
-    admin_provider_openai_image_normalize_options(provider_type)
+    admin_provider_openai_image_normalize_options(provider_type, provider_model)
 }
 
 pub(super) fn provider_query_openai_image_requested_count(request_body: &Value) -> Option<u64> {
@@ -35,9 +38,10 @@ pub(super) fn provider_query_openai_image_requested_count(request_body: &Value) 
 
 pub(super) fn provider_query_openai_image_normalize_failure_message(
     provider_type: &str,
+    provider_model: Option<&str>,
     request_body: &Value,
 ) -> String {
-    let capability = provider_query_openai_image_test_capability(provider_type);
+    let capability = provider_query_openai_image_test_capability(provider_type, provider_model);
     if provider_query_openai_image_requested_count(request_body)
         .is_some_and(|value| !capability.0.supports_generation_count(value))
     {

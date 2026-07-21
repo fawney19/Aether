@@ -1,8 +1,15 @@
 #!/usr/bin/env node
 const fs = require('node:fs')
 
+const STAGED_STREAM_LOAD_CONTRACT = {
+  expectedTimeoutMs: 150000,
+  expectedFirstBodyHoldMs: 120000,
+  expectedResponseMode: 'FirstBodyByte',
+}
+
 const STAGE_DEFAULTS = {
   S1: {
+    ...STAGED_STREAM_LOAD_CONTRACT,
     minRequests: 1000,
     minConcurrency: 1000,
     dbPoolMaxUsageBasisPoints: 5000,
@@ -24,7 +31,8 @@ const STAGE_DEFAULTS = {
     redisRuntimeMaxTotalErrorReplies: 0,
     redisRuntimeMaxLaneCommandErrorsTotal: 0,
     redisRuntimeMaxLaneCommandTimeoutsTotal: 0,
-    redisRuntimeMaxNonblockingCommandLatencyMs: 500,
+    redisRuntimeMaxNonblockingCommandLatencyMs: 1000,
+    redisRuntimeMaxNonblockingOver500MsRateBasisPoints: 10,
     gatewayProcessMaxFdUsageBasisPoints: 7000,
     gatewayProcessMaxTcpCloseWaitConnections: 0,
     usageQueueMaxFinalPending: 10,
@@ -44,6 +52,7 @@ const STAGE_DEFAULTS = {
     defaultReport: '/tmp/aether_gateway_pressure_s1_1k.json',
   },
   S2: {
+    ...STAGED_STREAM_LOAD_CONTRACT,
     minRequests: 3000,
     minConcurrency: 3000,
     dbPoolMaxUsageBasisPoints: 7000,
@@ -65,7 +74,8 @@ const STAGE_DEFAULTS = {
     redisRuntimeMaxTotalErrorReplies: 0,
     redisRuntimeMaxLaneCommandErrorsTotal: 0,
     redisRuntimeMaxLaneCommandTimeoutsTotal: 0,
-    redisRuntimeMaxNonblockingCommandLatencyMs: 500,
+    redisRuntimeMaxNonblockingCommandLatencyMs: 1000,
+    redisRuntimeMaxNonblockingOver500MsRateBasisPoints: 10,
     gatewayProcessMaxFdUsageBasisPoints: 7000,
     gatewayProcessMaxTcpCloseWaitConnections: 0,
     usageQueueMaxFinalPending: 10,
@@ -85,6 +95,7 @@ const STAGE_DEFAULTS = {
     defaultReport: '/tmp/aether_gateway_pressure_s2_3k.json',
   },
   S3: {
+    ...STAGED_STREAM_LOAD_CONTRACT,
     minRequests: 6000,
     minConcurrency: 6000,
     dbPoolMaxUsageBasisPoints: 8000,
@@ -106,7 +117,8 @@ const STAGE_DEFAULTS = {
     redisRuntimeMaxTotalErrorReplies: 0,
     redisRuntimeMaxLaneCommandErrorsTotal: 0,
     redisRuntimeMaxLaneCommandTimeoutsTotal: 0,
-    redisRuntimeMaxNonblockingCommandLatencyMs: 500,
+    redisRuntimeMaxNonblockingCommandLatencyMs: 1000,
+    redisRuntimeMaxNonblockingOver500MsRateBasisPoints: 10,
     gatewayProcessMaxFdUsageBasisPoints: 7000,
     gatewayProcessMaxTcpCloseWaitConnections: 0,
     usageQueueMaxFinalPending: 10,
@@ -126,6 +138,7 @@ const STAGE_DEFAULTS = {
     defaultReport: '/tmp/aether_gateway_pressure_s3_6k.json',
   },
   S4: {
+    ...STAGED_STREAM_LOAD_CONTRACT,
     minRequests: 10000,
     minConcurrency: 10000,
     dbPoolMaxUsageBasisPoints: 8000,
@@ -147,7 +160,8 @@ const STAGE_DEFAULTS = {
     redisRuntimeMaxTotalErrorReplies: 0,
     redisRuntimeMaxLaneCommandErrorsTotal: 0,
     redisRuntimeMaxLaneCommandTimeoutsTotal: 0,
-    redisRuntimeMaxNonblockingCommandLatencyMs: 500,
+    redisRuntimeMaxNonblockingCommandLatencyMs: 1000,
+    redisRuntimeMaxNonblockingOver500MsRateBasisPoints: 10,
     gatewayProcessMaxFdUsageBasisPoints: 7000,
     gatewayProcessMaxTcpCloseWaitConnections: 0,
     usageQueueMaxFinalPending: 10,
@@ -167,6 +181,7 @@ const STAGE_DEFAULTS = {
     defaultReport: '/tmp/aether_gateway_pressure_s4_10k.json',
   },
   S5: {
+    ...STAGED_STREAM_LOAD_CONTRACT,
     minRequests: 10000,
     minConcurrency: 10000,
     dbPoolMaxUsageBasisPoints: 8000,
@@ -188,7 +203,8 @@ const STAGE_DEFAULTS = {
     redisRuntimeMaxTotalErrorReplies: 0,
     redisRuntimeMaxLaneCommandErrorsTotal: 0,
     redisRuntimeMaxLaneCommandTimeoutsTotal: 0,
-    redisRuntimeMaxNonblockingCommandLatencyMs: 500,
+    redisRuntimeMaxNonblockingCommandLatencyMs: 1000,
+    redisRuntimeMaxNonblockingOver500MsRateBasisPoints: 10,
     gatewayProcessMaxFdUsageBasisPoints: 7000,
     gatewayProcessMaxTcpCloseWaitConnections: 0,
     usageQueueMaxFinalPending: 10,
@@ -211,6 +227,8 @@ const STAGE_DEFAULTS = {
 
 STAGE_DEFAULTS.REALISTIC_STREAM = {
   ...STAGE_DEFAULTS.S4,
+  expectedTimeoutMs: 150000,
+  expectedFirstBodyHoldMs: 0,
   minRequests: 1000,
   minConcurrency: 1000,
   minThroughputRps: 150,
@@ -225,16 +243,18 @@ STAGE_DEFAULTS.REALISTIC_STREAM = {
 
 STAGE_DEFAULTS.TPS = {
   ...STAGE_DEFAULTS.S4,
-  minRequests: 20000,
-  minConcurrency: 500,
-  minThroughputRps: 500,
+  expectedTimeoutMs: 150000,
+  expectedFirstBodyHoldMs: 0,
+  minRequests: 30000,
+  minConcurrency: 600,
+  minThroughputRps: 1000,
   maxHeadersP95Ms: 2000,
   maxFirstBodyP95Ms: 3000,
   maxP95Ms: 10000,
   maxP99Ms: 20000,
   maxFirstBodyHoldMs: 0,
   expectedResponseMode: 'FullBody',
-  defaultReport: '/tmp/aether_gateway_tps_20k_c500.json',
+  defaultReport: '/tmp/aether_gateway_tps_30k_c600_1krps.json',
 }
 
 function parseArgs(argv) {
@@ -270,6 +290,7 @@ function parseArgs(argv) {
     redisRuntimeMaxLaneCommandErrorsTotal: numberEnv('PRESSURE_MAX_REDIS_RUNTIME_LANE_COMMAND_ERRORS_TOTAL'),
     redisRuntimeMaxLaneCommandTimeoutsTotal: numberEnv('PRESSURE_MAX_REDIS_RUNTIME_LANE_COMMAND_TIMEOUTS_TOTAL'),
     redisRuntimeMaxNonblockingCommandLatencyMs: numberEnv('PRESSURE_MAX_REDIS_RUNTIME_NONBLOCKING_COMMAND_LATENCY_MS'),
+    redisRuntimeMaxNonblockingOver500MsRateBasisPoints: numberEnv('PRESSURE_MAX_REDIS_RUNTIME_NONBLOCKING_OVER_500MS_RATE_BASIS_POINTS'),
     gatewayProcessMaxFdUsageBasisPoints: numberEnv('PRESSURE_MAX_GATEWAY_PROCESS_FD_USAGE_BASIS_POINTS'),
     gatewayProcessMaxTcpCloseWaitConnections: numberEnv('PRESSURE_MAX_GATEWAY_PROCESS_TCP_CLOSE_WAIT_CONNECTIONS'),
     gatewayBackgroundTasksMaxUnexpectedExitsTotal: numberEnv('PRESSURE_MAX_GATEWAY_BACKGROUND_TASKS_UNEXPECTED_EXITS_TOTAL'),
@@ -351,6 +372,8 @@ function parseArgs(argv) {
       options.redisRuntimeMaxLaneCommandTimeoutsTotal = numberArg(nextValue(argv, ++index, arg), arg)
     } else if (arg === '--max-redis-runtime-nonblocking-command-latency-ms') {
       options.redisRuntimeMaxNonblockingCommandLatencyMs = numberArg(nextValue(argv, ++index, arg), arg)
+    } else if (arg === '--max-redis-runtime-nonblocking-over-500ms-rate-basis-points') {
+      options.redisRuntimeMaxNonblockingOver500MsRateBasisPoints = numberArg(nextValue(argv, ++index, arg), arg)
     } else if (arg === '--max-gateway-process-fd-usage-basis-points') {
       options.gatewayProcessMaxFdUsageBasisPoints = numberArg(nextValue(argv, ++index, arg), arg)
     } else if (arg === '--max-gateway-process-tcp-close-wait-connections') {
@@ -439,6 +462,7 @@ function parseArgs(argv) {
       redisRuntimeMaxLaneCommandErrorsTotal: options.redisRuntimeMaxLaneCommandErrorsTotal,
       redisRuntimeMaxLaneCommandTimeoutsTotal: options.redisRuntimeMaxLaneCommandTimeoutsTotal,
       redisRuntimeMaxNonblockingCommandLatencyMs: options.redisRuntimeMaxNonblockingCommandLatencyMs,
+      redisRuntimeMaxNonblockingOver500MsRateBasisPoints: options.redisRuntimeMaxNonblockingOver500MsRateBasisPoints,
       gatewayProcessMaxFdUsageBasisPoints: options.gatewayProcessMaxFdUsageBasisPoints,
       gatewayProcessMaxTcpCloseWaitConnections: options.gatewayProcessMaxTcpCloseWaitConnections,
       gatewayBackgroundTasksMaxUnexpectedExitsTotal: options.gatewayBackgroundTasksMaxUnexpectedExitsTotal,
@@ -598,6 +622,23 @@ function assertLoadAtMost(name, maximum) {
   }
 }
 
+function assertLoadEquals(name, expected) {
+  if (expected == null) return
+  const raw = load[name]
+  if (raw == null) {
+    fail(`missing load.${name}, expected ${expected}`)
+    return
+  }
+  const value = Number(raw)
+  if (!Number.isFinite(value)) {
+    fail(`load.${name} is not numeric: ${raw}`)
+    return
+  }
+  if (value !== expected) {
+    fail(`load.${name}=${value}, expected ${expected}`)
+  }
+}
+
 const statusCounts = load.status_counts || {}
 const non2xx = Object.entries(statusCounts)
   .filter(([status]) => !String(status).startsWith('2'))
@@ -631,6 +672,9 @@ if (non2xx !== 0) {
 if (Object.keys(load.error_counts || {}).length > 0) {
   fail(`load.error_counts is not empty: ${JSON.stringify(load.error_counts)}`)
 }
+
+assertLoadEquals('timeout_ms', options.expectedTimeoutMs)
+assertLoadEquals('first_body_hold_ms', options.expectedFirstBodyHoldMs)
 
 if (options.expectedResponseMode != null) {
   const responseMode = normalizeResponseMode(load.response_mode)
@@ -806,11 +850,25 @@ if (
 const redisRuntimeMaxNonblockingCommandLatencyMs = optionalMetric('redis_runtime_max_nonblocking_command_latency_ms')
 const redisRuntimeNonblockingCommandLatencyMs =
   optionalMetric('redis_runtime_nonblocking_command_latency_ms_delta') ?? redisRuntimeMaxNonblockingCommandLatencyMs
+const redisRuntimeNonblockingOver500MsRateBasisPoints = optionalMetric(
+  'redis_runtime_nonblocking_command_over_500ms_rate_basis_points',
+)
+const redisRuntimeNonblockingLatencyLimitMs =
+  redisRuntimeNonblockingOver500MsRateBasisPoints == null
+    ? 500
+    : options.redisRuntimeMaxNonblockingCommandLatencyMs
 if (
   redisRuntimeNonblockingCommandLatencyMs != null
-  && redisRuntimeNonblockingCommandLatencyMs >= options.redisRuntimeMaxNonblockingCommandLatencyMs
+  && redisRuntimeNonblockingCommandLatencyMs >= redisRuntimeNonblockingLatencyLimitMs
 ) {
-  fail(`redis_runtime_nonblocking_command_latency_ms_delta=${redisRuntimeNonblockingCommandLatencyMs}, expected < ${options.redisRuntimeMaxNonblockingCommandLatencyMs}`)
+  fail(`redis_runtime_nonblocking_command_latency_ms_delta=${redisRuntimeNonblockingCommandLatencyMs}, expected < ${redisRuntimeNonblockingLatencyLimitMs}`)
+}
+if (
+  redisRuntimeNonblockingOver500MsRateBasisPoints != null
+  && redisRuntimeNonblockingOver500MsRateBasisPoints
+    > options.redisRuntimeMaxNonblockingOver500MsRateBasisPoints
+) {
+  fail(`redis_runtime_nonblocking_command_over_500ms_rate_basis_points=${redisRuntimeNonblockingOver500MsRateBasisPoints}, expected <= ${options.redisRuntimeMaxNonblockingOver500MsRateBasisPoints}`)
 }
 
 if (metric('gateway_requests_max_rejected_total') !== 0) {
@@ -851,6 +909,31 @@ if (metric('usage_runtime_max_lifecycle_enqueue_failed_total') !== 0) {
 
 if (metric('usage_runtime_max_lifecycle_enqueue_deferred_dropped_total') !== 0) {
   fail(`usage_runtime_max_lifecycle_enqueue_deferred_dropped_total=${metrics.usage_runtime_max_lifecycle_enqueue_deferred_dropped_total}`)
+}
+
+const usageRuntimeFinalEnqueueRetryPending = optionalMetric('usage_runtime_final_enqueue_retry_pending')
+if (usageRuntimeFinalEnqueueRetryPending != null && usageRuntimeFinalEnqueueRetryPending !== 0) {
+  fail(`usage_runtime_final_enqueue_retry_pending=${usageRuntimeFinalEnqueueRetryPending}`)
+}
+
+const usageRuntimeEnqueueRetryScheduledDelta = optionalMetric('usage_runtime_enqueue_retry_scheduled_total_delta')
+const usageRuntimeEnqueueRetryRecoveredDelta = optionalMetric('usage_runtime_enqueue_retry_recovered_total_delta')
+if (
+  usageRuntimeEnqueueRetryScheduledDelta != null
+  && usageRuntimeEnqueueRetryRecoveredDelta != null
+  && usageRuntimeEnqueueRetryScheduledDelta !== usageRuntimeEnqueueRetryRecoveredDelta
+) {
+  fail(`usage_runtime enqueue dispatcher did not fully recover: scheduled_delta=${usageRuntimeEnqueueRetryScheduledDelta} recovered_delta=${usageRuntimeEnqueueRetryRecoveredDelta}`)
+}
+
+const usageRuntimeEnqueueRetryFailedDelta = optionalMetric('usage_runtime_enqueue_retry_failed_total_delta')
+if (usageRuntimeEnqueueRetryFailedDelta != null && usageRuntimeEnqueueRetryFailedDelta !== 0) {
+  fail(`usage_runtime_enqueue_retry_failed_total_delta=${usageRuntimeEnqueueRetryFailedDelta}`)
+}
+
+const usageRuntimeEnqueueRetryClosedDelta = optionalMetric('usage_runtime_enqueue_retry_closed_or_unavailable_total_delta')
+if (usageRuntimeEnqueueRetryClosedDelta != null && usageRuntimeEnqueueRetryClosedDelta !== 0) {
+  fail(`usage_runtime_enqueue_retry_closed_or_unavailable_total_delta=${usageRuntimeEnqueueRetryClosedDelta}`)
 }
 
 if (report.settle_after_ms > 0 && report.settle_drain_completed === false) {
@@ -1248,5 +1331,5 @@ if (usageRuntimeWorkerReclaimFailuresTotal != null) {
 }
 
 function printUsage() {
-  console.error('usage: check_gateway_stage_report.js [--stage S1|S2|S3|S4|S5|realistic-stream|tps] [--min-requests N] [--min-concurrency N] [--min-throughput-rps N] [--max-headers-p95-ms N] [--max-first-body-p95-ms N] [--max-p95-ms N] [--max-p99-ms N] [--max-first-body-hold-ms N] [--expected-response-mode headers|first-body-byte|full] [--db-pool-max-usage-basis-points N] [--max-db-pool-pressure-samples N] [--max-db-pool-pressure-sample-rate-basis-points N] [--max-postgres-observability-unavailable-samples N] [--max-postgres-wal-observability-unavailable-samples N] [--max-postgres-checkpoint-observability-unavailable-samples N] [--max-postgres-statement-observability-unavailable-samples N] [--max-postgres-lock-waiting-connections N] [--max-postgres-idle-in-transaction-connections N] [--max-postgres-oldest-active-query-age-ms N] [--max-postgres-oldest-transaction-age-ms N] [--max-postgres-statement-top-max-exec-time-ms N] [--max-redis-runtime-health-unavailable-samples N] [--max-redis-runtime-memory-usage-basis-points N] [--max-redis-runtime-rejected-connections-total N] [--max-redis-runtime-evicted-keys-total N] [--max-redis-runtime-error-replies-total N] [--max-redis-runtime-lane-command-errors-total N] [--max-redis-runtime-lane-command-timeouts-total N] [--max-redis-runtime-nonblocking-command-latency-ms N] [--max-gateway-process-fd-usage-basis-points N] [--max-gateway-process-tcp-close-wait-connections N] [--max-gateway-background-tasks-unexpected-exits-total N] [--max-usage-queue-final-pending N] [--max-usage-queue-final-lag N] [--max-usage-queue-final-dlq-length N] [--max-usage-queue-oldest-pending-idle-ms N] [--max-usage-queue-health-unavailable-samples N] [--max-usage-counter-outbox-final-pending-rows N] [--max-usage-counter-outbox-oldest-pending-age-seconds N] [--max-usage-counter-health-unavailable-samples N] [--max-usage-counter-outbox-flush-failed-batches-total N] [--max-usage-counter-outbox-cleanup-failed-batches-total N] [--max-usage-runtime-worker-dead-lettered-entries-total N] [--max-usage-runtime-worker-process-failures-total N] [--max-usage-runtime-worker-read-failures-total N] [--max-usage-runtime-worker-reclaim-failures-total N] [report.json]')
+  console.error('usage: check_gateway_stage_report.js [--stage S1|S2|S3|S4|S5|realistic-stream|tps] [--min-requests N] [--min-concurrency N] [--min-throughput-rps N] [--max-headers-p95-ms N] [--max-first-body-p95-ms N] [--max-p95-ms N] [--max-p99-ms N] [--max-first-body-hold-ms N] [--expected-response-mode headers|first-body-byte|full] [--db-pool-max-usage-basis-points N] [--max-db-pool-pressure-samples N] [--max-db-pool-pressure-sample-rate-basis-points N] [--max-postgres-observability-unavailable-samples N] [--max-postgres-wal-observability-unavailable-samples N] [--max-postgres-checkpoint-observability-unavailable-samples N] [--max-postgres-statement-observability-unavailable-samples N] [--max-postgres-lock-waiting-connections N] [--max-postgres-idle-in-transaction-connections N] [--max-postgres-oldest-active-query-age-ms N] [--max-postgres-oldest-transaction-age-ms N] [--max-postgres-statement-top-max-exec-time-ms N] [--max-redis-runtime-health-unavailable-samples N] [--max-redis-runtime-memory-usage-basis-points N] [--max-redis-runtime-rejected-connections-total N] [--max-redis-runtime-evicted-keys-total N] [--max-redis-runtime-error-replies-total N] [--max-redis-runtime-lane-command-errors-total N] [--max-redis-runtime-lane-command-timeouts-total N] [--max-redis-runtime-nonblocking-command-latency-ms N] [--max-redis-runtime-nonblocking-over-500ms-rate-basis-points N] [--max-gateway-process-fd-usage-basis-points N] [--max-gateway-process-tcp-close-wait-connections N] [--max-gateway-background-tasks-unexpected-exits-total N] [--max-usage-queue-final-pending N] [--max-usage-queue-final-lag N] [--max-usage-queue-final-dlq-length N] [--max-usage-queue-oldest-pending-idle-ms N] [--max-usage-queue-health-unavailable-samples N] [--max-usage-counter-outbox-final-pending-rows N] [--max-usage-counter-outbox-oldest-pending-age-seconds N] [--max-usage-counter-health-unavailable-samples N] [--max-usage-counter-outbox-flush-failed-batches-total N] [--max-usage-counter-outbox-cleanup-failed-batches-total N] [--max-usage-runtime-worker-dead-lettered-entries-total N] [--max-usage-runtime-worker-process-failures-total N] [--max-usage-runtime-worker-read-failures-total N] [--max-usage-runtime-worker-reclaim-failures-total N] [report.json]')
 }

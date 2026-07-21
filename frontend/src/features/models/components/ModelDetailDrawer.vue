@@ -145,6 +145,8 @@
                   默认定价
                 </h4>
 
+                <ProcessingTierPricingSummary :pricing="model.default_tiered_pricing" />
+
                 <!-- 图片输出计费 -->
                 <div
                   v-if="hasImagePricing"
@@ -556,6 +558,7 @@ import TableHead from '@/components/ui/table-head.vue'
 import TableCell from '@/components/ui/table-cell.vue'
 import RoutingTab from './RoutingTab.vue'
 import ModelMappingsTab from './ModelMappingsTab.vue'
+import ProcessingTierPricingSummary from './ProcessingTierPricingSummary.vue'
 import { sortResolutionEntries } from '@/utils/form'
 import { parseApiError } from '@/utils/errorParser'
 import { formatCompactNumber, formatTokens } from '@/utils/format'

@@ -1042,6 +1042,7 @@ fn grok_stream_terminal_summary(
         finish_reason: Some("stop".to_string()),
         response_id: None,
         model: plan.model_name.clone(),
+        provider_actual_service_tier: None,
         observed_finish: true,
         unknown_event_count: 0,
         parser_error: None,

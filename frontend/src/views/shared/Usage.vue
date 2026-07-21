@@ -123,6 +123,7 @@
       v-if="isAdminPage"
       :is-open="detailModalOpen"
       :request-id="selectedRequestId"
+      :summary-record="selectedRequestSummary"
       @close="detailModalOpen = false"
       @request-state="handleDetailRequestState"
     />
@@ -154,6 +155,13 @@ import {
   getDateRangeFromPeriod
 } from '@/features/usage/composables'
 import { reconcileActiveRequestDiscovery } from '@/features/usage/utils/activeRequestDiscovery'
+import {
+  mergeUsageRecordErrorMessage,
+  mergeUsageRecordFirstByteTimeMs,
+  mergeUsageRecordLifecycleSnapshot,
+  mergeUsageRecordResponseTiming,
+  parseUsageTimestampMs,
+} from '@/features/usage/utils/recordSync'
 import {
   hasUsageFallback,
   isUsageRecordFailed,
@@ -493,20 +501,27 @@ async function pollActiveRequests() {
       }
       const currentRank = record.status ? (statusPriority[record.status] ?? 0) : 0
       const newRank = update.status ? (statusPriority[update.status] ?? 0) : 0
-      const shouldApply = newRank >= currentRank
+      const currentUpdatedAtMs = parseUsageTimestampMs(record.updated_at)
+      const updateUpdatedAtMs = parseUsageTimestampMs(update.updated_at)
+      const updateSnapshotIsOlder = currentUpdatedAtMs != null &&
+        updateUpdatedAtMs != null &&
+        updateUpdatedAtMs < currentUpdatedAtMs
+      const shouldApply = !updateSnapshotIsOlder && newRank >= currentRank
       const updateHasFailureSignal =
         (typeof update.status_code === 'number' && update.status_code >= 400) ||
         (typeof update.error_message === 'string' && update.error_message.trim().length > 0) ||
         update.image_progress?.phase === 'failed'
-      const shouldApplyData = shouldApply || updateHasFailureSignal
+      const shouldApplyData = shouldApply || (
+        !updateSnapshotIsOlder && currentRank < 2 && updateHasFailureSignal
+      )
 
       if (shouldApply && record.status !== update.status) {
         record.status = update.status
       }
-      if ('image_progress' in update) {
-        record.image_progress = update.image_progress ?? null
-      }
       if (shouldApplyData) {
+        if ('image_progress' in update) {
+          record.image_progress = update.image_progress ?? null
+        }
         // 进行中状态也需要持续更新（provider/key/TTFB 可能在 streaming 后才落库）
         record.input_tokens = update.input_tokens
         record.effective_input_tokens = update.effective_input_tokens ?? record.effective_input_tokens
@@ -520,19 +535,38 @@ async function pollActiveRequests() {
         record.cost = update.cost
         record.actual_cost = update.actual_cost ?? undefined
         record.rate_multiplier = update.rate_multiplier ?? undefined
-        record.response_time_ms = update.response_time_ms ?? undefined
-        record.first_byte_time_ms = update.first_byte_time_ms ?? undefined
+        const responseTiming = mergeUsageRecordResponseTiming(
+          {
+            response_time_ms: record.response_time_ms,
+            response_time_updated_at: record.response_time_updated_at,
+          },
+          {
+            response_time_ms: update.response_time_ms,
+            response_time_updated_at: update.response_time_updated_at,
+          },
+          {
+            preferNext: update.status === 'completed' ||
+              update.status === 'failed' ||
+              update.status === 'cancelled',
+          },
+        )
+        record.response_time_ms = responseTiming.response_time_ms
+        record.response_time_updated_at = responseTiming.response_time_updated_at
+        record.first_byte_time_ms = mergeUsageRecordFirstByteTimeMs(
+          record.first_byte_time_ms,
+          update.first_byte_time_ms
+        )
         if ('updated_at' in update) {
-          record.updated_at = typeof update.updated_at === 'string' ? update.updated_at : null
-        }
-        if ('response_time_updated_at' in update) {
-          record.response_time_updated_at =
-            typeof update.response_time_updated_at === 'string'
-              ? update.response_time_updated_at
-              : null
+          if (typeof update.updated_at === 'string') {
+            record.updated_at = update.updated_at
+          }
         }
         record.status_code = update.status_code ?? undefined
-        record.error_message = update.error_message ?? undefined
+        record.error_message = mergeUsageRecordErrorMessage(
+          record.error_message,
+          update.error_message,
+          { authoritative: shouldApply },
+        )
         if (typeof update.upstream_is_stream === 'boolean') {
           record.upstream_is_stream = update.upstream_is_stream
           record.is_stream = update.upstream_is_stream
@@ -554,20 +588,28 @@ async function pollActiveRequests() {
         if (typeof update.has_fallback === 'boolean') {
           record.has_fallback = record.has_fallback === true || update.has_fallback
         }
-        // 模型映射：streaming 时已可确定
-        if ('target_model' in update && (typeof update.target_model === 'string' || update.target_model === null)) {
-          record.target_model = update.target_model
+        // Active responses are complete final-provider snapshots. Absence clears facts left by
+        // a previous candidate, while requested reasoning remains tied to the client request.
+        record.target_model = typeof update.target_model === 'string' && update.target_model.trim()
+          ? update.target_model
+          : null
+        record.reasoning_effort = typeof update.reasoning_effort === 'string' && update.reasoning_effort.trim()
+          ? update.reasoning_effort
+          : null
+        if (typeof update.request_type === 'string' && update.request_type.trim()) {
+          record.request_type = update.request_type
         }
-        if ('reasoning_effort' in update) {
-          record.reasoning_effort = typeof update.reasoning_effort === 'string'
-            ? update.reasoning_effort
-            : null
+        if (typeof update.requested_reasoning_effort === 'string' && update.requested_reasoning_effort.trim()) {
+          record.requested_reasoning_effort = update.requested_reasoning_effort
         }
-        if ('service_tier' in update) {
-          record.service_tier = typeof update.service_tier === 'string'
-            ? update.service_tier
-            : null
-        }
+        // Active responses describe the current final provider request. Clear an old Fast fact
+        // when the refreshed snapshot has no request-side tier instead of retaining it forever.
+        record.service_tier = typeof update.service_tier === 'string' && update.service_tier.trim()
+          ? update.service_tier
+          : null
+        record.actual_service_tier = typeof update.actual_service_tier === 'string' && update.actual_service_tier.trim()
+          ? update.actual_service_tier
+          : null
         // 管理员接口返回额外字段
         // 只有当返回的 provider 不是 pending/unknown/unknow 时才更新，避免覆盖已有的正确值
         if ('provider' in update && typeof update.provider === 'string') {
@@ -802,6 +844,9 @@ const availableClientFamilies = computed(() => {
 // 详情弹窗状态
 const detailModalOpen = ref(false)
 const selectedRequestId = ref<string | null>(null)
+const selectedRequestSummary = computed(() => (
+  currentRecords.value.find(record => record.id === selectedRequestId.value) ?? null
+))
 
 // 初始化加载
 onMounted(async () => {
@@ -812,6 +857,7 @@ onMounted(async () => {
     const heatmapPromise = loadHeatmapData().catch(err => {
       log.error('加载热力图数据失败:', err)
     })
+    const adminUsersPromise = loadAdminUsers()
 
     await loadRecords(
       { page: currentPage.value, pageSize: pageSize.value },
@@ -820,8 +866,7 @@ onMounted(async () => {
     )
     void (async () => {
       await refreshAdminAnalytics({ force: true, preserveOnFailure: false })
-      await heatmapPromise
-      await loadAdminUsers()
+      await Promise.all([heatmapPromise, adminUsersPromise])
     })()
   } else {
     // 用户页面：loadStats 已包含记录加载，不需要单独调用 loadRecords
@@ -1037,33 +1082,30 @@ function handleDetailRequestState(update: {
   endpointApiFormat?: string | null
   hasFormatConversion?: boolean | null
   targetModel?: string | null
+  requestedReasoningEffort?: string | null
   reasoningEffort?: string | null
   serviceTier?: string | null
+  actualServiceTier?: string | null
   imageProgress?: ImageProgress | null
   errorMessage?: string | null
+  updatedAt?: string | null
 }) {
   const record = currentRecords.value.find(record => record.id === update.id)
   if (!record) return
 
   const nextStatus = resolveDetailUpdateStatus(update)
+  const lifecycle = mergeUsageRecordLifecycleSnapshot(record, {
+    ...(nextStatus ? { status: nextStatus } : {}),
+    ...('statusCode' in update ? { statusCode: update.statusCode } : {}),
+    ...('errorMessage' in update ? { errorMessage: update.errorMessage } : {}),
+    ...('updatedAt' in update ? { updatedAt: update.updatedAt } : {}),
+  })
+  record.status = lifecycle.status
+  record.status_code = lifecycle.status_code
+  record.error_message = lifecycle.error_message
+  record.updated_at = lifecycle.updated_at
+  if (!lifecycle.accepted) return
 
-  const statusPriority: Record<RequestStatus, number> = {
-    pending: 0,
-    streaming: 1,
-    completed: 2,
-    failed: 2,
-    cancelled: 2,
-  }
-  if (nextStatus) {
-    const currentRank = record.status ? statusPriority[record.status] : 0
-    const nextRank = statusPriority[nextStatus]
-    if (nextRank >= currentRank) {
-      record.status = nextStatus
-    }
-  }
-  if ('statusCode' in update) {
-    record.status_code = update.statusCode ?? undefined
-  }
   if ('inputTokens' in update && update.inputTokens != null) {
     record.input_tokens = update.inputTokens
   }
@@ -1094,11 +1136,32 @@ function handleDetailRequestState(update: {
   if ('actualCost' in update && update.actualCost != null) {
     record.actual_cost = update.actualCost
   }
-  if ('responseTimeMs' in update && update.responseTimeMs != null) {
-    record.response_time_ms = update.responseTimeMs
+  if ('responseTimeMs' in update) {
+    const responseTiming = mergeUsageRecordResponseTiming(
+      {
+        response_time_ms: record.response_time_ms,
+        response_time_updated_at: record.response_time_updated_at,
+      },
+      {
+        response_time_ms: update.responseTimeMs,
+        response_time_updated_at: null,
+      },
+      {
+        preferNext: lifecycle.accepted && (
+          nextStatus === 'completed' ||
+          nextStatus === 'failed' ||
+          nextStatus === 'cancelled'
+        ),
+      },
+    )
+    record.response_time_ms = responseTiming.response_time_ms
+    record.response_time_updated_at = responseTiming.response_time_updated_at
   }
   if ('firstByteTimeMs' in update) {
-    record.first_byte_time_ms = update.firstByteTimeMs ?? undefined
+    record.first_byte_time_ms = mergeUsageRecordFirstByteTimeMs(
+      record.first_byte_time_ms,
+      update.firstByteTimeMs
+    )
   }
   if ('isStream' in update && typeof update.isStream === 'boolean') {
     record.is_stream = update.isStream
@@ -1127,17 +1190,24 @@ function handleDetailRequestState(update: {
   if ('reasoningEffort' in update) {
     record.reasoning_effort = typeof update.reasoningEffort === 'string' ? update.reasoningEffort : null
   }
+  if ('requestedReasoningEffort' in update) {
+    record.requested_reasoning_effort = typeof update.requestedReasoningEffort === 'string'
+      ? update.requestedReasoningEffort
+      : null
+  }
   if ('serviceTier' in update) {
     record.service_tier = typeof update.serviceTier === 'string' ? update.serviceTier : null
+  }
+  if ('actualServiceTier' in update) {
+    record.actual_service_tier = typeof update.actualServiceTier === 'string'
+      ? update.actualServiceTier
+      : null
   }
   if ('imageProgress' in update) {
     const nextProgress = update.imageProgress ?? null
     if (!sameImageProgress(record.image_progress, nextProgress)) {
       record.image_progress = nextProgress
     }
-  }
-  if ('errorMessage' in update) {
-    record.error_message = update.errorMessage ?? undefined
   }
 }
 

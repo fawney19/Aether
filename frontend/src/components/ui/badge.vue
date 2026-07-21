@@ -20,6 +20,7 @@ const badgeVariants = cva(
         destructive:
           'border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/80',
         outline: 'text-foreground border-border bg-card/50',
+        'outline-transparent': 'text-foreground border-border bg-transparent',
         success:
           'border-transparent bg-primary text-primary-foreground hover:bg-primary/80',
         warning:
@@ -35,7 +36,7 @@ const badgeVariants = cva(
 )
 
 interface Props {
-  variant?: 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning' | 'dark'
+  variant?: 'default' | 'secondary' | 'destructive' | 'outline' | 'outline-transparent' | 'success' | 'warning' | 'dark'
   class?: string
 }
 

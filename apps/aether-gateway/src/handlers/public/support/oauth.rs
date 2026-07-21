@@ -464,7 +464,7 @@ async fn complete_oauth_login(
         .cloned()
         .collect::<Vec<_>>();
     let body = login_response.into_body();
-    let body = match to_bytes(body, usize::MAX).await {
+    let body = match to_bytes(body, crate::headers::max_internal_buffered_body_bytes()).await {
         Ok(value) => value,
         Err(_) => return redirect_oauth_error(Some(frontend_callback_url), "provider_unavailable"),
     };

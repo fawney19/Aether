@@ -22,6 +22,9 @@ const props = withDefaults(defineProps<{
 const now = ref(Date.now())
 const precision = computed(() => Math.max(0, props.precision))
 const isActive = computed(() => props.status === 'pending' || props.status === 'streaming')
+// Usage timestamps have second precision while durations have millisecond precision.
+// Switching anchors can therefore introduce a sub-second phase shift at first byte.
+const ACTIVE_CLOCK_TIMESTAMP_PRECISION_MS = 1000
 
 let rafId: number | null = null
 
@@ -72,19 +75,29 @@ const displayText = computed(() => {
     return `${(responseTimeMs / 1000).toFixed(precision.value)}s`
   }
 
+  const createdAtMs = parseCreatedAtMs(props.createdAt)
+  const createdAtElapsedMs = Number.isNaN(createdAtMs)
+    ? null
+    : Math.max(0, now.value - createdAtMs)
+
   const responseTimeMs = finiteNonNegativeMs(props.responseTimeMs)
   const updatedAtMs = parseCreatedAtMs(props.responseTimeUpdatedAt)
   if (responseTimeMs != null && !Number.isNaN(updatedAtMs)) {
     const elapsedSinceUpdateMs = Math.max(0, now.value - updatedAtMs)
-    return `${((responseTimeMs + elapsedSinceUpdateMs) / 1000).toFixed(precision.value)}s`
+    const responseElapsedMs = responseTimeMs + elapsedSinceUpdateMs
+
+    // When both clocks differ only by timestamp truncation, keep the original
+    // created-at clock so the first-byte snapshot cannot make total time pause
+    // or move backwards. A larger difference is a real calibration signal
+    // (for example an audit row created before execution) and remains authoritative.
+    if (createdAtElapsedMs != null &&
+      Math.abs(responseElapsedMs - createdAtElapsedMs) <= ACTIVE_CLOCK_TIMESTAMP_PRECISION_MS) {
+      return `${(createdAtElapsedMs / 1000).toFixed(precision.value)}s`
+    }
+    return `${(responseElapsedMs / 1000).toFixed(precision.value)}s`
   }
 
-  if (!props.createdAt) return '-'
-
-  const createdAtMs = parseCreatedAtMs(props.createdAt)
-  if (Number.isNaN(createdAtMs)) return '-'
-
-  const elapsedMs = Math.max(0, now.value - createdAtMs)
-  return `${(elapsedMs / 1000).toFixed(precision.value)}s`
+  if (createdAtElapsedMs == null) return '-'
+  return `${(createdAtElapsedMs / 1000).toFixed(precision.value)}s`
 })
 </script>

@@ -35,13 +35,16 @@ pub(crate) async fn build_admin_create_user_api_key_response(
     let Some(user_id) = admin_user_id_from_api_keys_path(request_context.path()) else {
         return Ok(build_admin_users_bad_request_response("缺少 user_id"));
     };
-    if state.find_user_auth_by_id(&user_id).await?.is_none() {
+    let Some(target_user) = state.find_user_auth_by_id(&user_id).await? else {
         return Ok((
             http::StatusCode::NOT_FOUND,
             Json(json!({ "detail": "用户不存在" })),
         )
             .into_response());
-    }
+    };
+    // The authenticated principal authorizes this admin operation, but ownership and inherited
+    // policies must always come from the user selected in the request path.
+    let target_user_id = target_user.id;
 
     let Some(request_body) = request_body else {
         return Ok((
@@ -148,7 +151,7 @@ pub(crate) async fn build_admin_create_user_api_key_response(
 
     let Some(created) = state
         .create_user_api_key(aether_data::repository::auth::CreateUserApiKeyRecord {
-            user_id: user_id.clone(),
+            user_id: target_user_id.clone(),
             api_key_id: uuid::Uuid::new_v4().to_string(),
             key_hash: hash_admin_user_api_key(&plaintext_key),
             key_encrypted: Some(key_encrypted),
@@ -174,7 +177,11 @@ pub(crate) async fn build_admin_create_user_api_key_response(
 
     let created = if allowed_providers.is_some() {
         match state
-            .set_user_api_key_allowed_providers(&user_id, &created.api_key_id, allowed_providers)
+            .set_user_api_key_allowed_providers(
+                &target_user_id,
+                &created.api_key_id,
+                allowed_providers,
+            )
             .await?
         {
             Some(updated) => updated,
@@ -186,7 +193,7 @@ pub(crate) async fn build_admin_create_user_api_key_response(
     let created = if feature_settings.is_some() {
         match state
             .set_user_api_key_feature_settings(
-                &user_id,
+                &target_user_id,
                 &created.api_key_id,
                 feature_settings.clone(),
             )

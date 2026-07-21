@@ -58,9 +58,13 @@ vi.mock('../JsonContentPanel.vue', async () => {
           type: null,
           default: null,
         },
+        title: {
+          type: String,
+          default: 'JSON',
+        },
       },
       setup(props) {
-        return () => h('pre', JSON.stringify(props.data))
+        return () => h('pre', { 'data-title': props.title }, JSON.stringify(props.data))
       },
     }),
   }
@@ -517,7 +521,8 @@ describe('HorizontalRequestTimeline', () => {
     expect(requestPathCode?.textContent).toContain('/v1/images/generations')
   })
 
-  it('shows upstream response JSON inside the error block on trace nodes', async () => {
+  it('shows upstream response headers and body in one error envelope', async () => {
+    const upstreamErrorMessage = 'This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber'
     const trace = buildTrace([
       buildCandidate({
         id: 'cand-upstream-response',
@@ -527,21 +532,33 @@ describe('HorizontalRequestTimeline', () => {
         key_name: 'Upstream Key',
         candidate_index: 0,
         status: 'failed',
-        error_message: 'execution runtime stream returned non-success status 302',
+        error_message: 'execution runtime stream returned non-success status 400',
         extra_data: {
           upstream_response: {
-            status_code: 302,
-            headers: { location: '/' },
+            status_code: 400,
+            headers: {
+              'content-type': 'application/json',
+              'x-request-id': 'req_usage-cyber-risk-demo',
+            },
+            body: {
+              error: {
+                type: 'invalid_request',
+                message: upstreamErrorMessage,
+                code: 400,
+              },
+            },
+            body_ref: 'usage://request/req-1/response_body',
+            body_state: 'reference',
           },
           error_flow: {
             source: 'upstream_response',
-            status_code: 302,
+            status_code: 400,
             classification: 'use_default',
             decision: 'use_default',
             propagation: 'none',
             retryable: false,
             safe_to_expose: false,
-            message: 'execution runtime stream returned non-success status 302',
+            message: 'execution runtime stream returned non-success status 400',
           },
           client_response: {
             status_code: 502,
@@ -555,15 +572,31 @@ describe('HorizontalRequestTimeline', () => {
     await nextTick()
 
     expect(root.textContent).toContain('错误信息')
-    expect(root.textContent).toContain('HTTP 302')
-    expect(root.textContent).not.toContain('上游返回非成功状态 302')
-    expect(root.querySelector('.error-block .error-json')?.textContent).toContain('"status_code":302')
-    expect(root.querySelector('.error-block .error-json')?.textContent).toContain('"headers"')
+    expect(root.textContent).toContain('HTTP 400')
+    expect(root.textContent).not.toContain('上游返回非成功状态 400')
+    const upstreamResponse = root.querySelector<HTMLElement>('.error-upstream-response-json pre')
+    expect(upstreamResponse?.dataset.title).toBe('上游响应')
+    expect(JSON.parse(upstreamResponse?.textContent ?? '{}')).toEqual({
+      header: {
+        'content-type': 'application/json',
+        'x-request-id': 'req_usage-cyber-risk-demo',
+      },
+      body: {
+        error: {
+          type: 'invalid_request',
+          message: upstreamErrorMessage,
+          code: 400,
+        },
+      },
+    })
+    expect(upstreamResponse?.textContent).not.toContain('"status_code"')
+    expect(upstreamResponse?.textContent).not.toContain('"headers"')
+    expect(upstreamResponse?.textContent).not.toContain('"body_ref"')
+    expect(upstreamResponse?.textContent).not.toContain('"body_state"')
     expect(root.textContent).not.toContain('上游真实响应')
-    expect(root.textContent).not.toContain('execution runtime stream returned non-success status 302')
+    expect(root.textContent).not.toContain('execution runtime stream returned non-success status 400')
     expect(root.textContent).not.toContain('真实请求错误')
     expect(root.textContent).not.toContain('返回客户端响应')
-    expect(root.textContent).not.toContain('上游响应')
     expect(root.textContent).not.toContain('默认处理')
     expect(root.textContent).not.toContain('none')
     expect(root.textContent).not.toContain('不再重试')
@@ -601,12 +634,12 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).toContain('流式格式转换失败')
     expect(root.textContent).toContain('上游返回了当前不支持的 stream event')
     expect(root.textContent).toContain('字段 $.type = "response.future.delta"')
-    const errorJsonText = root.querySelector('.error-block .error-json')?.textContent ?? ''
-    expect(errorJsonText).toContain('"body_state":"disabled"')
-    expect(errorJsonText).toContain('"diagnostic"')
-    expect(errorJsonText).toContain('"breakpoint":"$.type"')
-    expect(errorJsonText).toContain('"analysis_hint"')
-    expect(errorJsonText).toContain('"raw"')
+    const diagnosticText = root.querySelector('.error-diagnostic-json')?.textContent ?? ''
+    expect(diagnosticText).toContain('"breakpoint":"$.type"')
+    expect(diagnosticText).toContain('"analysis_hint"')
+    expect(diagnosticText).toContain('"raw"')
+    expect(diagnosticText).toContain('"body_state":"disabled"')
+    expect(root.querySelector('.error-upstream-response-json')?.textContent).toContain('"header":{"content-type":"application/json"}')
   })
 
   it('formats request conversion diagnostics with field paths on skipped trace nodes', async () => {
@@ -664,9 +697,8 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).toContain('流式格式转换失败')
     expect(root.textContent).toContain('finish reason')
     expect(root.textContent).toContain('字段 $.finish_reason = "future_reason"')
-    const errorJsonText = root.querySelector('.error-block .error-json')?.textContent ?? ''
-    expect(errorJsonText).toContain('"diagnostic"')
-    expect(errorJsonText).toContain('"breakpoint":"$.finish_reason"')
+    const diagnosticText = root.querySelector('.error-diagnostic-json')?.textContent ?? ''
+    expect(diagnosticText).toContain('"breakpoint":"$.finish_reason"')
   })
 
   it('uses conversion messages from error_flow as the diagnostic breakpoint source', async () => {
@@ -701,10 +733,10 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).toContain('OpenAI Chat → OpenAI Responses')
     expect(root.textContent).toContain('字段 $.n 会丢失信息')
     expect(root.textContent).not.toContain('上游返回非成功状态 500')
-    const errorJsonText = root.querySelector('.error-block .error-json')?.textContent ?? ''
-    expect(errorJsonText).toContain('"body_state":"disabled"')
-    expect(errorJsonText).toContain('"breakpoint":"$.n"')
-    expect(errorJsonText).toContain('断点在请求/响应格式转换器')
+    const diagnosticText = root.querySelector('.error-diagnostic-json')?.textContent ?? ''
+    expect(diagnosticText).toContain('"body_state":"disabled"')
+    expect(diagnosticText).toContain('"breakpoint":"$.n"')
+    expect(diagnosticText).toContain('断点在请求/响应格式转换器')
   })
 
   it('shows failed diagnostic messages even when the only response panel data is diagnostic metadata', async () => {
@@ -735,9 +767,8 @@ describe('HorizontalRequestTimeline', () => {
     expect(root.textContent).toContain('错误信息')
     expect(root.textContent).toContain('格式转换失败')
     expect(root.textContent).toContain('OpenAI Responses 不支持字段 $.temperature')
-    const errorJsonText = root.querySelector('.error-block .error-json')?.textContent ?? ''
-    expect(errorJsonText).toContain('"diagnostic"')
-    expect(errorJsonText).toContain('"breakpoint":"$.temperature"')
+    const diagnosticText = root.querySelector('.error-diagnostic-json')?.textContent ?? ''
+    expect(diagnosticText).toContain('"breakpoint":"$.temperature"')
   })
 
   it('keeps the failure message when upstream response only records an empty body state', async () => {
@@ -790,6 +821,25 @@ describe('HorizontalRequestTimeline', () => {
     const detailText = root.querySelector('.detail-panel')?.textContent ?? ''
     expect(detailText).toContain('key-active-id')
     expect(detailText).not.toContain('未知')
+  })
+
+  it('uses latency to display the time range when recorded finish time equals start time', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-success-same-time',
+        status: 'success',
+        started_at: '2026-05-06T12:00:00.000Z',
+        finished_at: '2026-05-06T12:00:00.000Z',
+        latency_ms: 22200,
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    const detailText = root.querySelector('.detail-panel')?.textContent ?? ''
+    expect(detailText).toContain('+22.20s')
+    expect(detailText).not.toContain('+0ms')
   })
 
   it('follows the active key when silent polling updates the trace', async () => {

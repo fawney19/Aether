@@ -401,50 +401,54 @@ pub(crate) fn spawn_pool_score_rebuild_worker(
     }
 
     let config = PoolScoreRebuildWorkerConfig::from_env();
-    Some(tokio::spawn(async move {
-        if let Err(err) = perform_pool_score_rebuild_once_with_config(&state, config).await {
-            warn!(
-                error = ?err,
-                "gateway pool score rebuild initial tick failed"
-            );
-        }
-        let mut interval = tokio::time::interval(config.interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut deferred_since = None;
-        loop {
-            interval.tick().await;
-            if state
-                .data
-                .should_defer_maintenance_for_database_pool_pressure(&mut deferred_since)
-            {
-                debug!(
-                    event_name = "maintenance_worker_deferred",
-                    log_type = "ops",
-                    worker = "pool_score_rebuild",
-                    "gateway pool score rebuild deferred because database pool has no idle reserve"
+    Some(crate::task_runtime::spawn_singleton_worker(
+        state,
+        crate::task_runtime::TASK_KEY_POOL_SCORE_REBUILD,
+        move |state| async move {
+            if let Err(err) = perform_pool_score_rebuild_once_with_config(&state, config).await {
+                warn!(
+                    error = ?err,
+                    "gateway pool score rebuild initial tick failed"
                 );
-                continue;
             }
-            match perform_pool_score_rebuild_once_with_config(&state, config).await {
-                Ok(summary) if summary.scores_upserted > 0 => {
-                    info!(
-                        providers_checked = summary.providers_checked,
-                        providers_scored = summary.providers_scored,
-                        keys_seen = summary.keys_seen,
-                        scores_upserted = summary.scores_upserted,
-                        "gateway pool score rebuild completed"
+            let mut interval = tokio::time::interval(config.interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut deferred_since = None;
+            loop {
+                interval.tick().await;
+                if state
+                    .data
+                    .should_defer_maintenance_for_database_pool_pressure(&mut deferred_since)
+                {
+                    debug!(
+                        event_name = "maintenance_worker_deferred",
+                        log_type = "ops",
+                        worker = "pool_score_rebuild",
+                        "gateway pool score rebuild deferred because database pool has no idle reserve"
                     );
+                    continue;
                 }
-                Ok(_) => {}
-                Err(err) => {
-                    warn!(
-                        error = ?err,
-                        "gateway pool score rebuild worker tick failed"
-                    );
+                match perform_pool_score_rebuild_once_with_config(&state, config).await {
+                    Ok(summary) if summary.scores_upserted > 0 => {
+                        info!(
+                            providers_checked = summary.providers_checked,
+                            providers_scored = summary.providers_scored,
+                            keys_seen = summary.keys_seen,
+                            scores_upserted = summary.scores_upserted,
+                            "gateway pool score rebuild completed"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn!(
+                            error = ?err,
+                            "gateway pool score rebuild worker tick failed"
+                        );
+                    }
                 }
             }
-        }
-    }))
+        },
+    ))
 }
 
 #[cfg(test)]

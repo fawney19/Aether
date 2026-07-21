@@ -533,6 +533,7 @@ function mockApiFormatDisplayName(apiFormat: string) {
   const labels: Record<string, string> = {
     'claude:messages': 'Claude Messages',
     'gemini:generate_content': 'Gemini Generate Content',
+    'gemini:interactions': 'Gemini Interactions',
     'openai:chat': 'OpenAI Chat',
     'openai:embedding': 'OpenAI Embedding'
   }
@@ -704,6 +705,77 @@ function getActivityHeatmap() {
   return cachedHeatmap
 }
 
+const MOCK_CYBER_POLICY_USAGE_ID = 'usage-cyber-risk-demo'
+const MOCK_CYBER_POLICY_ERROR_MESSAGE = 'This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber'
+const MOCK_CYBER_POLICY_ERROR_BODY = {
+  error: {
+    type: 'invalid_request',
+    message: MOCK_CYBER_POLICY_ERROR_MESSAGE,
+    code: 400
+  }
+}
+
+interface MockManagedUserApiKey {
+  id: string
+  fullKey: string
+  key_display: string
+  name: string
+  created_at: string
+  last_used_at?: string
+  is_active: boolean
+  is_locked: boolean
+  is_standalone: false
+  feature_settings?: Record<string, unknown> | null
+  rate_limit?: number | null
+  concurrent_limit?: number | null
+  ip_rules?: string[] | null
+  total_requests: number
+  total_cost_usd: number
+  force_capabilities?: Record<string, unknown> | null
+}
+
+const mockManagedUserApiKeysByUserId = new Map<string, MockManagedUserApiKey[]>([
+  [MOCK_NORMAL_USER.id ?? '', MOCK_USER_API_KEYS.map((key, index) => ({
+    ...key,
+    fullKey: `sk-ae-demo-user-${index + 1}`,
+    is_locked: false,
+    is_standalone: false as const,
+  }))],
+])
+let mockManagedUserApiKeySequence = 0
+
+function mockManagedUserApiKeys(userId: string): MockManagedUserApiKey[] {
+  if (!MOCK_ALL_USERS.some(user => user.id === userId)) {
+    throw { response: createMockResponse({ detail: '用户不存在' }, 404) }
+  }
+  let keys = mockManagedUserApiKeysByUserId.get(userId)
+  if (!keys) {
+    keys = []
+    mockManagedUserApiKeysByUserId.set(userId, keys)
+  }
+  return keys
+}
+
+function publicMockManagedUserApiKey(key: MockManagedUserApiKey) {
+  const { fullKey: _fullKey, ...publicKey } = key
+  void _fullKey
+  return publicKey
+}
+
+function mockRequestObject(config: AxiosRequestConfig): Record<string, unknown> {
+  if (typeof config.data === 'string') {
+    try {
+      const parsed = JSON.parse(config.data)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+  return config.data && typeof config.data === 'object' && !Array.isArray(config.data)
+    ? config.data as Record<string, unknown>
+    : {}
+}
+
 // 生成更真实的使用记录
 function generateMockUsageRecords(count: number = 100) {
   const records = []
@@ -796,6 +868,47 @@ function generateMockUsageRecords(count: number = 100) {
       model_version: model.provider === 'google' ? 'gemini-3-pro-preview-2025-01' : undefined
     })
   }
+
+  // 固定在首屏的失败记录，用于预览候选链路中的实际上游错误响应。
+  records.unshift({
+    id: MOCK_CYBER_POLICY_USAGE_ID,
+    user_id: 'demo-admin-uuid-0001',
+    username: 'Demo Admin',
+    user_email: 'admin@demo.aether.ai',
+    api_key: {
+      id: 'key-demo-cyber-risk',
+      name: 'OpenAI Cyber Risk Demo',
+      display: 'sk-ae...demo'
+    },
+    provider: 'openai',
+    api_key_name: 'openai-cyber-risk-demo',
+    rate_multiplier: 1.0,
+    model: 'gpt-5',
+    target_model: 'gpt-5.1',
+    requested_reasoning_effort: 'xhigh',
+    reasoning_effort: 'max',
+    service_tier: 'priority',
+    // Deliberately conflicts with the final provider request. UI and billing
+    // must use the request-side `service_tier`, never this response fact.
+    actual_service_tier: 'default',
+    api_format: 'openai:responses',
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    total_tokens: 0,
+    cost: 0,
+    actual_cost: 0,
+    response_time_ms: 428,
+    is_stream: true,
+    status_code: 400,
+    error_message: MOCK_CYBER_POLICY_ERROR_MESSAGE,
+    status: 'failed',
+    created_at: new Date(now).toISOString(),
+    updated_at: new Date(now).toISOString(),
+    has_fallback: false,
+    model_version: undefined
+  })
 
   return records
 }
@@ -977,6 +1090,204 @@ const MOCK_CAPABILITIES = [
   { name: 'cache_1h', display_name: '1小时缓存', description: '支持1小时prompt缓存', match_mode: 'exclusive', short_name: '1h' },
   { name: 'context_1m', display_name: '1M上下文', description: '支持1M上下文窗口', match_mode: 'compatible', short_name: '1M' }
 ]
+
+const MOCK_CODEX_POOL_PROVIDER_ID = 'provider-codex-pool-demo'
+const MOCK_CODEX_POOL_PROVIDER = {
+  id: MOCK_CODEX_POOL_PROVIDER_ID,
+  name: 'Codex 周期额度演示',
+  provider_type: 'codex',
+  description: '展示 5H、周、月及组合额度窗口',
+  website: 'https://openai.com/codex',
+  provider_priority: 0,
+  billing_type: 'free_tier',
+  monthly_used_usd: 0,
+  is_active: true,
+  total_endpoints: 1,
+  active_endpoints: 1,
+  total_keys: 4,
+  active_keys: 4,
+  total_models: 3,
+  active_models: 3,
+  avg_health_score: 0.97,
+  unhealthy_endpoints: 0,
+  api_formats: ['openai:responses'],
+  endpoint_health_details: [
+    { api_format: 'openai:responses', health_score: 0.97, is_active: true, active_keys: 4 }
+  ],
+  pool_advanced: {
+    enabled: true,
+    probing_enabled: true,
+  },
+  claude_code_advanced: null,
+  proxy: null,
+  created_at: '2026-07-01T00:00:00Z',
+  updated_at: new Date().toISOString(),
+}
+
+function createMockCodexQuotaWindow(
+  code: string,
+  label: string,
+  windowMinutes: number,
+  remainingRatio: number,
+  resetSeconds: number,
+  observedAt: number,
+  requestCount: number,
+) {
+  return {
+    code,
+    label,
+    scope: 'account',
+    unit: 'percent',
+    used_ratio: 1 - remainingRatio,
+    remaining_ratio: remainingRatio,
+    reset_at: resetSeconds > 0 ? observedAt + resetSeconds : null,
+    reset_seconds: resetSeconds,
+    window_minutes: windowMinutes,
+    usage: {
+      request_count: requestCount,
+      total_tokens: requestCount * 1250,
+      total_cost_usd: (requestCount * 0.0025).toFixed(8),
+    },
+  }
+}
+
+function createMockCodexPoolKeys() {
+  const nowSeconds = Math.floor(Date.now() / 1000)
+  const common = {
+    provider_type: 'codex',
+    is_active: true,
+    auth_type: 'oauth',
+    credential_kind: 'oauth_session',
+    runtime_auth_kind: 'bearer',
+    oauth_managed: true,
+    oauth_header_auth: true,
+    can_refresh_oauth: true,
+    can_export_oauth: true,
+    can_edit_oauth: true,
+    oauth_expires_at: nowSeconds + 14 * 24 * 3600,
+    api_formats: ['openai:responses'],
+    rate_multipliers: null,
+    internal_priority: 50,
+    rpm_limit: null,
+    cache_ttl_minutes: 5,
+    max_probe_interval_minutes: 32,
+    health_score: 0.97,
+    circuit_breaker_open: false,
+    proxy: null,
+    cooldown_reason: null,
+    cooldown_ttl_seconds: null,
+    cost_window_usage: 0,
+    cost_limit: null,
+    sticky_sessions: 0,
+    lru_score: null,
+    created_at: '2026-07-01T00:00:00Z',
+    imported_at: '2026-07-01T00:00:00Z',
+    last_used_at: new Date(nowSeconds * 1000 - 10 * 60 * 1000).toISOString(),
+    scheduling_status: 'available',
+    scheduling_reason: 'available',
+    scheduling_label: '可调度',
+    scheduling_reasons: [],
+  }
+
+  const buildKey = (
+    keyId: string,
+    keyName: string,
+    planType: string,
+    accountQuota: string,
+    windows: ReturnType<typeof createMockCodexQuotaWindow>[],
+    requestCount: number,
+  ) => ({
+    ...common,
+    key_id: keyId,
+    key_name: keyName,
+    oauth_plan_type: planType,
+    oauth_account_id: `acct-${keyId}`,
+    oauth_account_name: keyName,
+    quota_updated_at: nowSeconds - 10 * 60,
+    account_quota: accountQuota,
+    request_count: requestCount,
+    total_tokens: requestCount * 2400,
+    total_cost_usd: (requestCount * 0.004).toFixed(8),
+    status_snapshot: {
+      oauth: {
+        code: 'valid',
+        label: '有效',
+        expires_at: nowSeconds + 14 * 24 * 3600,
+        requires_reauth: false,
+        expiring_soon: false,
+      },
+      account: {
+        code: 'ok',
+        label: null,
+        reason: null,
+        blocked: false,
+        source: null,
+        recoverable: false,
+      },
+      quota: {
+        version: 2,
+        provider_type: 'codex',
+        code: 'ok',
+        label: null,
+        reason: null,
+        freshness: 'fresh',
+        source: 'response_headers',
+        observed_at: nowSeconds,
+        updated_at: nowSeconds,
+        exhausted: false,
+        usage_ratio: windows.reduce((max, window) => Math.max(max, window.used_ratio), 0),
+        plan_type: planType,
+        credits: { has_credits: false, unlimited: false },
+        windows,
+      },
+    },
+  })
+
+  return [
+    buildKey(
+      'codex-pool-plus-dual',
+      'Plus · 5H + 周',
+      'plus',
+      '5H剩余 62.0% | 周剩余 84.0%',
+      [
+        createMockCodexQuotaWindow('5h', '5H', 300, 0.62, 3 * 3600, nowSeconds, 18),
+        createMockCodexQuotaWindow('weekly', '周', 10_080, 0.84, 5 * 24 * 3600, nowSeconds, 42),
+      ],
+      128,
+    ),
+    buildKey(
+      'codex-pool-team-weekly',
+      'Team · 仅周',
+      'team',
+      '周剩余 71.0%',
+      [
+        createMockCodexQuotaWindow('weekly', '周', 10_080, 0.71, 4 * 24 * 3600, nowSeconds, 31),
+      ],
+      96,
+    ),
+    buildKey(
+      'codex-pool-business-monthly',
+      'Codex · 仅月（含空占位）',
+      'self_serve_business_usage_based',
+      '月剩余 86.0%',
+      [
+        createMockCodexQuotaWindow('monthly', '月', 43_800, 0.86, 2_627_672, nowSeconds, 54),
+        createMockCodexQuotaWindow('weekly', '周', 0, 1, 0, nowSeconds, 0),
+      ],
+      214,
+    ),
+    buildKey(
+      'codex-pool-free-five-hour',
+      'Free · 仅5H',
+      'free',
+      '5H剩余 93.0%',
+      [
+        createMockCodexQuotaWindow('5h', '5H', 300, 0.93, 4 * 3600, nowSeconds, 7),
+      ],
+      37,
+    ),
+  ]
+}
 
 /**
  * Mock API 路由处理器
@@ -1329,6 +1640,15 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     return createMockResponse(MOCK_ALL_USERS)
   },
 
+  'GET /api/admin/user-groups': async () => {
+    await delay()
+    requireAdmin()
+    return createMockResponse({
+      items: [],
+      default_group_id: null,
+    })
+  },
+
   'POST /api/admin/users': async (config) => {
     await delay()
     requireAdmin()
@@ -1377,13 +1697,45 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
   'GET /api/admin/providers/summary': async () => {
     await delay()
     requireAdmin()
-    return createMockResponse(MOCK_PROVIDERS)
+    return createMockResponse({
+      total: MOCK_PROVIDERS.length,
+      page: 1,
+      page_size: MOCK_PROVIDERS.length,
+      items: MOCK_PROVIDERS,
+    })
   },
 
   'GET /api/admin/providers': async () => {
     await delay()
     requireAdmin()
     return createMockResponse(MOCK_PROVIDERS)
+  },
+
+  'GET /api/admin/pool/overview': async () => {
+    await delay()
+    requireAdmin()
+    return createMockResponse({
+      items: [{
+        provider_id: MOCK_CODEX_POOL_PROVIDER_ID,
+        provider_name: MOCK_CODEX_POOL_PROVIDER.name,
+        provider_type: 'codex',
+        total_keys: 4,
+        active_keys: 4,
+        cooldown_count: 0,
+        pool_enabled: true,
+        provider_hot_count: 2,
+        provider_desired_hot: 3,
+        provider_in_flight: 1,
+        provider_ema_in_flight: 0.8,
+        provider_burst_pending: false,
+      }]
+    })
+  },
+
+  'GET /api/admin/pool/scheduling-presets': async () => {
+    await delay()
+    requireAdmin()
+    return createMockResponse([])
   },
 
   'POST /api/admin/providers': async (config) => {
@@ -2403,11 +2755,84 @@ registerDynamicRoute('PUT', '/api/admin/modules/status/:moduleName/enabled', asy
 registerDynamicRoute('GET', '/api/admin/providers/:providerId/summary', async (_config, params) => {
   await delay()
   requireAdmin()
+  if (params.providerId === MOCK_CODEX_POOL_PROVIDER_ID) {
+    return createMockResponse(MOCK_CODEX_POOL_PROVIDER)
+  }
   const provider = MOCK_PROVIDERS.find(p => p.id === params.providerId)
   if (!provider) {
     throw { response: createMockResponse({ detail: '提供商不存在' }, 404) }
   }
   return createMockResponse(provider)
+})
+
+registerDynamicRoute('GET', '/api/admin/pool/:providerId/keys', async (config, params) => {
+  await delay()
+  requireAdmin()
+  if (params.providerId !== MOCK_CODEX_POOL_PROVIDER_ID) {
+    return createMockResponse({ total: 0, page: 1, page_size: 50, keys: [] })
+  }
+
+  const query = (config.params || {}) as Record<string, unknown>
+  const search = String(query.search || '').trim().toLowerCase()
+  const status = String(query.status || 'all').trim().toLowerCase()
+  const sortBy = String(query.sort_by || 'imported_at').trim()
+  const sortOrder = String(query.sort_order || 'desc').trim().toLowerCase()
+  let keys = createMockCodexPoolKeys()
+
+  if (search) {
+    keys = keys.filter(key => [
+      key.key_name,
+      key.oauth_plan_type,
+      key.oauth_account_id,
+      key.account_quota,
+    ].some(value => String(value || '').toLowerCase().includes(search)))
+  }
+  if (status === 'enabled') {
+    keys = keys.filter(key => key.is_active)
+  } else if (status === 'disabled') {
+    keys = keys.filter(key => !key.is_active)
+  } else if (status !== 'all') {
+    keys = keys.filter(key => key.scheduling_status === status || key.scheduling_reason === status)
+  }
+
+  keys.sort((left, right) => {
+    const leftValue = String((left as Record<string, unknown>)[sortBy] ?? left.imported_at ?? '')
+    const rightValue = String((right as Record<string, unknown>)[sortBy] ?? right.imported_at ?? '')
+    const comparison = leftValue.localeCompare(rightValue)
+    return sortOrder === 'asc' ? comparison : -comparison
+  })
+
+  const rawPage = Number(query.page)
+  const rawPageSize = Number(query.page_size)
+  const page = Number.isFinite(rawPage) && rawPage >= 1 ? Math.floor(rawPage) : 1
+  const pageSize = Number.isFinite(rawPageSize) && rawPageSize >= 1 ? Math.floor(rawPageSize) : 50
+  const start = (page - 1) * pageSize
+  return createMockResponse({
+    total: keys.length,
+    page,
+    page_size: pageSize,
+    keys: keys.slice(start, start + pageSize),
+  })
+})
+
+// Provider 模型映射预览
+registerDynamicRoute('GET', '/api/admin/providers/:providerId/mapping-preview', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const provider = MOCK_PROVIDERS.find(p => p.id === params.providerId)
+  if (!provider) {
+    throw { response: createMockResponse({ detail: '提供商不存在' }, 404) }
+  }
+  return createMockResponse({
+    provider_id: provider.id,
+    provider_name: provider.name,
+    keys: [],
+    total_keys: 0,
+    total_matches: 0,
+    truncated: false,
+    truncated_keys: 0,
+    truncated_models: 0,
+  })
 })
 
 // Provider 更新
@@ -2485,13 +2910,37 @@ registerDynamicRoute('DELETE', '/api/admin/endpoints/:endpointId', async (_confi
 })
 
 // Provider Keys 列表
-registerDynamicRoute('GET', '/api/admin/endpoints/providers/:providerId/keys', async (_config, params) => {
+registerDynamicRoute('GET', '/api/admin/endpoints/providers/:providerId/keys', async (config, params) => {
   await delay()
   requireAdmin()
   if (!PROVIDER_KEYS_CACHE[params.providerId]) {
     PROVIDER_KEYS_CACHE[params.providerId] = generateMockKeysForProvider(params.providerId, 2)
   }
-  return createMockResponse(PROVIDER_KEYS_CACHE[params.providerId])
+  const keys = PROVIDER_KEYS_CACHE[params.providerId]
+  const query = config.params || {}
+
+  // 当前详情抽屉使用 page/page_size 分页；其他调用仍使用 skip/limit 并期望裸数组。
+  if (query.page !== undefined || query.page_size !== undefined) {
+    const rawPage = Number(query.page)
+    const rawPageSize = Number(query.page_size)
+    const page = Number.isFinite(rawPage) && rawPage >= 1 ? Math.floor(rawPage) : 1
+    const pageSize = Number.isFinite(rawPageSize) && rawPageSize >= 1
+      ? Math.floor(rawPageSize)
+      : 20
+    const start = (page - 1) * pageSize
+    return createMockResponse({
+      total: keys.length,
+      page,
+      page_size: pageSize,
+      keys: keys.slice(start, start + pageSize),
+    })
+  }
+
+  const rawSkip = Number(query.skip)
+  const rawLimit = Number(query.limit)
+  const skip = Number.isFinite(rawSkip) && rawSkip >= 0 ? Math.floor(rawSkip) : 0
+  const limit = Number.isFinite(rawLimit) && rawLimit >= 1 ? Math.floor(rawLimit) : keys.length
+  return createMockResponse(keys.slice(skip, skip + limit))
 })
 
 // 为 Provider 创建 Key
@@ -2544,6 +2993,25 @@ registerDynamicRoute('POST', '/api/admin/endpoints/providers/:providerId/keys', 
 registerDynamicRoute('POST', '/api/admin/endpoints/providers/:providerId/refresh-quota', async (config, params) => {
   await delay()
   requireAdmin()
+  if (params.providerId === MOCK_CODEX_POOL_PROVIDER_ID) {
+    const body = JSON.parse(config.data || '{}')
+    const requestedKeyIds = Array.isArray(body.key_ids)
+      ? body.key_ids.map((id: unknown) => String(id).trim()).filter(Boolean)
+      : createMockCodexPoolKeys().map(key => key.key_id)
+    const keyNames = new Map(createMockCodexPoolKeys().map(key => [key.key_id, key.key_name]))
+    const results = requestedKeyIds.map((keyId: string) => ({
+      key_id: keyId,
+      key_name: keyNames.get(keyId) || keyId,
+      status: 'success',
+      metadata: { updated_at: new Date().toISOString() },
+    }))
+    return createMockResponse({
+      success: results.length,
+      failed: 0,
+      total: results.length,
+      results,
+    })
+  }
   if (!PROVIDER_KEYS_CACHE[params.providerId]) {
     PROVIDER_KEYS_CACHE[params.providerId] = generateMockKeysForProvider(params.providerId, 2)
   }
@@ -2681,6 +3149,20 @@ registerDynamicRoute('POST', '/api/admin/endpoints/keys/:keyId/clear-oauth-inval
   await delay()
   requireAdmin()
   return createMockResponse({ message: 'OAuth invalid cleared (demo)', key_id: params.keyId })
+})
+
+registerDynamicRoute('POST', '/api/admin/endpoints/keys/:keyId/reset-cycle-stats', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const key = createMockCodexPoolKeys().find(item => item.key_id === params.keyId)
+  const windows = key?.status_snapshot.quota.windows.filter(window => (
+    window.window_minutes > 0 && !window.code.startsWith('spark_')
+  )).length ?? 0
+  return createMockResponse({
+    message: '已重置周期统计（演示模式）',
+    reset_at: Math.floor(Date.now() / 1000),
+    windows,
+  })
 })
 
 
@@ -3205,10 +3687,122 @@ registerDynamicRoute('DELETE', '/api/admin/users/:userId', async (_config, param
 })
 
 // 用户 API Keys
-registerDynamicRoute('GET', '/api/admin/users/:userId/api-keys', async (_config, _params) => {
+registerDynamicRoute('GET', '/api/admin/users/:userId/api-keys', async (_config, params) => {
   await delay()
   requireAdmin()
-  return createMockResponse(MOCK_USER_API_KEYS)
+  const apiKeys = mockManagedUserApiKeys(params.userId).map(publicMockManagedUserApiKey)
+  return createMockResponse({
+    api_keys: apiKeys,
+    total: apiKeys.length,
+  })
+})
+
+registerDynamicRoute('POST', '/api/admin/users/:userId/api-keys', async (config, params) => {
+  await delay()
+  requireAdmin()
+  const keys = mockManagedUserApiKeys(params.userId)
+  const body = mockRequestObject(config)
+  const sequence = ++mockManagedUserApiKeySequence
+  const fullKey = `sk-ae-demo-${params.userId.slice(0, 8)}-${sequence}`
+  const key: MockManagedUserApiKey = {
+    id: `managed-key-${params.userId}-${sequence}`,
+    fullKey,
+    key_display: `${fullKey.slice(0, 10)}...${fullKey.slice(-4)}`,
+    name: typeof body.name === 'string' && body.name.trim()
+      ? body.name.trim()
+      : `Key-${sequence}`,
+    created_at: new Date().toISOString(),
+    is_active: true,
+    is_locked: false,
+    is_standalone: false,
+    feature_settings: body.feature_settings && typeof body.feature_settings === 'object'
+      ? body.feature_settings as Record<string, unknown>
+      : null,
+    rate_limit: typeof body.rate_limit === 'number' ? body.rate_limit : 0,
+    concurrent_limit: typeof body.concurrent_limit === 'number'
+      ? body.concurrent_limit
+      : null,
+    ip_rules: Array.isArray(body.ip_rules)
+      ? body.ip_rules.filter((value): value is string => typeof value === 'string')
+      : null,
+    total_requests: 0,
+    total_cost_usd: 0,
+    force_capabilities: null,
+  }
+  keys.unshift(key)
+  return createMockResponse({
+    ...publicMockManagedUserApiKey(key),
+    key: fullKey,
+    message: 'API Key创建成功，请妥善保存完整密钥',
+  })
+})
+
+registerDynamicRoute('PUT', '/api/admin/users/:userId/api-keys/:keyId', async (config, params) => {
+  await delay()
+  requireAdmin()
+  const keys = mockManagedUserApiKeys(params.userId)
+  const index = keys.findIndex(key => key.id === params.keyId)
+  if (index < 0) {
+    throw { response: createMockResponse({ detail: 'API Key 不存在' }, 404) }
+  }
+  const body = mockRequestObject(config)
+  const existing = keys[index]
+  const updated: MockManagedUserApiKey = {
+    ...existing,
+    ...(typeof body.name === 'string' ? { name: body.name.trim() } : {}),
+    ...(typeof body.rate_limit === 'number' ? { rate_limit: body.rate_limit } : {}),
+    ...(typeof body.concurrent_limit === 'number' || body.concurrent_limit === null
+      ? { concurrent_limit: body.concurrent_limit }
+      : {}),
+    ...(Array.isArray(body.ip_rules) || body.ip_rules === null
+      ? { ip_rules: body.ip_rules as string[] | null }
+      : {}),
+    ...('feature_settings' in body
+      ? { feature_settings: body.feature_settings as Record<string, unknown> | null }
+      : {}),
+  }
+  keys[index] = updated
+  return createMockResponse({
+    ...publicMockManagedUserApiKey(updated),
+    message: 'API Key更新成功',
+  })
+})
+
+registerDynamicRoute('DELETE', '/api/admin/users/:userId/api-keys/:keyId', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const keys = mockManagedUserApiKeys(params.userId)
+  const index = keys.findIndex(key => key.id === params.keyId)
+  if (index < 0) {
+    throw { response: createMockResponse({ detail: 'API Key 不存在' }, 404) }
+  }
+  keys.splice(index, 1)
+  return createMockResponse({ message: 'API Key删除成功' })
+})
+
+registerDynamicRoute('PATCH', '/api/admin/users/:userId/api-keys/:keyId/lock', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const key = mockManagedUserApiKeys(params.userId).find(key => key.id === params.keyId)
+  if (!key) {
+    throw { response: createMockResponse({ detail: 'API Key 不存在' }, 404) }
+  }
+  key.is_locked = !key.is_locked
+  return createMockResponse({
+    id: key.id,
+    is_locked: key.is_locked,
+    message: key.is_locked ? 'API Key已锁定' : 'API Key已解锁',
+  })
+})
+
+registerDynamicRoute('GET', '/api/admin/users/:userId/api-keys/:keyId/full-key', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const key = mockManagedUserApiKeys(params.userId).find(key => key.id === params.keyId)
+  if (!key) {
+    throw { response: createMockResponse({ detail: 'API Key 不存在' }, 404) }
+  }
+  return createMockResponse({ key: key.fullKey })
 })
 
 // 管理员 - 用户会话列表
@@ -3294,9 +3888,12 @@ registerDynamicRoute('DELETE', '/api/users/me/api-keys/:keyId', async (_config, 
 })
 
 // 使用记录详情 - /api/admin/usage/:requestId
-registerDynamicRoute('GET', '/api/admin/usage/:requestId', async (_config, params) => {
+registerDynamicRoute('GET', '/api/admin/usage/:requestId', async (config, params) => {
   await delay()
   requireAdmin()
+
+  const includeBodies = config.params?.include_bodies !== false
+    && config.params?.include_bodies !== 'false'
 
   const records = getUsageRecords()
   const record = records.find(r => r.id === params.requestId)
@@ -3317,6 +3914,9 @@ registerDynamicRoute('GET', '/api/admin/usage/:requestId', async (_config, param
   // 生成模拟的请求/响应数据
   const mockRequestBody = {
     model: record.model,
+    ...(record.requested_reasoning_effort
+      ? { reasoning: { effort: record.requested_reasoning_effort } }
+      : {}),
     max_tokens: 4096,
     messages: [
       {
@@ -3327,7 +3927,27 @@ registerDynamicRoute('GET', '/api/admin/usage/:requestId', async (_config, param
     stream: record.is_stream
   }
 
-  const mockResponseBody = record.status === 'failed' ? {
+  const mockProviderRequestBody = record.id === MOCK_CYBER_POLICY_USAGE_ID
+    ? {
+        model: record.target_model || record.model,
+        reasoning: { effort: record.reasoning_effort },
+        service_tier: record.service_tier,
+        input: [
+          {
+            role: 'user',
+            content: 'Help me with an authorized cybersecurity research task.'
+          }
+        ],
+        stream: record.is_stream
+      }
+    : {
+        ...mockRequestBody,
+        model: record.target_model || record.model
+      }
+
+  const mockResponseBody = record.id === MOCK_CYBER_POLICY_USAGE_ID
+    ? MOCK_CYBER_POLICY_ERROR_BODY
+    : record.status === 'failed' ? {
     error: {
       type: 'api_error',
       message: record.error_message || 'An error occurred'
@@ -3375,6 +3995,10 @@ registerDynamicRoute('GET', '/api/admin/usage/:requestId', async (_config, param
     api_format: record.api_format,
     model: record.model,
     target_model: record.target_model,
+    requested_reasoning_effort: record.requested_reasoning_effort,
+    reasoning_effort: record.reasoning_effort,
+    service_tier: record.service_tier,
+    actual_service_tier: record.actual_service_tier,
     tokens: {
       input: record.input_tokens,
       output: record.output_tokens,
@@ -3405,6 +4029,7 @@ registerDynamicRoute('GET', '/api/admin/usage/:requestId', async (_config, param
     error_message: record.error_message,
     response_time_ms: record.response_time_ms,
     created_at: record.created_at,
+    updated_at: record.updated_at ?? record.created_at,
     request_headers: {
       'Content-Type': 'application/json',
       'Authorization': 'Bearer sk-aether-***',
@@ -3413,7 +4038,12 @@ registerDynamicRoute('GET', '/api/admin/usage/:requestId', async (_config, param
       'Accept': 'application/json',
       'X-Request-ID': `req_${record.id}`
     },
-    request_body: mockRequestBody,
+    has_request_body: true,
+    has_provider_request_body: true,
+    has_response_body: true,
+    has_client_response_body: false,
+    request_body: includeBodies ? mockRequestBody : null,
+    provider_request_body: includeBodies ? mockProviderRequestBody : null,
     provider_request_headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer sk-${record.provider}-***`,
@@ -3427,7 +4057,9 @@ registerDynamicRoute('GET', '/api/admin/usage/:requestId', async (_config, param
       'X-RateLimit-Remaining': '999',
       'X-RateLimit-Reset': new Date(Date.now() + 60000).toISOString()
     },
-    response_body: mockResponseBody,
+    response_body: includeBodies ? mockResponseBody : null,
+    client_response_body: null,
+    body_load_errors: null,
     metadata: {
       client_ip: '192.168.1.100',
       user_agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
@@ -3575,7 +4207,8 @@ registerDynamicRoute('GET', '/api/admin/monitoring/trace/:requestId', async (_co
     })
   } else if (record.status === 'failed') {
     // 失败请求：多个候选都失败
-    const attemptCount = 2 + Math.floor(Math.random() * 2)
+    const isCyberPolicyDemo = record.id === MOCK_CYBER_POLICY_USAGE_ID
+    const attemptCount = isCyberPolicyDemo ? 1 : 2 + Math.floor(Math.random() * 2)
 
     for (let i = 0; i < attemptCount; i++) {
       const attemptStarted = new Date(now.getTime() + i * 200)
@@ -3610,7 +4243,20 @@ registerDynamicRoute('GET', '/api/admin/monitoring/trace/:requestId', async (_co
           ranking_mode: 'FixedOrder',
           priority_mode: 'Provider',
           ranking_index: i,
-          priority_slot: i + 1
+          priority_slot: i + 1,
+          ...(isCyberPolicyDemo ? {
+            upstream_response: {
+              source: 'upstream_response',
+              status_code: 400,
+              headers: {
+                'content-type': 'application/json',
+                'x-request-id': `req_${MOCK_CYBER_POLICY_USAGE_ID}`
+              },
+              body: MOCK_CYBER_POLICY_ERROR_BODY,
+              body_ref: `usage://request/req_${MOCK_CYBER_POLICY_USAGE_ID}/response_body`,
+              body_state: 'reference'
+            }
+          } : {})
         },
         latency_ms: attemptLatency,
         created_at: attemptStarted.toISOString(),

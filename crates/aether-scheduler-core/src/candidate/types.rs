@@ -25,12 +25,14 @@ pub struct SchedulerMinimalCandidateSelectionCandidate {
     pub global_model_id: String,
     pub global_model_name: String,
     pub selected_provider_model_name: String,
+    pub supports_streaming: bool,
     pub mapping_matched_model: Option<String>,
 }
 
 pub struct EnumerateMinimalCandidateSelectionInput<'a> {
     pub rows: Vec<StoredMinimalCandidateSelectionRow>,
     pub normalized_api_format: &'a str,
+    pub request_operation: Option<&'a str>,
     pub requested_model_name: &'a str,
     pub resolved_global_model_name: &'a str,
     pub require_streaming: bool,

@@ -96,14 +96,18 @@ export interface UsageRecord {
   model: string
   target_model?: string | null  // 映射后的目标模型名（若无映射则为空）
   model_version?: string | null  // Provider 返回的实际模型版本（列表轻量字段）
+  request_type?: string | null  // 由请求语义识别出的操作类型
+  requested_reasoning_effort?: string | null  // 用户请求侧 reasoning 级别，用于展示转换关系
   reasoning_effort?: string | null  // 从发送给 Provider 的请求体提取的 reasoning 级别
   service_tier?: string | null  // 从发送给 Provider 的请求体提取的服务层级
+  actual_service_tier?: string | null  // 响应侧审计事实，不用于 Fast 展示或计费
   api_format?: string
   endpoint_api_format?: string  // 端点原生格式
   has_format_conversion?: boolean  // 是否发生了格式转换
   input_tokens: number
   effective_input_tokens?: number
   output_tokens: number
+  reasoning_tokens?: number
   cache_creation_input_tokens?: number
   cache_creation_ephemeral_5m_input_tokens?: number
   cache_creation_ephemeral_1h_input_tokens?: number

@@ -45,6 +45,7 @@ fn provider_model_mapping_respects_endpoint_scope() {
         priority: 1,
         api_formats: Some(vec!["openai:chat".to_string()]),
         endpoint_ids: Some(vec!["endpoint-selected".to_string()]),
+        operations: None,
     }]);
 
     assert_eq!(
@@ -101,6 +102,7 @@ fn resolves_requested_global_model_from_provider_model_alias() {
         priority: 1,
         api_formats: Some(vec!["openai:chat".to_string()]),
         endpoint_ids: None,
+        operations: None,
     }]);
 
     let resolved = resolve_requested_global_model_name(&[row], "gpt-5.2", "openai:chat");
@@ -138,6 +140,7 @@ fn scheduler_candidate_is_serializable() {
         global_model_id: "global-model-1".to_string(),
         global_model_name: "gpt-4.1".to_string(),
         selected_provider_model_name: "gpt-4.1-canary".to_string(),
+        supports_streaming: true,
         mapping_matched_model: Some("gpt-4.1-canary".to_string()),
     };
 
@@ -155,6 +158,7 @@ async fn enumerate_minimal_candidate_selection_resolves_provider_model_alias() {
         priority: 1,
         api_formats: Some(vec!["openai:chat".to_string()]),
         endpoint_ids: None,
+        operations: None,
     }]);
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
@@ -192,6 +196,7 @@ async fn enumerate_minimal_candidate_selection_filters_endpoint_scoped_alias_row
         priority: 1,
         api_formats: Some(vec!["openai:chat".to_string()]),
         endpoint_ids: Some(vec!["endpoint-selected".to_string()]),
+        operations: None,
     }]);
 
     let mut other = selected.clone();
@@ -247,6 +252,7 @@ async fn enumerate_minimal_candidate_selection_keeps_only_resolved_global_model_
         priority: 1,
         api_formats: Some(vec!["openai:chat".to_string()]),
         endpoint_ids: None,
+        operations: None,
     }]);
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
@@ -286,6 +292,7 @@ async fn enumerate_minimal_candidate_selection_allows_resolved_global_model_in_a
         priority: 1,
         api_formats: Some(vec!["openai:chat".to_string()]),
         endpoint_ids: None,
+        operations: None,
     }]);
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![

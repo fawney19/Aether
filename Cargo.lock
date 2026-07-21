@@ -70,6 +70,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-admission-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "aether-ai-formats"
 version = "0.1.0"
 dependencies = [
@@ -155,7 +163,9 @@ dependencies = [
  "aether-ai-formats",
  "aether-cache",
  "aether-data-contracts",
- "aether-data-query",
+ "aether-data-mysql",
+ "aether-data-postgres",
+ "aether-data-sqlite",
  "aether-wallet",
  "async-trait",
  "chrono",
@@ -183,7 +193,47 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "aether-data-mysql"
+version = "0.1.0"
+dependencies = [
+ "aether-ai-formats",
+ "aether-data-contracts",
+ "aether-data-query",
+ "async-trait",
+ "chrono",
+ "chrono-tz",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "aether-data-postgres"
+version = "0.1.0"
+dependencies = [
+ "aether-ai-formats",
+ "aether-data-contracts",
+ "aether-data-query",
+ "async-trait",
+ "chrono",
+ "chrono-tz",
+ "flate2",
+ "futures-util",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -201,6 +251,25 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "toml",
+]
+
+[[package]]
+name = "aether-data-sqlite"
+version = "0.1.0"
+dependencies = [
+ "aether-ai-formats",
+ "aether-data-contracts",
+ "aether-data-query",
+ "async-trait",
+ "chrono",
+ "chrono-tz",
+ "flate2",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -229,6 +298,11 @@ dependencies = [
  "aether-data",
  "aether-data-contracts",
  "aether-dispatch-core",
+ "aether-gateway-control",
+ "aether-gateway-execution",
+ "aether-gateway-frontdoor",
+ "aether-gateway-tunnel",
+ "aether-gateway-workers",
  "aether-http",
  "aether-model-fetch",
  "aether-oauth",
@@ -240,7 +314,7 @@ dependencies = [
  "aether-runtime-state",
  "aether-scheduler-core",
  "aether-task-runtime",
- "aether-testkit",
+ "aether-test-support",
  "aether-usage-runtime",
  "aether-video-tasks-core",
  "aether-wallet",
@@ -296,11 +370,110 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-gateway-control"
+version = "0.1.0"
+dependencies = [
+ "http",
+]
+
+[[package]]
+name = "aether-gateway-execution"
+version = "0.1.0"
+dependencies = [
+ "aether-contracts",
+ "bytes",
+ "serde_json",
+]
+
+[[package]]
+name = "aether-gateway-frontdoor"
+version = "0.1.0"
+dependencies = [
+ "aether-ai-formats",
+ "axum",
+ "bytes",
+ "futures-util",
+ "http",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "aether-gateway-tunnel"
+version = "0.1.0"
+dependencies = [
+ "aether-admission-core",
+ "aether-contracts",
+ "base64 0.22.1",
+ "bytes",
+ "http",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "aether-gateway-workers"
+version = "0.1.0"
+dependencies = [
+ "aether-runtime-state",
+ "aether-task-runtime",
+ "aether-test-support",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "aether-http"
 version = "0.1.0"
 dependencies = [
  "reqwest",
  "serde",
+]
+
+[[package]]
+name = "aether-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "aether-contracts",
+ "aether-data",
+ "aether-data-contracts",
+ "aether-gateway",
+ "aether-runtime-state",
+ "aether-testkit",
+ "async-stream",
+ "axum",
+ "futures-util",
+ "http",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+]
+
+[[package]]
+name = "aether-loadtools"
+version = "0.1.0"
+dependencies = [
+ "aether-http",
+ "aether-runtime",
+ "aether-runtime-state",
+ "aether-test-support",
+ "bytes",
+ "futures-util",
+ "http",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
 ]
 
 [[package]]
@@ -346,6 +519,14 @@ version = "0.1.0"
 dependencies = [
  "aether-data-contracts",
  "serde_json",
+]
+
+[[package]]
+name = "aether-provider-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -448,10 +629,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-task-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "aether-task-runtime"
 version = "0.1.0"
 dependencies = [
  "aether-runtime",
+ "aether-task-core",
  "serde",
  "serde_json",
  "tokio",
@@ -460,31 +650,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-test-support"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "aether-testkit"
 version = "0.1.0"
 dependencies = [
- "aether-contracts",
  "aether-data",
- "aether-data-contracts",
  "aether-gateway",
- "aether-http",
+ "aether-loadtools",
  "aether-runtime",
  "aether-runtime-state",
- "async-stream",
  "axum",
- "bytes",
- "futures-util",
- "http",
- "libc",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
  "sqlx",
- "sysinfo",
  "tokio",
- "tokio-tungstenite 0.28.0",
- "uuid",
 ]
 
 [[package]]
@@ -493,6 +676,7 @@ version = "0.3.16"
 dependencies = [
  "aether-contracts",
  "aether-gateway",
+ "aether-gateway-tunnel",
  "aether-http",
  "aether-runtime",
  "aether-runtime-state",
@@ -529,6 +713,14 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "aether-usage-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

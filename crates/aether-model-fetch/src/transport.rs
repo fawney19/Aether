@@ -21,11 +21,10 @@ use aether_provider_transport::{
     GatewayProviderTransportSnapshot, LocalResolvedOAuthRequestAuth,
 };
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::{build_models_fetch_url, deepseek_anthropic_models_fetch_uses_openai_auth};
 
-const OPENAI_RESPONSES_USER_AGENT: &str = "openai-codex/1.0";
 const CLAUDE_CLI_USER_AGENT: &str = "claude-code/1.0.1";
 const GEMINI_CLI_USER_AGENT: &str = "GeminiCLI/0.1.5 (Windows; AMD64)";
 const CLAUDE_VERSION_HEADER: &str = "2023-06-01";
@@ -130,12 +129,23 @@ pub async fn build_standard_models_fetch_execution_plan(
             &auth_header_value,
         );
         if is_codex_openai_models_fetch {
-            if let Some(account_id) = extract_codex_account_id(transport) {
+            let auth_identity = aether_ai_formats::parse_codex_auth_identity(
+                transport.key.decrypted_auth_config.as_deref(),
+            );
+            if let Some(account_id) = auth_identity.account_id {
                 insert_non_empty_auth_header(
                     &mut headers,
                     &mut protected_headers,
                     "chatgpt-account-id",
                     &account_id,
+                );
+            }
+            if auth_identity.is_fedramp {
+                insert_non_empty_auth_header(
+                    &mut headers,
+                    &mut protected_headers,
+                    "x-openai-fedramp",
+                    "true",
                 );
             }
         }
@@ -582,10 +592,19 @@ fn standard_models_fetch_headers(
     let api_format = aether_ai_formats::normalize_api_format_alias(api_format);
     let provider_type = provider_type.trim().to_ascii_lowercase();
     match api_format.as_str() {
-        "openai:responses" | "openai:responses:compact" => BTreeMap::from([(
-            "user-agent".to_string(),
-            OPENAI_RESPONSES_USER_AGENT.to_string(),
-        )]),
+        "openai:responses" | "openai:responses:compact" => {
+            let mut headers = BTreeMap::from([(
+                "user-agent".to_string(),
+                aether_ai_formats::CODEX_CLIENT_USER_AGENT.to_string(),
+            )]);
+            if provider_type == "codex" {
+                headers.insert(
+                    "originator".to_string(),
+                    aether_ai_formats::CODEX_CLIENT_ORIGINATOR.to_string(),
+                );
+            }
+            headers
+        }
         "claude:messages" => {
             let mut headers = BTreeMap::from([(
                 "anthropic-version".to_string(),
@@ -669,23 +688,6 @@ fn append_query_param(mut url: String, key: &str, value: &str) -> String {
     url
 }
 
-fn extract_codex_account_id(transport: &GatewayProviderTransportSnapshot) -> Option<String> {
-    let raw = transport.key.decrypted_auth_config.as_deref()?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-
-    serde_json::from_str::<Value>(raw).ok().and_then(|value| {
-        value
-            .get("account_id")
-            .or_else(|| value.get("chatgpt_account_id"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-    })
-}
-
 fn insert_non_empty_auth_header(
     headers: &mut BTreeMap<String, String>,
     protected_headers: &mut Vec<String>,
@@ -727,6 +729,7 @@ mod tests {
         build_gemini_cli_load_code_assist_plan, build_kiro_list_available_models_plan,
         build_models_fetch_execution_plan, build_standard_models_fetch_execution_plan,
         build_vertex_models_fetch_execution_plan, ModelFetchTransportRuntime,
+        ANTIGRAVITY_REQUEST_USER_AGENT,
     };
 
     struct TestRuntime {
@@ -838,7 +841,7 @@ mod tests {
         assert_eq!(plan.url, "https://example.com/models");
         assert_eq!(
             plan.headers.get("user-agent").map(String::as_str),
-            Some("openai-codex/1.0")
+            Some(aether_ai_formats::CODEX_CLIENT_USER_AGENT)
         );
         assert_eq!(
             plan.headers.get("authorization").map(String::as_str),
@@ -909,7 +912,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builds_codex_models_fetch_plan_with_account_header() {
+    async fn builds_codex_models_fetch_plan_with_auth_identity_headers() {
         let runtime = TestRuntime {
             oauth_auth: Some(
                 aether_provider_transport::LocalResolvedOAuthRequestAuth::Header {
@@ -921,7 +924,12 @@ mod tests {
         };
         let mut transport = sample_transport("codex", "openai:responses", "oauth");
         transport.endpoint.base_url = "https://chatgpt.com/backend-api/codex".to_string();
-        transport.key.decrypted_auth_config = Some(r#"{"account_id":"account-1"}"#.to_string());
+        transport.endpoint.header_rules = Some(json!([
+            {"op": "set", "name": "chatgpt-account-id", "value": "spoofed-account"},
+            {"op": "set", "name": "x-openai-fedramp", "value": "false"}
+        ]));
+        transport.key.decrypted_auth_config =
+            Some(r#"{"account_id":"account-1","chatgpt_account_is_fedramp":true}"#.to_string());
 
         let plan = build_models_fetch_execution_plan(&runtime, &transport)
             .await
@@ -929,7 +937,7 @@ mod tests {
 
         assert_eq!(
             plan.url,
-            "https://chatgpt.com/backend-api/codex/models?client_version=0.128.0-alpha.1"
+            "https://chatgpt.com/backend-api/codex/models?client_version=0.144.1"
         );
         assert_eq!(
             plan.headers.get("authorization").map(String::as_str),
@@ -940,9 +948,18 @@ mod tests {
             Some("account-1")
         );
         assert_eq!(
+            plan.headers.get("x-openai-fedramp").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
             plan.headers.get("accept").map(String::as_str),
             Some("application/json")
         );
+        assert_eq!(
+            plan.headers.get("originator").map(String::as_str),
+            Some("codex_cli_rs")
+        );
+        assert!(!plan.headers.contains_key("version"));
     }
 
     #[tokio::test]
@@ -1053,7 +1070,7 @@ mod tests {
         );
         assert_eq!(
             plan.headers.get("user-agent").map(String::as_str),
-            Some("antigravity")
+            Some(ANTIGRAVITY_REQUEST_USER_AGENT)
         );
         assert_eq!(
             plan.headers.get("x-client-name").map(String::as_str),
@@ -1100,7 +1117,7 @@ mod tests {
         );
         assert_eq!(
             plan.headers.get("user-agent").map(String::as_str),
-            Some("antigravity")
+            Some(ANTIGRAVITY_REQUEST_USER_AGENT)
         );
         assert_eq!(
             plan.headers.get("x-client-name").map(String::as_str),

@@ -1,0 +1,22 @@
+[package]
+name = "aether-testkit"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared integration test helpers for Aether Rust services"
+
+[features]
+default = []
+gateway = ["dep:aether-gateway", "dep:aether-runtime-state"]
+postgres = ["dep:aether-data", "dep:sqlx"]
+
+[dependencies]
+aether-loadtools.workspace = true
+aether-data = { workspace = true, optional = true }
+aether-gateway = { workspace = true, features = ["testkit"], optional = true }
+aether-runtime.workspace = true
+aether-runtime-state = { workspace = true, optional = true }
+axum.workspace = true
+sqlx = { workspace = true, features = ["postgres"], optional = true }
+tokio.workspace = true

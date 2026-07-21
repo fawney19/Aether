@@ -112,7 +112,7 @@ pub(crate) async fn build_admin_keys_grouped_by_format_payload(
             None
         };
         let avg_response_time_ms = if success_count > 0 {
-            Some(f64::from(key.total_response_time_ms.unwrap_or(0)) / success_count as f64)
+            Some(key.total_response_time_ms.unwrap_or(0) as f64 / success_count as f64)
         } else {
             None
         };

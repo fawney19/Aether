@@ -10,7 +10,7 @@ Runtime same-format provider paths must not call canonical conversion.
 
 Current implementation:
 
-- `crates/aether-provider-transport/src/same_format_provider/mod.rs` checks `api_format_alias_matches(client_api_format, provider_api_format)`.
+- `crates/aether-provider/transport/src/same_format_provider/mod.rs` checks `api_format_alias_matches(client_api_format, provider_api_format)`.
 - When formats match, the provider body is built by copying the parsed JSON object field-for-field.
 - When formats differ, the provider body is built through `aether_ai_formats::convert_request_pure`.
 - Model override, body rules, model directives, Claude Code sanitization, Gemini function-response id stripping, and stream policy are applied only after the passthrough/conversion branch in provider transport.
@@ -56,7 +56,7 @@ Required behavior:
 
 ## Pure Conversion Interface
 
-Pure conversion lives in `crates/aether-ai-formats` and is limited to:
+Pure conversion lives in `crates/aether-ai/formats` and is limited to:
 
 - parse
 - emit

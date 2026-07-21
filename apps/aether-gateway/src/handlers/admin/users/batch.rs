@@ -643,7 +643,11 @@ fn count_active_admin_demotions(
     mutation: &AdminUserBatchMutation,
     items: &[AdminUserSelectionItem],
 ) -> usize {
-    if mutation.role.as_deref() != Some("user") {
+    if mutation
+        .role
+        .as_deref()
+        .is_none_or(crate::roles::is_full_admin_role)
+    {
         return 0;
     }
     items
@@ -659,7 +663,10 @@ fn batch_role_demotion_failure_reason(
     active_admin_demotions: usize,
     current_admin_user_id: Option<&str>,
 ) -> Option<&'static str> {
-    if mutation.role.as_deref() != Some("user")
+    if mutation
+        .role
+        .as_deref()
+        .is_none_or(crate::roles::is_full_admin_role)
         || !item.is_active
         || !item.role.eq_ignore_ascii_case("admin")
     {

@@ -130,10 +130,6 @@ fn try_send_window_update(frame_tx: &FrameSender, stream_id: u32, bytes: usize) 
     }
 }
 
-/// Minimum allowed upstream request timeout (milliseconds).
-const MIN_TIMEOUT_MS: u64 = 1;
-/// Maximum allowed upstream request timeout (milliseconds).
-const MAX_TIMEOUT_MS: u64 = 300_000;
 /// Match reqwest's default redirect budget so direct execution and tunnel relay
 /// fail at the same point instead of diverging after a different number of hops.
 const MAX_REDIRECTS: usize = 10;
@@ -707,41 +703,12 @@ fn remaining_timeout(deadline: Instant) -> Option<Duration> {
 }
 
 fn resolve_request_timeouts(meta: &RequestMeta) -> RequestTimeouts {
-    let first_byte_timeout = if meta.stream {
-        meta.stream_first_byte_timeout_ms
-            .map(timeout_duration_from_ms)
-            .unwrap_or_else(|| timeout_duration_from_legacy_secs(meta.timeout))
-    } else {
-        meta.request_timeout_ms
-            .or(meta.stream_first_byte_timeout_ms)
-            .map(timeout_duration_from_ms)
-            .unwrap_or_else(|| timeout_duration_from_legacy_secs(meta.timeout))
-    };
-
-    let response_body_timeout = if meta.stream {
-        None
-    } else {
-        Some(
-            meta.request_timeout_ms
-                .or(meta.stream_first_byte_timeout_ms)
-                .map(timeout_duration_from_ms)
-                .unwrap_or_else(|| timeout_duration_from_legacy_secs(meta.timeout)),
-        )
-    };
+    let resolved = aether_contracts::tunnel::resolve_tunnel_request_timeouts(meta);
 
     RequestTimeouts {
-        first_byte_timeout,
-        response_body_timeout,
+        first_byte_timeout: Duration::from_millis(resolved.first_byte_ms),
+        response_body_timeout: resolved.response_body_ms.map(Duration::from_millis),
     }
-}
-
-fn timeout_duration_from_ms(ms: u64) -> Duration {
-    Duration::from_millis(ms.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS))
-}
-
-fn timeout_duration_from_legacy_secs(secs: u64) -> Duration {
-    let ms = secs.saturating_mul(1_000);
-    timeout_duration_from_ms(ms)
 }
 
 async fn spool_request_body(
@@ -2174,6 +2141,18 @@ mod tests {
             timeouts.response_body_timeout,
             Some(Duration::from_millis(90_000))
         );
+    }
+
+    #[test]
+    fn non_stream_request_timeouts_keep_the_protocol_maximum() {
+        let mut meta = sample_request_meta();
+        meta.request_timeout_ms = Some(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_MS);
+
+        let timeouts = resolve_request_timeouts(&meta);
+
+        let expected = Duration::from_millis(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_MS);
+        assert_eq!(timeouts.first_byte_timeout, expected);
+        assert_eq!(timeouts.response_body_timeout, Some(expected));
     }
 
     #[test]

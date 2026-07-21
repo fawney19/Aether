@@ -12,10 +12,7 @@ use super::{
     StoredWalletSnapshot, UpdateManagementTokenRecord, UpsertOAuthProviderConfigRecord,
 };
 use crate::LocalMutationOutcome;
-use aether_data::repository::auth::{
-    read_resolved_auth_api_key_snapshot_by_key_hash,
-    read_resolved_auth_api_key_snapshot_by_user_api_key_ids,
-};
+use aether_data::repository::auth::ResolvedAuthApiKeySnapshotReader;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GatewayUserEffectiveListPolicies {
@@ -1751,15 +1748,14 @@ impl GatewayDataState {
         let snapshot = crate::request_diagnostics::observe_db_operation(
             "auth_api_key_snapshot",
             self.database_pool_summary(),
-            read_resolved_auth_api_key_snapshot_by_user_api_key_ids(
-                self,
+            self.find_stored_auth_api_key_snapshot(AuthApiKeyLookupKey::UserApiKeyIds {
                 user_id,
                 api_key_id,
-                now_unix_secs,
-            ),
+            }),
         )
         .await?;
-        self.apply_user_group_effective_policies(snapshot).await
+        self.apply_user_group_effective_policies(snapshot, now_unix_secs)
+            .await
     }
 
     pub(crate) async fn read_auth_api_key_snapshot_by_key_hash(
@@ -1770,84 +1766,57 @@ impl GatewayDataState {
         let snapshot = crate::request_diagnostics::observe_db_operation(
             "auth_api_key_snapshot_by_hash",
             self.database_pool_summary(),
-            read_resolved_auth_api_key_snapshot_by_key_hash(self, key_hash, now_unix_secs),
+            self.find_stored_auth_api_key_snapshot(AuthApiKeyLookupKey::KeyHash(key_hash)),
         )
         .await?;
-        self.apply_user_group_effective_policies(snapshot).await
+        self.apply_user_group_effective_policies(snapshot, now_unix_secs)
+            .await
     }
 
     async fn apply_user_group_effective_policies(
         &self,
-        snapshot: Option<GatewayAuthApiKeySnapshot>,
+        snapshot: Option<StoredAuthApiKeySnapshot>,
+        now_unix_secs: u64,
     ) -> Result<Option<GatewayAuthApiKeySnapshot>, DataLayerError> {
         let Some(mut snapshot) = snapshot else {
             return Ok(None);
         };
-        if snapshot.user_role.eq_ignore_ascii_case("admin") && !snapshot.api_key_is_standalone {
-            apply_admin_unrestricted_auth_snapshot(&mut snapshot);
-            return Ok(Some(snapshot));
-        }
         let Some(repository) = self.user_reader.as_ref() else {
-            return Ok(Some(snapshot));
+            return Ok(Some(GatewayAuthApiKeySnapshot::from_stored(
+                snapshot,
+                now_unix_secs,
+            )));
         };
-        let Some(user) = crate::request_diagnostics::observe_db_operation(
+        let Some(_) = crate::request_diagnostics::observe_db_operation(
             "auth_user_policy",
             self.database_pool_summary(),
             repository.find_user_auth_by_id(&snapshot.user_id),
         )
         .await?
         else {
-            return Ok(Some(snapshot));
+            return Ok(Some(GatewayAuthApiKeySnapshot::from_stored(
+                snapshot,
+                now_unix_secs,
+            )));
         };
-        if user.role.eq_ignore_ascii_case("admin") && !snapshot.api_key_is_standalone {
-            snapshot.user_role = user.role;
-            apply_admin_unrestricted_auth_snapshot(&mut snapshot);
-            return Ok(Some(snapshot));
-        }
         let groups = self
             .effective_user_groups_for_user(&snapshot.user_id)
             .await?;
 
-        let mut allowed_providers =
-            resolve_effective_list_policy(None, "unrestricted", &groups, |group| {
-                (
-                    &group.allowed_providers_mode,
-                    group.allowed_providers.clone(),
-                )
-            });
-        let mut allowed_api_formats =
-            resolve_effective_list_policy(None, "unrestricted", &groups, |group| {
-                (
-                    &group.allowed_api_formats_mode,
-                    group.allowed_api_formats.clone(),
-                )
-            });
-        let mut allowed_models =
-            resolve_effective_list_policy(None, "unrestricted", &groups, |group| {
-                (&group.allowed_models_mode, group.allowed_models.clone())
-            });
-        let user_rate_limit = resolve_effective_rate_limit_policy(None, "system", &groups);
-        if !snapshot.api_key_is_standalone {
-            constrain_api_key_list_policy_to_user_policy(
-                &mut allowed_providers,
-                &mut snapshot.api_key_allowed_providers,
-            );
-            constrain_api_key_list_policy_to_user_policy(
-                &mut allowed_api_formats,
-                &mut snapshot.api_key_allowed_api_formats,
-            );
-            constrain_api_key_list_policy_to_user_policy(
-                &mut allowed_models,
-                &mut snapshot.api_key_allowed_models,
-            );
-        }
-        snapshot.apply_user_policy(
+        let GatewayUserEffectiveListPolicies {
             allowed_providers,
             allowed_api_formats,
             allowed_models,
-            user_rate_limit,
-        );
-        Ok(Some(snapshot))
+        } = resolve_group_effective_list_policies(&groups);
+        let user_rate_limit = resolve_effective_rate_limit_policy(None, "system", &groups);
+        snapshot.user_allowed_providers = allowed_providers;
+        snapshot.user_allowed_api_formats = allowed_api_formats;
+        snapshot.user_allowed_models = allowed_models;
+        snapshot.user_rate_limit = user_rate_limit;
+        Ok(Some(GatewayAuthApiKeySnapshot::from_stored(
+            snapshot,
+            now_unix_secs,
+        )))
     }
 
     pub(crate) async fn resolve_user_effective_list_policies(
@@ -1863,36 +1832,7 @@ impl GatewayDataState {
         } else {
             Vec::new()
         };
-        Ok(GatewayUserEffectiveListPolicies {
-            allowed_providers: resolve_effective_list_policy(
-                user.allowed_providers.clone(),
-                &user.allowed_providers_mode,
-                &groups,
-                |group| {
-                    (
-                        &group.allowed_providers_mode,
-                        group.allowed_providers.clone(),
-                    )
-                },
-            ),
-            allowed_api_formats: resolve_effective_list_policy(
-                user.allowed_api_formats.clone(),
-                &user.allowed_api_formats_mode,
-                &groups,
-                |group| {
-                    (
-                        &group.allowed_api_formats_mode,
-                        group.allowed_api_formats.clone(),
-                    )
-                },
-            ),
-            allowed_models: resolve_effective_list_policy(
-                user.allowed_models.clone(),
-                &user.allowed_models_mode,
-                &groups,
-                |group| (&group.allowed_models_mode, group.allowed_models.clone()),
-            ),
-        })
+        Ok(resolve_group_effective_list_policies(&groups))
     }
 
     async fn effective_user_groups_for_user(
@@ -1970,16 +1910,33 @@ impl GatewayDataState {
     }
 }
 
-fn apply_admin_unrestricted_auth_snapshot(snapshot: &mut GatewayAuthApiKeySnapshot) {
-    snapshot.user_allowed_providers = None;
-    snapshot.user_allowed_api_formats = None;
-    snapshot.user_allowed_models = None;
-    snapshot.user_rate_limit = None;
-    snapshot.api_key_allowed_providers = None;
-    snapshot.api_key_allowed_api_formats = None;
-    snapshot.api_key_allowed_models = None;
-    snapshot.api_key_rate_limit = None;
-    snapshot.api_key_concurrent_limit = None;
+// Per-user list policy columns are retained only for legacy import/export compatibility.
+// Runtime authorization and user-facing catalogs must both treat group policies as authoritative.
+fn resolve_group_effective_list_policies(
+    groups: &[aether_data::repository::users::StoredUserGroup],
+) -> GatewayUserEffectiveListPolicies {
+    GatewayUserEffectiveListPolicies {
+        allowed_providers: resolve_effective_list_policy(None, "unrestricted", groups, |group| {
+            (
+                &group.allowed_providers_mode,
+                group.allowed_providers.clone(),
+            )
+        }),
+        allowed_api_formats: resolve_effective_api_format_policy(
+            None,
+            "unrestricted",
+            groups,
+            |group| {
+                (
+                    &group.allowed_api_formats_mode,
+                    group.allowed_api_formats.clone(),
+                )
+            },
+        ),
+        allowed_models: resolve_effective_list_policy(None, "unrestricted", groups, |group| {
+            (&group.allowed_models_mode, group.allowed_models.clone())
+        }),
+    }
 }
 
 fn resolve_effective_list_policy(
@@ -1993,6 +1950,19 @@ fn resolve_effective_list_policy(
     let group_policy = union_group_list_policies(groups, group_field);
     let user_policy = list_restriction_from_mode(user_mode, user_values);
     intersect_list_policies(group_policy, user_policy)
+}
+
+fn resolve_effective_api_format_policy(
+    user_values: Option<Vec<String>>,
+    user_mode: &str,
+    groups: &[aether_data::repository::users::StoredUserGroup],
+    group_field: impl Fn(
+        &aether_data::repository::users::StoredUserGroup,
+    ) -> (&str, Option<Vec<String>>),
+) -> Option<Vec<String>> {
+    let group_policy = union_group_list_policies(groups, group_field);
+    let user_policy = list_restriction_from_mode(user_mode, user_values);
+    intersect_api_format_list_policies(group_policy, user_policy)
 }
 
 fn union_group_list_policies(
@@ -2089,6 +2059,19 @@ fn intersect_list_policies(
     }
 }
 
+fn intersect_api_format_list_policies(
+    left: Option<Vec<String>>,
+    right: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(values), None) | (None, Some(values)) => Some(values),
+        (Some(left_values), Some(right_values)) => Some(
+            crate::ai_serving::intersect_api_format_allowed_lists(&left_values, &right_values),
+        ),
+    }
+}
+
 fn intersect_rate_limit_policies(
     left: Option<RateLimitRestriction>,
     right: Option<RateLimitRestriction>,
@@ -2131,22 +2114,6 @@ fn rate_limit_policy_value(policy: Option<RateLimitRestriction>) -> Option<i32> 
         Some(RateLimitRestriction::Unlimited) => Some(0),
         Some(RateLimitRestriction::Limited(value)) => Some(value),
     }
-}
-
-fn constrain_api_key_list_policy_to_user_policy(
-    user_policy: &mut Option<Vec<String>>,
-    api_key_policy: &mut Option<Vec<String>>,
-) {
-    let Some(api_key_values) = api_key_policy.as_ref().filter(|values| !values.is_empty()) else {
-        return;
-    };
-    let Some(user_values) = user_policy.clone() else {
-        return;
-    };
-    let effective = intersect_list_policies(Some(api_key_values.to_vec()), Some(user_values))
-        .unwrap_or_default();
-    *user_policy = Some(effective.clone());
-    *api_key_policy = Some(effective);
 }
 
 #[cfg(test)]
@@ -2277,6 +2244,41 @@ mod tests {
             policy,
             Some(vec!["gpt-4.1".to_string(), "gemini-2.5-pro".to_string()])
         );
+    }
+
+    #[test]
+    fn api_format_policy_intersection_preserves_search_companion_scope() {
+        let mut responses_group =
+            sample_group("responses", 10, None, "unrestricted", None, "system");
+        responses_group.allowed_api_formats = Some(vec!["openai:responses".to_string()]);
+        responses_group.allowed_api_formats_mode = "specific".to_string();
+
+        let search_policy = resolve_effective_api_format_policy(
+            Some(vec!["openai:search".to_string()]),
+            "specific",
+            std::slice::from_ref(&responses_group),
+            |group| {
+                (
+                    &group.allowed_api_formats_mode,
+                    group.allowed_api_formats.clone(),
+                )
+            },
+        );
+        assert_eq!(search_policy, Some(vec!["openai:search".to_string()]));
+
+        responses_group.allowed_api_formats = Some(vec!["openai:search".to_string()]);
+        let responses_policy = resolve_effective_api_format_policy(
+            Some(vec!["openai:responses".to_string()]),
+            "specific",
+            &[responses_group],
+            |group| {
+                (
+                    &group.allowed_api_formats_mode,
+                    group.allowed_api_formats.clone(),
+                )
+            },
+        );
+        assert_eq!(responses_policy, Some(vec!["openai:search".to_string()]));
     }
 
     #[test]
@@ -2452,17 +2454,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn api_key_specific_policy_cannot_expand_user_policy() {
-        let mut user_policy = Some(vec!["gpt-5".to_string()]);
-        let mut api_key_policy = Some(vec!["gpt-4.1".to_string()]);
-
-        constrain_api_key_list_policy_to_user_policy(&mut user_policy, &mut api_key_policy);
-
-        assert_eq!(user_policy, Some(Vec::<String>::new()));
-        assert_eq!(api_key_policy, Some(Vec::<String>::new()));
-    }
-
     #[tokio::test]
     async fn admin_non_standalone_snapshot_bypasses_group_and_key_policies() {
         let mut snapshot = sample_snapshot_with_role("key-admin", "admin-1", "admin")
@@ -2519,6 +2510,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn current_admin_role_bypasses_stored_user_and_key_policies() {
+        let mut snapshot = sample_snapshot("key-admin", "admin-1");
+        snapshot.api_key_allowed_providers = Some(vec!["anthropic".to_string()]);
+        snapshot.api_key_allowed_api_formats = Some(vec!["anthropic:messages".to_string()]);
+        snapshot.api_key_allowed_models = Some(vec!["claude-sonnet-4-5".to_string()]);
+
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some("hash-admin".to_string()),
+            snapshot,
+        )]));
+        let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
+            sample_auth_user("admin-1", "admin"),
+        ]));
+        let state = GatewayDataState::with_auth_api_key_reader_for_tests(auth_repository)
+            .with_user_reader(user_repository);
+
+        let resolved = state
+            .read_auth_api_key_snapshot_by_key_hash("hash-admin", 100)
+            .await
+            .expect("snapshot should resolve")
+            .expect("snapshot should exist");
+
+        assert_eq!(resolved.user_role, "admin");
+        assert_eq!(resolved.effective_allowed_providers(), None);
+        assert_eq!(resolved.effective_allowed_api_formats(), None);
+        assert_eq!(resolved.effective_allowed_models(), None);
+        assert_eq!(resolved.user_rate_limit, None);
+        assert_eq!(resolved.api_key_rate_limit, None);
+        assert_eq!(resolved.api_key_concurrent_limit, None);
+    }
+
+    #[tokio::test]
     async fn user_personal_policy_fields_are_ignored_when_groups_are_applied() {
         let mut snapshot = sample_snapshot("key-user", "user-1").with_user_rate_limit(Some(200));
         snapshot.api_key_allowed_providers = None;
@@ -2529,8 +2552,9 @@ mod tests {
             Some("hash-user".to_string()),
             snapshot,
         )]));
+        let user = sample_auth_user("user-1", "user");
         let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
-            sample_auth_user("user-1", "user"),
+            user.clone()
         ]));
         let group = user_repository
             .create_user_group(UpsertUserGroupRecord {
@@ -2575,6 +2599,110 @@ mod tests {
             Some(&["claude-sonnet-4-5".to_string()][..])
         );
         assert_eq!(resolved.user_rate_limit, Some(30));
+
+        let catalog_policies = state
+            .resolve_user_effective_list_policies(&user)
+            .await
+            .expect("catalog policies should resolve");
+        assert_eq!(
+            catalog_policies.allowed_providers.as_deref(),
+            resolved.effective_allowed_providers()
+        );
+        assert_eq!(
+            catalog_policies.allowed_api_formats.as_deref(),
+            resolved.effective_allowed_api_formats()
+        );
+        assert_eq!(
+            catalog_policies.allowed_models.as_deref(),
+            resolved.effective_allowed_models()
+        );
+    }
+
+    #[tokio::test]
+    async fn group_responses_permission_and_key_search_scope_resolve_to_search() {
+        let mut snapshot = sample_snapshot("key-search", "user-search");
+        snapshot.api_key_allowed_api_formats = Some(vec!["openai:search".to_string()]);
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some("hash-search".to_string()),
+            snapshot,
+        )]));
+        let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
+            sample_auth_user("user-search", "user"),
+        ]));
+        let group = user_repository
+            .create_user_group(UpsertUserGroupRecord {
+                name: "Responses".to_string(),
+                description: None,
+                priority: 10,
+                allowed_providers: None,
+                allowed_providers_mode: "unrestricted".to_string(),
+                allowed_api_formats: Some(vec!["openai:responses".to_string()]),
+                allowed_api_formats_mode: "specific".to_string(),
+                allowed_models: None,
+                allowed_models_mode: "unrestricted".to_string(),
+                rate_limit: None,
+                rate_limit_mode: "system".to_string(),
+            })
+            .await
+            .expect("group should create")
+            .expect("group should exist");
+        user_repository
+            .add_user_to_group(&group.id, "user-search")
+            .await
+            .expect("group membership should create");
+
+        let state = GatewayDataState::with_auth_api_key_reader_for_tests(auth_repository)
+            .with_user_reader(user_repository);
+        let resolved = state
+            .read_auth_api_key_snapshot_by_key_hash("hash-search", 100)
+            .await
+            .expect("snapshot should resolve")
+            .expect("snapshot should exist");
+
+        assert_eq!(
+            resolved.effective_allowed_api_formats(),
+            Some(&["openai:search".to_string()][..])
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_without_user_reader_uses_stored_policy_intersection() {
+        let mut snapshot = sample_snapshot("key-search", "user-search");
+        snapshot.api_key_allowed_api_formats = Some(vec!["openai:search".to_string()]);
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some("hash-search".to_string()),
+            snapshot,
+        )]));
+        let state = GatewayDataState::with_auth_api_key_reader_for_tests(auth_repository);
+
+        let resolved = state
+            .read_auth_api_key_snapshot_by_key_hash("hash-search", 100)
+            .await
+            .expect("snapshot should resolve")
+            .expect("snapshot should exist");
+
+        assert_eq!(resolved.effective_allowed_api_formats(), Some(&[][..]));
+    }
+
+    #[tokio::test]
+    async fn missing_current_user_uses_stored_policy_intersection() {
+        let mut snapshot = sample_snapshot("key-search", "missing-user");
+        snapshot.api_key_allowed_api_formats = Some(vec!["openai:search".to_string()]);
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some("hash-search".to_string()),
+            snapshot,
+        )]));
+        let user_repository = Arc::new(InMemoryUserReadRepository::default());
+        let state = GatewayDataState::with_auth_api_key_reader_for_tests(auth_repository)
+            .with_user_reader(user_repository);
+
+        let resolved = state
+            .read_auth_api_key_snapshot_by_key_hash("hash-search", 100)
+            .await
+            .expect("snapshot should resolve")
+            .expect("snapshot should exist");
+
+        assert_eq!(resolved.effective_allowed_api_formats(), Some(&[][..]));
     }
 
     #[tokio::test]

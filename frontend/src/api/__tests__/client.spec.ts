@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AxiosAdapter, AxiosInstance, InternalAxiosRequestConfig } from 'axios'
 
 import apiClient, { AUTH_STATE_CHANGE_EVENT } from '@/api/client'
+import { cache, cachedRequest } from '@/utils/cache'
 
 type TestableApiClient = typeof apiClient & {
   client: AxiosInstance
@@ -32,6 +33,42 @@ describe('apiClient auth state change event', () => {
     expect(event.detail).toEqual({ token: null })
 
     window.removeEventListener(AUTH_STATE_CHANGE_EVENT, handler as EventListener)
+  })
+
+  it('clears cached API data whenever the authentication identity changes', () => {
+    apiClient.setToken('first-token')
+    cache.set('dashboard', { owner: 'first-user' }, 30_000)
+
+    apiClient.setToken('second-token')
+
+    expect(cache.get('dashboard')).toBeNull()
+  })
+
+  it('does not share or restore an in-flight cached response across token changes', async () => {
+    let resolveFirst!: (value: string) => void
+    let resolveSecond!: (value: string) => void
+    const firstResponse = new Promise<string>((resolve) => {
+      resolveFirst = resolve
+    })
+    const secondResponse = new Promise<string>((resolve) => {
+      resolveSecond = resolve
+    })
+    const secondFetcher = vi.fn(() => secondResponse)
+
+    apiClient.setToken('first-token')
+    const firstRequest = cachedRequest('dashboard', () => firstResponse, 30_000)
+
+    apiClient.setToken('second-token')
+    const secondRequest = cachedRequest('dashboard', secondFetcher, 30_000)
+    expect(secondFetcher).toHaveBeenCalledTimes(1)
+
+    resolveFirst('first-user-data')
+    await expect(firstRequest).resolves.toBe('first-user-data')
+    expect(cache.get('dashboard')).toBeNull()
+
+    resolveSecond('second-user-data')
+    await expect(secondRequest).resolves.toBe('second-user-data')
+    expect(cache.get('dashboard')).toBe('second-user-data')
   })
 
   it('sends auth refresh without a request body', async () => {

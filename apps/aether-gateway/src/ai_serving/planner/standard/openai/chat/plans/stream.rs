@@ -111,7 +111,7 @@ pub(crate) async fn build_local_openai_chat_stream_attempt_source<'a>(
             input,
             candidates,
             prefetched_attempts: VecDeque::new(),
-            request_preparation: LocalOpenAiChatRequestPreparation::default(),
+            request_preparation: LocalOpenAiChatRequestPreparation,
         },
         candidate_count,
     )))

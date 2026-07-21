@@ -81,6 +81,7 @@ pub(super) async fn select_minimal_candidate(
         required_capabilities,
         auth_snapshot,
         enable_model_directives,
+        None,
     )
     .await?;
     let selected = collect_selectable_enumerated_candidates_with_skip_reasons(
@@ -137,6 +138,7 @@ pub(super) async fn collect_selectable_candidates(
         client_session_affinity,
         now_unix_secs,
         enable_model_directives,
+        None,
     )
     .await?
     .0)
@@ -153,6 +155,7 @@ pub(super) async fn collect_selectable_candidates_with_skip_reasons(
     client_session_affinity: Option<&ClientSessionAffinity>,
     now_unix_secs: u64,
     enable_model_directives: bool,
+    request_operation: Option<&str>,
 ) -> Result<
     (
         Vec<SchedulerMinimalCandidateSelectionCandidate>,
@@ -174,6 +177,7 @@ pub(super) async fn collect_selectable_candidates_with_skip_reasons(
         required_capabilities,
         auth_snapshot,
         enable_model_directives,
+        request_operation,
     )
     .await?;
     collect_selectable_enumerated_candidates_with_skip_reasons(

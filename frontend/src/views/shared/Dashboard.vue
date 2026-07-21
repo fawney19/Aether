@@ -7,30 +7,12 @@
         ref="statsPanelRef"
         class="flex-1 min-w-0 flex flex-col"
       >
-        <div class="mb-4 flex items-center justify-between gap-3">
-          <Badge
-            :variant="authStore.isAdmin ? 'default' : 'secondary'"
-            class="uppercase tracking-[0.45em]"
-          >
-            {{ dashboardModeLabel }}
-          </Badge>
-          <Button
-            type="button"
-            :variant="autoRefreshEnabled ? 'default' : 'outline'"
-            class="h-8 gap-1.5 px-3 text-xs"
-            :aria-pressed="autoRefreshEnabled"
-            :title="autoRefreshButtonTitle"
-            @click="toggleDashboardAutoRefresh"
-          >
-            <RefreshCw
-              class="h-3.5 w-3.5"
-              :class="{
-                'animate-spin': autoRefreshEnabled && autoRefreshLoading,
-              }"
-            />
-            <span>{{ autoRefreshButtonLabel }}</span>
-          </Button>
-        </div>
+        <Badge
+          :variant="authStore.isAdmin ? 'default' : 'secondary'"
+          class="mb-4 self-start uppercase tracking-[0.45em]"
+        >
+          {{ dashboardModeLabel }}
+        </Badge>
 
         <!-- 主要统计卡片 -->
         <div class="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
@@ -956,7 +938,6 @@ import {
   Clock,
   Database,
   Shuffle,
-  RefreshCw,
 } from "lucide-vue-next";
 import { formatTokens, formatCurrency } from "@/utils/format";
 import { parseDateLike } from "@/utils/date";
@@ -971,14 +952,8 @@ import type {
 
 const authStore = useAuthStore();
 
-const DASHBOARD_AUTO_REFRESH_INTERVAL_MS = 1_000;
-
 type DashboardStatCard = Omit<DashboardStat, "icon"> & {
   icon: Component;
-};
-
-type DashboardLoadOptions = {
-  silent?: boolean;
 };
 
 const statsPanelRef = ref<HTMLElement | null>(null);
@@ -1005,8 +980,6 @@ function checkScreenSize() {
 
 let statsPanelObserver: ResizeObserver | null = null;
 let announcementsTimelineObserver: ResizeObserver | null = null;
-let dashboardAutoRefreshTimer: ReturnType<typeof setInterval> | null = null;
-let dashboardRefreshPromise: Promise<void> | null = null;
 
 function updateAnnouncementsHeight() {
   if (typeof window === "undefined") return;
@@ -1107,14 +1080,6 @@ const getStatIconColor = (_index: number): string => {
 
 // 统计数据
 const stats = ref<DashboardStatCard[]>([]);
-const autoRefreshEnabled = ref(false);
-const autoRefreshLoading = ref(false);
-const autoRefreshButtonLabel = computed(() =>
-  autoRefreshEnabled.value ? "自动刷新中" : "自动刷新",
-);
-const autoRefreshButtonTitle = computed(() =>
-  autoRefreshEnabled.value ? "点击关闭自动刷新" : "点击开启自动刷新",
-);
 const todayStats = ref<{
   requests: number;
   tokens: number;
@@ -1499,55 +1464,17 @@ const dailyUsageTrendChartOptions = computed<ChartOptions<"line">>(() => {
   };
 });
 
-async function refreshDashboardContent(options: DashboardLoadOptions = {}) {
-  if (dashboardRefreshPromise) {
-    return dashboardRefreshPromise;
-  }
-  autoRefreshLoading.value = true;
-  dashboardRefreshPromise = (async () => {
-    await Promise.all([loadDashboardData(options), loadDailyStats(options)]);
-    await nextTick();
-    updateAnnouncementsHeight();
-    updateTimelineLine();
-  })().finally(() => {
-    autoRefreshLoading.value = false;
-    dashboardRefreshPromise = null;
-  });
-  return dashboardRefreshPromise;
-}
-
-function startDashboardAutoRefresh() {
-  if (typeof window === "undefined") return;
-  stopDashboardAutoRefresh();
-  dashboardAutoRefreshTimer = window.setInterval(() => {
-    void refreshDashboardContent({ silent: true });
-  }, DASHBOARD_AUTO_REFRESH_INTERVAL_MS);
-}
-
-function stopDashboardAutoRefresh() {
-  if (dashboardAutoRefreshTimer !== null) {
-    clearInterval(dashboardAutoRefreshTimer);
-    dashboardAutoRefreshTimer = null;
-  }
-}
-
-function toggleDashboardAutoRefresh() {
-  autoRefreshEnabled.value = !autoRefreshEnabled.value;
-  if (autoRefreshEnabled.value) {
-    startDashboardAutoRefresh();
-    void refreshDashboardContent({ silent: true });
-  } else {
-    stopDashboardAutoRefresh();
-  }
-}
-
 onMounted(async () => {
   checkScreenSize();
   setupResizeObserver();
   if (typeof window !== "undefined") {
     window.addEventListener("resize", handleWindowResize);
   }
-  await Promise.all([refreshDashboardContent(), loadAnnouncements()]);
+  await Promise.all([
+    loadDashboardData(),
+    loadDailyStats(),
+    loadAnnouncements(),
+  ]);
   await nextTick();
   setupTimelineResizeObserver();
   updateAnnouncementsHeight();
@@ -1555,7 +1482,6 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
-  stopDashboardAutoRefresh();
   if (typeof window !== "undefined") {
     window.removeEventListener("resize", handleWindowResize);
   }
@@ -1575,10 +1501,8 @@ onBeforeUnmount(() => {
   dailyStatsRequestId += 1;
 });
 
-async function loadDashboardData(options: DashboardLoadOptions = {}) {
-  if (!options.silent) {
-    loading.value = true;
-  }
+async function loadDashboardData() {
+  loading.value = true;
   try {
     const statsData = await dashboardApi.getStats({
       timezone: dailyTimeRange.value.timezone,
@@ -1604,21 +1528,17 @@ async function loadDashboardData(options: DashboardLoadOptions = {}) {
         userMonthlyCost.value = statsData.monthly_cost;
     }
   } finally {
-    if (!options.silent) {
-      loading.value = false;
-    }
+    loading.value = false;
   }
 }
 
-async function loadDailyStats(options: DashboardLoadOptions = {}) {
+async function loadDailyStats() {
   if (dailyStatsLoadPromise) {
     hasPendingDailyStatsLoad = true;
     return dailyStatsLoadPromise;
   }
   const requestId = ++dailyStatsRequestId;
-  if (!options.silent) {
-    loadingDaily.value = true;
-  }
+  loadingDaily.value = true;
   dailyStatsLoadPromise = (async () => {
     try {
       const response = await dashboardApi.getDailyStats(dailyTimeRange.value);
@@ -1630,7 +1550,7 @@ async function loadDailyStats(options: DashboardLoadOptions = {}) {
       dailyStats.value = [];
       providerSummary.value = [];
     } finally {
-      if (requestId === dailyStatsRequestId && !options.silent) {
+      if (requestId === dailyStatsRequestId) {
         loadingDaily.value = false;
       }
     }

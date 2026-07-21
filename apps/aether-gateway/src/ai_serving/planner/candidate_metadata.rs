@@ -134,6 +134,7 @@ mod tests {
             global_model_id: "global-1".to_string(),
             global_model_name: "gpt-5.4".to_string(),
             selected_provider_model_name: "gpt-5.4".to_string(),
+            supports_streaming: true,
             mapping_matched_model: None,
         }
     }

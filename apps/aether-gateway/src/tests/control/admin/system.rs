@@ -1452,6 +1452,11 @@ async fn gateway_handles_admin_system_api_formats_locally_with_trusted_admin_pri
     assert!(formats.iter().any(|item| item["value"] == "jina:embedding"));
     assert!(formats.iter().any(|item| item["value"] == "jina:rerank"));
     assert!(formats.iter().any(|item| item["value"] == "gemini:video"));
+    let gemini_interactions = formats
+        .iter()
+        .find(|item| item["value"] == "gemini:interactions")
+        .expect("gemini interactions format should exist");
+    assert_eq!(gemini_interactions["default_path"], "/v1/interactions");
     let aliyun_embedding = formats
         .iter()
         .find(|item| item["value"] == "aliyun:multimodal_embedding")

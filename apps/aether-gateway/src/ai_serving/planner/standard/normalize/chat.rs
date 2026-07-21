@@ -9,7 +9,10 @@ use crate::ai_serving::{
     GatewayProviderTransportSnapshot,
 };
 
-use super::{enforce_provider_body_stream_policy, request_requires_body_stream_field};
+use super::{
+    enforce_provider_body_stream_policy, request_requires_body_stream_field,
+    validate_final_openai_provider_request,
+};
 
 pub(crate) fn build_local_openai_chat_request_body(
     body_json: &Value,
@@ -39,6 +42,12 @@ pub(crate) fn build_local_openai_chat_request_body(
         upstream_is_stream,
         request_requires_body_stream_field(body_json, force_body_stream_field),
     );
+    validate_final_openai_provider_request(
+        "openai:chat",
+        mapped_model,
+        body_json,
+        &provider_request_body,
+    )?;
     Some(provider_request_body)
 }
 
@@ -92,6 +101,12 @@ pub(crate) fn build_cross_format_openai_chat_request_body(
         upstream_is_stream,
         request_requires_body_stream_field(body_json, force_body_stream_field),
     );
+    validate_final_openai_provider_request(
+        provider_api_format,
+        mapped_model,
+        body_json,
+        &provider_request_body,
+    )?;
     Some(provider_request_body)
 }
 

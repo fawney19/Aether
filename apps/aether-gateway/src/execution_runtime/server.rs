@@ -309,11 +309,14 @@ async fn parse_request_json<T>(request: Request) -> Result<T, ExecutionRuntimeAp
 where
     T: serde::de::DeserializeOwned,
 {
-    let body = to_bytes(request.into_body(), usize::MAX)
-        .await
-        .map_err(|err| {
-            ExecutionRuntimeAppError(ExecutionRuntimeServerError::RequestRead(err.to_string()))
-        })?;
+    let body = to_bytes(
+        request.into_body(),
+        usize::try_from(crate::headers::max_request_body_bytes()).unwrap_or(usize::MAX),
+    )
+    .await
+    .map_err(|err| {
+        ExecutionRuntimeAppError(ExecutionRuntimeServerError::RequestRead(err.to_string()))
+    })?;
     serde_json::from_slice(&body).map_err(|err| {
         ExecutionRuntimeAppError(ExecutionRuntimeServerError::InvalidRequestJson(err))
     })
@@ -356,8 +359,7 @@ impl IntoResponse for ExecutionRuntimeAppError {
                 return build_overloaded_response(&self.0.to_string());
             }
             ExecutionRuntimeServerError::Transport(
-                ExecutionRuntimeTransportError::StreamUnsupported
-                | ExecutionRuntimeTransportError::RequestBodyRequired
+                ExecutionRuntimeTransportError::RequestBodyRequired
                 | ExecutionRuntimeTransportError::BodyDecode(_)
                 | ExecutionRuntimeTransportError::UnsupportedContentEncoding(_)
                 | ExecutionRuntimeTransportError::ProxyUnsupported
@@ -394,7 +396,9 @@ mod tests {
         build_execution_runtime_router_with_request_concurrency_limit,
         build_execution_runtime_router_with_request_gates, DISTRIBUTED_REQUEST_GATE_NAME,
     };
-    use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
+    use aether_contracts::{
+        ExecutionPlan, ExecutionTimeouts, RequestBody, StreamFrame, StreamFrameType,
+    };
     use aether_runtime_state::{
         MemoryRuntimeStateConfig, RuntimeSemaphore, RuntimeSemaphoreConfig, RuntimeState,
     };
@@ -454,6 +458,43 @@ mod tests {
                 ..ExecutionTimeouts::default()
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn execution_runtime_stream_endpoint_carries_non_stream_upstream_plan() {
+        let upstream = Router::new().route(
+            "/sync-json",
+            any(|| async { axum::Json(serde_json::json!({"ok": true})) }),
+        );
+        let (upstream_url, upstream_handle) = start_server(upstream).await;
+        let runtime = build_execution_runtime_router_with_request_concurrency_limit(None);
+        let (runtime_url, runtime_handle) = start_server(runtime).await;
+        let mut plan = stream_plan(format!("{upstream_url}/sync-json"));
+        plan.stream = false;
+
+        let response = reqwest::Client::new()
+            .post(format!("{runtime_url}/v1/execute/stream"))
+            .json(&plan)
+            .send()
+            .await
+            .expect("execution request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.expect("frame body should read");
+        let frame_types = body
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<StreamFrame>(line)
+                    .expect("execution runtime frame should decode")
+                    .frame_type
+            })
+            .collect::<Vec<_>>();
+        assert!(frame_types.contains(&StreamFrameType::Headers));
+        assert!(frame_types.contains(&StreamFrameType::Data));
+        assert!(frame_types.contains(&StreamFrameType::Eof));
+
+        runtime_handle.abort();
+        upstream_handle.abort();
     }
 
     #[tokio::test]

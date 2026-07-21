@@ -5735,7 +5735,7 @@ async fn gateway_handles_users_me_usage_locally_without_proxying_upstream() {
         payload["records"][0]["cache_creation_ephemeral_5m_input_tokens"],
         4
     );
-    assert_eq!(payload["records"][0]["effective_input_tokens"], 105);
+    assert_eq!(payload["records"][0]["effective_input_tokens"], 95);
     assert_eq!(
         payload["records"][0]["cache_creation_ephemeral_1h_input_tokens"],
         6
@@ -5762,10 +5762,7 @@ async fn gateway_handles_users_me_usage_locally_without_proxying_upstream() {
         payload["summary_by_model"][0]["cache_creation_ephemeral_1h_tokens"],
         6
     );
-    assert_eq!(
-        payload["summary_by_model"][0]["effective_input_tokens"],
-        105
-    );
+    assert_eq!(payload["summary_by_model"][0]["effective_input_tokens"], 95);
     assert_eq!(payload["summary_by_model"][0]["total_input_context"], 120);
     assert!(payload.get("summary_by_provider").is_none());
     assert_eq!(payload["billing"]["id"], "wallet-auth-1");
@@ -8243,7 +8240,9 @@ async fn gateway_returns_service_unavailable_for_users_me_management_token_write
 #[tokio::test]
 async fn gateway_handles_users_me_providers_locally_without_proxying_upstream() {
     let now = Utc::now();
-    let user = sample_auth_user(now);
+    let mut user = sample_auth_user(now);
+    user.allowed_providers = Some(vec!["claude".to_string()]);
+    user.allowed_providers_mode = "specific".to_string();
     let access_token = build_test_auth_token(
         "access",
         serde_json::Map::from_iter([
@@ -8303,6 +8302,27 @@ async fn gateway_handles_users_me_providers_locally_without_proxying_upstream() 
             ]),
     );
     let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![user]));
+    let group = user_repository
+        .create_user_group(UpsertUserGroupRecord {
+            name: "OpenAI only".to_string(),
+            description: None,
+            priority: 0,
+            allowed_providers: Some(vec!["openai".to_string()]),
+            allowed_providers_mode: "specific".to_string(),
+            allowed_api_formats: None,
+            allowed_api_formats_mode: "unrestricted".to_string(),
+            allowed_models: None,
+            allowed_models_mode: "unrestricted".to_string(),
+            rate_limit: None,
+            rate_limit_mode: "system".to_string(),
+        })
+        .await
+        .expect("group should create")
+        .expect("group should exist");
+    user_repository
+        .add_user_to_group(&group.id, "user-auth-1")
+        .await
+        .expect("group membership should create");
 
     let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
         start_auth_gateway_with_builder(|| {
@@ -9700,13 +9720,13 @@ async fn gateway_handles_users_me_available_models_locally_without_proxying_upst
 }
 
 #[tokio::test]
-async fn gateway_filters_users_me_available_models_by_group_policy_and_hides_model_mappings() {
+async fn gateway_refreshes_users_me_available_models_after_group_assignment() {
     let now = Utc::now();
     let mut user = sample_auth_user(now);
     user.allowed_providers = None;
     user.allowed_providers_mode = "unrestricted".to_string();
-    user.allowed_models = None;
-    user.allowed_models_mode = "unrestricted".to_string();
+    // Keep the legacy gpt-5 personal policy from sample_auth_user. Group policies are the
+    // authority now, so this stale field must not narrow the user catalog.
     let access_token = build_test_auth_token(
         "access",
         serde_json::Map::from_iter([
@@ -9757,31 +9777,25 @@ async fn gateway_filters_users_me_available_models_by_group_policy_and_hides_mod
         .await
         .expect("group should create")
         .expect("group should exist");
-    user_repository
-        .add_user_to_group(&group.id, "user-auth-1")
-        .await
-        .expect("group membership should create");
-
-    let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
-        start_auth_gateway_with_builder(|| {
-            let data_state = crate::data::GatewayDataState::with_global_model_reader_for_tests(
-                global_model_repository,
-            )
+    let data_state =
+        crate::data::GatewayDataState::with_global_model_reader_for_tests(global_model_repository)
             .with_user_reader(Arc::clone(&user_repository));
-            AppState::new()
-                .expect("gateway should build")
-                .with_data_state_for_tests(data_state)
-                .with_auth_sessions_for_tests([sample_auth_session(
-                    "user-auth-1",
-                    "session-users-me-group-models",
-                    "device-users-me-group-models",
-                    "refresh-token-placeholder",
-                    now,
-                )])
-        })
-        .await;
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(data_state)
+        .with_auth_sessions_for_tests([sample_auth_session(
+            "user-auth-1",
+            "session-users-me-group-models",
+            "device-users-me-group-models",
+            "refresh-token-placeholder",
+            now,
+        )]);
+    let mutation_state = state.clone();
+    let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
+        start_auth_gateway_with_builder(|| state).await;
 
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let response = client
         .get(format!("{gateway_url}/api/users/me/available-models"))
         .header("authorization", format!("Bearer {access_token}"))
         .header("x-client-device-id", "device-users-me-group-models")
@@ -9789,6 +9803,24 @@ async fn gateway_filters_users_me_available_models_by_group_policy_and_hides_mod
         .send()
         .await
         .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["total"], 2);
+
+    mutation_state
+        .replace_user_groups_for_user("user-auth-1", std::slice::from_ref(&group.id))
+        .await
+        .expect("group membership should create");
+
+    let response = client
+        .get(format!("{gateway_url}/api/users/me/available-models"))
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("x-client-device-id", "device-users-me-group-models")
+        .header("user-agent", "AetherTest/1.0")
+        .send()
+        .await
+        .expect("request should succeed after group assignment");
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
@@ -9929,6 +9961,27 @@ async fn gateway_returns_service_unavailable_for_users_me_available_models_witho
         .expect("active global model ref should build")]),
     );
     let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![user]));
+    let group = user_repository
+        .create_user_group(UpsertUserGroupRecord {
+            name: "OpenAI provider only".to_string(),
+            description: None,
+            priority: 0,
+            allowed_providers: Some(vec!["openai".to_string()]),
+            allowed_providers_mode: "specific".to_string(),
+            allowed_api_formats: None,
+            allowed_api_formats_mode: "unrestricted".to_string(),
+            allowed_models: None,
+            allowed_models_mode: "unrestricted".to_string(),
+            rate_limit: None,
+            rate_limit_mode: "system".to_string(),
+        })
+        .await
+        .expect("group should create")
+        .expect("group should exist");
+    user_repository
+        .add_user_to_group(&group.id, "user-auth-1")
+        .await
+        .expect("group membership should create");
     let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
         start_auth_gateway_with_builder(|| {
             let data_state = crate::data::GatewayDataState::with_global_model_reader_for_tests(

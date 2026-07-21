@@ -49,12 +49,13 @@ fn build_admin_security_not_found_response(detail: impl Into<String>) -> Respons
 }
 
 fn admin_security_blacklist_ip_from_path(request_path: &str) -> Option<String> {
-    let value = request_path
-        .strip_prefix("/api/admin/security/ip/blacklist/")?
-        .trim()
-        .trim_matches('/')
-        .to_string();
-    if value.is_empty() || value.contains('/') {
+    let value = decode_admin_security_path_value(
+        request_path
+            .strip_prefix("/api/admin/security/ip/blacklist/")?
+            .trim()
+            .trim_matches('/'),
+    )?;
+    if value.parse::<std::net::IpAddr>().is_err() {
         None
     } else {
         Some(value)
@@ -62,15 +63,46 @@ fn admin_security_blacklist_ip_from_path(request_path: &str) -> Option<String> {
 }
 
 fn admin_security_whitelist_ip_from_path(request_path: &str) -> Option<String> {
-    let value = request_path
-        .strip_prefix("/api/admin/security/ip/whitelist/")?
-        .trim()
-        .trim_matches('/')
-        .to_string();
-    if value.is_empty() || value.contains('/') {
+    let value = decode_admin_security_path_value(
+        request_path
+            .strip_prefix("/api/admin/security/ip/whitelist/")?
+            .trim()
+            .trim_matches('/'),
+    )?;
+    if !admin_security_validate_ip_or_cidr(&value) {
         None
     } else {
         Some(value)
+    }
+}
+
+fn decode_admin_security_path_value(value: &str) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = *bytes.get(index + 1)?;
+            let low = *bytes.get(index + 2)?;
+            decoded.push((decode_hex_digit(high)? << 4) | decode_hex_digit(low)?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn decode_hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -107,7 +139,12 @@ async fn build_admin_security_blacklist_add_response(
         ));
     };
     let payload = match serde_json::from_slice::<AdminSecurityBlacklistAddRequest>(request_body) {
-        Ok(value) if !value.ip_address.trim().is_empty() && !value.reason.trim().is_empty() => {
+        Ok(value)
+            if value.ip_address.trim().parse::<std::net::IpAddr>().is_ok()
+                && !value.reason.trim().is_empty()
+                && value.reason.trim().chars().count() <= 200
+                && value.ttl.is_none_or(|ttl| ttl > 0) =>
+        {
             value
         }
         _ => {

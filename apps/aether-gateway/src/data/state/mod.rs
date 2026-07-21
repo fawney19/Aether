@@ -221,6 +221,7 @@ pub(super) struct BillingModelContextCacheState {
     pub(super) inflight: std::sync::Mutex<HashMap<BillingModelContextCacheKey, u64>>,
     pub(super) inflight_notify: tokio::sync::Notify,
     pub(super) next_inflight_token: std::sync::atomic::AtomicU64,
+    pub(super) epoch: std::sync::atomic::AtomicU64,
 }
 
 impl fmt::Debug for GatewayDataState {

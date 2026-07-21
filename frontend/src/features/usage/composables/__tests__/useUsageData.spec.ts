@@ -162,7 +162,146 @@ describe('useUsageData', () => {
     })
   })
 
-  it('preserves detail-filled usage metrics when a later list refresh is still empty', async () => {
+  it('clears a failed candidate Cyber snapshot when the final candidate completes', async () => {
+    const isAdminPage = ref(true)
+    const { loadRecords, currentRecords } = useUsageData({ isAdminPage })
+    const dateRange = { preset: 'today', tz_offset_minutes: 0 }
+    const cyberMessage = 'This content was flagged for possible cybersecurity risk. https://chatgpt.com/cyber'
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({
+        status: 'failed',
+        status_code: 400,
+        error_message: cyberMessage,
+        updated_at: '2026-07-17T00:00:01Z',
+      })],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    })
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({
+        status: 'completed',
+        status_code: 200,
+        error_message: undefined,
+        updated_at: '2026-07-17T00:00:02Z',
+      })],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    })
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+
+    expect(currentRecords.value[0]).toMatchObject({
+      status: 'completed',
+      status_code: 200,
+      updated_at: '2026-07-17T00:00:02Z',
+    })
+    expect(currentRecords.value[0]?.error_message).toBeUndefined()
+  })
+
+  it('rejects an older same-rank terminal snapshot as a unit', async () => {
+    const isAdminPage = ref(true)
+    const { loadRecords, currentRecords } = useUsageData({ isAdminPage })
+    const dateRange = { preset: 'today', tz_offset_minutes: 0 }
+    const cyberMessage = 'This content was flagged for possible cybersecurity risk. https://chatgpt.com/cyber'
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({
+        status: 'completed',
+        status_code: 200,
+        error_message: undefined,
+        updated_at: '2026-07-17T00:00:02Z',
+      })],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    })
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({
+        status: 'failed',
+        status_code: 400,
+        error_message: cyberMessage,
+        updated_at: '2026-07-17T00:00:01Z',
+      })],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    })
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+
+    expect(currentRecords.value[0]).toMatchObject({
+      status: 'completed',
+      status_code: 200,
+      updated_at: '2026-07-17T00:00:02Z',
+    })
+    expect(currentRecords.value[0]?.error_message).toBeUndefined()
+  })
+
+  it('keeps live response duration and its anchor atomic across stale refreshes', async () => {
+    const isAdminPage = ref(true)
+    const { loadRecords, currentRecords } = useUsageData({ isAdminPage })
+    const dateRange = { preset: 'today', tz_offset_minutes: 0 }
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({
+        status: 'streaming',
+        response_time_ms: 5500,
+        response_time_updated_at: '2026-07-17T12:00:06Z',
+        first_byte_time_ms: 2000,
+      })],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    })
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({
+        status: 'streaming',
+        response_time_ms: 5000,
+        response_time_updated_at: '2026-07-17T12:00:07Z',
+        first_byte_time_ms: 1500,
+      })],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    })
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+
+    expect(currentRecords.value[0]).toMatchObject({
+      status: 'streaming',
+      response_time_ms: 5500,
+      response_time_updated_at: '2026-07-17T12:00:06Z',
+      first_byte_time_ms: 2000,
+    })
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({
+        status: 'completed',
+        response_time_ms: 5200,
+        response_time_updated_at: '2026-07-17T12:00:07Z',
+        first_byte_time_ms: 1800,
+      })],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    })
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+
+    expect(currentRecords.value[0]).toMatchObject({
+      status: 'completed',
+      response_time_ms: 5200,
+      response_time_updated_at: '2026-07-17T12:00:07Z',
+      first_byte_time_ms: 2000,
+    })
+  })
+
+  it('preserves client/detail metrics but clears stale final-provider facts from the next list snapshot', async () => {
     const isAdminPage = ref(true)
     const { loadRecords, currentRecords } = useUsageData({ isAdminPage })
     const dateRange = { preset: 'today', tz_offset_minutes: 0 }
@@ -216,8 +355,11 @@ describe('useUsageData', () => {
       has_format_conversion: false,
       has_retry: true,
       target_model: 'gpt-5.5',
-      reasoning_effort: 'xhigh',
-      service_tier: 'auto',
+      request_type: 'compact',
+      requested_reasoning_effort: 'xhigh',
+      reasoning_effort: 'max',
+      service_tier: 'priority',
+      actual_service_tier: 'default',
     })
 
     getAllUsageRecordsMock.mockResolvedValueOnce({
@@ -243,9 +385,12 @@ describe('useUsageData', () => {
         endpoint_api_format: undefined,
         has_format_conversion: undefined,
         has_retry: false,
-        target_model: null,
-        reasoning_effort: null,
-        service_tier: null,
+        target_model: undefined,
+        request_type: null,
+        requested_reasoning_effort: null,
+        reasoning_effort: undefined,
+        service_tier: undefined,
+        actual_service_tier: undefined,
       })],
       total: 1,
       limit: 20,
@@ -276,9 +421,12 @@ describe('useUsageData', () => {
       endpoint_api_format: 'openai:responses',
       has_format_conversion: false,
       has_retry: true,
-      target_model: 'gpt-5.5',
-      reasoning_effort: 'xhigh',
-      service_tier: 'auto',
+      target_model: null,
+      request_type: 'compact',
+      requested_reasoning_effort: 'xhigh',
+      reasoning_effort: null,
+      service_tier: null,
+      actual_service_tier: null,
     })
   })
 

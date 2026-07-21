@@ -129,7 +129,7 @@ pub(crate) fn build_openai_chat_stream_plan_from_decision(
             headers: std::mem::take(&mut provider_request_headers),
             content_type,
             body: RequestBody::from_json(provider_request_body_value),
-            stream: true,
+            stream: effective_upstream_is_stream,
         },
     );
 
@@ -229,7 +229,7 @@ pub(crate) fn build_openai_responses_stream_plan_from_decision(
             headers: std::mem::take(&mut provider_request_headers),
             content_type,
             body: RequestBody::from_json(provider_request_body_value),
-            stream: true,
+            stream: effective_upstream_is_stream,
         },
     );
 
@@ -291,6 +291,7 @@ mod tests {
             request_id: Some("req_123".to_string()),
             candidate_id: Some("cand_123".to_string()),
             provider_name: Some("Codex".to_string()),
+            provider_type: Some("codex".to_string()),
             provider_id: Some("prov_123".to_string()),
             endpoint_id: Some("ep_123".to_string()),
             key_id: Some("key_123".to_string()),
@@ -386,6 +387,46 @@ mod tests {
     }
 
     #[test]
+    fn build_compact_stream_plan_preserves_non_stream_upstream_mode() {
+        let parts = http::Request::builder()
+            .uri("http://localhost/v1/responses/compact")
+            .body(())
+            .expect("request should build")
+            .into_parts()
+            .0;
+        let mut payload = sample_responses_payload();
+        payload.decision_kind = Some("openai_responses_compact_stream".to_string());
+        payload.upstream_url = Some("https://example.com/v1/responses/compact".to_string());
+        payload.provider_api_format = Some("openai:responses:compact".to_string());
+        payload.client_api_format = Some("openai:responses:compact".to_string());
+        payload.upstream_is_stream = false;
+        payload.provider_request_body = Some(json!({
+            "model": "gpt-5.6-sol",
+            "input": [],
+            "instructions": "You are Codex.",
+            "tools": [],
+            "parallel_tool_calls": true,
+            "reasoning": {"effort": "high"},
+            "prompt_cache_key": "cache-key",
+            "text": {"verbosity": "low"}
+        }));
+
+        let built =
+            build_openai_responses_stream_plan_from_decision(&parts, &json!({}), payload, true)
+                .expect("plan build should succeed")
+                .expect("plan should be produced");
+
+        assert!(!built.plan.stream);
+        assert!(built
+            .plan
+            .body
+            .json_body
+            .as_ref()
+            .is_some_and(|body| body.get("stream").is_none()));
+        assert!(!built.plan.headers.contains_key("accept"));
+    }
+
+    #[test]
     fn build_openai_chat_stream_plan_fallback_preserves_complete_same_format_headers() {
         let parts = http::Request::builder()
             .uri("http://localhost/v1/chat/completions")
@@ -404,6 +445,7 @@ mod tests {
             request_id: Some("req_stream_456".to_string()),
             candidate_id: Some("cand_stream_456".to_string()),
             provider_name: Some("OpenAI".to_string()),
+            provider_type: Some("openai".to_string()),
             provider_id: Some("prov_stream_456".to_string()),
             endpoint_id: Some("ep_stream_456".to_string()),
             key_id: Some("key_stream_456".to_string()),
@@ -462,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn build_openai_chat_stream_plan_keeps_downstream_stream_for_force_non_stream_upstream() {
+    fn build_openai_chat_stream_plan_preserves_force_non_stream_upstream_mode() {
         fn force_non_stream_payload(provider_request_body: Option<Value>) -> AiExecutionDecision {
             AiExecutionDecision {
                 action: "stream".to_string(),
@@ -472,6 +514,7 @@ mod tests {
                 request_id: Some("req_force_non_stream".to_string()),
                 candidate_id: Some("cand_force_non_stream".to_string()),
                 provider_name: Some("OpenAI".to_string()),
+                provider_type: Some("openai".to_string()),
                 provider_id: Some("prov_force_non_stream".to_string()),
                 endpoint_id: Some("ep_force_non_stream".to_string()),
                 key_id: Some("key_force_non_stream".to_string()),
@@ -523,7 +566,7 @@ mod tests {
         .expect("plan build should succeed")
         .expect("plan should be produced");
 
-        assert!(built.plan.stream);
+        assert!(!built.plan.stream);
         assert_eq!(
             built
                 .plan
@@ -548,7 +591,7 @@ mod tests {
         .expect("fallback plan build should succeed")
         .expect("fallback plan should be produced");
 
-        assert!(built.plan.stream);
+        assert!(!built.plan.stream);
         assert_eq!(
             built
                 .plan
@@ -579,6 +622,7 @@ mod tests {
             request_id: Some("req_stream_789".to_string()),
             candidate_id: Some("cand_stream_789".to_string()),
             provider_name: Some("Claude".to_string()),
+            provider_type: Some("anthropic".to_string()),
             provider_id: Some("prov_stream_789".to_string()),
             endpoint_id: Some("ep_stream_789".to_string()),
             key_id: Some("key_stream_789".to_string()),

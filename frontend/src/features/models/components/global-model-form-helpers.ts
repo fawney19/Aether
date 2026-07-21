@@ -23,6 +23,14 @@ export interface GlobalModelFormPayloadState {
   is_active?: boolean
 }
 
+export function cloneTieredPricingConfig(
+  pricing: TieredPricingConfig,
+): TieredPricingConfig {
+  // Presets live inside a Vue ref and can therefore be reactive proxies, which
+  // structuredClone cannot clone directly. Pricing configs are JSON payloads.
+  return JSON.parse(JSON.stringify(pricing)) as TieredPricingConfig
+}
+
 function cleanGlobalModelConfig(form: GlobalModelFormPayloadState): Record<string, unknown> | undefined {
   return form.config && Object.keys(form.config).length > 0 ? form.config : undefined
 }

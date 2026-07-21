@@ -1,6 +1,7 @@
 <template>
   <div class="relative">
     <button
+      ref="triggerElement"
       type="button"
       :class="
         cn(
@@ -10,7 +11,7 @@
         )
       "
       :disabled="disabled"
-      @click="isOpen = !isOpen"
+      @click="toggleDropdown"
     >
       <span
         :class="modelValue.length ? 'text-foreground' : 'text-muted-foreground'"
@@ -27,99 +28,105 @@
         :class="isOpen ? 'rotate-180' : ''"
       />
     </button>
-    <div
-      v-if="isOpen"
-      class="fixed inset-0 z-[80]"
-      @click.stop="isOpen = false"
-    />
-    <div
-      v-if="isOpen"
-      class="absolute z-[90] mt-1 w-full overflow-hidden rounded-2xl border border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
-      :style="dropdownMinWidth ? { minWidth: dropdownMinWidth } : undefined"
+    <Teleport
+      to="body"
+      :disabled="!teleport"
     >
       <div
-        v-if="showSearch"
-        class="sticky top-0 z-10 border-b border-border/60 bg-card/95 p-1 backdrop-blur supports-[backdrop-filter]:bg-card/85"
+        v-if="isOpen"
+        class="fixed inset-0 z-[80]"
+        @click.stop="isOpen = false"
+      />
+      <div
+        v-if="isOpen"
+        class="z-[90] overflow-hidden rounded-2xl border border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
+        :class="teleport ? 'fixed' : 'absolute mt-1 w-full'"
+        :style="dropdownStyle"
       >
-        <div class="relative">
-          <Search
-            class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
-          />
-          <Input
-            v-model="searchQuery"
-            :placeholder="localizedSearchPlaceholder"
-            class="h-9 rounded-xl border-border/60 bg-background/80 pl-9 pr-3 text-sm"
-            @keydown.stop
-          />
+        <div
+          v-if="showSearch"
+          class="sticky top-0 z-10 border-b border-border/60 bg-card/95 p-1 backdrop-blur supports-[backdrop-filter]:bg-card/85"
+        >
+          <div class="relative">
+            <Search
+              class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
+            />
+            <Input
+              v-model="searchQuery"
+              :placeholder="localizedSearchPlaceholder"
+              class="h-9 rounded-xl border-border/60 bg-background/80 pl-9 pr-3 text-sm"
+              @keydown.stop
+            />
+          </div>
+        </div>
+
+        <div class="max-h-64 overflow-y-auto p-1">
+          <div
+            v-if="hasOptions"
+            class="sticky top-0 z-10 flex cursor-pointer items-center gap-2 rounded-lg border-b border-border/60 bg-card/95 px-3 py-2 backdrop-blur hover:bg-muted/50 supports-[backdrop-filter]:bg-card/85"
+            @click="toggleAll"
+          >
+            <input
+              type="checkbox"
+              :checked="isAllSelected"
+              :indeterminate="isPartiallySelected"
+              :aria-label="legacyT('全选')"
+              class="h-4 w-4 shrink-0 cursor-pointer rounded border-border/60 bg-card/80 text-primary shadow-sm accent-primary focus:ring-2 focus:ring-primary/40 focus:ring-offset-1"
+              @click.stop
+              @change="toggleAll"
+            >
+            <span class="min-w-0 truncate text-sm">{{ legacyT('全选') }}</span>
+            <span class="ml-auto shrink-0 text-xs text-muted-foreground">
+              {{ selectedOptionCount }}/{{ options.length }}
+            </span>
+          </div>
+
+          <div
+            v-for="item in filteredInvalidItems"
+            :key="'invalid-' + item"
+            class="flex cursor-pointer items-center gap-2 rounded-lg bg-destructive/5 px-3 py-2 hover:bg-muted/50"
+            @click="remove(item)"
+          >
+            <input
+              type="checkbox"
+              :checked="true"
+              class="h-4 w-4 shrink-0 cursor-pointer rounded border-border/60 bg-card/80 text-primary shadow-sm accent-primary focus:ring-2 focus:ring-primary/40 focus:ring-offset-1"
+              @click.stop
+              @change="remove(item)"
+            >
+            <span class="min-w-0 truncate text-sm text-destructive">{{ item }}</span>
+            <span class="shrink-0 text-xs text-destructive/70">{{ legacyT('(已失效)') }}</span>
+          </div>
+
+          <div
+            v-for="item in filteredOptions"
+            :key="item.value"
+            class="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 hover:bg-muted/50"
+            @click="toggle(item.value)"
+          >
+            <input
+              type="checkbox"
+              :checked="modelValue.includes(item.value)"
+              class="h-4 w-4 shrink-0 cursor-pointer rounded border-border/60 bg-card/80 text-primary shadow-sm accent-primary focus:ring-2 focus:ring-primary/40 focus:ring-offset-1"
+              @click.stop
+              @change="toggle(item.value)"
+            >
+            <span class="min-w-0 truncate text-sm">{{ item.label }}</span>
+          </div>
+          <div
+            v-if="filteredOptions.length === 0 && filteredInvalidItems.length === 0"
+            class="px-3 py-2 text-sm text-muted-foreground"
+          >
+            {{ searchQuery.trim() ? localizedNoResultsText : localizedEmptyText }}
+          </div>
         </div>
       </div>
-
-      <div class="max-h-64 overflow-y-auto p-1">
-        <div
-          v-if="hasOptions"
-          class="sticky top-0 z-10 flex cursor-pointer items-center gap-2 rounded-lg border-b border-border/60 bg-card/95 px-3 py-2 backdrop-blur hover:bg-muted/50 supports-[backdrop-filter]:bg-card/85"
-          @click="toggleAll"
-        >
-          <input
-            type="checkbox"
-            :checked="isAllSelected"
-            :indeterminate="isPartiallySelected"
-            :aria-label="legacyT('全选')"
-            class="h-4 w-4 shrink-0 cursor-pointer rounded border-border/60 bg-card/80 text-primary shadow-sm accent-primary focus:ring-2 focus:ring-primary/40 focus:ring-offset-1"
-            @click.stop
-            @change="toggleAll"
-          >
-          <span class="min-w-0 truncate text-sm">{{ legacyT('全选') }}</span>
-          <span class="ml-auto shrink-0 text-xs text-muted-foreground">
-            {{ selectedOptionCount }}/{{ options.length }}
-          </span>
-        </div>
-
-        <div
-          v-for="item in filteredInvalidItems"
-          :key="'invalid-' + item"
-          class="flex cursor-pointer items-center gap-2 rounded-lg bg-destructive/5 px-3 py-2 hover:bg-muted/50"
-          @click="remove(item)"
-        >
-          <input
-            type="checkbox"
-            :checked="true"
-            class="h-4 w-4 shrink-0 cursor-pointer rounded border-border/60 bg-card/80 text-primary shadow-sm accent-primary focus:ring-2 focus:ring-primary/40 focus:ring-offset-1"
-            @click.stop
-            @change="remove(item)"
-          >
-          <span class="min-w-0 truncate text-sm text-destructive">{{ item }}</span>
-          <span class="shrink-0 text-xs text-destructive/70">{{ legacyT('(已失效)') }}</span>
-        </div>
-
-        <div
-          v-for="item in filteredOptions"
-          :key="item.value"
-          class="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 hover:bg-muted/50"
-          @click="toggle(item.value)"
-        >
-          <input
-            type="checkbox"
-            :checked="modelValue.includes(item.value)"
-            class="h-4 w-4 shrink-0 cursor-pointer rounded border-border/60 bg-card/80 text-primary shadow-sm accent-primary focus:ring-2 focus:ring-primary/40 focus:ring-offset-1"
-            @click.stop
-            @change="toggle(item.value)"
-          >
-          <span class="min-w-0 truncate text-sm">{{ item.label }}</span>
-        </div>
-        <div
-          v-if="filteredOptions.length === 0 && filteredInvalidItems.length === 0"
-          class="px-3 py-2 text-sm text-muted-foreground"
-        >
-          {{ searchQuery.trim() ? localizedNoResultsText : localizedEmptyText }}
-        </div>
-      </div>
-    </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { ChevronDown, Search } from 'lucide-vue-next'
 import { Input } from '@/components/ui'
 import { cn } from '@/lib/utils'
@@ -144,6 +151,7 @@ const props = withDefaults(
     searchable?: boolean
     searchThreshold?: number
     searchPlaceholder?: string
+    teleport?: boolean
   }>(),
   {
     placeholder: '请选择',
@@ -155,6 +163,7 @@ const props = withDefaults(
     searchable: true,
     searchThreshold: 8,
     searchPlaceholder: '输入关键词搜索...',
+    teleport: false,
   },
 )
 
@@ -165,6 +174,40 @@ const { legacyT, locale } = useI18n()
 
 const isOpen = ref(false)
 const searchQuery = ref('')
+const triggerElement = ref<HTMLElement | null>(null)
+const dropdownPosition = ref<Record<string, string>>({})
+
+const dropdownStyle = computed(() => {
+  const style: Record<string, string> = { ...dropdownPosition.value }
+  if (props.dropdownMinWidth) {
+    style.minWidth = props.dropdownMinWidth
+  }
+  return style
+})
+
+function updateDropdownPosition() {
+  if (!props.teleport || !triggerElement.value) return
+  const rect = triggerElement.value.getBoundingClientRect()
+  dropdownPosition.value = {
+    top: `${rect.bottom + 4}px`,
+    left: `${rect.left}px`,
+    width: `${rect.width}px`,
+  }
+}
+
+async function toggleDropdown() {
+  isOpen.value = !isOpen.value
+  if (isOpen.value && props.teleport) {
+    await nextTick()
+    updateDropdownPosition()
+  }
+}
+
+function removePositionListeners() {
+  if (typeof window === 'undefined') return
+  window.removeEventListener('resize', updateDropdownPosition)
+  window.removeEventListener('scroll', updateDropdownPosition, true)
+}
 
 const validValues = computed(() => new Set(props.options.map(o => o.value)))
 
@@ -233,10 +276,16 @@ const displayText = computed(() => {
 })
 
 watch(isOpen, (open) => {
-  if (!open) {
+  if (open && props.teleport && typeof window !== 'undefined') {
+    window.addEventListener('resize', updateDropdownPosition)
+    window.addEventListener('scroll', updateDropdownPosition, true)
+  } else {
     searchQuery.value = ''
+    removePositionListeners()
   }
 })
+
+onBeforeUnmount(removePositionListeners)
 
 function toggle(value: string) {
   const newValue = [...props.modelValue]

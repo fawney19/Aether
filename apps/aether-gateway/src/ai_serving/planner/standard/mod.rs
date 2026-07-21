@@ -15,7 +15,8 @@ mod normalize;
 mod openai;
 
 pub(crate) use self::codex::{
-    apply_codex_openai_responses_special_body_edits, apply_codex_openai_responses_special_headers,
+    apply_codex_openai_responses_special_body_edits, apply_codex_openai_special_headers,
+    codex_model_capabilities_for_transport,
 };
 pub(crate) use self::deepseek::{apply_deepseek_tool_call_thinking_compat, is_deepseek_provider};
 pub(crate) use self::family::{
@@ -25,9 +26,11 @@ pub(crate) use self::family::{
 pub(crate) use self::normalize::{
     build_cross_format_openai_chat_request_body, build_cross_format_openai_chat_upstream_url,
     build_cross_format_openai_responses_request_body,
+    build_cross_format_openai_responses_request_body_with_codex_model_capabilities,
     build_cross_format_openai_responses_upstream_url, build_local_openai_chat_request_body,
     build_local_openai_chat_upstream_url, build_local_openai_responses_request_body,
-    build_local_openai_responses_upstream_url,
+    build_local_openai_responses_request_body_with_codex_model_capabilities,
+    build_local_openai_responses_upstream_url, validate_final_openai_provider_request,
 };
 pub(crate) use self::openai::{
     build_local_openai_chat_stream_attempt_source_for_kind,
@@ -297,7 +300,7 @@ mod tests {
         let converted = build_standard_request_body(
             &request,
             "claude:messages",
-            "gpt-5",
+            "gpt-5.4",
             "codex",
             "openai:responses",
             "/v1/messages",
@@ -309,7 +312,7 @@ mod tests {
 
         assert!(converted.get("metadata").is_none());
         assert_eq!(converted["store"], false);
-        assert_eq!(converted["instructions"], "");
+        assert!(converted.get("instructions").is_none());
         assert_eq!(converted["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(converted["parallel_tool_calls"], true);
         assert_eq!(converted["reasoning"]["effort"], "medium");

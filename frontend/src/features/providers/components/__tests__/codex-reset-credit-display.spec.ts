@@ -1,14 +1,45 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  createCodexResetCreditIdempotencyKey,
   formatCodexResetCreditCount,
-  formatCodexResetCreditDays,
+  formatCodexResetCreditExpiresAt,
   getCodexResetCreditAvailableCount,
   getVisibleCodexResetCreditItems,
+  mergeCodexQuotaDisplays,
 } from '@/features/providers/components/codex-reset-credit-display'
 import type { QuotaResetCreditsSnapshot } from '@/api/endpoints/types'
 
 describe('codex reset credit display helpers', () => {
+  it('keeps reset credits and usage windows when snapshot sources are partially populated', () => {
+    const merged = mergeCodexQuotaDisplays(
+      {
+        updated_at: 1_700_000_100,
+        primary_used_percent: 25,
+        reset_credits: {
+          available_count: 2,
+        },
+      },
+      {
+        updated_at: 1_700_000_000,
+        secondary_used_percent: 40,
+        reset_credits: {
+          credits: [{ id: 'credit-1', expires_at: 1_700_086_400 }],
+        },
+      },
+    )
+
+    expect(merged).toMatchObject({
+      updated_at: 1_700_000_100,
+      primary_used_percent: 25,
+      secondary_used_percent: 40,
+      reset_credits: {
+        available_count: 2,
+        credits: [{ id: 'credit-1', expires_at: 1_700_086_400 }],
+      },
+    })
+  })
+
   it('keeps zero available credits displayable but non-positive detail items hidden', () => {
     const snapshot: QuotaResetCreditsSnapshot = {
       available_count: 0,
@@ -74,8 +105,38 @@ describe('codex reset credit display helpers', () => {
     ])
   })
 
-  it('formats reset credit remaining days with a one-day minimum', () => {
-    expect(formatCodexResetCreditDays(1)).toBe('1天')
-    expect(formatCodexResetCreditDays(86_401)).toBe('2天')
+  it('formats reset credit expiry as a precise local timestamp', () => {
+    const expiresAt = new Date(2026, 6, 12, 22, 4, 41).getTime() / 1000
+    expect(formatCodexResetCreditExpiresAt(expiresAt)).toBe('07-12 22:04:41')
+    expect(formatCodexResetCreditExpiresAt(null)).toBe('-')
+  })
+
+  it('derives a stable expiry timestamp from remaining seconds', () => {
+    const snapshot: QuotaResetCreditsSnapshot = {
+      available_count: 1,
+      updated_at: 1_700_000_000,
+      credits: [{ status: 'available', remaining_seconds: 600 }],
+    }
+
+    expect(getVisibleCodexResetCreditItems(snapshot, 1_700_000_300)[0]?.expiresAt)
+      .toBe(1_700_000_600)
+  })
+
+  it('generates a UUID v4 with secure random bytes when randomUUID is unavailable', () => {
+    const idempotencyKey = createCodexResetCreditIdempotencyKey({
+      getRandomValues(array) {
+        array.set(Array.from({ length: 16 }, (_, index) => index))
+        return array
+      },
+    })
+
+    expect(idempotencyKey).toBe('00010203-0405-4607-8809-0a0b0c0d0e0f')
+  })
+
+  it('prefers the browser randomUUID implementation when available', () => {
+    expect(createCodexResetCreditIdempotencyKey({
+      randomUUID: () => 'existing-random-uuid',
+      getRandomValues: array => array,
+    })).toBe('existing-random-uuid')
   })
 })

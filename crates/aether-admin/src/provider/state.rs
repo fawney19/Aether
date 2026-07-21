@@ -217,6 +217,14 @@ fn extract_openai_chatgpt_auth_fields_from_object(
         result.insert("user_id".to_string(), json!(user_id));
     }
 
+    if let Some(is_fedramp) = auth
+        .and_then(|value| value.get("chatgpt_account_is_fedramp"))
+        .and_then(Value::as_bool)
+        .or_else(|| source.get("is_fedramp").and_then(Value::as_bool))
+    {
+        result.insert("is_fedramp".to_string(), json!(is_fedramp));
+    }
+
     if let Some(organizations) = auth
         .and_then(|value| value.get("organizations"))
         .and_then(Value::as_array)
@@ -250,6 +258,7 @@ pub fn enrich_admin_provider_oauth_auth_config(
             "plan_type",
             "user_id",
             "account_name",
+            "is_fedramp",
         ],
     );
 
@@ -268,6 +277,7 @@ pub fn enrich_admin_provider_oauth_auth_config(
             "plan_type",
             "user_id",
             "organizations",
+            "is_fedramp",
         ],
     );
 
@@ -288,6 +298,7 @@ pub fn enrich_admin_provider_oauth_auth_config(
                 "plan_type",
                 "user_id",
                 "account_name",
+                "is_fedramp",
             ],
         );
         let chatgpt_claim_fields = extract_openai_chatgpt_auth_fields_from_object(&claims);
@@ -301,6 +312,7 @@ pub fn enrich_admin_provider_oauth_auth_config(
                 "plan_type",
                 "user_id",
                 "organizations",
+                "is_fedramp",
             ],
         );
     }
@@ -428,6 +440,7 @@ mod tests {
                 "chatgpt_account_user_id": "user-image__acc-image",
                 "chatgpt_plan_type": "plus",
                 "chatgpt_user_id": "user-image",
+                "chatgpt_account_is_fedramp": true,
             },
         }));
         let token_payload = json!({
@@ -445,5 +458,6 @@ mod tests {
         );
         assert_eq!(auth_config.get("plan_type"), Some(&json!("plus")));
         assert_eq!(auth_config.get("user_id"), Some(&json!("user-image")));
+        assert_eq!(auth_config.get("is_fedramp"), Some(&json!(true)));
     }
 }

@@ -77,6 +77,7 @@ mod tests {
             auth_endpoint_signature: None,
             execution_runtime_candidate: true,
             local_auth_rejection: None,
+            model_directive_policy: Default::default(),
         }
     }
 

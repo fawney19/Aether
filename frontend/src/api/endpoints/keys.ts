@@ -121,17 +121,50 @@ export interface ProviderKeysPageQuery {
   page_size?: number
 }
 
+type ProviderKeysPagePayload = ProviderKeysPageResponse | EndpointAPIKey[]
+
+function normalizeProviderKeysPage(
+  value: ProviderKeysPagePayload,
+  page: number,
+  pageSize: number,
+): ProviderKeysPageResponse {
+  if (Array.isArray(value)) {
+    const start = value.length > pageSize ? (page - 1) * pageSize : 0
+    const keys = value.slice(start, start + pageSize)
+    return {
+      total: value.length,
+      page,
+      page_size: pageSize,
+      keys,
+    }
+  }
+
+  const keys = Array.isArray(value.keys) ? value.keys : []
+  return {
+    total: typeof value.total === 'number' && Number.isFinite(value.total)
+      ? value.total
+      : keys.length,
+    page: typeof value.page === 'number' && Number.isFinite(value.page)
+      ? value.page
+      : page,
+    page_size: typeof value.page_size === 'number' && Number.isFinite(value.page_size)
+      ? value.page_size
+      : pageSize,
+    keys,
+  }
+}
+
 export async function getProviderKeysPage(
   providerId: string,
   params: ProviderKeysPageQuery = {},
 ): Promise<ProviderKeysPageResponse> {
   const page = params.page ?? 1
   const pageSize = params.page_size ?? 20
-  const response = await client.get<ProviderKeysPageResponse>(
+  const response = await client.get<ProviderKeysPagePayload>(
     `/api/admin/endpoints/providers/${providerId}/keys`,
     { params: { page, page_size: pageSize } },
   )
-  return response.data
+  return normalizeProviderKeysPage(response.data, page, pageSize)
 }
 
 export async function getProviderKeys(providerId: string): Promise<EndpointAPIKey[]> {

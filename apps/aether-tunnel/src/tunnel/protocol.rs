@@ -1,1 +1,1 @@
-pub use aether_contracts::tunnel::*;
+pub use aether_gateway_tunnel::protocol::*;

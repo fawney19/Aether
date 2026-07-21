@@ -106,7 +106,17 @@ fn reset_codex_cycle_usage_windows(status_snapshot: &mut Value, now_unix_secs: u
             .and_then(Value::as_str)
             .map(str::trim)
             .unwrap_or_default();
-        if !code.eq_ignore_ascii_case("5h") && !code.eq_ignore_ascii_case("weekly") {
+        let scope = window
+            .get("scope")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("account");
+        let has_zero_window = window.get("window_minutes").and_then(Value::as_u64) == Some(0);
+        if code.is_empty()
+            || !scope.eq_ignore_ascii_case("account")
+            || code.to_ascii_lowercase().starts_with("spark_")
+            || has_zero_window
+        {
             continue;
         }
 
@@ -177,7 +187,7 @@ mod tests {
             }
         });
 
-        assert_eq!(reset_codex_cycle_usage_windows(&mut snapshot, 1_234), 2);
+        assert_eq!(reset_codex_cycle_usage_windows(&mut snapshot, 1_234), 3);
         let windows = snapshot["quota"]["windows"].as_array().expect("windows");
         assert_eq!(windows[0]["usage_reset_at"], json!(1_234));
         assert_eq!(windows[0]["usage"]["request_count"], json!(0));
@@ -187,7 +197,7 @@ mod tests {
         assert_eq!(windows[1]["usage"]["request_count"], json!(0));
         assert_eq!(windows[1]["usage"]["total_tokens"], json!(0));
         assert_eq!(windows[1]["usage"]["total_cost_usd"], json!("0.00000000"));
-        assert!(windows[2].get("usage_reset_at").is_none());
-        assert!(windows[2].get("usage").is_some());
+        assert_eq!(windows[2]["usage_reset_at"], json!(1_234));
+        assert_eq!(windows[2]["usage"]["request_count"], json!(0));
     }
 }

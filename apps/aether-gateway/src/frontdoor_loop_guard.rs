@@ -41,6 +41,7 @@ pub(crate) fn frontdoor_self_loop_public_ai_path(path: &str) -> bool {
             | "/v1/rerank"
             | "/v1/responses"
             | "/v1/responses/compact"
+            | "/v1/alpha/search"
             | "/v1beta/files"
             | "/upload/v1beta/files"
             | "/v1beta/operations"

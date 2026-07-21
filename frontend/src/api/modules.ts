@@ -1,6 +1,8 @@
 import apiClient from './client'
+import { buildCacheKey, cache, cachedRequest } from '@/utils/cache'
 
 const MODULE_MANAGEMENT_ORDER_CONFIG_KEY = 'module_management.extension_order'
+const ALL_SYSTEM_CONFIGS_CACHE_KEY = 'admin:system:configs'
 
 export interface ModuleStatus {
   name: string
@@ -160,17 +162,28 @@ function normalizePlaceholderPrefix(value: unknown): string {
     : CHAT_PII_REDACTION_DEFAULT_CONFIG.placeholder_prefix
 }
 
-async function getSystemConfigValue(key: string): Promise<unknown> {
-  const response = await apiClient.get<{ key: string; value: unknown }>(`/api/admin/system/configs/${key}`)
-  return response.data.value
-}
-
 async function updateSystemConfigValue(key: string, value: unknown, description: string) {
   const response = await apiClient.put<{ key: string; value: unknown; description?: string }>(
     `/api/admin/system/configs/${key}`,
     { value, description },
   )
+  cache.delete(ALL_SYSTEM_CONFIGS_CACHE_KEY)
+  cache.delete(buildCacheKey('admin:system:config', { key }))
   return response.data.value
+}
+
+async function getAllSystemConfigValues(): Promise<Map<string, unknown>> {
+  const configs = await cachedRequest(
+    ALL_SYSTEM_CONFIGS_CACHE_KEY,
+    async () => {
+      const response = await apiClient.get<Array<{ key: string; value: unknown }>>(
+        '/api/admin/system/configs'
+      )
+      return response.data
+    },
+    30_000,
+  )
+  return new Map(configs.map(config => [config.key, config.value]))
 }
 
 export const modulesApi = {
@@ -202,6 +215,7 @@ export const modulesApi = {
       `/api/admin/modules/status/${moduleName}/enabled`,
       { enabled }
     )
+    cache.delete(ALL_SYSTEM_CONFIGS_CACHE_KEY)
     return response.data
   },
 
@@ -227,22 +241,21 @@ export const modulesApi = {
         description: '模块管理扩展模块展示顺序',
       },
     )
+    cache.delete(ALL_SYSTEM_CONFIGS_CACHE_KEY)
+    cache.delete(buildCacheKey('admin:system:config', {
+      key: MODULE_MANAGEMENT_ORDER_CONFIG_KEY,
+    }))
     return normalizeModuleManagementOrder(response.data.value)
   },
 
   async getChatPiiRedactionConfig(): Promise<ChatPiiRedactionConfig> {
-    const [enabled, rules, cacheTtlSeconds, placeholderPrefix] = await Promise.all([
-      getSystemConfigValue(CHAT_PII_REDACTION_CONFIG_KEYS.enabled),
-      getSystemConfigValue(CHAT_PII_REDACTION_CONFIG_KEYS.rules),
-      getSystemConfigValue(CHAT_PII_REDACTION_CONFIG_KEYS.cache_ttl_seconds),
-      getSystemConfigValue(CHAT_PII_REDACTION_CONFIG_KEYS.placeholder_prefix),
-    ])
+    const configsByKey = await getAllSystemConfigValues()
 
     return normalizeChatPiiRedactionConfig({
-      enabled,
-      rules,
-      cache_ttl_seconds: cacheTtlSeconds,
-      placeholder_prefix: placeholderPrefix,
+      enabled: configsByKey.get(CHAT_PII_REDACTION_CONFIG_KEYS.enabled),
+      rules: configsByKey.get(CHAT_PII_REDACTION_CONFIG_KEYS.rules),
+      cache_ttl_seconds: configsByKey.get(CHAT_PII_REDACTION_CONFIG_KEYS.cache_ttl_seconds),
+      placeholder_prefix: configsByKey.get(CHAT_PII_REDACTION_CONFIG_KEYS.placeholder_prefix),
     })
   },
 

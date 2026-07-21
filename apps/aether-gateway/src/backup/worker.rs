@@ -20,17 +20,21 @@ pub(crate) fn spawn_s3_backup_worker(app: AppState) -> Option<JoinHandle<()>> {
         return None;
     }
 
-    Some(tokio::spawn(async move {
-        let mut interval = tokio::time::interval(S3_BACKUP_WORKER_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        interval.tick().await;
-        loop {
+    Some(crate::task_runtime::spawn_singleton_worker(
+        app,
+        S3_BACKUP_WORKER_TASK_KEY,
+        |app| async move {
+            let mut interval = tokio::time::interval(S3_BACKUP_WORKER_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await;
-            if let Err(error) = run_s3_backup_schedule_tick(&app, Utc::now()).await {
-                warn!(error = ?error, "S3 backup schedule tick failed");
+            loop {
+                interval.tick().await;
+                if let Err(error) = run_s3_backup_schedule_tick(&app, Utc::now()).await {
+                    warn!(error = ?error, "S3 backup schedule tick failed");
+                }
             }
-        }
-    }))
+        },
+    ))
 }
 
 async fn run_s3_backup_schedule_tick(

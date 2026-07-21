@@ -600,7 +600,7 @@ mod tests {
     };
     use crate::AppState;
     use aether_runtime_state::{RedisClientConfig, RuntimeState, RuntimeStateConfig};
-    use aether_testkit::ManagedRedisServer;
+    use aether_test_support::ManagedRedisServer;
     use std::collections::BTreeMap;
 
     async fn start_managed_redis_or_skip() -> Option<ManagedRedisServer> {

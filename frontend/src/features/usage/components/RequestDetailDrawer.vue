@@ -23,23 +23,21 @@
                 <h3 class="text-lg font-semibold">
                   请求详情
                 </h3>
-                <div class="flex min-w-0 max-w-[10rem] items-center gap-1 text-sm font-mono text-muted-foreground bg-muted px-2 py-0.5 rounded sm:max-w-none">
-                  <span class="truncate">{{ detail?.model || '-' }}</span>
-                  <template v-if="detail?.target_model && detail.target_model !== detail.model">
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      viewBox="0 0 20 20"
-                      fill="currentColor"
-                      class="w-3 h-3 flex-shrink-0"
-                    >
-                      <path
-                        fill-rule="evenodd"
-                        d="M3 10a.75.75 0 01.75-.75h10.638L10.23 5.29a.75.75 0 111.04-1.08l5.5 5.25a.75.75 0 010 1.08l-5.5 5.25a.75.75 0 11-1.04-1.08l4.158-3.96H3.75A.75.75 0 013 10z"
-                        clip-rule="evenodd"
-                      />
-                    </svg>
-                    <span class="truncate">{{ detail.target_model }}</span>
-                  </template>
+                <UsageModelDisplay
+                  v-if="headerModelRecord"
+                  :record="headerModelRecord"
+                  :cyber="detailCyberPolicyError"
+                  context="detail"
+                  data-request-detail-model-display
+                  class="min-w-0 max-w-[18rem] text-sm font-mono text-muted-foreground sm:max-w-none"
+                  model-row-class="rounded bg-muted px-2 py-0.5"
+                />
+                <div
+                  v-else
+                  data-request-detail-model-display
+                  class="rounded bg-muted px-2 py-0.5 text-sm font-mono text-muted-foreground"
+                >
+                  -
                 </div>
                 <Badge
                   v-if="detail?.status_code === 200"
@@ -159,47 +157,6 @@
               v-else-if="detail"
               class="space-y-4"
             >
-              <!-- 执行失败原因：优先展示本地调度/运行时失败摘要 -->
-              <Card
-                v-if="failureNotice"
-                class="border-red-200 bg-red-50/80 shadow-sm dark:border-red-900/60 dark:bg-red-950/30"
-              >
-                <div class="p-3 sm:p-4 flex gap-3">
-                  <div class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600 dark:bg-red-900/50 dark:text-red-300">
-                    <AlertTriangle class="h-4 w-4" />
-                  </div>
-                  <div class="min-w-0 flex-1 space-y-2">
-                    <div class="flex flex-wrap items-center gap-2">
-                      <h4 class="text-sm font-semibold text-red-950 dark:text-red-100">
-                        {{ failureNotice.title }}
-                      </h4>
-                      <Badge
-                        v-if="failureNotice.isSchedulingFailure"
-                        variant="outline"
-                        class="border-red-300 bg-white/60 text-[10px] text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200"
-                      >
-                        调度阶段
-                      </Badge>
-                    </div>
-                    <p class="text-sm leading-6 text-red-900 dark:text-red-100">
-                      {{ failureNotice.message }}
-                    </p>
-                    <div
-                      v-if="failureNotice.meta.length > 0"
-                      class="flex flex-wrap gap-1.5"
-                    >
-                      <span
-                        v-for="item in failureNotice.meta"
-                        :key="item"
-                        class="rounded-full border border-red-200 bg-white/70 px-2 py-0.5 text-[11px] font-mono text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200"
-                      >
-                        {{ item }}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </Card>
-
               <!-- 费用与性能概览 -->
               <Card>
                 <div class="p-3 sm:p-4">
@@ -249,6 +206,12 @@
                         <span class="ml-1 font-bold text-primary">{{ formatOutputRateValue(detailOutputRate) }}tps</span>
                       </span>
                     </div>
+                    <ServiceTierFacts
+                      v-if="hasServiceTierFacts && processingTierPriceMultiplier === null"
+                      class="mt-3"
+                      :requested="serviceTierFacts.requested"
+                      :price-multiplier="processingTierPriceMultiplier"
+                    />
                   </div>
 
                   <!-- 分隔线 -->
@@ -262,7 +225,14 @@
                     <!-- 阶梯标题 -->
                     <div class="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
                       <span class="font-medium text-foreground">Token 计费</span>
-                      <span class="font-mono font-medium text-foreground">${{ tokenCostTotal.toFixed(6) }}</span>
+                      <span class="font-mono font-medium text-foreground">
+                        <template v-if="processingTierPriceMultiplier !== null">
+                          ${{ tokenCostBaseTotal.toFixed(6) }} × {{ processingTierPriceMultiplier }} ({{ processingTierLabel }} 层级)
+                        </template>
+                        <template v-else>
+                          ${{ tokenCostTotal.toFixed(6) }}
+                        </template>
+                      </span>
                       <span class="text-muted-foreground/60">(输入 {{ formatNumber(displayInputTokens) }} + 缓存创建 {{ cacheCreationSummaryText }} + 缓存读取 {{ formatNumber(detail.cache_read_input_tokens || 0) }})</span>
                       <Badge
                         v-if="displayTiers.length > 1"
@@ -306,13 +276,13 @@
                         <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground sm:hidden">
                           <div class="grid grid-cols-[max-content_1fr] items-baseline gap-x-1">
                             <span>输入</span>
-                            <span class="text-right">${{ formatPrice(tier.input_price_per_1m) }}/M</span>
+                            <span class="text-right">{{ formatPricePerMillion(tier.input_price_per_1m) }}</span>
                           </div>
                           <div
                             class="grid grid-cols-[max-content_1fr] items-baseline gap-x-1"
                           >
                             <span>输出</span>
-                            <span class="text-right">${{ formatPrice(tier.output_price_per_1m) }}/M</span>
+                            <span class="text-right">{{ formatPricePerMillion(tier.output_price_per_1m) }}</span>
                           </div>
                           <template v-if="getTierActiveCacheCreationDisplay(tier) || shouldShowCacheReadPrice(tier)">
                             <div
@@ -334,8 +304,8 @@
                           </template>
                         </div>
                         <div class="text-muted-foreground hidden items-center gap-2 flex-wrap sm:flex">
-                          <span>输入 ${{ formatPrice(tier.input_price_per_1m) }}/M</span>
-                          <span>输出 ${{ formatPrice(tier.output_price_per_1m) }}/M</span>
+                          <span>输入 {{ formatPricePerMillion(tier.input_price_per_1m) }}</span>
+                          <span>输出 {{ formatPricePerMillion(tier.output_price_per_1m) }}</span>
                           <span v-if="getTierActiveCacheCreationDisplay(tier)">
                             {{ getTierActiveCacheCreationDisplay(tier)?.label }}
                             ${{ formatPrice(getTierActiveCacheCreationDisplay(tier)?.price || 0) }}/M
@@ -352,22 +322,22 @@
                           <div class="grid grid-cols-[64px_minmax(0,1fr)_92px] items-center gap-x-2">
                             <span class="text-xs text-muted-foreground">输入</span>
                             <span class="text-sm font-semibold font-mono text-right tabular-nums">{{ displayInputTokens }}</span>
-                            <span class="text-xs font-mono text-right tabular-nums">${{ effectiveInputCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono text-right tabular-nums">${{ displayInputCost.toFixed(6) }}</span>
                           </div>
                           <div class="grid grid-cols-[64px_minmax(0,1fr)_92px] items-center gap-x-2">
                             <span class="text-xs text-muted-foreground">输出</span>
                             <span class="text-sm font-semibold font-mono text-right tabular-nums">{{ detail.tokens?.output || detail.output_tokens || 0 }}</span>
-                            <span class="text-xs font-mono text-right tabular-nums">${{ effectiveOutputCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono text-right tabular-nums">${{ displayOutputCost.toFixed(6) }}</span>
                           </div>
                           <div class="grid grid-cols-[64px_minmax(0,1fr)_92px] items-center gap-x-2">
                             <span class="text-xs text-muted-foreground">缓存创建</span>
                             <span class="text-sm font-semibold font-mono text-right tabular-nums">{{ totalCacheCreationTokens }}</span>
-                            <span class="text-xs font-mono text-right tabular-nums">${{ effectiveCacheCreationCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono text-right tabular-nums">${{ displayCacheCreationCost.toFixed(6) }}</span>
                           </div>
                           <div class="grid grid-cols-[64px_minmax(0,1fr)_92px] items-center gap-x-2">
                             <span class="text-xs text-muted-foreground">缓存读取</span>
                             <span class="text-sm font-semibold font-mono text-right tabular-nums">{{ detail.cache_read_input_tokens || 0 }}</span>
-                            <span class="text-xs font-mono text-right tabular-nums">${{ effectiveCacheReadCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono text-right tabular-nums">${{ displayCacheReadCost.toFixed(6) }}</span>
                           </div>
                         </div>
                         <!-- 输入 输出 -->
@@ -375,7 +345,7 @@
                           <div class="flex items-center flex-1">
                             <span class="text-xs text-muted-foreground w-[56px]">输入</span>
                             <span class="text-sm font-semibold font-mono flex-1 text-center">{{ displayInputTokens }}</span>
-                            <span class="text-xs font-mono">${{ effectiveInputCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono">${{ displayInputCost.toFixed(6) }}</span>
                           </div>
                           <Separator
                             orientation="vertical"
@@ -384,7 +354,7 @@
                           <div class="flex items-center flex-1">
                             <span class="text-xs text-muted-foreground w-[56px]">输出</span>
                             <span class="text-sm font-semibold font-mono flex-1 text-center">{{ detail.tokens?.output || detail.output_tokens || 0 }}</span>
-                            <span class="text-xs font-mono">${{ effectiveOutputCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono">${{ displayOutputCost.toFixed(6) }}</span>
                           </div>
                         </div>
                         <!-- 缓存创建 缓存读取 -->
@@ -392,7 +362,7 @@
                           <div class="flex items-center flex-1">
                             <span class="text-xs text-muted-foreground w-[56px]">{{ cacheCreationSplitRows.length > 0 ? '创建合计' : '缓存创建' }}</span>
                             <span class="text-sm font-semibold font-mono flex-1 text-center">{{ totalCacheCreationTokens }}</span>
-                            <span class="text-xs font-mono">${{ effectiveCacheCreationCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono">${{ displayCacheCreationCost.toFixed(6) }}</span>
                           </div>
                           <Separator
                             orientation="vertical"
@@ -401,7 +371,7 @@
                           <div class="flex items-center flex-1">
                             <span class="text-xs text-muted-foreground w-[56px]">缓存读取</span>
                             <span class="text-sm font-semibold font-mono flex-1 text-center">{{ detail.cache_read_input_tokens || 0 }}</span>
-                            <span class="text-xs font-mono">${{ effectiveCacheReadCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono">${{ displayCacheReadCost.toFixed(6) }}</span>
                           </div>
                         </div>
                         <!-- 缓存创建 5m/1h 细分 -->
@@ -878,6 +848,7 @@ import TabsContent from '@/components/ui/tabs-content.vue'
 import { AlertTriangle, Check, Columns2, RefreshCw, X, Monitor, Server, MessageSquareText, Code2, Terminal, Play } from 'lucide-vue-next'
 import { dashboardApi, type RequestDetail } from '@/api/dashboard'
 import type { ImageProgress, RequestTrace } from '@/api/requestTrace'
+import type { UsageRecord } from '../types'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import {
   formatByteSize,
@@ -898,7 +869,18 @@ import {
   resolveDisplayRequestStatus,
   resolveUsageStreamLabelSegments,
 } from '../utils/status'
-import { resolveRequestFailureNotice } from '../utils/errorNotice'
+import { isCyberPolicyError } from '../utils/cyberError'
+import {
+  mergeUsageRecordErrorMessage,
+  parseUsageTimestampMs,
+} from '../utils/recordSync'
+import {
+  formatPricePerMillion,
+  resolveProcessingTierPriceMultiplier,
+  resolveSettlementPricingSnapshot,
+  resolveSettlementPricingSourceLabel,
+  resolveSettlementPricingTiers,
+} from '../utils/settlement-pricing'
 
 // 子组件
 import RequestHeadersContent from './RequestDetailDrawer/RequestHeadersContent.vue'
@@ -907,6 +889,13 @@ import JsonContentPanel from './JsonContentPanel.vue'
 import ConversationView from './RequestDetailDrawer/ConversationView.vue'
 import HorizontalRequestTimeline from './HorizontalRequestTimeline.vue'
 import ReplayDialog from './ReplayDialog.vue'
+import ServiceTierFacts from './ServiceTierFacts.vue'
+import UsageModelDisplay from './UsageModelDisplay.vue'
+import {
+  formatServiceTierFact,
+  hasServiceTierFact,
+  resolveServiceTierFacts,
+} from '../utils/service-tier'
 
 // 对话解析器
 import {
@@ -921,6 +910,7 @@ type RequestStateStatus = 'pending' | 'streaming' | 'completed' | 'failed' | 'ca
 const props = defineProps<{
   isOpen: boolean
   requestId: string | null
+  summaryRecord?: UsageRecord | null
 }>()
 
 const emit = defineEmits<{
@@ -950,10 +940,13 @@ const emit = defineEmits<{
     endpointApiFormat?: string | null
     hasFormatConversion?: boolean | null
     targetModel?: string | null
+    requestedReasoningEffort?: string | null
     reasoningEffort?: string | null
     serviceTier?: string | null
+    actualServiceTier?: string | null
     imageProgress?: ImageProgress | null
     errorMessage?: string | null
+    updatedAt?: string | null
   }]
 }>()
 
@@ -1081,6 +1074,116 @@ function resolveRequestStateStatusFromDetail(nextDetail: Pick<RequestDetail, 'st
   return resolveRequestStateStatus(nextDetail.status, nextDetail.status_code, nextDetail.error_message)
 }
 
+type HeaderModelTextField =
+  | 'model'
+  | 'target_model'
+  | 'model_version'
+  | 'request_type'
+  | 'requested_reasoning_effort'
+  | 'reasoning_effort'
+  | 'service_tier'
+  | 'actual_service_tier'
+
+const FINAL_PROVIDER_HEADER_FIELDS = new Set<HeaderModelTextField>([
+  'target_model',
+  'reasoning_effort',
+  'service_tier',
+  'actual_service_tier',
+])
+
+let modelSnapshotRevision = 0
+const summaryModelRevision = ref(0)
+const detailModelRevision = ref(0)
+
+function usageSnapshotUpdatedAtMs(
+  source: UsageRecord | RequestDetail | null | undefined,
+): number | null {
+  const value = source?.updated_at
+  if (typeof value !== 'string' || !value.trim()) return null
+  return parseUsageTimestampMs(value)
+}
+
+function summaryNullIsNewerForProviderField(
+  field: HeaderModelTextField,
+  nextDetail: RequestDetail | null | undefined,
+): boolean {
+  if (!FINAL_PROVIDER_HEADER_FIELDS.has(field) || !props.summaryRecord) return false
+
+  const summaryUpdatedAt = usageSnapshotUpdatedAtMs(props.summaryRecord)
+  const detailUpdatedAt = usageSnapshotUpdatedAtMs(nextDetail)
+  if (summaryUpdatedAt != null && detailUpdatedAt != null && summaryUpdatedAt !== detailUpdatedAt) {
+    return summaryUpdatedAt > detailUpdatedAt
+  }
+
+  if (summaryModelRevision.value > detailModelRevision.value) return true
+
+  // A terminal list row is a complete final-provider snapshot. When no
+  // comparable timestamps exist, its explicit null must beat a cached detail
+  // from an earlier candidate. Non-terminal rows may still be filled by a
+  // detail request that completed after the lightweight list response.
+  return ['completed', 'failed', 'cancelled'].includes(props.summaryRecord.status ?? '')
+}
+
+function readHeaderModelTextField(
+  source: UsageRecord | RequestDetail | null | undefined,
+  field: HeaderModelTextField,
+): { resolved: boolean, value: string | null } {
+  if (!source || !Object.prototype.hasOwnProperty.call(source, field)) {
+    return { resolved: false, value: null }
+  }
+
+  const value = (source as unknown as Record<string, unknown>)[field]
+  if (value === null) return { resolved: true, value: null }
+  if (typeof value !== 'string') return { resolved: false, value: null }
+
+  const normalized = value.trim()
+  return { resolved: true, value: normalized || null }
+}
+
+function resolveHeaderModelTextField(
+  field: HeaderModelTextField,
+  nextDetail: RequestDetail | null | undefined,
+): string | null | undefined {
+  // Prefer a populated list/active fact so sparse detail cannot make the header
+  // flicker. A summary null is often only a lightweight-contract placeholder,
+  // though, so a later populated detail is still useful. Final-provider stale
+  // facts are cleared when full list/active snapshots merge into the summary.
+  const summaryValue = readHeaderModelTextField(props.summaryRecord, field)
+  if (summaryValue.value) return summaryValue.value
+
+  const detailValue = readHeaderModelTextField(nextDetail, field)
+  if (detailValue.value) {
+    if (
+      summaryValue.resolved
+      && summaryValue.value === null
+      && summaryNullIsNewerForProviderField(field, nextDetail)
+    ) return null
+    return detailValue.value
+  }
+
+  return summaryValue.resolved || detailValue.resolved ? null : undefined
+}
+
+watch(
+  () => [
+    props.requestId,
+    props.summaryRecord?.status,
+    props.summaryRecord?.updated_at,
+    props.summaryRecord?.model,
+    props.summaryRecord?.target_model,
+    props.summaryRecord?.model_version,
+    props.summaryRecord?.request_type,
+    props.summaryRecord?.requested_reasoning_effort,
+    props.summaryRecord?.reasoning_effort,
+    props.summaryRecord?.service_tier,
+    props.summaryRecord?.actual_service_tier,
+  ],
+  () => {
+    summaryModelRevision.value = ++modelSnapshotRevision
+  },
+  { immediate: true },
+)
+
 function detailTotalCost(nextDetail: RequestDetail): number | null {
   const structuredCost = typeof nextDetail.cost === 'object' ? nextDetail.cost?.total : null
   const totalCost = toNumber(nextDetail.total_cost)
@@ -1107,6 +1210,15 @@ function emitDetailRequestState(nextDetail: RequestDetail) {
   const id = props.requestId
   if (!id) return
 
+  const targetModel = resolveHeaderModelTextField('target_model', nextDetail)
+  const requestedReasoningEffort = resolveHeaderModelTextField(
+    'requested_reasoning_effort',
+    nextDetail,
+  )
+  const reasoningEffort = resolveHeaderModelTextField('reasoning_effort', nextDetail)
+  const serviceTier = resolveHeaderModelTextField('service_tier', nextDetail)
+  const actualServiceTier = resolveHeaderModelTextField('actual_service_tier', nextDetail)
+
   emit('requestState', {
     id,
     requestId: nextDetail.request_id || nextDetail.id || null,
@@ -1131,10 +1243,13 @@ function emitDetailRequestState(nextDetail: RequestDetail) {
     apiFormat: nextDetail.api_format ?? null,
     endpointApiFormat: nextDetail.endpoint_api_format ?? null,
     hasFormatConversion: nextDetail.has_format_conversion ?? null,
-    targetModel: nextDetail.target_model ?? null,
-    reasoningEffort: nextDetail.reasoning_effort ?? null,
-    serviceTier: nextDetail.service_tier ?? null,
+    ...(targetModel ? { targetModel } : {}),
+    ...(requestedReasoningEffort ? { requestedReasoningEffort } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(serviceTier ? { serviceTier } : {}),
+    ...(actualServiceTier ? { actualServiceTier } : {}),
     errorMessage: nextDetail.error_message ?? undefined,
+    updatedAt: nextDetail.updated_at ?? undefined,
   })
 }
 
@@ -1340,7 +1455,116 @@ const metadataPanelData = computed<Record<string, unknown> | null>(() => {
     : null
 })
 
-const failureNotice = computed(() => resolveRequestFailureNotice(detail.value))
+const detailForCurrentRequest = computed(() => (
+  detailMatchesRequestId(detail.value, props.requestId) ? detail.value : null
+))
+
+type AuthoritativeErrorSource = 'summary' | 'detail' | null
+
+function isTerminalRequestState(status: RequestStateStatus | undefined): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled'
+}
+
+function isSuccessfulTerminalRequestState(status: RequestStateStatus | undefined): boolean {
+  return status === 'completed' || status === 'cancelled'
+}
+
+const authoritativeErrorSource = computed<AuthoritativeErrorSource>(() => {
+  const summary = props.summaryRecord
+  const currentDetail = detailForCurrentRequest.value
+  if (!summary || !currentDetail) return null
+
+  const summaryStatus = resolveRequestStateStatus(
+    summary.status,
+    summary.status_code,
+    summary.error_message,
+  )
+  const detailStatus = resolveRequestStateStatusFromDetail(currentDetail)
+  const summaryUpdatedAtMs = usageSnapshotUpdatedAtMs(summary)
+  const detailUpdatedAtMs = usageSnapshotUpdatedAtMs(currentDetail)
+
+  if (summaryUpdatedAtMs != null && detailUpdatedAtMs != null &&
+    summaryUpdatedAtMs !== detailUpdatedAtMs) {
+    if (detailUpdatedAtMs > summaryUpdatedAtMs && isTerminalRequestState(detailStatus)) {
+      return 'detail'
+    }
+    if (summaryUpdatedAtMs > detailUpdatedAtMs && isTerminalRequestState(summaryStatus)) {
+      return 'summary'
+    }
+  }
+
+  // Without a comparable timestamp, a successful/cancelled terminal snapshot
+  // still has to clear a failure from the other source. Generic failed detail
+  // remains non-authoritative so opening the drawer cannot flash away a Cyber
+  // refusal already resolved by the list.
+  const detailSucceeded = isSuccessfulTerminalRequestState(detailStatus)
+  const summarySucceeded = isSuccessfulTerminalRequestState(summaryStatus)
+  if (detailSucceeded && !summarySucceeded) return 'detail'
+  if (summarySucceeded && !detailSucceeded) return 'summary'
+  if (detailSucceeded && summarySucceeded) {
+    return detailModelRevision.value >= summaryModelRevision.value ? 'detail' : 'summary'
+  }
+
+  return null
+})
+
+const headerModelRecord = computed(() => {
+  const summary = props.summaryRecord
+  const currentDetail = detailForCurrentRequest.value
+  if (!summary && !currentDetail) return null
+
+  const authoritativeSource = authoritativeErrorSource.value
+  const errorMessage = authoritativeSource === 'summary'
+    ? mergeUsageRecordErrorMessage(undefined, summary?.error_message, { authoritative: true })
+    : mergeUsageRecordErrorMessage(
+      summary?.error_message,
+      currentDetail?.error_message,
+      { authoritative: authoritativeSource === 'detail' },
+    )
+
+  return {
+    model: resolveHeaderModelTextField('model', currentDetail) ?? '-',
+    target_model: resolveHeaderModelTextField('target_model', currentDetail),
+    model_version: resolveHeaderModelTextField('model_version', currentDetail),
+    request_type: resolveHeaderModelTextField('request_type', currentDetail),
+    requested_reasoning_effort: resolveHeaderModelTextField(
+      'requested_reasoning_effort',
+      currentDetail,
+    ),
+    reasoning_effort: resolveHeaderModelTextField('reasoning_effort', currentDetail),
+    service_tier: resolveHeaderModelTextField('service_tier', currentDetail),
+    error_message: errorMessage,
+  }
+})
+const serviceTierFacts = computed(() => resolveServiceTierFacts(headerModelRecord.value))
+const hasServiceTierFacts = computed(() => hasServiceTierFact(serviceTierFacts.value))
+const settlementPricingSnapshot = computed(() => resolveSettlementPricingSnapshot(detail.value))
+const processingTierLabel = computed(() => (
+  formatServiceTierFact(serviceTierFacts.value.requested)
+  ?? formatServiceTierFact(getNestedString(settlementPricingSnapshot.value, 'billing_processing_tier'))
+  ?? '处理'
+))
+const detailCyberPolicyError = computed(() => {
+  const summaryError = props.summaryRecord?.error_message
+  const currentDetail = detailForCurrentRequest.value
+  const detailErrors = [
+    currentDetail?.error_message,
+    currentDetail?.upstream_error,
+    currentDetail?.failure_summary,
+    currentDetail?.response_body,
+  ]
+
+  if (authoritativeErrorSource.value === 'summary') {
+    return isCyberPolicyError(summaryError)
+  }
+  if (authoritativeErrorSource.value === 'detail') {
+    return isCyberPolicyError(detailErrors)
+  }
+  return isCyberPolicyError([summaryError, ...detailErrors])
+})
+const processingTierPriceMultiplier = computed(() => (
+  resolveProcessingTierPriceMultiplier(detail.value)
+))
 
 const settlementInfo = computed<JsonRecord | null>(() =>
   asRecord(detail.value?.settlement ?? null),
@@ -1629,20 +1853,10 @@ const hasValidConversation = computed(() => {
   return false
 })
 
-// 价格来源标签
-// tiered_pricing.source 表示定价来源: 'provider' 或 'global'
+// 价格来源优先使用 v3 结算快照，旧 tiered_pricing.source 仅作回退。
 const priceSourceLabel = computed(() => {
   if (!detail.value) return '历史定价'
-
-  const source = detail.value.tiered_pricing?.source
-  if (source === 'provider') {
-    return '提供商定价'
-  } else if (source === 'global') {
-    return '全局定价'
-  }
-
-  // 没有 tiered_pricing 时，使用历史价格
-  return '历史定价'
+  return resolveSettlementPricingSourceLabel(detail.value) ?? '历史定价'
 })
 
 const cacheCreationInputTokens5m = computed(() => {
@@ -1720,6 +1934,20 @@ const effectiveCacheReadCost = computed(() =>
   ?? toNumber(detail.value?.cache_read_cost)
   ?? 0,
 )
+
+// Fast/Priority 的倍率目录是由后端从 Standard 目录物化出来的。详情页的阶梯与
+// 分项成本保留 Standard 基准值，倍率统一显示在 Token 计费标题中，避免把倍率
+// 隐藏在每个单价和每个分项成本里。
+function removeProcessingTierMultiplier(value: number): number {
+  const multiplier = processingTierPriceMultiplier.value
+  if (multiplier === null || multiplier <= 0) return value
+  return value / multiplier
+}
+
+const displayInputCost = computed(() => removeProcessingTierMultiplier(effectiveInputCost.value))
+const displayOutputCost = computed(() => removeProcessingTierMultiplier(effectiveOutputCost.value))
+const displayCacheCreationCost = computed(() => removeProcessingTierMultiplier(effectiveCacheCreationCost.value))
+const displayCacheReadCost = computed(() => removeProcessingTierMultiplier(effectiveCacheReadCost.value))
 
 const effectiveRequestCost = computed(() => {
   const snapshotCost = getNestedNumber(billingCostBreakdown.value, 'request_cost')
@@ -1879,23 +2107,49 @@ const activeCacheTtlMinutes = computed(() => {
 
 // 统一的阶梯显示数据
 // 如果有 tiered_pricing，使用它；否则用历史价格构建单阶梯
+function restoreBaseTierPricing(tier: PricingTierLike): PricingTierLike {
+  const multiplier = processingTierPriceMultiplier.value
+  if (multiplier === null || multiplier <= 0) return tier
+
+  const restore = (value: number | null | undefined): number | null | undefined => {
+    if (value === null || value === undefined) return value
+    return value / multiplier
+  }
+
+  return {
+    ...tier,
+    input_price_per_1m: restore(tier.input_price_per_1m),
+    output_price_per_1m: restore(tier.output_price_per_1m),
+    cache_creation_price_per_1m: restore(tier.cache_creation_price_per_1m),
+    cache_read_price_per_1m: restore(tier.cache_read_price_per_1m),
+    cache_ttl_pricing: Array.isArray(tier.cache_ttl_pricing)
+      ? tier.cache_ttl_pricing.map(entry => ({
+          ...entry,
+          cache_creation_price_per_1m: restore(entry.cache_creation_price_per_1m),
+          cache_read_price_per_1m: restore(entry.cache_read_price_per_1m),
+        }))
+      : tier.cache_ttl_pricing,
+  }
+}
+
 const displayTiers = computed(() => {
   if (!detail.value) return []
 
-  // 如果有阶梯定价数据，直接使用
-  if (detail.value.tiered_pricing?.tiers && detail.value.tiered_pricing.tiers.length > 0) {
-    return detail.value.tiered_pricing.tiers
+  // 优先展示结算快照中已解析的价格目录，旧字段仅作回退。
+  const resolvedTiers = resolveSettlementPricingTiers(detail.value)
+  if (resolvedTiers) {
+    return (resolvedTiers as PricingTierLike[]).map(restoreBaseTierPricing)
   }
 
   // 否则用历史价格构建单阶梯（无上限）
-  return [{
+  return [restoreBaseTierPricing({
     up_to: null,
     input_price_per_1m: effectiveInputPricePer1M.value ?? 0,
     output_price_per_1m: effectiveOutputPricePer1M.value ?? 0,
     cache_creation_price_per_1m: effectiveCacheCreationPricePer1M.value,
     cache_read_price_per_1m: effectiveCacheReadPricePer1M.value,
     cache_ttl_pricing: fallbackCacheTtlPricing.value,
-  }]
+  })]
 })
 
 // 当前命中的阶梯索引
@@ -2004,6 +2258,13 @@ const tokenCostTotal = computed(() => {
     + effectiveCacheCreationCost.value
     + effectiveCacheReadCost.value
 })
+
+const tokenCostBaseTotal = computed(() => (
+  displayInputCost.value
+  + displayOutputCost.value
+  + displayCacheCreationCost.value
+  + displayCacheReadCost.value
+))
 
 // 按次计费费用（非视频任务时）
 const perRequestCost = computed(() => {
@@ -2128,7 +2389,7 @@ function getTierActiveCacheCreationDisplay(
       const fallbackPrice = toFiniteNumber(tier?.cache_creation_price_per_1m)
       if (fallbackPrice !== null) {
         return {
-          label: formatCacheTtlLabel(activeTtl),
+          label: '缓存创建',
           price: fallbackPrice,
         }
       }
@@ -2244,15 +2505,12 @@ const visibleTabs = computed(() => {
   })
 })
 
-watch(() => props.requestId, async (newId) => {
-  if (newId && props.isOpen) {
-    await loadDetail(newId)
-  }
-})
-
-watch(() => props.isOpen, async (isOpen) => {
-  if (isOpen && props.requestId) {
-    await loadDetail(props.requestId)
+watch([() => props.isOpen, () => props.requestId], async ([isOpen, requestId]) => {
+  if (isOpen && requestId) {
+    if (!detailMatchesRequestId(detail.value, requestId)) {
+      detail.value = null
+    }
+    await loadDetail(requestId)
   } else if (!isOpen) {
     stopAutoRefresh()
     showTimeline.value = false
@@ -2262,6 +2520,14 @@ watch(() => props.isOpen, async (isOpen) => {
     bodiesLoadedForRequestId.value = null
   }
 })
+
+function detailMatchesRequestId(
+  candidate: RequestDetail | null | undefined,
+  requestId: string | null | undefined,
+): boolean {
+  if (!candidate || !requestId) return false
+  return candidate.id === requestId || candidate.request_id === requestId
+}
 
 async function ensureBodyContentLoaded() {
   if (!props.requestId || !detail.value) return
@@ -2321,6 +2587,9 @@ async function loadDetail(id: string, silent = false) {
   const requestId = ++loadDetailRequestId
   loadDetailInFlight = true
   if (!silent) {
+    if (!detailMatchesRequestId(detail.value, id)) {
+      detail.value = null
+    }
     loading.value = true
     historicalPricing.value = null
     timelineLoaded.value = false
@@ -2358,6 +2627,7 @@ async function loadDetail(id: string, silent = false) {
       error_flow: response.error_flow,
       scheduling_failure: response.scheduling_failure,
     }
+    detailModelRevision.value = ++modelSnapshotRevision
     detail.value = nextDetail
     bodiesLoadedForRequestId.value = sameRequest ? bodiesLoadedForRequestId.value : null
     emitDetailRequestState(nextDetail)

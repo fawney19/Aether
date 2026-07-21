@@ -104,15 +104,47 @@
 
       <div class="space-y-3 rounded-lg border border-border bg-muted/30 p-3">
         <div class="flex items-center justify-between gap-3">
+          <div>
+            <Label class="text-sm font-medium">
+              {{ legacyT('敏感信息保护') }}
+            </Label>
+            <p class="mt-1 text-xs text-muted-foreground">
+              {{ legacyT(form.chat_pii_redaction_mode === 'inherit' ? '跟随目标用户设置' : '仅覆盖此 API Key') }}
+            </p>
+          </div>
+          <div class="flex items-center gap-2">
+            <Button
+              size="sm"
+              :variant="form.chat_pii_redaction_mode === 'inherit' ? 'default' : 'outline'"
+              @click="updateField('chat_pii_redaction_mode', 'inherit')"
+            >
+              {{ legacyT('跟随用户') }}
+            </Button>
+            <Button
+              size="sm"
+              :variant="form.chat_pii_redaction_mode === 'custom' ? 'default' : 'outline'"
+              @click="updateField('chat_pii_redaction_mode', 'custom')"
+            >
+              {{ legacyT('单独配置') }}
+            </Button>
+          </div>
+        </div>
+        <div
+          v-if="form.chat_pii_redaction_mode === 'custom'"
+          class="flex items-center justify-between gap-3 border-t border-border/50 pt-3"
+        >
           <Label class="text-sm font-medium">
-            {{ legacyT('敏感信息保护') }}
+            {{ legacyT('启用保护') }}
           </Label>
           <Switch
             :model-value="form.chat_pii_redaction_enabled"
             @update:model-value="updateField('chat_pii_redaction_enabled', $event)"
           />
         </div>
-        <div class="flex items-center justify-between gap-3">
+        <div
+          v-if="form.chat_pii_redaction_mode === 'custom' && form.chat_pii_redaction_enabled"
+          class="flex items-center justify-between gap-3 border-t border-border/50 pt-3"
+        >
           <Label class="text-sm font-medium">
             {{ legacyT('占位符说明') }}
           </Label>
@@ -156,6 +188,7 @@ export interface UserApiKeyFormState {
   rate_limit?: number
   concurrent_limit?: number
   ip_rules_text: string
+  chat_pii_redaction_mode: 'inherit' | 'custom'
   chat_pii_redaction_enabled: boolean
   chat_pii_redaction_placeholder_notice: boolean
 }

@@ -127,7 +127,7 @@ fn provider_key_score_input(
         oauth_invalid_reason: key.oauth_invalid_reason.clone(),
         success_count: key.success_count.unwrap_or(0).into(),
         error_count: key.error_count.unwrap_or(0).into(),
-        total_response_time_ms: key.total_response_time_ms.unwrap_or(0).into(),
+        total_response_time_ms: key.total_response_time_ms.unwrap_or(0),
         total_tokens: key.total_tokens,
         total_cost_usd: key.total_cost_usd,
         last_used_at: key.last_used_at_unix_secs,

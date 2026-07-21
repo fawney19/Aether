@@ -14,8 +14,11 @@ export interface UsageRecord {
   provider_id?: string // UUID
   provider_name?: string
   model: string
+  request_type?: string | null
+  requested_reasoning_effort?: string | null
   reasoning_effort?: string | null
   service_tier?: string | null
+  actual_service_tier?: string | null
   input_tokens: number
   effective_input_tokens?: number
   output_tokens: number
@@ -43,6 +46,8 @@ export interface UsageStats {
   total_cost: number
   total_actual_cost?: number
   avg_response_time: number
+  error_count?: number
+  error_rate?: number
   today?: {
     requests: number
     tokens: number
@@ -565,8 +570,11 @@ export const usageApi = {
       has_format_conversion?: boolean | null
       has_fallback?: boolean | null
       target_model?: string | null
+      request_type?: string | null
+      requested_reasoning_effort?: string | null
       reasoning_effort?: string | null
       service_tier?: string | null
+      actual_service_tier?: string | null
       image_progress?: ImageProgress | null
     }>
   }> {

@@ -34,9 +34,10 @@
           <DropdownMenuItem
             v-for="item in items"
             :key="item.model"
+            :title="item.model"
             @select="handleTestModel(item.model)"
           >
-            {{ item.model }}
+            <span class="truncate">{{ item.label }}</span>
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -52,12 +53,14 @@
           :key="item.model"
         >
           <div class="flex items-center justify-between text-[10px] mb-0.5">
-            <span
-              class="text-muted-foreground truncate mr-2 min-w-0 flex-1"
-              :title="item.model"
-            >
-              {{ item.label }}
-            </span>
+            <div class="min-w-0 flex-1 mr-2">
+              <div
+                class="text-muted-foreground truncate"
+                :title="item.model"
+              >
+                {{ item.label }}
+              </div>
+            </div>
             <span :class="getQuotaRemainingClass(item.usedPercent)">
               {{ item.remainingPercent.toFixed(1) }}%
             </span>
@@ -115,6 +118,11 @@ import { testModel } from '@/api/endpoints/providers'
 import type { UpstreamMetadata, QuotaStatusSnapshot, QuotaWindowSnapshot } from '@/api/endpoints/types'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
+import {
+  compareAntigravityQuotaItems,
+  dedupeAntigravityQuotaItemsByLabel,
+  resolveAntigravityQuotaLabel,
+} from '@/features/providers/utils/antigravityQuota'
 
 const props = defineProps<{
   open: boolean
@@ -165,6 +173,25 @@ function getQuotaWindowLiveResetSeconds(
   return null
 }
 
+function coercePercent(value: unknown): number | null {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) return null
+  return Math.min(Math.max(numericValue, 0), 100)
+}
+
+function coerceRemainingFraction(value: unknown): number | null {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) return null
+  return Math.min(Math.max(numericValue, 0), 1)
+}
+
+function secondsUntilUnixReset(resetAt: unknown): number | null {
+  const numericResetAt = Number(resetAt)
+  if (!Number.isFinite(numericResetAt) || numericResetAt <= 0) return null
+  const now = Math.floor(Date.now() / 1000)
+  return Math.max(Math.floor(numericResetAt - now), 0)
+}
+
 function buildItemsFromQuotaSnapshot(quota: QuotaStatusSnapshot | null | undefined): QuotaItem[] {
   if (!quota) return []
 
@@ -175,6 +202,7 @@ function buildItemsFromQuotaSnapshot(quota: QuotaStatusSnapshot | null | undefin
     ? quota.windows.filter(window => String(window?.scope || '').trim().toLowerCase() === 'model')
     : []
   if (windows.length === 0) return []
+  const opaqueDisplayIndex = { value: 1 }
 
   const items = windows
     .map((window) => {
@@ -196,7 +224,7 @@ function buildItemsFromQuotaSnapshot(quota: QuotaStatusSnapshot | null | undefin
 
       return {
         model,
-        label: String(window.label || window.model || model),
+        label: resolveAntigravityQuotaLabel(model, window.label || window.model, opaqueDisplayIndex),
         usedPercent,
         remainingPercent,
         resetSeconds: getQuotaWindowLiveResetSeconds(quota, window),
@@ -204,8 +232,8 @@ function buildItemsFromQuotaSnapshot(quota: QuotaStatusSnapshot | null | undefin
     })
     .filter((item): item is QuotaItem => item !== null)
 
-  items.sort((a, b) => (b.usedPercent - a.usedPercent) || a.model.localeCompare(b.model))
-  return items
+  items.sort(compareAntigravityQuotaItems)
+  return dedupeAntigravityQuotaItemsByLabel(items)
 }
 
 const items = computed<QuotaItem[]>(() => {
@@ -218,26 +246,26 @@ const items = computed<QuotaItem[]>(() => {
   if (!quotaByModel || typeof quotaByModel !== 'object') return []
 
   const result: QuotaItem[] = []
+  const opaqueDisplayIndex = { value: 1 }
   for (const [model, rawInfo] of Object.entries(quotaByModel)) {
     if (!model) continue
     const info = (rawInfo || {}) as Record<string, unknown>
 
-    let usedPercent = Number(info['used_percent'])
-    if (!Number.isFinite(usedPercent)) {
-      const remainingFraction = Number(info['remaining_fraction'])
-      if (Number.isFinite(remainingFraction)) {
+    let usedPercent = coercePercent(info['used_percent'])
+    if (usedPercent === null) {
+      const remainingFraction = coerceRemainingFraction(info['remaining_fraction'])
+      if (remainingFraction !== null) {
         usedPercent = (1 - remainingFraction) * 100
       } else {
         continue
       }
     }
 
-    if (usedPercent < 0) usedPercent = 0
-    if (usedPercent > 100) usedPercent = 100
+    usedPercent = coercePercent(usedPercent) ?? 0
 
     const remainingPercent = Math.max(100 - usedPercent, 0)
 
-    let resetSeconds: number | null = null
+    let resetSeconds = secondsUntilUnixReset(info['reset_at'])
     const resetTime = info['reset_time']
     if (typeof resetTime === 'string' && resetTime.trim()) {
       const ts = Date.parse(resetTime.trim())
@@ -247,11 +275,17 @@ const items = computed<QuotaItem[]>(() => {
       }
     }
 
-    result.push({ model, label: model, usedPercent, remainingPercent, resetSeconds })
+    result.push({
+      model,
+      label: resolveAntigravityQuotaLabel(model, info['display_name'], opaqueDisplayIndex),
+      usedPercent,
+      remainingPercent,
+      resetSeconds,
+    })
   }
 
-  result.sort((a, b) => (b.usedPercent - a.usedPercent) || a.model.localeCompare(b.model))
-  return result
+  result.sort(compareAntigravityQuotaItems)
+  return dedupeAntigravityQuotaItemsByLabel(result)
 })
 
 async function handleTestModel(modelName: string) {

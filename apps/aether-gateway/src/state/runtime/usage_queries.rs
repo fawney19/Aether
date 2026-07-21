@@ -181,6 +181,16 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn summarize_dashboard_stats(
+        &self,
+        query: &usage::UsageDashboardSummaryQuery,
+    ) -> Result<usage::StoredUsageDashboardStatsSummary, GatewayError> {
+        self.data
+            .summarize_dashboard_stats(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn list_dashboard_daily_breakdown(
         &self,
         query: &usage::UsageDashboardDailyBreakdownQuery,

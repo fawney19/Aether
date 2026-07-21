@@ -255,20 +255,28 @@ impl GatewayDataState {
         &self,
         record: &UpsertAdminProviderModelRecord,
     ) -> Result<Option<StoredAdminProviderModel>, DataLayerError> {
-        match &self.global_model_writer {
+        let result = match &self.global_model_writer {
             Some(repository) => repository.create_admin_provider_model(record).await,
             None => Ok(None),
+        };
+        if result.as_ref().is_ok_and(Option::is_some) {
+            self.clear_billing_model_context_cache();
         }
+        result
     }
 
     pub(crate) async fn update_admin_provider_model(
         &self,
         record: &UpsertAdminProviderModelRecord,
     ) -> Result<Option<StoredAdminProviderModel>, DataLayerError> {
-        match &self.global_model_writer {
+        let result = match &self.global_model_writer {
             Some(repository) => repository.update_admin_provider_model(record).await,
             None => Ok(None),
+        };
+        if result.as_ref().is_ok_and(Option::is_some) {
+            self.clear_billing_model_context_cache();
         }
+        result
     }
 
     pub(crate) async fn delete_admin_provider_model(
@@ -276,44 +284,60 @@ impl GatewayDataState {
         provider_id: &str,
         model_id: &str,
     ) -> Result<bool, DataLayerError> {
-        match &self.global_model_writer {
+        let result = match &self.global_model_writer {
             Some(repository) => {
                 repository
                     .delete_admin_provider_model(provider_id, model_id)
                     .await
             }
             None => Ok(false),
+        };
+        if result.as_ref().is_ok_and(|changed| *changed) {
+            self.clear_billing_model_context_cache();
         }
+        result
     }
 
     pub(crate) async fn create_admin_global_model(
         &self,
         record: &CreateAdminGlobalModelRecord,
     ) -> Result<Option<StoredAdminGlobalModel>, DataLayerError> {
-        match &self.global_model_writer {
+        let result = match &self.global_model_writer {
             Some(repository) => repository.create_admin_global_model(record).await,
             None => Ok(None),
+        };
+        if result.as_ref().is_ok_and(Option::is_some) {
+            self.clear_billing_model_context_cache();
         }
+        result
     }
 
     pub(crate) async fn update_admin_global_model(
         &self,
         record: &UpdateAdminGlobalModelRecord,
     ) -> Result<Option<StoredAdminGlobalModel>, DataLayerError> {
-        match &self.global_model_writer {
+        let result = match &self.global_model_writer {
             Some(repository) => repository.update_admin_global_model(record).await,
             None => Ok(None),
+        };
+        if result.as_ref().is_ok_and(Option::is_some) {
+            self.clear_billing_model_context_cache();
         }
+        result
     }
 
     pub(crate) async fn delete_admin_global_model(
         &self,
         global_model_id: &str,
     ) -> Result<bool, DataLayerError> {
-        match &self.global_model_writer {
+        let result = match &self.global_model_writer {
             Some(repository) => repository.delete_admin_global_model(global_model_id).await,
             None => Ok(false),
+        };
+        if result.as_ref().is_ok_and(|changed| *changed) {
+            self.clear_billing_model_context_cache();
         }
+        result
     }
 
     pub(crate) async fn list_provider_model_stats(

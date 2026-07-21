@@ -180,20 +180,22 @@ onMounted(() => {
 
 async function loadConfig() {
   try {
-    const [moduleStatus, deviceKey, serverUrl, template] = await Promise.all([
+    const [moduleStatus, configs] = await Promise.all([
       modulesApi.getStatus('bark_push'),
-      adminApi.getSystemConfig(CONFIG_KEYS.device_key),
-      adminApi.getSystemConfig(CONFIG_KEYS.server_url),
-      adminApi.getSystemConfig(CONFIG_KEYS.template),
+      adminApi.getAllSystemConfigs({ cacheTtlMs: 30_000 }),
     ])
+    const configsByKey = new Map(configs.map(config => [config.key, config]))
+    const deviceKey = configsByKey.get(CONFIG_KEYS.device_key)
+    const serverUrl = configsByKey.get(CONFIG_KEYS.server_url)
+    const template = configsByKey.get(CONFIG_KEYS.template)
 
     enabled.value = moduleStatus.enabled === true
-    deviceKeyIsSet.value = deviceKey.is_set === true
+    deviceKeyIsSet.value = deviceKey?.is_set === true
     deviceKeyInput.value = ''
-    serverUrlInput.value = typeof serverUrl.value === 'string' && serverUrl.value.trim()
+    serverUrlInput.value = typeof serverUrl?.value === 'string' && serverUrl.value.trim()
       ? serverUrl.value
       : DEFAULT_SERVER_URL
-    templateInput.value = typeof template.value === 'string' ? template.value : ''
+    templateInput.value = typeof template?.value === 'string' ? template.value : ''
   } catch (err) {
     error(parseApiError(err, '加载 Bark 推送配置失败'))
     log.error('加载 Bark 推送配置失败:', err)

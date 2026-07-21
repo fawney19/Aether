@@ -68,6 +68,7 @@ pub(crate) use aether_ai_formats::api::{
     OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
 pub(crate) use aether_ai_formats::protocol::stream::CanonicalUsage as StreamingCanonicalUsage;
+pub(crate) use aether_ai_formats::CODEX_RESPONSES_LITE_HEADER;
 
 pub(crate) fn parse_direct_request_body(
     parts: &http::request::Parts,

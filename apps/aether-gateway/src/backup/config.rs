@@ -11,6 +11,7 @@ pub(crate) struct S3BackupConfig {
     pub(crate) scope: BackupScope,
     pub(crate) endpoint: String,
     pub(crate) region: String,
+    pub(crate) user_agent: String,
     pub(crate) bucket: String,
     pub(crate) prefix: String,
     pub(crate) access_key_id: String,
@@ -104,6 +105,8 @@ impl S3BackupConfig {
             endpoint,
             region: optional_string(entries, "backup_s3_region")?
                 .unwrap_or_else(|| "auto".to_string()),
+            user_agent: optional_string(entries, "backup_s3_user_agent")?
+                .unwrap_or_else(|| "rclone/v1.68.0".to_string()),
             bucket,
             prefix: optional_string(entries, "backup_s3_prefix")?
                 .unwrap_or_else(|| "aether/backups/".to_string()),
@@ -179,6 +182,7 @@ fn config_label(key: &str) -> &str {
     match key {
         "backup_s3_endpoint" => "Endpoint（S3 地址）",
         "backup_s3_region" => "Region（S3 区域）",
+        "backup_s3_user_agent" => "User-Agent（请求头标识）",
         "backup_s3_bucket" => "Bucket（存储桶）",
         "backup_s3_prefix" => "Prefix（备份前缀）",
         "backup_s3_access_key_id" => "Access Key ID（访问密钥 ID）",
@@ -384,6 +388,7 @@ mod tests {
 
         assert_eq!(config.scope, BackupScope::Data);
         assert_eq!(config.region, "auto");
+        assert_eq!(config.user_agent, "rclone/v1.68.0");
         assert_eq!(config.prefix, "aether/backups/");
         assert_eq!(config.path_style, true);
         assert_eq!(config.compression, "zstd");

@@ -107,6 +107,7 @@ async fn same_priority_candidates_are_distributed_by_affinity_key() {
         priority: 1,
         api_formats: Some(vec!["openai:chat".to_string()]),
         endpoint_ids: None,
+        operations: None,
     }]);
 
     let mut second = sample_row();
@@ -124,6 +125,7 @@ async fn same_priority_candidates_are_distributed_by_affinity_key() {
         priority: 1,
         api_formats: Some(vec!["openai:chat".to_string()]),
         endpoint_ids: None,
+        operations: None,
     }]);
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
@@ -142,6 +144,7 @@ async fn same_priority_candidates_are_distributed_by_affinity_key() {
         enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
             rows,
             normalized_api_format: "openai:chat",
+            request_operation: None,
             requested_model_name: "gpt-4.1",
             resolved_global_model_name: "gpt-4.1",
             require_streaming: false,

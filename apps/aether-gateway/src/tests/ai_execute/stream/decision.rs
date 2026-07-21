@@ -131,6 +131,7 @@ async fn gateway_executes_openai_chat_stream_via_local_decision_gate_without_exe
                 priority: 1,
                 api_formats: Some(vec!["openai:chat".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -463,8 +464,8 @@ async fn gateway_executes_openai_chat_stream_via_local_openai_responses_cross_fo
         accept: String,
         authorization: String,
         x_client_request_id: String,
-        session_id: String,
-        conversation_id: String,
+        codex_session_id: String,
+        codex_thread_id: String,
         instructions: String,
         user_text: String,
         prompt_cache_key: String,
@@ -535,6 +536,7 @@ async fn gateway_executes_openai_chat_stream_via_local_openai_responses_cross_fo
                 priority: 1,
                 api_formats: Some(vec!["openai:responses".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -742,15 +744,15 @@ async fn gateway_executes_openai_chat_stream_via_local_openai_responses_cross_fo
                             .and_then(|value| value.as_str())
                             .unwrap_or_default()
                             .to_string(),
-                        session_id: payload
+                        codex_session_id: payload
                             .get("headers")
-                            .and_then(|value| value.get("session_id"))
+                            .and_then(|value| value.get("session-id"))
                             .and_then(|value| value.as_str())
                             .unwrap_or_default()
                             .to_string(),
-                        conversation_id: payload
+                        codex_thread_id: payload
                             .get("headers")
-                            .and_then(|value| value.get("conversation_id"))
+                            .and_then(|value| value.get("thread-id"))
                             .and_then(|value| value.as_str())
                             .unwrap_or_default()
                             .to_string(),
@@ -889,19 +891,16 @@ async fn gateway_executes_openai_chat_stream_via_local_openai_responses_cross_fo
     );
     assert_eq!(
         seen_execution_runtime_request.x_client_request_id,
-        "trace-openai-chat-cli-local-123"
+        seen_execution_runtime_request.codex_thread_id
     );
     assert_eq!(
-        seen_execution_runtime_request.prompt_cache_key,
-        "bc749eb7-a9e2-5793-8d14-abd659c700b0"
+        seen_execution_runtime_request.codex_session_id,
+        seen_execution_runtime_request.codex_thread_id
     );
-    assert_eq!(
-        seen_execution_runtime_request.session_id,
-        "d1e9b802644e1f52"
-    );
-    assert_eq!(
-        seen_execution_runtime_request.conversation_id,
-        "d1e9b802644e1f52"
+    assert!(seen_execution_runtime_request.prompt_cache_key.is_empty());
+    assert_ne!(
+        seen_execution_runtime_request.codex_thread_id,
+        seen_execution_runtime_request.trace_id
     );
     assert_eq!(
         seen_execution_runtime_request.instructions,
@@ -1023,6 +1022,7 @@ async fn gateway_executes_openai_chat_stream_via_local_cross_format_gemini_candi
                 priority: 1,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1461,6 +1461,7 @@ async fn gateway_executes_openai_chat_stream_with_custom_path_via_local_decision
                 priority: 1,
                 api_formats: Some(vec!["openai:chat".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1964,6 +1965,7 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
                 priority: 1,
                 api_formats: Some(vec!["openai:chat".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,

@@ -13,7 +13,7 @@ const AUTH_API_KEY_SNAPSHOT_RUNTIME_CACHE_TTL: Duration = Duration::from_secs(30
 use super::super::super::{AUTH_API_KEY_LAST_USED_MAX_ENTRIES, AUTH_API_KEY_LAST_USED_TTL};
 
 impl AppState {
-    async fn acquire_auth_snapshot_load_gate(
+    pub(crate) async fn acquire_auth_snapshot_load_gate(
         &self,
     ) -> Result<Option<aether_runtime::ConcurrencyPermit>, GatewayError> {
         let Some(gate) = self.auth_snapshot_load_gate.as_ref() else {

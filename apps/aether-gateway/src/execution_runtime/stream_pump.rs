@@ -676,6 +676,14 @@ fn should_buffer_non_stream_response(
         return false;
     }
 
+    if report_context
+        .get("upstream_is_stream")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        return true;
+    }
+
     headers
         .get("content-length")
         .and_then(|value| value.trim().parse::<u64>().ok())
@@ -1134,22 +1142,36 @@ mod tests {
     }
 
     #[test]
-    fn buffers_non_sse_response_only_when_content_length_is_known() {
-        let report_context = serde_json::json!({
+    fn buffers_declared_non_stream_responses_without_relying_on_content_length() {
+        let streaming_context = serde_json::json!({
             "provider_api_format": "openai:chat",
             "client_api_format": "openai:chat",
+            "upstream_is_stream": true,
+        });
+        let non_stream_context = serde_json::json!({
+            "provider_api_format": "openai:image",
+            "client_api_format": "openai:responses",
+            "upstream_is_stream": false,
         });
 
         assert!(!should_buffer_non_stream_response(
             &BTreeMap::from([("content-type".into(), "application/json".into())]),
-            &report_context
+            &streaming_context
+        ));
+        assert!(should_buffer_non_stream_response(
+            &BTreeMap::from([("content-type".into(), "application/json".into())]),
+            &non_stream_context
         ));
         assert!(should_buffer_non_stream_response(
             &BTreeMap::from([
                 ("content-type".into(), "application/json".into()),
                 ("content-length".into(), "128".into()),
             ]),
-            &report_context
+            &streaming_context
+        ));
+        assert!(!should_buffer_non_stream_response(
+            &BTreeMap::from([("content-type".into(), "text/event-stream".into())]),
+            &non_stream_context
         ));
     }
 
@@ -1567,33 +1589,48 @@ mod tests {
             .await
             .expect("listener should bind");
         let addr = listener.local_addr().expect("local addr should resolve");
+        let generated_image = "a".repeat(32 * 1024);
+        let expected_image = generated_image.clone();
         let server = tokio::spawn(async move {
             let app = Router::new().route(
-                "/responses",
-                post(|| async {
-                    let body = serde_json::json!({
-                        "created": 1776971267_u64,
-                        "data": [{
-                            "b64_json": "aGVsbG8="
-                        }],
-                        "usage": {
-                            "total_tokens": 100,
-                            "input_tokens": 50,
-                            "output_tokens": 50,
-                            "input_tokens_details": {
-                                "text_tokens": 10,
-                                "image_tokens": 40
+                "/images/generations",
+                post(move || {
+                    let generated_image = generated_image.clone();
+                    async move {
+                        let body = serde_json::json!({
+                            "created": 1776971267_u64,
+                            "data": [{
+                                "b64_json": generated_image
+                            }],
+                            "usage": {
+                                "total_tokens": 100,
+                                "input_tokens": 50,
+                                "output_tokens": 50,
+                                "input_tokens_details": {
+                                    "text_tokens": 10,
+                                    "image_tokens": 40
+                                }
                             }
-                        }
-                    });
-                    let mut response = axum::http::Response::new(Body::from(
-                        serde_json::to_vec(&body).expect("json should encode"),
-                    ));
-                    response.headers_mut().insert(
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/json"),
-                    );
-                    response
+                        });
+                        let encoded = serde_json::to_vec(&body).expect("json should encode");
+                        let chunks = encoded
+                            .chunks(4096)
+                            .map(Bytes::copy_from_slice)
+                            .collect::<Vec<_>>();
+                        let chunked_body = stream! {
+                            for chunk in chunks {
+                                yield Ok::<Bytes, Infallible>(chunk);
+                                tokio::task::yield_now().await;
+                            }
+                        };
+                        let mut response =
+                            axum::http::Response::new(Body::from_stream(chunked_body));
+                        response.headers_mut().insert(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/json"),
+                        );
+                        response
+                    }
                 }),
             );
             axum::serve(listener, app)
@@ -1611,16 +1648,15 @@ mod tests {
                 endpoint_id: "endpoint-1".to_string(),
                 key_id: "key-1".to_string(),
                 method: "POST".to_string(),
-                url: format!("http://{addr}/responses"),
+                url: format!("http://{addr}/images/generations"),
                 headers: BTreeMap::new(),
                 content_type: None,
                 content_encoding: None,
                 body: RequestBody::from_json(serde_json::json!({
                     "model": "gpt-image-1",
-                    "prompt": "poster",
-                    "stream": true
+                    "prompt": "poster"
                 })),
-                stream: true,
+                stream: false,
                 client_api_format: "openai:image".to_string(),
                 provider_api_format: "openai:image".to_string(),
                 model_name: Some("gpt-image-1".into()),
@@ -1673,7 +1709,8 @@ mod tests {
         let bridged_text = String::from_utf8(bridged_body).expect("bridged body should be utf8");
         assert!(bridged_text.contains("event: image_generation.completed"));
         assert!(bridged_text.contains("\"type\":\"image_generation.completed\""));
-        assert!(bridged_text.contains("\"b64_json\":\"aGVsbG8=\""));
+        assert!(bridged_text.contains(&format!("\"b64_json\":\"{expected_image}\"")));
+        assert!(bridged_text.len() > 32 * 1024);
         assert!(bridged_text.contains("\"total_tokens\":100"));
 
         let eof_frame = frames

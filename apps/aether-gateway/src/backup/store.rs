@@ -6,7 +6,8 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path;
-use object_store::ObjectStore;
+use object_store::{ClientOptions, ObjectStore};
+use reqwest::header::HeaderValue;
 use tokio::sync::RwLock;
 
 use super::config::S3BackupConfig;
@@ -84,7 +85,19 @@ pub(crate) struct ObjectStoreS3BackupStore {
 
 impl ObjectStoreS3BackupStore {
     pub(crate) fn from_config(config: &S3BackupConfig) -> Result<Self, BackupStoreError> {
+        // 部分 S3 兼容网关（如中国科技云 s3.cstcloud.cn）按 User-Agent 放行请求，
+        // object_store 默认 UA 会被拒，因此允许自定义 User-Agent。
+        let client_options = if config.user_agent.trim().is_empty() {
+            ClientOptions::new()
+        } else {
+            ClientOptions::new().with_user_agent(
+                HeaderValue::from_str(config.user_agent.trim()).map_err(|error| {
+                    BackupStoreError::new(format!("S3 备份 User-Agent 配置无效: {error}"))
+                })?,
+            )
+        };
         let store = AmazonS3Builder::new()
+            .with_client_options(client_options)
             .with_endpoint(config.endpoint.clone())
             .with_region(config.region.clone())
             .with_bucket_name(config.bucket.clone())

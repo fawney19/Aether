@@ -101,7 +101,6 @@ vi.mock('lucide-vue-next', async () => {
     Clock: Icon,
     Database: Icon,
     Shuffle: Icon,
-    RefreshCw: Icon,
   }
 })
 
@@ -166,5 +165,29 @@ describe('Dashboard ordinary user wallet card', () => {
 
     expect(root.textContent).toContain('$110.00')
     expect(root.textContent).toContain('套餐额度 $100.00 · 钱包余额 $10.00')
+  })
+})
+
+describe('Dashboard refresh controls', () => {
+  it('does not render or run automatic refresh', async () => {
+    vi.useFakeTimers()
+    dashboardApiMocks.getStats.mockResolvedValue({ stats: [] })
+
+    try {
+      const root = mountDashboard()
+      await settle()
+
+      expect(root.textContent).not.toContain('自动刷新')
+      expect(dashboardApiMocks.getStats).toHaveBeenCalledTimes(1)
+      expect(dashboardApiMocks.getDailyStats).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await settle()
+
+      expect(dashboardApiMocks.getStats).toHaveBeenCalledTimes(1)
+      expect(dashboardApiMocks.getDailyStats).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

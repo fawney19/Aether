@@ -1,4 +1,5 @@
 const PLAN_TYPE_LABELS: Record<string, string> = {
+  self_serve_business_usage_based: 'Codex',
   free: 'Free',
   plus: 'Plus',
   team: 'Team',

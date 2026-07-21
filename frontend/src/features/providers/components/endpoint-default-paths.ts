@@ -91,6 +91,7 @@ function usesVersionedApiRootByDefault(apiFormat: string): boolean {
   return apiFormat === 'openai:chat'
     || apiFormat === 'openai:responses'
     || apiFormat === 'openai:responses:compact'
+    || apiFormat === 'openai:search'
     || apiFormat === 'openai:embedding'
     || apiFormat === 'openai:rerank'
     || apiFormat === 'openai:image'
@@ -99,11 +100,17 @@ function usesVersionedApiRootByDefault(apiFormat: string): boolean {
     || apiFormat === 'jina:rerank'
     || apiFormat === 'claude:messages'
     || apiFormat === 'gemini:generate_content'
+    || apiFormat === 'gemini:interactions'
     || apiFormat === 'gemini:embedding'
     || apiFormat === 'gemini:video'
 }
 
 function versionedApiRootSuffix(apiFormat: string): '/v1' | '/v1beta' {
+  if (
+    apiFormat === 'gemini:interactions'
+  ) {
+    return '/v1'
+  }
   if (
     apiFormat === 'gemini:generate_content'
     || apiFormat === 'gemini:embedding'
@@ -117,12 +124,14 @@ function versionedApiRootSuffix(apiFormat: string): '/v1' | '/v1beta' {
 function skipsVersionedApiRootDefault(apiFormat: string, baseUrl: string): boolean {
   if (
     apiFormat === 'gemini:generate_content'
+    || apiFormat === 'gemini:interactions'
     || apiFormat === 'gemini:embedding'
     || apiFormat === 'gemini:video'
   ) {
     return false
   }
   return isDeepSeekApiRoot(baseUrl)
+    || isCodexUrl(baseUrl)
     || isGlmCodingApiRoot(baseUrl)
     || isGoogleOpenAiCompatApiRoot(baseUrl)
     || isVertexOpenAiCompatApiRoot(baseUrl)
@@ -191,6 +200,9 @@ export function getDefaultEndpointPath(params: {
     : (!!params.baseUrl && isCodexUrl(params.baseUrl))
   if (normalizedApiFormat === 'openai:responses' && isCodex) {
     return '/responses'
+  }
+  if (normalizedApiFormat === 'openai:search' && isCodex) {
+    return '/alpha/search'
   }
   if (usesVersionedApiRootByDefault(normalizedApiFormat)) {
     return stripVersionPrefixForApiRoot(defaultPath)

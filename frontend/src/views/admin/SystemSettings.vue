@@ -83,6 +83,7 @@
             :enable-format-conversion="systemConfig.enable_format_conversion"
             :enable-openai-image-sync-heartbeat="systemConfig.enable_openai_image_sync_heartbeat"
             :enable-standard-text-sync-heartbeat="systemConfig.enable_standard_text_sync_heartbeat"
+            :cyber-continue-failover="systemConfig.cyber_continue_failover"
             :loading="systemConfigLoading || basicConfigLoading"
             :has-changes="hasBasicConfigChanges"
             @save="saveBasicConfig"
@@ -108,6 +109,7 @@
             @update:enable-format-conversion="systemConfig.enable_format_conversion = $event"
             @update:enable-openai-image-sync-heartbeat="systemConfig.enable_openai_image_sync_heartbeat = $event"
             @update:enable-standard-text-sync-heartbeat="systemConfig.enable_standard_text_sync_heartbeat = $event"
+            @update:cyber-continue-failover="systemConfig.cyber_continue_failover = $event"
           />
 
           <!-- 请求记录配置 -->

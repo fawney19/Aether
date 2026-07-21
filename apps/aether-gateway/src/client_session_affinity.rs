@@ -101,6 +101,29 @@ pub(crate) fn client_session_affinity_from_request(
     client_session_scope_from_request(headers, body_json)?.scheduler_affinity()
 }
 
+pub(crate) fn client_session_affinity_from_api_request(
+    api_format: &str,
+    headers: &http::HeaderMap,
+    body_json: Option<&Value>,
+) -> Option<ClientSessionAffinity> {
+    client_session_scope_from_api_request(api_format, headers, body_json)?.scheduler_affinity()
+}
+
+fn client_session_scope_from_api_request(
+    api_format: &str,
+    headers: &http::HeaderMap,
+    body_json: Option<&Value>,
+) -> Option<ClientSessionScope> {
+    if api_format.trim().eq_ignore_ascii_case("openai:search") {
+        let request = ClientSessionRequest { headers, body_json };
+        return explicit_aether_session_scope(&request, CodexSessionScopeAdapter.family())
+            .or_else(|| codex_search_session_scope(&request))
+            .or_else(|| client_session_scope_from_request(headers, body_json));
+    }
+
+    client_session_scope_from_request(headers, body_json)
+}
+
 pub(crate) fn client_session_scope_from_request(
     headers: &http::HeaderMap,
     body_json: Option<&Value>,
@@ -111,6 +134,22 @@ pub(crate) fn client_session_scope_from_request(
         .or_else(|| extract_scope_for_client_family(&request, client_family.as_str()))
         .or_else(|| extract_generic_scope_for_client_family(&request, client_family.as_str()))
         .or_else(|| extract_scope_from_other_specific_adapters(&request, client_family.as_str()))
+}
+
+fn codex_search_session_scope(request: &ClientSessionRequest<'_>) -> Option<ClientSessionScope> {
+    let session_id = request
+        .body_json?
+        .get("id")?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(ClientSessionScope::new(
+        CodexSessionScopeAdapter.family(),
+        session_id,
+        None,
+        header_value_str(request.headers, "chatgpt-account-id"),
+        ClientSessionSignalSource::Body,
+    ))
 }
 
 pub(crate) fn client_session_affinity_from_parts(
@@ -307,7 +346,9 @@ impl ClientSessionScopeAdapter for GenericSessionScopeAdapter {
     }
 
     fn extract_scope(&self, request: &ClientSessionRequest<'_>) -> Option<ClientSessionScope> {
-        if let Some(root_session) = header_value_str(request.headers, "session_id")
+        if let Some(root_session) = header_value_str(request.headers, "session-id")
+            .or_else(|| header_value_str(request.headers, "thread-id"))
+            .or_else(|| header_value_str(request.headers, "session_id"))
             .or_else(|| header_value_str(request.headers, "conversation_id"))
         {
             return Some(ClientSessionScope::new(
@@ -367,7 +408,9 @@ impl ClientSessionScopeAdapter for CodexSessionScopeAdapter {
     }
 
     fn extract_scope(&self, request: &ClientSessionRequest<'_>) -> Option<ClientSessionScope> {
-        header_value_str(request.headers, "session_id")
+        header_value_str(request.headers, "session-id")
+            .or_else(|| header_value_str(request.headers, "thread-id"))
+            .or_else(|| header_value_str(request.headers, "session_id"))
             .or_else(|| header_value_str(request.headers, "conversation_id"))
             .map(|root_session| {
                 ClientSessionScope::new(
@@ -785,6 +828,7 @@ fn has_header_with_prefix(headers: &http::HeaderMap, prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
+        client_session_affinity_from_api_request,
         client_session_affinity_from_report_context_value, client_session_affinity_from_request,
         client_session_affinity_report_context_value, client_session_scope_from_request,
         ClientSessionSignalSource, AETHER_AGENT_ID_HEADER, AETHER_SESSION_ID_HEADER,
@@ -841,9 +885,10 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::USER_AGENT,
-            HeaderValue::from_static("codex-tui/0.122.0"),
+            HeaderValue::from_static("codex_cli_rs/0.144.1"),
         );
-        headers.insert("session_id", HeaderValue::from_static("codex-session"));
+        headers.insert("session-id", HeaderValue::from_static("codex-session"));
+        headers.insert("thread-id", HeaderValue::from_static("codex-thread"));
 
         let affinity =
             client_session_affinity_from_request(&headers, None).expect("affinity should build");
@@ -860,7 +905,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::USER_AGENT,
-            HeaderValue::from_static("codex-tui/0.122.0"),
+            HeaderValue::from_static("codex_cli_rs/0.144.1"),
         );
         headers.insert(
             "x-client-request-id",
@@ -1119,5 +1164,29 @@ mod tests {
         let body = json!({"model": "gpt-5"});
 
         assert!(client_session_affinity_from_request(&headers, Some(&body)).is_none());
+    }
+
+    #[test]
+    fn codex_search_uses_request_id_as_session_affinity() {
+        let mut headers = HeaderMap::new();
+        headers.insert("chatgpt-account-id", HeaderValue::from_static("account-1"));
+        let body = json!({"id": "codex-session-1", "model": "gpt-5.6"});
+
+        let affinity =
+            client_session_affinity_from_api_request("openai:search", &headers, Some(&body))
+                .expect("search affinity should build");
+
+        assert_eq!(affinity.client_family.as_deref(), Some("codex"));
+        assert_eq!(
+            affinity.session_key.as_deref(),
+            Some("account=account-1;session=codex-session-1")
+        );
+    }
+
+    #[test]
+    fn top_level_request_id_is_not_a_generic_session_signal() {
+        let body = json!({"id": "request-id", "model": "gpt-5.6"});
+
+        assert!(client_session_affinity_from_request(&HeaderMap::new(), Some(&body)).is_none());
     }
 }

@@ -169,6 +169,7 @@ mod tests {
             global_model_id: "global-model-1".to_string(),
             global_model_name: "gpt-test".to_string(),
             selected_provider_model_name: "gpt-test-upstream".to_string(),
+            supports_streaming: true,
             mapping_matched_model: None,
         }
     }

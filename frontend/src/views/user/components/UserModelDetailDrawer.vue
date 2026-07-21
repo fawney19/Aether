@@ -173,6 +173,8 @@
                 定价信息
               </h4>
 
+              <ProcessingTierPricingSummary :pricing="model.default_tiered_pricing" />
+
               <!-- 单阶梯（固定价格）展示 -->
               <div
                 v-if="getTierCount(model.default_tiered_pricing) <= 1"
@@ -336,6 +338,7 @@ import TableRow from '@/components/ui/table-row.vue'
 import TableHead from '@/components/ui/table-head.vue'
 import TableCell from '@/components/ui/table-cell.vue'
 import { formatTokens } from '@/utils/format'
+import ProcessingTierPricingSummary from '@/features/models/components/ProcessingTierPricingSummary.vue'
 
 import type { PublicGlobalModel } from '@/api/public-models'
 import type { TieredPricingConfig, PricingTier } from '@/api/endpoints/types'

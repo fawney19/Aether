@@ -170,7 +170,7 @@ async fn execute_model_fetch_strategy(
             true,
         )),
         ModelFetchStrategyKind::StandardTransport => {
-            fetch_standard_models(runtime, transports).await
+            fetch_standard_models(runtime, transports, strategy.provider_id()).await
         }
         ModelFetchStrategyKind::Vertex => fetch_vertex_models(runtime, transports).await,
         ModelFetchStrategyKind::Antigravity => {
@@ -192,6 +192,7 @@ async fn execute_model_fetch_strategy(
 async fn fetch_standard_models(
     runtime: &(impl ModelFetchTransportRuntime + ?Sized),
     transports: &[GatewayProviderTransportSnapshot],
+    provider_type: &str,
 ) -> Result<ModelsFetchOutcome, String> {
     let mut all_models = Vec::new();
     let mut errors = Vec::new();
@@ -208,7 +209,9 @@ async fn fetch_standard_models(
     }
 
     let merged_models = aggregate_models_for_cache(&all_models);
-    Ok(build_success_outcome(merged_models, None, has_success).with_errors(errors))
+    let upstream_metadata =
+        crate::logic::model_catalog_upstream_metadata(provider_type, &merged_models);
+    Ok(build_success_outcome(merged_models, upstream_metadata, has_success).with_errors(errors))
 }
 
 async fn fetch_standard_models_for_transport(
@@ -1996,7 +1999,11 @@ mod tests {
             executed_urls: Arc::clone(&executed_urls),
             response_body: json!({
                 "models": [{
-                    "id": "gpt-5.4-upstream"
+                    "id": "gpt-5.6-future",
+                    "slug": "gpt-5.6-future",
+                    "default_reasoning_level": "high",
+                    "supported_reasoning_levels": [{"effort": "high"}],
+                    "future_capability": {"mode": "preserve-me"}
                 }]
             }),
             status_code: 200,
@@ -2008,10 +2015,16 @@ mod tests {
         let urls = executed_urls.lock().expect("executed_urls lock");
         assert_eq!(
             urls.as_slice(),
-            &["https://chatgpt.com/backend-api/codex/models?client_version=0.128.0-alpha.1"]
+            &["https://chatgpt.com/backend-api/codex/models?client_version=0.144.1"]
         );
-        assert_eq!(outcome.fetched_model_ids, vec!["gpt-5.4-upstream"]);
+        assert_eq!(outcome.fetched_model_ids, vec!["gpt-5.6-future"]);
         assert_eq!(outcome.cached_models.len(), 1);
+        let card = &outcome
+            .upstream_metadata
+            .as_ref()
+            .expect("Codex model catalog metadata")["codex_models"]["cards"]["gpt-5.6-future"];
+        assert_eq!(card["default_reasoning_level"], "high");
+        assert_eq!(card["future_capability"]["mode"], "preserve-me");
     }
 
     #[tokio::test]

@@ -243,7 +243,11 @@ fn local_client_session_affinity(report_context: Option<&Value>) -> Option<Clien
         .get("original_request_body")
         .filter(|value| !value.is_null());
 
-    crate::client_session_affinity::client_session_affinity_from_request(&headers, body_json)
+    crate::client_session_affinity::client_session_affinity_from_api_request(
+        report_context_string_field(Some(report_context), "client_api_format").unwrap_or_default(),
+        &headers,
+        body_json,
+    )
 }
 
 fn header_map_from_report_context(headers: Option<&Value>) -> http::HeaderMap {
@@ -1279,7 +1283,7 @@ mod tests {
     use aether_data_contracts::repository::provider_catalog::{
         StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
-    use aether_testkit::ManagedRedisServer;
+    use aether_test_support::ManagedRedisServer;
     use serde_json::{json, Value};
 
     use super::{

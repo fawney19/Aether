@@ -107,16 +107,9 @@ pub(crate) async fn build_admin_create_provider_record(
         None => Some(2),
     };
     let proxy = normalize_json_object(payload.proxy, "proxy")?;
-    let stream_first_byte_timeout_secs = match payload.stream_first_byte_timeout {
-        Some(value) if (1.0..=300.0).contains(&value) => Some(value),
-        Some(_) => return Err("stream_first_byte_timeout 必须是 1 到 300 之间的数字".to_string()),
-        None => None,
-    };
-    let request_timeout_secs = match payload.request_timeout {
-        Some(value) if (1.0..=600.0).contains(&value) => Some(value),
-        Some(_) => return Err("request_timeout 必须是 1 到 600 之间的数字".to_string()),
-        None => None,
-    };
+    let stream_first_byte_timeout_secs =
+        super::normalize_provider_stream_first_byte_timeout(payload.stream_first_byte_timeout)?;
+    let request_timeout_secs = super::normalize_provider_request_timeout(payload.request_timeout)?;
 
     let mut config_map = normalize_json_object(payload.config, "config")?
         .and_then(|value| value.as_object().cloned())

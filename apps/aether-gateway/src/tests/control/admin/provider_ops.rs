@@ -10,7 +10,7 @@ use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadReposi
 use aether_data::repository::proxy_nodes::InMemoryProxyNodeRepository;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
 use aether_runtime_state::{RedisClientConfig, RuntimeState};
-use aether_testkit::ManagedRedisServer;
+use aether_test_support::ManagedRedisServer;
 use axum::body::to_bytes;
 use axum::body::Body;
 use axum::routing::{any, get, post};

@@ -203,7 +203,7 @@
               :model-value="form.request_timeout ?? ''"
               type="number"
               min="1"
-              max="600"
+              max="1200"
               step="1"
               placeholder="300"
               @update:model-value="(v) => form.request_timeout = parseNumberInput(v)"

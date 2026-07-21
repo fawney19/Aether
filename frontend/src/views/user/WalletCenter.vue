@@ -781,6 +781,9 @@ const refundPage = ref(1)
 const refundPageSize = ref(20)
 
 const activeTab = ref('transactions')
+const loadedTabs = new Set<string>()
+const tabLoadPromises = new Map<string, Promise<void>>()
+let refundEligibilityLoaded = false
 let todayCostPollTimer: ReturnType<typeof setInterval> | null = null
 
 const rechargeForm = reactive({
@@ -909,10 +912,6 @@ onMounted(async () => {
     await Promise.all([
       loadBalance(),
       loadTransactions(),
-      loadTodayCost(),
-      loadOrders(),
-      loadRefunds(),
-      loadRefundEligibility(),
       loadRechargeOptions(),
     ])
     syncTodayCostPolling()
@@ -926,8 +925,9 @@ onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 
-watch(activeTab, () => {
+watch(activeTab, (tab) => {
   syncTodayCostPolling()
+  void loadActiveTab(tab)
 })
 
 watch(refundableOrders, () => {
@@ -961,6 +961,7 @@ async function loadTransactions() {
     flowItems.value = resp.items
     txTotal.value = resp.total
     todayUsage.value = resp.today_entry
+    loadedTabs.add('transactions')
   } catch (error) {
     log.error('加载钱包流水失败:', error)
     showError(parseApiError(error, '加载钱包流水失败'))
@@ -1009,6 +1010,7 @@ async function loadOrders() {
     const resp = await walletApi.listRechargeOrders({ limit: orderPageSize.value, offset })
     rechargeOrders.value = resp.items
     orderTotal.value = resp.total
+    loadedTabs.add('orders')
     syncRefundOrderSelection()
   } catch (error) {
     log.error('加载充值订单失败:', error)
@@ -1027,6 +1029,7 @@ async function loadRefundEligibility() {
         .map(item => item.trim().toLowerCase())
         .filter(Boolean)
     )
+    refundEligibilityLoaded = true
     syncRefundOrderSelection()
   } catch (error) {
     refundEligiblePaymentMethods.value = new Set()
@@ -1043,12 +1046,38 @@ async function loadRefunds() {
     const resp = await walletApi.listRefunds({ limit: refundPageSize.value, offset })
     refunds.value = resp.items
     refundTotal.value = resp.total
+    loadedTabs.add('refunds')
   } catch (error) {
     log.error('加载退款记录失败:', error)
     showError(parseApiError(error, '加载退款记录失败'))
   } finally {
     loadingRefunds.value = false
   }
+}
+
+function loadActiveTab(tab: string): Promise<void> {
+  const tabIsLoaded = tab === 'refunds'
+    ? loadedTabs.has('refunds') && loadedTabs.has('orders') && refundEligibilityLoaded
+    : loadedTabs.has(tab)
+  if (tabIsLoaded) return Promise.resolve()
+  const existing = tabLoadPromises.get(tab)
+  if (existing) return existing
+
+  const request = (async () => {
+    if (tab === 'orders') {
+      await loadOrders()
+    } else if (tab === 'refunds') {
+      const requests: Promise<void>[] = []
+      if (!loadedTabs.has('refunds')) requests.push(loadRefunds())
+      if (!refundEligibilityLoaded) requests.push(loadRefundEligibility())
+      if (!loadedTabs.has('orders')) requests.push(loadOrders())
+      await Promise.all(requests)
+    }
+  })().finally(() => {
+    if (tabLoadPromises.get(tab) === request) tabLoadPromises.delete(tab)
+  })
+  tabLoadPromises.set(tab, request)
+  return request
 }
 
 async function refreshRefundPanel() {

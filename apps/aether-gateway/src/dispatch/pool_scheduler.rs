@@ -1238,7 +1238,7 @@ fn build_pool_catalog_key_context(
         .filter(|count| *count > 0)
         .zip(key.total_response_time_ms)
         .map(|(success_count, total_response_time_ms)| {
-            f64::from(total_response_time_ms) / f64::from(success_count)
+            total_response_time_ms as f64 / f64::from(success_count)
         })
         .filter(|value| value.is_finite() && *value >= 0.0);
 
@@ -4172,6 +4172,7 @@ mod tests {
                 global_model_id: "global-model-1".to_string(),
                 global_model_name: "gpt-5".to_string(),
                 selected_provider_model_name: "gpt-5".to_string(),
+                supports_streaming: true,
                 mapping_matched_model: None,
             },
             provider_api_format: "openai:responses".to_string(),
@@ -4285,6 +4286,7 @@ mod tests {
                 global_model_id: "global-model-1".to_string(),
                 global_model_name: "gpt-5".to_string(),
                 selected_provider_model_name: "gpt-5".to_string(),
+                supports_streaming: true,
                 mapping_matched_model: None,
             },
             provider_api_format: "openai:chat".to_string(),

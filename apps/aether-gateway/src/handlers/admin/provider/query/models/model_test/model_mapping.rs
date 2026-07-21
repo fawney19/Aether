@@ -101,8 +101,7 @@ fn provider_query_model_mapping_matches_endpoint(
 ) -> bool {
     let api_format_matches = mapping.api_formats.as_ref().is_none_or(|api_formats| {
         api_formats.iter().any(|value| {
-            aether_scheduler_core::normalize_api_format(value)
-                == aether_scheduler_core::normalize_api_format(&endpoint.api_format)
+            crate::ai_serving::api_format_permission_covers(value, &endpoint.api_format)
         })
     });
     if !api_format_matches {
@@ -214,6 +213,7 @@ fn provider_query_parse_embedded_provider_model_mappings(
         priority: 1,
         api_formats: None,
         endpoint_ids: None,
+        operations: None,
     }]))
 }
 
@@ -238,6 +238,7 @@ fn provider_query_parse_provider_model_mappings_array(
                         priority: 1,
                         api_formats: None,
                         endpoint_ids: None,
+                        operations: None,
                     });
                 }
             }
@@ -294,6 +295,11 @@ fn provider_query_parse_provider_model_mapping_object_lenient(
         object.get("endpoint_ids"),
         "models.provider_model_mappings.endpoint_ids",
     )?;
+    let operations = provider_query_parse_mapping_string_list(
+        object.get("operations"),
+        "models.provider_model_mappings.operations",
+    )?
+    .and_then(provider_query_normalize_request_operations);
 
     Ok(Some(StoredProviderModelMapping {
         name: name.to_string(),
@@ -304,7 +310,17 @@ fn provider_query_parse_provider_model_mapping_object_lenient(
         })?,
         api_formats,
         endpoint_ids,
+        operations,
     }))
+}
+
+fn provider_query_normalize_request_operations(values: Vec<String>) -> Option<Vec<String>> {
+    let operations = values
+        .into_iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    (!operations.is_empty()).then_some(operations)
 }
 
 fn provider_query_parse_mapping_string_list(
@@ -366,4 +382,43 @@ fn provider_query_parse_mapping_string_list_array(
         }
     }
     Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_endpoint(api_format: &str) -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            "endpoint-1".to_string(),
+            "provider-1".to_string(),
+            api_format.to_string(),
+            None,
+            None,
+            true,
+        )
+        .expect("endpoint should build")
+    }
+
+    fn sample_mapping(api_format: &str) -> StoredProviderModelMapping {
+        StoredProviderModelMapping {
+            name: "gpt-5.6-luna".to_string(),
+            priority: 1,
+            api_formats: Some(vec![api_format.to_string()]),
+            endpoint_ids: None,
+            operations: None,
+        }
+    }
+
+    #[test]
+    fn responses_mapping_scope_covers_search_in_one_direction() {
+        assert!(provider_query_model_mapping_matches_endpoint(
+            &sample_mapping("openai:responses"),
+            &sample_endpoint("openai:search"),
+        ));
+        assert!(!provider_query_model_mapping_matches_endpoint(
+            &sample_mapping("openai:search"),
+            &sample_endpoint("openai:responses"),
+        ));
+    }
 }

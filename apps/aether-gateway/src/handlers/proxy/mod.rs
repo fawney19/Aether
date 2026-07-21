@@ -1,5 +1,10 @@
+mod body_buffer;
 mod local;
 
+use self::body_buffer::{
+    buffer_and_normalize_request_body, build_request_body_buffer_error_response,
+    RequestBodyBufferError, RequestBodyBufferPolicy,
+};
 use self::local::{
     maybe_build_local_admin_proxy_response, maybe_build_local_internal_proxy_response,
 };
@@ -51,8 +56,8 @@ use crate::handlers::shared::{
     should_strip_forwarded_provider_credential_header, should_strip_forwarded_trusted_admin_header,
 };
 use crate::headers::{
-    extract_or_generate_trace_id, request_origin_from_headers_and_remote_addr,
-    should_skip_request_header, RequestBodyNormalizationError,
+    effective_client_ip, extract_or_generate_trace_id, request_origin_from_headers_and_remote_addr,
+    should_skip_request_header,
 };
 use crate::router::RequestAdmissionError;
 use crate::scheduler::candidate::{
@@ -70,11 +75,7 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{self, header::HeaderName, header::HeaderValue, Response};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
-use std::{
-    collections::BTreeMap,
-    error::Error as StdError,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, time::Instant};
 use tracing::{debug, info, warn};
 
 const OPENAI_CHAT_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
@@ -83,6 +84,8 @@ const OPENAI_RESPONSES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
     "当前 OpenAI Responses 请求无法在本地执行：没有匹配到可用的执行路径";
 const OPENAI_RESPONSES_COMPACT_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
     "当前 OpenAI Responses Compact 请求无法在本地执行：没有匹配到可用的执行路径";
+const OPENAI_SEARCH_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
+    "当前 OpenAI Search 请求无法在本地执行：没有匹配到可用的执行路径";
 const OPENAI_VIDEO_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
     "当前 OpenAI Video 请求无法在本地执行：没有匹配到可用的执行路径";
 const CLAUDE_MESSAGES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
@@ -98,201 +101,11 @@ const LOCAL_EXECUTION_LOOP_DETECTED_DETAIL: &str =
     "Gateway detected an execution runtime request loop back into the local frontdoor";
 const AUTH_API_KEY_CONCURRENCY_LIMIT_REACHED_DETAIL: &str =
     "当前调用方 API Key 并发请求数已达上限，请稍后重试";
-const REQUEST_BODY_READ_TIMEOUT_DETAIL: &str =
-    "Request body read timed out before the gateway could route the request";
-const REQUEST_BODY_READ_FAILED_DETAIL: &str = "Failed to read request body";
 const LOCAL_EXECUTION_PLANNING_TIMEOUT_DETAIL: &str =
     "当前 AI 请求在本地执行规划阶段超时，请稍后重试";
 const EXECUTION_PATH_TUNNEL_AFFINITY_FORWARD: &str = "tunnel_affinity_forward";
 const MANAGEMENT_TOKEN_PREFIX: &str = "ae-";
 const LEGACY_MANAGEMENT_TOKEN_PREFIX: &str = "ae_";
-
-#[derive(Debug, Clone, Copy)]
-struct RequestBodyBufferPolicy {
-    max_bytes: u64,
-    read_timeout: Duration,
-}
-
-impl RequestBodyBufferPolicy {
-    fn from_state(state: &AppState) -> Self {
-        Self {
-            max_bytes: crate::headers::max_request_body_bytes(),
-            read_timeout: state.frontdoor_runtime_guards.request_body_read_timeout,
-        }
-    }
-
-    #[cfg(test)]
-    fn for_tests(max_bytes: u64, read_timeout: Duration) -> Self {
-        Self {
-            max_bytes,
-            read_timeout,
-        }
-    }
-}
-
-#[derive(Debug)]
-enum RequestBodyBufferError {
-    Normalization(RequestBodyNormalizationError),
-    TooLarge { limit_bytes: u64 },
-    Timeout { timeout_ms: u64 },
-    ReadFailed { message: String },
-}
-
-impl RequestBodyBufferError {
-    fn http_status(&self) -> http::StatusCode {
-        match self {
-            Self::Normalization(error) => error.http_status(),
-            Self::TooLarge { .. } => http::StatusCode::PAYLOAD_TOO_LARGE,
-            Self::Timeout { .. } => http::StatusCode::REQUEST_TIMEOUT,
-            Self::ReadFailed { .. } => http::StatusCode::BAD_REQUEST,
-        }
-    }
-
-    fn client_message(&self) -> String {
-        match self {
-            Self::Normalization(error) => error.client_message(),
-            Self::TooLarge { limit_bytes } => format!("Request body exceeds {limit_bytes} bytes"),
-            Self::Timeout { .. } => REQUEST_BODY_READ_TIMEOUT_DETAIL.to_string(),
-            Self::ReadFailed { .. } => REQUEST_BODY_READ_FAILED_DETAIL.to_string(),
-        }
-    }
-
-    fn reason(&self) -> &'static str {
-        match self {
-            Self::Normalization(error) => match error {
-                RequestBodyNormalizationError::UnsupportedContentEncoding(_) => {
-                    "unsupported_content_encoding"
-                }
-                RequestBodyNormalizationError::DecodeFailed { .. } => "decode_failed",
-                RequestBodyNormalizationError::DecompressedBodyTooLarge { .. } => {
-                    "decompressed_body_too_large"
-                }
-                RequestBodyNormalizationError::RequestBodyTooLarge { .. } => {
-                    "request_body_too_large"
-                }
-            },
-            Self::TooLarge { .. } => "request_body_too_large",
-            Self::Timeout { .. } => "request_body_read_timeout",
-            Self::ReadFailed { .. } => "request_body_read_failed",
-        }
-    }
-}
-
-async fn buffer_and_normalize_request_body(
-    request_body: &mut Option<Body>,
-    headers: &mut http::HeaderMap,
-    body_owner_expectation: &'static str,
-    trace_id: &str,
-    method: &http::Method,
-    path_and_query: &str,
-    phase: &'static str,
-    policy: RequestBodyBufferPolicy,
-) -> Result<Bytes, RequestBodyBufferError> {
-    if let Err(err) =
-        crate::headers::check_request_content_length_with_limit(headers, policy.max_bytes)
-    {
-        return Err(RequestBodyBufferError::Normalization(err));
-    }
-
-    let read_started_at = Instant::now();
-    let timeout_ms = policy.read_timeout.as_millis() as u64;
-    info!(
-        event_name = "frontdoor_request_body_buffer_started",
-        log_type = "event",
-        trace_id,
-        method = %method,
-        path = %path_and_query,
-        phase,
-        max_body_bytes = policy.max_bytes,
-        timeout_ms,
-        "gateway started buffering request body"
-    );
-
-    let body_limit = usize::try_from(policy.max_bytes).unwrap_or(usize::MAX);
-    let body = match tokio::time::timeout(
-        policy.read_timeout,
-        to_bytes(
-            request_body.take().expect(body_owner_expectation),
-            body_limit,
-        ),
-    )
-    .await
-    {
-        Ok(Ok(body)) => body,
-        Ok(Err(err)) if request_body_collection_exceeded_limit(&err) => {
-            return Err(RequestBodyBufferError::TooLarge {
-                limit_bytes: policy.max_bytes,
-            });
-        }
-        Ok(Err(err)) => {
-            return Err(RequestBodyBufferError::ReadFailed {
-                message: err.to_string(),
-            });
-        }
-        Err(_) => {
-            return Err(RequestBodyBufferError::Timeout { timeout_ms });
-        }
-    };
-
-    let normalized = crate::headers::normalize_request_body_headers_and_bytes_with_limit(
-        headers,
-        body,
-        policy.max_bytes,
-    )
-    .map_err(RequestBodyBufferError::Normalization)?;
-    info!(
-        event_name = "frontdoor_request_body_buffer_completed",
-        log_type = "event",
-        trace_id,
-        method = %method,
-        path = %path_and_query,
-        phase,
-        body_bytes = normalized.len(),
-        elapsed_ms = read_started_at.elapsed().as_millis() as u64,
-        "gateway completed request body buffering"
-    );
-    Ok(normalized)
-}
-
-fn request_body_collection_exceeded_limit(error: &(dyn StdError + 'static)) -> bool {
-    let mut current = Some(error);
-    while let Some(error) = current {
-        if error.to_string().contains("length limit exceeded") {
-            return true;
-        }
-        current = error.source();
-    }
-    false
-}
-
-fn build_request_body_buffer_error_response(
-    trace_id: &str,
-    request_context: &GatewayPublicRequestContext,
-    error: &RequestBodyBufferError,
-) -> Result<Response<Body>, GatewayError> {
-    warn!(
-        event_name = "frontdoor_request_body_buffer_failed",
-        log_type = "ops",
-        trace_id,
-        method = %request_context.request_method,
-        path = %request_context.request_path_and_query(),
-        status_code = error.http_status().as_u16(),
-        reason = error.reason(),
-        detail = %error.client_message(),
-        read_error = match error {
-            RequestBodyBufferError::ReadFailed { message } => message.as_str(),
-            _ => "",
-        },
-        "gateway rejected request body before local execution planning"
-    );
-    build_local_http_error_response(
-        trace_id,
-        request_context.control_decision.as_ref(),
-        error.http_status(),
-        error.client_message().as_str(),
-    )
-}
-
 fn finalize_request_body_buffer_rejection(
     state: &AppState,
     request_context: &GatewayPublicRequestContext,
@@ -303,12 +116,17 @@ fn finalize_request_body_buffer_rejection(
     error: &RequestBodyBufferError,
 ) -> Result<Response<Body>, GatewayError> {
     let response = build_request_body_buffer_error_response(trace_id, request_context, error)?;
+    let execution_path = if matches!(error, RequestBodyBufferError::Overloaded { .. }) {
+        EXECUTION_PATH_LOCAL_OVERLOADED
+    } else {
+        EXECUTION_PATH_LOCAL_INVALID_REQUEST
+    };
     Ok(finalize_gateway_response_with_context(
         state,
         response,
         remote_addr,
         request_context,
-        EXECUTION_PATH_LOCAL_INVALID_REQUEST,
+        execution_path,
         started_at,
         request_permit,
     ))
@@ -417,7 +235,7 @@ fn api_key_remote_ip_allowed(ip_rules: Option<&[String]>, remote_ip: std::net::I
 
 async fn maybe_promote_management_token_admin_principal(
     state: &AppState,
-    remote_addr: &std::net::SocketAddr,
+    client_ip: std::net::IpAddr,
     headers: &http::HeaderMap,
     trace_id: &str,
     request_context: &mut GatewayPublicRequestContext,
@@ -451,7 +269,7 @@ async fn maybe_promote_management_token_admin_principal(
     {
         return Ok(());
     }
-    if !remote_ip_allowed(token_with_user.token.allowed_ips.as_ref(), remote_addr.ip()) {
+    if !remote_ip_allowed(token_with_user.token.allowed_ips.as_ref(), client_ip) {
         return Ok(());
     }
     let Some(user) = state.find_user_auth_by_id(&token_with_user.user.id).await? else {
@@ -483,7 +301,7 @@ async fn maybe_promote_management_token_admin_principal(
         management_token_permissions,
     });
 
-    let remote_ip = remote_addr.ip().to_string();
+    let remote_ip = client_ip.to_string();
     if let Err(err) = state
         .record_management_token_usage(&token_with_user.token.id, Some(remote_ip.as_str()))
         .await
@@ -565,8 +383,9 @@ async fn maybe_forward_public_request_to_tunnel_owner(
         serde_json::from_slice::<serde_json::Value>(body.as_ref()).ok()
     });
     let client_session_affinity =
-        crate::client_session_affinity::client_session_affinity_from_parts(
-            parts,
+        crate::client_session_affinity::client_session_affinity_from_api_request(
+            api_format,
+            &parts.headers,
             body_json.as_ref(),
         );
     let Some(target) = crate::scheduler::affinity::read_cached_scheduler_affinity_target(
@@ -636,7 +455,27 @@ async fn maybe_forward_public_request_to_tunnel_owner(
         owner.relay_base_url.trim_end_matches('/'),
         request_context.request_path_and_query()
     );
-    let mut upstream_request = state.client.request(parts.method.clone(), owner_url);
+    let is_stream =
+        owner_forward_request_is_stream(parts, decision, buffered_body.unwrap_or(&empty_body));
+    let transport_timeouts =
+        crate::provider_transport::resolve_transport_execution_timeouts(&transport);
+    let non_stream_timeout =
+        crate::execution_runtime::transport::resolve_non_stream_total_timeout_for_request(
+            is_stream,
+            &transport.endpoint.api_format,
+            transport_timeouts.as_ref(),
+        );
+    let stream_first_byte_timeout =
+        crate::execution_runtime::transport::resolve_stream_first_byte_timeout_for_request(
+            is_stream,
+            transport_timeouts.as_ref(),
+        );
+    let mut upstream_request = state
+        .owner_forward_client
+        .request(parts.method.clone(), owner_url);
+    if let Some(timeout) = non_stream_timeout {
+        upstream_request = upstream_request.timeout(timeout);
+    }
     for (name, value) in &parts.headers {
         if should_skip_request_header(name.as_str()) || name == http::header::HOST {
             continue;
@@ -682,14 +521,15 @@ async fn maybe_forward_public_request_to_tunnel_owner(
             upstream_request.header(TRUSTED_AUTH_BALANCE_HEADER, balance_remaining.to_string());
     }
 
-    let upstream_response = upstream_request
-        .body(buffered_body.cloned().unwrap_or_default())
-        .send()
-        .await
-        .map_err(|err| GatewayError::UpstreamUnavailable {
-            trace_id: request_context.trace_id.clone(),
-            message: format!("owner gateway affinity forward failed: {err}"),
-        })?;
+    let upstream_response = crate::tunnel::send_owner_forward_request(
+        upstream_request.body(buffered_body.cloned().unwrap_or_default()),
+        stream_first_byte_timeout,
+    )
+    .await
+    .map_err(|message| GatewayError::UpstreamUnavailable {
+        trace_id: request_context.trace_id.clone(),
+        message: format!("owner gateway affinity forward failed: {message}"),
+    })?;
 
     let mut response = build_sync_aware_affinity_forward_response(
         request_context,
@@ -705,6 +545,29 @@ async fn maybe_forward_public_request_to_tunnel_owner(
             .map_err(|err| GatewayError::Internal(err.to_string()))?,
     );
     Ok(Some(response))
+}
+
+fn owner_forward_request_is_stream(
+    parts: &http::request::Parts,
+    decision: &GatewayControlDecision,
+    body_bytes: &Bytes,
+) -> bool {
+    let Some(plan_kind) =
+        crate::ai_serving::api::resolve_execution_runtime_stream_plan_kind(parts, decision)
+    else {
+        return false;
+    };
+    let Some((body_json, body_base64)) =
+        crate::ai_serving::api::parse_direct_request_body(parts, body_bytes)
+    else {
+        return false;
+    };
+    crate::ai_serving::api::is_matching_stream_request(
+        plan_kind,
+        parts,
+        &body_json,
+        body_base64.as_deref(),
+    )
 }
 
 fn upstream_response_is_sse(headers: &reqwest::header::HeaderMap) -> bool {
@@ -776,9 +639,17 @@ async fn restore_redacted_sync_execution_response(
         return Ok(Response::from_parts(parts, body));
     };
     let mut headers = collect_response_headers(&parts.headers);
-    let body_bytes = to_bytes(body, usize::MAX)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let response_body_limit = crate::headers::max_redacted_sync_response_body_bytes();
+    let body_bytes = to_bytes(
+        body,
+        usize::try_from(response_body_limit).unwrap_or(usize::MAX),
+    )
+    .await
+    .map_err(|err| {
+        GatewayError::Internal(format!(
+            "failed to buffer redacted sync response within {response_body_limit} bytes: {err}"
+        ))
+    })?;
     let restored =
         crate::privacy::restore_sync_response_body(&mut headers, body_bytes.as_ref(), &session)?;
     replace_response_headers(&mut parts.headers, &headers)?;
@@ -1039,6 +910,8 @@ async fn proxy_request_inner(
     request: Request,
 ) -> Result<Response<Body>, GatewayError> {
     let started_at = Instant::now();
+    let client_ip = effective_client_ip(request.headers(), &remote_addr);
+    let trace_id = extract_or_generate_trace_id(request.headers());
     let accepted_at = request
         .extensions()
         .get::<crate::middleware::GatewayRequestAcceptedAt>()
@@ -1116,6 +989,49 @@ async fn proxy_request_inner(
     };
     let request_admission_ms = started_at.elapsed().as_millis() as u64;
     observe_gateway_stage_ms("frontdoor_admission", request_admission_ms);
+    match state.admin_security_ip_blacklisted(client_ip).await {
+        Ok(true) => {
+            warn!(
+                event_name = "frontdoor_ip_blacklist_rejected",
+                log_type = "event",
+                trace_id = %trace_id,
+                client_ip = %client_ip,
+                path = %request.uri().path(),
+                "gateway rejected blacklisted client IP"
+            );
+            let response = build_local_http_error_response(
+                &trace_id,
+                None,
+                http::StatusCode::FORBIDDEN,
+                "当前 IP 已被禁止访问",
+            )?;
+            return Ok(finalize_gateway_response(
+                &state,
+                response,
+                &trace_id,
+                &remote_addr,
+                request.method(),
+                request
+                    .uri()
+                    .path_and_query()
+                    .map(|value| value.as_str())
+                    .unwrap_or("/"),
+                None,
+                EXECUTION_PATH_LOCAL_AUTH_DENIED,
+                &started_at,
+                request_permit.take(),
+            ));
+        }
+        Ok(false) => {}
+        Err(err) => warn!(
+            event_name = "frontdoor_ip_blacklist_check_failed",
+            log_type = "ops",
+            trace_id = %trace_id,
+            client_ip = %client_ip,
+            error = ?err,
+            "gateway failed open after IP blacklist check error"
+        ),
+    }
     let (mut parts, body) = request.into_parts();
     let redaction_slot = crate::privacy::RedactionSessionSlot::default();
     parts.extensions.insert(redaction_slot.clone());
@@ -1175,7 +1091,7 @@ async fn proxy_request_inner(
     .await?;
     maybe_promote_management_token_admin_principal(
         &state,
-        &remote_addr,
+        client_ip,
         &parts.headers,
         &trace_id,
         &mut request_context,
@@ -1186,9 +1102,9 @@ async fn proxy_request_inner(
         .as_ref()
         .and_then(|decision| decision.auth_context.as_ref())
     {
-        if !api_key_remote_ip_allowed(auth_context.ip_rules.as_deref(), remote_addr.ip()) {
+        if !api_key_remote_ip_allowed(auth_context.ip_rules.as_deref(), client_ip) {
             let rejection = crate::control::GatewayLocalAuthRejection::IpNotAllowed {
-                remote_ip: remote_addr.ip().to_string(),
+                remote_ip: client_ip.to_string(),
             };
             let response = build_local_auth_rejection_response(
                 &trace_id,
@@ -1528,10 +1444,36 @@ async fn proxy_request_inner(
     }
 
     let rpm_started_at = Instant::now();
-    let rate_limit_outcome = state
-        .frontdoor_user_rpm()
-        .check_and_consume(&state, control_decision)
-        .await?;
+    let ip_whitelist_applies =
+        control_decision.and_then(|decision| decision.route_class.as_deref()) == Some("ai_public");
+    let ip_whitelisted = if ip_whitelist_applies {
+        state.admin_security_ip_whitelisted(client_ip).await
+    } else {
+        Ok(false)
+    };
+    let rate_limit_outcome = match ip_whitelisted {
+        Ok(true) => FrontdoorUserRpmOutcome::NotApplicable,
+        Ok(false) => {
+            state
+                .frontdoor_user_rpm()
+                .check_and_consume(&state, control_decision)
+                .await?
+        }
+        Err(err) => {
+            warn!(
+                event_name = "frontdoor_ip_whitelist_check_failed",
+                log_type = "ops",
+                trace_id = %trace_id,
+                client_ip = %client_ip,
+                error = ?err,
+                "gateway continued with rate limiting after IP whitelist check error"
+            );
+            state
+                .frontdoor_user_rpm()
+                .check_and_consume(&state, control_decision)
+                .await?
+        }
+    };
     observe_gateway_stage_ms("frontdoor_rpm", rpm_started_at.elapsed().as_millis() as u64);
     if let FrontdoorUserRpmOutcome::Rejected(rejection) = &rate_limit_outcome {
         let auth_context = control_decision.and_then(|decision| decision.auth_context.as_ref());
@@ -2301,6 +2243,7 @@ fn local_execution_runtime_miss_route_label(
         "/v1/chat/completions" => "OpenAI Chat Completions",
         "/v1/responses" => "OpenAI Responses",
         "/v1/responses/compact" => "OpenAI Responses Compact",
+        "/v1/alpha/search" => "OpenAI Search",
         "/v1/messages" => "Claude Messages",
         path if path.starts_with("/v1/videos") => "OpenAI Video",
         path if path.starts_with("/upload/v1beta/files") || path.starts_with("/v1beta/files") => {
@@ -2343,6 +2286,7 @@ fn local_execution_runtime_miss_route_detail(
         "/v1/responses/compact" => {
             Some(OPENAI_RESPONSES_COMPACT_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL)
         }
+        "/v1/alpha/search" => Some(OPENAI_SEARCH_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL),
         "/v1/messages" => Some(CLAUDE_MESSAGES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL),
         path if path.starts_with("/v1/videos") => {
             Some(OPENAI_VIDEO_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL)
@@ -2361,18 +2305,134 @@ fn local_execution_runtime_miss_route_detail(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use super::{
         api_key_remote_ip_allowed, buffer_and_normalize_request_body,
         diagnostic_is_auth_api_key_concurrency_limited, local_execution_runtime_miss_detail,
-        restore_redacted_stream_execution_response, restore_redacted_sync_execution_response,
-        GatewayControlDecision, LocalExecutionRuntimeMissDiagnostic, RequestBodyBufferError,
-        RequestBodyBufferPolicy,
+        owner_forward_request_is_stream, restore_redacted_stream_execution_response,
+        restore_redacted_sync_execution_response, GatewayControlDecision,
+        LocalExecutionRuntimeMissDiagnostic, RequestBodyBufferError, RequestBodyBufferPolicy,
     };
     use axum::body::{to_bytes, Body, Bytes};
-    use axum::http::{header, HeaderMap, Method, Response};
+    use axum::http::{header, HeaderMap, HeaderValue, Method, Response};
     use serde_json::json;
+    use tokio::sync::Semaphore;
+
+    #[test]
+    fn owner_forward_uses_search_protocol_timeout_semantics() {
+        let request = http::Request::builder()
+            .method(Method::POST)
+            .uri("/v1/alpha/search")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(())
+            .expect("request should build");
+        let (parts, _) = request.into_parts();
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/alpha/search",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("search".to_string()),
+            Some("openai:search".to_string()),
+        );
+        let body =
+            Bytes::from_static(br#"{"model":"gpt-5.6-sol","input":"find docs","stream":true}"#);
+        let is_stream = owner_forward_request_is_stream(&parts, &decision, &body);
+        let timeouts = aether_contracts::ExecutionTimeouts {
+            total_ms: Some(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_MS),
+            first_byte_ms: Some(10),
+            ..aether_contracts::ExecutionTimeouts::default()
+        };
+
+        assert!(!is_stream);
+        assert_eq!(
+            crate::execution_runtime::transport::resolve_non_stream_total_timeout_for_request(
+                is_stream,
+                "openai:search",
+                Some(&timeouts),
+            ),
+            Some(Duration::from_millis(
+                aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_MS
+            ))
+        );
+        assert_eq!(
+            crate::execution_runtime::transport::resolve_stream_first_byte_timeout_for_request(
+                is_stream,
+                Some(&timeouts),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn owner_forward_keeps_streaming_for_stream_capable_protocols() {
+        let chat_request = http::Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(())
+            .expect("request should build");
+        let (chat_parts, _) = chat_request.into_parts();
+        let chat_decision = GatewayControlDecision::synthetic(
+            "/v1/chat/completions",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+        );
+
+        assert!(owner_forward_request_is_stream(
+            &chat_parts,
+            &chat_decision,
+            &Bytes::from_static(br#"{"model":"gpt-5.6-sol","stream":true}"#),
+        ));
+        assert!(!owner_forward_request_is_stream(
+            &chat_parts,
+            &chat_decision,
+            &Bytes::from_static(br#"{"model":"gpt-5.6-sol","stream":false}"#),
+        ));
+
+        let image_request = http::Request::builder()
+            .method(Method::POST)
+            .uri("/v1/images/generations")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(())
+            .expect("request should build");
+        let (image_parts, _) = image_request.into_parts();
+        let image_decision = GatewayControlDecision::synthetic(
+            "/v1/images/generations",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("image".to_string()),
+            Some("openai:image".to_string()),
+        );
+        assert!(owner_forward_request_is_stream(
+            &image_parts,
+            &image_decision,
+            &Bytes::from_static(br#"{"model":"gpt-image-1","stream":true}"#),
+        ));
+
+        let compact_request = http::Request::builder()
+            .method(Method::POST)
+            .uri("/v1/responses/compact")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(())
+            .expect("request should build");
+        let (compact_parts, _) = compact_request.into_parts();
+        let compact_decision = GatewayControlDecision::synthetic(
+            "/v1/responses/compact",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("responses:compact".to_string()),
+            Some("openai:responses:compact".to_string()),
+        );
+        assert!(!owner_forward_request_is_stream(
+            &compact_parts,
+            &compact_decision,
+            &Bytes::from_static(br#"{"model":"gpt-5.6-sol","stream":true}"#),
+        ));
+    }
 
     #[test]
     fn api_key_remote_ip_allows_unrestricted_keys() {
@@ -2548,6 +2608,45 @@ mod tests {
         assert!(matches!(
             err,
             RequestBodyBufferError::Timeout { timeout_ms: 5 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn request_body_buffer_rejects_when_weighted_budget_is_exhausted() {
+        let budget = Arc::new(Semaphore::new(1));
+        let _held = Arc::clone(&budget)
+            .acquire_owned()
+            .await
+            .expect("test budget should be open");
+        let mut body = Some(Body::from(Bytes::from_static(b"{}")));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("2"));
+
+        let err = buffer_and_normalize_request_body(
+            &mut body,
+            &mut headers,
+            "test owns body",
+            "trace-body-budget",
+            &Method::POST,
+            "/v1/responses",
+            "test",
+            RequestBodyBufferPolicy::for_tests_with_budget(
+                1024,
+                Duration::from_secs(1),
+                Duration::from_millis(5),
+                crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES,
+                budget,
+            ),
+        )
+        .await
+        .expect_err("exhausted body budget should reject quickly");
+
+        assert!(matches!(
+            err,
+            RequestBodyBufferError::Overloaded {
+                requested_bytes: 2,
+                ..
+            }
         ));
     }
 

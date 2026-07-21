@@ -12,6 +12,59 @@ fn production_workspace_source(path: &Path) -> String {
 }
 
 #[test]
+fn gateway_production_body_collection_stays_bounded() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rust_files(&root, &mut files);
+    let forbidden = [
+        "to_bytes(body, usize::MAX)",
+        "to_bytes(request.into_body(), usize::MAX)",
+        "to_bytes(response.into_body(), usize::MAX)",
+        "into_body(),\n        usize::MAX",
+    ];
+    let violations = files
+        .into_iter()
+        .filter(|path| {
+            !path
+                .components()
+                .any(|component| component.as_os_str() == "tests")
+        })
+        .filter_map(|path| {
+            let source = production_workspace_source(&path);
+            let hits = forbidden
+                .iter()
+                .filter(|pattern| source.contains(**pattern))
+                .copied()
+                .collect::<Vec<_>>();
+            if hits.is_empty() {
+                None
+            } else {
+                Some(format!("{} -> {}", path.display(), hits.join(", ")))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        violations.is_empty(),
+        "production body collection must use explicit limits:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn tunnel_node_status_delivery_stays_bounded() {
+    let source = read_workspace_file("apps/aether-gateway/src/tunnel/embedded/hub.rs");
+    assert!(
+        !source.contains("unbounded_channel::<NodeStatusEvent>"),
+        "tunnel node status delivery must not use an unbounded channel"
+    );
+    assert!(
+        source.contains("bounded_queue::<NodeStatusEvent>"),
+        "tunnel node status delivery must use the tracked bounded queue"
+    );
+}
+
+#[test]
 fn gateway_small_runtime_shims_stay_deleted() {
     for path in [
         "apps/aether-gateway/src/hooks/audit.rs",
@@ -108,11 +161,11 @@ fn runtime_state_owns_redis_runtime_boundaries() {
         "crates/aether-admin/src",
         "crates/aether-billing/src",
         "crates/aether-model-fetch/src",
-        "crates/aether-provider-pool/src",
-        "crates/aether-runtime/src",
-        "crates/aether-task-runtime/src",
-        "crates/aether-usage-runtime/src",
-        "crates/aether-provider-transport/src",
+        "crates/aether-provider/pool/src",
+        "crates/aether-runtime/base/src",
+        "crates/aether-task/runtime/src",
+        "crates/aether-usage/runtime/src",
+        "crates/aether-provider/transport/src",
         "crates/aether-wallet/src",
     ] {
         for path in collect_workspace_rust_files(root) {
@@ -146,11 +199,11 @@ fn runtime_state_owns_redis_runtime_boundaries() {
         "crates/aether-admin/Cargo.toml",
         "crates/aether-billing/Cargo.toml",
         "crates/aether-model-fetch/Cargo.toml",
-        "crates/aether-provider-pool/Cargo.toml",
-        "crates/aether-provider-transport/Cargo.toml",
-        "crates/aether-runtime/Cargo.toml",
-        "crates/aether-task-runtime/Cargo.toml",
-        "crates/aether-usage-runtime/Cargo.toml",
+        "crates/aether-provider/pool/Cargo.toml",
+        "crates/aether-provider/transport/Cargo.toml",
+        "crates/aether-runtime/base/Cargo.toml",
+        "crates/aether-task/runtime/Cargo.toml",
+        "crates/aether-usage/runtime/Cargo.toml",
         "crates/aether-wallet/Cargo.toml",
     ] {
         let cargo = read_workspace_file(manifest);
@@ -167,7 +220,7 @@ fn runtime_state_owns_redis_runtime_boundaries() {
     );
 
     let mut runtime_state_violations = Vec::new();
-    for path in collect_workspace_rust_files("crates/aether-runtime-state/src") {
+    for path in collect_workspace_rust_files("crates/aether-runtime/state/src") {
         if path
             .components()
             .any(|component| component.as_os_str() == "redis")
@@ -191,13 +244,13 @@ fn runtime_state_owns_redis_runtime_boundaries() {
     }
     assert!(
         runtime_state_violations.is_empty(),
-        "only crates/aether-runtime-state/src/redis may depend on the redis crate directly:\n{}",
+        "only crates/aether-runtime/state/src/redis may depend on the redis crate directly:\n{}",
         runtime_state_violations.join("\n")
     );
 
     let mut runtime_connection_violations = Vec::new();
-    for path in collect_workspace_rust_files("crates/aether-runtime-state/src") {
-        if path.ends_with("crates/aether-runtime-state/src/redis/client.rs") {
+    for path in collect_workspace_rust_files("crates/aether-runtime/state/src") {
+        if path.ends_with("crates/aether-runtime/state/src/redis/client.rs") {
             continue;
         }
         let source = production_workspace_source(&path);
@@ -214,17 +267,17 @@ fn runtime_state_owns_redis_runtime_boundaries() {
 
 #[test]
 fn aether_data_stays_free_of_redis_runtime_backends() {
-    let cargo = read_workspace_file("crates/aether-data/Cargo.toml");
+    let cargo = read_workspace_file("crates/aether-data/runtime/Cargo.toml");
     assert!(
         !cargo.contains("redis.workspace"),
         "aether-data should not depend on redis; runtime Redis belongs to aether-runtime-state"
     );
 
     for removed_path in [
-        "crates/aether-data/src/backend/redis.rs",
-        "crates/aether-data/src/backend/locks.rs",
-        "crates/aether-data/src/backend/workers.rs",
-        "crates/aether-data/src/driver/redis/mod.rs",
+        "crates/aether-data/runtime/src/backend/redis.rs",
+        "crates/aether-data/runtime/src/backend/locks.rs",
+        "crates/aether-data/runtime/src/backend/workers.rs",
+        "crates/aether-data/runtime/src/driver/redis/mod.rs",
     ] {
         assert!(
             !workspace_file_exists(removed_path),
@@ -232,7 +285,7 @@ fn aether_data_stays_free_of_redis_runtime_backends() {
         );
     }
 
-    for path in collect_workspace_rust_files("crates/aether-data/src") {
+    for path in collect_workspace_rust_files("crates/aether-data/runtime/src") {
         let source = production_workspace_source(&path);
         for forbidden in [
             "pub mod redis",
@@ -275,7 +328,7 @@ fn gateway_request_candidate_trace_type_is_owned_by_aether_data_contracts() {
     }
 
     let candidate_types =
-        read_workspace_file("crates/aether-data-contracts/src/repository/candidates/types.rs");
+        read_workspace_file("crates/aether-data/contracts/src/repository/candidates/types.rs");
     for pattern in [
         "pub enum RequestCandidateFinalStatus",
         "pub struct RequestCandidateTrace",
@@ -313,7 +366,7 @@ fn gateway_decision_trace_type_is_owned_by_aether_data_contracts() {
     }
 
     let candidate_types =
-        read_workspace_file("crates/aether-data-contracts/src/repository/candidates/types.rs");
+        read_workspace_file("crates/aether-data/contracts/src/repository/candidates/types.rs");
     for pattern in [
         "pub struct DecisionTraceCandidate",
         "pub struct DecisionTrace",
@@ -858,7 +911,8 @@ fn gateway_request_audit_bundle_type_is_owned_by_aether_data() {
         );
     }
 
-    let audit_types = read_workspace_file("crates/aether-data/src/repository/audit.rs");
+    let audit_types =
+        read_workspace_file("crates/aether-data/runtime/src/repository/audit/types.rs");
     for pattern in [
         "pub struct RequestAuditBundle",
         "pub trait RequestAuditReader",
@@ -1381,7 +1435,7 @@ fn provider_transport_cache_helpers_live_in_shared_crate() {
         "state/mod.rs should import refresh detection from shared provider transport"
     );
 
-    let transport_cache = read_workspace_file("crates/aether-provider-transport/src/cache.rs");
+    let transport_cache = read_workspace_file("crates/aether-provider/transport/src/cache.rs");
     for pattern in [
         "pub struct ProviderTransportSnapshotCacheKey",
         "pub fn provider_transport_snapshot_looks_refreshed(",

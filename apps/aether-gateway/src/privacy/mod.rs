@@ -1063,6 +1063,7 @@ impl MaskChatRequestOptions {
 pub(crate) enum ChatPiiRedactionRequestFormat {
     OpenAiChat,
     OpenAiResponses,
+    OpenAiSearch,
     ClaudeMessages,
 }
 
@@ -1071,6 +1072,7 @@ impl ChatPiiRedactionRequestFormat {
         match api_format.trim().to_ascii_lowercase().as_str() {
             "openai:chat" => Some(Self::OpenAiChat),
             "openai:responses" | "openai:responses:compact" => Some(Self::OpenAiResponses),
+            "openai:search" => Some(Self::OpenAiSearch),
             "claude:messages" => Some(Self::ClaudeMessages),
             _ => None,
         }
@@ -1604,6 +1606,7 @@ fn request_collision_corpus(format: ChatPiiRedactionRequestFormat, value: &Value
             .map(|messages| chat_message_collision_corpus(messages))
             .unwrap_or_default(),
         ChatPiiRedactionRequestFormat::OpenAiResponses => openai_responses_collision_corpus(value),
+        ChatPiiRedactionRequestFormat::OpenAiSearch => openai_search_collision_corpus(value),
         ChatPiiRedactionRequestFormat::ClaudeMessages => claude_messages_collision_corpus(value),
     }
 }
@@ -1621,6 +1624,9 @@ fn mask_request_value(
         }
         ChatPiiRedactionRequestFormat::OpenAiResponses => {
             mask_openai_responses_request_value(value, session, scan_state)
+        }
+        ChatPiiRedactionRequestFormat::OpenAiSearch => {
+            mask_openai_search_request_value(value, session, scan_state)
         }
         ChatPiiRedactionRequestFormat::ClaudeMessages => {
             mask_claude_messages_request_value(value, session, scan_state)
@@ -1642,6 +1648,9 @@ async fn mask_request_value_async(
         }
         ChatPiiRedactionRequestFormat::OpenAiResponses => {
             mask_openai_responses_request_value_async(value, session, scan_state, cache).await
+        }
+        ChatPiiRedactionRequestFormat::OpenAiSearch => {
+            mask_openai_search_request_value_async(value, session, scan_state, cache).await
         }
         ChatPiiRedactionRequestFormat::ClaudeMessages => {
             mask_claude_messages_request_value_async(value, session, scan_state, cache).await
@@ -1806,6 +1815,31 @@ fn openai_responses_collision_corpus(value: &Value) -> Vec<String> {
     }
     if let Some(input) = value.get("input") {
         collect_openai_responses_input_collision_text(input, &mut corpus);
+    }
+    corpus
+}
+
+const OPENAI_SEARCH_COMMAND_TEXT_FIELDS: [(&str, &str); 4] = [
+    ("search_query", "q"),
+    ("image_query", "q"),
+    ("find", "pattern"),
+    ("weather", "location"),
+];
+
+fn openai_search_collision_corpus(value: &Value) -> Vec<String> {
+    let mut corpus = openai_responses_collision_corpus(value);
+    let Some(commands) = value.get("commands").and_then(Value::as_object) else {
+        return corpus;
+    };
+    for (command, field) in OPENAI_SEARCH_COMMAND_TEXT_FIELDS {
+        let Some(entries) = commands.get(command).and_then(Value::as_array) else {
+            continue;
+        };
+        for entry in entries {
+            if let Some(text) = entry.get(field).and_then(Value::as_str) {
+                corpus.push(text.to_string());
+            }
+        }
     }
     corpus
 }
@@ -2021,6 +2055,31 @@ fn mask_openai_responses_request_value(
     }
     if let Some(input) = value.get_mut("input") {
         redacted |= mask_openai_responses_input_value(input, session, scan_state)?;
+    }
+    Ok(redacted)
+}
+
+fn mask_openai_search_request_value(
+    value: &mut Value,
+    session: &mut RedactionSession,
+    scan_state: &mut RedactionScanState,
+) -> Result<bool, RedactionLimitError> {
+    let mut redacted = false;
+    if let Some(input) = value.get_mut("input") {
+        redacted |= mask_openai_responses_input_value(input, session, scan_state)?;
+    }
+    let Some(commands) = value.get_mut("commands").and_then(Value::as_object_mut) else {
+        return Ok(redacted);
+    };
+    for (command, field) in OPENAI_SEARCH_COMMAND_TEXT_FIELDS {
+        let Some(entries) = commands.get_mut(command).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for entry in entries {
+            if let Some(Value::String(text)) = entry.get_mut(field) {
+                redacted |= mask_json_string(text, session, scan_state)?;
+            }
+        }
     }
     Ok(redacted)
 }
@@ -2306,6 +2365,33 @@ async fn mask_openai_responses_request_value_async(
     if let Some(input) = value.get_mut("input") {
         redacted |=
             mask_openai_responses_input_value_async(input, session, scan_state, cache).await?;
+    }
+    Ok(redacted)
+}
+
+async fn mask_openai_search_request_value_async(
+    value: &mut Value,
+    session: &mut RedactionSession,
+    scan_state: &mut RedactionScanState,
+    cache: Option<&RedisRedactionMappingCache<'_>>,
+) -> Result<bool, RedactionMaskError> {
+    let mut redacted = false;
+    if let Some(input) = value.get_mut("input") {
+        redacted |=
+            mask_openai_responses_input_value_async(input, session, scan_state, cache).await?;
+    }
+    let Some(commands) = value.get_mut("commands").and_then(Value::as_object_mut) else {
+        return Ok(redacted);
+    };
+    for (command, field) in OPENAI_SEARCH_COMMAND_TEXT_FIELDS {
+        let Some(entries) = commands.get_mut(command).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for entry in entries {
+            if let Some(Value::String(text)) = entry.get_mut(field) {
+                redacted |= mask_json_string_async(text, session, scan_state, cache).await?;
+            }
+        }
     }
     Ok(redacted)
 }
@@ -4072,6 +4158,7 @@ mod tests {
         build_redaction_session_config, detect_candidates_with_probe, mask_chat_request_json,
         mask_chat_request_json_with_options, parse_chat_pii_redaction_rules,
         restore_sync_response_body, try_mask_chat_pii_request_json_with_options,
+        try_mask_chat_pii_request_value_with_cache_options,
         try_mask_chat_request_json_with_cache_options, try_mask_chat_request_json_with_options,
         ChatPiiRedactionRequestFormat, ChatPiiRedactionRuntimeConfig, DetectorProbe, MappingKey,
         MaskChatRequestOptions, RedactionKind, RedactionLimitError, RedactionMapping,
@@ -4082,8 +4169,8 @@ mod tests {
     use std::time::Duration;
 
     use aether_runtime_state::{RedisClientConfig, RuntimeState};
-    use aether_testkit::ManagedRedisServer;
-    use serde_json::json;
+    use aether_test_support::ManagedRedisServer;
+    use serde_json::{json, Value};
 
     fn assert_debug_surface_hides_values(debug: &str, originals: &[&str], sentinels: &[String]) {
         for original in originals {
@@ -4732,6 +4819,98 @@ mod tests {
             .as_str()
             .expect("arguments should remain a string")
             .contains("secretValueABCDEF1234567890abcdef"));
+    }
+
+    #[test]
+    fn pii_redaction_request_masks_openai_search_text_fields() {
+        let request = json!({
+            "id": "session-1",
+            "model": "gpt-5.6",
+            "input": "Find alice@example.com",
+            "commands": {
+                "search_query": [{"q": "Phone +14155552671"}],
+                "image_query": [{"q": "Image for bob@example.com"}],
+                "find": [{"ref_id": "https://example.com/alice@example.com", "pattern": "secret_key=secretValueABCDEF1234567890abcdef"}],
+                "weather": [{"location": "Contact carol@example.com"}],
+                "open": [{"ref_id": "https://example.com/alice@example.com"}]
+            }
+        });
+        let raw = serde_json::to_vec(&request).expect("request should serialize");
+
+        let masked = try_mask_chat_pii_request_json_with_options(
+            &raw,
+            ChatPiiRedactionRequestFormat::OpenAiSearch,
+            test_config(),
+            MaskChatRequestOptions::runtime(),
+        )
+        .expect("search request should mask");
+        let masked_json: Value =
+            serde_json::from_slice(&masked.body).expect("masked request should parse");
+
+        assert!(masked.redacted);
+        assert!(!masked_json["input"]
+            .as_str()
+            .unwrap()
+            .contains("alice@example.com"));
+        assert!(!masked_json["commands"]["search_query"][0]["q"]
+            .as_str()
+            .unwrap()
+            .contains("+14155552671"));
+        assert!(!masked_json["commands"]["image_query"][0]["q"]
+            .as_str()
+            .unwrap()
+            .contains("bob@example.com"));
+        assert!(!masked_json["commands"]["find"][0]["pattern"]
+            .as_str()
+            .unwrap()
+            .contains("secretValueABCDEF1234567890abcdef"));
+        assert!(!masked_json["commands"]["weather"][0]["location"]
+            .as_str()
+            .unwrap()
+            .contains("carol@example.com"));
+        assert_eq!(
+            masked_json["commands"]["open"][0]["ref_id"],
+            "https://example.com/alice@example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn pii_redaction_async_request_masks_openai_search_text_fields() {
+        let request = json!({
+            "id": "session-1",
+            "model": "gpt-5.6",
+            "input": "Find alice@example.com",
+            "commands": {
+                "search_query": [{"q": "Phone +14155552671"}],
+                "find": [{"ref_id": "turn0search0", "pattern": "bob@example.com"}]
+            }
+        });
+
+        let masked = try_mask_chat_pii_request_value_with_cache_options(
+            &request,
+            ChatPiiRedactionRequestFormat::OpenAiSearch,
+            test_config(),
+            MaskChatRequestOptions::runtime(),
+            None,
+        )
+        .await
+        .expect("search request should mask");
+        let masked_json = masked.body_json.expect("masked body should be present");
+
+        assert!(masked.redacted);
+        assert!(!masked_json["input"]
+            .as_str()
+            .unwrap()
+            .contains("alice@example.com"));
+        assert!(!masked_json["commands"]["search_query"][0]["q"]
+            .as_str()
+            .unwrap()
+            .contains("+14155552671"));
+        assert!(!masked_json["commands"]["find"][0]["pattern"]
+            .as_str()
+            .unwrap()
+            .contains("bob@example.com"));
+        assert_eq!(masked_json["commands"]["find"][0]["ref_id"], "turn0search0");
     }
 
     #[test]

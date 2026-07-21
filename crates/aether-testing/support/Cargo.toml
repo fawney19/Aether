@@ -1,0 +1,10 @@
+[package]
+name = "aether-test-support"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Small dependency-light integration test helpers for Aether"
+
+[dependencies]
+tokio.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "aether-data-postgres"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PostgreSQL repositories, pools, transactions, and migrations for Aether"
+
+[dependencies]
+aether-ai-formats.workspace = true
+aether-data-contracts.workspace = true
+aether-data-query.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+flate2.workspace = true
+futures-util.workspace = true
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls", "chrono", "migrate", "macros"] }
+serde_json.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
