@@ -98,36 +98,40 @@ export async function getProvider(providerId: string): Promise<ProviderWithEndpo
   return normalizeProviderSummary(response.data)
 }
 
+export type ProviderUpdatePayload = Partial<{
+  name: string
+  provider_type: ProviderType
+  description: string | null
+  website: string
+  provider_priority: number
+  keep_priority_on_conversion: boolean
+  billing_type: 'monthly_quota' | 'pay_as_you_go' | 'free_tier'
+  monthly_quota_usd: number
+  quota_reset_day: number
+  quota_last_reset_at: string  // 周期开始时间
+  quota_expires_at: string
+  rpm_limit: number | null
+  // 请求配置（从 Endpoint 迁移）
+  max_retries: number
+  stream_first_byte_timeout: number | null
+  request_timeout: number | null
+  proxy: ProxyConfig | null
+  cache_ttl_minutes: number  // 0表示不支持缓存，>0表示支持缓存并设置TTL(分钟)
+  max_probe_interval_minutes: number
+  enable_format_conversion: boolean  // 是否允许格式转换（提供商级别开关）
+  is_active: boolean
+  claude_code_advanced: ClaudeCodeAdvancedConfig | null
+  pool_advanced: PoolAdvancedConfig | null
+  failover_rules: FailoverRulesConfig | null
+  config: ProviderConfig | null
+}>
+
 /**
  * 更新 Provider 基础配置
  */
 export async function updateProvider(
   providerId: string,
-  data: Partial<{
-    name: string
-    provider_type: ProviderType
-    description: string | null
-    website: string
-    provider_priority: number
-    keep_priority_on_conversion: boolean
-    billing_type: 'monthly_quota' | 'pay_as_you_go' | 'free_tier'
-    monthly_quota_usd: number
-    quota_reset_day: number
-    quota_last_reset_at: string  // 周期开始时间
-    quota_expires_at: string
-    rpm_limit: number | null
-    // 请求配置（从 Endpoint 迁移）
-    max_retries: number
-    proxy: ProxyConfig | null
-    cache_ttl_minutes: number  // 0表示不支持缓存，>0表示支持缓存并设置TTL(分钟)
-    max_probe_interval_minutes: number
-    enable_format_conversion: boolean  // 是否允许格式转换（提供商级别开关）
-    is_active: boolean
-    claude_code_advanced: ClaudeCodeAdvancedConfig | null
-    pool_advanced: PoolAdvancedConfig | null
-    failover_rules: FailoverRulesConfig | null
-    config: ProviderConfig | null
-  }>,
+  data: ProviderUpdatePayload,
   requestOptions?: ProviderRequestOptions,
 ): Promise<ProviderWithEndpointsSummary> {
   const response = await client.patch(`/api/admin/providers/${providerId}`, data, requestOptions)
