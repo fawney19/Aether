@@ -8,6 +8,7 @@ const ADMIN_EXTERNAL_MODELS_CACHE_KEY: &str = "aether:external:models_dev";
 const ADMIN_EXTERNAL_MODELS_CACHE_TTL_SECS: u64 = 15 * 60;
 const ADMIN_EXTERNAL_MODELS_SOURCE_URL_ENV: &str = "AETHER_GATEWAY_EXTERNAL_MODELS_URL";
 const ADMIN_EXTERNAL_MODELS_SOURCE_URL_DEFAULT: &str = "https://models.dev/api.json";
+const ADMIN_EXTERNAL_MODELS_PROXY_ENV: &str = "AETHER_GATEWAY_EXTERNAL_MODELS_PROXY";
 
 fn admin_external_models_source_url() -> String {
     std::env::var(ADMIN_EXTERNAL_MODELS_SOURCE_URL_ENV)
@@ -15,6 +16,40 @@ fn admin_external_models_source_url() -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| ADMIN_EXTERNAL_MODELS_SOURCE_URL_DEFAULT.to_string())
+}
+
+fn admin_external_models_proxy_url() -> Option<String> {
+    std::env::var(ADMIN_EXTERNAL_MODELS_PROXY_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn build_admin_external_models_proxy_client(
+    proxy_url: Option<&str>,
+) -> Result<Option<reqwest::Client>, GatewayError> {
+    let Some(proxy_url) = proxy_url else {
+        return Ok(None);
+    };
+    let proxy = reqwest::Proxy::all(proxy_url).map_err(|_| {
+        GatewayError::Internal(format!(
+            "invalid {ADMIN_EXTERNAL_MODELS_PROXY_ENV} proxy URL"
+        ))
+    })?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(300))
+        .http2_adaptive_window(true)
+        .use_rustls_tls()
+        .no_proxy()
+        .proxy(proxy)
+        .build()
+        .map_err(|_| {
+            GatewayError::Internal(format!(
+                "failed to build {ADMIN_EXTERNAL_MODELS_PROXY_ENV} proxy client"
+            ))
+        })?;
+    Ok(Some(client))
 }
 
 fn normalize_admin_external_models_payload(payload: serde_json::Value) -> serde_json::Value {
@@ -42,12 +77,17 @@ async fn fetch_admin_external_models_from_source(
     state: &AdminAppState<'_>,
 ) -> Result<serde_json::Value, GatewayError> {
     let url = admin_external_models_source_url();
-    let response = state
-        .http_client()
-        .get(&url)
-        .send()
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let proxy_url = admin_external_models_proxy_url();
+    let proxy_client = build_admin_external_models_proxy_client(proxy_url.as_deref())?;
+    let using_proxy = proxy_client.is_some();
+    let client = proxy_client.as_ref().unwrap_or_else(|| state.http_client());
+    let response = client.get(&url).send().await.map_err(|err| {
+        if using_proxy {
+            GatewayError::Internal("external models proxy request failed".to_string())
+        } else {
+            GatewayError::Internal(err.to_string())
+        }
+    })?;
     let response = response
         .error_for_status()
         .map_err(|err| GatewayError::Internal(err.to_string()))?;
@@ -110,8 +150,9 @@ pub(crate) async fn clear_admin_external_models_cache(
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_external_models_source_url, normalize_admin_external_models_payload,
-        read_admin_external_models_cache, ADMIN_EXTERNAL_MODELS_SOURCE_URL_ENV,
+        admin_external_models_source_url, build_admin_external_models_proxy_client,
+        normalize_admin_external_models_payload, read_admin_external_models_cache,
+        ADMIN_EXTERNAL_MODELS_SOURCE_URL_ENV,
     };
     use crate::handlers::admin::request::AdminAppState;
     use crate::tests::{start_server, AppState};
@@ -216,5 +257,34 @@ mod tests {
         assert_eq!(payload["openai"]["models"]["gpt-5"]["name"], json!("GPT-5"));
 
         upstream_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn external_models_proxy_client_routes_requests_through_configured_proxy() {
+        let proxy = Router::new().fallback(get(|| async {
+            Json(json!({
+                "openai": {
+                    "name": "Proxied OpenAI",
+                    "models": {}
+                }
+            }))
+        }));
+        let (proxy_url, proxy_handle) = start_server(proxy).await;
+        let client = build_admin_external_models_proxy_client(Some(&proxy_url))
+            .expect("proxy client should build")
+            .expect("proxy client should be configured");
+
+        let payload = client
+            .get("http://models.invalid/api.json")
+            .send()
+            .await
+            .expect("request should use the configured proxy")
+            .json::<serde_json::Value>()
+            .await
+            .expect("proxy response should be valid JSON");
+
+        assert_eq!(payload["openai"]["name"], json!("Proxied OpenAI"));
+
+        proxy_handle.abort();
     }
 }

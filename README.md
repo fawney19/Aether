@@ -154,6 +154,8 @@ Aether Tunnel 是配套的正向代理节点，部署在海外 VPS 上，为墙�
 - `REDIS_URL`：Redis 连接串；仅 Postgres + Redis 的 Docker Compose 部署需要配置
 - `AETHER_RUNTIME_BACKEND=memory|redis`：运行时缓存/协调后端。SQLite 默认用 `memory`，不会连接 Redis
 - `AETHER_GATEWAY_AUTO_PREPARE_DATABASE`：常规启动前自动执行挂起的 schema migration 和 backfill；仓库自带的 `docker-compose.yml` 默认开启
+- `AETHER_GATEWAY_EXTERNAL_MODELS_URL`：模型管理使用的外部模型目录，默认 `https://models.dev/api.json`
+- `AETHER_GATEWAY_EXTERNAL_MODELS_PROXY`：仅用于拉取外部模型目录的出站代理，例如同一 Docker 网络中的 `http://proxy:7890`；不影响 Provider 或其他 Gateway 请求，也不复用 `AETHER_UPDATE_PROXY_URL`
 - `JWT_SECRET_KEY` / `ENCRYPTION_KEY`：认证和敏感数据加密所需密钥
 - `API_KEY_PREFIX`：用户和管理员新建 API Key 时使用的前缀，默认 `sk`
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD` / `ADMIN_EMAIL`：首次启动时自举首个本地管理员；`install.sh` 会提示输入管理员密码
