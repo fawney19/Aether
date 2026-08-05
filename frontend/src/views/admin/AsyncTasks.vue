@@ -1,443 +1,456 @@
 <template>
   <div class="space-y-6 pb-8">
-    <!-- 统计卡片 -->
-    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-      <Card
-        variant="default"
-        class="p-4"
-      >
-        <div class="flex items-center gap-3">
-          <div class="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center">
-            <Zap class="w-5 h-5 text-primary" />
-          </div>
-          <div>
-            <p class="text-2xl font-bold">
-              {{ stats?.total ?? '-' }}
-            </p>
-            <p class="text-xs text-muted-foreground">
-              总任务数
-            </p>
-          </div>
-        </div>
-      </Card>
-      <Card
-        variant="default"
-        class="p-4"
-      >
-        <div class="flex items-center gap-3">
-          <div class="w-10 h-10 rounded-lg bg-blue-500/10 flex items-center justify-center">
-            <Loader2
-              class="w-5 h-5 text-blue-500"
-              :class="{ 'animate-spin': runningCount > 0 }"
-            />
-          </div>
-          <div>
-            <p class="text-2xl font-bold">
-              {{ runningCount || '-' }}
-            </p>
-            <p class="text-xs text-muted-foreground">
-              处理中
-            </p>
-          </div>
-        </div>
-      </Card>
-      <Card
-        variant="default"
-        class="p-4"
-      >
-        <div class="flex items-center gap-3">
-          <div class="w-10 h-10 rounded-lg bg-green-500/10 flex items-center justify-center">
-            <CheckCircle class="w-5 h-5 text-green-500" />
-          </div>
-          <div>
-            <p class="text-2xl font-bold">
-              {{ stats?.by_status?.succeeded ?? '-' }}
-            </p>
-            <p class="text-xs text-muted-foreground">
-              已完成
-            </p>
-          </div>
-        </div>
-      </Card>
-      <Card
-        variant="default"
-        class="p-4"
-      >
-        <div class="flex items-center gap-3">
-          <div class="w-10 h-10 rounded-lg bg-amber-500/10 flex items-center justify-center">
-            <Calendar class="w-5 h-5 text-amber-500" />
-          </div>
-          <div>
-            <p class="text-2xl font-bold">
-              {{ stats?.registered_tasks ?? '-' }}
-            </p>
-            <p class="text-xs text-muted-foreground">
-              已注册
-            </p>
-          </div>
-        </div>
-      </Card>
-    </div>
-
-    <!-- 任务表格 -->
-    <Card
-      variant="default"
-      class="overflow-hidden"
-    >
-      <!-- 标题和筛选器 -->
-      <div class="px-4 sm:px-6 py-3.5 border-b border-border/60">
-        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <h3 class="text-base font-semibold">
-            异步任务
-          </h3>
-          <div class="flex items-center gap-2">
-            <!-- 状态筛选 -->
-            <Select
-              v-model="filterStatus"
+    <!-- 视频生成任务与系统运维任务是两套独立的后端系统，分 Tab 展示避免语义混淆 -->
+    <Tabs v-model="activeTab">
+      <TabsList class="tabs-button-list grid w-full max-w-[420px] grid-cols-2">
+        <TabsTrigger value="video">
+          <span class="flex items-center gap-1.5">
+            <Video class="w-3.5 h-3.5" />
+            视频任务
+            <Badge
+              v-if="videoTaskCount !== null"
+              variant="secondary"
+              class="ml-0.5 h-4 px-1.5 text-[10px]"
             >
-              <SelectTrigger class="w-28 h-8 text-xs border-border/60">
-                <SelectValue placeholder="状态" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  全部状态
-                </SelectItem>
-                <SelectItem value="queued">
-                  排队中
-                </SelectItem>
-                <SelectItem value="running">
-                  运行中
-                </SelectItem>
-                <SelectItem value="retrying">
-                  重试中
-                </SelectItem>
-                <SelectItem value="succeeded">
-                  成功
-                </SelectItem>
-                <SelectItem value="failed">
-                  失败
-                </SelectItem>
-                <SelectItem value="cancelled">
-                  已取消
-                </SelectItem>
-                <SelectItem value="skipped">
-                  已跳过
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <!-- 模型筛选 -->
-            <Input
-              v-model="filterModel"
-              type="text"
-              placeholder="任务 Key..."
-              class="w-32 h-8 text-xs"
-            />
-            <!-- 刷新按钮 -->
-            <Button
-              variant="ghost"
-              size="icon"
-              class="h-8 w-8"
-              :disabled="loading"
-              @click="fetchTasks"
+              {{ videoTaskCount }}
+            </Badge>
+          </span>
+        </TabsTrigger>
+        <TabsTrigger value="system">
+          <span class="flex items-center gap-1.5">
+            <Zap class="w-3.5 h-3.5" />
+            系统任务
+            <Badge
+              v-if="stats?.total !== undefined"
+              variant="secondary"
+              class="ml-0.5 h-4 px-1.5 text-[10px]"
             >
-              <RefreshCw
-                class="w-3.5 h-3.5"
-                :class="{ 'animate-spin': loading }"
-              />
-            </Button>
-          </div>
-        </div>
-      </div>
+              {{ stats.total }}
+            </Badge>
+          </span>
+        </TabsTrigger>
+      </TabsList>
 
-      <!-- 加载状态 -->
-      <div
-        v-if="loading && !tasks.length"
-        class="p-8 text-center"
+      <TabsContent
+        value="video"
+        class="mt-4"
       >
-        <Loader2 class="w-8 h-8 animate-spin mx-auto text-muted-foreground" />
-        <p class="mt-2 text-sm text-muted-foreground">
-          加载中...
-        </p>
-      </div>
+        <VideoTasksPanel
+          :active="activeTab === 'video'"
+          @stats="onVideoStats"
+        />
+      </TabsContent>
 
-      <!-- 空状态 -->
-      <div
-        v-else-if="!tasks.length"
-        class="p-8 text-center"
+      <TabsContent
+        value="system"
+        class="mt-4 space-y-6"
       >
-        <Zap class="w-12 h-12 mx-auto text-muted-foreground/50" />
-        <p class="mt-2 text-sm text-muted-foreground">
-          暂无异步任务
-        </p>
-      </div>
-
-      <!-- 桌面端表格 -->
-      <Table
-        v-else
-        class="hidden md:table"
-      >
-        <TableHeader>
-          <TableRow>
-            <TableHead class="w-[25%]">
-              任务
-            </TableHead>
-            <TableHead class="w-[15%]">
-              {{ isAdmin ? '用户/Provider' : 'Provider' }}
-            </TableHead>
-            <TableHead class="w-[12%]">
-              状态
-            </TableHead>
-            <TableHead class="w-[10%]">
-              参数
-            </TableHead>
-            <TableHead class="w-[15%]">
-              时间
-            </TableHead>
-            <TableHead class="w-[8%] text-center">
-              操作
-            </TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          <TableRow
-            v-for="task in tasks"
-            :key="task.id"
-            class="cursor-pointer hover:bg-muted/50"
-            @click="openTaskDetail(task)"
+        <!-- 统计卡片 -->
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <Card
+            variant="default"
+            class="p-4"
           >
-            <!-- 任务信息 -->
-            <TableCell>
-              <div class="space-y-1">
-                <div class="flex items-center gap-2">
-                  <Video
-                    v-if="isVideoTask(task)"
-                    class="w-4 h-4 text-muted-foreground shrink-0"
-                  />
-                  <span class="font-medium text-sm truncate">{{ displayTaskName(task) }}</span>
-                </div>
-                <p
-                  class="text-xs text-muted-foreground truncate max-w-[280px]"
-                  :title="displayTaskDescription(task)"
-                >
-                  {{ displayTaskDescription(task) }}
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                <Zap class="w-5 h-5 text-primary" />
+              </div>
+              <div>
+                <p class="text-2xl font-bold">
+                  {{ stats?.total ?? '-' }}
+                </p>
+                <p class="text-xs text-muted-foreground">
+                  总任务数
                 </p>
               </div>
-            </TableCell>
-            <!-- 用户/Provider -->
-            <TableCell>
-              <div class="space-y-0.5 text-sm">
-                <div
-                  v-if="isAdmin"
-                  class="flex items-center gap-1.5"
-                >
-                  <User class="w-3 h-3 text-muted-foreground" />
-                  <span class="truncate max-w-[100px]">{{ task.username }}</span>
-                </div>
-                <div class="flex items-center gap-1.5 text-muted-foreground">
-                  <Server class="w-3 h-3" />
-                  <span class="truncate max-w-[100px]">{{ displayTaskSource(task) }}</span>
-                </div>
+            </div>
+          </Card>
+          <Card
+            variant="default"
+            class="p-4"
+          >
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-lg bg-blue-500/10 flex items-center justify-center">
+                <Loader2
+                  class="w-5 h-5 text-blue-500"
+                  :class="{ 'animate-spin': runningCount > 0 }"
+                />
               </div>
-            </TableCell>
-            <!-- 状态 -->
-            <TableCell>
-              <div class="flex flex-col items-start gap-1">
+              <div>
+                <p class="text-2xl font-bold">
+                  {{ runningCount || '-' }}
+                </p>
+                <p class="text-xs text-muted-foreground">
+                  处理中
+                </p>
+              </div>
+            </div>
+          </Card>
+          <Card
+            variant="default"
+            class="p-4"
+          >
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-lg bg-green-500/10 flex items-center justify-center">
+                <CheckCircle class="w-5 h-5 text-green-500" />
+              </div>
+              <div>
+                <p class="text-2xl font-bold">
+                  {{ stats?.by_status?.succeeded ?? '-' }}
+                </p>
+                <p class="text-xs text-muted-foreground">
+                  已完成
+                </p>
+              </div>
+            </div>
+          </Card>
+          <Card
+            variant="default"
+            class="p-4"
+          >
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-lg bg-amber-500/10 flex items-center justify-center">
+                <Calendar class="w-5 h-5 text-amber-500" />
+              </div>
+              <div>
+                <p class="text-2xl font-bold">
+                  {{ stats?.registered_tasks ?? '-' }}
+                </p>
+                <p class="text-xs text-muted-foreground">
+                  已注册
+                </p>
+              </div>
+            </div>
+          </Card>
+        </div>
+
+        <!-- 任务表格 -->
+        <Card
+          variant="default"
+          class="overflow-hidden"
+        >
+          <!-- 标题和筛选器 -->
+          <div class="px-4 sm:px-6 py-3.5 border-b border-border/60">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <h3 class="text-base font-semibold">
+                异步任务
+              </h3>
+              <div class="flex items-center gap-2">
+                <!-- 状态筛选 -->
+                <Select
+                  v-model="filterStatus"
+                >
+                  <SelectTrigger class="w-28 h-8 text-xs border-border/60">
+                    <SelectValue placeholder="状态" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">
+                      全部状态
+                    </SelectItem>
+                    <SelectItem value="queued">
+                      排队中
+                    </SelectItem>
+                    <SelectItem value="running">
+                      运行中
+                    </SelectItem>
+                    <SelectItem value="retrying">
+                      重试中
+                    </SelectItem>
+                    <SelectItem value="succeeded">
+                      成功
+                    </SelectItem>
+                    <SelectItem value="failed">
+                      失败
+                    </SelectItem>
+                    <SelectItem value="cancelled">
+                      已取消
+                    </SelectItem>
+                    <SelectItem value="skipped">
+                      已跳过
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <!-- 模型筛选 -->
+                <Input
+                  v-model="filterModel"
+                  type="text"
+                  placeholder="任务 Key..."
+                  class="w-32 h-8 text-xs"
+                />
+                <!-- 刷新按钮 -->
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="h-8 w-8"
+                  :disabled="loading"
+                  @click="fetchTasks"
+                >
+                  <RefreshCw
+                    class="w-3.5 h-3.5"
+                    :class="{ 'animate-spin': loading }"
+                  />
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 加载状态 -->
+          <div
+            v-if="loading && !tasks.length"
+            class="p-8 text-center"
+          >
+            <Loader2 class="w-8 h-8 animate-spin mx-auto text-muted-foreground" />
+            <p class="mt-2 text-sm text-muted-foreground">
+              加载中...
+            </p>
+          </div>
+
+          <!-- 空状态 -->
+          <div
+            v-else-if="!tasks.length"
+            class="p-8 text-center"
+          >
+            <Zap class="w-12 h-12 mx-auto text-muted-foreground/50" />
+            <p class="mt-2 text-sm text-muted-foreground">
+              暂无异步任务
+            </p>
+          </div>
+
+          <!-- 桌面端表格 -->
+          <Table
+            v-else
+            class="hidden md:table"
+          >
+            <TableHeader>
+              <TableRow>
+                <TableHead class="w-[25%]">
+                  任务
+                </TableHead>
+                <TableHead class="w-[15%]">
+                  {{ isAdmin ? '用户/Provider' : 'Provider' }}
+                </TableHead>
+                <TableHead class="w-[12%]">
+                  状态
+                </TableHead>
+                <TableHead class="w-[10%]">
+                  参数
+                </TableHead>
+                <TableHead class="w-[15%]">
+                  时间
+                </TableHead>
+                <TableHead class="w-[8%] text-center">
+                  操作
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              <TableRow
+                v-for="task in tasks"
+                :key="task.id"
+                class="cursor-pointer hover:bg-muted/50"
+                @click="openTaskDetail(task)"
+              >
+                <!-- 任务信息 -->
+                <TableCell>
+                  <div class="space-y-1">
+                    <div class="flex items-center gap-2">
+                      <span class="font-medium text-sm truncate">{{ displayTaskName(task) }}</span>
+                    </div>
+                    <p
+                      class="text-xs text-muted-foreground truncate max-w-[280px]"
+                      :title="displayTaskDescription(task)"
+                    >
+                      {{ displayTaskDescription(task) }}
+                    </p>
+                  </div>
+                </TableCell>
+                <!-- 用户/Provider -->
+                <TableCell>
+                  <div class="space-y-0.5 text-sm">
+                    <div
+                      v-if="isAdmin"
+                      class="flex items-center gap-1.5"
+                    >
+                      <User class="w-3 h-3 text-muted-foreground" />
+                      <span class="truncate max-w-[100px]">{{ task.username }}</span>
+                    </div>
+                    <div class="flex items-center gap-1.5 text-muted-foreground">
+                      <Server class="w-3 h-3" />
+                      <span class="truncate max-w-[100px]">{{ displayTaskSource(task) }}</span>
+                    </div>
+                  </div>
+                </TableCell>
+                <!-- 状态 -->
+                <TableCell>
+                  <div class="flex flex-col items-start gap-1">
+                    <Badge
+                      :variant="getStatusVariant(task.status)"
+                      class="text-xs"
+                    >
+                      {{ getStatusLabel(task.status) }}
+                    </Badge>
+                    <div
+                      v-if="task.progress_percent > 0 && isRunningStatus(task.status)"
+                      class="w-full"
+                    >
+                      <div class="flex items-center gap-2">
+                        <div class="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+                          <div
+                            class="h-full bg-primary transition-all"
+                            :style="{ width: `${task.progress_percent}%` }"
+                          />
+                        </div>
+                        <span class="text-xs text-muted-foreground">{{ task.progress_percent }}%</span>
+                      </div>
+                    </div>
+                  </div>
+                </TableCell>
+                <!-- 参数 -->
+                <TableCell>
+                  <div class="text-xs space-y-0.5 text-muted-foreground">
+                    <div
+                      v-if="task.attempt"
+                      class="flex items-center gap-1"
+                    >
+                      <Timer class="w-3 h-3" />
+                      <span>{{ task.attempt }}/{{ task.max_attempts ?? 1 }}</span>
+                    </div>
+                  </div>
+                </TableCell>
+                <!-- 时间 -->
+                <TableCell>
+                  <div class="text-xs space-y-0.5">
+                    <div class="flex items-center gap-1.5 text-muted-foreground">
+                      <Clock class="w-3 h-3" />
+                      <span>{{ formatDate(task.created_at) }}</span>
+                    </div>
+                    <div
+                      v-if="finishTime(task)"
+                      class="flex items-center gap-1.5 text-green-600 dark:text-green-400"
+                    >
+                      <CheckCircle class="w-3 h-3" />
+                      <span>{{ formatDate(finishTime(task)) }}</span>
+                    </div>
+                  </div>
+                </TableCell>
+                <!-- 操作 -->
+                <TableCell class="text-center">
+                  <div class="flex items-center justify-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      class="h-7 w-7"
+                      title="任务详情"
+                      @click.stop="openTaskDetail(task)"
+                    >
+                      <Eye class="w-4 h-4" />
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+
+          <!-- 移动端卡片列表 -->
+          <div
+            v-if="tasks.length"
+            class="md:hidden divide-y divide-border/60"
+          >
+            <div
+              v-for="task in tasks"
+              :key="`m-${task.id}`"
+              class="p-4 space-y-3 hover:bg-muted/30 cursor-pointer active:bg-muted/50 transition-colors"
+              @click="openTaskDetail(task)"
+            >
+              <!-- 顶部：模型和状态 -->
+              <div class="flex items-start justify-between gap-2">
+                <div class="flex items-center gap-2 min-w-0 flex-1">
+                  <span class="font-medium text-sm truncate">{{ displayTaskName(task) }}</span>
+                </div>
                 <Badge
                   :variant="getStatusVariant(task.status)"
-                  class="text-xs"
+                  class="text-xs shrink-0"
                 >
                   {{ getStatusLabel(task.status) }}
                 </Badge>
-                <div
-                  v-if="task.progress_percent > 0 && isRunningStatus(task.status)"
-                  class="w-full"
-                >
-                  <div class="flex items-center gap-2">
-                    <div class="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-                      <div
-                        class="h-full bg-primary transition-all"
-                        :style="{ width: `${task.progress_percent}%` }"
-                      />
-                    </div>
-                    <span class="text-xs text-muted-foreground">{{ task.progress_percent }}%</span>
-                  </div>
-                </div>
               </div>
-            </TableCell>
-            <!-- 参数 -->
-            <TableCell>
-              <div class="text-xs space-y-0.5 text-muted-foreground">
-                <div
-                  v-if="task.duration_seconds || task.attempt"
-                  class="flex items-center gap-1"
-                >
-                  <Timer class="w-3 h-3" />
-                  <span>{{ task.duration_seconds ? `${task.duration_seconds}s` : `${task.attempt}/${task.max_attempts ?? 1}` }}</span>
+
+              <!-- 进度条（如果有） -->
+              <div
+                v-if="task.progress_percent > 0 && isRunningStatus(task.status)"
+                class="space-y-1"
+              >
+                <div class="h-1.5 bg-muted rounded-full overflow-hidden">
+                  <div
+                    class="h-full bg-primary transition-all"
+                    :style="{ width: `${task.progress_percent}%` }"
+                  />
                 </div>
-                <div v-if="task.resolution">
-                  {{ task.resolution }}
-                </div>
-                <div v-if="task.aspect_ratio">
-                  {{ task.aspect_ratio }}
-                </div>
+                <p class="text-xs text-muted-foreground text-right">
+                  {{ task.progress_percent }}%
+                </p>
               </div>
-            </TableCell>
-            <!-- 时间 -->
-            <TableCell>
-              <div class="text-xs space-y-0.5">
+
+              <!-- Prompt -->
+              <p class="text-sm text-muted-foreground line-clamp-2">
+                {{ displayTaskDescription(task) }}
+              </p>
+
+              <!-- 信息网格 -->
+              <div class="grid grid-cols-2 gap-2 text-xs">
+                <div
+                  v-if="isAdmin"
+                  class="flex items-center gap-1.5 text-muted-foreground"
+                >
+                  <User class="w-3 h-3" />
+                  <span class="truncate">{{ task.username }}</span>
+                </div>
+                <div class="flex items-center gap-1.5 text-muted-foreground">
+                  <Server class="w-3 h-3" />
+                  <span class="truncate">{{ displayTaskSource(task) }}</span>
+                </div>
                 <div class="flex items-center gap-1.5 text-muted-foreground">
                   <Clock class="w-3 h-3" />
                   <span>{{ formatDate(task.created_at) }}</span>
                 </div>
                 <div
-                  v-if="finishTime(task)"
-                  class="flex items-center gap-1.5 text-green-600 dark:text-green-400"
+                  v-if="task.attempt"
+                  class="flex items-center gap-1.5 text-muted-foreground"
                 >
-                  <CheckCircle class="w-3 h-3" />
-                  <span>{{ formatDate(finishTime(task)) }}</span>
+                  <Timer class="w-3 h-3" />
+                  <span>{{ task.attempt }}/{{ task.max_attempts ?? 1 }}</span>
                 </div>
               </div>
-            </TableCell>
-            <!-- 操作 -->
-            <TableCell class="text-center">
-              <div class="flex items-center justify-center gap-1">
+
+              <!-- 操作按钮 -->
+              <div class="flex justify-end gap-2">
                 <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-7 w-7"
-                  title="任务详情"
-                  @click.stop="openTaskDetail(task)"
+                  v-if="authStore.canOperateAdmin && canCancel(task.status)"
+                  variant="outline"
+                  size="sm"
+                  class="h-7 text-xs text-red-500 border-red-200 hover:bg-red-50"
+                  @click.stop="cancelTask(task)"
                 >
-                  <Eye class="w-4 h-4" />
-                </Button>
-                <Button
-                  v-if="isVideoTask(task)"
-                  variant="ghost"
-                  size="icon"
-                  class="h-7 w-7"
-                  title="使用记录"
-                  @click.stop="openUsageRecord(task)"
-                >
-                  <ExternalLink class="w-4 h-4" />
+                  <XCircle class="w-3.5 h-3.5 mr-1" />
+                  取消
                 </Button>
               </div>
-            </TableCell>
-          </TableRow>
-        </TableBody>
-      </Table>
-
-      <!-- 移动端卡片列表 -->
-      <div
-        v-if="tasks.length"
-        class="md:hidden divide-y divide-border/60"
-      >
-        <div
-          v-for="task in tasks"
-          :key="`m-${task.id}`"
-          class="p-4 space-y-3 hover:bg-muted/30 cursor-pointer active:bg-muted/50 transition-colors"
-          @click="openTaskDetail(task)"
-        >
-          <!-- 顶部：模型和状态 -->
-          <div class="flex items-start justify-between gap-2">
-            <div class="flex items-center gap-2 min-w-0 flex-1">
-              <Video
-                v-if="isVideoTask(task)"
-                class="w-4 h-4 text-muted-foreground shrink-0"
-              />
-              <span class="font-medium text-sm truncate">{{ displayTaskName(task) }}</span>
-            </div>
-            <Badge
-              :variant="getStatusVariant(task.status)"
-              class="text-xs shrink-0"
-            >
-              {{ getStatusLabel(task.status) }}
-            </Badge>
-          </div>
-
-          <!-- 进度条（如果有） -->
-          <div
-            v-if="task.progress_percent > 0 && isRunningStatus(task.status)"
-            class="space-y-1"
-          >
-            <div class="h-1.5 bg-muted rounded-full overflow-hidden">
-              <div
-                class="h-full bg-primary transition-all"
-                :style="{ width: `${task.progress_percent}%` }"
-              />
-            </div>
-            <p class="text-xs text-muted-foreground text-right">
-              {{ task.progress_percent }}%
-            </p>
-          </div>
-
-          <!-- Prompt -->
-          <p class="text-sm text-muted-foreground line-clamp-2">
-            {{ displayTaskDescription(task) }}
-          </p>
-
-          <!-- 信息网格 -->
-          <div class="grid grid-cols-2 gap-2 text-xs">
-            <div
-              v-if="isAdmin"
-              class="flex items-center gap-1.5 text-muted-foreground"
-            >
-              <User class="w-3 h-3" />
-              <span class="truncate">{{ task.username }}</span>
-            </div>
-            <div class="flex items-center gap-1.5 text-muted-foreground">
-              <Server class="w-3 h-3" />
-              <span class="truncate">{{ displayTaskSource(task) }}</span>
-            </div>
-            <div class="flex items-center gap-1.5 text-muted-foreground">
-              <Clock class="w-3 h-3" />
-              <span>{{ formatDate(task.created_at) }}</span>
-            </div>
-            <div
-              v-if="task.duration_seconds || task.attempt"
-              class="flex items-center gap-1.5 text-muted-foreground"
-            >
-              <Timer class="w-3 h-3" />
-              <span>{{ task.duration_seconds ? `${task.duration_seconds}s` : `${task.attempt}/${task.max_attempts ?? 1}` }}</span>
             </div>
           </div>
 
-          <!-- 操作按钮 -->
-          <div class="flex justify-end gap-2">
-            <Button
-              v-if="isVideoTask(task)"
-              variant="outline"
-              size="sm"
-              class="h-7 text-xs"
-              @click.stop="openUsageRecord(task)"
-            >
-              <ExternalLink class="w-3.5 h-3.5 mr-1" />
-              使用记录
-            </Button>
-            <Button
-              v-if="authStore.canOperateAdmin && canCancel(task.status)"
-              variant="outline"
-              size="sm"
-              class="h-7 text-xs text-red-500 border-red-200 hover:bg-red-50"
-              @click.stop="cancelTask(task)"
-            >
-              <XCircle class="w-3.5 h-3.5 mr-1" />
-              取消
-            </Button>
-          </div>
-        </div>
-      </div>
-
-      <!-- 分页 -->
-      <Pagination
-        v-if="total > 0"
-        :current="currentPage"
-        :total="total"
-        :page-size="pageSize"
-        cache-key="async-tasks-page-size"
-        @update:current="goToPage"
-        @update:page-size="handlePageSizeChange"
-      />
-    </Card>
+          <!-- 分页 -->
+          <Pagination
+            v-if="total > 0"
+            :current="currentPage"
+            :total="total"
+            :page-size="pageSize"
+            cache-key="async-tasks-page-size"
+            @update:current="goToPage"
+            @update:page-size="handlePageSizeChange"
+          />
+        </Card>
+      </TabsContent>
+    </Tabs>
 
     <!-- 任务详情抽屉 -->
     <Teleport to="body">
@@ -463,10 +476,6 @@
                     任务详情
                   </h3>
                   <div class="flex items-center gap-1 text-sm font-mono text-muted-foreground bg-muted px-2 py-0.5 rounded">
-                    <Video
-                      v-if="isVideoTask(selectedTask)"
-                      class="w-3.5 h-3.5 mr-1"
-                    />
                     <span>{{ displayTaskName(selectedTask) }}</span>
                   </div>
                   <Badge :variant="getStatusVariant(selectedTask.status)">
@@ -477,8 +486,7 @@
                   <Button
                     variant="ghost"
                     size="icon"
-                    class="h-8 w-8"
-                    :class="{ 'text-primary': detailAutoRefresh }"
+                    :class="detailAutoRefresh ? 'h-8 w-8 text-primary' : 'h-8 w-8'"
                     :title="detailAutoRefresh ? '停止自动刷新' : '开启自动刷新（每5秒）'"
                     @click="toggleDetailAutoRefresh"
                   >
@@ -649,7 +657,7 @@
 
               <!-- 任务完成但无视频 -->
               <div
-                v-else-if="isSucceededStatus(selectedTask.status) && isVideoTask(selectedTask)"
+                v-else-if="isSucceededStatus(selectedTask.status) && !!selectedTask.video_url"
                 class="p-4 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-200 dark:border-amber-800 text-center"
               >
                 <Video class="w-8 h-8 mx-auto mb-2 text-amber-500" />
@@ -879,6 +887,12 @@ import TableRow from '@/components/ui/table-row.vue'
 import TableHead from '@/components/ui/table-head.vue'
 import TableCell from '@/components/ui/table-cell.vue'
 import Pagination from '@/components/ui/pagination.vue'
+import Tabs from '@/components/ui/tabs.vue'
+import TabsList from '@/components/ui/tabs-list.vue'
+import TabsTrigger from '@/components/ui/tabs-trigger.vue'
+import TabsContent from '@/components/ui/tabs-content.vue'
+import VideoTasksPanel from '@/features/async-tasks/components/VideoTasksPanel.vue'
+import type { VideoTaskStatsResponse } from '@/api/video-tasks'
 import { RequestDetailDrawer } from '@/features/usage/components'
 import {
   Zap,
@@ -896,7 +910,6 @@ import {
   X,
   AlertCircle,
   Eye,
-  ExternalLink,
   Copy,
 } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
@@ -909,6 +922,8 @@ const { legacyT } = useI18n()
 const { copyToClipboard } = useClipboard()
 
 // 状态
+const activeTab = ref('video')
+const videoTaskCount = ref<number | null>(null)
 const loading = ref(false)
 const tasks = ref<AsyncTaskItem[]>([])
 const stats = ref<AsyncTaskStatsResponse | null>(null)
@@ -935,9 +950,8 @@ const runningCount = computed(() => {
     ?? 0
 })
 
-// 判断是否为视频任务
-function isVideoTask(task: AsyncTaskItem): boolean {
-  return task.task_type === 'video' || !!task.video_url || !!task.duration_seconds || task.task_key === 'video.task.poller'
+function onVideoStats(payload: VideoTaskStatsResponse | null) {
+  videoTaskCount.value = payload?.total ?? null
 }
 
 function displayTaskName(task: AsyncTaskItem | AsyncTaskDetail): string {
@@ -1084,30 +1098,6 @@ function closeDetail() {
 }
 
 // 打开使用记录详情抽屉
-async function openUsageRecord(task: AsyncTaskItem) {
-  try {
-    // 获取任务详情以获得 request_id
-    const detail = await asyncTasksApi.getDetail(task.id)
-    const requestId = detail.request_metadata?.request_id
-    if (requestId) {
-      usageRequestId.value = requestId
-      usageDetailOpen.value = true
-    } else {
-      toast({
-        title: '无法打开使用记录',
-        description: '该任务没有关联的请求ID',
-        variant: 'destructive',
-      })
-    }
-  } catch (error: unknown) {
-    toast({
-      title: '获取任务信息失败',
-      description: error instanceof Error ? error.message : String(error),
-      variant: 'destructive',
-    })
-  }
-}
-
 // 取消任务
 async function cancelTask(task: AsyncTaskItem | AsyncTaskDetail) {
   if (!confirm(legacyT('确定要取消这个任务吗？'))) return

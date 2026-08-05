@@ -137,6 +137,8 @@ pub(crate) const RUST_FRONTDOOR_OWNED_ROUTE_PATTERNS: &[&str] = &[
     "/v1beta/operations/{id}",
     "/v1/videos",
     "/v1/videos/{path...}",
+    "/v3/contents/generations/tasks",
+    "/v3/contents/generations/tasks/{path...}",
     "/upload/v1beta/files",
     "/v1beta/files",
     "/v1beta/files/{path...}",

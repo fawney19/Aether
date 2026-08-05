@@ -4,8 +4,9 @@ use std::sync::Mutex;
 use serde_json::{Map, Value};
 
 use crate::{
-    GeminiVideoTaskSeed, LocalVideoTaskReadResponse, LocalVideoTaskRegistryMutation,
-    LocalVideoTaskSnapshot, OpenAiVideoTaskSeed, VideoTaskRegistry, VideoTaskStore,
+    DoubaoVideoTaskSeed, GeminiVideoTaskSeed, LocalVideoTaskReadResponse,
+    LocalVideoTaskRegistryMutation, LocalVideoTaskSnapshot, OpenAiVideoTaskSeed, VideoTaskRegistry,
+    VideoTaskStore,
 };
 
 #[derive(Debug, Default)]
@@ -36,6 +37,11 @@ impl VideoTaskStore for InMemoryVideoTaskStore {
         registry.read_gemini(short_id)
     }
 
+    fn read_doubao(&self, task_id: &str) -> Option<LocalVideoTaskReadResponse> {
+        let registry = self.registry.lock().ok()?;
+        registry.read_doubao(task_id)
+    }
+
     fn clone_openai(&self, task_id: &str) -> Option<OpenAiVideoTaskSeed> {
         let registry = self.registry.lock().ok()?;
         registry.clone_openai(task_id)
@@ -44,6 +50,11 @@ impl VideoTaskStore for InMemoryVideoTaskStore {
     fn clone_gemini(&self, short_id: &str) -> Option<GeminiVideoTaskSeed> {
         let registry = self.registry.lock().ok()?;
         registry.clone_gemini(short_id)
+    }
+
+    fn clone_doubao(&self, task_id: &str) -> Option<DoubaoVideoTaskSeed> {
+        let registry = self.registry.lock().ok()?;
+        registry.clone_doubao(task_id)
     }
 
     fn list_active_snapshots(&self, limit: usize) -> Vec<LocalVideoTaskSnapshot> {
@@ -71,6 +82,13 @@ impl VideoTaskStore for InMemoryVideoTaskStore {
             return false;
         };
         registry.project_gemini(short_id, provider_body)
+    }
+
+    fn project_doubao(&self, task_id: &str, provider_body: &Map<String, Value>) -> bool {
+        let Ok(mut registry) = self.registry.lock() else {
+            return false;
+        };
+        registry.project_doubao(task_id, provider_body)
     }
 }
 
@@ -137,6 +155,11 @@ impl VideoTaskStore for FileVideoTaskStore {
         registry.read_gemini(short_id)
     }
 
+    fn read_doubao(&self, task_id: &str) -> Option<LocalVideoTaskReadResponse> {
+        let registry = self.registry.lock().ok()?;
+        registry.read_doubao(task_id)
+    }
+
     fn clone_openai(&self, task_id: &str) -> Option<OpenAiVideoTaskSeed> {
         let registry = self.registry.lock().ok()?;
         registry.clone_openai(task_id)
@@ -145,6 +168,11 @@ impl VideoTaskStore for FileVideoTaskStore {
     fn clone_gemini(&self, short_id: &str) -> Option<GeminiVideoTaskSeed> {
         let registry = self.registry.lock().ok()?;
         registry.clone_gemini(short_id)
+    }
+
+    fn clone_doubao(&self, task_id: &str) -> Option<DoubaoVideoTaskSeed> {
+        let registry = self.registry.lock().ok()?;
+        registry.clone_doubao(task_id)
     }
 
     fn list_active_snapshots(&self, limit: usize) -> Vec<LocalVideoTaskSnapshot> {
@@ -167,5 +195,9 @@ impl VideoTaskStore for FileVideoTaskStore {
 
     fn project_gemini(&self, short_id: &str, provider_body: &Map<String, Value>) -> bool {
         self.mutate_registry(|registry| registry.project_gemini(short_id, provider_body))
+    }
+
+    fn project_doubao(&self, task_id: &str, provider_body: &Map<String, Value>) -> bool {
+        self.mutate_registry(|registry| registry.project_doubao(task_id, provider_body))
     }
 }

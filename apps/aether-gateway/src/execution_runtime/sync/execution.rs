@@ -3005,7 +3005,30 @@ async fn execute_execution_runtime_sync_impl(
                     candidate_id,
                 )?));
             }
-            LocalVideoSyncSuccessBuild::NotHandled(payload) => payload,
+            LocalVideoSyncSuccessBuild::NotHandled(payload) => {
+                // A video create that reports success but produces no task would
+                // silently never reach the database, leaving the task invisible
+                // in the admin UI with no trace of why.
+                if payload.report_kind.starts_with("doubao_video_create")
+                    || payload.report_kind.starts_with("openai_video_create")
+                    || payload.report_kind.starts_with("openai_video_remix")
+                    || payload.report_kind.starts_with("gemini_video_create")
+                {
+                    warn!(
+                        event_name = "local_video_task_not_persisted",
+                        log_type = "event",
+                        trace_id = %trace_id,
+                        report_kind = %payload.report_kind,
+                        status_code = payload.status_code,
+                        provider_api_format = %plan.provider_api_format,
+                        upstream_url = %plan.url,
+                        truth_source_rust_authoritative = state.video_tasks.is_rust_authoritative(),
+                        has_body_json = payload.body_json.is_some(),
+                        "gateway video create succeeded upstream but produced no local task"
+                    );
+                }
+                payload
+            }
         };
         if let Some(response) =
             maybe_build_local_sync_finalize_response(trace_id, decision, &payload)?

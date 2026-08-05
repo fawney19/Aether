@@ -59,6 +59,24 @@ pub fn extract_gemini_short_id_from_cancel_path(path: &str) -> Option<&str> {
     Some(short_id)
 }
 
+/// Client-facing root of the Doubao (Volcengine Ark) generation task surface.
+pub const DOUBAO_VIDEO_TASKS_PATH: &str = "/v3/contents/generations/tasks";
+
+pub fn extract_doubao_task_id_from_path(path: &str) -> Option<&str> {
+    let suffix = path
+        .strip_prefix(DOUBAO_VIDEO_TASKS_PATH)?
+        .strip_prefix('/')?;
+    (!suffix.is_empty() && !suffix.contains('/')).then_some(suffix)
+}
+
+pub fn extract_doubao_task_id_from_content_path(path: &str) -> Option<&str> {
+    let suffix = path
+        .strip_prefix(DOUBAO_VIDEO_TASKS_PATH)?
+        .strip_prefix('/')?
+        .strip_suffix("/content")?;
+    (!suffix.is_empty() && !suffix.contains('/')).then_some(suffix)
+}
+
 pub fn resolve_video_task_read_lookup_key<'a>(
     route_family: Option<&str>,
     request_path: &'a str,
@@ -69,6 +87,9 @@ pub fn resolve_video_task_read_lookup_key<'a>(
         }
         Some("gemini") => {
             extract_gemini_short_id_from_path(request_path).map(VideoTaskLookupKey::ShortId)
+        }
+        Some("doubao") => {
+            extract_doubao_task_id_from_path(request_path).map(VideoTaskLookupKey::Id)
         }
         _ => None,
     }
@@ -87,6 +108,9 @@ pub fn resolve_video_task_hydration_lookup_key<'a>(
         Some("gemini") => extract_gemini_short_id_from_path(request_path)
             .or_else(|| extract_gemini_short_id_from_cancel_path(request_path))
             .map(VideoTaskLookupKey::ShortId),
+        Some("doubao") => extract_doubao_task_id_from_path(request_path)
+            .or_else(|| extract_doubao_task_id_from_content_path(request_path))
+            .map(VideoTaskLookupKey::Id),
         _ => None,
     }
 }
@@ -163,6 +187,11 @@ pub fn build_local_sync_finalize_request_path(
                 "/v1beta/models/{model}/operations/{short_id}:cancel"
             ))
         }
+        "doubao_video_delete_sync_finalize" => {
+            let task_id =
+                report_context.and_then(|value| non_empty_context_str(value, "task_id"))?;
+            Some(format!("{DOUBAO_VIDEO_TASKS_PATH}/{task_id}"))
+        }
         _ => None,
     }
 }
@@ -193,6 +222,13 @@ pub fn resolve_local_video_registry_mutation(
             let short_id = extract_gemini_short_id_from_cancel_path(request_path)?;
             Some(LocalVideoTaskRegistryMutation::GeminiCancelled {
                 short_id: short_id.to_string(),
+            })
+        }
+        // Ark has no separate cancel verb, so DELETE always retires the task.
+        "doubao_video_delete_sync_finalize" => {
+            let task_id = extract_doubao_task_id_from_path(request_path)?;
+            Some(LocalVideoTaskRegistryMutation::DoubaoDeleted {
+                task_id: task_id.to_string(),
             })
         }
         _ => None,
@@ -377,6 +413,86 @@ mod tests {
                 Some(&json!({"operation_name": "models/veo-3/operations/abc123"})),
             ),
             Some("/v1beta/models/veo-3/operations/abc123:cancel".to_string())
+        );
+    }
+
+    #[test]
+    fn doubao_path_extractors_reject_nested_and_root_paths() {
+        use super::{extract_doubao_task_id_from_content_path, extract_doubao_task_id_from_path};
+
+        assert_eq!(
+            extract_doubao_task_id_from_path("/v3/contents/generations/tasks/cgt-123"),
+            Some("cgt-123")
+        );
+        assert_eq!(
+            extract_doubao_task_id_from_content_path(
+                "/v3/contents/generations/tasks/cgt-123/content"
+            ),
+            Some("cgt-123")
+        );
+        // The collection root carries no task id.
+        assert_eq!(
+            extract_doubao_task_id_from_path("/v3/contents/generations/tasks"),
+            None
+        );
+        // A sub-resource is not a task-level path.
+        assert_eq!(
+            extract_doubao_task_id_from_path("/v3/contents/generations/tasks/cgt-123/content"),
+            None
+        );
+        assert_eq!(
+            extract_doubao_task_id_from_content_path("/v3/contents/generations/tasks/cgt-123"),
+            None
+        );
+        // Other surfaces must not be mistaken for Doubao paths.
+        assert_eq!(
+            extract_doubao_task_id_from_path("/v1/videos/task_123"),
+            None
+        );
+    }
+
+    #[test]
+    fn resolves_doubao_lookup_keys_and_delete_mutation() {
+        use super::{
+            resolve_local_video_registry_mutation, LocalVideoTaskRegistryMutation,
+            VideoTaskTruthSourceMode,
+        };
+
+        assert_eq!(
+            resolve_video_task_read_lookup_key(
+                Some("doubao"),
+                "/v3/contents/generations/tasks/cgt-123"
+            ),
+            Some(VideoTaskLookupKey::Id("cgt-123"))
+        );
+        assert_eq!(
+            resolve_video_task_hydration_lookup_key(
+                Some("doubao"),
+                "/v3/contents/generations/tasks/cgt-123/content"
+            ),
+            Some(VideoTaskLookupKey::Id("cgt-123"))
+        );
+        assert_eq!(
+            resolve_local_video_registry_mutation(
+                VideoTaskTruthSourceMode::RustAuthoritative,
+                "/v3/contents/generations/tasks/cgt-123",
+                "doubao_video_delete_sync_finalize",
+            ),
+            Some(LocalVideoTaskRegistryMutation::DoubaoDeleted {
+                task_id: "cgt-123".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn builds_doubao_delete_finalize_request_path() {
+        assert_eq!(
+            build_local_sync_finalize_request_path(
+                "doubao_video_delete_sync_finalize",
+                "doubao:video",
+                Some(&json!({"task_id": "cgt-123"})),
+            ),
+            Some("/v3/contents/generations/tasks/cgt-123".to_string())
         );
     }
 

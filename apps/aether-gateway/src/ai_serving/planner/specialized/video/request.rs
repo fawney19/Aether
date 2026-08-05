@@ -188,5 +188,6 @@ fn provider_video_create_family(family: LocalVideoCreateFamily) -> ProviderVideo
     match family {
         LocalVideoCreateFamily::OpenAi => ProviderVideoCreateFamily::OpenAi,
         LocalVideoCreateFamily::Gemini => ProviderVideoCreateFamily::Gemini,
+        LocalVideoCreateFamily::Doubao => ProviderVideoCreateFamily::Doubao,
     }
 }

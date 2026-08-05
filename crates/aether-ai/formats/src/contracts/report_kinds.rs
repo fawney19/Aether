@@ -18,6 +18,8 @@ pub const CLAUDE_CLI_SYNC_FINALIZE_REPORT_KIND: &str = "claude_cli_sync_finalize
 pub const GEMINI_CLI_SYNC_FINALIZE_REPORT_KIND: &str = "gemini_cli_sync_finalize";
 pub const OPENAI_VIDEO_CREATE_SYNC_FINALIZE_REPORT_KIND: &str = "openai_video_create_sync_finalize";
 pub const GEMINI_VIDEO_CREATE_SYNC_FINALIZE_REPORT_KIND: &str = "gemini_video_create_sync_finalize";
+pub const DOUBAO_VIDEO_CREATE_SYNC_FINALIZE_REPORT_KIND: &str = "doubao_video_create_sync_finalize";
+pub const DOUBAO_VIDEO_DELETE_SYNC_FINALIZE_REPORT_KIND: &str = "doubao_video_delete_sync_finalize";
 const LEGACY_OPENAI_CLI_SYNC_FINALIZE_REPORT_KIND: &str = "openai_cli_sync_finalize";
 const LEGACY_OPENAI_COMPACT_SYNC_FINALIZE_REPORT_KIND: &str = "openai_compact_sync_finalize";
 

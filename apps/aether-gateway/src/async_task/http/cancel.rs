@@ -119,6 +119,17 @@ fn build_video_task_cancel_plan(task: &StoredVideoTask) -> Option<VideoTaskCance
                 request_path: format!("/v1beta/models/{model}/operations/{short_id}:cancel"),
             })
         }
+        // Ark folds cancel into delete, so an admin-initiated cancel retires the task.
+        "doubao:video" => Some(VideoTaskCancelPlan {
+            route_family: "doubao",
+            plan_kind: "doubao_video_delete_sync",
+            report_kind: "doubao_video_delete_sync_finalize",
+            request_path: format!(
+                "{}/{}",
+                aether_video_tasks_core::DOUBAO_VIDEO_TASKS_PATH,
+                task.id
+            ),
+        }),
         _ => None,
     }
 }

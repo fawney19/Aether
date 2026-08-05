@@ -4,21 +4,25 @@ use url::form_urlencoded;
 use crate::contracts::{
     ClientSurface, CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CHAT_SYNC_PLAN_KIND,
     CLAUDE_CLI_STREAM_PLAN_KIND, CLAUDE_CLI_SYNC_PLAN_KIND, CLAUDE_COUNT_TOKENS_SYNC_PLAN_KIND,
-    GEMINI_CHAT_STREAM_PLAN_KIND, GEMINI_CHAT_SYNC_PLAN_KIND, GEMINI_CLI_STREAM_PLAN_KIND,
-    GEMINI_CLI_SYNC_PLAN_KIND, GEMINI_EMBEDDING_SYNC_PLAN_KIND, GEMINI_FILES_DELETE_PLAN_KIND,
-    GEMINI_FILES_DOWNLOAD_PLAN_KIND, GEMINI_FILES_GET_PLAN_KIND, GEMINI_FILES_LIST_PLAN_KIND,
-    GEMINI_FILES_UPLOAD_PLAN_KIND, GEMINI_INTERACTIONS_STREAM_PLAN_KIND,
-    GEMINI_INTERACTIONS_SYNC_PLAN_KIND, GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND,
-    GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND,
-    OPENAI_EMBEDDING_SYNC_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND,
-    OPENAI_RERANK_SYNC_PLAN_KIND, OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND,
-    OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND, OPENAI_RESPONSES_STREAM_PLAN_KIND,
-    OPENAI_RESPONSES_SYNC_PLAN_KIND, OPENAI_SEARCH_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,
-    OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
+    DOUBAO_VIDEO_CONTENT_PLAN_KIND, DOUBAO_VIDEO_CREATE_SYNC_PLAN_KIND,
+    DOUBAO_VIDEO_DELETE_SYNC_PLAN_KIND, GEMINI_CHAT_STREAM_PLAN_KIND, GEMINI_CHAT_SYNC_PLAN_KIND,
+    GEMINI_CLI_STREAM_PLAN_KIND, GEMINI_CLI_SYNC_PLAN_KIND, GEMINI_EMBEDDING_SYNC_PLAN_KIND,
+    GEMINI_FILES_DELETE_PLAN_KIND, GEMINI_FILES_DOWNLOAD_PLAN_KIND, GEMINI_FILES_GET_PLAN_KIND,
+    GEMINI_FILES_LIST_PLAN_KIND, GEMINI_FILES_UPLOAD_PLAN_KIND,
+    GEMINI_INTERACTIONS_STREAM_PLAN_KIND, GEMINI_INTERACTIONS_SYNC_PLAN_KIND,
+    GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND, GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND,
+    OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND, OPENAI_EMBEDDING_SYNC_PLAN_KIND,
+    OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND, OPENAI_RERANK_SYNC_PLAN_KIND,
+    OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND, OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND,
+    OPENAI_RESPONSES_STREAM_PLAN_KIND, OPENAI_RESPONSES_SYNC_PLAN_KIND,
+    OPENAI_SEARCH_SYNC_PLAN_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_CONTENT_PLAN_KIND, OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND, OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
 use crate::formats::openai::image::request::is_openai_image_stream_request;
+
+/// Client-facing root of the Doubao (Volcengine Ark) content generation task surface.
+pub const DOUBAO_VIDEO_TASKS_PATH: &str = "/v3/contents/generations/tasks";
 
 pub fn resolve_execution_runtime_stream_plan_kind(
     route_class: Option<&str>,
@@ -132,6 +136,14 @@ pub fn resolve_execution_runtime_stream_plan_kind_with_client_surface(
         return Some(OPENAI_VIDEO_CONTENT_PLAN_KIND);
     }
 
+    if route_family == Some("doubao")
+        && route_kind == Some("video")
+        && *method == Method::GET
+        && path.ends_with("/content")
+    {
+        return Some(DOUBAO_VIDEO_CONTENT_PLAN_KIND);
+    }
+
     None
 }
 
@@ -174,6 +186,16 @@ pub fn resolve_execution_runtime_sync_plan_kind_with_client_surface(
         && path.ends_with("/cancel")
     {
         return Some(OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND);
+    }
+
+    if route_family == Some("doubao") && route_kind == Some("video") {
+        if *method == Method::POST && path == DOUBAO_VIDEO_TASKS_PATH {
+            return Some(DOUBAO_VIDEO_CREATE_SYNC_PLAN_KIND);
+        }
+        // Ark folds cancel and delete into a single DELETE on the task resource.
+        if *method == Method::DELETE && doubao_video_task_id_from_path(path).is_some() {
+            return Some(DOUBAO_VIDEO_DELETE_SYNC_PLAN_KIND);
+        }
     }
 
     if route_family == Some("openai")
@@ -349,6 +371,17 @@ fn is_openai_responses_route_kind(route_kind: Option<&str>) -> bool {
     matches!(route_kind, Some("responses") | Some("cli"))
 }
 
+/// Returns the task id for a `{DOUBAO_VIDEO_TASKS_PATH}/{id}` resource path.
+///
+/// Sub-resources such as `/content` are intentionally rejected so the caller can
+/// tell a task-level operation apart from a nested one.
+fn doubao_video_task_id_from_path(path: &str) -> Option<&str> {
+    let suffix = path
+        .strip_prefix(DOUBAO_VIDEO_TASKS_PATH)?
+        .strip_prefix('/')?;
+    (!suffix.is_empty() && !suffix.contains('/')).then_some(suffix)
+}
+
 fn is_openai_responses_compact_route_kind(route_kind: Option<&str>) -> bool {
     matches!(route_kind, Some("responses:compact") | Some("compact"))
 }
@@ -518,6 +551,8 @@ pub fn supports_sync_execution_decision_kind(plan_kind: &str) -> bool {
             | OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND
             | GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND
             | GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND
+            | DOUBAO_VIDEO_CREATE_SYNC_PLAN_KIND
+            | DOUBAO_VIDEO_DELETE_SYNC_PLAN_KIND
             | GEMINI_FILES_GET_PLAN_KIND
             | GEMINI_FILES_LIST_PLAN_KIND
             | GEMINI_FILES_DELETE_PLAN_KIND
@@ -537,6 +572,7 @@ pub fn supports_stream_execution_decision_kind(plan_kind: &str) -> bool {
             | GEMINI_INTERACTIONS_STREAM_PLAN_KIND
             | GEMINI_FILES_DOWNLOAD_PLAN_KIND
             | OPENAI_VIDEO_CONTENT_PLAN_KIND
+            | DOUBAO_VIDEO_CONTENT_PLAN_KIND
     )
 }
 
@@ -890,6 +926,106 @@ mod tests {
         ));
         assert!(supports_stream_execution_decision_kind(
             OPENAI_CHAT_STREAM_PLAN_KIND
+        ));
+    }
+
+    #[test]
+    fn resolves_doubao_video_plan_kinds() {
+        use super::{DOUBAO_VIDEO_CONTENT_PLAN_KIND, DOUBAO_VIDEO_TASKS_PATH};
+        use crate::contracts::{
+            DOUBAO_VIDEO_CREATE_SYNC_PLAN_KIND, DOUBAO_VIDEO_DELETE_SYNC_PLAN_KIND,
+        };
+
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("doubao"),
+                Some("video"),
+                None,
+                &Method::POST,
+                DOUBAO_VIDEO_TASKS_PATH,
+            ),
+            Some(DOUBAO_VIDEO_CREATE_SYNC_PLAN_KIND)
+        );
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("doubao"),
+                Some("video"),
+                None,
+                &Method::DELETE,
+                "/v3/contents/generations/tasks/cgt-123",
+            ),
+            Some(DOUBAO_VIDEO_DELETE_SYNC_PLAN_KIND)
+        );
+        assert_eq!(
+            resolve_execution_runtime_stream_plan_kind(
+                Some("ai_public"),
+                Some("doubao"),
+                Some("video"),
+                None,
+                &Method::GET,
+                "/v3/contents/generations/tasks/cgt-123/content",
+            ),
+            Some(DOUBAO_VIDEO_CONTENT_PLAN_KIND)
+        );
+
+        // Reads and list are served locally, so they must not resolve to a plan kind.
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("doubao"),
+                Some("video"),
+                None,
+                &Method::GET,
+                "/v3/contents/generations/tasks/cgt-123",
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("doubao"),
+                Some("video"),
+                None,
+                &Method::GET,
+                DOUBAO_VIDEO_TASKS_PATH,
+            ),
+            None
+        );
+        // A DELETE on the collection root has no task id and must not resolve.
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("doubao"),
+                Some("video"),
+                None,
+                &Method::DELETE,
+                DOUBAO_VIDEO_TASKS_PATH,
+            ),
+            None
+        );
+        // Nested sub-resources must not be mistaken for a task-level DELETE.
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("doubao"),
+                Some("video"),
+                None,
+                &Method::DELETE,
+                "/v3/contents/generations/tasks/cgt-123/content",
+            ),
+            None
+        );
+
+        assert!(supports_sync_execution_decision_kind(
+            DOUBAO_VIDEO_CREATE_SYNC_PLAN_KIND
+        ));
+        assert!(supports_sync_execution_decision_kind(
+            DOUBAO_VIDEO_DELETE_SYNC_PLAN_KIND
+        ));
+        assert!(supports_stream_execution_decision_kind(
+            DOUBAO_VIDEO_CONTENT_PLAN_KIND
         ));
     }
 

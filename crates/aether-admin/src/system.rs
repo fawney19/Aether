@@ -848,6 +848,12 @@ const ADMIN_API_FORMAT_DEFINITIONS: &[AdminApiFormatDefinition] = &[
         aliases: &["doubao_embedding"],
     },
     AdminApiFormatDefinition {
+        value: "doubao:video",
+        label: "Doubao Video",
+        default_path: "/v3/contents/generations/tasks",
+        aliases: &["doubao_video", "seedance", "ark_video"],
+    },
+    AdminApiFormatDefinition {
         value: "aliyun:multimodal_embedding",
         label: "Aliyun Multimodal Embedding",
         default_path: "/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding",

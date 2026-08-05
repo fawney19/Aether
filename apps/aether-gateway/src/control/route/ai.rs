@@ -112,6 +112,14 @@ pub(super) fn classify_ai_public_route(
             "openai:video",
             true,
         ))
+    } else if normalized_path.starts_with(aether_video_tasks_core::DOUBAO_VIDEO_TASKS_PATH) {
+        Some(classified(
+            "ai_public",
+            "doubao",
+            "video",
+            "doubao:video",
+            true,
+        ))
     } else if method == http::Method::POST
         && matches!(normalized_path, "/v1/interactions" | "/v1beta/interactions")
     {

@@ -20,6 +20,7 @@ export const API_FORMATS = {
   JINA_EMBEDDING: 'jina:embedding',
   JINA_RERANK: 'jina:rerank',
   DOUBAO_EMBEDDING: 'doubao:embedding',
+  DOUBAO_VIDEO: 'doubao:video',
   ALIYUN_MULTIMODAL_EMBEDDING: 'aliyun:multimodal_embedding',
 } as const
 
@@ -44,6 +45,7 @@ export const API_FORMAT_LABELS: Record<string, string> = {
   [API_FORMATS.JINA_EMBEDDING]: 'Jina Embedding',
   [API_FORMATS.JINA_RERANK]: 'Jina Rerank',
   [API_FORMATS.DOUBAO_EMBEDDING]: 'Doubao Embedding',
+  [API_FORMATS.DOUBAO_VIDEO]: 'Doubao Video',
   [API_FORMATS.ALIYUN_MULTIMODAL_EMBEDDING]: 'Aliyun Multimodal Embedding',
   CLAUDE: 'Claude Messages',
   CLAUDE_MESSAGES: 'Claude Messages',
@@ -64,6 +66,7 @@ export const API_FORMAT_LABELS: Record<string, string> = {
   JINA_EMBEDDING: 'Jina Embedding',
   JINA_RERANK: 'Jina Rerank',
   DOUBAO_EMBEDDING: 'Doubao Embedding',
+  DOUBAO_VIDEO: 'Doubao Video',
   ALIYUN_MULTIMODAL_EMBEDDING: 'Aliyun Multimodal Embedding',
 }
 
@@ -86,6 +89,7 @@ export const API_FORMAT_SHORT: Record<string, string> = {
   [API_FORMATS.JINA_EMBEDDING]: 'JE',
   [API_FORMATS.JINA_RERANK]: 'JR',
   [API_FORMATS.DOUBAO_EMBEDDING]: 'DE',
+  [API_FORMATS.DOUBAO_VIDEO]: 'DV',
   [API_FORMATS.ALIYUN_MULTIMODAL_EMBEDDING]: 'AE',
   OPENAI: 'O',
   OPENAI_RESPONSES: 'OR',
@@ -106,6 +110,7 @@ export const API_FORMAT_SHORT: Record<string, string> = {
   JINA_EMBEDDING: 'JE',
   JINA_RERANK: 'JR',
   DOUBAO_EMBEDDING: 'DE',
+  DOUBAO_VIDEO: 'DV',
   ALIYUN_MULTIMODAL_EMBEDDING: 'AE',
 }
 
@@ -128,6 +133,7 @@ export const API_FORMAT_ORDER: string[] = [
   API_FORMATS.JINA_EMBEDDING,
   API_FORMATS.JINA_RERANK,
   API_FORMATS.DOUBAO_EMBEDDING,
+  API_FORMATS.DOUBAO_VIDEO,
   API_FORMATS.ALIYUN_MULTIMODAL_EMBEDDING,
 ]
 
@@ -209,6 +215,8 @@ export function normalizeApiFormatAlias(format: string | null | undefined): stri
       return API_FORMATS.JINA_RERANK
     case 'DOUBAO_EMBEDDING':
       return API_FORMATS.DOUBAO_EMBEDDING
+    case 'DOUBAO_VIDEO':
+      return API_FORMATS.DOUBAO_VIDEO
     case 'ALIYUN_MULTIMODAL_EMBEDDING':
     case 'ALIYUN_EMBEDDING':
     case 'DASHSCOPE_MULTIMODAL_EMBEDDING':

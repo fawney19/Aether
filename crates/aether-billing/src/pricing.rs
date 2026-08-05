@@ -38,7 +38,7 @@ impl BillingPricingConfigurationError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BillingPricingResolution {
     pub requested_processing_tier: Option<String>,
     pub actual_processing_tier: Option<String>,
@@ -48,6 +48,12 @@ pub struct BillingPricingResolution {
     pub processing_tier_price_multiplier: Option<f64>,
     pub price_per_request: Option<f64>,
     pub price_per_request_source: Option<BillingPricingSource>,
+    /// `config.billing.video` for the model, provider override taking precedence.
+    ///
+    /// Video pricing lives in the model config rather than in `tiered_pricing`,
+    /// because it is keyed by rendered resolution instead of token counts.
+    #[serde(default)]
+    pub video_pricing: Option<Value>,
 }
 
 impl BillingPricingResolution {
@@ -133,6 +139,7 @@ impl BillingModelPricingSnapshot {
             processing_tier_price_multiplier,
             price_per_request,
             price_per_request_source,
+            video_pricing: self.resolve_video_pricing(),
         }
     }
 
@@ -173,7 +180,23 @@ impl BillingModelPricingSnapshot {
             processing_tier_price_multiplier,
             price_per_request,
             price_per_request_source,
+            video_pricing: self.resolve_video_pricing(),
         })
+    }
+
+    /// Reads `config.billing.video`, letting a provider-level model config
+    /// override the global model config, matching how `tiered_pricing` resolves.
+    pub fn resolve_video_pricing(&self) -> Option<Value> {
+        fn video_section(config: Option<&Value>) -> Option<Value> {
+            config?
+                .get("billing")?
+                .get("video")
+                .filter(|value| value.is_object())
+                .cloned()
+        }
+
+        video_section(self.model_config.as_ref())
+            .or_else(|| video_section(self.global_model_config.as_ref()))
     }
 
     pub fn resolve_authorization_pricing_candidates(
@@ -235,6 +258,7 @@ impl BillingModelPricingSnapshot {
             processing_tier_price_multiplier,
             price_per_request,
             price_per_request_source,
+            video_pricing: self.resolve_video_pricing(),
         })
     }
 
@@ -1496,6 +1520,15 @@ pub struct BillingUsageInput {
     pub image_size: Option<String>,
     pub image_quality: Option<String>,
     pub image_output_format: Option<String>,
+    /// Resolution the provider actually rendered, e.g. `720p` or `1280x720`.
+    #[serde(default)]
+    pub video_resolution: Option<String>,
+    #[serde(default)]
+    pub video_duration_seconds: i64,
+    /// True when the request supplied a reference video, which is priced apart
+    /// from text- and image-driven generation.
+    #[serde(default)]
+    pub video_has_video_input: bool,
     pub cache_ttl_minutes: Option<i64>,
 }
 
@@ -1541,6 +1574,9 @@ impl BillingUsageInput {
             image_size: None,
             image_quality: None,
             image_output_format: None,
+            video_resolution: None,
+            video_duration_seconds: 0,
+            video_has_video_input: false,
             cache_ttl_minutes: None,
         }
     }

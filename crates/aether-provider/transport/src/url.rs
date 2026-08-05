@@ -261,6 +261,28 @@ pub fn build_passthrough_path_url(
     Some(url)
 }
 
+/// Builds an Ark generation-task URL, merging configured and request query layers.
+///
+/// The configured base URL is appended to verbatim — no API-root segment is
+/// inferred. The client surface is rooted at `/v3` while Ark's own root is
+/// `/api/v3`, so the resource path is composed from the provider base URL rather
+/// than passed through from the request path.
+pub fn doubao_video_tasks_upstream_url(
+    upstream_base_url: &str,
+    task_id: Option<&str>,
+    query: Option<&str>,
+) -> Option<String> {
+    let (trimmed_base_url, base_query) = split_base_url_query(upstream_base_url);
+    let trimmed_base_url = trimmed_base_url.trim_end_matches('/');
+    if trimmed_base_url.is_empty() {
+        return None;
+    }
+
+    let mut url = aether_video_tasks_core::doubao_video_tasks_url(trimmed_base_url, task_id);
+    append_merged_query(&mut url, base_query, None, query, &[]);
+    Some(url)
+}
+
 pub fn build_bigmodel_coding_models_url(upstream_base_url: &str) -> Option<String> {
     let (trimmed_base_url, base_query) = split_base_url_query(upstream_base_url);
     let trimmed_base_url = trimmed_base_url.trim_end_matches('/');
@@ -852,6 +874,39 @@ mod tests {
                 "https://generativelanguage.googleapis.com/upload/v1beta/files?alt=media&pageSize=10&uploadType=resumable"
             )
         );
+    }
+
+    #[test]
+    fn appends_doubao_task_resource_path_to_the_configured_base() {
+        use super::doubao_video_tasks_upstream_url;
+
+        assert_eq!(
+            doubao_video_tasks_upstream_url(
+                "https://ark.cn-beijing.volces.com/api?tenant=demo",
+                None,
+                Some("trace=1")
+            )
+            .as_deref(),
+            Some(
+                "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks?tenant=demo&trace=1"
+            )
+        );
+        assert_eq!(
+            doubao_video_tasks_upstream_url(
+                "https://ark.cn-beijing.volces.com/api",
+                Some("cgt-1"),
+                None
+            )
+            .as_deref(),
+            Some("https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/cgt-1")
+        );
+        // The base is never rewritten, so a misconfigured root stays visible.
+        assert_eq!(
+            doubao_video_tasks_upstream_url("https://ark.cn-beijing.volces.com/api/v3", None, None)
+                .as_deref(),
+            Some("https://ark.cn-beijing.volces.com/api/v3/v3/contents/generations/tasks")
+        );
+        assert_eq!(doubao_video_tasks_upstream_url("", None, None), None);
     }
 
     #[test]

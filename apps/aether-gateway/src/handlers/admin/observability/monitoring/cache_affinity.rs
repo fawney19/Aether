@@ -117,6 +117,7 @@ fn is_known_admin_monitoring_api_format(value: &str) -> bool {
             | "jina:embedding"
             | "jina:rerank"
             | "doubao:embedding"
+            | "doubao:video"
             | "aliyun:multimodal_embedding"
     )
 }

@@ -631,4 +631,202 @@ describe('GlobalModelFormDialog preset replacement', () => {
     expect(document.body.querySelector('[data-testid="online-pricing-source-openai"]')).toBeNull()
     expect(globalModelMocks.updateGlobalModel).not.toHaveBeenCalled()
   })
+
+  it('restores per-resolution video token prices for both input kinds', async () => {
+    globalModelMocks.listGlobalModels.mockResolvedValue({
+      models: [{
+        ...buildExistingStaleModel(),
+        config: {
+          streaming: true,
+          billing: {
+            video: {
+              mode: 'per_token',
+              token_prices_by_resolution: {
+                '720p': { input_price_per_1m: 1, output_price_per_1m: 2 },
+              },
+              with_video_input: {
+                token_prices_by_resolution: {
+                  '720p': { input_price_per_1m: 3, output_price_per_1m: 6 },
+                },
+              },
+            },
+          },
+        },
+      }],
+      total: 1,
+    })
+    mountDialog()
+    await settle()
+
+    findExistingEditButton(stalePreset.modelId).click()
+    await settle()
+    findBillingTab('video').click()
+    await nextTick()
+
+    expect(document.body.querySelector<HTMLInputElement>('[data-testid="video-token-resolution"]')?.value)
+      .toBe('720p')
+    expect(document.body.querySelector<HTMLInputElement>('[data-testid="video-token-input-price"]')?.value)
+      .toBe('1')
+    expect(document.body.querySelector<HTMLInputElement>('[data-testid="video-token-output-price"]')?.value)
+      .toBe('2')
+    expect(document.body.querySelector<HTMLInputElement>('[data-testid="video-token-with-input-input-price"]')?.value)
+      .toBe('3')
+    expect(document.body.querySelector<HTMLInputElement>('[data-testid="video-token-with-input-output-price"]')?.value)
+      .toBe('6')
+  })
+
+  it('submits an edited video token price while keeping the video-input table', async () => {
+    globalModelMocks.listGlobalModels.mockResolvedValue({
+      models: [{
+        ...buildExistingStaleModel(),
+        config: {
+          streaming: true,
+          billing: {
+            video: {
+              mode: 'per_token',
+              token_prices_by_resolution: {
+                '720p': { input_price_per_1m: 1, output_price_per_1m: 2 },
+              },
+              with_video_input: {
+                token_prices_by_resolution: {
+                  '720p': { input_price_per_1m: 3, output_price_per_1m: 6 },
+                },
+              },
+            },
+          },
+        },
+      }],
+      total: 1,
+    })
+    mountDialog()
+    await settle()
+
+    findExistingEditButton(stalePreset.modelId).click()
+    await settle()
+    findBillingTab('video').click()
+    await nextTick()
+
+    await setInput(
+      document.body.querySelector<HTMLInputElement>('[data-testid="video-token-output-price"]'),
+      '5',
+    )
+    findButton('保存').click()
+    await settle()
+
+    expect(globalModelMocks.updateGlobalModel).toHaveBeenCalledOnce()
+    const payload = globalModelMocks.updateGlobalModel.mock.calls[0][1]
+    expect(payload.config.billing.video).toEqual({
+      mode: 'per_token',
+      token_prices_by_resolution: {
+        '720p': { input_price_per_1m: 1, output_price_per_1m: 5 },
+      },
+      with_video_input: {
+        token_prices_by_resolution: {
+          '720p': { input_price_per_1m: 3, output_price_per_1m: 6 },
+        },
+      },
+    })
+  })
+
+  it('restores default prices and the merged video-input column', async () => {
+    globalModelMocks.listGlobalModels.mockResolvedValue({
+      models: [{
+        ...buildExistingStaleModel(),
+        config: {
+          streaming: true,
+          billing: {
+            video: {
+              mode: 'per_token',
+              token_price_default: { output_price_per_1m: 8 },
+              token_prices_by_resolution: {
+                '720p': { input_price_per_1m: 1, output_price_per_1m: 2 },
+              },
+              with_video_input: {
+                token_price_default: { output_price_per_1m: 20 },
+                // Priced only in the override; still needs its own row.
+                token_prices_by_resolution: {
+                  '1080p': { output_price_per_1m: 9 },
+                },
+              },
+            },
+          },
+        },
+      }],
+      total: 1,
+    })
+    mountDialog()
+    await settle()
+
+    findExistingEditButton(stalePreset.modelId).click()
+    await settle()
+    findBillingTab('video').click()
+    await nextTick()
+
+    expect(document.body.querySelector<HTMLInputElement>('[data-testid="video-token-default-output-price"]')?.value)
+      .toBe('8')
+    expect(document.body.querySelector<HTMLInputElement>('[data-testid="video-token-default-with-input-output-price"]')?.value)
+      .toBe('20')
+
+    const resolutions = [...document.body.querySelectorAll<HTMLInputElement>('[data-testid="video-token-resolution"]')]
+      .map(input => input.value)
+    expect(resolutions).toEqual(['720p', '1080p'])
+
+    // The 1080p row carries only its override column.
+    const overrideOutputs = [...document.body.querySelectorAll<HTMLInputElement>('[data-testid="video-token-with-input-output-price"]')]
+      .map(input => input.value)
+    expect(overrideOutputs).toEqual(['', '9'])
+  })
+
+  it('submits a default price alongside the merged per-resolution rows', async () => {
+    globalModelMocks.listGlobalModels.mockResolvedValue({
+      models: [{
+        ...buildExistingStaleModel(),
+        config: {
+          streaming: true,
+          billing: {
+            video: {
+              mode: 'per_token',
+              token_prices_by_resolution: {
+                '720p': { input_price_per_1m: 1, output_price_per_1m: 2 },
+              },
+            },
+          },
+        },
+      }],
+      total: 1,
+    })
+    mountDialog()
+    await settle()
+
+    findExistingEditButton(stalePreset.modelId).click()
+    await settle()
+    findBillingTab('video').click()
+    await nextTick()
+
+    await setInput(
+      document.body.querySelector<HTMLInputElement>('[data-testid="video-token-default-output-price"]'),
+      '7',
+    )
+    await setInput(
+      document.body.querySelector<HTMLInputElement>('[data-testid="video-token-with-input-output-price"]'),
+      '6',
+    )
+    findButton('保存').click()
+    await settle()
+
+    expect(globalModelMocks.updateGlobalModel).toHaveBeenCalledOnce()
+    const payload = globalModelMocks.updateGlobalModel.mock.calls[0][1]
+    expect(payload.config.billing.video).toEqual({
+      mode: 'per_token',
+      token_price_default: { output_price_per_1m: 7 },
+      token_prices_by_resolution: {
+        '720p': { input_price_per_1m: 1, output_price_per_1m: 2 },
+      },
+      with_video_input: {
+        token_prices_by_resolution: {
+          '720p': { output_price_per_1m: 6 },
+        },
+      },
+    })
+  })
 })

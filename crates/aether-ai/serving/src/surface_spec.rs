@@ -114,7 +114,10 @@ pub const fn ai_requested_model_family_for_video_create(
     family: LocalVideoCreateFamily,
 ) -> AiRequestedModelFamily {
     match family {
-        LocalVideoCreateFamily::OpenAi => AiRequestedModelFamily::Standard,
+        // Doubao carries the model in the request body, same as OpenAI.
+        LocalVideoCreateFamily::OpenAi | LocalVideoCreateFamily::Doubao => {
+            AiRequestedModelFamily::Standard
+        }
         LocalVideoCreateFamily::Gemini => AiRequestedModelFamily::Gemini,
     }
 }

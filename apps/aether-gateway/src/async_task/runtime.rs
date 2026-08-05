@@ -531,6 +531,49 @@ pub(crate) async fn finalize_video_task_if_terminal(state: &AppState, task: &Sto
     }
 }
 
+/// Publishes the billing dimensions a finished video task priced by.
+///
+/// Billing reads dimensions out of `request_metadata.dimensions` (the same path
+/// image pricing uses), so resolution, duration and whether the request supplied
+/// a reference video have to be surfaced there. The task's existing metadata is
+/// preserved; only the dimension bag is merged in.
+fn build_video_task_billing_dimensions(task: &StoredVideoTask) -> Value {
+    let mut metadata = match task.request_metadata.clone() {
+        Some(Value::Object(object)) => object,
+        _ => Map::new(),
+    };
+    let mut dimensions = match metadata.get("dimensions") {
+        Some(Value::Object(object)) => object.clone(),
+        _ => Map::new(),
+    };
+
+    if let Some(resolution) = task
+        .resolution
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        dimensions.insert("video_resolution".to_string(), Value::from(resolution));
+    }
+    if let Some(duration_seconds) = task.duration_seconds {
+        dimensions.insert(
+            "video_duration_seconds".to_string(),
+            Value::from(duration_seconds),
+        );
+    }
+    let has_video_input = task
+        .original_request_body
+        .as_ref()
+        .is_some_and(aether_video_tasks_core::doubao_content_has_video_input);
+    dimensions.insert(
+        "video_has_video_input".to_string(),
+        Value::from(has_video_input),
+    );
+
+    metadata.insert("dimensions".to_string(), Value::Object(dimensions));
+    Value::Object(metadata)
+}
+
 fn build_video_task_terminal_usage_event(task: &StoredVideoTask) -> Option<UsageEvent> {
     let event_type = match task.status {
         VideoTaskStatus::Completed => UsageEventType::Completed,
@@ -547,6 +590,10 @@ fn build_video_task_terminal_usage_event(task: &StoredVideoTask) -> Option<Usage
         .and_then(|snapshot| snapshot.provider_name().map(str::to_string))
         .or_else(|| task.provider_id.clone())
         .unwrap_or_else(|| "unknown".to_string());
+    // Doubao bills video generation by tokens rather than by duration, so the
+    // reported usage has to reach the billing pipeline like a chat completion.
+    let usage_tokens =
+        LocalVideoTaskSnapshot::from_stored_task(task).and_then(|snapshot| snapshot.usage_tokens());
     let response_time_ms = task
         .submitted_at_unix_secs
         .zip(
@@ -583,7 +630,9 @@ fn build_video_task_terminal_usage_event(task: &StoredVideoTask) -> Option<Usage
             error_message: task.error_message.clone().or(task.error_code.clone()),
             response_time_ms,
             request_body: task.original_request_body.clone(),
-            request_metadata: task.request_metadata.clone(),
+            request_metadata: Some(build_video_task_billing_dimensions(task)),
+            output_tokens: usage_tokens.map(|(completion_tokens, _)| completion_tokens),
+            total_tokens: usage_tokens.map(|(_, total_tokens)| total_tokens),
             ..UsageEventData::default()
         },
     ))
@@ -598,7 +647,10 @@ fn now_unix_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_failed_poll_update, stored_task_to_upsert, VideoTaskRefreshError};
+    use super::{
+        build_failed_poll_update, build_video_task_billing_dimensions, stored_task_to_upsert,
+        VideoTaskRefreshError,
+    };
     use crate::video_tasks::{
         LocalVideoTaskPersistence, LocalVideoTaskSnapshot, LocalVideoTaskStatus,
         LocalVideoTaskTransport, OpenAiVideoTaskSeed,
@@ -744,5 +796,60 @@ mod tests {
         );
         assert_eq!(record.prompt.as_deref(), Some("hello"));
         assert_eq!(record.resolution.as_deref(), Some("720p"));
+    }
+
+    #[test]
+    fn billing_dimensions_carry_resolution_duration_and_input_kind() {
+        let mut task = sample_sparse_stored_task();
+        task.resolution = Some(" 720p ".to_string());
+        task.duration_seconds = Some(5);
+        task.original_request_body = Some(json!({
+            "content": [
+                {"type": "text", "text": "a cat"},
+                {"type": "video_url", "video_url": {"url": "https://e/a.mp4"}}
+            ]
+        }));
+
+        let metadata = build_video_task_billing_dimensions(&task);
+        let dimensions = metadata
+            .get("dimensions")
+            .expect("dimensions should be present");
+
+        assert_eq!(dimensions.get("video_resolution"), Some(&json!("720p")));
+        assert_eq!(dimensions.get("video_duration_seconds"), Some(&json!(5)));
+        assert_eq!(dimensions.get("video_has_video_input"), Some(&json!(true)));
+        // Existing metadata must survive the merge.
+        assert!(metadata.get("rust_local_snapshot").is_some());
+    }
+
+    #[test]
+    fn billing_dimensions_omit_absent_resolution_and_default_to_no_video_input() {
+        let task = sample_sparse_stored_task();
+
+        let metadata = build_video_task_billing_dimensions(&task);
+        let dimensions = metadata
+            .get("dimensions")
+            .expect("dimensions should be present");
+
+        assert!(dimensions.get("video_resolution").is_none());
+        assert!(dimensions.get("video_duration_seconds").is_none());
+        assert_eq!(dimensions.get("video_has_video_input"), Some(&json!(false)));
+    }
+
+    #[test]
+    fn billing_dimensions_preserve_unrelated_existing_dimensions() {
+        let mut task = sample_sparse_stored_task();
+        task.request_metadata = Some(json!({
+            "dimensions": { "image_size": "1024x1024" }
+        }));
+        task.resolution = Some("1080p".to_string());
+
+        let metadata = build_video_task_billing_dimensions(&task);
+        let dimensions = metadata
+            .get("dimensions")
+            .expect("dimensions should be present");
+
+        assert_eq!(dimensions.get("image_size"), Some(&json!("1024x1024")));
+        assert_eq!(dimensions.get("video_resolution"), Some(&json!("1080p")));
     }
 }

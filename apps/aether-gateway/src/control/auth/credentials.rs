@@ -233,6 +233,12 @@ fn select_primary_credential(
     if signature.starts_with("openai:") {
         return select_openai_credential(bundle);
     }
+    // Doubao (Volcengine Ark) authenticates with a bearer token, so the caller's
+    // API key arrives the same way it does on the OpenAI surface. Without this the
+    // generic branch would treat it as a deferred bearer token and drop it.
+    if signature.starts_with("doubao:") {
+        return select_openai_credential(bundle);
+    }
     if signature.starts_with("aether:") {
         return select_openai_credential(bundle);
     }
@@ -425,6 +431,37 @@ mod tests {
 
     fn uri(path: &str) -> Uri {
         path.parse().expect("uri should parse")
+    }
+
+    #[test]
+    fn doubao_signature_treats_bearer_as_caller_api_key() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_static("Bearer sk-caller-key"),
+        );
+
+        // A deferred bearer token would be dropped by the auth resolver, so the
+        // Doubao surface must classify it as a caller-provided API key.
+        let extracted = extract_request_credentials(
+            &headers,
+            &uri("/v3/contents/generations/tasks"),
+            "doubao:video",
+        );
+
+        assert!(matches!(
+            extracted.primary,
+            Some(GatewayPrimaryCredential::ProviderApiKey {
+                carrier: GatewayCredentialCarrier::AuthorizationBearer,
+                ..
+            })
+        ));
+        assert!(build_auth_context_cache_key(
+            &headers,
+            &uri("/v3/contents/generations/tasks"),
+            "doubao:video"
+        )
+        .is_some());
     }
 
     #[test]

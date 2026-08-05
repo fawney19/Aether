@@ -46,7 +46,9 @@ pub(crate) fn frontdoor_self_loop_public_ai_path(path: &str) -> bool {
             | "/upload/v1beta/files"
             | "/v1beta/operations"
             | "/v1/videos"
+            | aether_video_tasks_core::DOUBAO_VIDEO_TASKS_PATH
     ) || path.starts_with("/v1/videos/")
+        || path.starts_with("/v3/contents/generations/tasks/")
         || path.starts_with("/v1beta/files/")
         || path.starts_with("/v1beta/operations/")
         || path.starts_with("/v1internal:")

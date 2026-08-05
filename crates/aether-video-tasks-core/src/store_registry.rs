@@ -4,14 +4,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
-    GeminiVideoTaskSeed, LocalVideoTaskReadResponse, LocalVideoTaskRegistryMutation,
-    LocalVideoTaskSnapshot, LocalVideoTaskStatus, OpenAiVideoTaskSeed,
+    DoubaoVideoTaskSeed, GeminiVideoTaskSeed, LocalVideoTaskReadResponse,
+    LocalVideoTaskRegistryMutation, LocalVideoTaskSnapshot, LocalVideoTaskStatus,
+    OpenAiVideoTaskSeed,
 };
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VideoTaskRegistry {
     openai: BTreeMap<String, LocalVideoTaskSnapshot>,
     gemini: BTreeMap<String, LocalVideoTaskSnapshot>,
+    #[serde(default)]
+    doubao: BTreeMap<String, LocalVideoTaskSnapshot>,
 }
 
 impl VideoTaskRegistry {
@@ -22,6 +25,9 @@ impl VideoTaskRegistry {
             }
             LocalVideoTaskSnapshot::Gemini(seed) => {
                 self.gemini.insert(seed.local_short_id.clone(), snapshot);
+            }
+            LocalVideoTaskSnapshot::Doubao(seed) => {
+                self.doubao.insert(seed.local_task_id.clone(), snapshot);
             }
         }
     }
@@ -35,6 +41,12 @@ impl VideoTaskRegistry {
     pub fn read_gemini(&self, short_id: &str) -> Option<LocalVideoTaskReadResponse> {
         self.gemini
             .get(short_id)
+            .map(LocalVideoTaskSnapshot::read_response)
+    }
+
+    pub fn read_doubao(&self, task_id: &str) -> Option<LocalVideoTaskReadResponse> {
+        self.doubao
+            .get(task_id)
             .map(LocalVideoTaskSnapshot::read_response)
     }
 
@@ -52,10 +64,18 @@ impl VideoTaskRegistry {
         Some(seed)
     }
 
+    pub fn clone_doubao(&self, task_id: &str) -> Option<DoubaoVideoTaskSeed> {
+        let LocalVideoTaskSnapshot::Doubao(seed) = self.doubao.get(task_id)?.clone() else {
+            return None;
+        };
+        Some(seed)
+    }
+
     pub fn list_active_snapshots(&self, limit: usize) -> Vec<LocalVideoTaskSnapshot> {
         self.openai
             .values()
             .chain(self.gemini.values())
+            .chain(self.doubao.values())
             .filter(|snapshot| snapshot.is_active_for_refresh())
             .take(limit)
             .cloned()
@@ -79,6 +99,11 @@ impl VideoTaskRegistry {
                     seed.status = LocalVideoTaskStatus::Cancelled;
                 }
             }
+            LocalVideoTaskRegistryMutation::DoubaoDeleted { task_id } => {
+                if let Some(LocalVideoTaskSnapshot::Doubao(seed)) = self.doubao.get_mut(&task_id) {
+                    seed.status = LocalVideoTaskStatus::Deleted;
+                }
+            }
         }
     }
 
@@ -92,6 +117,14 @@ impl VideoTaskRegistry {
 
     pub fn project_gemini(&mut self, short_id: &str, provider_body: &Map<String, Value>) -> bool {
         let Some(LocalVideoTaskSnapshot::Gemini(seed)) = self.gemini.get_mut(short_id) else {
+            return false;
+        };
+        seed.apply_provider_body(provider_body);
+        true
+    }
+
+    pub fn project_doubao(&mut self, task_id: &str, provider_body: &Map<String, Value>) -> bool {
+        let Some(LocalVideoTaskSnapshot::Doubao(seed)) = self.doubao.get_mut(task_id) else {
             return false;
         };
         seed.apply_provider_body(provider_body);

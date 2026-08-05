@@ -6,6 +6,7 @@ use aether_data_contracts::repository::video_tasks::StoredVideoTask;
 use serde_json::{Map, Value};
 
 use crate::{
+    extract_doubao_task_id_from_content_path, extract_doubao_task_id_from_path,
     extract_gemini_short_id_from_cancel_path, extract_gemini_short_id_from_path,
     extract_openai_task_id_from_cancel_path, extract_openai_task_id_from_content_path,
     extract_openai_task_id_from_path, extract_openai_task_id_from_remix_path,
@@ -109,6 +110,8 @@ impl VideoTaskService {
                 .and_then(|task_id| self.store.read_openai(task_id)),
             Some("gemini") => extract_gemini_short_id_from_path(request_path)
                 .and_then(|short_id| self.store.read_gemini(short_id)),
+            Some("doubao") => extract_doubao_task_id_from_path(request_path)
+                .and_then(|task_id| self.store.read_doubao(task_id)),
             _ => None,
         }
     }
@@ -125,6 +128,9 @@ impl VideoTaskService {
             Some("gemini") => extract_gemini_short_id_from_path(request_path)
                 .and_then(|short_id| self.store.clone_gemini(short_id))
                 .map(LocalVideoTaskSnapshot::Gemini),
+            Some("doubao") => extract_doubao_task_id_from_path(request_path)
+                .and_then(|task_id| self.store.clone_doubao(task_id))
+                .map(LocalVideoTaskSnapshot::Doubao),
             _ => None,
         }
     }
@@ -143,6 +149,20 @@ impl VideoTaskService {
         seed.build_content_stream_action(query_string, trace_id)
     }
 
+    pub fn prepare_doubao_content_stream_action(
+        &self,
+        request_path: &str,
+        query_string: Option<&str>,
+        trace_id: &str,
+    ) -> Option<LocalVideoTaskContentAction> {
+        if self.truth_source_mode != VideoTaskTruthSourceMode::RustAuthoritative {
+            return None;
+        }
+        let task_id = extract_doubao_task_id_from_content_path(request_path)?;
+        let seed = self.store.clone_doubao(task_id)?;
+        seed.build_content_stream_action(query_string, trace_id)
+    }
+
     pub fn snapshot_for_refresh_plan(
         &self,
         refresh_plan: &LocalVideoTaskReadRefreshPlan,
@@ -156,6 +176,10 @@ impl VideoTaskService {
                 .store
                 .clone_gemini(short_id)
                 .map(LocalVideoTaskSnapshot::Gemini),
+            LocalVideoTaskProjectionTarget::Doubao { task_id } => self
+                .store
+                .clone_doubao(task_id)
+                .map(LocalVideoTaskSnapshot::Doubao),
         }
     }
 
@@ -179,6 +203,17 @@ impl VideoTaskService {
             return false;
         }
         self.store.project_gemini(short_id, provider_body)
+    }
+
+    pub fn project_doubao_task_response(
+        &self,
+        task_id: &str,
+        provider_body: &Map<String, Value>,
+    ) -> bool {
+        if self.truth_source_mode != VideoTaskTruthSourceMode::RustAuthoritative {
+            return false;
+        }
+        self.store.project_doubao(task_id, provider_body)
     }
 
     pub fn prepare_read_refresh_sync_plan(
@@ -208,6 +243,16 @@ impl VideoTaskService {
                     plan: seed.build_get_follow_up_plan(trace_id)?,
                     projection_target: LocalVideoTaskProjectionTarget::Gemini {
                         short_id: short_id.to_string(),
+                    },
+                })
+            }
+            Some("doubao") => {
+                let task_id = extract_doubao_task_id_from_path(request_path)?;
+                let seed = self.store.clone_doubao(task_id)?;
+                Some(LocalVideoTaskReadRefreshPlan {
+                    plan: seed.build_get_follow_up_plan(trace_id)?,
+                    projection_target: LocalVideoTaskProjectionTarget::Doubao {
+                        task_id: task_id.to_string(),
                     },
                 })
             }
@@ -243,6 +288,12 @@ impl VideoTaskService {
                             short_id: seed.local_short_id.clone(),
                         },
                     }),
+                    LocalVideoTaskSnapshot::Doubao(seed) => Some(LocalVideoTaskReadRefreshPlan {
+                        plan: seed.build_get_follow_up_plan(&trace_id)?,
+                        projection_target: LocalVideoTaskProjectionTarget::Doubao {
+                            task_id: seed.local_task_id.clone(),
+                        },
+                    }),
                 }
             })
             .collect()
@@ -271,6 +322,12 @@ impl VideoTaskService {
                     short_id: seed.local_short_id.clone(),
                 },
             }),
+            LocalVideoTaskSnapshot::Doubao(seed) => Some(LocalVideoTaskReadRefreshPlan {
+                plan: seed.build_get_follow_up_plan(trace_id)?,
+                projection_target: LocalVideoTaskProjectionTarget::Doubao {
+                    task_id: seed.local_task_id.clone(),
+                },
+            }),
         }
     }
 
@@ -285,6 +342,9 @@ impl VideoTaskService {
             }
             LocalVideoTaskProjectionTarget::Gemini { short_id } => {
                 self.project_gemini_task_response(short_id, provider_body)
+            }
+            LocalVideoTaskProjectionTarget::Doubao { task_id } => {
+                self.project_doubao_task_response(task_id, provider_body)
             }
         }
     }
@@ -323,6 +383,11 @@ impl VideoTaskService {
                 let short_id = extract_gemini_short_id_from_cancel_path(request_path)?;
                 let seed = self.store.clone_gemini(short_id)?;
                 seed.build_cancel_follow_up_plan(fallback_user_id, fallback_api_key_id, trace_id)
+            }
+            "doubao_video_delete_sync" => {
+                let task_id = extract_doubao_task_id_from_path(request_path)?;
+                let seed = self.store.clone_doubao(task_id)?;
+                seed.build_delete_follow_up_plan(fallback_user_id, fallback_api_key_id, trace_id)
             }
             _ => None,
         }

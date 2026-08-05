@@ -10,10 +10,10 @@ use std::collections::BTreeMap;
 use crate::ai_serving::api::{
     is_matching_stream_request, resolve_execution_runtime_stream_plan_kind,
     supports_stream_execution_decision_kind, AiStreamAttempt, CLAUDE_CHAT_STREAM_PLAN_KIND,
-    CLAUDE_CLI_STREAM_PLAN_KIND, GEMINI_CHAT_STREAM_PLAN_KIND, GEMINI_CLI_STREAM_PLAN_KIND,
-    GEMINI_FILES_DOWNLOAD_PLAN_KIND, OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND,
-    OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND, OPENAI_RESPONSES_STREAM_PLAN_KIND,
-    OPENAI_VIDEO_CONTENT_PLAN_KIND,
+    CLAUDE_CLI_STREAM_PLAN_KIND, DOUBAO_VIDEO_CONTENT_PLAN_KIND, GEMINI_CHAT_STREAM_PLAN_KIND,
+    GEMINI_CLI_STREAM_PLAN_KIND, GEMINI_FILES_DOWNLOAD_PLAN_KIND, OPENAI_CHAT_STREAM_PLAN_KIND,
+    OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND,
+    OPENAI_RESPONSES_STREAM_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,
 };
 use crate::api::response::build_client_response_from_parts;
 use crate::control::GatewayControlDecision;
@@ -484,34 +484,58 @@ async fn maybe_execute_local_video_task_content_stream(
     plan_kind: &str,
     transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    if plan_kind != OPENAI_VIDEO_CONTENT_PLAN_KIND
-        || decision.route_family.as_deref() != Some("openai")
-    {
+    let route_family = decision.route_family.as_deref();
+    let is_video_content_plan = matches!(
+        (plan_kind, route_family),
+        (OPENAI_VIDEO_CONTENT_PLAN_KIND, Some("openai"))
+            | (DOUBAO_VIDEO_CONTENT_PLAN_KIND, Some("doubao"))
+    );
+    if !is_video_content_plan {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
 
     let _ = state
-        .hydrate_video_task_for_route(decision.route_family.as_deref(), parts.uri.path())
+        .hydrate_video_task_for_route(route_family, parts.uri.path())
         .await?;
 
-    if let Some(task_id) =
-        crate::video_tasks::extract_openai_task_id_from_content_path(parts.uri.path())
-    {
-        let refresh_path = format!("/v1/videos/{task_id}");
-        if let Some(refresh_plan) = state.video_tasks.prepare_read_refresh_sync_plan(
-            Some("openai"),
-            &refresh_path,
-            trace_id,
-        ) {
+    // A download can be the first read after the task finished, so refresh the
+    // task state before deciding whether the asset is available.
+    let refresh_path = match route_family {
+        Some("doubao") => crate::video_tasks::extract_doubao_task_id_from_content_path(
+            parts.uri.path(),
+        )
+        .map(|task_id| {
+            format!(
+                "{}/{task_id}",
+                aether_video_tasks_core::DOUBAO_VIDEO_TASKS_PATH
+            )
+        }),
+        _ => crate::video_tasks::extract_openai_task_id_from_content_path(parts.uri.path())
+            .map(|task_id| format!("/v1/videos/{task_id}")),
+    };
+    if let Some(refresh_path) = refresh_path {
+        if let Some(refresh_plan) =
+            state
+                .video_tasks
+                .prepare_read_refresh_sync_plan(route_family, &refresh_path, trace_id)
+        {
             state.execute_video_task_refresh_plan(&refresh_plan).await?;
         }
     }
 
-    let Some(action) = state.video_tasks.prepare_openai_content_stream_action(
-        parts.uri.path(),
-        parts.uri.query(),
-        trace_id,
-    ) else {
+    let action = match route_family {
+        Some("doubao") => state.video_tasks.prepare_doubao_content_stream_action(
+            parts.uri.path(),
+            parts.uri.query(),
+            trace_id,
+        ),
+        _ => state.video_tasks.prepare_openai_content_stream_action(
+            parts.uri.path(),
+            parts.uri.query(),
+            trace_id,
+        ),
+    };
+    let Some(action) = action else {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 

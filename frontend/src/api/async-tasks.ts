@@ -14,8 +14,13 @@ export type AsyncTaskStatus =
   | 'completed'
 
 export type AsyncTaskKind = 'scheduled' | 'daemon' | 'on_demand' | 'fire_and_forget'
-export type AsyncTaskType = AsyncTaskKind | 'video'
 
+/**
+ * Background worker runs (backups, cleanup, quota resets, pollers).
+ *
+ * User-submitted video generation tasks are a separate system with its own
+ * table and API; see `./video-tasks`. `/api/admin/tasks` never returns them.
+ */
 export interface AsyncTaskDefinition {
   task_key: string
   kind: AsyncTaskKind
@@ -30,7 +35,7 @@ export interface AsyncTaskItem {
   task_key?: string
   kind?: AsyncTaskKind
   trigger?: string
-  task_type?: AsyncTaskType
+  task_type?: AsyncTaskKind
   external_task_id?: string
   user_id?: string
   username?: string
@@ -151,7 +156,7 @@ export interface AsyncTaskStatsResponse {
 export interface AsyncTaskQueryParams {
   status?: AsyncTaskStatus
   kind?: AsyncTaskKind
-  task_type?: AsyncTaskType
+  task_type?: AsyncTaskKind
   task_key?: string
   trigger?: string
   user_id?: string
@@ -172,7 +177,7 @@ export const asyncTasksApi = {
     const searchParams = new URLSearchParams()
     if (params.status) searchParams.append('status', normalizeStatus(params.status))
     if (params.kind) searchParams.append('kind', params.kind)
-    if (params.task_type && params.task_type !== 'video') searchParams.append('kind', params.task_type)
+    if (params.task_type) searchParams.append('kind', params.task_type)
     if (params.task_key) searchParams.append('task_key', params.task_key)
     if (params.trigger) searchParams.append('trigger', params.trigger)
     if (params.page) searchParams.append('page', params.page.toString())

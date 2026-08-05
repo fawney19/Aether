@@ -86,6 +86,12 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           secure: false,
         },
+        // Doubao (Volcengine Ark) video task surface
+        '/v3/': {
+          target: gatewayTarget,
+          changeOrigin: true,
+          secure: false,
+        },
         '/health': {
           target: gatewayTarget,
           changeOrigin: true,

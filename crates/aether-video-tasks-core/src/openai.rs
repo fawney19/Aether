@@ -584,7 +584,8 @@ impl OpenAiVideoTaskSeed {
         };
         UpsertVideoTask {
             id: self.local_task_id.clone(),
-            short_id: None,
+            // The column is NOT NULL; the OpenAI surface exposes no short id.
+            short_id: Some(crate::derive_video_task_short_id(&self.local_task_id)),
             request_id: self.persistence.request_id.clone(),
             user_id: self.user_id.clone(),
             api_key_id: self.api_key_id.clone(),

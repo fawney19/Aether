@@ -17,6 +17,7 @@ pub mod stream_rewrite;
 pub mod sync_products;
 pub mod sync_to_stream;
 pub mod video;
+pub mod video_conversion;
 
 pub use self::sse::{encode_done_sse, encode_json_sse, map_claude_stop_reason};
 pub use self::stream_core::{CanonicalStreamEvent, CanonicalStreamFrame};

@@ -544,6 +544,11 @@ WHERE "usage".billing_status = 'pending'
   AND "usage".finalized_at IS NULL
 "#;
 
+/// Video generation is an async job: the record is written when the task is
+/// submitted and stays pending until the poller observes the upstream finish,
+/// which routinely takes longer than the stale-request timeout. The video task
+/// poller owns their terminal state, so sweeping them here would void billing
+/// on jobs that are still running.
 const SELECT_STALE_PENDING_USAGE_BATCH_SQL: &str = r#"
 SELECT
   "usage".request_id,
@@ -554,6 +559,7 @@ LEFT JOIN usage_settlement_snapshots
   ON usage_settlement_snapshots.request_id = "usage".request_id
 WHERE "usage".status IN ('pending', 'streaming')
   AND "usage".created_at_unix_ms < ?
+  AND COALESCE("usage".request_type, '') <> 'video'
 ORDER BY "usage".created_at_unix_ms ASC, "usage".request_id ASC
 LIMIT ?
 "#;

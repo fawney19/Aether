@@ -94,6 +94,8 @@ const GEMINI_PUBLIC_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
     "当前 Gemini Public 请求无法在本地执行：没有匹配到可用的执行路径";
 const GEMINI_FILES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
     "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径";
+const DOUBAO_VIDEO_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
+    "当前 Doubao Video 请求无法在本地执行：没有匹配到可用的执行路径";
 const LOCAL_ROUTE_NOT_FOUND_DETAIL: &str = "Route not found";
 const LOCAL_PROXY_PASSTHROUGH_REMOVED_DETAIL: &str =
     "Route matched a removed compatibility passthrough; implement it in Rust or retire the route";
@@ -1887,6 +1889,11 @@ async fn proxy_request_inner(
             .then(|| {
                 local_execution_runtime_miss_context
                     .all_provider_request_body_build_failures_detail()
+                    // The request did reach an upstream and was refused there, so
+                    // report that instead of a generic "no execution path" miss.
+                    .or_else(|| {
+                        local_execution_runtime_miss_context.all_candidates_failed_upstream_detail()
+                    })
             })
             .flatten()
             .or_else(|| {
@@ -2348,6 +2355,9 @@ fn local_execution_runtime_miss_route_detail(
         "/v1/messages" => Some(CLAUDE_MESSAGES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL),
         path if path.starts_with("/v1/videos") => {
             Some(OPENAI_VIDEO_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL)
+        }
+        path if path.starts_with(aether_video_tasks_core::DOUBAO_VIDEO_TASKS_PATH) => {
+            Some(DOUBAO_VIDEO_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL)
         }
         path if path.starts_with("/upload/v1beta/files") || path.starts_with("/v1beta/files") => {
             Some(GEMINI_FILES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL)

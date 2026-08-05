@@ -15,6 +15,7 @@ impl LocalVideoTaskTransport {
         let upstream_base_url = match plan.provider_api_format.as_str() {
             "openai:video" => trim_openai_video_resource_root(&plan.url)?,
             "gemini:video" => plan.url.split("/v1beta/").next()?.to_string(),
+            "doubao:video" => trim_doubao_video_resource_root(&plan.url)?,
             _ => return None,
         };
         if upstream_base_url.is_empty() {
@@ -58,6 +59,20 @@ impl LocalVideoTaskTransport {
 fn trim_openai_video_resource_root(url: &str) -> Option<String> {
     let base = url.split_once('?').map(|(base, _)| base).unwrap_or(url);
     let (root, suffix) = base.rsplit_once("/videos")?;
+    if !suffix.is_empty() && !suffix.starts_with('/') {
+        return None;
+    }
+    Some(root.to_string())
+}
+
+/// Recovers the provider base URL from an Ark task URL.
+///
+/// This is the inverse of [`crate::doubao_video_tasks_url`]: it must strip the
+/// exact path that builder appends, including the version segment. Stripping
+/// less would re-add `/v3` on every follow-up request and produce `/v3/v3/...`.
+fn trim_doubao_video_resource_root(url: &str) -> Option<String> {
+    let base = url.split_once('?').map(|(base, _)| base).unwrap_or(url);
+    let (root, suffix) = base.rsplit_once(crate::DOUBAO_VIDEO_TASKS_PATH)?;
     if !suffix.is_empty() && !suffix.starts_with('/') {
         return None;
     }
@@ -119,5 +134,66 @@ impl LocalVideoTaskStatus {
             Self::Expired => StoredVideoTaskStatus::Expired,
             Self::Deleted => StoredVideoTaskStatus::Deleted,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aether_contracts::{ExecutionPlan, RequestBody};
+    use serde_json::json;
+
+    use crate::{doubao_video_tasks_url, LocalVideoTaskTransport};
+
+    fn doubao_plan(url: &str) -> ExecutionPlan {
+        ExecutionPlan {
+            request_id: "req-1".to_string(),
+            candidate_id: None,
+            provider_name: Some("ark".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: url.to_string(),
+            headers: Default::default(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({})),
+            stream: false,
+            client_api_format: "doubao:video".to_string(),
+            provider_api_format: "doubao:video".to_string(),
+            model_name: None,
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        }
+    }
+
+    /// Creating a task and then polling it must target the same resource.
+    ///
+    /// The create URL is built from the configured base, while follow-up URLs
+    /// are rebuilt from a base recovered out of the create plan. If those two
+    /// steps disagree the task is created successfully and then polls a 404,
+    /// which surfaces only as a failed task long after the request succeeded.
+    #[test]
+    fn doubao_base_url_survives_a_build_parse_build_round_trip() {
+        let configured_base = "https://ark.cn-beijing.volces.com/api";
+        let create_url = doubao_video_tasks_url(configured_base, None);
+
+        let transport = LocalVideoTaskTransport::from_plan(&doubao_plan(&create_url))
+            .expect("doubao plan should yield a transport");
+        assert_eq!(transport.upstream_base_url, configured_base);
+
+        let poll_url = doubao_video_tasks_url(&transport.upstream_base_url, Some("cgt-1"));
+        assert_eq!(
+            poll_url,
+            "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/cgt-1"
+        );
+    }
+
+    #[test]
+    fn doubao_transport_is_rejected_for_a_non_task_url() {
+        let plan = doubao_plan("https://ark.cn-beijing.volces.com/api/v3/chat/completions");
+
+        assert!(LocalVideoTaskTransport::from_plan(&plan).is_none());
     }
 }

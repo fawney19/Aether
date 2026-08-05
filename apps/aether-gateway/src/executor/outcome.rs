@@ -157,6 +157,46 @@ impl LocalExecutionRuntimeMissContext {
         detail.push_str("（原因代码: provider_request_body_build_failed）");
         Some(detail)
     }
+
+    /// Reports the upstream status when every candidate was actually attempted
+    /// and rejected by its provider.
+    ///
+    /// Without this the caller only learns that no execution path matched, which
+    /// reads as a routing/configuration problem and hides the fact that the
+    /// request did reach an upstream and was refused there.
+    pub(crate) fn all_candidates_failed_upstream_detail(&self) -> Option<String> {
+        if self.candidate_contexts.is_empty() {
+            return None;
+        }
+
+        let mut status_codes = Vec::new();
+        for candidate in &self.candidate_contexts {
+            // A skipped candidate never reached an upstream, so a mixed batch is
+            // not attributable to the provider.
+            if candidate.candidate.status == RequestCandidateStatus::Skipped {
+                return None;
+            }
+            let Some(status_code) = candidate.candidate.status_code else {
+                return None;
+            };
+            if status_code < 400 {
+                return None;
+            }
+            if !status_codes.contains(&status_code) {
+                status_codes.push(status_code);
+            }
+        }
+
+        let status_summary = status_codes
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join("、");
+        let attempted = self.candidate_contexts.len();
+        Some(format!(
+            "上游返回错误，已尝试 {attempted} 个候选端点，均失败（上游状态码: {status_summary}）"
+        ))
+    }
 }
 
 struct RuntimeMissFailureDiagnostic {
@@ -1482,5 +1522,127 @@ mod tests {
         assert!(detail.contains("字段 n"));
         assert!(detail.contains("字段路径：$.n"));
         assert!(detail.contains("provider_request_body_build_failed"));
+    }
+
+    fn upstream_failed_candidate(
+        id: &str,
+        status: RequestCandidateStatus,
+        status_code: Option<i32>,
+    ) -> RuntimeMissCandidateContext {
+        let candidate = StoredRequestCandidate::new(
+            id.to_string(),
+            "req-1".to_string(),
+            Some("user-1".to_string()),
+            Some("api-key-1".to_string()),
+            Some("alice".to_string()),
+            Some("default".to_string()),
+            0,
+            0,
+            Some("provider-1".to_string()),
+            Some("endpoint-1".to_string()),
+            Some("provider-key-1".to_string()),
+            status,
+            None,
+            false,
+            status_code,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            100,
+            None,
+            None,
+        )
+        .expect("candidate should build");
+
+        RuntimeMissCandidateContext {
+            candidate,
+            provider_name: Some("ark".to_string()),
+            key_name: Some("prod".to_string()),
+            client_api_format: Some("doubao:video".to_string()),
+            provider_api_format: Some("doubao:video".to_string()),
+            global_model_name: Some("seedance".to_string()),
+            selected_provider_model_name: Some("seedance-upstream".to_string()),
+            endpoint_url: Some(
+                "https://ark.example.com/api/v3/contents/generations/tasks".to_string(),
+            ),
+        }
+    }
+
+    #[test]
+    fn runtime_miss_context_reports_upstream_status_when_all_candidates_failed() {
+        let context = LocalExecutionRuntimeMissContext {
+            candidate_contexts: vec![upstream_failed_candidate(
+                "cand-1",
+                RequestCandidateStatus::Failed,
+                Some(404),
+            )],
+            ..LocalExecutionRuntimeMissContext::default()
+        };
+
+        let detail = context
+            .all_candidates_failed_upstream_detail()
+            .expect("upstream failure should be reported");
+
+        assert!(detail.contains("上游返回错误"));
+        assert!(detail.contains("404"));
+        assert!(detail.contains("1 个候选端点"));
+    }
+
+    #[test]
+    fn runtime_miss_context_reports_each_distinct_upstream_status() {
+        let context = LocalExecutionRuntimeMissContext {
+            candidate_contexts: vec![
+                upstream_failed_candidate("cand-1", RequestCandidateStatus::Failed, Some(404)),
+                upstream_failed_candidate("cand-2", RequestCandidateStatus::Failed, Some(401)),
+            ],
+            ..LocalExecutionRuntimeMissContext::default()
+        };
+
+        let detail = context
+            .all_candidates_failed_upstream_detail()
+            .expect("upstream failure should be reported");
+
+        assert!(detail.contains("404"));
+        assert!(detail.contains("401"));
+        assert!(detail.contains("2 个候选端点"));
+    }
+
+    #[test]
+    fn runtime_miss_context_stays_silent_when_a_candidate_never_reached_upstream() {
+        // A skipped candidate is a routing decision, not a provider refusal, so
+        // the batch must not be attributed to the upstream.
+        let context = LocalExecutionRuntimeMissContext {
+            candidate_contexts: vec![
+                upstream_failed_candidate("cand-1", RequestCandidateStatus::Failed, Some(404)),
+                upstream_failed_candidate("cand-2", RequestCandidateStatus::Skipped, None),
+            ],
+            ..LocalExecutionRuntimeMissContext::default()
+        };
+
+        assert!(context.all_candidates_failed_upstream_detail().is_none());
+    }
+
+    #[test]
+    fn runtime_miss_context_stays_silent_without_an_error_status_code() {
+        let context = LocalExecutionRuntimeMissContext {
+            candidate_contexts: vec![upstream_failed_candidate(
+                "cand-1",
+                RequestCandidateStatus::Failed,
+                Some(200),
+            )],
+            ..LocalExecutionRuntimeMissContext::default()
+        };
+
+        assert!(context.all_candidates_failed_upstream_detail().is_none());
+    }
+
+    #[test]
+    fn runtime_miss_context_stays_silent_without_candidates() {
+        let context = LocalExecutionRuntimeMissContext::default();
+
+        assert!(context.all_candidates_failed_upstream_detail().is_none());
     }
 }

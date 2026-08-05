@@ -17,6 +17,7 @@ pub(crate) use aether_video_tasks_core::{
 };
 
 pub(crate) use self::helpers::{
+    extract_doubao_task_id_from_content_path, extract_doubao_task_id_from_path,
     extract_gemini_short_id_from_cancel_path, extract_gemini_short_id_from_path,
     extract_openai_task_id_from_cancel_path, extract_openai_task_id_from_content_path,
     extract_openai_task_id_from_path, extract_openai_task_id_from_remix_path,

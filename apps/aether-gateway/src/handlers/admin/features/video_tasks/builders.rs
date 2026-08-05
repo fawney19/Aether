@@ -64,9 +64,71 @@ pub(super) async fn build_admin_video_task_provider_names(
         .collect())
 }
 
+/// Token and cost figures for one video task, resolved from its usage record.
+#[derive(Debug, Clone, Default)]
+pub(super) struct AdminVideoTaskUsageSummary {
+    /// Usage primary key. The admin usage detail endpoint looks records up by
+    /// this id, not by `request_id`.
+    pub(super) usage_id: String,
+    pub(super) input_tokens: u64,
+    pub(super) output_tokens: u64,
+    pub(super) total_tokens: u64,
+    pub(super) cost: f64,
+    pub(super) actual_cost: f64,
+}
+
+/// Resolves usage figures for a page of video tasks, keyed by request id.
+///
+/// Video tasks store only generation parameters; tokens and cost live on the
+/// usage record written when the task settles. Tasks that have not settled yet
+/// simply have no entry, which the caller renders as "no data" rather than zero.
+///
+/// This issues one point lookup per task. A page is capped at 100 rows by the
+/// route, and the usage repository has no batch-by-request-id query today, so
+/// adding one would mean touching contracts plus all three adapters.
+pub(super) async fn build_admin_video_task_usage_summaries(
+    state: &AdminAppState<'_>,
+    tasks: &[StoredVideoTask],
+) -> Result<BTreeMap<String, AdminVideoTaskUsageSummary>, GatewayError> {
+    let request_ids = tasks
+        .iter()
+        .map(|task| task.request_id.trim())
+        .filter(|request_id| !request_id.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+
+    let mut summaries = BTreeMap::new();
+    for request_id in request_ids {
+        // The shallow read intentionally skips captured HTTP bodies; a list view
+        // only needs the token and cost columns.
+        let usage = state
+            .app()
+            .data
+            .read_request_usage_audit_shallow(&request_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        let Some(usage) = usage else {
+            continue;
+        };
+        summaries.insert(
+            request_id,
+            AdminVideoTaskUsageSummary {
+                usage_id: usage.id.clone(),
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                total_tokens: usage.total_tokens,
+                cost: usage.total_cost_usd,
+                actual_cost: usage.actual_total_cost_usd,
+            },
+        );
+    }
+    Ok(summaries)
+}
+
 pub(super) fn build_admin_video_task_list_item(
     task: &StoredVideoTask,
     provider_names: &BTreeMap<String, String>,
+    usage_summaries: &BTreeMap<String, AdminVideoTaskUsageSummary>,
 ) -> Value {
     let provider_name = task
         .provider_id
@@ -74,8 +136,13 @@ pub(super) fn build_admin_video_task_list_item(
         .and_then(|provider_id| provider_names.get(provider_id))
         .cloned()
         .unwrap_or_else(|| "Unknown".to_string());
+    // Absent while the task is still queued or running; the client renders a
+    // placeholder instead of a misleading zero.
+    let usage = usage_summaries.get(task.request_id.trim());
     json!({
         "id": task.id,
+        "request_id": task.request_id,
+        "usage_id": usage.map(|usage| usage.usage_id.clone()),
         "external_task_id": task.external_task_id,
         "user_id": task.user_id,
         "username": task.username.clone().unwrap_or_else(|| "Unknown".to_string()),
@@ -94,6 +161,11 @@ pub(super) fn build_admin_video_task_list_item(
         "error_message": task.error_message,
         "poll_count": task.poll_count,
         "max_poll_count": task.max_poll_count,
+        "input_tokens": usage.map(|usage| usage.input_tokens),
+        "output_tokens": usage.map(|usage| usage.output_tokens),
+        "total_tokens": usage.map(|usage| usage.total_tokens),
+        "cost": usage.map(|usage| usage.cost),
+        "actual_cost": usage.map(|usage| usage.actual_cost),
         "created_at": admin_video_task_timestamp(Some(task.created_at_unix_ms)),
         "completed_at": admin_video_task_timestamp(task.completed_at_unix_secs),
         "submitted_at": admin_video_task_timestamp(task.submitted_at_unix_secs),

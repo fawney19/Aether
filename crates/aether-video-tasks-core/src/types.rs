@@ -49,12 +49,14 @@ pub enum LocalVideoTaskContentAction {
 pub enum LocalVideoTaskProjectionTarget {
     OpenAi { task_id: String },
     Gemini { short_id: String },
+    Doubao { task_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LocalVideoTaskSnapshot {
     OpenAi(OpenAiVideoTaskSeed),
     Gemini(GeminiVideoTaskSeed),
+    Doubao(DoubaoVideoTaskSeed),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +82,7 @@ pub enum LocalVideoTaskRegistryMutation {
     OpenAiCancelled { task_id: String },
     OpenAiDeleted { task_id: String },
     GeminiCancelled { short_id: String },
+    DoubaoDeleted { task_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +90,7 @@ pub enum LocalVideoTaskSeed {
     OpenAiCreate(OpenAiVideoTaskSeed),
     OpenAiRemix(OpenAiVideoTaskSeed),
     GeminiCreate(GeminiVideoTaskSeed),
+    DoubaoCreate(DoubaoVideoTaskSeed),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -166,6 +170,38 @@ pub struct GeminiVideoTaskSeed {
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub metadata: Value,
+    pub persistence: LocalVideoTaskPersistence,
+    pub transport: LocalVideoTaskTransport,
+}
+
+/// Doubao (Volcengine Ark) content generation task.
+///
+/// Ark exposes generation parameters as top-level request fields and echoes them
+/// back on read, so the resolved values are refreshed from the provider body
+/// whenever it reports them. Only the fields the gateway must understand are
+/// modeled; everything else rides along in `persistence.original_request_body`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DoubaoVideoTaskSeed {
+    pub local_task_id: String,
+    pub upstream_task_id: String,
+    pub created_at_unix_secs: u64,
+    pub user_id: Option<String>,
+    pub api_key_id: Option<String>,
+    pub model: Option<String>,
+    pub prompt: Option<String>,
+    pub resolution: Option<String>,
+    pub ratio: Option<String>,
+    pub duration_seconds: Option<u32>,
+    pub status: LocalVideoTaskStatus,
+    pub progress_percent: u16,
+    pub completed_at_unix_secs: Option<u64>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub video_url: Option<String>,
+    pub last_frame_url: Option<String>,
+    /// Ark bills video generation by tokens, unlike the per-second video surfaces.
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
     pub persistence: LocalVideoTaskPersistence,
     pub transport: LocalVideoTaskTransport,
 }

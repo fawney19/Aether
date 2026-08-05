@@ -26,6 +26,7 @@ export type ModelTestKeySource = {
 const MODEL_TEST_UNSUPPORTED_API_FORMATS = new Set([
   'openai:video',
   'gemini:video',
+  'doubao:video',
   'gemini:files',
 ])
 

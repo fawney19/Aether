@@ -174,6 +174,14 @@ pub struct StreamTerminalUsagePayloadSeed {
 #[derive(Debug, Clone)]
 pub struct TerminalUsageSeed {
     pub terminal_state: UsageTerminalState,
+    /// Keeps the record unsettled even though the request itself finished.
+    ///
+    /// An async job submission (video create) returns success as soon as the
+    /// upstream accepts the task, but its tokens and cost are only known when
+    /// the poller sees the job finish. Settling now would freeze the record at
+    /// zero, because the usage upsert only accepts token and cost updates while
+    /// `billing_status = 'pending'`.
+    pub defer_settlement: bool,
     pub client_contract: String,
     pub provider_contract: String,
     pub request_id: String,
@@ -633,6 +641,7 @@ fn build_terminal_usage_event_from_seed_impl(
 ) -> Result<UsageEvent, DataLayerError> {
     let TerminalUsageSeed {
         terminal_state,
+        defer_settlement,
         client_contract,
         provider_contract,
         request_id,
@@ -672,6 +681,9 @@ fn build_terminal_usage_event_from_seed_impl(
         standardized_usage,
     } = seed;
     let event_type = match terminal_state {
+        // A deferred submission stays pending so the terminal poll can still
+        // write the tokens and cost it discovers later.
+        UsageTerminalState::Completed if defer_settlement => UsageEventType::Pending,
         UsageTerminalState::Completed => UsageEventType::Completed,
         UsageTerminalState::Failed => UsageEventType::Failed,
         UsageTerminalState::Cancelled => UsageEventType::Cancelled,
@@ -1030,6 +1042,7 @@ pub fn build_sync_terminal_usage_seed(
     );
 
     TerminalUsageSeed {
+        defer_settlement: report_kind_defers_settlement(report_kind.as_str()),
         terminal_state,
         client_contract: context_seed.client_contract,
         provider_contract: context_seed.provider_contract,
@@ -1214,6 +1227,7 @@ pub fn build_stream_terminal_usage_seed(
     );
 
     TerminalUsageSeed {
+        defer_settlement: false,
         terminal_state,
         client_contract: context_seed.client_contract,
         provider_contract: context_seed.provider_contract,
@@ -1276,6 +1290,28 @@ fn infer_sync_terminal_state(
     } else {
         UsageTerminalState::Completed
     }
+}
+
+/// Whether a successful report only submitted work whose cost is not yet known.
+///
+/// Video create returns as soon as the upstream accepts the task; tokens and
+/// cost arrive later from the poller. Settling at submission time would pin the
+/// record to zero, since the usage upsert refuses token and cost updates once
+/// `billing_status` leaves `pending`.
+///
+/// Cancel and delete reports are genuinely terminal and settle normally.
+fn report_kind_defers_settlement(report_kind: &str) -> bool {
+    matches!(
+        report_kind,
+        "openai_video_create_sync_success"
+            | "openai_video_create_sync_finalize"
+            | "openai_video_remix_sync_success"
+            | "openai_video_remix_sync_finalize"
+            | "gemini_video_create_sync_success"
+            | "gemini_video_create_sync_finalize"
+            | "doubao_video_create_sync_success"
+            | "doubao_video_create_sync_finalize"
+    )
 }
 
 fn infer_stream_terminal_state(
@@ -6498,6 +6534,7 @@ mod tests {
     fn manual_terminal_seed_event_builder_sanitizes_headers_and_metadata_but_preserves_bodies() {
         let event = build_terminal_usage_event_from_seed(TerminalUsageSeed {
             terminal_state: UsageTerminalState::Completed,
+            defer_settlement: false,
             client_contract: "openai:chat".to_string(),
             provider_contract: "openai:chat".to_string(),
             request_id: "req-manual-seed-1".to_string(),
@@ -6979,6 +7016,83 @@ mod tests {
         assert_eq!(
             extract_token_counts_from_value(&Value::String(sse_body.to_string())),
             Some((3, 5, 8)),
+        );
+    }
+}
+
+#[cfg(test)]
+mod deferred_settlement_tests {
+    use super::{report_kind_defers_settlement, UsageTerminalState};
+    use crate::UsageEventType;
+
+    #[test]
+    fn video_create_reports_defer_settlement() {
+        for report_kind in [
+            "doubao_video_create_sync_success",
+            "doubao_video_create_sync_finalize",
+            "openai_video_create_sync_success",
+            "openai_video_remix_sync_success",
+            "gemini_video_create_sync_success",
+        ] {
+            assert!(
+                report_kind_defers_settlement(report_kind),
+                "{report_kind} only submits a job; its cost is unknown until it finishes"
+            );
+        }
+    }
+
+    #[test]
+    fn genuinely_terminal_reports_settle_immediately() {
+        // Cancel and delete end the task, and chat completions already carry
+        // their usage, so none of them may be held open.
+        for report_kind in [
+            "doubao_video_delete_sync_success",
+            "openai_video_cancel_sync_success",
+            "gemini_video_cancel_sync_success",
+            "openai_chat_sync_success",
+            "openai_chat_sync_finalize",
+        ] {
+            assert!(
+                !report_kind_defers_settlement(report_kind),
+                "{report_kind} is terminal and must settle"
+            );
+        }
+    }
+
+    /// Mirrors the event-type decision in `build_terminal_usage_event_from_seed_impl`.
+    fn event_type_for(terminal_state: UsageTerminalState, defer: bool) -> UsageEventType {
+        match terminal_state {
+            UsageTerminalState::Completed if defer => UsageEventType::Pending,
+            UsageTerminalState::Completed => UsageEventType::Completed,
+            UsageTerminalState::Failed => UsageEventType::Failed,
+            UsageTerminalState::Cancelled => UsageEventType::Cancelled,
+        }
+    }
+
+    #[test]
+    fn deferred_success_stays_pending_so_later_tokens_are_accepted() {
+        // The usage upsert only applies token and cost updates while
+        // billing_status is 'pending'; settling here would freeze it at zero.
+        assert_eq!(
+            event_type_for(UsageTerminalState::Completed, true),
+            UsageEventType::Pending
+        );
+        assert_eq!(
+            event_type_for(UsageTerminalState::Completed, false),
+            UsageEventType::Completed
+        );
+    }
+
+    #[test]
+    fn deferral_never_masks_a_failure() {
+        // A submission that failed is final: there is no later poll to correct it.
+        assert_eq!(
+            event_type_for(UsageTerminalState::Failed, true),
+            UsageEventType::Failed
+        );
+        assert_eq!(
+            event_type_for(UsageTerminalState::Cancelled, true),
+            UsageEventType::Cancelled
         );
     }
 }

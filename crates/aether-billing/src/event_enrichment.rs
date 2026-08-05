@@ -178,6 +178,11 @@ fn calculate_billing_computation(
         image_size: usage_event_dimension_string(&event.data, "image_size"),
         image_quality: usage_event_dimension_string(&event.data, "image_quality"),
         image_output_format: usage_event_dimension_string(&event.data, "image_output_format"),
+        video_resolution: usage_event_dimension_string(&event.data, "video_resolution"),
+        video_duration_seconds: usage_event_dimension_i64(&event.data, "video_duration_seconds")
+            .unwrap_or_default(),
+        video_has_video_input: usage_event_dimension_bool(&event.data, "video_has_video_input")
+            .unwrap_or(false),
         cache_ttl_minutes: usage_event_provider_cache_ttl_minutes(&event.data)
             .or(pricing.provider_api_key_cache_ttl_minutes),
     };
@@ -254,6 +259,49 @@ fn usage_event_dimension_string(
             )
         },
     )
+}
+
+fn usage_event_dimension_i64(
+    data: &aether_usage_runtime::UsageEventData,
+    dimension_key: &str,
+) -> Option<i64> {
+    metadata_dimension_i64(data.request_metadata.as_ref(), "dimensions", dimension_key).or_else(
+        || {
+            metadata_dimension_i64(
+                data.request_metadata.as_ref(),
+                "billing_dimensions",
+                dimension_key,
+            )
+        },
+    )
+}
+
+fn usage_event_dimension_bool(
+    data: &aether_usage_runtime::UsageEventData,
+    dimension_key: &str,
+) -> Option<bool> {
+    metadata_dimension_bool(data.request_metadata.as_ref(), "dimensions", dimension_key).or_else(
+        || {
+            metadata_dimension_bool(
+                data.request_metadata.as_ref(),
+                "billing_dimensions",
+                dimension_key,
+            )
+        },
+    )
+}
+
+fn metadata_dimension_bool(
+    metadata: Option<&Value>,
+    bag_key: &str,
+    dimension_key: &str,
+) -> Option<bool> {
+    metadata
+        .and_then(Value::as_object)
+        .and_then(|object| object.get(bag_key))
+        .and_then(Value::as_object)
+        .and_then(|object| object.get(dimension_key))
+        .and_then(Value::as_bool)
 }
 
 fn metadata_dimension_string(
@@ -402,7 +450,8 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        enrich_usage_event_with_billing, usage_event_processing_tiers, BillingModelContextLookup,
+        enrich_usage_event_with_billing, usage_event_dimension_bool, usage_event_dimension_i64,
+        usage_event_dimension_string, usage_event_processing_tiers, BillingModelContextLookup,
     };
 
     struct TestLookup {
@@ -431,6 +480,89 @@ mod tests {
         {
             Ok(self.name_context.clone())
         }
+    }
+
+    #[test]
+    fn video_dimensions_read_from_the_dimensions_bag() {
+        let data = UsageEventData {
+            request_metadata: Some(json!({
+                "dimensions": {
+                    "video_resolution": " 720p ",
+                    "video_duration_seconds": 5,
+                    "video_has_video_input": true
+                }
+            })),
+            ..UsageEventData::default()
+        };
+
+        assert_eq!(
+            usage_event_dimension_string(&data, "video_resolution").as_deref(),
+            Some("720p")
+        );
+        assert_eq!(
+            usage_event_dimension_i64(&data, "video_duration_seconds"),
+            Some(5)
+        );
+        assert_eq!(
+            usage_event_dimension_bool(&data, "video_has_video_input"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn video_dimensions_fall_back_to_the_billing_dimensions_bag() {
+        let data = UsageEventData {
+            request_metadata: Some(json!({
+                "billing_dimensions": {
+                    "video_resolution": "1080p",
+                    "video_duration_seconds": 10,
+                    "video_has_video_input": false
+                }
+            })),
+            ..UsageEventData::default()
+        };
+
+        assert_eq!(
+            usage_event_dimension_string(&data, "video_resolution").as_deref(),
+            Some("1080p")
+        );
+        assert_eq!(
+            usage_event_dimension_i64(&data, "video_duration_seconds"),
+            Some(10)
+        );
+        assert_eq!(
+            usage_event_dimension_bool(&data, "video_has_video_input"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn video_dimensions_are_absent_without_metadata() {
+        let data = UsageEventData::default();
+
+        assert!(usage_event_dimension_string(&data, "video_resolution").is_none());
+        assert!(usage_event_dimension_i64(&data, "video_duration_seconds").is_none());
+        assert!(usage_event_dimension_bool(&data, "video_has_video_input").is_none());
+    }
+
+    #[test]
+    fn video_dimensions_reject_mistyped_values_instead_of_guessing() {
+        let data = UsageEventData {
+            request_metadata: Some(json!({
+                "dimensions": {
+                    "video_resolution": "   ",
+                    "video_duration_seconds": "5",
+                    "video_has_video_input": "true"
+                }
+            })),
+            ..UsageEventData::default()
+        };
+
+        // A blank resolution and string-typed number/bool must not silently
+        // become a price lookup key or a duration.
+        assert!(usage_event_dimension_string(&data, "video_resolution").is_none());
+        assert!(usage_event_dimension_i64(&data, "video_duration_seconds").is_none());
+        assert!(usage_event_dimension_bool(&data, "video_has_video_input").is_none());
     }
 
     #[test]

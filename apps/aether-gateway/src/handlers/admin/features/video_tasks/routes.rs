@@ -17,7 +17,8 @@ use serde_json::json;
 use super::builders::{
     admin_video_task_detail_id_from_path, admin_video_task_nested_id_from_path,
     admin_video_task_status_name, admin_video_task_timestamp, build_admin_video_task_list_item,
-    build_admin_video_task_provider_names, current_admin_video_task_unix_secs,
+    build_admin_video_task_provider_names, build_admin_video_task_usage_summaries,
+    current_admin_video_task_unix_secs,
 };
 
 pub(super) async fn maybe_build_local_admin_video_tasks_response(
@@ -64,12 +65,18 @@ pub(super) async fn maybe_build_local_admin_video_tasks_response(
             .read_video_task_page_summary(&filter, page, page_size)
             .await?;
         let provider_names = build_admin_video_task_provider_names(state, &response.items).await?;
+        let usage_summaries =
+            build_admin_video_task_usage_summaries(state, &response.items).await?;
         return Ok(Some(
             Json(json!({
                 "items": response
                     .items
                     .iter()
-                    .map(|task| build_admin_video_task_list_item(task, &provider_names))
+                    .map(|task| build_admin_video_task_list_item(
+                        task,
+                        &provider_names,
+                        &usage_summaries,
+                    ))
                     .collect::<Vec<_>>(),
                 "total": response.total,
                 "page": response.page,

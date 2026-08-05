@@ -1,4 +1,5 @@
 import type { PublicGlobalModel } from '@/api/public-models'
+import { hasVideoPricing as hasVideoPricingConfigured } from '@/utils/form'
 
 function isEmbeddingApiFormat(format: unknown): boolean {
   const value = String(format).trim().toLowerCase()
@@ -20,15 +21,14 @@ export function supportsRerank(model: PublicGlobalModel): boolean {
     || (Array.isArray(model.config?.api_formats) && model.config.api_formats.some((format) => String(format).endsWith(':rerank')))
 }
 
+/**
+ * 是否按视频计费（两种方式任一）。
+ *
+ * 这里是能力标签，不是价格展示，所以按秒和按 token 都算；判定委托给共享
+ * helper，避免各处重复实现时漏掉计费方式。
+ */
 export function hasVideoPricing(model: PublicGlobalModel): boolean {
-  const billing = model.config?.billing
-  const video = billing && typeof billing === 'object' && !Array.isArray(billing)
-    ? (billing as Record<string, unknown>).video
-    : null
-  const priceByResolution = video && typeof video === 'object' && !Array.isArray(video)
-    ? (video as Record<string, unknown>).price_per_second_by_resolution
-    : null
-  return !!priceByResolution && typeof priceByResolution === 'object' && Object.keys(priceByResolution).length > 0
+  return hasVideoPricingConfigured(model.config)
 }
 
 export function getModelCapabilityLabels(model: PublicGlobalModel): string[] {

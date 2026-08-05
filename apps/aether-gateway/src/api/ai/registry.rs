@@ -44,6 +44,8 @@ const AI_ANY_ROUTE_PATTERNS: &[&str] = &[
     "/v1beta/operations/{*operation_path}",
     "/v1/videos",
     "/v1/videos/{*video_path}",
+    "/v3/contents/generations/tasks",
+    "/v3/contents/generations/tasks/{*task_path}",
     "/upload/v1beta/files",
     "/v1beta/files",
     "/v1beta/files/{*file_path}",
@@ -140,6 +142,12 @@ mod tests {
             ),
             ("jina:embedding", "jina", "embedding", "/v1/embeddings"),
             ("doubao:embedding", "doubao", "embedding", "/v1/embeddings"),
+            (
+                "doubao:video",
+                "doubao",
+                "video",
+                "/v3/contents/generations/tasks",
+            ),
             (
                 "aliyun:multimodal_embedding",
                 "aliyun",

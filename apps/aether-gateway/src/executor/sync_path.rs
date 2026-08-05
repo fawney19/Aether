@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 use crate::ai_serving::api::{
     is_matching_stream_request, resolve_execution_runtime_stream_plan_kind,
     resolve_execution_runtime_sync_plan_kind, supports_sync_execution_decision_kind, AiSyncAttempt,
-    GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND, OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
+    DOUBAO_VIDEO_DELETE_SYNC_PLAN_KIND, GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND, OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
 use crate::api::response::build_client_response_from_parts;
 use crate::control::resolve_execution_runtime_auth_context;
@@ -385,6 +386,7 @@ async fn maybe_execute_local_video_task_follow_up_sync(
             | OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND
             | OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND
             | GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND
+            | DOUBAO_VIDEO_DELETE_SYNC_PLAN_KIND
     ) {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }

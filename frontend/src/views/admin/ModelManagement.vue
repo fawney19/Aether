@@ -700,7 +700,15 @@ import { useConfirm } from '@/composables/useConfirm'
 import { useClipboard } from '@/composables/useClipboard'
 import { useRowClick } from '@/composables/useRowClick'
 import { parseApiError } from '@/utils/errorParser'
-import { sortResolutionEntries } from '@/utils/form'
+import {
+  getVideoBillingMode,
+  getVideoDefaultPricePerSecond,
+  getVideoPricePerSecondTable,
+  getVideoTokenPriceEntries,
+  hasVideoPricing as hasVideoPricingConfigured,
+  sortResolutionEntries,
+  type VideoTokenPriceEntry,
+} from '@/utils/form'
 import {
   Button,
   Card,
@@ -868,41 +876,68 @@ function hasTieredPricing(model: GlobalModelResponse): boolean {
   return (tiered?.tiers?.length || 0) > 1
 }
 
-// 检测是否有视频分辨率计费配置
+// 检测是否有生效的视频计费配置（按秒或按 token）
 function hasVideoPricing(model: GlobalModelResponse): boolean {
-  const priceByResolution = model.config?.billing?.video?.price_per_second_by_resolution
-  return priceByResolution && typeof priceByResolution === 'object' && Object.keys(priceByResolution).length > 0
+  return hasVideoPricingConfigured(model.config)
 }
 
-// 获取视频分辨率计费的数量
-function _getVideoPricingCount(model: GlobalModelResponse): number {
-  const priceByResolution = model.config?.billing?.video?.price_per_second_by_resolution
-  if (!priceByResolution || typeof priceByResolution !== 'object') return 0
-  return Object.keys(priceByResolution).length
+function videoPricePerSecondEntries(model: GlobalModelResponse): [string, number][] {
+  return sortResolutionEntries(Object.entries(getVideoPricePerSecondTable(model.config)))
 }
 
-// 获取视频计费的显示文本（如：720p $0.1/s [多分辨率]）
+/** 一条 token 单价的紧凑写法：有输入价时写成 `in/out`，否则只写输出价。 */
+function formatTokenPricePair(entry: VideoTokenPriceEntry, digits: number): string {
+  const output = entry.outputPricePer1m
+  const input = entry.inputPricePer1m
+  if (input !== null && output !== null) {
+    return `$${input.toFixed(digits)}/$${output.toFixed(digits)}`
+  }
+  const single = output ?? input
+  return single === null ? '' : `$${single.toFixed(digits)}`
+}
+
+// 获取视频计费的显示文本（如：720p $0.1/s [2种]、720p $15.00/M [2种]）
 function getVideoPricingDisplay(model: GlobalModelResponse): string {
-  const priceByResolution = model.config?.billing?.video?.price_per_second_by_resolution
-  if (!priceByResolution || typeof priceByResolution !== 'object') return ''
-  const entries = sortResolutionEntries(Object.entries(priceByResolution))
-  if (entries.length === 0) return ''
+  // 按 token 计费时视频价格来自 billing.video，而不是模型的 token 阶梯目录，
+  // 所以这一列必须自己呈现，否则整行会退化成「-」。
+  if (getVideoBillingMode(model.config) === 'per_token') {
+    const entries = getVideoTokenPriceEntries(model.config)
+    if (entries.length === 0) return ''
+    const first = `${entries[0].resolution} ${formatTokenPricePair(entries[0], 2)}/M`
+    return entries.length > 1 ? `${first} [${entries.length}种]` : first
+  }
+
+  const entries = videoPricePerSecondEntries(model)
+  const defaultPrice = getVideoDefaultPricePerSecond(model.config)
+  if (entries.length === 0) {
+    return defaultPrice === null ? '' : `默认 $${defaultPrice.toFixed(2)}/s`
+  }
   // 获取最低分辨率和价格
   const [firstRes, firstPrice] = entries[0]
-  const priceStr = `${firstRes} $${(firstPrice as number).toFixed(2)}/s`
+  const priceStr = `${firstRes} $${firstPrice.toFixed(2)}/s`
   // 如果有多个分辨率，添加标记
-  if (entries.length > 1) {
-    return `${priceStr} [${entries.length}种]`
+  const variants = entries.length + (defaultPrice === null ? 0 : 1)
+  if (variants > 1) {
+    return `${priceStr} [${variants}种]`
   }
   return priceStr
 }
 
 // 获取视频计费详情的 tooltip
 function getVideoPricingTooltip(model: GlobalModelResponse): string {
-  const priceByResolution = model.config?.billing?.video?.price_per_second_by_resolution
-  if (!priceByResolution || typeof priceByResolution !== 'object') return ''
-  const entries = sortResolutionEntries(Object.entries(priceByResolution))
-  return entries.map(([res, price]) => `${res}: $${(price as number).toFixed(4)}/s`).join('\n')
+  if (getVideoBillingMode(model.config) === 'per_token') {
+    return getVideoTokenPriceEntries(model.config)
+      .map(entry => `${entry.resolution}: ${formatTokenPricePair(entry, 4)}/M`)
+      .join('\n')
+  }
+
+  const lines = videoPricePerSecondEntries(model)
+    .map(([res, price]) => `${res}: $${price.toFixed(4)}/s`)
+  const defaultPrice = getVideoDefaultPricePerSecond(model.config)
+  if (defaultPrice !== null) {
+    lines.push(`默认: $${defaultPrice.toFixed(4)}/s`)
+  }
+  return lines.join('\n')
 }
 
 // 检测是否有对话框打开（防止误关闭抽屉）

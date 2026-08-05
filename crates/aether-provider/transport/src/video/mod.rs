@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use aether_ai_formats::api::convert_openai_video_request_to_doubao;
 use aether_data_contracts::repository::video_tasks::StoredVideoTask;
 use aether_video_tasks_core::{
     LocalVideoTaskSnapshot, LocalVideoTaskTransport, LocalVideoTaskTransportBridgeInput,
@@ -21,12 +22,16 @@ use super::rules::{
     apply_local_body_rules_with_request_headers, apply_local_header_rules_with_request_headers,
 };
 use super::snapshot::GatewayProviderTransportSnapshot;
-use super::url::{build_gemini_video_predict_long_running_url, build_passthrough_path_url};
+use super::url::{
+    build_gemini_video_predict_long_running_url, build_passthrough_path_url,
+    doubao_video_tasks_upstream_url,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderVideoCreateFamily {
     OpenAi,
     Gemini,
+    Doubao,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -56,7 +61,8 @@ pub fn resolve_local_video_task_transport(
 ) -> Option<LocalVideoTaskTransport> {
     let api_format = api_format.trim();
     let (auth_header, auth_value) = match api_format {
-        "openai:video" => {
+        // Ark authenticates with a bearer token, same as the OpenAI surface.
+        "openai:video" | "doubao:video" => {
             if !supports_local_standard_transport(transport, api_format) {
                 return None;
             }
@@ -101,6 +107,9 @@ pub fn video_create_transport_unsupported_reason(
         ProviderVideoCreateFamily::Gemini => {
             local_gemini_transport_unsupported_reason_with_network(transport, api_format)
         }
+        ProviderVideoCreateFamily::Doubao => {
+            local_standard_transport_unsupported_reason_with_network(transport, api_format)
+        }
     }
 }
 
@@ -109,7 +118,9 @@ pub fn resolve_video_create_auth(
     family: ProviderVideoCreateFamily,
 ) -> Option<(String, String)> {
     match family {
-        ProviderVideoCreateFamily::OpenAi => resolve_local_openai_bearer_auth(transport),
+        ProviderVideoCreateFamily::OpenAi | ProviderVideoCreateFamily::Doubao => {
+            resolve_local_openai_bearer_auth(transport)
+        }
         ProviderVideoCreateFamily::Gemini => resolve_local_gemini_auth(transport),
     }
 }
@@ -121,8 +132,48 @@ pub fn build_video_create_request_body(
     body_rules: Option<&Value>,
     request_headers: Option<&http::HeaderMap>,
 ) -> Option<Value> {
-    let mut provider_request_body = match family {
-        ProviderVideoCreateFamily::OpenAi => {
+    build_video_create_request_body_for_client(
+        body_json,
+        family,
+        family,
+        mapped_model,
+        body_rules,
+        request_headers,
+    )
+}
+
+/// Builds the upstream request body, converting first when the client surface
+/// differs from the provider surface.
+///
+/// Only OpenAI-to-Doubao is convertible; other mismatches are rejected so a
+/// request is never silently sent in a shape the provider cannot read.
+pub fn build_video_create_request_body_for_client(
+    body_json: &Value,
+    client_family: ProviderVideoCreateFamily,
+    provider_family: ProviderVideoCreateFamily,
+    mapped_model: &str,
+    body_rules: Option<&Value>,
+    request_headers: Option<&http::HeaderMap>,
+) -> Option<Value> {
+    let converted;
+    let body_json = if client_family == provider_family {
+        body_json
+    } else {
+        match (client_family, provider_family) {
+            (ProviderVideoCreateFamily::OpenAi, ProviderVideoCreateFamily::Doubao) => {
+                converted = convert_openai_video_request_to_doubao(body_json).ok()?;
+                &converted
+            }
+            _ => return None,
+        }
+    };
+
+    let mut provider_request_body = match provider_family {
+        // Ark and OpenAI both carry the model in the request body, so the mapped
+        // model replaces whatever the client asked for. Every other field rides
+        // through untouched, which keeps new Ark parameters working without a
+        // gateway change.
+        ProviderVideoCreateFamily::OpenAi | ProviderVideoCreateFamily::Doubao => {
             let mut provider_request_body = body_json.as_object().cloned().unwrap_or_default();
             provider_request_body
                 .insert("model".to_string(), Value::String(mapped_model.to_string()));
@@ -157,7 +208,7 @@ pub fn build_video_create_upstream_url(
 
     if let Some(path) = custom_path {
         let blocked_keys = match family {
-            ProviderVideoCreateFamily::OpenAi => &[][..],
+            ProviderVideoCreateFamily::OpenAi | ProviderVideoCreateFamily::Doubao => &[][..],
             ProviderVideoCreateFamily::Gemini => &["key"][..],
         };
         return build_passthrough_path_url(
@@ -180,6 +231,11 @@ pub fn build_video_create_upstream_url(
             mapped_model,
             request_query,
         ),
+        // The client path is `/v3/...` while Ark's own root is `/api/v3/...`, so
+        // the resource path is rebuilt rather than passed through verbatim.
+        ProviderVideoCreateFamily::Doubao => {
+            doubao_video_tasks_upstream_url(&transport.endpoint.base_url, None, request_query)
+        }
     }
 }
 
@@ -222,7 +278,10 @@ pub async fn reconstruct_local_video_task_snapshot(
         .as_deref()
         .unwrap_or_default()
         .trim();
-    if !matches!(provider_api_format, "openai:video" | "gemini:video") {
+    if !matches!(
+        provider_api_format,
+        "openai:video" | "gemini:video" | "doubao:video"
+    ) {
         return Ok(None);
     }
 
@@ -496,6 +555,79 @@ mod tests {
     }
 
     #[test]
+    fn resolves_doubao_video_transport_with_bearer_auth() {
+        let transport = resolve_local_video_task_transport(
+            &sample_transport("doubao:video", "api_key"),
+            "doubao:video",
+            Some("doubao-seedance-2-0-260128".to_string()),
+        )
+        .expect("transport");
+
+        assert_eq!(
+            transport.headers.get("authorization").map(String::as_str),
+            Some("Bearer secret")
+        );
+        assert_eq!(
+            transport.model_name.as_deref(),
+            Some("doubao-seedance-2-0-260128")
+        );
+    }
+
+    #[test]
+    fn builds_doubao_video_create_url_from_client_v3_path() {
+        let mut transport = sample_transport("doubao:video", "bearer");
+        transport.endpoint.base_url = "https://ark.cn-beijing.volces.com/api".to_string();
+        let url = build_video_create_upstream_url(
+            &transport,
+            "/v3/contents/generations/tasks",
+            Some("trace=1"),
+            "doubao-seedance-2-0-260128",
+            ProviderVideoCreateFamily::Doubao,
+        )
+        .expect("url should build");
+
+        assert_eq!(
+            url,
+            "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks?trace=1"
+        );
+    }
+
+    #[test]
+    fn builds_doubao_video_create_body_with_mapped_model_and_passthrough_fields() {
+        let body = build_video_create_request_body(
+            &json!({
+                "model": "client-model",
+                "content": [
+                    {"type": "text", "text": "a clip"},
+                    {"type": "audio_url", "audio_url": {"url": "https://a.example/a.mp3"}, "role": "reference_audio"}
+                ],
+                "generate_audio": true,
+                "ratio": "16:9",
+                "duration": 11
+            }),
+            ProviderVideoCreateFamily::Doubao,
+            "doubao-seedance-2-0-260128",
+            None,
+            None,
+        )
+        .expect("body should build");
+
+        assert_eq!(
+            body.get("model"),
+            Some(&json!("doubao-seedance-2-0-260128"))
+        );
+        // Unmodeled fields must survive verbatim so new Ark parameters keep working.
+        assert_eq!(body.get("generate_audio"), Some(&json!(true)));
+        assert_eq!(body.get("duration"), Some(&json!(11)));
+        assert_eq!(
+            body.get("content")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(2)
+        );
+    }
+
+    #[test]
     fn rejects_mismatched_video_transport_format() {
         let transport = sample_transport("openai:chat", "bearer");
         assert!(resolve_local_video_task_transport(&transport, "openai:video", None).is_none());
@@ -514,7 +646,34 @@ mod tests {
                 assert_eq!(seed.transport.provider_id, "provider-1");
                 assert_eq!(seed.transport.model_name.as_deref(), Some("sora"));
             }
-            LocalVideoTaskSnapshot::Gemini(_) => panic!("expected openai snapshot"),
+            other => panic!("expected openai snapshot, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reconstructs_doubao_video_snapshot_via_lookup_trait() {
+        let mut task = sample_stored_video_task();
+        task.client_api_format = Some("doubao:video".to_string());
+        task.provider_api_format = Some("doubao:video".to_string());
+        task.model = Some("doubao-seedance-2-0-260128".to_string());
+        task.aspect_ratio = Some("16:9".to_string());
+        task.duration_seconds = Some(11);
+
+        let lookup = TestLookup(Some(sample_transport("doubao:video", "bearer")));
+        let snapshot = reconstruct_local_video_task_snapshot(&lookup, &task)
+            .await
+            .expect("lookup should succeed")
+            .expect("snapshot");
+
+        match snapshot {
+            LocalVideoTaskSnapshot::Doubao(seed) => {
+                assert_eq!(seed.local_task_id, "task-1");
+                assert_eq!(seed.upstream_task_id, "upstream-task-1");
+                assert_eq!(seed.ratio.as_deref(), Some("16:9"));
+                assert_eq!(seed.duration_seconds, Some(11));
+                assert_eq!(seed.transport.provider_id, "provider-1");
+            }
+            other => panic!("expected doubao snapshot, got {other:?}"),
         }
     }
 }

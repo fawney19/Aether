@@ -106,7 +106,7 @@ async fn gateway_handles_admin_billing_presets_locally_with_trusted_admin_princi
     assert_eq!(payload["items"].as_array().map(Vec::len), Some(1));
     assert_eq!(payload["items"][0]["name"], "aether-core");
     assert_eq!(payload["items"][0]["version"], "1.0");
-    assert_eq!(payload["items"][0]["collector_count"], 16);
+    assert_eq!(payload["items"][0]["collector_count"], 22);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -150,7 +150,7 @@ async fn gateway_handles_admin_billing_apply_preset_locally_with_trusted_admin_p
     assert_eq!(merge_payload["ok"], json!(true));
     assert_eq!(merge_payload["preset"], json!("aether-core"));
     assert_eq!(merge_payload["mode"], json!("merge"));
-    assert_eq!(merge_payload["created"], json!(16));
+    assert_eq!(merge_payload["created"], json!(22));
     assert_eq!(merge_payload["updated"], json!(0));
     assert_eq!(merge_payload["skipped"], json!(0));
     assert_eq!(merge_payload["errors"], json!([]));
@@ -171,7 +171,7 @@ async fn gateway_handles_admin_billing_apply_preset_locally_with_trusted_admin_p
     assert_eq!(merge_again_payload["preset"], json!("aether-core"));
     assert_eq!(merge_again_payload["created"], json!(0));
     assert_eq!(merge_again_payload["updated"], json!(0));
-    assert_eq!(merge_again_payload["skipped"], json!(16));
+    assert_eq!(merge_again_payload["skipped"], json!(22));
 
     let overwrite_response = send_admin_billing_request(
         &gateway_url,
@@ -189,7 +189,7 @@ async fn gateway_handles_admin_billing_apply_preset_locally_with_trusted_admin_p
     assert_eq!(overwrite_payload["preset"], json!("aether-core"));
     assert_eq!(overwrite_payload["mode"], json!("overwrite"));
     assert_eq!(overwrite_payload["created"], json!(0));
-    assert_eq!(overwrite_payload["updated"], json!(16));
+    assert_eq!(overwrite_payload["updated"], json!(22));
     assert_eq!(overwrite_payload["skipped"], json!(0));
     assert_eq!(overwrite_payload["errors"], json!([]));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);

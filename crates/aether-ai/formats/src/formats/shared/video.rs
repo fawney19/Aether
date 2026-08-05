@@ -2,6 +2,7 @@
 pub enum LocalVideoCreateFamily {
     OpenAi,
     Gemini,
+    Doubao,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -15,6 +16,7 @@ pub struct LocalVideoCreateSpec {
 pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalVideoCreateSpec> {
     crate::formats::openai::video::spec::resolve_sync_spec(plan_kind)
         .or_else(|| crate::formats::gemini::video::spec::resolve_sync_spec(plan_kind))
+        .or_else(|| crate::formats::doubao::video::spec::resolve_sync_spec(plan_kind))
 }
 
 #[cfg(test)]
@@ -30,5 +32,12 @@ mod tests {
         let gemini = resolve_sync_spec("gemini_video_create_sync").expect("gemini spec");
         assert_eq!(gemini.api_format, "gemini:video");
         assert_eq!(gemini.family, LocalVideoCreateFamily::Gemini);
+    }
+
+    #[test]
+    fn resolves_doubao_video_create_spec() {
+        let doubao = resolve_sync_spec("doubao_video_create_sync").expect("doubao spec");
+        assert_eq!(doubao.api_format, "doubao:video");
+        assert_eq!(doubao.family, LocalVideoCreateFamily::Doubao);
     }
 }

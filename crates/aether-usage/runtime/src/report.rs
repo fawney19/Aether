@@ -133,6 +133,9 @@ pub fn infer_internal_finalize_signature(payload: &GatewaySyncReportRequest) -> 
     if report_kind.starts_with("gemini_video_") {
         return Some("gemini:video".to_string());
     }
+    if report_kind.starts_with("doubao_video_") {
+        return Some("doubao:video".to_string());
+    }
     None
 }
 
@@ -181,6 +184,11 @@ pub fn resolve_internal_finalize_route(signature: &str) -> Option<InternalFinali
         "gemini:video" => Some(InternalFinalizeRoute {
             public_path: "/v1beta/models",
             route_family: "gemini",
+            route_kind: "video",
+        }),
+        "doubao:video" => Some(InternalFinalizeRoute {
+            public_path: "/v3/contents/generations/tasks",
+            route_family: "doubao",
             route_kind: "video",
         }),
         _ => None,
@@ -277,6 +285,10 @@ pub fn is_local_ai_sync_report_kind(report_kind: &str) -> bool {
             | "openai_video_delete_sync_error"
             | "openai_video_cancel_sync_error"
             | "gemini_video_cancel_sync_error"
+            | "doubao_video_create_sync_success"
+            | "doubao_video_create_sync_error"
+            | "doubao_video_delete_sync_success"
+            | "doubao_video_delete_sync_error"
             | "gemini_files_store_mapping"
             | "gemini_files_delete_mapping"
     )
@@ -873,6 +885,12 @@ mod tests {
     fn classifies_local_ai_sync_report_kinds() {
         assert!(is_local_ai_sync_report_kind(
             "openai_video_create_sync_success"
+        ));
+        assert!(is_local_ai_sync_report_kind(
+            "doubao_video_create_sync_success"
+        ));
+        assert!(is_local_ai_sync_report_kind(
+            "doubao_video_delete_sync_error"
         ));
         assert!(is_local_ai_sync_report_kind(
             "openai_responses_compact_sync_success"

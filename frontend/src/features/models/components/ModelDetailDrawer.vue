@@ -310,7 +310,7 @@
                   >
                     <div class="flex items-center gap-2 text-sm text-muted-foreground">
                       <Video class="w-4 h-4" />
-                      <span>视频分辨率计费 ({{ videoPricingEntries.length }} 种)</span>
+                      <span>{{ videoBillingMode === 'per_token' ? '视频 Token 计费' : '视频分辨率计费' }} ({{ videoPricingEntries.length }} 种)</span>
                     </div>
                     <div class="border rounded-lg overflow-hidden">
                       <Table>
@@ -319,22 +319,34 @@
                             <TableHead class="text-xs h-9">
                               分辨率
                             </TableHead>
+                            <TableHead
+                              v-if="videoBillingMode === 'per_token'"
+                              class="text-xs h-9 text-right"
+                            >
+                              输入 ($/M)
+                            </TableHead>
                             <TableHead class="text-xs h-9 text-right">
-                              单价 ($/秒)
+                              {{ videoBillingMode === 'per_token' ? '输出 ($/M)' : '单价 ($/秒)' }}
                             </TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
                           <TableRow
-                            v-for="[res, price] in videoPricingEntries"
-                            :key="res"
+                            v-for="entry in videoPricingEntries"
+                            :key="entry.resolution"
                             class="text-xs"
                           >
                             <TableCell class="py-2">
-                              {{ res }}
+                              {{ entry.resolution }}
+                            </TableCell>
+                            <TableCell
+                              v-if="videoBillingMode === 'per_token'"
+                              class="py-2 text-right font-mono"
+                            >
+                              {{ entry.input === null ? '-' : `$${entry.input.toFixed(4)}` }}
                             </TableCell>
                             <TableCell class="py-2 text-right font-mono">
-                              ${{ (price as number).toFixed(4) }}
+                              {{ entry.output === null ? '-' : `$${entry.output.toFixed(4)}` }}
                             </TableCell>
                           </TableRow>
                         </TableBody>
@@ -430,7 +442,7 @@
                   >
                     <div class="flex items-center gap-2 text-sm text-muted-foreground">
                       <Video class="w-4 h-4" />
-                      <span>视频分辨率计费 ({{ videoPricingEntries.length }} 种)</span>
+                      <span>{{ videoBillingMode === 'per_token' ? '视频 Token 计费' : '视频分辨率计费' }} ({{ videoPricingEntries.length }} 种)</span>
                     </div>
                     <div class="border rounded-lg overflow-hidden">
                       <Table>
@@ -439,22 +451,34 @@
                             <TableHead class="text-xs h-9">
                               分辨率
                             </TableHead>
+                            <TableHead
+                              v-if="videoBillingMode === 'per_token'"
+                              class="text-xs h-9 text-right"
+                            >
+                              输入 ($/M)
+                            </TableHead>
                             <TableHead class="text-xs h-9 text-right">
-                              单价 ($/秒)
+                              {{ videoBillingMode === 'per_token' ? '输出 ($/M)' : '单价 ($/秒)' }}
                             </TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
                           <TableRow
-                            v-for="[res, price] in videoPricingEntries"
-                            :key="res"
+                            v-for="entry in videoPricingEntries"
+                            :key="entry.resolution"
                             class="text-xs"
                           >
                             <TableCell class="py-2">
-                              {{ res }}
+                              {{ entry.resolution }}
+                            </TableCell>
+                            <TableCell
+                              v-if="videoBillingMode === 'per_token'"
+                              class="py-2 text-right font-mono"
+                            >
+                              {{ entry.input === null ? '-' : `$${entry.input.toFixed(4)}` }}
                             </TableCell>
                             <TableCell class="py-2 text-right font-mono">
-                              ${{ (price as number).toFixed(4) }}
+                              {{ entry.output === null ? '-' : `$${entry.output.toFixed(4)}` }}
                             </TableCell>
                           </TableRow>
                         </TableBody>
@@ -559,7 +583,14 @@ import TableCell from '@/components/ui/table-cell.vue'
 import RoutingTab from './RoutingTab.vue'
 import ModelMappingsTab from './ModelMappingsTab.vue'
 import ProcessingTierPricingSummary from './ProcessingTierPricingSummary.vue'
-import { sortResolutionEntries } from '@/utils/form'
+import {
+  getVideoBillingMode,
+  getVideoDefaultPricePerSecond,
+  getVideoPricePerSecondTable,
+  getVideoTokenPriceEntries,
+  hasVideoPricing as hasVideoPricingConfigured,
+  sortResolutionEntries,
+} from '@/utils/form'
 import { parseApiError } from '@/utils/errorParser'
 import { formatCompactNumber, formatTokens } from '@/utils/format'
 import { getGlobalModelRoutingPreview } from '@/api/global-models'
@@ -660,17 +691,36 @@ defineExpose({
   refreshRoutingData
 })
 
-// 检测是否有视频分辨率计费配置
-const hasVideoPricing = computed(() => {
-  const priceByResolution = props.model?.config?.billing?.video?.price_per_second_by_resolution
-  return priceByResolution && typeof priceByResolution === 'object' && Object.keys(priceByResolution).length > 0
-})
+// 检测是否有生效的视频计费配置（按秒或按 token）
+const hasVideoPricing = computed(() => hasVideoPricingConfigured(props.model?.config))
 
-// 获取视频分辨率计费条目（按分辨率从低到高排序）
-const videoPricingEntries = computed(() => {
-  const priceByResolution = props.model?.config?.billing?.video?.price_per_second_by_resolution
-  if (!priceByResolution || typeof priceByResolution !== 'object') return []
-  return sortResolutionEntries(Object.entries(priceByResolution))
+/** 当前生效的视频计费方式，决定表头单位与列数。 */
+const videoBillingMode = computed(() => getVideoBillingMode(props.model?.config))
+
+/**
+ * 视频价格行，两种计费方式共用一个结构。
+ *
+ * 按秒只有一个价格，填进 `output`（表头随模式切换成「单价 ($/秒)」）；按 token
+ * 时输入价可能缺省，缺省列显示「-」。默认价作为最后一行呈现。
+ */
+const videoPricingEntries = computed<
+  Array<{ resolution: string, input: number | null, output: number | null }>
+>(() => {
+  if (videoBillingMode.value === 'per_token') {
+    return getVideoTokenPriceEntries(props.model?.config).map(entry => ({
+      resolution: entry.resolution,
+      input: entry.inputPricePer1m,
+      output: entry.outputPricePer1m,
+    }))
+  }
+  const rows = sortResolutionEntries(
+    Object.entries(getVideoPricePerSecondTable(props.model?.config)),
+  ).map(([resolution, price]) => ({ resolution, input: null, output: price }))
+  const defaultPrice = getVideoDefaultPricePerSecond(props.model?.config)
+  if (defaultPrice !== null) {
+    rows.push({ resolution: '默认', input: null, output: defaultPrice })
+  }
+  return rows
 })
 
 const IMAGE_OUTPUT_QUALITIES = ['low', 'medium', 'high'] as const

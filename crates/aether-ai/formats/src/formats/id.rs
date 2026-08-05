@@ -550,6 +550,7 @@ mod tests {
         assert_eq!(normalize_api_format_alias("openai:image"), "openai:image");
         assert_eq!(normalize_api_format_alias("openai:video"), "openai:video");
         assert_eq!(normalize_api_format_alias("gemini:video"), "gemini:video");
+        assert_eq!(normalize_api_format_alias("DOUBAO:VIDEO"), "doubao:video");
         assert_eq!(normalize_api_format_alias("gemini:files"), "gemini:files");
         assert!(!api_format_alias_matches("claude:cli", "claude:messages"));
         assert!(!api_format_alias_matches(

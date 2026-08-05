@@ -150,7 +150,209 @@ pub(crate) async fn maybe_build_local_ai_public_response(
         return Some(response);
     }
 
+    if let Some(response) =
+        maybe_build_local_doubao_video_request_validation_response(request_context, request_body)
+    {
+        return Some(response);
+    }
+
+    if let Some(response) =
+        maybe_build_local_doubao_video_tasks_list_response(state, request_context, decision).await
+    {
+        return Some(response);
+    }
+
     maybe_build_local_gemini_video_operations_response(state, request_context, decision).await
+}
+
+/// Rejects a Doubao create request that asks the provider to call back directly.
+///
+/// The gateway owns task state, so an upstream callback would bypass it entirely
+/// and leak the upstream task id. Failing loudly beats silently stripping the
+/// field, which would leave the client waiting for a callback that never comes.
+fn maybe_build_local_doubao_video_request_validation_response(
+    request_context: &GatewayPublicRequestContext,
+    request_body: Option<&Bytes>,
+) -> Option<Response<Body>> {
+    let decision = request_context.control_decision.as_ref()?;
+    if decision.route_family.as_deref() != Some("doubao")
+        || decision.route_kind.as_deref() != Some("video")
+        || request_context.request_method != http::Method::POST
+    {
+        return None;
+    }
+
+    let body_json = serde_json::from_slice::<Value>(request_body?.as_ref()).ok()?;
+    let callback_url_present = body_json
+        .get("callback_url")
+        .is_some_and(|value| !value.is_null());
+    if !callback_url_present {
+        return None;
+    }
+
+    Some(build_ai_public_error_response(
+        http::StatusCode::BAD_REQUEST,
+        "callback_url is not supported through the gateway; poll the task instead",
+    ))
+}
+
+/// Serves the Doubao task list from gateway state.
+///
+/// Proxying this upstream would return every task owned by the shared provider
+/// key, so the listing is answered locally and scoped to the calling user.
+async fn maybe_build_local_doubao_video_tasks_list_response(
+    state: &AppState,
+    request_context: &GatewayPublicRequestContext,
+    decision: &GatewayControlDecision,
+) -> Option<Response<Body>> {
+    if decision.route_family.as_deref() != Some("doubao")
+        || decision.route_kind.as_deref() != Some("video")
+        || request_context.request_path != aether_video_tasks_core::DOUBAO_VIDEO_TASKS_PATH
+    {
+        return None;
+    }
+
+    if request_context.request_method != http::Method::GET {
+        return None;
+    }
+
+    let Some(user_id) = decision
+        .auth_context
+        .as_ref()
+        .map(|auth_context| auth_context.user_id.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return Some(build_ai_public_error_response(
+            http::StatusCode::UNAUTHORIZED,
+            AI_PUBLIC_UNAUTHORIZED_DETAIL,
+        ));
+    };
+
+    let query = request_context
+        .request_query_string
+        .as_deref()
+        .unwrap_or_default();
+    let list_query = match parse_doubao_video_tasks_list_query(query) {
+        Ok(list_query) => list_query,
+        Err(message) => {
+            return Some(build_ai_public_error_response(
+                http::StatusCode::BAD_REQUEST,
+                message,
+            ));
+        }
+    };
+
+    let filter = VideoTaskQueryFilter {
+        user_id: Some(user_id.to_string()),
+        status: list_query.status,
+        model_substring: list_query.model,
+        client_api_format: Some("doubao:video".to_string()),
+    };
+    let tasks = match state
+        .list_video_task_page(&filter, list_query.offset, list_query.page_size)
+        .await
+    {
+        Ok(tasks) => tasks,
+        Err(err) => {
+            return Some(build_ai_public_error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{err:?}"),
+            ));
+        }
+    };
+
+    let items = tasks
+        .into_iter()
+        .filter(is_doubao_video_task)
+        .map(|task| {
+            aether_video_tasks_core::map_doubao_stored_task_to_read_response(task).body_json
+        })
+        .collect::<Vec<_>>();
+
+    Some(Json(json!({ "items": items, "total": items.len() })).into_response())
+}
+
+struct DoubaoVideoTasksListQuery {
+    status: Option<VideoTaskStatus>,
+    model: Option<String>,
+    page_size: usize,
+    offset: usize,
+}
+
+/// Parses Ark's list query shape (`page_size`, `page_num`, `filter.status`).
+fn parse_doubao_video_tasks_list_query(
+    query: &str,
+) -> Result<DoubaoVideoTasksListQuery, &'static str> {
+    const DEFAULT_PAGE_SIZE: usize = 10;
+    const MAX_PAGE_SIZE: usize = 500;
+
+    let mut page_size = DEFAULT_PAGE_SIZE;
+    let mut page_num = 1usize;
+    let mut status = None;
+    let mut model = None;
+
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        match key.as_ref() {
+            "page_size" => {
+                page_size = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or("page_size must be a positive integer")?
+                    .min(MAX_PAGE_SIZE);
+            }
+            "page_num" => {
+                page_num = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or("page_num must be a positive integer")?;
+            }
+            "filter.status" => {
+                status = Some(
+                    doubao_status_filter_to_stored_status(value.as_ref())
+                        .ok_or("filter.status is not a supported task status")?,
+                );
+            }
+            "filter.model" => {
+                let value = value.trim();
+                if !value.is_empty() {
+                    model = Some(value.to_string());
+                }
+            }
+            // Unknown filters are ignored rather than rejected, so newer Ark
+            // query parameters do not turn into gateway errors.
+            _ => {}
+        }
+    }
+
+    Ok(DoubaoVideoTasksListQuery {
+        status,
+        model,
+        page_size,
+        offset: (page_num - 1).saturating_mul(page_size),
+    })
+}
+
+fn doubao_status_filter_to_stored_status(value: &str) -> Option<VideoTaskStatus> {
+    match value.trim() {
+        "queued" => Some(VideoTaskStatus::Queued),
+        "running" => Some(VideoTaskStatus::Processing),
+        "succeeded" => Some(VideoTaskStatus::Completed),
+        "failed" => Some(VideoTaskStatus::Failed),
+        "cancelled" => Some(VideoTaskStatus::Cancelled),
+        _ => None,
+    }
+}
+
+fn is_doubao_video_task(task: &StoredVideoTask) -> bool {
+    matches!(
+        task.provider_api_format
+            .as_deref()
+            .or(task.client_api_format.as_deref())
+            .map(str::trim),
+        Some("doubao:video")
+    )
 }
 
 fn maybe_build_local_openai_request_validation_response(

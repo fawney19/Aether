@@ -612,104 +612,278 @@
                 value="video"
                 class="pt-2"
               >
-                <div class="space-y-3 rounded-lg border bg-muted/20 p-4">
-                  <div>
-                    <div class="text-sm font-medium">
-                      视频计费（分辨率 × 时长）
+                <div class="space-y-4 rounded-lg border bg-muted/20 p-4">
+                  <div class="flex items-start justify-between gap-3">
+                    <div>
+                      <div class="text-sm font-medium">
+                        {{ videoBillingMode === 'per_second' ? '按秒计费（分辨率 × 时长）' : '按 Token 计费' }}
+                      </div>
+                      <p class="mt-1 text-xs text-muted-foreground">
+                        按输出分辨率配置单价。「含视频输入」列可选，留空则沿用左侧单价；未列出的分辨率按默认价计费。
+                      </p>
                     </div>
-                    <p class="mt-1 text-xs text-muted-foreground">
-                      根据输出分辨率配置每秒视频价格。
-                    </p>
-                  </div>
-
-                  <div class="flex items-center gap-1.5 flex-wrap">
                     <Button
                       type="button"
-                      variant="outline"
+                      variant="ghost"
                       size="sm"
-                      class="h-7 text-xs"
-                      @click="fillVideoResolutionPricePreset('common')"
+                      class="h-7 px-2 text-xs text-muted-foreground shrink-0"
+                      :aria-label="`切换视频计费方式，当前${videoBillingMode === 'per_second' ? '按秒' : '按 Token'}`"
+                      @click="toggleVideoBillingMode"
                     >
-                      通用
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      class="h-7 text-xs"
-                      @click="fillVideoResolutionPricePreset('sora')"
-                    >
-                      Sora
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      class="h-7 text-xs"
-                      @click="fillVideoResolutionPricePreset('veo')"
-                    >
-                      Veo
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      class="h-7 text-xs"
-                      @click="addVideoResolutionPriceRow"
-                    >
-                      <Plus class="w-3.5 h-3.5 mr-0.5" />
-                      自定义
+                      <Repeat2 class="mr-1 h-3.5 w-3.5" />
+                      {{ videoBillingMode === 'per_second' ? '按 Token' : '按秒' }}
                     </Button>
                   </div>
 
-                  <div
-                    v-if="videoResolutionPrices.length > 0"
-                    class="rounded-lg border border-border overflow-hidden"
-                  >
-                    <div class="grid grid-cols-[1fr_1fr_32px] gap-0 text-xs text-muted-foreground bg-muted/50 px-3 py-1.5 border-b border-border">
-                      <span>分辨率</span>
-                      <span>单价（$/秒）</span>
-                      <span />
-                    </div>
-                    <div class="divide-y divide-border">
-                      <div
-                        v-for="(row, idx) in videoResolutionPrices"
-                        :key="idx"
-                        class="grid grid-cols-[1fr_1fr_32px] gap-2 items-center px-3 py-1.5"
+                  <template v-if="videoBillingMode === 'per_second'">
+                    <div class="flex items-center gap-1.5 flex-wrap">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        class="h-7 text-xs"
+                        @click="fillVideoResolutionPricePreset('common')"
                       >
-                        <Input
-                          v-model="row.resolution"
-                          class="h-7 text-sm"
-                          placeholder="如 720p"
-                        />
-                        <Input
-                          :model-value="row.price_per_second ?? ''"
-                          type="number"
-                          step="0.0001"
-                          min="0"
-                          class="h-7 text-sm"
-                          placeholder="0"
-                          @update:model-value="(v) => row.price_per_second = parseNumberInput(v, { allowFloat: true })"
-                        />
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          class="h-7 w-7"
-                          title="删除"
-                          @click="removeVideoResolutionPriceRow(idx)"
+                        通用
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        class="h-7 text-xs"
+                        @click="fillVideoResolutionPricePreset('sora')"
+                      >
+                        Sora
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        class="h-7 text-xs"
+                        @click="fillVideoResolutionPricePreset('veo')"
+                      >
+                        Veo
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        class="h-7 text-xs"
+                        @click="addVideoResolutionPriceRow"
+                      >
+                        <Plus class="w-3.5 h-3.5 mr-0.5" />
+                        自定义
+                      </Button>
+                    </div>
+
+                    <div class="rounded-lg border border-border overflow-hidden">
+                      <div class="grid grid-cols-[1fr_1fr_1fr_32px] gap-2 text-xs text-muted-foreground bg-muted/50 px-3 py-1.5 border-b border-border">
+                        <span>分辨率</span>
+                        <span>单价（$/秒）</span>
+                        <span>含视频输入（可选）</span>
+                        <span />
+                      </div>
+                      <div class="divide-y divide-border">
+                        <div class="grid grid-cols-[1fr_1fr_1fr_32px] gap-2 items-center px-3 py-1.5 bg-muted/20">
+                          <span class="text-sm text-muted-foreground">默认价</span>
+                          <Input
+                            :model-value="videoDefaultPricePerSecond ?? ''"
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            class="h-7 text-sm"
+                            placeholder="未列出的分辨率"
+                            data-testid="video-second-default-price"
+                            @update:model-value="(v) => videoDefaultPricePerSecond = parseNumberInput(v, { allowFloat: true })"
+                          />
+                          <Input
+                            :model-value="videoDefaultPricePerSecondWithInput ?? ''"
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            class="h-7 text-sm"
+                            placeholder="可选"
+                            data-testid="video-second-default-price-with-input"
+                            @update:model-value="(v) => videoDefaultPricePerSecondWithInput = parseNumberInput(v, { allowFloat: true })"
+                          />
+                          <span />
+                        </div>
+                        <div
+                          v-for="(row, idx) in videoResolutionPrices"
+                          :key="idx"
+                          class="grid grid-cols-[1fr_1fr_1fr_32px] gap-2 items-center px-3 py-1.5"
                         >
-                          <Trash2 class="w-3.5 h-3.5" />
-                        </Button>
+                          <Input
+                            v-model="row.resolution"
+                            class="h-7 text-sm"
+                            placeholder="如 720p"
+                          />
+                          <Input
+                            :model-value="row.price_per_second ?? ''"
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            class="h-7 text-sm"
+                            placeholder="0"
+                            @update:model-value="(v) => row.price_per_second = parseNumberInput(v, { allowFloat: true })"
+                          />
+                          <Input
+                            :model-value="row.price_per_second_with_input ?? ''"
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            class="h-7 text-sm"
+                            placeholder="可选"
+                            @update:model-value="(v) => row.price_per_second_with_input = parseNumberInput(v, { allowFloat: true })"
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            class="h-7 w-7"
+                            title="删除"
+                            @click="removeVideoResolutionPriceRow(idx)"
+                          >
+                            <Trash2 class="w-3.5 h-3.5" />
+                          </Button>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  <div
-                    v-else
-                    class="rounded-lg border border-dashed py-8 text-center text-xs text-muted-foreground"
-                  >
-                    选择一个价格预设或添加自定义分辨率
-                  </div>
+                  </template>
+
+                  <template v-else>
+                    <div class="flex items-center gap-1.5 flex-wrap">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        class="h-7 text-xs"
+                        @click="addVideoTokenPriceRow"
+                      >
+                        <Plus class="w-3.5 h-3.5 mr-0.5" />
+                        添加分辨率
+                      </Button>
+                    </div>
+
+                    <div class="rounded-lg border border-border overflow-hidden">
+                      <div class="grid grid-cols-[1.1fr_1fr_1fr_1fr_1fr_32px] gap-2 text-xs text-muted-foreground bg-muted/50 px-3 py-1.5 border-b border-border">
+                        <span>分辨率</span>
+                        <span>输入（$/1M）</span>
+                        <span>输出（$/1M）</span>
+                        <span>含视频输入·输入</span>
+                        <span>含视频输入·输出</span>
+                        <span />
+                      </div>
+                      <div class="divide-y divide-border">
+                        <div class="grid grid-cols-[1.1fr_1fr_1fr_1fr_1fr_32px] gap-2 items-center px-3 py-1.5 bg-muted/20">
+                          <span class="text-sm text-muted-foreground">默认价</span>
+                          <Input
+                            :model-value="videoDefaultTokenPrice.input_price_per_1m ?? ''"
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            class="h-7 text-sm"
+                            placeholder="0"
+                            data-testid="video-token-default-input-price"
+                            @update:model-value="(v) => videoDefaultTokenPrice.input_price_per_1m = parseNumberInput(v, { allowFloat: true })"
+                          />
+                          <Input
+                            :model-value="videoDefaultTokenPrice.output_price_per_1m ?? ''"
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            class="h-7 text-sm"
+                            placeholder="0"
+                            data-testid="video-token-default-output-price"
+                            @update:model-value="(v) => videoDefaultTokenPrice.output_price_per_1m = parseNumberInput(v, { allowFloat: true })"
+                          />
+                          <Input
+                            :model-value="videoDefaultTokenPriceWithInput.input_price_per_1m ?? ''"
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            class="h-7 text-sm"
+                            placeholder="可选"
+                            data-testid="video-token-default-with-input-input-price"
+                            @update:model-value="(v) => videoDefaultTokenPriceWithInput.input_price_per_1m = parseNumberInput(v, { allowFloat: true })"
+                          />
+                          <Input
+                            :model-value="videoDefaultTokenPriceWithInput.output_price_per_1m ?? ''"
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            class="h-7 text-sm"
+                            placeholder="可选"
+                            data-testid="video-token-default-with-input-output-price"
+                            @update:model-value="(v) => videoDefaultTokenPriceWithInput.output_price_per_1m = parseNumberInput(v, { allowFloat: true })"
+                          />
+                          <span />
+                        </div>
+                        <div
+                          v-for="(row, idx) in videoTokenPrices"
+                          :key="idx"
+                          class="grid grid-cols-[1.1fr_1fr_1fr_1fr_1fr_32px] gap-2 items-center px-3 py-1.5"
+                        >
+                          <Input
+                            v-model="row.resolution"
+                            class="h-7 text-sm"
+                            placeholder="如 720p"
+                            data-testid="video-token-resolution"
+                          />
+                          <Input
+                            :model-value="row.input_price_per_1m ?? ''"
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            class="h-7 text-sm"
+                            placeholder="0"
+                            data-testid="video-token-input-price"
+                            @update:model-value="(v) => row.input_price_per_1m = parseNumberInput(v, { allowFloat: true })"
+                          />
+                          <Input
+                            :model-value="row.output_price_per_1m ?? ''"
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            class="h-7 text-sm"
+                            placeholder="0"
+                            data-testid="video-token-output-price"
+                            @update:model-value="(v) => row.output_price_per_1m = parseNumberInput(v, { allowFloat: true })"
+                          />
+                          <Input
+                            :model-value="row.input_price_per_1m_with_input ?? ''"
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            class="h-7 text-sm"
+                            placeholder="可选"
+                            data-testid="video-token-with-input-input-price"
+                            @update:model-value="(v) => row.input_price_per_1m_with_input = parseNumberInput(v, { allowFloat: true })"
+                          />
+                          <Input
+                            :model-value="row.output_price_per_1m_with_input ?? ''"
+                            type="number"
+                            step="0.0001"
+                            min="0"
+                            class="h-7 text-sm"
+                            placeholder="可选"
+                            data-testid="video-token-with-input-output-price"
+                            @update:model-value="(v) => row.output_price_per_1m_with_input = parseNumberInput(v, { allowFloat: true })"
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            class="h-7 w-7"
+                            title="删除"
+                            @click="removeVideoTokenPriceRow(idx)"
+                          >
+                            <Trash2 class="w-3.5 h-3.5" />
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </template>
                 </div>
               </TabsContent>
             </Tabs>
@@ -762,7 +936,7 @@ import { ref, computed, nextTick, watch } from 'vue'
 import {
   Loader2, Layers, SquarePen,
   Search, ChevronLeft, ChevronRight, Plus, Trash2, Check,
-  BrainCircuit, Eye, Wrench, Braces, Database, PackageOpen, RefreshCw
+  BrainCircuit, Eye, Wrench, Braces, Database, PackageOpen, RefreshCw, Repeat2
 } from 'lucide-vue-next'
 import {
   Dialog, Button, Input, Label, Checkbox,
@@ -1016,13 +1190,51 @@ function reopenPresetPanel() {
 // 阶梯计费配置
 const tieredPricing = ref<TieredPricingConfig | null>(null)
 
-type VideoResolutionPriceRow = { resolution: string; price_per_second: number | undefined }
+/** One resolution row; the `_with_input` fields are the optional override column. */
+type VideoResolutionPriceRow = {
+  resolution: string
+  price_per_second: number | undefined
+  price_per_second_with_input: number | undefined
+}
+
+type VideoTokenPriceRow = {
+  resolution: string
+  input_price_per_1m: number | undefined
+  output_price_per_1m: number | undefined
+  input_price_per_1m_with_input: number | undefined
+  output_price_per_1m_with_input: number | undefined
+}
+
+type VideoTokenDefaultPrice = {
+  input_price_per_1m: number | undefined
+  output_price_per_1m: number | undefined
+}
 
 const videoResolutionPrices = ref<VideoResolutionPriceRow[]>([])
+/** Per-resolution token prices, used when the model bills per token. */
+const videoTokenPrices = ref<VideoTokenPriceRow[]>([])
+/** Charged for any resolution the table does not list. */
+const videoDefaultPricePerSecond = ref<number | undefined>(undefined)
+const videoDefaultPricePerSecondWithInput = ref<number | undefined>(undefined)
+const videoDefaultTokenPrice = ref<VideoTokenDefaultPrice>({
+  input_price_per_1m: undefined,
+  output_price_per_1m: undefined,
+})
+const videoDefaultTokenPriceWithInput = ref<VideoTokenDefaultPrice>({
+  input_price_per_1m: undefined,
+  output_price_per_1m: undefined,
+})
+const videoBillingMode = ref<'per_second' | 'per_token'>('per_second')
+
+function toggleVideoBillingMode() {
+  // Switching modes keeps the other mode's tables intact so operators can flip
+  // back and forth while comparing.
+  videoBillingMode.value = videoBillingMode.value === 'per_second' ? 'per_token' : 'per_second'
+}
 
 const VIDEO_RESOLUTION_PRICE_PRESETS: Record<
   'common' | 'sora' | 'veo',
-  VideoResolutionPriceRow[]
+  Array<{ resolution: string; price_per_second: number }>
 > = {
   common: [
     { resolution: '480p', price_per_second: 0 },
@@ -1184,8 +1396,16 @@ function pruneEmptyBillingConfig() {
   const billing = cfg.billing as Record<string, unknown> | undefined
   if (!billing || typeof billing !== 'object') return
   const video = billing.video as Record<string, unknown> | undefined
-  if (video && typeof video === 'object' && Object.keys(video).length === 0) {
-    delete billing.video
+  if (video && typeof video === 'object') {
+    // Both price tables can be cleared independently, so drop the container
+    // once nothing is left inside it.
+    const withInput = video.with_video_input as Record<string, unknown> | undefined
+    if (withInput && typeof withInput === 'object' && Object.keys(withInput).length === 0) {
+      delete video.with_video_input
+    }
+    if (Object.keys(video).length === 0) {
+      delete billing.video
+    }
   }
   if (Object.keys(billing).length === 0) {
     delete cfg.billing
@@ -1210,19 +1430,95 @@ function normalizeResolutionKey(raw: string): string {
   return k
 }
 
+/** Merges the base table and its `with_video_input` overrides into one row list. */
+function mergeVideoPriceRows<TRow extends { resolution: string }>(
+  base: unknown,
+  withInput: unknown,
+  buildRow: (resolution: string, entry: unknown, overrideEntry: unknown) => TRow,
+): TRow[] {
+  const asTable = (raw: unknown): Record<string, unknown> =>
+    (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw as Record<string, unknown> : {}
+  const baseTable = asTable(base)
+  const overrideTable = asTable(withInput)
+  // A resolution priced only in the override column still needs its own row.
+  const keys = [...new Set([...Object.keys(baseTable), ...Object.keys(overrideTable)])]
+  return sortResolutionEntries(keys.map(key => [key, baseTable[key]] as [string, unknown]))
+    .map(([key]) => buildRow(String(key), baseTable[key], overrideTable[key]))
+}
+
+function readVideoNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function readTokenEntryField(entry: unknown, field: string): number | undefined {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return undefined
+  return readVideoNumber((entry as Record<string, unknown>)[field])
+}
+
 function loadVideoPricingFromConfig() {
   const cfg = form.value.config || {}
-  const raw = getNested(cfg, 'billing.video.price_per_second_by_resolution')
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-    // 按分辨率从低到高排序
-    const sortedEntries = sortResolutionEntries(Object.entries(raw as Record<string, unknown>))
-    videoResolutionPrices.value = sortedEntries.map(([k, v]) => ({
-      resolution: String(k),
-      price_per_second: typeof v === 'number' ? v : undefined,
-    }))
-  } else {
-    videoResolutionPrices.value = []
+  const mode = getNested(cfg, 'billing.video.mode')
+  videoBillingMode.value = mode === 'per_token' ? 'per_token' : 'per_second'
+
+  videoResolutionPrices.value = mergeVideoPriceRows(
+    getNested(cfg, 'billing.video.price_per_second_by_resolution'),
+    getNested(cfg, 'billing.video.with_video_input.price_per_second_by_resolution'),
+    (resolution, entry, overrideEntry) => ({
+      resolution,
+      price_per_second: readVideoNumber(entry),
+      price_per_second_with_input: readVideoNumber(overrideEntry),
+    }),
+  )
+  videoDefaultPricePerSecond.value = readVideoNumber(
+    getNested(cfg, 'billing.video.price_per_second_default'),
+  )
+  videoDefaultPricePerSecondWithInput.value = readVideoNumber(
+    getNested(cfg, 'billing.video.with_video_input.price_per_second_default'),
+  )
+
+  videoTokenPrices.value = mergeVideoPriceRows(
+    getNested(cfg, 'billing.video.token_prices_by_resolution'),
+    getNested(cfg, 'billing.video.with_video_input.token_prices_by_resolution'),
+    (resolution, entry, overrideEntry) => ({
+      resolution,
+      input_price_per_1m: readTokenEntryField(entry, 'input_price_per_1m'),
+      output_price_per_1m: readTokenEntryField(entry, 'output_price_per_1m'),
+      input_price_per_1m_with_input: readTokenEntryField(overrideEntry, 'input_price_per_1m'),
+      output_price_per_1m_with_input: readTokenEntryField(overrideEntry, 'output_price_per_1m'),
+    }),
+  )
+  const tokenDefault = getNested(cfg, 'billing.video.token_price_default')
+  videoDefaultTokenPrice.value = {
+    input_price_per_1m: readTokenEntryField(tokenDefault, 'input_price_per_1m'),
+    output_price_per_1m: readTokenEntryField(tokenDefault, 'output_price_per_1m'),
   }
+  const tokenDefaultWithInput = getNested(cfg, 'billing.video.with_video_input.token_price_default')
+  videoDefaultTokenPriceWithInput.value = {
+    input_price_per_1m: readTokenEntryField(tokenDefaultWithInput, 'input_price_per_1m'),
+    output_price_per_1m: readTokenEntryField(tokenDefaultWithInput, 'output_price_per_1m'),
+  }
+}
+
+/** Writes `value` at `path`, removing the key when the value is absent. */
+function setOrDeleteNested(cfg: Record<string, unknown>, path: string, value: unknown) {
+  const isEmptyObject = value !== null
+    && typeof value === 'object'
+    && Object.keys(value as Record<string, unknown>).length === 0
+  if (value === undefined || value === null || isEmptyObject) {
+    deleteNested(cfg, path)
+  } else {
+    setNested(cfg, path, value)
+  }
+}
+
+function buildTokenPriceEntry(
+  input: number | undefined,
+  output: number | undefined,
+): Record<string, number> | undefined {
+  const entry: Record<string, number> = {}
+  if (typeof input === 'number' && Number.isFinite(input)) entry.input_price_per_1m = input
+  if (typeof output === 'number' && Number.isFinite(output)) entry.output_price_per_1m = output
+  return Object.keys(entry).length > 0 ? entry : undefined
 }
 
 function applyVideoPricingToConfig() {
@@ -1235,36 +1531,112 @@ function applyVideoPricingToConfig() {
   deleteNested(cfg, 'billing.video.price_per_second')
   deleteNested(cfg, 'billing.video.resolution_multipliers')
 
-  // resolution/size prices (normalized: 1080x720 → 720x1080)
-  const map: Record<string, number> = {}
+  // per_second is the backend default, so it is only persisted when explicit.
+  setOrDeleteNested(
+    cfg,
+    'billing.video.mode',
+    videoBillingMode.value === 'per_token' ? 'per_token' : undefined,
+  )
+
+  // The merged table splits back into a base map and an override map, since
+  // that is the shape the backend resolves prices from.
+  const secondMap: Record<string, number> = {}
+  const secondMapWithInput: Record<string, number> = {}
   for (const row of videoResolutionPrices.value) {
-    const k = normalizeResolutionKey(row.resolution || '')
-    const v = row.price_per_second
-    if (!k) continue
-    if (typeof v !== 'number' || Number.isNaN(v)) continue
-    map[k] = v
+    const key = normalizeResolutionKey(row.resolution || '')
+    if (!key) continue
+    const price = readVideoNumber(row.price_per_second)
+    if (price !== undefined) secondMap[key] = price
+    const overridePrice = readVideoNumber(row.price_per_second_with_input)
+    if (overridePrice !== undefined) secondMapWithInput[key] = overridePrice
   }
-  if (Object.keys(map).length > 0) {
-    setNested(cfg, 'billing.video.price_per_second_by_resolution', map)
-  } else {
-    deleteNested(cfg, 'billing.video.price_per_second_by_resolution')
+  setOrDeleteNested(cfg, 'billing.video.price_per_second_by_resolution', secondMap)
+  setOrDeleteNested(
+    cfg,
+    'billing.video.with_video_input.price_per_second_by_resolution',
+    secondMapWithInput,
+  )
+  setOrDeleteNested(
+    cfg,
+    'billing.video.price_per_second_default',
+    readVideoNumber(videoDefaultPricePerSecond.value),
+  )
+  setOrDeleteNested(
+    cfg,
+    'billing.video.with_video_input.price_per_second_default',
+    readVideoNumber(videoDefaultPricePerSecondWithInput.value),
+  )
+
+  const tokenMap: Record<string, unknown> = {}
+  const tokenMapWithInput: Record<string, unknown> = {}
+  for (const row of videoTokenPrices.value) {
+    const key = normalizeResolutionKey(row.resolution || '')
+    if (!key) continue
+    const entry = buildTokenPriceEntry(row.input_price_per_1m, row.output_price_per_1m)
+    if (entry) tokenMap[key] = entry
+    const overrideEntry = buildTokenPriceEntry(
+      row.input_price_per_1m_with_input,
+      row.output_price_per_1m_with_input,
+    )
+    if (overrideEntry) tokenMapWithInput[key] = overrideEntry
   }
+  setOrDeleteNested(cfg, 'billing.video.token_prices_by_resolution', tokenMap)
+  setOrDeleteNested(
+    cfg,
+    'billing.video.with_video_input.token_prices_by_resolution',
+    tokenMapWithInput,
+  )
+  setOrDeleteNested(
+    cfg,
+    'billing.video.token_price_default',
+    buildTokenPriceEntry(
+      videoDefaultTokenPrice.value.input_price_per_1m,
+      videoDefaultTokenPrice.value.output_price_per_1m,
+    ),
+  )
+  setOrDeleteNested(
+    cfg,
+    'billing.video.with_video_input.token_price_default',
+    buildTokenPriceEntry(
+      videoDefaultTokenPriceWithInput.value.input_price_per_1m,
+      videoDefaultTokenPriceWithInput.value.output_price_per_1m,
+    ),
+  )
 
   pruneEmptyBillingConfig()
 }
 
 function addVideoResolutionPriceRow() {
-  videoResolutionPrices.value.push({ resolution: '', price_per_second: undefined })
+  videoResolutionPrices.value.push({
+    resolution: '',
+    price_per_second: undefined,
+    price_per_second_with_input: undefined,
+  })
 }
 
 function removeVideoResolutionPriceRow(idx: number) {
   videoResolutionPrices.value.splice(idx, 1)
 }
 
+function addVideoTokenPriceRow() {
+  videoTokenPrices.value.push({
+    resolution: '',
+    input_price_per_1m: undefined,
+    output_price_per_1m: undefined,
+    input_price_per_1m_with_input: undefined,
+    output_price_per_1m_with_input: undefined,
+  })
+}
+
+function removeVideoTokenPriceRow(idx: number) {
+  videoTokenPrices.value.splice(idx, 1)
+}
+
 function fillVideoResolutionPricePreset(preset: 'common' | 'sora' | 'veo') {
   videoResolutionPrices.value = VIDEO_RESOLUTION_PRICE_PRESETS[preset].map(r => ({
     resolution: r.resolution,
     price_per_second: r.price_per_second,
+    price_per_second_with_input: undefined,
   }))
 }
 
@@ -1607,6 +1979,18 @@ function clearSelection() {
   form.value = defaultForm()
   tieredPricing.value = null
   videoResolutionPrices.value = []
+  videoTokenPrices.value = []
+  videoDefaultPricePerSecond.value = undefined
+  videoDefaultPricePerSecondWithInput.value = undefined
+  videoDefaultTokenPrice.value = {
+    input_price_per_1m: undefined,
+    output_price_per_1m: undefined,
+  }
+  videoDefaultTokenPriceWithInput.value = {
+    input_price_per_1m: undefined,
+    output_price_per_1m: undefined,
+  }
+  videoBillingMode.value = 'per_second'
   billingMode.value = 'token'
 }
 
@@ -1624,6 +2008,18 @@ function resetForm() {
   form.value = defaultForm()
   tieredPricing.value = null
   videoResolutionPrices.value = []
+  videoTokenPrices.value = []
+  videoDefaultPricePerSecond.value = undefined
+  videoDefaultPricePerSecondWithInput.value = undefined
+  videoDefaultTokenPrice.value = {
+    input_price_per_1m: undefined,
+    output_price_per_1m: undefined,
+  }
+  videoDefaultTokenPriceWithInput.value = {
+    input_price_per_1m: undefined,
+    output_price_per_1m: undefined,
+  }
+  videoBillingMode.value = 'per_second'
   searchQuery.value = ''
   selectedModel.value = null
   expandedProvider.value = null

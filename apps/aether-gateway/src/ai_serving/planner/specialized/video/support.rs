@@ -1,5 +1,5 @@
 use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::{LocalVideoCreateFamily, LocalVideoCreateSpec};
 use crate::ai_serving::planner::candidate_materialization::{
@@ -45,6 +45,11 @@ pub(super) async fn resolve_local_video_create_decision_input(
 ) -> Result<Option<LocalVideoCreateDecisionInput>, GatewayError> {
     let spec_metadata = local_video_create_spec_metadata(spec);
     let Some(auth_context) = resolve_local_video_create_auth_context(decision, spec.family) else {
+        debug!(
+            trace_id = %trace_id,
+            decision_kind = spec_metadata.decision_kind,
+            "gateway local video decision skipped: no execution runtime auth context"
+        );
         return Ok(None);
     };
 
@@ -55,6 +60,11 @@ pub(super) async fn resolve_local_video_create_decision_input(
             .requested_model_family
             .expect("video specs should declare requested-model family"),
     ) else {
+        debug!(
+            trace_id = %trace_id,
+            decision_kind = spec_metadata.decision_kind,
+            "gateway local video decision skipped: request carries no requested model"
+        );
         return Ok(None);
     };
 
@@ -69,7 +79,19 @@ pub(super) async fn resolve_local_video_create_decision_input(
     .await
     {
         Ok(Some(resolved_input)) => resolved_input,
-        Ok(None) => return Ok(None),
+        Ok(None) => {
+            // The API key is not authorized for this format, or the requested
+            // model is not configured/allowed for it.
+            debug!(
+                trace_id = %trace_id,
+                decision_kind = spec_metadata.decision_kind,
+                api_format = spec_metadata.api_format,
+                requested_model = %requested_model,
+                auth_endpoint_signature = decision.auth_endpoint_signature.as_deref().unwrap_or("-"),
+                "gateway local video decision skipped: requested model not authorized for this api format"
+            );
+            return Ok(None);
+        }
         Err(err) => {
             warn!(
                 trace_id = %trace_id,
@@ -110,7 +132,9 @@ fn resolve_local_video_create_auth_context(
 ) -> Option<ExecutionRuntimeAuthContext> {
     let auth_context = resolve_local_decision_execution_runtime_auth_context(decision)?;
     match family {
-        LocalVideoCreateFamily::OpenAi | LocalVideoCreateFamily::Gemini => Some(auth_context),
+        LocalVideoCreateFamily::OpenAi
+        | LocalVideoCreateFamily::Gemini
+        | LocalVideoCreateFamily::Doubao => Some(auth_context),
     }
 }
 

@@ -5,7 +5,8 @@ use serde_json::{json, Value};
 
 use crate::default_rule::{
     explicit_image_output_price_default, explicit_image_output_price_entries,
-    explicit_image_output_price_ranges, normalize_task_type, DefaultBillingRuleGenerator,
+    explicit_image_output_price_ranges, normalize_task_type, resolve_video_price_per_second,
+    resolve_video_token_prices, video_pricing_state, DefaultBillingRuleGenerator, VideoBillingMode,
 };
 use crate::precision::quantize_cost;
 use crate::pricing::{
@@ -194,7 +195,14 @@ impl BillingService {
             || input.output_tokens > 0
             || input.cache_creation_tokens > 0
             || input.cache_read_tokens > 0;
-        if has_token_usage {
+        // Video models price outside the token tier catalog either way: per-second
+        // billing zeroes the token rates at rule level, and resolution-keyed token
+        // billing supplies its rates as dimensions. An empty tier catalog is the
+        // expected shape for both and must not be read as a missing price.
+        let video_pricing = video_pricing_state(pricing_resolution.video_pricing.as_ref());
+        let bills_video_outside_token_tiers =
+            video_pricing.per_second_enabled || video_pricing.per_token_by_resolution_enabled;
+        if has_token_usage && !bills_video_outside_token_tiers {
             if let Some(pricing_config) = pricing_resolution.tiered_pricing.as_ref() {
                 let tiers = pricing_config
                     .get("tiers")
@@ -463,6 +471,36 @@ fn build_dimensions(
     let pricing_config = pricing.tiered_pricing.as_ref();
     let image_output_pricing = image_output_pricing_state(pricing_config);
     let image_output_resolution = resolve_image_output_price_resolution(pricing_config, input);
+    // Video pricing is keyed by rendered resolution, so it lives in the model
+    // config rather than the token tier catalog.
+    let video_pricing_config = pricing.video_pricing.as_ref();
+    let video_pricing = video_pricing_state(video_pricing_config);
+    let video_price_per_second = if video_pricing.per_second_enabled {
+        resolve_video_price_per_second(
+            video_pricing_config,
+            input.video_resolution.as_deref(),
+            input.video_has_video_input,
+        )
+    } else {
+        0.0
+    };
+    let video_seconds_unmetered = if video_pricing.per_second_enabled {
+        input.video_duration_seconds.max(0)
+    } else {
+        0
+    };
+    // Token rates for video vary by rendered resolution and by whether a
+    // reference video was supplied, so they are resolved here rather than by the
+    // tier catalog, which can only key on context size.
+    let video_token_prices = if video_pricing.per_token_by_resolution_enabled {
+        resolve_video_token_prices(
+            video_pricing_config,
+            input.video_resolution.as_deref(),
+            input.video_has_video_input,
+        )
+    } else {
+        None
+    };
 
     let mut out = BTreeMap::from([
         ("input_tokens".to_string(), json!(normalized_input_tokens)),
@@ -519,6 +557,47 @@ fn build_dimensions(
         (
             "image_output_price_per_image".to_string(),
             json!(image_output_resolution.price_per_image),
+        ),
+        (
+            "video_seconds_unmetered".to_string(),
+            json!(video_seconds_unmetered),
+        ),
+        (
+            "video_price_per_second".to_string(),
+            json!(video_price_per_second),
+        ),
+        (
+            "video_token_input_price_per_1m".to_string(),
+            json!(video_token_prices.map_or(0.0, |prices| prices.input_price_per_1m)),
+        ),
+        (
+            "video_token_output_price_per_1m".to_string(),
+            json!(video_token_prices.map_or(0.0, |prices| prices.output_price_per_1m)),
+        ),
+        (
+            "video_pricing_enabled".to_string(),
+            json!(
+                video_pricing.per_second_enabled || video_pricing.per_token_by_resolution_enabled
+            ),
+        ),
+        (
+            "video_token_pricing_resolved".to_string(),
+            json!(video_token_prices.is_some()),
+        ),
+        (
+            "video_pricing_mode".to_string(),
+            json!(match video_pricing.mode {
+                VideoBillingMode::PerSecond => "per_second",
+                VideoBillingMode::PerToken => "per_token",
+            }),
+        ),
+        (
+            "video_duration_seconds".to_string(),
+            json!(input.video_duration_seconds.max(0)),
+        ),
+        (
+            "video_has_video_input".to_string(),
+            json!(input.video_has_video_input),
         ),
         (
             "total_input_context".to_string(),
@@ -1005,6 +1084,9 @@ mod tests {
                     image_size: None,
                     image_quality: None,
                     image_output_format: None,
+                    video_resolution: None,
+                    video_duration_seconds: 0,
+                    video_has_video_input: false,
                     cache_ttl_minutes: Some(60),
                 },
             )
@@ -1037,6 +1119,9 @@ mod tests {
                     image_size: None,
                     image_quality: None,
                     image_output_format: None,
+                    video_resolution: None,
+                    video_duration_seconds: 0,
+                    video_has_video_input: false,
                     cache_ttl_minutes: Some(60),
                 },
             )
@@ -1081,6 +1166,9 @@ mod tests {
                     image_size: None,
                     image_quality: None,
                     image_output_format: None,
+                    video_resolution: None,
+                    video_duration_seconds: 0,
+                    video_has_video_input: false,
                     cache_ttl_minutes: Some(60),
                 },
             )
@@ -1864,6 +1952,9 @@ mod tests {
                     image_size: Some("1024x1024".to_string()),
                     image_quality: Some("medium".to_string()),
                     image_output_format: Some("png".to_string()),
+                    video_resolution: None,
+                    video_duration_seconds: 0,
+                    video_has_video_input: false,
                     cache_ttl_minutes: None,
                 },
             )
@@ -1930,6 +2021,9 @@ mod tests {
                     image_size: Some("1024x1024".to_string()),
                     image_quality: Some("medium".to_string()),
                     image_output_format: Some("png".to_string()),
+                    video_resolution: None,
+                    video_duration_seconds: 0,
+                    video_has_video_input: false,
                     cache_ttl_minutes: None,
                 },
             )
@@ -1983,6 +2077,9 @@ mod tests {
                     image_size: Some("1024x1024".to_string()),
                     image_quality: Some("medium".to_string()),
                     image_output_format: Some("png".to_string()),
+                    video_resolution: None,
+                    video_duration_seconds: 0,
+                    video_has_video_input: false,
                     cache_ttl_minutes: None,
                 },
             )
@@ -2032,6 +2129,9 @@ mod tests {
                     image_size: Some("1024x1024".to_string()),
                     image_quality: Some("medium".to_string()),
                     image_output_format: Some("png".to_string()),
+                    video_resolution: None,
+                    video_duration_seconds: 0,
+                    video_has_video_input: false,
                     cache_ttl_minutes: None,
                 },
             )
@@ -2094,6 +2194,9 @@ mod tests {
                     image_size: Some("1024x1024".to_string()),
                     image_quality: Some("medium".to_string()),
                     image_output_format: Some("png".to_string()),
+                    video_resolution: None,
+                    video_duration_seconds: 0,
+                    video_has_video_input: false,
                     cache_ttl_minutes: None,
                 },
             )
@@ -2161,6 +2264,9 @@ mod tests {
                     image_size: Some("1536 x 1024".to_string()),
                     image_quality: Some("medium".to_string()),
                     image_output_format: Some("png".to_string()),
+                    video_resolution: None,
+                    video_duration_seconds: 0,
+                    video_has_video_input: false,
                     cache_ttl_minutes: None,
                 },
             )
@@ -2261,6 +2367,9 @@ mod tests {
                     image_size: None,
                     image_quality: None,
                     image_output_format: None,
+                    video_resolution: None,
+                    video_duration_seconds: 0,
+                    video_has_video_input: false,
                     cache_ttl_minutes: Some(5),
                 },
             )
@@ -2336,6 +2445,9 @@ mod tests {
                     image_size: None,
                     image_quality: None,
                     image_output_format: None,
+                    video_resolution: None,
+                    video_duration_seconds: 0,
+                    video_has_video_input: false,
                     cache_ttl_minutes: Some(60),
                 },
             )
@@ -2357,5 +2469,401 @@ mod tests {
                 .get("cache_read_price_per_1m"),
             Some(&json!(0.25))
         );
+    }
+
+    fn video_pricing_snapshot(video: serde_json::Value) -> BillingModelPricingSnapshot {
+        BillingModelPricingSnapshot {
+            provider_id: "provider-1".to_string(),
+            provider_billing_type: Some("pay_as_you_go".to_string()),
+            provider_api_key_id: Some("key-1".to_string()),
+            provider_api_key_rate_multipliers: None,
+            provider_api_key_cache_ttl_minutes: None,
+            global_model_id: "global-model-1".to_string(),
+            global_model_name: "doubao-seedance".to_string(),
+            global_model_config: Some(json!({ "billing": { "video": video } })),
+            default_price_per_request: None,
+            // A stale token tier that per-second billing must neutralize.
+            default_tiered_pricing: Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 3.0,
+                    "output_price_per_1m": 15.0
+                }]
+            })),
+            model_id: None,
+            model_provider_model_name: None,
+            model_config: None,
+            model_price_per_request: None,
+            model_tiered_pricing: None,
+        }
+    }
+
+    fn video_usage_input(
+        resolution: &str,
+        duration_seconds: i64,
+        has_video_input: bool,
+    ) -> BillingUsageInput {
+        let mut input = BillingUsageInput::new("video");
+        input.api_format = Some("doubao:video".to_string());
+        input.output_tokens = 980_100;
+        input.video_resolution = Some(resolution.to_string());
+        input.video_duration_seconds = duration_seconds;
+        input.video_has_video_input = has_video_input;
+        input
+    }
+
+    #[test]
+    fn per_second_video_pricing_survives_an_empty_token_tier_catalog() {
+        // A video model priced only by the second has no reason to carry token
+        // tiers. The token short-circuit must not swallow the video price when
+        // the provider still reports output tokens.
+        let mut pricing = video_pricing_snapshot(json!({
+            "price_per_second_by_resolution": { "720p": 2.0 }
+        }));
+        pricing.default_tiered_pricing = Some(json!({ "tiers": [] }));
+
+        let result = BillingService::new()
+            .calculate(&pricing, &video_usage_input("720p", 5, false))
+            .expect("billing should calculate");
+
+        assert_eq!(
+            result.cost_result.snapshot.status,
+            BillingSnapshotStatus::Complete,
+            "empty token tiers must not leave the video charge unpriced: {:?}",
+            result.cost_result.snapshot.rule_id
+        );
+        assert_eq!(result.cost_result.snapshot.total_cost, 10.0);
+    }
+
+    #[test]
+    fn per_second_video_usage_charges_resolution_price_times_duration() {
+        let pricing = video_pricing_snapshot(json!({
+            "price_per_second_by_resolution": { "480p": 1.0, "720p": 2.0, "1080p": 3.0 }
+        }));
+
+        let result = BillingService::new()
+            .calculate(&pricing, &video_usage_input("720p", 5, false))
+            .expect("billing should calculate");
+        let snapshot = &result.cost_result.snapshot;
+
+        assert_eq!(
+            snapshot.resolved_dimensions.get("video_seconds_unmetered"),
+            Some(&json!(5))
+        );
+        assert_eq!(
+            snapshot.resolved_dimensions.get("video_price_per_second"),
+            Some(&json!(2.0))
+        );
+        assert_eq!(snapshot.cost_breakdown.get("video_cost"), Some(&10.0));
+        // The stale token tier must not contribute alongside the second price.
+        assert_eq!(snapshot.cost_breakdown.get("output_cost"), Some(&0.0));
+        assert_eq!(result.cost_result.snapshot.total_cost, 10.0);
+    }
+
+    #[test]
+    fn video_input_requests_use_the_override_price_table() {
+        let pricing = video_pricing_snapshot(json!({
+            "price_per_second_by_resolution": { "720p": 2.0, "1080p": 3.0 },
+            "with_video_input": {
+                "price_per_second_by_resolution": { "720p": 4.0 }
+            }
+        }));
+
+        let with_video = BillingService::new()
+            .calculate(&pricing, &video_usage_input("720p", 5, true))
+            .expect("billing should calculate");
+        assert_eq!(with_video.cost_result.snapshot.total_cost, 20.0);
+
+        // A resolution absent from the override falls back to the default table.
+        let fallback = BillingService::new()
+            .calculate(&pricing, &video_usage_input("1080p", 5, true))
+            .expect("billing should calculate");
+        assert_eq!(fallback.cost_result.snapshot.total_cost, 15.0);
+
+        // Text-to-video keeps the default price.
+        let text_to_video = BillingService::new()
+            .calculate(&pricing, &video_usage_input("720p", 5, false))
+            .expect("billing should calculate");
+        assert_eq!(text_to_video.cost_result.snapshot.total_cost, 10.0);
+    }
+    #[test]
+    fn pixel_resolution_from_the_provider_matches_a_tier_keyed_price() {
+        let pricing = video_pricing_snapshot(json!({
+            "price_per_second_by_resolution": { "1280x720": 2.5 }
+        }));
+
+        // Sora reports pixels; portrait and landscape share one price entry.
+        for resolution in ["1280x720", "720x1280"] {
+            let result = BillingService::new()
+                .calculate(&pricing, &video_usage_input(resolution, 4, false))
+                .expect("billing should calculate");
+            assert_eq!(
+                result.cost_result.snapshot.total_cost, 10.0,
+                "resolution {resolution} should price at 2.5/s"
+            );
+        }
+    }
+
+    #[test]
+    fn per_token_mode_bills_tokens_and_never_rendered_seconds() {
+        let pricing = video_pricing_snapshot(json!({
+            "mode": "per_token",
+            "price_per_second_by_resolution": { "720p": 2.0 }
+        }));
+
+        let result = BillingService::new()
+            .calculate(&pricing, &video_usage_input("720p", 5, false))
+            .expect("billing should calculate");
+        let snapshot = &result.cost_result.snapshot;
+
+        assert_eq!(
+            snapshot.resolved_dimensions.get("video_seconds_unmetered"),
+            Some(&json!(0))
+        );
+        assert_eq!(snapshot.cost_breakdown.get("video_cost"), Some(&0.0));
+        // 980_100 output tokens at 15.0/1M.
+        assert!(
+            (result.cost_result.snapshot.total_cost - 14.7015).abs() < 1e-9,
+            "expected token pricing, got {}",
+            result.cost_result.snapshot.total_cost
+        );
+    }
+
+    #[test]
+    fn per_token_mode_prices_output_tokens_by_resolution() {
+        let pricing = video_pricing_snapshot(json!({
+            "mode": "per_token",
+            "token_prices_by_resolution": { "480p": 5.0, "720p": 15.0, "1080p": 30.0 }
+        }));
+        let service = BillingService::new();
+
+        // 980_100 output tokens, priced per resolution rather than by the
+        // model-wide tier catalog.
+        for (resolution, expected) in [("480p", 4.9005), ("720p", 14.7015), ("1080p", 29.403)] {
+            let result = service
+                .calculate(&pricing, &video_usage_input(resolution, 5, false))
+                .expect("billing should calculate");
+            assert!(
+                (result.cost_result.snapshot.total_cost - expected).abs() < 1e-9,
+                "{resolution} expected {expected}, got {}",
+                result.cost_result.snapshot.total_cost
+            );
+        }
+    }
+
+    #[test]
+    fn per_token_mode_uses_the_override_table_for_video_input_requests() {
+        let pricing = video_pricing_snapshot(json!({
+            "mode": "per_token",
+            "token_prices_by_resolution": { "720p": 15.0, "1080p": 30.0 },
+            "with_video_input": {
+                "token_prices_by_resolution": { "720p": 45.0 }
+            }
+        }));
+        let service = BillingService::new();
+
+        let with_input = service
+            .calculate(&pricing, &video_usage_input("720p", 5, true))
+            .expect("billing should calculate");
+        assert!(
+            (with_input.cost_result.snapshot.total_cost - 44.1045).abs() < 1e-9,
+            "expected the override rate, got {}",
+            with_input.cost_result.snapshot.total_cost
+        );
+
+        // The override only covers 720p, so 1080p falls back to the default table
+        // instead of going unpriced.
+        let fallback = service
+            .calculate(&pricing, &video_usage_input("1080p", 5, true))
+            .expect("billing should calculate");
+        assert!(
+            (fallback.cost_result.snapshot.total_cost - 29.403).abs() < 1e-9,
+            "expected the default table fallback, got {}",
+            fallback.cost_result.snapshot.total_cost
+        );
+    }
+
+    #[test]
+    fn per_token_resolution_pricing_overrides_the_token_tier_catalog() {
+        let mut pricing = video_pricing_snapshot(json!({
+            "mode": "per_token",
+            "token_prices_by_resolution": { "720p": 15.0 }
+        }));
+        // A stale model-wide token price must not win over the video table.
+        pricing.default_tiered_pricing = Some(json!({
+            "tiers": [{ "up_to": null, "input_price_per_1m": 3.0, "output_price_per_1m": 999.0 }]
+        }));
+
+        let result = BillingService::new()
+            .calculate(&pricing, &video_usage_input("720p", 5, false))
+            .expect("billing should calculate");
+
+        assert!(
+            (result.cost_result.snapshot.total_cost - 14.7015).abs() < 1e-9,
+            "expected the video token table to win, got {}",
+            result.cost_result.snapshot.total_cost
+        );
+    }
+
+    #[test]
+    fn per_token_mode_prices_input_and_output_separately_when_configured() {
+        let pricing = video_pricing_snapshot(json!({
+            "mode": "per_token",
+            "token_prices_by_resolution": {
+                "720p": { "input_price_per_1m": 2.0, "output_price_per_1m": 15.0 }
+            }
+        }));
+
+        let mut input = video_usage_input("720p", 5, false);
+        input.input_tokens = 1_000_000;
+        let result = BillingService::new()
+            .calculate(&pricing, &input)
+            .expect("billing should calculate");
+
+        // 1M input at 2.0 plus 980_100 output at 15.0.
+        assert!(
+            (result.cost_result.snapshot.total_cost - 16.7015).abs() < 1e-9,
+            "expected split token rates, got {}",
+            result.cost_result.snapshot.total_cost
+        );
+    }
+
+    #[test]
+    fn a_token_default_prices_resolutions_missing_from_the_table() {
+        let pricing = video_pricing_snapshot(json!({
+            "mode": "per_token",
+            "token_price_default": { "output_price_per_1m": 10.0 },
+            "token_prices_by_resolution": { "720p": 15.0 }
+        }));
+        let service = BillingService::new();
+
+        // The listed resolution keeps its own rate.
+        let listed = service
+            .calculate(&pricing, &video_usage_input("720p", 5, false))
+            .expect("billing should calculate");
+        assert!((listed.cost_result.snapshot.total_cost - 14.7015).abs() < 1e-9);
+
+        // 980_100 output tokens at the default 10.0/1M.
+        let unlisted = service
+            .calculate(&pricing, &video_usage_input("4k", 5, false))
+            .expect("billing should calculate");
+        assert!(
+            (unlisted.cost_result.snapshot.total_cost - 9.801).abs() < 1e-9,
+            "expected the default token rate, got {}",
+            unlisted.cost_result.snapshot.total_cost
+        );
+    }
+
+    #[test]
+    fn a_video_input_token_default_covers_the_override_section() {
+        let pricing = video_pricing_snapshot(json!({
+            "mode": "per_token",
+            "token_price_default": { "output_price_per_1m": 10.0 },
+            "token_prices_by_resolution": { "720p": 15.0 },
+            "with_video_input": {
+                "token_price_default": { "output_price_per_1m": 30.0 },
+                "token_prices_by_resolution": { "720p": 45.0 }
+            }
+        }));
+        let service = BillingService::new();
+
+        // The override row wins for the resolution it lists.
+        let listed = service
+            .calculate(&pricing, &video_usage_input("720p", 5, true))
+            .expect("billing should calculate");
+        assert!((listed.cost_result.snapshot.total_cost - 44.1045).abs() < 1e-9);
+
+        // Anything else in the override section takes its default, not the base.
+        let unlisted = service
+            .calculate(&pricing, &video_usage_input("1080p", 5, true))
+            .expect("billing should calculate");
+        assert!(
+            (unlisted.cost_result.snapshot.total_cost - 29.403).abs() < 1e-9,
+            "expected the override default, got {}",
+            unlisted.cost_result.snapshot.total_cost
+        );
+    }
+
+    #[test]
+    fn per_token_mode_leaves_an_unknown_resolution_unpriced() {
+        let pricing = video_pricing_snapshot(json!({
+            "mode": "per_token",
+            "token_prices_by_resolution": { "720p": 15.0 }
+        }));
+
+        let result = BillingService::new()
+            .calculate(&pricing, &video_usage_input("4k", 5, false))
+            .expect("billing should calculate");
+        let snapshot = &result.cost_result.snapshot;
+
+        assert_eq!(
+            snapshot
+                .resolved_dimensions
+                .get("video_token_pricing_resolved"),
+            Some(&json!(false))
+        );
+        assert_eq!(snapshot.total_cost, 0.0);
+    }
+
+    #[test]
+    fn per_token_resolution_keys_normalize_like_per_second_keys() {
+        let pricing = video_pricing_snapshot(json!({
+            "mode": "per_token",
+            "token_prices_by_resolution": { "1280x720": 15.0, "720p": 15.0 }
+        }));
+        let service = BillingService::new();
+
+        // Providers report either a tier or a pixel pair; pixel pairs arrive in
+        // either orientation and casing.
+        for resolution in ["720p", "720P", "1280x720", "720x1280", "1280X720"] {
+            let result = service
+                .calculate(&pricing, &video_usage_input(resolution, 5, false))
+                .expect("billing should calculate");
+            assert!(
+                (result.cost_result.snapshot.total_cost - 14.7015).abs() < 1e-9,
+                "{resolution} should match the configured rate, got {}",
+                result.cost_result.snapshot.total_cost
+            );
+        }
+    }
+
+    #[test]
+    fn video_usage_without_configured_video_pricing_costs_nothing_extra() {
+        let mut pricing = video_pricing_snapshot(json!({}));
+        pricing.global_model_config = None;
+        pricing.default_tiered_pricing = Some(json!({
+            "tiers": [{ "up_to": null, "input_price_per_1m": 0.0, "output_price_per_1m": 0.0 }]
+        }));
+
+        let result = BillingService::new()
+            .calculate(&pricing, &video_usage_input("720p", 5, false))
+            .expect("billing should calculate");
+
+        assert_eq!(
+            result.cost_result.snapshot.cost_breakdown.get("video_cost"),
+            Some(&0.0)
+        );
+        assert_eq!(result.cost_result.snapshot.total_cost, 0.0);
+    }
+
+    #[test]
+    fn unknown_resolution_does_not_silently_charge_a_default_price() {
+        let pricing = video_pricing_snapshot(json!({
+            "price_per_second_by_resolution": { "720p": 2.0 }
+        }));
+
+        let result = BillingService::new()
+            .calculate(&pricing, &video_usage_input("4k", 5, false))
+            .expect("billing should calculate");
+
+        assert_eq!(
+            result
+                .cost_result
+                .snapshot
+                .resolved_dimensions
+                .get("video_price_per_second"),
+            Some(&json!(0.0))
+        );
+        assert_eq!(result.cost_result.snapshot.total_cost, 0.0);
     }
 }
