@@ -5480,7 +5480,13 @@ async fn probe_local_stream_success_failover_text<R>(
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    while let Some(observed_frame) = read_next_observed_stream_frame(lines).await? {
+    let mut aggregated = String::new();
+    let mut frames_probed = 0usize;
+    while frames_probed < MAX_STREAM_PREFETCH_FRAMES && aggregated.len() < MAX_STREAM_PREFETCH_BYTES
+    {
+        let Some(observed_frame) = read_next_observed_stream_frame(lines).await? else {
+            break;
+        };
         let probe_text = match &observed_frame.frame.payload {
             StreamFramePayload::Data { chunk_b64, text } => {
                 match decode_stream_data_chunk(chunk_b64.as_deref(), text.as_deref()) {
@@ -5494,12 +5500,24 @@ where
             StreamFramePayload::Headers { .. } | StreamFramePayload::Telemetry { .. } => None,
         };
         buffered_frames.push_back(observed_frame);
-        if probe_text.is_some() {
-            return Ok(probe_text);
+        if let Some(probe_text) = probe_text {
+            aggregated.push_str(&probe_text);
+            // Bound the probe to the same prefetch limits as the main
+            // stream inspection so chunked JSON bodies spanning multiple
+            // data frames are still matched before the first visible output
+            // is committed.
+            frames_probed += 1;
+            if aggregated.len() >= MAX_STREAM_PREFETCH_BYTES {
+                break;
+            }
         }
     }
 
-    Ok(None)
+    if aggregated.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(aggregated))
+    }
 }
 
 async fn execute_stream_from_frame_stream(
@@ -6393,39 +6411,48 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                 provider_prefetched_body_bytes = provider_prefetched_body.len(),
                                 "gateway detected embedded error while prefetching execution runtime stream"
                             );
-                            let request_diagnostics = current_request_diagnostics();
-                            let terminal_report_context = report_context_with_request_diagnostics(
-                                report_context,
-                                request_diagnostics.as_ref(),
-                                stream_started_at,
-                                prefetched_usage_telemetry.as_ref(),
-                            );
-                            let payload = build_stream_sync_payload(
-                                trace_id,
-                                report_kind.clone(),
-                                terminal_report_context,
+                            // Map the transport status (often HTTP 200) to the
+                            // logical provider error status before failover
+                            // analysis, so service_unavailable_error-style
+                            // nested bodies classify as retryable 5xx instead of
+                            // passing the raw 200 through to the classifier.
+                            let error_status_code = resolve_provider_stream_error_status_code(
+                                plan.provider_api_format.as_str(),
                                 status_code,
-                                headers,
-                                Some(body_json),
-                                None,
-                                prefetched_usage_telemetry.clone(),
+                                &body_json,
                             );
-                            record_sync_terminal_usage_with_handoff(
+                            // Keep diagnostic parity with the plain non-2xx
+                            // path: attach upstream response body/headers to
+                            // the report context so the failed candidate
+                            // record retains the provider error payload even
+                            // though the transport status was HTTP 200.
+                            let trace_report_context = with_upstream_response_report_context(
+                                report_context.as_ref(),
+                                error_status_code,
+                                Some(&upstream_headers),
+                                Some(&body_json),
+                                None,
+                                None,
+                            );
+                            return handle_prefetch_provider_private_stream_error(
                                 state,
+                                trace_id,
+                                decision,
                                 &plan,
-                                payload.report_context.as_ref(),
-                                &payload,
+                                trace_report_context.or(report_context),
+                                request_id,
+                                candidate_id,
+                                report_kind,
+                                headers,
+                                prefetched_usage_telemetry.clone(),
+                                &provider_prefetched_body,
+                                status_code,
+                                error_status_code,
+                                body_json,
+                                retry_scope_out.as_deref_mut(),
+                                retry_fallback_out.as_deref_mut(),
                             )
                             .await;
-                            let response = submit_local_core_error_or_sync_finalize(
-                                state, trace_id, decision, payload,
-                            )
-                            .await?;
-                            return Ok(Some(attach_control_metadata_headers(
-                                response,
-                                Some(request_id),
-                                candidate_id,
-                            )?));
                         }
                         StreamPrefetchInspection::NeedMore => {}
                         StreamPrefetchInspection::NonError => {}

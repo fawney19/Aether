@@ -1,0 +1,284 @@
+[
+  {
+    "action": "snapshot -i",
+    "relativeTimeSec": 42.6,
+    "timestamp": "2026-04-08T14:46:55.716Z"
+  },
+  {
+    "action": "click @e12",
+    "relativeTimeSec": 74.6,
+    "timestamp": "2026-04-08T14:47:27.688Z"
+  },
+  {
+    "action": "wait 800",
+    "relativeTimeSec": 75,
+    "timestamp": "2026-04-08T14:47:28.098Z"
+  },
+  {
+    "action": "snapshot -i",
+    "relativeTimeSec": 76.1,
+    "timestamp": "2026-04-08T14:47:29.181Z"
+  },
+  {
+    "action": "fill @e25 admin@example.com",
+    "relativeTimeSec": 108.5,
+    "timestamp": "2026-04-08T14:48:01.590Z",
+    "element": {
+      "label": "用户名/邮箱",
+      "bbox": {
+        "x": 449,
+        "y": 330,
+        "width": 382,
+        "height": 44
+      },
+      "viewport": {
+        "width": 1280,
+        "height": 720
+      }
+    }
+  },
+  {
+    "action": "fill @e26 admin123456",
+    "relativeTimeSec": 120.1,
+    "timestamp": "2026-04-08T14:48:13.194Z"
+  },
+  {
+    "action": "screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/01-login-filled.png",
+    "relativeTimeSec": 120.4,
+    "timestamp": "2026-04-08T14:48:13.498Z"
+  },
+  {
+    "action": "click @e27",
+    "relativeTimeSec": 131.9,
+    "timestamp": "2026-04-08T14:48:24.976Z"
+  },
+  {
+    "action": "wait 1500",
+    "relativeTimeSec": 132.2,
+    "timestamp": "2026-04-08T14:48:25.326Z"
+  },
+  {
+    "action": "snapshot -i",
+    "relativeTimeSec": 134,
+    "timestamp": "2026-04-08T14:48:27.113Z"
+  },
+  {
+    "action": "click @e6",
+    "relativeTimeSec": 174.3,
+    "timestamp": "2026-04-08T14:49:07.449Z",
+    "element": {
+      "label": "提供商",
+      "bbox": {
+        "x": 48,
+        "y": 314,
+        "width": 38.03125,
+        "height": 19.5
+      },
+      "viewport": {
+        "width": 1280,
+        "height": 720
+      }
+    }
+  },
+  {
+    "action": "wait 1500",
+    "relativeTimeSec": 174.7,
+    "timestamp": "2026-04-08T14:49:07.758Z"
+  },
+  {
+    "action": "snapshot -i",
+    "relativeTimeSec": 176.4,
+    "timestamp": "2026-04-08T14:49:09.550Z"
+  },
+  {
+    "action": "reload",
+    "relativeTimeSec": 812.6,
+    "timestamp": "2026-04-08T14:59:45.747Z"
+  },
+  {
+    "action": "wait 2500",
+    "relativeTimeSec": 813,
+    "timestamp": "2026-04-08T14:59:46.109Z"
+  },
+  {
+    "action": "snapshot -i",
+    "relativeTimeSec": 815.9,
+    "timestamp": "2026-04-08T14:59:48.957Z"
+  },
+  {
+    "action": "screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/02-provider-management-loaded.png",
+    "relativeTimeSec": 864.3,
+    "timestamp": "2026-04-08T15:00:37.380Z"
+  },
+  {
+    "action": "reload",
+    "relativeTimeSec": 903.9,
+    "timestamp": "2026-04-08T15:01:17.030Z"
+  },
+  {
+    "action": "wait 2000",
+    "relativeTimeSec": 904.3,
+    "timestamp": "2026-04-08T15:01:17.384Z"
+  },
+  {
+    "action": "snapshot -i",
+    "relativeTimeSec": 906.6,
+    "timestamp": "2026-04-08T15:01:19.688Z"
+  },
+  {
+    "action": "screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/03-import-reminder-cleared.png",
+    "relativeTimeSec": 906.9,
+    "timestamp": "2026-04-08T15:01:20.015Z"
+  },
+  {
+    "action": "click @e28",
+    "relativeTimeSec": 979,
+    "timestamp": "2026-04-08T15:02:32.141Z"
+  },
+  {
+    "action": "wait 800",
+    "relativeTimeSec": 979.4,
+    "timestamp": "2026-04-08T15:02:32.480Z"
+  },
+  {
+    "action": "snapshot -i",
+    "relativeTimeSec": 980.5,
+    "timestamp": "2026-04-08T15:02:33.580Z"
+  },
+  {
+    "action": "click @e27",
+    "relativeTimeSec": 1028.7,
+    "timestamp": "2026-04-08T15:03:21.795Z"
+  },
+  {
+    "action": "wait 500",
+    "relativeTimeSec": 1029,
+    "timestamp": "2026-04-08T15:03:22.152Z"
+  },
+  {
+    "action": "press ArrowDown",
+    "relativeTimeSec": 1029.8,
+    "timestamp": "2026-04-08T15:03:22.938Z"
+  },
+  {
+    "action": "press Enter",
+    "relativeTimeSec": 1030.1,
+    "timestamp": "2026-04-08T15:03:23.228Z"
+  },
+  {
+    "action": "wait 1500",
+    "relativeTimeSec": 1030.4,
+    "timestamp": "2026-04-08T15:03:23.532Z"
+  },
+  {
+    "action": "screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/04-proxy-filter-applied.png",
+    "relativeTimeSec": 1032.2,
+    "timestamp": "2026-04-08T15:03:25.314Z"
+  },
+  {
+    "action": "snapshot -i",
+    "relativeTimeSec": 1032.6,
+    "timestamp": "2026-04-08T15:03:25.724Z"
+  },
+  {
+    "action": "click @e28",
+    "relativeTimeSec": 1038.9,
+    "timestamp": "2026-04-08T15:03:32.021Z"
+  },
+  {
+    "action": "wait 300",
+    "relativeTimeSec": 1039.2,
+    "timestamp": "2026-04-08T15:03:32.326Z"
+  },
+  {
+    "action": "eval (() => ({visible: localStorage.getItem('provider-management-visible-filters'), url: location.href}))()",
+    "relativeTimeSec": 1039.8,
+    "timestamp": "2026-04-08T15:03:32.908Z"
+  },
+  {
+    "action": "click @e34",
+    "relativeTimeSec": 1091.5,
+    "timestamp": "2026-04-08T15:04:24.565Z",
+    "element": {
+      "label": "清除筛选",
+      "bbox": {
+        "x": 729,
+        "y": 286,
+        "width": 82,
+        "height": 36
+      },
+      "viewport": {
+        "width": 1280,
+        "height": 720
+      }
+    }
+  },
+  {
+    "action": "wait 1200",
+    "relativeTimeSec": 1091.8,
+    "timestamp": "2026-04-08T15:04:24.880Z"
+  },
+  {
+    "action": "snapshot -i",
+    "relativeTimeSec": 1093.3,
+    "timestamp": "2026-04-08T15:04:26.378Z"
+  },
+  {
+    "action": "click @e34",
+    "relativeTimeSec": 1147.2,
+    "timestamp": "2026-04-08T15:05:20.262Z"
+  },
+  {
+    "action": "wait 2000",
+    "relativeTimeSec": 1147.5,
+    "timestamp": "2026-04-08T15:05:20.595Z"
+  },
+  {
+    "action": "snapshot -i",
+    "relativeTimeSec": 1149.8,
+    "timestamp": "2026-04-08T15:05:22.890Z"
+  },
+  {
+    "action": "screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/05-provider-detail-before-refresh.png",
+    "relativeTimeSec": 1186.8,
+    "timestamp": "2026-04-08T15:05:59.933Z"
+  },
+  {
+    "action": "click @e180",
+    "relativeTimeSec": 1198,
+    "timestamp": "2026-04-08T15:06:11.085Z",
+    "element": {
+      "label": "刷新并适配",
+      "bbox": {
+        "x": 1122,
+        "y": 465,
+        "width": 116,
+        "height": 32
+      },
+      "viewport": {
+        "width": 1280,
+        "height": 720
+      }
+    }
+  },
+  {
+    "action": "wait 4000",
+    "relativeTimeSec": 1198.3,
+    "timestamp": "2026-04-08T15:06:11.405Z"
+  },
+  {
+    "action": "screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/06-provider-detail-after-refresh-sync.png",
+    "relativeTimeSec": 1202.6,
+    "timestamp": "2026-04-08T15:06:15.700Z"
+  },
+  {
+    "action": "snapshot -i",
+    "relativeTimeSec": 1202.9,
+    "timestamp": "2026-04-08T15:06:16.038Z"
+  },
+  {
+    "action": "errors",
+    "relativeTimeSec": 1246.3,
+    "timestamp": "2026-04-08T15:06:59.368Z"
+  }
+]

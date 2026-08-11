@@ -1,0 +1,1579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ProofShot — Verification Report</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+      min-height: 100vh;
+    }
+
+    .header {
+      padding: 24px 32px;
+      border-bottom: 1px solid #21262d;
+      background: #161b22;
+    }
+
+    .header h1 {
+      font-size: 20px;
+      font-weight: 600;
+      color: #f0f6fc;
+      margin-bottom: 8px;
+    }
+
+    .header .description {
+      font-size: 14px;
+      color: #8b949e;
+      margin-bottom: 6px;
+    }
+
+    .header .description.clamped .description-text {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .header .description .show-more {
+      background: none;
+      border: none;
+      color: #58a6ff;
+      font-size: 12px;
+      cursor: pointer;
+      padding: 0;
+      margin-top: 4px;
+      display: block;
+    }
+
+    .header .description .show-more:hover {
+      text-decoration: underline;
+    }
+
+    .header .meta {
+      font-size: 12px;
+      color: #484f58;
+    }
+
+    /* Overlay toggle controls */
+    .overlay-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      user-select: none;
+      position: relative;
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: 0;
+      font-size: 12px;
+    }
+
+    .overlay-toggle .tooltip {
+      display: none;
+      position: absolute;
+      top: 100%;
+      right: 0;
+      margin-top: 6px;
+      background: #1c2128;
+      color: #c9d1d9;
+      font-size: 11px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      white-space: nowrap;
+      pointer-events: none;
+      border: 1px solid #30363d;
+      z-index: 10;
+    }
+
+    .overlay-toggle:hover .tooltip {
+      display: block;
+    }
+
+    .overlay-toggle input[type="checkbox"] {
+      display: none;
+    }
+
+    .toggle-track {
+      position: relative;
+      width: 34px;
+      height: 18px;
+      background: #30363d;
+      border-radius: 9px;
+      transition: background 0.2s;
+      flex-shrink: 0;
+    }
+
+    .toggle-track::after {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 14px;
+      height: 14px;
+      background: #8b949e;
+      border-radius: 50%;
+      transition: transform 0.2s, background 0.2s;
+    }
+
+    .overlay-toggle input:checked + .toggle-track {
+      background: #1f6feb;
+    }
+
+    .overlay-toggle input:checked + .toggle-track::after {
+      transform: translateX(16px);
+      background: #fff;
+    }
+
+    .error-badges {
+      display: flex;
+      gap: 12px;
+      margin-top: 10px;
+    }
+
+    .error-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+      font-family: inherit;
+      line-height: inherit;
+    }
+
+    .error-badge:hover {
+      opacity: 0.85;
+      transform: translateY(-1px);
+    }
+
+    .error-badge.clean {
+      background: rgba(63, 185, 80, 0.12);
+      color: #3fb950;
+      border: 1px solid rgba(63, 185, 80, 0.25);
+    }
+
+    .error-badge.has-errors {
+      background: rgba(248, 81, 73, 0.12);
+      color: #f85149;
+      border: 1px solid rgba(248, 81, 73, 0.25);
+    }
+
+    .error-badge .badge-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+    }
+
+    .error-badge.clean .badge-dot {
+      background: #3fb950;
+    }
+
+    .error-badge.has-errors .badge-dot {
+      background: #f85149;
+    }
+
+    .viewer {
+      display: flex;
+      height: calc(100vh - 180px);
+      min-height: 400px;
+    }
+
+    .video-panel {
+      flex: 0 0 62%;
+      padding: 16px;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      background: #0d1117;
+      overflow: hidden;
+    }
+
+    .video-wrapper {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .video-container {
+      position: relative;
+      width: 100%;
+    }
+
+    .video-container video {
+      width: 100%;
+      border-radius: 8px 8px 0 0;
+      background: #000;
+      display: block;
+    }
+
+    .video-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      overflow: hidden;
+      border-radius: 8px 8px 0 0;
+    }
+
+    /* Scrub bar */
+    .scrub-bar {
+      position: relative;
+      width: 100%;
+      padding: 8px 0 6px;
+      background: #161b22;
+      border-radius: 0 0 8px 8px;
+      border-top: 1px solid #21262d;
+    }
+
+    .scrub-track {
+      position: relative;
+      height: 6px;
+      background: #21262d;
+      border-radius: 3px;
+      margin: 0 16px;
+      cursor: pointer;
+    }
+
+    .scrub-track:hover {
+      height: 8px;
+      margin-top: -1px;
+    }
+
+    .scrub-progress {
+      position: absolute;
+      top: 0;
+      left: 0;
+      height: 100%;
+      background: #58a6ff;
+      border-radius: 3px;
+      pointer-events: none;
+      transition: width 0.1s linear;
+    }
+
+    .scrub-playhead {
+      position: absolute;
+      top: 50%;
+      width: 14px;
+      height: 14px;
+      background: #f0f6fc;
+      border: 2px solid #58a6ff;
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 3;
+      box-shadow: 0 0 4px rgba(0,0,0,0.4);
+      transition: left 0.1s linear;
+    }
+
+    .scrub-marker {
+      position: absolute;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 2;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .scrub-marker-icon {
+      font-size: 14px;
+      width: 22px;
+      height: 22px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #21262d;
+      border: 1.5px solid #30363d;
+      border-radius: 50%;
+      transition: all 0.15s;
+    }
+
+    .scrub-marker:hover .scrub-marker-icon,
+    .scrub-marker.active .scrub-marker-icon {
+      background: #1f2a37;
+      border-color: #58a6ff;
+      transform: scale(1.25);
+    }
+
+    .scrub-tooltip {
+      display: none;
+      position: absolute;
+      bottom: 100%;
+      left: 0;
+      margin-bottom: 8px;
+      padding: 6px 10px;
+      background: #1c2128;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      font-size: 12px;
+      color: #c9d1d9;
+      white-space: nowrap;
+      pointer-events: none;
+      z-index: 20;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    }
+
+    .scrub-tooltip .tooltip-icon {
+      margin-right: 4px;
+    }
+
+    .scrub-tooltip .tooltip-time {
+      color: #58a6ff;
+      margin-left: 6px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .no-video {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      height: 300px;
+      border: 1px dashed #30363d;
+      border-radius: 8px;
+      color: #484f58;
+      font-size: 15px;
+    }
+
+    .no-video-hint {
+      font-size: 12px;
+      margin-top: 8px;
+      color: #30363d;
+    }
+
+    .timeline-panel {
+      flex: 0 0 38%;
+      border-left: 1px solid #21262d;
+      overflow-y: auto;
+      background: #161b22;
+    }
+
+    /* Tab bar */
+    .panel-tabs {
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      border-bottom: 1px solid #21262d;
+      position: sticky;
+      top: 0;
+      background: #161b22;
+      z-index: 10;
+      gap: 0;
+    }
+
+    .panel-tab {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: #8b949e;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 10px 16px;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      transition: color 0.15s, border-color 0.15s;
+      white-space: nowrap;
+      font-family: inherit;
+    }
+
+    .panel-tab:hover { color: #c9d1d9; }
+    .panel-tab.active { color: #f0f6fc; border-bottom-color: #58a6ff; }
+
+    .panel-tab-actions {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+    }
+
+    /* Log tab content */
+    .log-tab-content {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+    }
+
+    .log-tab-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      border-bottom: 1px solid #21262d;
+      font-size: 12px;
+    }
+
+    .log-pre {
+      margin: 0;
+      padding: 12px 16px;
+      background: #0d1117;
+      font-family: 'SF Mono', SFMono-Regular, 'Consolas', 'Liberation Mono', Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      color: #c9d1d9;
+      overflow-x: auto;
+      white-space: pre;
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    .log-pre::-webkit-scrollbar { width: 6px; height: 6px; }
+    .log-pre::-webkit-scrollbar-track { background: transparent; }
+    .log-pre::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+    .log-pre::-webkit-scrollbar-thumb:hover { background: #484f58; }
+
+    .log-line { display: block; }
+    .log-line[data-time] { cursor: pointer; transition: background 0.15s; padding: 0 4px; margin: 0 -4px; border-radius: 2px; }
+    .log-line[data-time]:hover { background: rgba(88, 166, 255, 0.08); }
+    .log-line.active { background: #1f2a37; border-left: 3px solid #58a6ff; padding-left: 1px; }
+    .log-line.active .log-time { color: #58a6ff; }
+
+    .log-time {
+      display: inline-block;
+      min-width: 36px;
+      padding-right: 8px;
+      text-align: right;
+      color: #484f58;
+      user-select: none;
+      font-variant-numeric: tabular-nums;
+      font-size: 11px;
+    }
+
+    .log-ln {
+      display: inline-block;
+      min-width: 40px;
+      padding-right: 12px;
+      text-align: right;
+      color: #484f58;
+      user-select: none;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .log-line-error { background: rgba(248, 81, 73, 0.1); color: #f85149; }
+    .log-line-error .log-ln { color: rgba(248, 81, 73, 0.5); }
+    .log-line-error .log-time { color: rgba(248, 81, 73, 0.5); }
+
+    .log-empty {
+      padding: 32px 16px;
+      text-align: center;
+      color: #484f58;
+      font-size: 13px;
+      font-style: italic;
+    }
+
+    .log-truncated {
+      padding: 8px 16px;
+      font-size: 11px;
+      color: #484f58;
+      font-style: italic;
+      border-top: 1px solid #21262d;
+      background: #161b22;
+    }
+
+    .step {
+      display: flex;
+      align-items: center;
+      padding: 10px 20px;
+      cursor: pointer;
+      border-bottom: 1px solid #21262d;
+      transition: background 0.15s;
+      gap: 10px;
+    }
+
+    .step:hover {
+      background: #1c2128;
+    }
+
+    .step.active {
+      background: #1f2a37;
+      border-left: 3px solid #58a6ff;
+      padding-left: 17px;
+    }
+
+    .step-number {
+      font-size: 11px;
+      color: #484f58;
+      min-width: 20px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .icon {
+      font-size: 16px;
+      min-width: 24px;
+      text-align: center;
+    }
+
+    .step-content {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .action {
+      font-size: 13px;
+      font-family: 'SF Mono', SFMono-Regular, 'Consolas', 'Liberation Mono', Menlo, monospace;
+      color: #c9d1d9;
+      word-break: break-all;
+    }
+
+    .step.active .action {
+      color: #f0f6fc;
+    }
+
+    .time {
+      font-size: 12px;
+      color: #484f58;
+      font-variant-numeric: tabular-nums;
+      min-width: 36px;
+      text-align: right;
+    }
+
+    .step.active .time {
+      color: #58a6ff;
+    }
+
+
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 200px;
+      color: #484f58;
+      font-size: 14px;
+    }
+
+    /* Overlay animations */
+    .ripple {
+      position: absolute;
+      border-radius: 50%;
+      pointer-events: none;
+      transform: translate(-50%, -50%);
+      animation: ripple-expand 600ms ease-out forwards;
+    }
+
+    @keyframes ripple-expand {
+      0%   { width: 12px; height: 12px; opacity: 0.7; }
+      100% { width: 60px; height: 60px; opacity: 0; }
+    }
+
+    .ripple-click  { background: rgba(56, 132, 255, 0.5); }
+    .ripple-fill   { background: rgba(255, 152, 56, 0.5); }
+
+    .scroll-indicator {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 32px;
+      opacity: 0.6;
+      pointer-events: none;
+      animation: fade-out 800ms ease-out forwards;
+    }
+
+    @keyframes fade-out {
+      0%   { opacity: 0.6; }
+      100% { opacity: 0; }
+    }
+
+    .toast {
+      position: absolute;
+      bottom: 32px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.85);
+      color: #fff;
+      padding: 10px 20px;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 500;
+      pointer-events: none;
+      animation: toast-in 200ms ease-out;
+      white-space: nowrap;
+      letter-spacing: 0.2px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    }
+
+    @keyframes toast-in {
+      0%   { opacity: 0; transform: translateX(-50%) translateY(8px); }
+      100% { opacity: 1; transform: translateX(-50%) translateY(0); }
+    }
+
+    /* Scrollbar styling */
+    .timeline-panel::-webkit-scrollbar { width: 6px; }
+    .timeline-panel::-webkit-scrollbar-track { background: transparent; }
+    .timeline-panel::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+    .timeline-panel::-webkit-scrollbar-thumb:hover { background: #484f58; }
+
+    @media (max-width: 768px) {
+      .viewer {
+        flex-direction: column;
+        height: auto;
+      }
+      .video-panel, .timeline-panel {
+        flex: none;
+        width: 100%;
+      }
+      .timeline-panel {
+        border-left: none;
+        border-top: 1px solid #21262d;
+        max-height: 50vh;
+      }
+      .error-badges {
+        flex-wrap: wrap;
+      }
+      .log-pre {
+        max-height: 50vh;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1><svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" style="width:24px;height:24px;vertical-align:middle;margin-right:8px"><path d="M8,24 L8,12 C8,8 12,8 12,8 L24,8" fill="none" stroke="#6366F1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><path d="M40,8 L52,8 C56,8 56,12 56,12 L56,24" fill="none" stroke="#6366F1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><path d="M8,40 L8,52 C8,56 12,56 12,56 L24,56" fill="none" stroke="#6366F1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><path d="M40,56 L52,56 C56,56 56,52 56,52 L56,40" fill="none" stroke="#6366F1" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><path d="M20,34 L28,42 L44,22" fill="none" stroke="#22D3EE" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg>ProofShot Verification</h1>
+    <p class="description" id="description"><span class="description-text">Verify provider management fixes: import reminder, proxy filter visibility, upstream model refresh and sync</span><button class="show-more" id="showMoreBtn" style="display:none" onclick="toggleDescription()">Show more</button></p>
+    <p class="meta">2026-04-08 15:07:02 &middot; 1246s</p>
+    <div class="error-badges">
+      <button class="error-badge clean" onclick="switchTab('console')"><span class="badge-dot"></span>Console: clean</button>
+      <button class="error-badge clean" onclick="switchTab('server')"><span class="badge-dot"></span>Server: clean</button>
+    </div>
+  </div>
+  <div class="viewer">
+    <div class="video-panel">
+      <div class="video-wrapper">
+        <div class="video-container">
+          <video src="./session.webm" controls></video>
+          <div class="video-overlay"></div>
+        </div>
+        <div class="scrub-bar">
+        <div class="scrub-track" id="scrubTrack">
+          <div class="scrub-progress" id="scrubProgress"></div>
+          <div class="scrub-playhead" id="scrubPlayhead"></div>
+          <div class="scrub-marker" data-index="0" data-time="42.6" style="left:3.418940609951846%"><span class="scrub-marker-icon">👁</span></div>
+          <div class="scrub-marker" data-index="1" data-time="74.6" style="left:5.987158908507223%"><span class="scrub-marker-icon">🖱</span></div>
+          <div class="scrub-marker" data-index="2" data-time="75" style="left:6.019261637239166%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="3" data-time="76.1" style="left:6.107544141252006%"><span class="scrub-marker-icon">👁</span></div>
+          <div class="scrub-marker" data-index="4" data-time="108.5" style="left:8.707865168539326%"><span class="scrub-marker-icon">⌨</span></div>
+          <div class="scrub-marker" data-index="5" data-time="120.1" style="left:9.63884430176565%"><span class="scrub-marker-icon">⌨</span></div>
+          <div class="scrub-marker" data-index="6" data-time="120.4" style="left:9.662921348314606%"><span class="scrub-marker-icon">📷</span></div>
+          <div class="scrub-marker" data-index="7" data-time="131.9" style="left:10.585874799357946%"><span class="scrub-marker-icon">🖱</span></div>
+          <div class="scrub-marker" data-index="8" data-time="132.2" style="left:10.6099518459069%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="9" data-time="134" style="left:10.754414125200643%"><span class="scrub-marker-icon">👁</span></div>
+          <div class="scrub-marker" data-index="10" data-time="174.3" style="left:13.98876404494382%"><span class="scrub-marker-icon">🖱</span></div>
+          <div class="scrub-marker" data-index="11" data-time="174.7" style="left:14.020866773675762%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="12" data-time="176.4" style="left:14.157303370786517%"><span class="scrub-marker-icon">👁</span></div>
+          <div class="scrub-marker" data-index="13" data-time="812.6" style="left:65.21669341894061%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="14" data-time="813" style="left:65.24879614767255%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="15" data-time="815.9" style="left:65.48154093097914%"><span class="scrub-marker-icon">👁</span></div>
+          <div class="scrub-marker" data-index="16" data-time="864.3" style="left:69.36597110754413%"><span class="scrub-marker-icon">📷</span></div>
+          <div class="scrub-marker" data-index="17" data-time="903.9" style="left:72.54414125200643%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="18" data-time="904.3" style="left:72.57624398073837%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="19" data-time="906.6" style="left:72.76083467094703%"><span class="scrub-marker-icon">👁</span></div>
+          <div class="scrub-marker" data-index="20" data-time="906.9" style="left:72.78491171749599%"><span class="scrub-marker-icon">📷</span></div>
+          <div class="scrub-marker" data-index="21" data-time="979" style="left:78.57142857142857%"><span class="scrub-marker-icon">🖱</span></div>
+          <div class="scrub-marker" data-index="22" data-time="979.4" style="left:78.60353130016051%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="23" data-time="980.5" style="left:78.69181380417335%"><span class="scrub-marker-icon">👁</span></div>
+          <div class="scrub-marker" data-index="24" data-time="1028.7" style="left:82.56019261637239%"><span class="scrub-marker-icon">🖱</span></div>
+          <div class="scrub-marker" data-index="25" data-time="1029" style="left:82.58426966292134%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="26" data-time="1029.8" style="left:82.64847512038523%"><span class="scrub-marker-icon">⌘</span></div>
+          <div class="scrub-marker" data-index="27" data-time="1030.1" style="left:82.67255216693418%"><span class="scrub-marker-icon">⌘</span></div>
+          <div class="scrub-marker" data-index="28" data-time="1030.4" style="left:82.69662921348315%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="29" data-time="1032.2" style="left:82.84109149277688%"><span class="scrub-marker-icon">📷</span></div>
+          <div class="scrub-marker" data-index="30" data-time="1032.6" style="left:82.87319422150881%"><span class="scrub-marker-icon">👁</span></div>
+          <div class="scrub-marker" data-index="31" data-time="1038.9" style="left:83.37881219903693%"><span class="scrub-marker-icon">🖱</span></div>
+          <div class="scrub-marker" data-index="32" data-time="1039.2" style="left:83.40288924558588%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="33" data-time="1039.8" style="left:83.45104333868379%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="34" data-time="1091.5" style="left:87.60032102728732%"><span class="scrub-marker-icon">🖱</span></div>
+          <div class="scrub-marker" data-index="35" data-time="1091.8" style="left:87.62439807383628%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="36" data-time="1093.3" style="left:87.74478330658106%"><span class="scrub-marker-icon">👁</span></div>
+          <div class="scrub-marker" data-index="37" data-time="1147.2" style="left:92.07062600321028%"><span class="scrub-marker-icon">🖱</span></div>
+          <div class="scrub-marker" data-index="38" data-time="1147.5" style="left:92.09470304975923%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="39" data-time="1149.8" style="left:92.2792937399679%"><span class="scrub-marker-icon">👁</span></div>
+          <div class="scrub-marker" data-index="40" data-time="1186.8" style="left:95.24879614767255%"><span class="scrub-marker-icon">📷</span></div>
+          <div class="scrub-marker" data-index="41" data-time="1198" style="left:96.14767255216692%"><span class="scrub-marker-icon">🖱</span></div>
+          <div class="scrub-marker" data-index="42" data-time="1198.3" style="left:96.17174959871588%"><span class="scrub-marker-icon">▶</span></div>
+          <div class="scrub-marker" data-index="43" data-time="1202.6" style="left:96.51685393258427%"><span class="scrub-marker-icon">📷</span></div>
+          <div class="scrub-marker" data-index="44" data-time="1202.9" style="left:96.54093097913324%"><span class="scrub-marker-icon">👁</span></div>
+          <div class="scrub-marker" data-index="45" data-time="1246.3" style="left:100.02407704654894%"><span class="scrub-marker-icon">▶</span></div>
+        </div>
+        <div class="scrub-tooltip" id="scrubTooltip"></div>
+      </div>
+      </div>
+    </div>
+    <div class="timeline-panel">
+      <div class="panel-tabs">
+        <button class="panel-tab active" data-tab="timeline" onclick="switchTab('timeline')">Timeline &middot; 46</button>
+        <button class="panel-tab" data-tab="console" onclick="switchTab('console')">Console</button>
+        <button class="panel-tab" data-tab="server" onclick="switchTab('server')">Server</button>
+        <div class="panel-tab-actions" id="tabActionsTimeline">
+          <label class="overlay-toggle"><input type="checkbox" id="toggle-overlays" checked><span class="toggle-track"></span> Overlays<span class="tooltip">Show ripple animations and action labels on the video as each step plays.</span></label>
+        </div>
+      </div>
+      <div id="tabTimeline">
+      <div class="step" data-time="42.6" data-index="0" onclick="seekTo(42.6)">
+        <span class="step-number">1</span>
+        <span class="icon">👁</span>
+        <div class="step-content">
+          <span class="action">snapshot -i</span>
+        </div>
+        <span class="time">0:42</span>
+      </div>
+      <div class="step" data-time="74.6" data-index="1" onclick="seekTo(74.6)">
+        <span class="step-number">2</span>
+        <span class="icon">🖱</span>
+        <div class="step-content">
+          <span class="action">click @e12</span>
+        </div>
+        <span class="time">1:14</span>
+      </div>
+      <div class="step" data-time="75" data-index="2" onclick="seekTo(75)">
+        <span class="step-number">3</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">wait 800</span>
+        </div>
+        <span class="time">1:15</span>
+      </div>
+      <div class="step" data-time="76.1" data-index="3" onclick="seekTo(76.1)">
+        <span class="step-number">4</span>
+        <span class="icon">👁</span>
+        <div class="step-content">
+          <span class="action">snapshot -i</span>
+        </div>
+        <span class="time">1:16</span>
+      </div>
+      <div class="step" data-time="108.5" data-index="4" onclick="seekTo(108.5)">
+        <span class="step-number">5</span>
+        <span class="icon">⌨</span>
+        <div class="step-content">
+          <span class="action">fill @e25 admin@example.com</span>
+        </div>
+        <span class="time">1:48</span>
+      </div>
+      <div class="step" data-time="120.1" data-index="5" onclick="seekTo(120.1)">
+        <span class="step-number">6</span>
+        <span class="icon">⌨</span>
+        <div class="step-content">
+          <span class="action">fill @e26 admin123456</span>
+        </div>
+        <span class="time">2:00</span>
+      </div>
+      <div class="step" data-time="120.4" data-index="6" onclick="seekTo(120.4)">
+        <span class="step-number">7</span>
+        <span class="icon">📷</span>
+        <div class="step-content">
+          <span class="action">screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/01-login-filled.png</span>
+        </div>
+        <span class="time">2:00</span>
+      </div>
+      <div class="step" data-time="131.9" data-index="7" onclick="seekTo(131.9)">
+        <span class="step-number">8</span>
+        <span class="icon">🖱</span>
+        <div class="step-content">
+          <span class="action">click @e27</span>
+        </div>
+        <span class="time">2:11</span>
+      </div>
+      <div class="step" data-time="132.2" data-index="8" onclick="seekTo(132.2)">
+        <span class="step-number">9</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">wait 1500</span>
+        </div>
+        <span class="time">2:12</span>
+      </div>
+      <div class="step" data-time="134" data-index="9" onclick="seekTo(134)">
+        <span class="step-number">10</span>
+        <span class="icon">👁</span>
+        <div class="step-content">
+          <span class="action">snapshot -i</span>
+        </div>
+        <span class="time">2:14</span>
+      </div>
+      <div class="step" data-time="174.3" data-index="10" onclick="seekTo(174.3)">
+        <span class="step-number">11</span>
+        <span class="icon">🖱</span>
+        <div class="step-content">
+          <span class="action">click @e6</span>
+        </div>
+        <span class="time">2:54</span>
+      </div>
+      <div class="step" data-time="174.7" data-index="11" onclick="seekTo(174.7)">
+        <span class="step-number">12</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">wait 1500</span>
+        </div>
+        <span class="time">2:54</span>
+      </div>
+      <div class="step" data-time="176.4" data-index="12" onclick="seekTo(176.4)">
+        <span class="step-number">13</span>
+        <span class="icon">👁</span>
+        <div class="step-content">
+          <span class="action">snapshot -i</span>
+        </div>
+        <span class="time">2:56</span>
+      </div>
+      <div class="step" data-time="812.6" data-index="13" onclick="seekTo(812.6)">
+        <span class="step-number">14</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">reload</span>
+        </div>
+        <span class="time">13:32</span>
+      </div>
+      <div class="step" data-time="813" data-index="14" onclick="seekTo(813)">
+        <span class="step-number">15</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">wait 2500</span>
+        </div>
+        <span class="time">13:33</span>
+      </div>
+      <div class="step" data-time="815.9" data-index="15" onclick="seekTo(815.9)">
+        <span class="step-number">16</span>
+        <span class="icon">👁</span>
+        <div class="step-content">
+          <span class="action">snapshot -i</span>
+        </div>
+        <span class="time">13:35</span>
+      </div>
+      <div class="step" data-time="864.3" data-index="16" onclick="seekTo(864.3)">
+        <span class="step-number">17</span>
+        <span class="icon">📷</span>
+        <div class="step-content">
+          <span class="action">screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/02-provider-management-loaded.png</span>
+        </div>
+        <span class="time">14:24</span>
+      </div>
+      <div class="step" data-time="903.9" data-index="17" onclick="seekTo(903.9)">
+        <span class="step-number">18</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">reload</span>
+        </div>
+        <span class="time">15:03</span>
+      </div>
+      <div class="step" data-time="904.3" data-index="18" onclick="seekTo(904.3)">
+        <span class="step-number">19</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">wait 2000</span>
+        </div>
+        <span class="time">15:04</span>
+      </div>
+      <div class="step" data-time="906.6" data-index="19" onclick="seekTo(906.6)">
+        <span class="step-number">20</span>
+        <span class="icon">👁</span>
+        <div class="step-content">
+          <span class="action">snapshot -i</span>
+        </div>
+        <span class="time">15:06</span>
+      </div>
+      <div class="step" data-time="906.9" data-index="20" onclick="seekTo(906.9)">
+        <span class="step-number">21</span>
+        <span class="icon">📷</span>
+        <div class="step-content">
+          <span class="action">screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/03-import-reminder-cleared.png</span>
+        </div>
+        <span class="time">15:06</span>
+      </div>
+      <div class="step" data-time="979" data-index="21" onclick="seekTo(979)">
+        <span class="step-number">22</span>
+        <span class="icon">🖱</span>
+        <div class="step-content">
+          <span class="action">click @e28</span>
+        </div>
+        <span class="time">16:19</span>
+      </div>
+      <div class="step" data-time="979.4" data-index="22" onclick="seekTo(979.4)">
+        <span class="step-number">23</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">wait 800</span>
+        </div>
+        <span class="time">16:19</span>
+      </div>
+      <div class="step" data-time="980.5" data-index="23" onclick="seekTo(980.5)">
+        <span class="step-number">24</span>
+        <span class="icon">👁</span>
+        <div class="step-content">
+          <span class="action">snapshot -i</span>
+        </div>
+        <span class="time">16:20</span>
+      </div>
+      <div class="step" data-time="1028.7" data-index="24" onclick="seekTo(1028.7)">
+        <span class="step-number">25</span>
+        <span class="icon">🖱</span>
+        <div class="step-content">
+          <span class="action">click @e27</span>
+        </div>
+        <span class="time">17:08</span>
+      </div>
+      <div class="step" data-time="1029" data-index="25" onclick="seekTo(1029)">
+        <span class="step-number">26</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">wait 500</span>
+        </div>
+        <span class="time">17:09</span>
+      </div>
+      <div class="step" data-time="1029.8" data-index="26" onclick="seekTo(1029.8)">
+        <span class="step-number">27</span>
+        <span class="icon">⌘</span>
+        <div class="step-content">
+          <span class="action">press ArrowDown</span>
+        </div>
+        <span class="time">17:09</span>
+      </div>
+      <div class="step" data-time="1030.1" data-index="27" onclick="seekTo(1030.1)">
+        <span class="step-number">28</span>
+        <span class="icon">⌘</span>
+        <div class="step-content">
+          <span class="action">press Enter</span>
+        </div>
+        <span class="time">17:10</span>
+      </div>
+      <div class="step" data-time="1030.4" data-index="28" onclick="seekTo(1030.4)">
+        <span class="step-number">29</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">wait 1500</span>
+        </div>
+        <span class="time">17:10</span>
+      </div>
+      <div class="step" data-time="1032.2" data-index="29" onclick="seekTo(1032.2)">
+        <span class="step-number">30</span>
+        <span class="icon">📷</span>
+        <div class="step-content">
+          <span class="action">screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/04-proxy-filter-applied.png</span>
+        </div>
+        <span class="time">17:12</span>
+      </div>
+      <div class="step" data-time="1032.6" data-index="30" onclick="seekTo(1032.6)">
+        <span class="step-number">31</span>
+        <span class="icon">👁</span>
+        <div class="step-content">
+          <span class="action">snapshot -i</span>
+        </div>
+        <span class="time">17:12</span>
+      </div>
+      <div class="step" data-time="1038.9" data-index="31" onclick="seekTo(1038.9)">
+        <span class="step-number">32</span>
+        <span class="icon">🖱</span>
+        <div class="step-content">
+          <span class="action">click @e28</span>
+        </div>
+        <span class="time">17:18</span>
+      </div>
+      <div class="step" data-time="1039.2" data-index="32" onclick="seekTo(1039.2)">
+        <span class="step-number">33</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">wait 300</span>
+        </div>
+        <span class="time">17:19</span>
+      </div>
+      <div class="step" data-time="1039.8" data-index="33" onclick="seekTo(1039.8)">
+        <span class="step-number">34</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">eval (() =&gt; ({visible: localStorage.getItem('provider-management-visible-filters'), url: location.href}))()</span>
+        </div>
+        <span class="time">17:19</span>
+      </div>
+      <div class="step" data-time="1091.5" data-index="34" onclick="seekTo(1091.5)">
+        <span class="step-number">35</span>
+        <span class="icon">🖱</span>
+        <div class="step-content">
+          <span class="action">click @e34</span>
+        </div>
+        <span class="time">18:11</span>
+      </div>
+      <div class="step" data-time="1091.8" data-index="35" onclick="seekTo(1091.8)">
+        <span class="step-number">36</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">wait 1200</span>
+        </div>
+        <span class="time">18:11</span>
+      </div>
+      <div class="step" data-time="1093.3" data-index="36" onclick="seekTo(1093.3)">
+        <span class="step-number">37</span>
+        <span class="icon">👁</span>
+        <div class="step-content">
+          <span class="action">snapshot -i</span>
+        </div>
+        <span class="time">18:13</span>
+      </div>
+      <div class="step" data-time="1147.2" data-index="37" onclick="seekTo(1147.2)">
+        <span class="step-number">38</span>
+        <span class="icon">🖱</span>
+        <div class="step-content">
+          <span class="action">click @e34</span>
+        </div>
+        <span class="time">19:07</span>
+      </div>
+      <div class="step" data-time="1147.5" data-index="38" onclick="seekTo(1147.5)">
+        <span class="step-number">39</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">wait 2000</span>
+        </div>
+        <span class="time">19:07</span>
+      </div>
+      <div class="step" data-time="1149.8" data-index="39" onclick="seekTo(1149.8)">
+        <span class="step-number">40</span>
+        <span class="icon">👁</span>
+        <div class="step-content">
+          <span class="action">snapshot -i</span>
+        </div>
+        <span class="time">19:09</span>
+      </div>
+      <div class="step" data-time="1186.8" data-index="40" onclick="seekTo(1186.8)">
+        <span class="step-number">41</span>
+        <span class="icon">📷</span>
+        <div class="step-content">
+          <span class="action">screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/05-provider-detail-before-refresh.png</span>
+        </div>
+        <span class="time">19:46</span>
+      </div>
+      <div class="step" data-time="1198" data-index="41" onclick="seekTo(1198)">
+        <span class="step-number">42</span>
+        <span class="icon">🖱</span>
+        <div class="step-content">
+          <span class="action">click @e180</span>
+        </div>
+        <span class="time">19:58</span>
+      </div>
+      <div class="step" data-time="1198.3" data-index="42" onclick="seekTo(1198.3)">
+        <span class="step-number">43</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">wait 4000</span>
+        </div>
+        <span class="time">19:58</span>
+      </div>
+      <div class="step" data-time="1202.6" data-index="43" onclick="seekTo(1202.6)">
+        <span class="step-number">44</span>
+        <span class="icon">📷</span>
+        <div class="step-content">
+          <span class="action">screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/06-provider-detail-after-refresh-sync.png</span>
+        </div>
+        <span class="time">20:02</span>
+      </div>
+      <div class="step" data-time="1202.9" data-index="44" onclick="seekTo(1202.9)">
+        <span class="step-number">45</span>
+        <span class="icon">👁</span>
+        <div class="step-content">
+          <span class="action">snapshot -i</span>
+        </div>
+        <span class="time">20:02</span>
+      </div>
+      <div class="step" data-time="1246.3" data-index="45" onclick="seekTo(1246.3)">
+        <span class="step-number">46</span>
+        <span class="icon">▶</span>
+        <div class="step-content">
+          <span class="action">errors</span>
+        </div>
+        <span class="time">20:46</span>
+      </div>
+      </div>
+      <div id="tabConsole" style="display:none">
+        <div class="log-tab-content">
+          <div class="log-tab-status">
+            <span class="error-badge clean" style="cursor:default"><span class="badge-dot"></span>Console: clean</span>
+          </div>
+          <p class="log-empty">No console output captured</p>
+        </div>
+      </div>
+      <div id="tabServer" style="display:none">
+        <div class="log-tab-content">
+          <div class="log-tab-status">
+            <span class="error-badge clean" style="cursor:default"><span class="badge-dot"></span>Server: clean</span>
+          </div>
+          <p class="log-empty">No server log captured</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    // --- Description expand/collapse ---
+    function initDescription() {
+      const desc = document.getElementById('description');
+      const btn = document.getElementById('showMoreBtn');
+      if (!desc || !btn) return;
+      const textEl = desc.querySelector('.description-text');
+      // Clamp initially, then check if text overflows
+      desc.classList.add('clamped');
+      requestAnimationFrame(() => {
+        if (textEl.scrollHeight > textEl.clientHeight + 1) {
+          btn.style.display = 'block';
+        }
+      });
+    }
+    function toggleDescription() {
+      const desc = document.getElementById('description');
+      const btn = document.getElementById('showMoreBtn');
+      if (!desc || !btn) return;
+      const isClamped = desc.classList.contains('clamped');
+      desc.classList.toggle('clamped');
+      btn.textContent = isClamped ? 'Show less' : 'Show more';
+    }
+    initDescription();
+
+    // --- Tab switching ---
+    let activeTab = 'timeline';
+
+    function switchTab(tab) {
+      if (tab === activeTab) return;
+      activeTab = tab;
+      document.querySelectorAll('.panel-tab').forEach(function(btn) {
+        btn.classList.toggle('active', btn.dataset.tab === tab);
+      });
+      document.getElementById('tabTimeline').style.display = tab === 'timeline' ? '' : 'none';
+      document.getElementById('tabConsole').style.display = tab === 'console' ? '' : 'none';
+      document.getElementById('tabServer').style.display = tab === 'server' ? '' : 'none';
+      var actions = document.getElementById('tabActionsTimeline');
+      if (actions) actions.style.display = tab === 'timeline' ? '' : 'none';
+    }
+
+    const video = document.querySelector('video');
+    const steps = document.querySelectorAll('.step');
+    const timelinePanel = document.querySelector('.timeline-panel');
+    const overlay = document.querySelector('.video-overlay');
+    const entries = [{"action":"snapshot -i","relativeTimeSec":42.6,"timestamp":"2026-04-08T14:46:55.716Z"},{"action":"click @e12","relativeTimeSec":74.6,"timestamp":"2026-04-08T14:47:27.688Z"},{"action":"wait 800","relativeTimeSec":75,"timestamp":"2026-04-08T14:47:28.098Z"},{"action":"snapshot -i","relativeTimeSec":76.1,"timestamp":"2026-04-08T14:47:29.181Z"},{"action":"fill @e25 admin@example.com","relativeTimeSec":108.5,"timestamp":"2026-04-08T14:48:01.590Z","element":{"label":"用户名/邮箱","bbox":{"x":449,"y":330,"width":382,"height":44},"viewport":{"width":1280,"height":720}}},{"action":"fill @e26 admin123456","relativeTimeSec":120.1,"timestamp":"2026-04-08T14:48:13.194Z"},{"action":"screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/01-login-filled.png","relativeTimeSec":120.4,"timestamp":"2026-04-08T14:48:13.498Z"},{"action":"click @e27","relativeTimeSec":131.9,"timestamp":"2026-04-08T14:48:24.976Z"},{"action":"wait 1500","relativeTimeSec":132.2,"timestamp":"2026-04-08T14:48:25.326Z"},{"action":"snapshot -i","relativeTimeSec":134,"timestamp":"2026-04-08T14:48:27.113Z"},{"action":"click @e6","relativeTimeSec":174.3,"timestamp":"2026-04-08T14:49:07.449Z","element":{"label":"提供商","bbox":{"x":48,"y":314,"width":38.03125,"height":19.5},"viewport":{"width":1280,"height":720}}},{"action":"wait 1500","relativeTimeSec":174.7,"timestamp":"2026-04-08T14:49:07.758Z"},{"action":"snapshot -i","relativeTimeSec":176.4,"timestamp":"2026-04-08T14:49:09.550Z"},{"action":"reload","relativeTimeSec":812.6,"timestamp":"2026-04-08T14:59:45.747Z"},{"action":"wait 2500","relativeTimeSec":813,"timestamp":"2026-04-08T14:59:46.109Z"},{"action":"snapshot -i","relativeTimeSec":815.9,"timestamp":"2026-04-08T14:59:48.957Z"},{"action":"screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/02-provider-management-loaded.png","relativeTimeSec":864.3,"timestamp":"2026-04-08T15:00:37.380Z"},{"action":"reload","relativeTimeSec":903.9,"timestamp":"2026-04-08T15:01:17.030Z"},{"action":"wait 2000","relativeTimeSec":904.3,"timestamp":"2026-04-08T15:01:17.384Z"},{"action":"snapshot -i","relativeTimeSec":906.6,"timestamp":"2026-04-08T15:01:19.688Z"},{"action":"screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/03-import-reminder-cleared.png","relativeTimeSec":906.9,"timestamp":"2026-04-08T15:01:20.015Z"},{"action":"click @e28","relativeTimeSec":979,"timestamp":"2026-04-08T15:02:32.141Z"},{"action":"wait 800","relativeTimeSec":979.4,"timestamp":"2026-04-08T15:02:32.480Z"},{"action":"snapshot -i","relativeTimeSec":980.5,"timestamp":"2026-04-08T15:02:33.580Z"},{"action":"click @e27","relativeTimeSec":1028.7,"timestamp":"2026-04-08T15:03:21.795Z"},{"action":"wait 500","relativeTimeSec":1029,"timestamp":"2026-04-08T15:03:22.152Z"},{"action":"press ArrowDown","relativeTimeSec":1029.8,"timestamp":"2026-04-08T15:03:22.938Z"},{"action":"press Enter","relativeTimeSec":1030.1,"timestamp":"2026-04-08T15:03:23.228Z"},{"action":"wait 1500","relativeTimeSec":1030.4,"timestamp":"2026-04-08T15:03:23.532Z"},{"action":"screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/04-proxy-filter-applied.png","relativeTimeSec":1032.2,"timestamp":"2026-04-08T15:03:25.314Z"},{"action":"snapshot -i","relativeTimeSec":1032.6,"timestamp":"2026-04-08T15:03:25.724Z"},{"action":"click @e28","relativeTimeSec":1038.9,"timestamp":"2026-04-08T15:03:32.021Z"},{"action":"wait 300","relativeTimeSec":1039.2,"timestamp":"2026-04-08T15:03:32.326Z"},{"action":"eval (() => ({visible: localStorage.getItem('provider-management-visible-filters'), url: location.href}))()","relativeTimeSec":1039.8,"timestamp":"2026-04-08T15:03:32.908Z"},{"action":"click @e34","relativeTimeSec":1091.5,"timestamp":"2026-04-08T15:04:24.565Z","element":{"label":"清除筛选","bbox":{"x":729,"y":286,"width":82,"height":36},"viewport":{"width":1280,"height":720}}},{"action":"wait 1200","relativeTimeSec":1091.8,"timestamp":"2026-04-08T15:04:24.880Z"},{"action":"snapshot -i","relativeTimeSec":1093.3,"timestamp":"2026-04-08T15:04:26.378Z"},{"action":"click @e34","relativeTimeSec":1147.2,"timestamp":"2026-04-08T15:05:20.262Z"},{"action":"wait 2000","relativeTimeSec":1147.5,"timestamp":"2026-04-08T15:05:20.595Z"},{"action":"snapshot -i","relativeTimeSec":1149.8,"timestamp":"2026-04-08T15:05:22.890Z"},{"action":"screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/05-provider-detail-before-refresh.png","relativeTimeSec":1186.8,"timestamp":"2026-04-08T15:05:59.933Z"},{"action":"click @e180","relativeTimeSec":1198,"timestamp":"2026-04-08T15:06:11.085Z","element":{"label":"刷新并适配","bbox":{"x":1122,"y":465,"width":116,"height":32},"viewport":{"width":1280,"height":720}}},{"action":"wait 4000","relativeTimeSec":1198.3,"timestamp":"2026-04-08T15:06:11.405Z"},{"action":"screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/06-provider-detail-after-refresh-sync.png","relativeTimeSec":1202.6,"timestamp":"2026-04-08T15:06:15.700Z"},{"action":"snapshot -i","relativeTimeSec":1202.9,"timestamp":"2026-04-08T15:06:16.038Z"},{"action":"errors","relativeTimeSec":1246.3,"timestamp":"2026-04-08T15:06:59.368Z"}];
+    let duration = 1246;
+    const markers = [{"time":42.6,"icon":"👁","action":"snapshot -i","index":0},{"time":74.6,"icon":"🖱","action":"click @e12","index":1},{"time":75,"icon":"▶","action":"wait 800","index":2},{"time":76.1,"icon":"👁","action":"snapshot -i","index":3},{"time":108.5,"icon":"⌨","action":"fill @e25 admin@example.com","index":4},{"time":120.1,"icon":"⌨","action":"fill @e26 admin123456","index":5},{"time":120.4,"icon":"📷","action":"screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/01-login-filled.png","index":6},{"time":131.9,"icon":"🖱","action":"click @e27","index":7},{"time":132.2,"icon":"▶","action":"wait 1500","index":8},{"time":134,"icon":"👁","action":"snapshot -i","index":9},{"time":174.3,"icon":"🖱","action":"click @e6","index":10},{"time":174.7,"icon":"▶","action":"wait 1500","index":11},{"time":176.4,"icon":"👁","action":"snapshot -i","index":12},{"time":812.6,"icon":"▶","action":"reload","index":13},{"time":813,"icon":"▶","action":"wait 2500","index":14},{"time":815.9,"icon":"👁","action":"snapshot -i","index":15},{"time":864.3,"icon":"📷","action":"screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/02-provider-management-loaded.png","index":16},{"time":903.9,"icon":"▶","action":"reload","index":17},{"time":904.3,"icon":"▶","action":"wait 2000","index":18},{"time":906.6,"icon":"👁","action":"snapshot -i","index":19},{"time":906.9,"icon":"📷","action":"screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/03-import-reminder-cleared.png","index":20},{"time":979,"icon":"🖱","action":"click @e28","index":21},{"time":979.4,"icon":"▶","action":"wait 800","index":22},{"time":980.5,"icon":"👁","action":"snapshot -i","index":23},{"time":1028.7,"icon":"🖱","action":"click @e27","index":24},{"time":1029,"icon":"▶","action":"wait 500","index":25},{"time":1029.8,"icon":"⌘","action":"press ArrowDown","index":26},{"time":1030.1,"icon":"⌘","action":"press Enter","index":27},{"time":1030.4,"icon":"▶","action":"wait 1500","index":28},{"time":1032.2,"icon":"📷","action":"screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/04-proxy-filter-applied.png","index":29},{"time":1032.6,"icon":"👁","action":"snapshot -i","index":30},{"time":1038.9,"icon":"🖱","action":"click @e28","index":31},{"time":1039.2,"icon":"▶","action":"wait 300","index":32},{"time":1039.8,"icon":"▶","action":"eval (() => ({visible: localStorage.getItem('provider-management-visible-filters'), url: location.href}))()","index":33},{"time":1091.5,"icon":"🖱","action":"click @e34","index":34},{"time":1091.8,"icon":"▶","action":"wait 1200","index":35},{"time":1093.3,"icon":"👁","action":"snapshot -i","index":36},{"time":1147.2,"icon":"🖱","action":"click @e34","index":37},{"time":1147.5,"icon":"▶","action":"wait 2000","index":38},{"time":1149.8,"icon":"👁","action":"snapshot -i","index":39},{"time":1186.8,"icon":"📷","action":"screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/05-provider-detail-before-refresh.png","index":40},{"time":1198,"icon":"🖱","action":"click @e180","index":41},{"time":1198.3,"icon":"▶","action":"wait 4000","index":42},{"time":1202.6,"icon":"📷","action":"screenshot proofshot-artifacts/2026-04-08_14-46-10_verify-provider-management-fixes-import/06-provider-detail-after-refresh-sync.png","index":43},{"time":1202.9,"icon":"👁","action":"snapshot -i","index":44},{"time":1246.3,"icon":"▶","action":"errors","index":45}];
+
+    // Scrub bar elements
+    const scrubTrack = document.getElementById('scrubTrack');
+    const scrubProgress = document.getElementById('scrubProgress');
+    const scrubPlayhead = document.getElementById('scrubPlayhead');
+    const scrubTooltip = document.getElementById('scrubTooltip');
+    const scrubMarkers = document.querySelectorAll('.scrub-marker');
+
+    // --- Toggle state ---
+    const toggleOverlays = document.getElementById('toggle-overlays');
+
+    function loadToggleState() {
+      try {
+        const saved = JSON.parse(localStorage.getItem('proofshot-overlays') || '{}');
+        if (saved.overlays === false) toggleOverlays.checked = false;
+      } catch {}
+    }
+    function saveToggleState() {
+      try {
+        localStorage.setItem('proofshot-overlays', JSON.stringify({
+          overlays: toggleOverlays.checked,
+        }));
+      } catch {}
+    }
+    loadToggleState();
+
+    toggleOverlays.addEventListener('change', () => {
+      if (!toggleOverlays.checked) clearOverlays();
+      saveToggleState();
+    });
+
+    function clearOverlays() {
+      if (!overlay) return;
+      overlay.querySelectorAll('.ripple, .scroll-indicator, .toast').forEach(el => el.remove());
+    }
+
+    // --- Action icon (mirrors server-side getActionIcon) ---
+    function getActionIconJS(action) {
+      const cmd = action.split(' ')[0].toLowerCase();
+      switch (cmd) {
+        case 'open': case 'navigate': return '\u{1F9ED}';
+        case 'click': return '\u{1F5B1}';
+        case 'fill': case 'type': return '\u2328';
+        case 'screenshot': return '\u{1F4F7}';
+        case 'snapshot': return '\u{1F441}';
+        case 'scroll': return '\u2195';
+        case 'press': case 'keyboard': return '\u2318';
+        default: return '\u25B6';
+      }
+    }
+
+    // --- Toast text generation ---
+    function getToastText(entry) {
+      const action = entry.action;
+      const parts = action.split(' ');
+      const cmd = parts[0].toLowerCase();
+      const label = entry.element ? entry.element.label : '';
+      const icon = getActionIconJS(action);
+
+      switch (cmd) {
+        case 'click':
+          return icon + '  Click' + (label ? ': ' + label : '');
+        case 'fill': {
+          const valMatch = action.match(/"([^"]*)"/);
+          const val = valMatch ? valMatch[1] : '';
+          const target = label || '';
+          return icon + '  Type: ' + val + (target ? ' into ' + target : '');
+        }
+        case 'type': {
+          const valMatch2 = action.match(/"([^"]*)"/);
+          const val2 = valMatch2 ? valMatch2[1] : '';
+          const target2 = label || '';
+          return icon + '  Type: ' + val2 + (target2 ? ' into ' + target2 : '');
+        }
+        case 'scroll': {
+          const dir = parts[1] || '';
+          return icon + '  Scroll ' + dir;
+        }
+        case 'open': {
+          const url = parts.slice(1).join(' ');
+          try {
+            return icon + '  Navigate: ' + new URL(url).pathname;
+          } catch {
+            return icon + '  Navigate: ' + url;
+          }
+        }
+        case 'press':
+          return icon + '  Press: ' + parts.slice(1).join(' ');
+        case 'screenshot':
+          return icon + '  Screenshot';
+        default:
+          return icon + '  ' + action;
+      }
+    }
+
+    // --- Scroll direction arrows ---
+    function getScrollArrow(action) {
+      const parts = action.split(' ');
+      const dir = (parts[1] || '').toLowerCase();
+      switch (dir) {
+        case 'up': return '\u2191';
+        case 'down': return '\u2193';
+        case 'left': return '\u2190';
+        case 'right': return '\u2192';
+        default: return '\u2195';
+      }
+    }
+
+    // --- Overlay scheduling ---
+    const overlayWindows = entries.map((entry, i) => {
+      const cmd = entry.action.split(' ')[0].toLowerCase();
+      const nextTime = i + 1 < entries.length ? entries[i + 1].relativeTimeSec : entry.relativeTimeSec + 3;
+      const rippleEnd = entry.relativeTimeSec + 0.6;
+      const toastEnd = Math.min(nextTime, entry.relativeTimeSec + 3);
+      const scrollEnd = entry.relativeTimeSec + 0.8;
+
+      return {
+        entry,
+        cmd,
+        rippleStart: entry.relativeTimeSec,
+        rippleEnd: cmd === 'scroll' ? scrollEnd : rippleEnd,
+        toastStart: entry.relativeTimeSec,
+        toastEnd,
+      };
+    });
+
+    const activeRipples = new Map();
+    const activeToasts = new Map();
+    let rafId = null;
+
+    function renderOverlays() {
+      if (!video || !overlay) return;
+      const t = video.currentTime;
+      const videoEl = video;
+
+      overlayWindows.forEach((win, idx) => {
+        const enabled = toggleOverlays.checked;
+
+        // --- Ripple / scroll indicator ---
+        if (enabled) {
+          if (t >= win.rippleStart && t < win.rippleEnd && !activeRipples.has(idx)) {
+            const el = document.createElement('div');
+
+            if (win.cmd === 'scroll') {
+              el.className = 'scroll-indicator';
+              el.textContent = getScrollArrow(win.entry.action);
+              overlay.appendChild(el);
+              activeRipples.set(idx, el);
+            } else if ((win.cmd === 'click' || win.cmd === 'fill' || win.cmd === 'type') && win.entry.element) {
+              const elem = win.entry.element;
+              const scaleX = videoEl.clientWidth / elem.viewport.width;
+              const scaleY = videoEl.clientHeight / elem.viewport.height;
+              const cx = (elem.bbox.x + elem.bbox.width / 2) * scaleX;
+              const cy = (elem.bbox.y + elem.bbox.height / 2) * scaleY;
+
+              el.className = 'ripple ' + (win.cmd === 'click' ? 'ripple-click' : 'ripple-fill');
+              el.style.left = cx + 'px';
+              el.style.top = cy + 'px';
+              overlay.appendChild(el);
+              activeRipples.set(idx, el);
+            }
+          }
+          if (t >= win.rippleEnd && activeRipples.has(idx)) {
+            activeRipples.get(idx).remove();
+            activeRipples.delete(idx);
+          }
+        } else if (activeRipples.has(idx)) {
+          activeRipples.get(idx).remove();
+          activeRipples.delete(idx);
+        }
+
+        // --- Toast ---
+        if (enabled) {
+          if (t >= win.toastStart && t < win.toastEnd && !activeToasts.has(idx)) {
+            activeToasts.forEach((el) => el.remove());
+            activeToasts.clear();
+
+            const el = document.createElement('div');
+            el.className = 'toast';
+            el.textContent = getToastText(win.entry);
+            overlay.appendChild(el);
+            activeToasts.set(idx, el);
+          }
+          if (t >= win.toastEnd && activeToasts.has(idx)) {
+            activeToasts.get(idx).remove();
+            activeToasts.delete(idx);
+          }
+        } else if (activeToasts.has(idx)) {
+          activeToasts.get(idx).remove();
+          activeToasts.delete(idx);
+        }
+      });
+
+      rafId = requestAnimationFrame(renderOverlays);
+    }
+
+    function startOverlayLoop() {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(renderOverlays);
+    }
+
+    function stopOverlayLoop() {
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+    }
+
+    // --- Seek handler: clear overlays on seek so they re-trigger correctly ---
+    function onSeeked() {
+      activeRipples.forEach(el => el.remove());
+      activeRipples.clear();
+      activeToasts.forEach(el => el.remove());
+      activeToasts.clear();
+    }
+
+    function seekTo(time) {
+      if (video) {
+        video.currentTime = time;
+        video.play();
+      }
+    }
+
+    function formatTimeFn(sec) {
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      return m + ':' + String(s).padStart(2, '0');
+    }
+
+    // Update scrub bar position
+    function updateScrubBar(t) {
+      if (!scrubTrack || duration <= 0) return;
+      const pct = Math.min((t / duration) * 100, 100);
+      if (scrubProgress) scrubProgress.style.width = pct + '%';
+      if (scrubPlayhead) scrubPlayhead.style.left = pct + '%';
+    }
+
+    // Highlight active marker on scrub bar
+    function updateActiveMarker(t) {
+      scrubMarkers.forEach(m => {
+        const mTime = parseFloat(m.dataset.time);
+        const idx = parseInt(m.dataset.index);
+        const nextMarker = markers[idx + 1];
+        const nextTime = nextMarker ? nextMarker.time : Infinity;
+        m.classList.toggle('active', t >= mTime && t < nextTime);
+      });
+    }
+
+    // Scrub bar: click track to seek
+    if (scrubTrack && video) {
+      let isDragging = false;
+
+      function getTimeFromEvent(e) {
+        const rect = scrubTrack.getBoundingClientRect();
+        const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        return pct * duration;
+      }
+
+      scrubTrack.addEventListener('mousedown', (e) => {
+        if (e.target.closest('.scrub-marker')) return;
+        isDragging = true;
+        const t = getTimeFromEvent(e);
+        video.currentTime = t;
+        updateScrubBar(t);
+      });
+
+      document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const t = getTimeFromEvent(e);
+        video.currentTime = t;
+        updateScrubBar(t);
+      });
+
+      document.addEventListener('mouseup', () => {
+        if (isDragging) {
+          isDragging = false;
+          video.play();
+        }
+      });
+    }
+
+    // Scrub bar: marker hover tooltips
+    scrubMarkers.forEach(marker => {
+      marker.addEventListener('mouseenter', (e) => {
+        const idx = parseInt(marker.dataset.index);
+        const m = markers[idx];
+        if (!m || !scrubTooltip) return;
+        const action = m.action.length > 40 ? m.action.slice(0, 40) + '\u2026' : m.action;
+        scrubTooltip.innerHTML = '<span class="tooltip-icon">' + m.icon + '</span>' + action + '<span class="tooltip-time">' + formatTimeFn(m.time) + '</span>';
+        scrubTooltip.style.display = 'block';
+
+        const trackRect = scrubTrack.getBoundingClientRect();
+        const markerRect = marker.getBoundingClientRect();
+        const tooltipLeft = markerRect.left - trackRect.left + markerRect.width / 2;
+        scrubTooltip.style.left = tooltipLeft + 'px';
+        scrubTooltip.style.transform = 'translateX(-50%)';
+      });
+
+      marker.addEventListener('mouseleave', () => {
+        if (scrubTooltip) scrubTooltip.style.display = 'none';
+      });
+
+      marker.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const t = parseFloat(marker.dataset.time);
+        seekTo(t);
+      });
+    });
+
+    // Log lines with timestamps for video sync
+    const logLines = document.querySelectorAll('.log-line[data-time]');
+
+    // Highlight active log line for a given video time
+    function updateActiveLogLine(t) {
+      logLines.forEach(line => {
+        const lt = parseFloat(line.dataset.time);
+        const nextLine = line.nextElementSibling;
+        const hasNext = nextLine && nextLine.dataset && nextLine.dataset.time !== undefined;
+        const nextTime = hasNext ? parseFloat(nextLine.dataset.time) : Infinity;
+        line.classList.toggle('active', t >= lt && t < nextTime);
+      });
+
+      // Auto-scroll the active log line in the currently visible tab
+      if (activeTab === 'console' || activeTab === 'server') {
+        var tabId = activeTab === 'console' ? 'tabConsole' : 'tabServer';
+        var tabEl = document.getElementById(tabId);
+        if (tabEl) {
+          var activeLine = tabEl.querySelector('.log-line.active');
+          if (activeLine && timelinePanel) {
+            var panelRect = timelinePanel.getBoundingClientRect();
+            var lineRect = activeLine.getBoundingClientRect();
+            if (lineRect.top < panelRect.top || lineRect.bottom > panelRect.bottom) {
+              activeLine.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            }
+          }
+        }
+      }
+    }
+
+    // Highlight active step as video plays (only if video exists)
+    if (video) {
+      video.addEventListener('timeupdate', () => {
+        const t = video.currentTime;
+        let activeStep = null;
+
+        steps.forEach(step => {
+          const stepTime = parseFloat(step.dataset.time);
+          const nextStep = step.nextElementSibling;
+          const isLastStep = !nextStep || !nextStep.classList.contains('step');
+          const nextTime = isLastStep ? Infinity : parseFloat(nextStep.dataset.time);
+          const isActive = t >= stepTime && t < nextTime;
+          step.classList.toggle('active', isActive);
+          if (isActive) activeStep = step;
+        });
+
+        // Auto-scroll the active step into view (only when timeline tab is active)
+        if (activeStep && activeTab === 'timeline') {
+          const panelRect = timelinePanel.getBoundingClientRect();
+          const stepRect = activeStep.getBoundingClientRect();
+          if (stepRect.top < panelRect.top || stepRect.bottom > panelRect.bottom) {
+            activeStep.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          }
+        }
+
+        // Sync log lines with video
+        updateActiveLogLine(t);
+
+        // Update scrub bar + markers
+        updateScrubBar(t);
+        updateActiveMarker(t);
+      });
+
+      // Sync scrub bar duration with actual video duration
+      video.addEventListener('loadedmetadata', () => {
+        if (video.duration && isFinite(video.duration)) {
+          duration = video.duration;
+          // Reposition markers to match actual video duration
+          scrubMarkers.forEach(m => {
+            const mTime = parseFloat(m.dataset.time);
+            m.style.left = (duration > 0 ? (mTime / duration) * 100 : 0) + '%';
+          });
+        }
+      });
+
+      // Start/stop rAF overlay loop with video play state
+      video.addEventListener('play', startOverlayLoop);
+      video.addEventListener('pause', stopOverlayLoop);
+      video.addEventListener('ended', stopOverlayLoop);
+      video.addEventListener('seeked', onSeeked);
+    }
+
+    // Keyboard navigation: left/right arrows jump between steps
+    document.addEventListener('keydown', (e) => {
+      if (activeTab !== 'timeline') return;
+      if (!video || !markers.length) return;
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        const t = video.currentTime;
+        let targetIdx = -1;
+
+        if (e.key === 'ArrowRight') {
+          // Find next marker after current time
+          for (let i = 0; i < markers.length; i++) {
+            if (markers[i].time > t + 0.5) { targetIdx = i; break; }
+          }
+          if (targetIdx === -1) targetIdx = markers.length - 1;
+        } else {
+          // Find previous marker before current time
+          for (let i = markers.length - 1; i >= 0; i--) {
+            if (markers[i].time < t - 0.5) { targetIdx = i; break; }
+          }
+          if (targetIdx === -1) targetIdx = 0;
+        }
+
+        seekTo(markers[targetIdx].time);
+      }
+    });
+  </script>
+</body>
+</html>

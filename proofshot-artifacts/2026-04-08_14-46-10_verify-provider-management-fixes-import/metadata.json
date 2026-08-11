@@ -1,0 +1,6 @@
+{
+  "branch": "master",
+  "commitSha": "27b09d8e0e12ad1c7c9273834b1f9dc566ad4a14",
+  "startedAt": "2026-04-08T14:46:10.855Z",
+  "description": "Verify provider management fixes: import reminder, proxy filter visibility, upstream model refresh and sync"
+}

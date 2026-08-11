@@ -1,0 +1,1 @@
+等待窗口结束后，Coordinator 和 writer 仍在推进，未出现停滞或需要干预的迹象。现在补齐只读证据，包括当前 diff 摘要、index 状态、远端分支/PR/Actions/artifact 状态，然后写监督报告。
