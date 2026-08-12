@@ -56,9 +56,9 @@ use super::error::{
 mod execution_failures;
 use self::execution_failures::{
     build_stream_failure_from_execution_error, build_stream_failure_from_provider_error_body,
-    build_stream_failure_report, build_stream_transport_failure_report,
-    handle_prefetch_provider_private_stream_error, handle_prefetch_stream_failure,
-    submit_midstream_stream_failure, StreamFailureReport,
+    build_stream_failure_report, build_stream_retryable_upstream_failure_report,
+    build_stream_transport_failure_report, handle_prefetch_provider_private_stream_error,
+    handle_prefetch_stream_failure, submit_midstream_stream_failure, StreamFailureReport,
 };
 use crate::ai_serving::api::{
     extract_provider_private_stream_error_body, maybe_bridge_standard_sync_json_to_stream,
@@ -6079,6 +6079,24 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     let limit_direct_finalize_prefetch =
         should_limit_direct_finalize_prefetch(plan_kind, local_stream_rewriter.is_some())
             || stream_commit_policy.requires_bounded_frame_wait();
+    // For JSON-classified responses (FirstClassifiedBody), transport frames are
+    // not semantic boundaries: a single JSON error envelope may span more than
+    // MAX_STREAM_PREFETCH_FRAMES data frames. Keep prefetching until the JSON
+    // is complete (or the byte cap is reached) so an embedded provider error is
+    // detected before the candidate stream is committed.
+    //
+    // The classifier treats a body as JSON when the header declares JSON or the
+    // body (after BOM/whitespace strip) starts with '{' or '['. Keep both
+    // signals in sync: when the header is missing/mislabeled but the body looks
+    // like JSON, prefetching must also continue past the frame cap.
+    let mut prefetch_waits_for_complete_json = matches!(
+        stream_commit_policy,
+        StreamCommitPolicy::FirstClassifiedBody
+    ) && !limit_direct_finalize_prefetch
+        && upstream_content_type.is_some_and(|content_type| {
+            let content_type = content_type.to_ascii_lowercase();
+            content_type.contains("json") || content_type.ends_with("+json")
+        });
     let mut stream_commit_gate = StreamCommitGate::new(stream_commit_policy);
     let mut prefetch_client_completion_tracker = ClientVisibleStreamCompletionTracker::default();
     let mut prefetched_client_visible_stream_completed = false;
@@ -6088,6 +6106,12 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         stream_commit_gate.commit();
     }
     let mut prefetched_chunks: Vec<Bytes> = Vec::new();
+    // Tracks the most recent classification of the prefetched body. Used after
+    // the prefetch loop to detect a JSON body that reached the byte cap while
+    // still incomplete (NeedMore): committing it would hide an embedded error
+    // and disable failover, so it must go through the retryable failure path
+    // instead.
+    let mut last_prefetch_inspection: Option<StreamPrefetchInspection> = None;
     let mut provider_prefetched_body = Vec::new();
     let mut provider_prefetched_body_truncated = false;
     let mut prefetched_body = Vec::new();
@@ -6122,6 +6146,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         .filter(|_| !skip_direct_finalize_prefetch)
     {
         while (stream_commit_policy.requires_bounded_frame_wait()
+            || prefetch_waits_for_complete_json
             || prefetched_chunks.len() < MAX_STREAM_PREFETCH_FRAMES)
             && prefetched_inspection_body.len() < MAX_STREAM_PREFETCH_BYTES
         {
@@ -6323,6 +6348,28 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         &mut prefetched_inspection_body_truncated,
                     );
 
+                    // Sync the prefetch wait flag with the classifier: a body
+                    // that starts with '{' or '[' is treated as JSON even when
+                    // the upstream Content-Type header is missing or mislabeled.
+                    // Without this, a JSON error body split over more than
+                    // MAX_STREAM_PREFETCH_FRAMES frames would still be committed
+                    // after the frame cap and lose failover.
+                    if matches!(
+                        stream_commit_policy,
+                        StreamCommitPolicy::FirstClassifiedBody
+                    ) && !limit_direct_finalize_prefetch
+                    {
+                        let body = &prefetched_inspection_body;
+                        let stripped = strip_utf8_bom_and_ws(body);
+                        let looks_like_json = stripped.starts_with(b"{")
+                            || stripped.starts_with(b"[")
+                            || upstream_content_type.is_some_and(|content_type| {
+                                let content_type = content_type.to_ascii_lowercase();
+                                content_type.contains("json") || content_type.ends_with("+json")
+                            });
+                        prefetch_waits_for_complete_json = looks_like_json;
+                    }
+
                     let anthropic_commit_ready =
                         match stream_commit_gate.observe_provider_bytes(&chunk) {
                             StreamPrecommitObservation::Pending => false,
@@ -6393,6 +6440,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             &prefetched_inspection_body,
                         )
                     };
+                    last_prefetch_inspection = Some(inspection.clone());
                     match inspection {
                         StreamPrefetchInspection::EmbeddedError(body_json) => {
                             debug!(
@@ -6456,6 +6504,35 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         }
                         StreamPrefetchInspection::NeedMore => {}
                         StreamPrefetchInspection::NonError => {}
+                        StreamPrefetchInspection::MalformedJson => {
+                            // Complete but invalid JSON in the prefetch buffer is
+                            // not a confirmed non-error response. Fail over like
+                            // a malformed upstream body instead of committing
+                            // the candidate stream and losing failover.
+                            let failure = build_stream_retryable_upstream_failure_report(
+                                "execution_runtime_stream_prefetch_malformed_json",
+                                "prefetched execution runtime stream body is complete but not valid JSON".to_string(),
+                                502,
+                            );
+                            return handle_prefetch_stream_failure(
+                                state,
+                                trace_id,
+                                decision,
+                                &plan,
+                                report_context,
+                                request_id,
+                                candidate_id,
+                                report_kind.as_str(),
+                                headers,
+                                prefetched_usage_telemetry.clone(),
+                                &provider_prefetched_body,
+                                candidate_started_unix_secs,
+                                stream_elapsed_ms_since(stream_started_at),
+                                failure,
+                                retry_scope_out.as_deref_mut(),
+                            )
+                            .await;
+                        }
                     }
 
                     if !response_headers_indicate_sse(&upstream_headers)
@@ -6678,6 +6755,41 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 StreamFramePayload::Headers { .. } => {}
             }
         }
+    }
+    if prefetch_waits_for_complete_json
+        && matches!(
+            last_prefetch_inspection,
+            Some(StreamPrefetchInspection::NeedMore)
+        )
+        && !prefetched_inspection_body.is_empty()
+    {
+        // The JSON body could not be fully classified before the prefetch cap
+        // (16 KiB) or stream end. Committing a partial JSON body would hide a
+        // possible embedded provider error and lose failover, so surface it as
+        // a retryable upstream failure instead.
+        let failure = build_stream_retryable_upstream_failure_report(
+            "execution_runtime_stream_prefetch_incomplete_json",
+            "prefetched execution runtime stream JSON body exceeded the prefetch cap while incomplete".to_string(),
+            502,
+        );
+        return handle_prefetch_stream_failure(
+            state,
+            trace_id,
+            decision,
+            &plan,
+            report_context,
+            request_id,
+            candidate_id,
+            report_kind.as_deref().unwrap_or_default(),
+            headers,
+            prefetched_usage_telemetry.clone(),
+            &provider_prefetched_body,
+            candidate_started_unix_secs,
+            stream_elapsed_ms_since(stream_started_at),
+            failure,
+            retry_scope_out.as_deref_mut(),
+        )
+        .await;
     }
     if stream_commit_gate.is_uncommitted() {
         stream_commit_gate.commit();

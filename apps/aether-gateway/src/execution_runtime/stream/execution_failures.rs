@@ -127,6 +127,31 @@ pub(super) fn build_stream_failure_report(
     }
 }
 
+/// Pre-commit upstream protocol/body failure that is retryable across
+/// candidates (e.g. complete-but-invalid JSON or a JSON body that could not
+/// be classified before the prefetch cap). Unlike
+/// `build_stream_failure_report`, this honours local failover analysis so a
+/// 5xx-classified failure schedules the next candidate instead of committing
+/// the current stream.
+pub(super) fn build_stream_retryable_upstream_failure_report(
+    error_type: impl Into<String>,
+    error_message: impl Into<String>,
+    status_code: u16,
+) -> StreamFailureReport {
+    let error_type = error_type.into();
+    let error_message = error_message.into();
+    StreamFailureReport {
+        status_code,
+        error_type,
+        error_message,
+        upstream_status_code: Some(status_code),
+        transport_error: false,
+        honor_http_failover: true,
+        extra_error_fields: Map::new(),
+        provider_body_json: None,
+    }
+}
+
 pub(super) fn build_stream_transport_failure_report(
     error_type: impl Into<String>,
     error_message: impl Into<String>,
