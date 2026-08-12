@@ -1203,6 +1203,13 @@ function removePerModelPolicy(model: string): void {
   modelFilter.value = 'unconfigured'
   updateDraftConfig(next)
   resetEditingConfig()
+  // 移除最后一个模型特殊配置后，自动回到统一调度维度：
+  // 若仍停留在“区分模型”维度，canSaveDraft 会因
+  // perModelPolicies 为空而禁用保存按钮，且保存时会拦截
+  // “按模型排序时至少选择一个模型”，导致无法保存删除结果。
+  if (perModelPolicies.value.length === 0) {
+    setSortingScope('unified')
+  }
 }
 
 function selectGlobalModel(model: string): void {
