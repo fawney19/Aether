@@ -1,4 +1,5 @@
 use super::ADMIN_USERS_DATA_UNAVAILABLE_DETAIL;
+use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::AdminTypedObjectPatch;
 use crate::handlers::shared::{deserialize_optional_string_list_patch, normalize_ip_rules};
 use axum::{
@@ -302,6 +303,88 @@ pub(crate) fn normalize_admin_user_ip_rules(
     value: Option<Vec<String>>,
 ) -> Result<Option<Vec<String>>, String> {
     normalize_ip_rules(value)
+}
+
+/// Parses and validates a provider-scoped key allowlist payload.
+///
+/// Returns `Ok(None)` when the payload is absent/empty (legacy provider-only
+/// behavior). A non-empty scope requires a non-empty provider allowlist; every
+/// referenced key must exist, be active, belong to the provider named by its
+/// object key, and the provider itself must be allowed by the allowlist
+/// (matching by stable id, name, or type).
+pub(crate) async fn normalize_admin_provider_key_scope(
+    state: &AdminAppState<'_>,
+    allowed_providers: Option<&[String]>,
+    raw_scope: Option<serde_json::Value>,
+) -> Result<Option<aether_data::repository::provider_key_scope::ProviderKeyScope>, String> {
+    use aether_data::repository::provider_key_scope::{parse_provider_key_scope, ProviderKeyScope};
+
+    let Some(scope) = parse_provider_key_scope(raw_scope, "allowed_provider_key_ids")
+        .map_err(|err| err.to_string())?
+    else {
+        return Ok(None);
+    };
+    let allowed_providers = allowed_providers
+        .map(|items| items.iter().map(|item| item.as_str()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if allowed_providers.is_empty() {
+        return Err("设置 allowed_provider_key_ids 前必须先选择允许的提供商".to_string());
+    }
+
+    let key_ids = scope
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let keys = state
+        .read_provider_catalog_keys_by_ids(&key_ids)
+        .await
+        .map_err(|err| format!("校验 Key 失败: {:?}", err))?;
+    let key_by_id = keys
+        .into_iter()
+        .map(|key| (key.id.clone(), key))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let provider_ids = scope.keys().cloned().collect::<Vec<_>>();
+    let providers = state
+        .read_provider_catalog_providers_by_ids(&provider_ids)
+        .await
+        .map_err(|err| format!("校验提供商失败: {:?}", err))?;
+    let provider_by_id = providers
+        .into_iter()
+        .map(|provider| (provider.id.clone(), provider))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    for (provider_id, key_ids) in &scope {
+        let Some(provider) = provider_by_id.get(provider_id) else {
+            return Err(format!("提供商 {provider_id} 不存在"));
+        };
+        let provider_allowed = allowed_providers.iter().any(|allowed| {
+            aether_scheduler_core::provider_matches_allowed_value(
+                allowed,
+                &provider.id,
+                &provider.name,
+                &provider.provider_type,
+            )
+        });
+        if !provider_allowed {
+            return Err(format!("提供商 {} 未在允许的提供商列表中", provider.name));
+        }
+        for key_id in key_ids {
+            let Some(key) = key_by_id.get(key_id) else {
+                return Err(format!("Key {key_id} 不存在"));
+            };
+            if !key.is_active {
+                return Err(format!("Key {key_id} 已禁用，不能勾选"));
+            }
+            if key.provider_id != *provider_id {
+                return Err(format!("Key {key_id} 不属于提供商 {provider_id}"));
+            }
+        }
+    }
+    Ok(Some(scope))
 }
 
 pub(crate) fn normalize_admin_list_policy_mode(value: &str) -> Result<String, String> {

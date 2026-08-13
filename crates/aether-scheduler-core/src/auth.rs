@@ -1,6 +1,11 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SchedulerAuthConstraints {
     pub allowed_providers: Option<Vec<String>>,
+    /// Stable provider ID -> allowed `provider_api_keys.id` set. A provider
+    /// with no entry is unrestricted (all active keys usable).
+    pub allowed_provider_key_ids: Option<BTreeMap<String, BTreeSet<String>>>,
     pub allowed_api_formats: Option<Vec<String>>,
     pub allowed_models: Option<Vec<String>>,
 }
@@ -33,6 +38,25 @@ pub fn auth_constraints_allow_provider(
     allowed.iter().any(|value| {
         provider_matches_allowed_value(value, provider_id, provider_name, provider_type)
     })
+}
+
+/// Key-level gate: the candidate row's stable `key_id` must be inside the
+/// allowlist for the row's stable `provider_id` when the scope restricts that
+/// provider. No entry (or an empty set) means all active keys are usable.
+pub fn auth_constraints_allow_provider_key(
+    constraints: Option<&SchedulerAuthConstraints>,
+    provider_id: &str,
+    key_id: &str,
+) -> bool {
+    let Some(scope) =
+        constraints.and_then(|constraints| constraints.allowed_provider_key_ids.as_ref())
+    else {
+        return true;
+    };
+    match scope.get(provider_id) {
+        Some(allowed_key_ids) => allowed_key_ids.contains(key_id),
+        None => true,
+    }
 }
 
 pub fn auth_constraints_allow_api_format(
@@ -100,12 +124,14 @@ mod tests {
     use super::{
         api_format_matches_allowed_value, auth_constraints_allow_api_format,
         auth_constraints_allow_model, auth_constraints_allow_model_with_model_directives,
-        auth_constraints_allow_provider, provider_matches_allowed_value, SchedulerAuthConstraints,
+        auth_constraints_allow_provider, auth_constraints_allow_provider_key,
+        provider_matches_allowed_value, SchedulerAuthConstraints,
     };
 
     fn sample_constraints() -> SchedulerAuthConstraints {
         SchedulerAuthConstraints {
             allowed_providers: Some(vec!["provider-1".to_string(), "OpenAI".to_string()]),
+            allowed_provider_key_ids: None,
             allowed_api_formats: Some(vec!["OPENAI:CHAT".to_string()]),
             allowed_models: Some(vec!["gpt-5".to_string()]),
         }
@@ -235,6 +261,86 @@ mod tests {
             "gpt-5-high",
             "gpt-5-high",
             true
+        ));
+    }
+
+    #[test]
+    fn provider_key_scope_allows_all_keys_when_scope_absent() {
+        let constraints = sample_constraints();
+        assert!(auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-1",
+            "any-key",
+        ));
+        assert!(auth_constraints_allow_provider_key(
+            None,
+            "provider-1",
+            "any-key"
+        ));
+    }
+
+    #[test]
+    fn provider_key_scope_restricts_only_listed_provider_keys() {
+        let constraints = SchedulerAuthConstraints {
+            allowed_providers: Some(vec!["provider-1".to_string()]),
+            allowed_provider_key_ids: Some(
+                [(
+                    "provider-1".to_string(),
+                    ["key-a".to_string(), "key-b".to_string()].into(),
+                )]
+                .into(),
+            ),
+            allowed_api_formats: None,
+            allowed_models: None,
+        };
+
+        assert!(auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-1",
+            "key-a",
+        ));
+        assert!(auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-1",
+            "key-b",
+        ));
+        assert!(!auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-1",
+            "key-c",
+        ));
+        assert!(auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-2",
+            "key-c",
+        ));
+    }
+
+    #[test]
+    fn provider_key_scope_matches_stable_ids_only() {
+        let constraints = SchedulerAuthConstraints {
+            allowed_providers: Some(vec!["OpenAI".to_string()]),
+            allowed_provider_key_ids: Some(
+                [("provider-1".to_string(), ["key-a".to_string()].into())].into(),
+            ),
+            allowed_api_formats: None,
+            allowed_models: None,
+        };
+
+        assert!(auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-1",
+            "key-a",
+        ));
+        assert!(auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-2",
+            "key-a",
+        ));
+        assert!(!auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-1",
+            "key-b",
         ));
     }
 

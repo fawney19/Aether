@@ -1687,6 +1687,10 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
       key_display: 'sk-sa...demo',
       is_active: true,
       is_standalone: true,
+      allowed_providers: body.allowed_providers ?? null,
+      allowed_provider_key_ids: body.allowed_provider_key_ids ?? null,
+      allowed_api_formats: body.allowed_api_formats ?? null,
+      allowed_models: body.allowed_models ?? null,
       total_requests: 0,
       created_at: new Date().toISOString()
     }

@@ -120,6 +120,7 @@ pub(super) fn sample_auth_snapshot(api_key_id: &str) -> GatewayAuthApiKeySnapsho
         user_allowed_providers: None,
         user_allowed_api_formats: None,
         user_allowed_models: None,
+        user_allowed_provider_key_ids: None,
         api_key_id: api_key_id.to_string(),
         api_key_name: Some("default".to_string()),
         api_key_is_active: true,
@@ -131,6 +132,7 @@ pub(super) fn sample_auth_snapshot(api_key_id: &str) -> GatewayAuthApiKeySnapsho
         api_key_allowed_providers: None,
         api_key_allowed_api_formats: None,
         api_key_allowed_models: None,
+        api_key_allowed_provider_key_ids: None,
         api_key_ip_rules: None,
         currently_usable: true,
     }

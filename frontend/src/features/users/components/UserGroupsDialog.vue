@@ -40,6 +40,9 @@
             :provider-options="providerOptions"
             :api-format-options="apiFormatOptions"
             :model-options="modelOptions"
+            :provider-keys-by-provider="providerKeysByProvider"
+            :provider-keys-loading="providerKeysLoading"
+            :provider-display-name="providerDisplayName"
             :help-text="groupPolicyHelpTextLocalized"
           />
         </div>
@@ -76,6 +79,11 @@ import { useConfirm } from '@/composables/useConfirm'
 import { parseApiError } from '@/utils/errorParser'
 import { useI18n } from '@/i18n'
 import { useUserAccessControlOptions } from '@/features/users/composables/useUserAccessControlOptions'
+import {
+  providerKeyScopeForSubmit,
+  providerKeyScopeFromApi,
+  restrictProviderKeyScopeToProviders,
+} from '@/features/api-keys/utils/providerKeyScope'
 import UserGroupAccessControlFields from './UserGroupAccessControlFields.vue'
 import UserGroupEditorHeader from './UserGroupEditorHeader.vue'
 import UserGroupListPanel from './UserGroupListPanel.vue'
@@ -107,7 +115,11 @@ const {
   providerOptions,
   apiFormatOptions,
   modelOptions,
+  providerKeysByProvider,
+  providerKeysLoading,
   loadAccessControlOptions,
+  loadProviderKeys,
+  clearProviderKeysCache,
 } = useUserAccessControlOptions()
 
 const loading = ref(false)
@@ -143,6 +155,41 @@ watch(
     })
   },
 )
+
+watch(
+  () => form.value.allowed_providers,
+  (providers) => {
+    if (form.value.allowed_providers_mode !== 'specific') return
+    const nextScope = restrictProviderKeyScopeToProviders(
+      form.value.provider_key_scope,
+      providers,
+    )
+    if (JSON.stringify(nextScope) !== JSON.stringify(form.value.provider_key_scope)) {
+      form.value.provider_key_scope = nextScope
+    }
+    const cached = new Set(Object.keys(providerKeysByProvider.value))
+    const removed = [...cached].filter((providerId) => !providers.includes(providerId))
+    if (removed.length > 0) {
+      clearProviderKeysCache(removed)
+    }
+    for (const providerId of providers) {
+      void loadProviderKeys(providerId)
+    }
+  },
+)
+
+watch(
+  () => form.value.allowed_providers_mode,
+  (mode) => {
+    if (mode !== 'specific') {
+      form.value.provider_key_scope = {}
+    }
+  },
+)
+
+function providerDisplayName(providerId: string): string {
+  return providerOptions.value.find((provider) => provider.value === providerId)?.label || providerId
+}
 
 function handleDialogUpdate(value: boolean): void {
   if (!value) emit('close')
@@ -203,6 +250,7 @@ async function selectGroup(groupId: string): Promise<void> {
     allowed_api_formats_mode: normalizeListMode(group.allowed_api_formats_mode),
     allowed_models_mode: normalizeListMode(group.allowed_models_mode),
     allowed_providers: group.allowed_providers ? [...group.allowed_providers] : [],
+    provider_key_scope: providerKeyScopeFromApi(group.allowed_provider_key_ids),
     allowed_api_formats: group.allowed_api_formats ? [...group.allowed_api_formats] : [],
     allowed_models: group.allowed_models ? [...group.allowed_models] : [],
     rate_limit_mode: normalizeRateMode(group.rate_limit_mode),
@@ -232,6 +280,7 @@ function createEmptyForm(): UserGroupFormState {
     allowed_api_formats_mode: 'unrestricted',
     allowed_models_mode: 'unrestricted',
     allowed_providers: [],
+    provider_key_scope: {},
     allowed_api_formats: [],
     allowed_models: [],
     rate_limit_mode: 'system',
@@ -277,6 +326,10 @@ function buildPayload(): UpsertUserGroupRequest {
     allowed_providers: form.value.allowed_providers_mode === 'specific'
       ? [...form.value.allowed_providers]
       : null,
+    allowed_provider_key_ids: providerKeyScopeForSubmit(
+      form.value.provider_key_scope,
+      form.value.allowed_providers_mode !== 'specific',
+    ),
     allowed_api_formats: form.value.allowed_api_formats_mode === 'specific'
       ? [...form.value.allowed_api_formats]
       : null,

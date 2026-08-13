@@ -195,6 +195,51 @@
                 </div>
               </div>
 
+              <!-- 提供商下的具体 Key -->
+              <div
+                v-if="!form.provider_unrestricted && form.allowed_providers.length > 0"
+                class="space-y-3"
+              >
+                <Label class="text-sm font-medium">允许的具体 Key（可选）</Label>
+                <p class="text-xs text-muted-foreground">
+                  不勾选任何 Key 时该提供商下全部可用 Key 均可使用；勾选后仅使用选中的 Key。
+                </p>
+                <div
+                  v-for="providerId in form.allowed_providers"
+                  :key="providerId"
+                  class="rounded-lg border border-border/70 bg-background/60"
+                >
+                  <div class="flex items-center justify-between gap-2 border-b border-border/50 px-3 py-2">
+                    <span class="text-xs font-medium">{{ providerDisplayName(providerId) }}</span>
+                    <span class="text-[11px] text-muted-foreground">
+                      {{ providerKeyScopeSelectedCount(providerId) > 0 ? `已选 ${providerKeyScopeSelectedCount(providerId)} 个 Key` : '全部 Key 可用' }}
+                    </span>
+                  </div>
+                  <div v-if="providerKeysLoading.has(providerId)" class="px-3 py-2 text-xs text-muted-foreground">
+                    加载 Key 中...
+                  </div>
+                  <div v-else-if="providerKeysByProvider[providerId]?.length" class="grid gap-1 p-2">
+                    <label
+                      v-for="key in providerKeysByProvider[providerId]"
+                      :key="key.id"
+                      class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm hover:bg-muted/50"
+                    >
+                      <input
+                        :checked="selectedProviderKeyIds(providerId).includes(key.id)"
+                        type="checkbox"
+                        class="h-3.5 w-3.5 rounded border-gray-300 cursor-pointer"
+                        @change="toggleProviderKey(providerId, key.id)"
+                      >
+                      <span class="min-w-0 flex-1 truncate">{{ key.name || key.id }}</span>
+                      <span class="text-[11px] text-muted-foreground">{{ key.api_key_masked }}</span>
+                    </label>
+                  </div>
+                  <div v-else class="px-3 py-2 text-xs text-muted-foreground">
+                    该提供商暂无可用 Key
+                  </div>
+                </div>
+              </div>
+
               <!-- 端点 -->
               <div class="space-y-2">
                 <Label class="text-sm font-medium">允许的端点</Label>
@@ -364,6 +409,7 @@ import { useFormDialog } from '@/composables/useFormDialog'
 import { MultiSelect } from '@/components/common'
 import { getProvidersSummary } from '@/api/endpoints/providers'
 import { getGlobalModels } from '@/api/global-models'
+import { getProviderKeys } from '@/api/endpoints/keys'
 import { adminApi } from '@/api/admin'
 import { log } from '@/utils/logger'
 import { parseNumberInput } from '@/utils/form'
@@ -371,7 +417,13 @@ import {
   mergeChatPiiRedactionFeatureSettings,
   readChatPiiRedactionFeatureSettings,
 } from '@/utils/featureSettings'
+import {
+  providerKeyScopeForSubmit,
+  providerKeyScopeFromApi,
+  restrictProviderKeyScopeToProviders,
+} from '@/features/api-keys/utils/providerKeyScope'
 import type { ProviderWithEndpointsSummary, GlobalModelResponse } from '@/api/endpoints/types'
+import type { EndpointAPIKey } from '@/api/endpoints/keys'
 
 export interface StandaloneKeyFormData {
   id?: string
@@ -384,6 +436,7 @@ export interface StandaloneKeyFormData {
   concurrent_limit?: number | null
   auto_delete_on_expiry: boolean
   allowed_providers?: string[] | null
+  allowed_provider_key_ids?: Record<string, string[]> | null
   allowed_api_formats?: string[] | null
   allowed_models?: string[] | null
   ip_rules?: string[] | null
@@ -406,6 +459,7 @@ interface StandaloneKeyFormState {
   api_format_unrestricted: boolean
   model_unrestricted: boolean
   allowed_providers: string[]
+  provider_key_scope: Record<string, string[]>
   allowed_api_formats: string[]
   allowed_models: string[]
   ip_rules_text: string
@@ -431,6 +485,9 @@ const accessRestrictionsExpanded = ref(false)
 const providers = ref<ProviderWithEndpointsSummary[]>([])
 const globalModels = ref<GlobalModelResponse[]>([])
 const allApiFormats = ref<string[]>([])
+const providerKeysByProvider = ref<Record<string, EndpointAPIKey[]>>({})
+const providerKeysLoading = ref<Set<string>>(new Set())
+const providerKeysLoaded = ref<Set<string>>(new Set())
 
 const providerOptions = computed(() =>
   providers.value.map((provider) => ({
@@ -467,6 +524,7 @@ const form = ref<StandaloneKeyFormState>({
   api_format_unrestricted: true,
   model_unrestricted: true,
   allowed_providers: [],
+  provider_key_scope: {},
   allowed_api_formats: [],
   allowed_models: [],
   ip_rules_text: '',
@@ -516,6 +574,7 @@ function resetForm() {
     api_format_unrestricted: true,
     model_unrestricted: true,
     allowed_providers: [],
+    provider_key_scope: {},
     allowed_api_formats: [],
     allowed_models: [],
     ip_rules_text: '',
@@ -543,6 +602,7 @@ function loadKeyData() {
     api_format_unrestricted: props.apiKey.allowed_api_formats == null,
     model_unrestricted: props.apiKey.allowed_models == null,
     allowed_providers: props.apiKey.allowed_providers ? [...props.apiKey.allowed_providers] : [],
+    provider_key_scope: providerKeyScopeFromApi(props.apiKey.allowed_provider_key_ids),
     allowed_api_formats: props.apiKey.allowed_api_formats ? [...props.apiKey.allowed_api_formats] : [],
     allowed_models: props.apiKey.allowed_models ? [...props.apiKey.allowed_models] : [],
     ip_rules_text: props.apiKey.ip_rules?.join(', ') ?? '',
@@ -582,6 +642,84 @@ function clearExpiryDate() {
   form.value.auto_delete_on_expiry = false
 }
 
+// 提供商下具体 Key 的加载与联动
+async function loadProviderKeys(providerId: string) {
+  if (providerKeysLoaded.value.has(providerId) || providerKeysLoading.value.has(providerId)) return
+  providerKeysLoading.value = new Set([...providerKeysLoading.value, providerId])
+  try {
+    const keys = await getProviderKeys(providerId)
+    providerKeysByProvider.value = {
+      ...providerKeysByProvider.value,
+      [providerId]: keys.filter((key) => key.is_active !== false),
+    }
+  } catch (err) {
+    log.error('加载提供商 Key 失败:', err)
+    providerKeysByProvider.value = { ...providerKeysByProvider.value, [providerId]: [] }
+  } finally {
+    const next = new Set(providerKeysLoading.value)
+    next.delete(providerId)
+    providerKeysLoading.value = next
+    providerKeysLoaded.value = new Set([...providerKeysLoaded.value, providerId])
+  }
+}
+
+function providerDisplayName(providerId: string): string {
+  return providers.value.find((provider) => provider.id === providerId)?.name || providerId
+}
+
+function providerKeyScopeSelectedCount(providerId: string): number {
+  return form.value.provider_key_scope[providerId]?.length ?? 0
+}
+
+function selectedProviderKeyIds(providerId: string): string[] {
+  return form.value.provider_key_scope[providerId] ?? []
+}
+
+function toggleProviderKey(providerId: string, keyId: string): void {
+  const current = new Set(form.value.provider_key_scope[providerId] ?? [])
+  if (current.has(keyId)) {
+    current.delete(keyId)
+  } else {
+    current.add(keyId)
+  }
+  form.value.provider_key_scope = {
+    ...form.value.provider_key_scope,
+    [providerId]: [...current].sort(),
+  }
+}
+
+watch(
+  () => form.value.allowed_providers,
+  (providers) => {
+    const selected = new Set(providers)
+    // 清除已取消选择 provider 的 scope 条目与缓存
+    const nextScope = restrictProviderKeyScopeToProviders(form.value.provider_key_scope, providers)
+    if (JSON.stringify(nextScope) !== JSON.stringify(form.value.provider_key_scope)) {
+      form.value.provider_key_scope = nextScope
+    }
+    const cached = new Set(Object.keys(providerKeysByProvider.value))
+    for (const providerId of cached) {
+      if (!selected.has(providerId)) {
+        const next = { ...providerKeysByProvider.value }
+        delete next[providerId]
+        providerKeysByProvider.value = next
+      }
+    }
+    for (const providerId of providers) {
+      void loadProviderKeys(providerId)
+    }
+  }
+)
+
+watch(
+  () => form.value.provider_unrestricted,
+  (unrestricted) => {
+    if (unrestricted) {
+      form.value.provider_key_scope = {}
+    }
+  }
+)
+
 // 提交表单
 function handleSubmit() {
   emit('submit', {
@@ -594,6 +732,10 @@ function handleSubmit() {
     concurrent_limit: form.value.concurrent_limit_inherited ? null : (form.value.concurrent_limit ?? 0),
     auto_delete_on_expiry: form.value.auto_delete_on_expiry,
     allowed_providers: form.value.provider_unrestricted ? null : [...form.value.allowed_providers],
+    allowed_provider_key_ids: providerKeyScopeForSubmit(
+      form.value.provider_key_scope,
+      form.value.provider_unrestricted,
+    ),
     allowed_api_formats: form.value.api_format_unrestricted ? null : [...form.value.allowed_api_formats],
     allowed_models: form.value.model_unrestricted ? null : [...form.value.allowed_models],
     ip_rules: parseIpRulesInput(form.value.ip_rules_text),

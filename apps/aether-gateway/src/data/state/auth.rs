@@ -17,6 +17,8 @@ use aether_data::repository::auth::ResolvedAuthApiKeySnapshotReader;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GatewayUserEffectiveListPolicies {
     pub(crate) allowed_providers: Option<Vec<String>>,
+    pub(crate) allowed_provider_key_ids:
+        Option<aether_data::repository::provider_key_scope::ProviderKeyScope>,
     pub(crate) allowed_api_formats: Option<Vec<String>>,
     pub(crate) allowed_models: Option<Vec<String>>,
 }
@@ -1739,6 +1741,20 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn prune_provider_key_scope_references(
+        &self,
+        key_ids: &[String],
+    ) -> Result<u64, DataLayerError> {
+        match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .prune_provider_key_scope_references(key_ids)
+                    .await
+            }
+            None => Ok(0),
+        }
+    }
+
     pub(crate) async fn read_auth_api_key_snapshot(
         &self,
         user_id: &str,
@@ -1806,11 +1822,13 @@ impl GatewayDataState {
 
         let GatewayUserEffectiveListPolicies {
             allowed_providers,
+            allowed_provider_key_ids,
             allowed_api_formats,
             allowed_models,
         } = resolve_group_effective_list_policies(&groups);
         let user_rate_limit = resolve_effective_rate_limit_policy(None, "system", &groups);
         snapshot.user_allowed_providers = allowed_providers;
+        snapshot.user_allowed_provider_key_ids = allowed_provider_key_ids;
         snapshot.user_allowed_api_formats = allowed_api_formats;
         snapshot.user_allowed_models = allowed_models;
         snapshot.user_rate_limit = user_rate_limit;
@@ -1916,13 +1934,17 @@ impl GatewayDataState {
 fn resolve_group_effective_list_policies(
     groups: &[aether_data::repository::users::StoredUserGroup],
 ) -> GatewayUserEffectiveListPolicies {
+    let allowed_providers = resolve_effective_list_policy(None, "unrestricted", groups, |group| {
+        (
+            &group.allowed_providers_mode,
+            group.allowed_providers.clone(),
+        )
+    });
+    let allowed_provider_key_ids =
+        resolve_effective_provider_key_scope(groups, allowed_providers.as_deref());
     GatewayUserEffectiveListPolicies {
-        allowed_providers: resolve_effective_list_policy(None, "unrestricted", groups, |group| {
-            (
-                &group.allowed_providers_mode,
-                group.allowed_providers.clone(),
-            )
-        }),
+        allowed_providers,
+        allowed_provider_key_ids,
         allowed_api_formats: resolve_effective_api_format_policy(
             None,
             "unrestricted",
@@ -1938,6 +1960,43 @@ fn resolve_group_effective_list_policies(
             (&group.allowed_models_mode, group.allowed_models.clone())
         }),
     }
+}
+
+/// Merges per-group provider key scopes into the effective scope.
+///
+/// Semantics (kept consistent with `union_group_list_policies`):
+/// - If any group is `unrestricted` for providers, the merged provider policy is
+///   `None` (no provider restriction), and the key scope is dropped too:
+///   an unrestricted provider policy cannot carry a key-level restriction.
+/// - Otherwise the scope is the union of every `specific` group's key sets per
+///   provider. Enforcement uses stable provider IDs against candidate rows, so
+///   entries whose provider is denied by the merged allowlist are harmless
+///   (the provider check fails before the key check).
+fn resolve_effective_provider_key_scope(
+    groups: &[aether_data::repository::users::StoredUserGroup],
+    effective_allowed_providers: Option<&[String]>,
+) -> Option<aether_data::repository::provider_key_scope::ProviderKeyScope> {
+    if effective_allowed_providers.is_none() {
+        return None;
+    }
+    use aether_data::repository::provider_key_scope as scope;
+
+    let mut merged = scope::ProviderKeyScope::new();
+    for group in groups {
+        if group.allowed_providers_mode != "specific" {
+            continue;
+        }
+        let Some(group_scope) = group.allowed_provider_key_ids.as_ref() else {
+            continue;
+        };
+        for (provider_id, key_ids) in group_scope {
+            merged
+                .entry(provider_id.clone())
+                .or_default()
+                .extend(key_ids.iter().cloned());
+        }
+    }
+    scope::normalize_provider_key_scope(Some(merged))
 }
 
 fn resolve_effective_list_policy(
@@ -2203,6 +2262,7 @@ mod tests {
             description: None,
             priority,
             allowed_providers: None,
+            allowed_provider_key_ids: None,
             allowed_providers_mode: "unrestricted".to_string(),
             allowed_api_formats: None,
             allowed_api_formats_mode: "unrestricted".to_string(),
@@ -2478,6 +2538,7 @@ mod tests {
                 description: None,
                 priority: 10,
                 allowed_providers: Some(vec!["openai".to_string()]),
+                allowed_provider_key_ids: None,
                 allowed_providers_mode: "specific".to_string(),
                 allowed_api_formats: Some(vec!["openai:chat".to_string()]),
                 allowed_api_formats_mode: "specific".to_string(),
@@ -2595,6 +2656,7 @@ mod tests {
                 description: None,
                 priority: 10,
                 allowed_providers: Some(vec!["anthropic".to_string()]),
+                allowed_provider_key_ids: None,
                 allowed_providers_mode: "specific".to_string(),
                 allowed_api_formats: Some(vec!["claude:messages".to_string()]),
                 allowed_api_formats_mode: "specific".to_string(),
@@ -2668,6 +2730,7 @@ mod tests {
                 description: None,
                 priority: 10,
                 allowed_providers: None,
+                allowed_provider_key_ids: None,
                 allowed_providers_mode: "unrestricted".to_string(),
                 allowed_api_formats: Some(vec!["openai:responses".to_string()]),
                 allowed_api_formats_mode: "specific".to_string(),
@@ -2846,5 +2909,130 @@ mod tests {
         assert_eq!(standalone_records.len(), 1);
         assert_eq!(standalone_records[0].api_key_id, "key-standalone");
         assert!(standalone_records[0].is_standalone);
+    }
+
+    #[test]
+    fn group_key_scope_unions_specific_groups_per_provider() {
+        let mut group_a = sample_group("group-a", 0, None, "unrestricted", None, "inherit");
+        group_a.allowed_providers = Some(vec!["p1".to_string()]);
+        group_a.allowed_providers_mode = "specific".to_string();
+        group_a.allowed_provider_key_ids =
+            Some([("p1".to_string(), ["key-a".to_string()].into())].into());
+        let mut group_b = sample_group("group-b", 0, None, "unrestricted", None, "inherit");
+        group_b.allowed_providers = Some(vec!["p1".to_string(), "p2".to_string()]);
+        group_b.allowed_providers_mode = "specific".to_string();
+        group_b.allowed_provider_key_ids =
+            Some([("p1".to_string(), ["key-b".to_string()].into())].into());
+        group_b
+            .allowed_provider_key_ids
+            .as_mut()
+            .expect("scope")
+            .insert("p2".to_string(), ["key-c".to_string()].into());
+
+        let policies = resolve_group_effective_list_policies(&[group_a, group_b]);
+
+        assert_eq!(
+            policies.allowed_providers,
+            Some(vec!["p1".to_string(), "p2".to_string()])
+        );
+        assert_eq!(
+            policies.allowed_provider_key_ids,
+            Some(
+                [
+                    (
+                        "p1".to_string(),
+                        ["key-a".to_string(), "key-b".to_string()].into()
+                    ),
+                    ("p2".to_string(), ["key-c".to_string()].into()),
+                ]
+                .into()
+            )
+        );
+    }
+
+    #[test]
+    fn group_key_scope_is_dropped_when_any_group_is_unrestricted() {
+        let mut group_a = sample_group("group-a", 0, None, "unrestricted", None, "inherit");
+        group_a.allowed_providers = Some(vec!["p1".to_string()]);
+        group_a.allowed_providers_mode = "specific".to_string();
+        group_a.allowed_provider_key_ids =
+            Some([("p1".to_string(), ["key-a".to_string()].into())].into());
+        let group_b = sample_group("group-b", 0, None, "unrestricted", None, "inherit");
+
+        let policies = resolve_group_effective_list_policies(&[group_a, group_b]);
+
+        assert_eq!(policies.allowed_providers, None);
+        assert_eq!(policies.allowed_provider_key_ids, None);
+    }
+
+    #[test]
+    fn group_key_scope_without_specific_provider_mode_is_ignored() {
+        // A group with a scope but unrestricted providers must not leak a key
+        // restriction into the merged policy.
+        let mut group_a = sample_group("group-a", 0, None, "unrestricted", None, "inherit");
+        group_a.allowed_provider_key_ids =
+            Some([("p1".to_string(), ["key-a".to_string()].into())].into());
+
+        let policies = resolve_group_effective_list_policies(&[group_a]);
+
+        assert_eq!(policies.allowed_providers, None);
+        assert_eq!(policies.allowed_provider_key_ids, None);
+    }
+
+    #[test]
+    fn non_standalone_snapshot_applies_merged_group_key_scope() {
+        let snapshot = aether_data::repository::auth::StoredAuthApiKeySnapshot::new(
+            "user-1".to_string(),
+            "alice".to_string(),
+            None,
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            None,
+            None,
+            None,
+            "key-1".to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("snapshot should build");
+        let mut resolved = crate::data::auth::GatewayAuthApiKeySnapshot::from_stored(snapshot, 150);
+        resolved.apply_user_policy(
+            Some(vec!["p1".to_string()]),
+            Some(
+                [(
+                    "p1".to_string(),
+                    ["key-a".to_string(), "key-b".to_string()].into(),
+                )]
+                .into(),
+            ),
+            None,
+            None,
+            Some(60),
+        );
+
+        assert_eq!(
+            resolved.effective_allowed_provider_key_ids(),
+            Some(
+                &[(
+                    "p1".to_string(),
+                    ["key-a".to_string(), "key-b".to_string()].into()
+                )]
+                .into()
+            )
+        );
+        assert_eq!(
+            resolved.effective_allowed_providers(),
+            Some(&["p1".to_string()][..])
+        );
     }
 }

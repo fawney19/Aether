@@ -579,6 +579,7 @@ pub(super) async fn handle_users_me_api_key_create(
         key_encrypted: Some(key_encrypted),
         name: Some(name.clone()),
         allowed_providers: None,
+        allowed_provider_key_ids: None,
         allowed_api_formats: None,
         allowed_models: None,
         ip_rules,

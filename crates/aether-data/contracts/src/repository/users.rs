@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+use super::provider_key_scope::{parse_provider_key_scope, ProviderKeyScope};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredUserSummary {
     pub id: String,
@@ -491,6 +493,7 @@ pub struct StoredUserGroup {
     pub description: Option<String>,
     pub priority: i32,
     pub allowed_providers: Option<Vec<String>>,
+    pub allowed_provider_key_ids: Option<ProviderKeyScope>,
     pub allowed_providers_mode: String,
     pub allowed_api_formats: Option<Vec<String>>,
     pub allowed_api_formats_mode: String,
@@ -511,6 +514,7 @@ impl StoredUserGroup {
         description: Option<String>,
         priority: i32,
         allowed_providers: Option<Value>,
+        allowed_provider_key_ids: Option<Value>,
         allowed_providers_mode: String,
         allowed_api_formats: Option<Value>,
         allowed_api_formats_mode: String,
@@ -545,6 +549,10 @@ impl StoredUserGroup {
             allowed_providers: parse_string_list(
                 allowed_providers,
                 "user_groups.allowed_providers",
+            )?,
+            allowed_provider_key_ids: parse_provider_key_scope(
+                allowed_provider_key_ids,
+                "user_groups.allowed_provider_key_ids",
             )?,
             allowed_providers_mode: normalize_list_policy_mode(
                 &allowed_providers_mode,
@@ -601,6 +609,7 @@ pub struct UpsertUserGroupRecord {
     pub description: Option<String>,
     pub priority: i32,
     pub allowed_providers: Option<Vec<String>>,
+    pub allowed_provider_key_ids: Option<ProviderKeyScope>,
     pub allowed_providers_mode: String,
     pub allowed_api_formats: Option<Vec<String>>,
     pub allowed_api_formats_mode: String,
@@ -1154,7 +1163,7 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        legacy_list_policy_mode, StoredUserAuthRecord, StoredUserExportRow,
+        legacy_list_policy_mode, StoredUserAuthRecord, StoredUserExportRow, StoredUserGroup,
         StoredUserPreferenceRecord, StoredUserSessionRecord,
     };
 
@@ -1319,5 +1328,66 @@ mod tests {
         assert!(record.email_notifications);
         assert!(record.usage_alerts);
         assert!(record.announcement_notifications);
+    }
+
+    #[test]
+    fn user_group_parses_and_normalizes_provider_key_scope() {
+        let group = StoredUserGroup::new(
+            "group-1".to_string(),
+            "Group".to_string(),
+            "group".to_string(),
+            None,
+            0,
+            Some(serde_json::json!(["openai"])),
+            Some(serde_json::json!({
+                "openai": ["key-a", " key-b ", "key-a"],
+                "anthropic": []
+            })),
+            "specific".to_string(),
+            None,
+            "inherit".to_string(),
+            None,
+            "inherit".to_string(),
+            None,
+            "inherit".to_string(),
+            None,
+            None,
+        )
+        .expect("group should build");
+
+        assert_eq!(
+            group.allowed_provider_key_ids,
+            Some(
+                [(
+                    "openai".to_string(),
+                    ["key-a".to_string(), "key-b".to_string()].into()
+                )]
+                .into()
+            )
+        );
+    }
+
+    #[test]
+    fn user_group_rejects_non_object_provider_key_scope() {
+        let result = StoredUserGroup::new(
+            "group-1".to_string(),
+            "Group".to_string(),
+            "group".to_string(),
+            None,
+            0,
+            None,
+            Some(serde_json::json!(["openai"])),
+            "inherit".to_string(),
+            None,
+            "inherit".to_string(),
+            None,
+            "inherit".to_string(),
+            None,
+            "inherit".to_string(),
+            None,
+            None,
+        );
+
+        assert!(result.is_err());
     }
 }

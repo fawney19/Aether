@@ -60,6 +60,13 @@ fn enumerate_minimal_candidate_selection_inner(
         ) {
             continue;
         }
+        if !crate::auth_constraints_allow_provider_key(
+            auth_constraints,
+            &row.provider_id,
+            &row.key_id,
+        ) {
+            continue;
+        }
         if require_streaming && !row.supports_streaming() {
             continue;
         }
@@ -125,6 +132,13 @@ pub fn collect_global_model_names_for_required_capability(
             &row.provider_id,
             &row.provider_name,
             &row.provider_type,
+        ) {
+            continue;
+        }
+        if !crate::auth_constraints_allow_provider_key(
+            auth_constraints,
+            &row.provider_id,
+            &row.key_id,
         ) {
             continue;
         }

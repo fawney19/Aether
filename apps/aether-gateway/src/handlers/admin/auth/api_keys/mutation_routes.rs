@@ -10,8 +10,8 @@ use crate::handlers::admin::users::{
     default_admin_user_api_key_name, format_optional_unix_secs_iso8601,
     generate_admin_user_api_key_plaintext, hash_admin_user_api_key, masked_user_api_key_display,
     normalize_admin_feature_settings, normalize_admin_optional_api_key_name,
-    normalize_admin_user_api_formats, normalize_admin_user_ip_rules,
-    normalize_admin_user_string_list,
+    normalize_admin_provider_key_scope, normalize_admin_user_api_formats,
+    normalize_admin_user_ip_rules, normalize_admin_user_string_list,
 };
 use crate::handlers::shared::normalize_optional_api_key_concurrent_limit;
 use crate::GatewayError;
@@ -101,6 +101,16 @@ pub(super) async fn build_admin_create_api_key_response(
             Ok(value) => value,
             Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
         };
+    let allowed_provider_key_ids = match normalize_admin_provider_key_scope(
+        state,
+        allowed_providers.as_deref(),
+        payload.allowed_provider_key_ids,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+    };
     let allowed_api_formats = match normalize_admin_user_api_formats(payload.allowed_api_formats) {
         Ok(value) => value,
         Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
@@ -165,6 +175,7 @@ pub(super) async fn build_admin_create_api_key_response(
                 key_encrypted: Some(key_encrypted),
                 name: Some(name),
                 allowed_providers,
+                allowed_provider_key_ids,
                 allowed_api_formats,
                 allowed_models,
                 ip_rules,
@@ -210,6 +221,7 @@ pub(super) async fn build_admin_create_api_key_response(
             "rate_limit": created.rate_limit,
             "concurrent_limit": created.concurrent_limit,
             "allowed_providers": created.allowed_providers,
+            "allowed_provider_key_ids": created.allowed_provider_key_ids,
             "allowed_api_formats": created.allowed_api_formats,
             "allowed_models": created.allowed_models,
             "expires_at": format_optional_unix_secs_iso8601(created.expires_at_unix_secs),
@@ -317,6 +329,24 @@ pub(super) async fn build_admin_update_api_key_response(
     } else {
         None
     };
+    let effective_allowed_providers = allowed_providers
+        .clone()
+        .flatten()
+        .or_else(|| existing.allowed_providers.clone());
+    let allowed_provider_key_ids = if field_presence.contains("allowed_provider_key_ids") {
+        match normalize_admin_provider_key_scope(
+            state,
+            effective_allowed_providers.as_deref(),
+            payload.allowed_provider_key_ids,
+        )
+        .await
+        {
+            Ok(value) => Some(value),
+            Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+        }
+    } else {
+        None
+    };
     let allowed_api_formats = if field_presence.contains("allowed_api_formats") {
         match normalize_admin_user_api_formats(payload.allowed_api_formats) {
             Ok(value) => Some(value),
@@ -411,6 +441,7 @@ pub(super) async fn build_admin_update_api_key_response(
                 concurrent_limit_present: field_presence.contains("concurrent_limit"),
                 concurrent_limit,
                 allowed_providers,
+                allowed_provider_key_ids,
                 allowed_api_formats,
                 allowed_models,
                 ip_rules,

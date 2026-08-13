@@ -1418,6 +1418,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
         auto_delete_on_expiry: data.auto_delete_on_expiry,
         // 空数组表示清除限制（允许全部），后端会将空数组存为 NULL
         allowed_providers: data.allowed_providers,
+        allowed_provider_key_ids: data.allowed_provider_key_ids ?? null,
         allowed_api_formats: data.allowed_api_formats,
         allowed_models: data.allowed_models,
         ip_rules: data.ip_rules,
@@ -1450,6 +1451,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
         auto_delete_on_expiry: data.auto_delete_on_expiry,
         // 空数组表示不设置限制（允许全部），后端会将空数组存为 NULL
         allowed_providers: data.allowed_providers,
+        allowed_provider_key_ids: data.allowed_provider_key_ids ?? null,
         allowed_api_formats: data.allowed_api_formats,
         allowed_models: data.allowed_models,
         ip_rules: data.ip_rules,

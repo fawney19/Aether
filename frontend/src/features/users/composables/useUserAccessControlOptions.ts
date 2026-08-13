@@ -1,14 +1,20 @@
 import { computed, ref } from 'vue'
 import { getProvidersSummary } from '@/api/endpoints/providers'
 import { getGlobalModels } from '@/api/global-models'
+import { getProviderKeys } from '@/api/endpoints/keys'
 import { adminApi } from '@/api/admin'
+import { log } from '@/utils/logger'
 import type { ProviderWithEndpointsSummary } from '@/api/endpoints/types'
 import type { GlobalModelResponse } from '@/api/global-models'
+import type { EndpointAPIKey } from '@/api/endpoints/keys'
 
 export function useUserAccessControlOptions() {
   const providers = ref<ProviderWithEndpointsSummary[]>([])
   const globalModels = ref<GlobalModelResponse[]>([])
   const apiFormats = ref<Array<{ value: string; label: string }>>([])
+  const providerKeysByProvider = ref<Record<string, EndpointAPIKey[]>>({})
+  const providerKeysLoading = ref<Record<string, boolean>>({})
+  const providerKeysLoaded = ref<Record<string, boolean>>({})
 
   const providerOptions = computed(() =>
     providers.value.map((provider) => ({
@@ -40,6 +46,34 @@ export function useUserAccessControlOptions() {
     apiFormats.value = formatsData.formats || []
   }
 
+  async function loadProviderKeys(providerId: string): Promise<void> {
+    if (providerKeysLoaded.value[providerId] || providerKeysLoading.value[providerId]) return
+    providerKeysLoading.value = { ...providerKeysLoading.value, [providerId]: true }
+    try {
+      const keys = await getProviderKeys(providerId)
+      providerKeysByProvider.value = {
+        ...providerKeysByProvider.value,
+        [providerId]: keys.filter((key) => key.is_active !== false),
+      }
+    } catch (err) {
+      log.error('加载提供商 Key 失败:', err)
+      providerKeysByProvider.value = { ...providerKeysByProvider.value, [providerId]: [] }
+    } finally {
+      const nextLoading = { ...providerKeysLoading.value }
+      delete nextLoading[providerId]
+      providerKeysLoading.value = nextLoading
+      providerKeysLoaded.value = { ...providerKeysLoaded.value, [providerId]: true }
+    }
+  }
+
+  function clearProviderKeysCache(providerIds: string[]): void {
+    const next: Record<string, EndpointAPIKey[]> = { ...providerKeysByProvider.value }
+    for (const providerId of providerIds) {
+      delete next[providerId]
+    }
+    providerKeysByProvider.value = next
+  }
+
   return {
     providers,
     globalModels,
@@ -47,6 +81,10 @@ export function useUserAccessControlOptions() {
     providerOptions,
     apiFormatOptions,
     modelOptions,
+    providerKeysByProvider,
+    providerKeysLoading,
     loadAccessControlOptions,
+    loadProviderKeys,
+    clearProviderKeysCache,
   }
 }

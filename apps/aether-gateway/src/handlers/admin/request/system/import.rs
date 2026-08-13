@@ -944,6 +944,29 @@ fn normalize_imported_user_string_list(
     )
 }
 
+/// Parses an imported `allowed_provider_key_ids` payload. Catalog validation
+/// is intentionally skipped during import (provider keys may be imported
+/// later in the same transaction batch); the scope is only syntactically
+/// normalized and dropped when the provider allowlist is unrestricted.
+fn imported_standalone_key_scope(
+    key: &Map<String, Value>,
+) -> Result<Option<aether_data::repository::provider_key_scope::ProviderKeyScope>, String> {
+    let scope = aether_data::repository::provider_key_scope::parse_provider_key_scope(
+        key.get("allowed_provider_key_ids").cloned(),
+        "allowed_provider_key_ids",
+    )
+    .map_err(|err| err.to_string())?;
+    let allowed_providers = normalize_imported_user_string_list(key, "allowed_providers")?;
+    if scope.is_some()
+        && allowed_providers
+            .as_ref()
+            .is_none_or(|items| items.is_empty())
+    {
+        return Err("allowed_provider_key_ids 需要非空的 allowed_providers".to_string());
+    }
+    Ok(scope)
+}
+
 fn normalize_imported_user_api_formats(
     object: &Map<String, Value>,
     field_name: &str,
@@ -1052,6 +1075,12 @@ fn build_imported_user_group_record(
             description,
             priority: 0,
             allowed_providers,
+            allowed_provider_key_ids:
+                aether_data::repository::provider_key_scope::parse_provider_key_scope(
+                    group.get("allowed_provider_key_ids").cloned(),
+                    "user_groups.allowed_provider_key_ids",
+                )
+                .map_err(|err| format!("user_groups.allowed_provider_key_ids 无效: {err}"))?,
             allowed_providers_mode,
             allowed_api_formats,
             allowed_api_formats_mode,
@@ -3116,6 +3145,7 @@ impl<'a> AdminAppState<'a> {
                         key_encrypted,
                         name,
                         allowed_providers,
+                        allowed_provider_key_ids: None,
                         allowed_api_formats,
                         allowed_models,
                         ip_rules,
@@ -3286,6 +3316,9 @@ impl<'a> AdminAppState<'a> {
                                     concurrent_limit_present: key.contains_key("concurrent_limit"),
                                     concurrent_limit,
                                     allowed_providers: Some(allowed_providers.clone()),
+                                    allowed_provider_key_ids: Some(invalid_value!(
+                                        imported_standalone_key_scope(key)
+                                    )),
                                     allowed_api_formats: Some(allowed_api_formats.clone()),
                                     allowed_models: Some(allowed_models.clone()),
                                     ip_rules: imported_ip_rules_present(key)
@@ -3371,6 +3404,9 @@ impl<'a> AdminAppState<'a> {
                             key_encrypted,
                             name,
                             allowed_providers,
+                            allowed_provider_key_ids: invalid_value!(
+                                imported_standalone_key_scope(key)
+                            ),
                             allowed_api_formats,
                             allowed_models,
                             ip_rules,

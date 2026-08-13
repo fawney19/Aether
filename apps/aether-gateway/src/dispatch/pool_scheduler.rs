@@ -358,6 +358,8 @@ pub(crate) struct PoolKeyCursor<'a> {
     request_auth_channel: Option<String>,
     routing_overlay: Option<RankingOverlay>,
     routing_allowed_key_ids: Option<Vec<String>>,
+    allowed_provider_key_ids:
+        Option<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>,
     effective_pool_config: Option<AdminProviderPoolConfig>,
     runtime_miss_trace_id: Option<String>,
     record_runtime_miss_diagnostic: bool,
@@ -456,6 +458,7 @@ impl<'a> PoolKeyCursor<'a> {
             request_auth_channel: request_auth_channel.map(str::to_string),
             routing_overlay,
             routing_allowed_key_ids,
+            allowed_provider_key_ids: None,
             effective_pool_config,
             runtime_miss_trace_id: None,
             record_runtime_miss_diagnostic: false,
@@ -494,6 +497,16 @@ impl<'a> PoolKeyCursor<'a> {
             self.runtime_miss_trace_id = Some(trace_id.to_string());
             self.record_runtime_miss_diagnostic = true;
         }
+        self
+    }
+
+    pub(crate) fn with_allowed_provider_key_scope(
+        mut self,
+        allowed_provider_key_ids: Option<
+            std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+        >,
+    ) -> Self {
+        self.allowed_provider_key_ids = allowed_provider_key_ids;
         self
     }
 
@@ -1277,6 +1290,14 @@ impl<'a> PoolKeyCursor<'a> {
         &mut self,
         candidate: aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate,
     ) -> Option<EligibleLocalExecutionCandidate> {
+        if let Some(scope) = self.allowed_provider_key_ids.as_ref() {
+            if let Some(allowed_key_ids) = scope.get(candidate.provider_id.as_str()) {
+                if !allowed_key_ids.contains(candidate.key_id.as_str()) {
+                    self.record_skip_reason("auth_provider_key_not_allowed");
+                    return None;
+                }
+            }
+        }
         if self
             .routing_overlay
             .as_ref()

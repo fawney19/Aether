@@ -406,6 +406,7 @@ export const MOCK_ADMIN_API_KEYS: AdminApiKeysResponse = {
       key_display: 'sk-sa...abc1',
       is_active: true,
       is_standalone: true,
+      allowed_provider_key_ids: { 'provider-002': ['provider-key-002-1'] },
       total_requests: 500,
       total_tokens: 1500000,
       total_cost_usd: 25.50,

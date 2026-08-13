@@ -198,6 +198,11 @@ type = "json"
 nullable = true
 
 [[table.user_groups.columns]]
+name = "allowed_provider_key_ids"
+type = "json"
+nullable = true
+
+[[table.user_groups.columns]]
 name = "allowed_providers_mode"
 type = "text"
 length = 32
@@ -325,6 +330,11 @@ nullable = true
 
 [[table.api_keys.columns]]
 name = "allowed_providers"
+type = "json"
+nullable = true
+
+[[table.api_keys.columns]]
+name = "allowed_provider_key_ids"
 type = "json"
 nullable = true
 
