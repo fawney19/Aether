@@ -387,6 +387,89 @@ pub(crate) async fn normalize_admin_provider_key_scope(
     Ok(Some(scope))
 }
 
+/// Canonicalizes an existing provider key scope against a (possibly new)
+/// provider allowlist: entries whose provider is no longer allowed (matched
+/// by stable id, name, or type) and references to missing/disabled keys or
+/// keys owned by a different provider are dropped. Used when a PATCH changes
+/// the provider allowlist without sending the scope field, so the stored
+/// scope can never disagree with the allowlist. Returns `None` when the
+/// allowlist is unrestricted/empty (legacy provider-only behavior).
+pub(crate) async fn canonicalize_admin_provider_key_scope(
+    state: &AdminAppState<'_>,
+    allowed_providers: Option<&[String]>,
+    existing_scope: Option<aether_data::repository::provider_key_scope::ProviderKeyScope>,
+) -> Result<Option<aether_data::repository::provider_key_scope::ProviderKeyScope>, String> {
+    use aether_data::repository::provider_key_scope::ProviderKeyScope;
+
+    let Some(scope) = existing_scope else {
+        return Ok(None);
+    };
+    let allowed_providers = allowed_providers
+        .map(|items| items.iter().map(|item| item.as_str()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if allowed_providers.is_empty() {
+        return Ok(None);
+    }
+
+    let key_ids = scope
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let keys = state
+        .read_provider_catalog_keys_by_ids(&key_ids)
+        .await
+        .map_err(|err| format!("校验 Key 失败: {:?}", err))?;
+    let key_by_id = keys
+        .into_iter()
+        .map(|key| (key.id.clone(), key))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let provider_ids = scope.keys().cloned().collect::<Vec<_>>();
+    let providers = state
+        .read_provider_catalog_providers_by_ids(&provider_ids)
+        .await
+        .map_err(|err| format!("校验提供商失败: {:?}", err))?;
+    let provider_by_id = providers
+        .into_iter()
+        .map(|provider| (provider.id.clone(), provider))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let mut canonical = ProviderKeyScope::new();
+    for (provider_id, key_ids) in scope {
+        let Some(provider) = provider_by_id.get(&provider_id) else {
+            continue;
+        };
+        let provider_allowed = allowed_providers.iter().any(|allowed| {
+            aether_scheduler_core::provider_matches_allowed_value(
+                allowed,
+                &provider.id,
+                &provider.name,
+                &provider.provider_type,
+            )
+        });
+        if !provider_allowed {
+            continue;
+        }
+        let mut kept = std::collections::BTreeSet::new();
+        for key_id in key_ids {
+            let Some(key) = key_by_id.get(&key_id) else {
+                continue;
+            };
+            if !key.is_active || key.provider_id != provider_id {
+                continue;
+            }
+            kept.insert(key_id);
+        }
+        if !kept.is_empty() {
+            canonical.insert(provider_id, kept);
+        }
+    }
+    Ok(aether_data::repository::provider_key_scope::normalize_provider_key_scope(Some(canonical)))
+}
+
 pub(crate) fn normalize_admin_list_policy_mode(value: &str) -> Result<String, String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "inherit" | "unrestricted" | "specific" | "deny_all" => {

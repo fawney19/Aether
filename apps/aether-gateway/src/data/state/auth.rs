@@ -1651,6 +1651,28 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn set_user_api_key_allowed_provider_key_ids(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        allowed_provider_key_ids: Option<
+            aether_data::repository::provider_key_scope::ProviderKeyScope,
+        >,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .set_user_api_key_allowed_provider_key_ids(
+                        user_id,
+                        api_key_id,
+                        allowed_provider_key_ids,
+                    )
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn set_user_api_key_force_capabilities(
         &self,
         user_id: &str,
@@ -1746,6 +1768,20 @@ impl GatewayDataState {
         key_ids: &[String],
     ) -> Result<u64, DataLayerError> {
         match &self.auth_api_key_writer {
+            Some(repository) => {
+                repository
+                    .prune_provider_key_scope_references(key_ids)
+                    .await
+            }
+            None => Ok(0),
+        }
+    }
+
+    pub(crate) async fn prune_user_group_provider_key_scope_references(
+        &self,
+        key_ids: &[String],
+    ) -> Result<u64, DataLayerError> {
+        match &self.user_reader {
             Some(repository) => {
                 repository
                     .prune_provider_key_scope_references(key_ids)
@@ -1968,10 +2004,13 @@ fn resolve_group_effective_list_policies(
 /// - If any group is `unrestricted` for providers, the merged provider policy is
 ///   `None` (no provider restriction), and the key scope is dropped too:
 ///   an unrestricted provider policy cannot carry a key-level restriction.
-/// - Otherwise the scope is the union of every `specific` group's key sets per
-///   provider. Enforcement uses stable provider IDs against candidate rows, so
-///   entries whose provider is denied by the merged allowlist are harmless
-///   (the provider check fails before the key check).
+/// - Otherwise the scope is computed per stable provider id across every
+///   `specific` group:
+///   * a group that allows provider P but has no non-empty key scope for P
+///     grants P fully, so P must carry NO key restriction in the merged scope;
+///   * a group that restricts P contributes its key set (union across groups);
+///   * a scope entry for P owned by a group whose own allowlist no longer
+///     contains P is stale and contributes nothing.
 fn resolve_effective_provider_key_scope(
     groups: &[aether_data::repository::users::StoredUserGroup],
     effective_allowed_providers: Option<&[String]>,
@@ -1982,19 +2021,44 @@ fn resolve_effective_provider_key_scope(
     use aether_data::repository::provider_key_scope as scope;
 
     let mut merged = scope::ProviderKeyScope::new();
+    let mut fully_granted = std::collections::BTreeSet::new();
     for group in groups {
         if group.allowed_providers_mode != "specific" {
             continue;
         }
-        let Some(group_scope) = group.allowed_provider_key_ids.as_ref() else {
+        let Some(group_providers) = group.allowed_providers.as_ref() else {
             continue;
         };
-        for (provider_id, key_ids) in group_scope {
-            merged
-                .entry(provider_id.clone())
-                .or_default()
-                .extend(key_ids.iter().cloned());
+        let group_scope = group.allowed_provider_key_ids.as_ref();
+        let mut allowlist = std::collections::BTreeSet::new();
+        for value in group_providers {
+            let value = value.trim();
+            if !value.is_empty() {
+                allowlist.insert(value.to_string());
+            }
         }
+        if let Some(group_scope) = group_scope {
+            for (provider_id, key_ids) in group_scope {
+                if key_ids.is_empty() || !allowlist.contains(provider_id) {
+                    continue;
+                }
+                merged
+                    .entry(provider_id.clone())
+                    .or_default()
+                    .extend(key_ids.iter().cloned());
+            }
+        }
+        for provider_id in allowlist {
+            let restricted = group_scope
+                .and_then(|scope| scope.get(&provider_id))
+                .is_some_and(|key_ids| !key_ids.is_empty());
+            if !restricted {
+                fully_granted.insert(provider_id);
+            }
+        }
+    }
+    for provider_id in fully_granted {
+        merged.remove(&provider_id);
     }
     scope::normalize_provider_key_scope(Some(merged))
 }
@@ -2977,6 +3041,137 @@ mod tests {
 
         assert_eq!(policies.allowed_providers, None);
         assert_eq!(policies.allowed_provider_key_ids, None);
+    }
+
+    #[test]
+    fn group_key_scope_provider_only_group_grants_full_access_to_shared_provider() {
+        // Group A allows p1 without any key scope (all keys usable per the
+        // requirement); group B allows p1 restricted to key-a. A user in both
+        // groups must keep full p1 access: the merged scope must not restrict
+        // p1 at all.
+        let mut group_a = sample_group("group-a", 0, None, "unrestricted", None, "inherit");
+        group_a.allowed_providers = Some(vec!["p1".to_string()]);
+        group_a.allowed_providers_mode = "specific".to_string();
+        group_a.allowed_provider_key_ids = None;
+        let mut group_b = sample_group("group-b", 0, None, "unrestricted", None, "inherit");
+        group_b.allowed_providers = Some(vec!["p1".to_string()]);
+        group_b.allowed_providers_mode = "specific".to_string();
+        group_b.allowed_provider_key_ids =
+            Some([("p1".to_string(), ["key-a".to_string()].into())].into());
+
+        let policies = resolve_group_effective_list_policies(&[group_a, group_b]);
+
+        assert_eq!(policies.allowed_providers, Some(vec!["p1".to_string()]));
+        assert_eq!(policies.allowed_provider_key_ids, None);
+    }
+
+    #[test]
+    fn group_key_scope_fully_granted_provider_drops_restriction_while_others_keep_union() {
+        // Group A restricts p1 to [key-a]; group B allows p1 fully and
+        // restricts p2 to [key-b]; group C restricts p1 to [key-c].
+        // Merged: p1 unrestricted (group B grants it fully), p2 -> [key-b].
+        let mut group_a = sample_group("group-a", 0, None, "unrestricted", None, "inherit");
+        group_a.allowed_providers = Some(vec!["p1".to_string()]);
+        group_a.allowed_providers_mode = "specific".to_string();
+        group_a.allowed_provider_key_ids =
+            Some([("p1".to_string(), ["key-a".to_string()].into())].into());
+        let mut group_b = sample_group("group-b", 0, None, "unrestricted", None, "inherit");
+        group_b.allowed_providers = Some(vec!["p1".to_string(), "p2".to_string()]);
+        group_b.allowed_providers_mode = "specific".to_string();
+        group_b.allowed_provider_key_ids =
+            Some([("p2".to_string(), ["key-b".to_string()].into())].into());
+        let mut group_c = sample_group("group-c", 0, None, "unrestricted", None, "inherit");
+        group_c.allowed_providers = Some(vec!["p1".to_string()]);
+        group_c.allowed_providers_mode = "specific".to_string();
+        group_c.allowed_provider_key_ids =
+            Some([("p1".to_string(), ["key-c".to_string()].into())].into());
+
+        let policies = resolve_group_effective_list_policies(&[group_a, group_b, group_c]);
+
+        assert_eq!(
+            policies.allowed_provider_key_ids,
+            Some([("p2".to_string(), ["key-b".to_string()].into())].into())
+        );
+    }
+
+    #[test]
+    fn group_key_scope_stale_entry_for_unallowed_provider_contributes_nothing() {
+        // Group A's scope references p1 but its allowlist no longer contains
+        // p1 (stale entry). The entry must not restrict p1 in the merged
+        // scope, and since no group grants p1, p1 stays out of the scope.
+        let mut group_a = sample_group("group-a", 0, None, "unrestricted", None, "inherit");
+        group_a.allowed_providers = Some(vec!["p2".to_string()]);
+        group_a.allowed_providers_mode = "specific".to_string();
+        group_a.allowed_provider_key_ids =
+            Some([("p1".to_string(), ["key-a".to_string()].into())].into());
+
+        let policies = resolve_group_effective_list_policies(&[group_a]);
+
+        assert_eq!(policies.allowed_providers, Some(vec!["p2".to_string()]));
+        assert_eq!(policies.allowed_provider_key_ids, None);
+    }
+
+    #[test]
+    fn merged_provider_only_and_scoped_groups_leave_all_keys_usable_at_enumeration() {
+        // Group A allows p1 without any key scope; group B allows p1 with
+        // only key-a. The merged policy must not restrict p1 at all, so a
+        // candidate enumeration under that snapshot accepts every key of p1.
+        let mut group_a = sample_group("group-a", 0, None, "unrestricted", None, "inherit");
+        group_a.allowed_providers = Some(vec!["p1".to_string()]);
+        group_a.allowed_providers_mode = "specific".to_string();
+        let mut group_b = sample_group("group-b", 0, None, "unrestricted", None, "inherit");
+        group_b.allowed_providers = Some(vec!["p1".to_string()]);
+        group_b.allowed_providers_mode = "specific".to_string();
+        group_b.allowed_provider_key_ids =
+            Some([("p1".to_string(), ["key-a".to_string()].into())].into());
+
+        let policies = resolve_group_effective_list_policies(&[group_a, group_b]);
+        assert_eq!(policies.allowed_provider_key_ids, None);
+
+        let snapshot = aether_data::repository::auth::StoredAuthApiKeySnapshot::new(
+            "user-1".to_string(),
+            "alice".to_string(),
+            None,
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            None,
+            None,
+            None,
+            "key-1".to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("snapshot should build");
+        let mut resolved = crate::data::auth::GatewayAuthApiKeySnapshot::from_stored(snapshot, 150);
+        resolved.apply_user_policy(
+            policies.allowed_providers,
+            policies.allowed_provider_key_ids,
+            None,
+            None,
+            None,
+        );
+
+        let constraints = crate::data::candidate_selection::auth_snapshot_constraints(&resolved);
+        assert!(aether_scheduler_core::auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "p1",
+            "key-a",
+        ));
+        assert!(aether_scheduler_core::auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "p1",
+            "key-b",
+        ));
     }
 
     #[test]

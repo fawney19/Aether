@@ -9,7 +9,7 @@ use aether_data_contracts::repository::auth::{
     UpdateStandaloneApiKeyBasicRecord, UpdateUserApiKeyBasicRecord,
 };
 use aether_data_contracts::repository::provider_key_scope::{
-    normalize_provider_key_scope, remove_key_ids_from_provider_key_scope, ProviderKeyScope,
+    plan_provider_key_scope_prune, ProviderKeyScope,
 };
 use aether_data_contracts::DataLayerError;
 
@@ -1191,42 +1191,45 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
                 else {
                     continue;
                 };
-                let parsed = original_value.clone();
-                let parsed_scope = match serde_json::from_value::<ProviderKeyScope>(parsed) {
-                    Ok(scope) => normalize_provider_key_scope(Some(scope)),
-                    Err(_) => continue,
-                };
-                let pruned = remove_key_ids_from_provider_key_scope(parsed_scope, &removed);
-                match pruned {
-                    None => {
-                        sqlx::query(&format!(
-                            "UPDATE {table} SET allowed_provider_key_ids = NULL WHERE id = $1"
-                        ))
-                        .bind(&id)
-                        .execute(&self.pool)
-                        .await
-                        .map_postgres_err()?;
-                        updated += 1;
-                    }
-                    Some(next) => {
-                        let next_value = serde_json::to_value(&next).map_err(|err| {
-                            DataLayerError::UnexpectedValue(format!(
-                                "{table}.allowed_provider_key_ids contains unserializable scope: {err}"
+                let raw = serde_json::to_string(&original_value).map_err(|err| {
+                    DataLayerError::UnexpectedValue(format!(
+                        "{table}.allowed_provider_key_ids contains unserializable JSON: {err}"
+                    ))
+                })?;
+                let field_name = format!("{table}.allowed_provider_key_ids");
+                let plans = plan_provider_key_scope_prune(
+                    std::iter::once((id.clone(), raw)),
+                    &removed,
+                    &field_name,
+                )?;
+                for plan in plans {
+                    match plan.next {
+                        None => {
+                            sqlx::query(&format!(
+                                "UPDATE {table} SET allowed_provider_key_ids = NULL WHERE id = $1"
                             ))
-                        })?;
-                        if next_value == original_value {
-                            continue;
+                            .bind(&plan.row_id)
+                            .execute(&self.pool)
+                            .await
+                            .map_postgres_err()?;
                         }
-                        sqlx::query(&format!(
-                            "UPDATE {table} SET allowed_provider_key_ids = $2 WHERE id = $1"
-                        ))
-                        .bind(&id)
-                        .bind(next_value)
-                        .execute(&self.pool)
-                        .await
-                        .map_postgres_err()?;
-                        updated += 1;
+                        Some(next) => {
+                            let next_value = serde_json::to_value(&next).map_err(|err| {
+                                DataLayerError::UnexpectedValue(format!(
+                                    "{table}.allowed_provider_key_ids contains unserializable scope: {err}"
+                                ))
+                            })?;
+                            sqlx::query(&format!(
+                                "UPDATE {table} SET allowed_provider_key_ids = $2 WHERE id = $1"
+                            ))
+                            .bind(&plan.row_id)
+                            .bind(next_value)
+                            .execute(&self.pool)
+                            .await
+                            .map_postgres_err()?;
+                        }
                     }
+                    updated += 1;
                 }
             }
         }
@@ -1529,6 +1532,60 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
+        row.as_ref().map(map_auth_api_key_export_row).transpose()
+    }
+
+    async fn set_user_api_key_allowed_provider_key_ids(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        allowed_provider_key_ids: Option<ProviderKeyScope>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        let allowed_provider_key_ids = allowed_provider_key_ids
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let row = sqlx::query(
+            r#"
+UPDATE api_keys
+SET allowed_provider_key_ids = $3,
+    updated_at = now()
+WHERE user_id = $1
+  AND id = $2
+  AND is_standalone = FALSE
+RETURNING
+  user_id,
+  id AS api_key_id,
+  key_hash,
+  key_encrypted,
+  name,
+  allowed_providers,
+  allowed_provider_key_ids,
+  allowed_api_formats,
+  allowed_models,
+  ip_rules,
+  rate_limit,
+  concurrent_limit,
+  force_capabilities,
+  feature_settings,
+  is_active,
+  CAST(EXTRACT(EPOCH FROM expires_at) AS BIGINT) AS expires_at_unix_secs,
+  auto_delete_on_expiry,
+  total_requests,
+  COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
+  COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
+  is_standalone
+"#,
+        )
+        .bind(user_id)
+        .bind(api_key_id)
+        .bind(allowed_provider_key_ids)
+        .fetch_optional(&self.pool)
+        .await
+        .map_postgres_err()?;
         row.as_ref().map(map_auth_api_key_export_row).transpose()
     }
 

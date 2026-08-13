@@ -17,6 +17,9 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
     StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
+use aether_data_contracts::repository::provider_key_scope::{
+    plan_provider_key_scope_prune, serialize_provider_key_scope,
+};
 use aether_data_contracts::DataLayerError;
 use aether_data_query::{
     push_ci_contains_any, push_eq, push_in, push_limit_offset, push_optional_eq, SqlDialect,
@@ -616,9 +619,76 @@ WHERE id = ?
                 .await
                 .map_sql_err()?;
         }
+        if !key_ids.is_empty() {
+            let removed = key_ids
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            Self::prune_provider_key_scope_references_in_tx(&mut tx, &removed).await?;
+        }
 
         tx.commit().await.map_sql_err()?;
         Ok(())
+    }
+
+    /// Prunes `api_keys` and `user_groups` scope columns inside the caller's
+    /// transaction. Rows are parsed with the unified compatible parser; a
+    /// parse failure aborts the transaction instead of keeping a stale
+    /// reference.
+    async fn prune_provider_key_scope_references_in_tx(
+        tx: &mut sqlx::Transaction<'_, MySql>,
+        removed_key_ids: &std::collections::BTreeSet<String>,
+    ) -> Result<u64, DataLayerError> {
+        let mut updated = 0u64;
+        for table in ["api_keys", "user_groups"] {
+            let rows = sqlx::query(&format!(
+                "SELECT id, allowed_provider_key_ids FROM {table} WHERE allowed_provider_key_ids IS NOT NULL"
+            ))
+            .fetch_all(&mut **tx)
+            .await
+            .map_sql_err()?;
+            for row in rows {
+                let id: String = row.try_get("id").map_sql_err()?;
+                let Some(raw) = row
+                    .try_get::<Option<String>, _>("allowed_provider_key_ids")
+                    .map_sql_err()?
+                else {
+                    continue;
+                };
+                let field_name = format!("{table}.allowed_provider_key_ids");
+                let plans = plan_provider_key_scope_prune(
+                    std::iter::once((id.clone(), raw)),
+                    removed_key_ids,
+                    &field_name,
+                )?;
+                for plan in plans {
+                    match plan.next {
+                        None => {
+                            sqlx::query(&format!(
+                                "UPDATE {table} SET allowed_provider_key_ids = NULL WHERE id = ?"
+                            ))
+                            .bind(&plan.row_id)
+                            .execute(&mut **tx)
+                            .await
+                            .map_sql_err()?;
+                        }
+                        Some(next) => {
+                            let next_raw = serialize_provider_key_scope(Some(&next), &field_name)?;
+                            sqlx::query(&format!(
+                                "UPDATE {table} SET allowed_provider_key_ids = ? WHERE id = ?"
+                            ))
+                            .bind(&next_raw)
+                            .bind(&plan.row_id)
+                            .execute(&mut **tx)
+                            .await
+                            .map_sql_err()?;
+                        }
+                    }
+                    updated += 1;
+                }
+            }
+        }
+        Ok(updated)
     }
 
     pub async fn create_endpoint(
@@ -1070,6 +1140,31 @@ WHERE id = ?
             .map_sql_err()?
             .rows_affected();
         Ok(rows_affected > 0)
+    }
+
+    /// Deletes the key and prunes its id from every api_keys/user_groups key
+    /// scope in one transaction. A scope parse failure or update error rolls
+    /// the deletion back.
+    pub async fn delete_provider_api_key_and_prune_scope(
+        &self,
+        key_id: &str,
+    ) -> Result<bool, DataLayerError> {
+        validate_non_empty(key_id, "provider catalog key_id")?;
+        let mut tx = self.pool.begin().await.map_sql_err()?;
+        let rows_affected = sqlx::query("DELETE FROM provider_api_keys WHERE id = ?")
+            .bind(key_id)
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?
+            .rows_affected();
+        if rows_affected == 0 {
+            return Ok(false);
+        }
+        let removed =
+            std::iter::once(key_id.to_string()).collect::<std::collections::BTreeSet<_>>();
+        Self::prune_provider_key_scope_references_in_tx(&mut tx, &removed).await?;
+        tx.commit().await.map_sql_err()?;
+        Ok(true)
     }
 
     pub async fn compare_and_delete_key_oauth_credential(
@@ -3646,5 +3741,114 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         format!("{}-{nanos}", std::process::id())
+    }
+
+    /// Fault-injection / rollback coverage for the transactional key-delete +
+    /// scope-prune path. Requires a live MySQL at AETHER_TEST_MYSQL_URL;
+    /// skipped when the variable is unset (CI without a database).
+    #[tokio::test]
+    async fn mysql_delete_key_prune_scope_is_atomic_and_reports_parse_failures() {
+        let Some(database_url) = std::env::var("AETHER_TEST_MYSQL_URL").ok() else {
+            eprintln!("AETHER_TEST_MYSQL_URL unset; skipping mysql fault-injection test");
+            return;
+        };
+        // Use a dedicated database so this test never collides with the
+        // repository's other AETHER_TEST_MYSQL_URL tests. The URL must point
+        // at a MySQL server; the database name is derived and created here.
+        let server_url = database_url
+            .rsplit_once('/')
+            .map(|(prefix, _)| prefix.to_string())
+            .unwrap_or_else(|| database_url.clone());
+        let scope_url = format!("{server_url}/aether_test_scope");
+        let admin_pool = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect(&server_url)
+            .await
+            .expect("mysql admin pool should connect");
+        sqlx::query("DROP DATABASE IF EXISTS aether_test_scope")
+            .execute(&admin_pool)
+            .await
+            .expect("database should drop");
+        sqlx::query("CREATE DATABASE aether_test_scope")
+            .execute(&admin_pool)
+            .await
+            .expect("database should create");
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect(&scope_url)
+            .await
+            .expect("mysql pool should connect");
+        crate::run_migrations(&pool)
+            .await
+            .expect("migrations should run");
+
+        sqlx::query(
+            "INSERT INTO providers (id, name, provider_type, is_active, provider_priority, created_at, updated_at) VALUES ('provider-1', 'P1', 'custom', 1, 1, 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("provider should seed");
+        sqlx::query(
+            "INSERT INTO provider_api_keys (id, provider_id, name, api_key, auth_type, is_active, internal_priority, created_at, updated_at) VALUES ('key-1', 'provider-1', 'one', 'enc', 'api_key', 1, 1, 1, 1), ('key-2', 'provider-1', 'two', 'enc', 'api_key', 1, 1, 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("keys should seed");
+        sqlx::query(
+            r#"INSERT INTO api_keys (id, user_id, key_hash, allowed_providers, allowed_provider_key_ids, rate_limit, is_active, is_standalone, total_requests, total_tokens, total_cost_usd, created_at, updated_at) VALUES ('auth-key-1', 'user-1', 'hash-1', '["provider-1"]', '{"provider-1":["key-1"]}', 100, 1, 1, 0, 0, 0, 1, 1)"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("api key should seed");
+        sqlx::query(
+            r#"INSERT INTO user_groups (id, name, normalized_name, priority, allowed_providers, allowed_provider_key_ids, allowed_providers_mode, allowed_api_formats_mode, allowed_models_mode, rate_limit_mode, created_at, updated_at) VALUES ('group-1', 'G', 'g', 0, '["provider-1"]', '{"provider-1":["key-1"]}', 'specific', 'inherit', 'inherit', 'inherit', 1, 1)"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("group should seed");
+
+        let repository = MysqlProviderCatalogReadRepository::new(pool.clone());
+        let deleted = repository
+            .delete_provider_api_key_and_prune_scope("key-1")
+            .await
+            .expect("delete should succeed");
+        assert!(deleted);
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM provider_api_keys WHERE id = 'key-1'")
+                .fetch_one(&pool)
+                .await
+                .expect("count should load");
+        assert_eq!(remaining, 0);
+        let scope: Option<String> = sqlx::query_scalar(
+            "SELECT allowed_provider_key_ids FROM api_keys WHERE id = 'auth-key-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("scope should load");
+        assert_eq!(scope, None);
+
+        // Fault injection: corrupt the group scope, then delete key-2.
+        sqlx::query(r#"UPDATE user_groups SET allowed_provider_key_ids = '{corrupt json' WHERE id = 'group-1'"#)
+            .execute(&pool)
+            .await
+            .expect("corrupt scope should write");
+
+        let result = repository
+            .delete_provider_api_key_and_prune_scope("key-2")
+            .await;
+        assert!(result.is_err(), "corrupt scope must abort the delete");
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM provider_api_keys WHERE id = 'key-2'")
+                .fetch_one(&pool)
+                .await
+                .expect("count should load");
+        assert_eq!(remaining, 1, "key deletion must roll back");
+        let scope: Option<String> = sqlx::query_scalar(
+            "SELECT allowed_provider_key_ids FROM api_keys WHERE id = 'auth-key-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("scope should load");
+        assert_eq!(scope, None, "no partial prune may persist");
     }
 }

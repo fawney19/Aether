@@ -783,6 +783,13 @@ pub trait AuthApiKeyWriteRepository: Send + Sync {
         allowed_providers: Option<Vec<String>>,
     ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError>;
 
+    async fn set_user_api_key_allowed_provider_key_ids(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        allowed_provider_key_ids: Option<ProviderKeyScope>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError>;
+
     async fn set_user_api_key_force_capabilities(
         &self,
         user_id: &str,

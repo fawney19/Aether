@@ -8,8 +8,7 @@ use aether_data_contracts::repository::auth::{
     UpdateStandaloneApiKeyBasicRecord, UpdateUserApiKeyBasicRecord,
 };
 use aether_data_contracts::repository::provider_key_scope::{
-    normalize_provider_key_scope, remove_key_ids_from_provider_key_scope,
-    serialize_provider_key_scope, ProviderKeyScope,
+    plan_provider_key_scope_prune, serialize_provider_key_scope, ProviderKeyScope,
 };
 use aether_data_contracts::DataLayerError;
 
@@ -435,38 +434,37 @@ impl AuthApiKeyWriteRepository for MysqlAuthApiKeyReadRepository {
                 else {
                     continue;
                 };
-                let parsed = match serde_json::from_str::<ProviderKeyScope>(&raw) {
-                    Ok(scope) => normalize_provider_key_scope(Some(scope)),
-                    Err(_) => continue,
-                };
-                let pruned = remove_key_ids_from_provider_key_scope(parsed, &removed);
-                let Some(next_raw) = serialize_provider_key_scope(
-                    pruned.as_ref(),
-                    &format!("{table}.allowed_provider_key_ids"),
-                )?
-                else {
-                    sqlx::query(&format!(
-                        "UPDATE {table} SET allowed_provider_key_ids = NULL WHERE id = ?"
-                    ))
-                    .bind(&id)
-                    .execute(&self.pool)
-                    .await
-                    .map_sql_err()?;
+                let field_name = format!("{table}.allowed_provider_key_ids");
+                let plans = plan_provider_key_scope_prune(
+                    std::iter::once((id.clone(), raw)),
+                    &removed,
+                    &field_name,
+                )?;
+                for plan in plans {
+                    match plan.next {
+                        None => {
+                            sqlx::query(&format!(
+                                "UPDATE {table} SET allowed_provider_key_ids = NULL WHERE id = ?"
+                            ))
+                            .bind(&plan.row_id)
+                            .execute(&self.pool)
+                            .await
+                            .map_sql_err()?;
+                        }
+                        Some(next) => {
+                            let next_raw = serialize_provider_key_scope(Some(&next), &field_name)?;
+                            sqlx::query(&format!(
+                                "UPDATE {table} SET allowed_provider_key_ids = ? WHERE id = ?"
+                            ))
+                            .bind(&next_raw)
+                            .bind(&plan.row_id)
+                            .execute(&self.pool)
+                            .await
+                            .map_sql_err()?;
+                        }
+                    }
                     updated += 1;
-                    continue;
-                };
-                if next_raw == raw {
-                    continue;
                 }
-                sqlx::query(&format!(
-                    "UPDATE {table} SET allowed_provider_key_ids = ? WHERE id = ?"
-                ))
-                .bind(&next_raw)
-                .bind(&id)
-                .execute(&self.pool)
-                .await
-                .map_sql_err()?;
-                updated += 1;
             }
         }
         Ok(updated)
@@ -713,6 +711,34 @@ WHERE id = ?
         .bind(json_string_from_string_list(
             allowed_providers.as_ref(),
             "api_keys.allowed_providers",
+        )?)
+        .bind(current_unix_secs() as i64)
+        .bind(api_key_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map_sql_err()?;
+        self.reload_export_by_id(api_key_id).await
+    }
+
+    async fn set_user_api_key_allowed_provider_key_ids(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        allowed_provider_key_ids: Option<ProviderKeyScope>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        sqlx::query(
+            r#"
+UPDATE api_keys
+SET allowed_provider_key_ids = ?, updated_at = ?
+WHERE id = ?
+  AND user_id = ?
+  AND is_standalone = 0
+"#,
+        )
+        .bind(serialize_provider_key_scope(
+            allowed_provider_key_ids.as_ref(),
+            "api_keys.allowed_provider_key_ids",
         )?)
         .bind(current_unix_secs() as i64)
         .bind(api_key_id)

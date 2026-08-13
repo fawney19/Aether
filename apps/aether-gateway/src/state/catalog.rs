@@ -610,10 +610,9 @@ impl AppState {
             self.invalidate_provider_routing_caches();
         }
         if !key_ids.is_empty() {
-            // Provider deletion removes its keys; prune their ids from every
-            // api_keys/user_groups key scope so policies never reference
-            // deleted provider keys.
-            let _ = self.data.prune_provider_key_scope_references(key_ids).await;
+            // The adapter prunes the deleted key ids from every
+            // api_keys/user_groups key scope inside the same transaction as
+            // the provider ref cleanup; failures abort that transaction.
             self.invalidate_auth_context_cache();
         }
         Ok(())
@@ -668,6 +667,13 @@ impl AppState {
         &self,
         key: &provider_catalog::StoredProviderCatalogKey,
     ) -> Result<Option<provider_catalog::StoredProviderCatalogKey>, GatewayError> {
+        let previous = self
+            .data
+            .list_provider_catalog_keys_by_ids(std::slice::from_ref(&key.id))
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+            .into_iter()
+            .next();
         let updated = self
             .data
             .update_provider_catalog_key(key)
@@ -675,6 +681,22 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.is_some() {
             self.invalidate_provider_routing_caches();
+        }
+        if let (Some(previous), Some(updated)) = (previous.as_ref(), updated.as_ref()) {
+            if previous.is_active && !updated.is_active {
+                // The key just became disabled: prune its id from every
+                // api_keys/user_groups key scope so the stored policy never
+                // references a disabled key, then refresh auth snapshots.
+                self.data
+                    .prune_provider_key_scope_references(&[key.id.clone()])
+                    .await
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                self.data
+                    .prune_user_group_provider_key_scope_references(&[key.id.clone()])
+                    .await
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                self.invalidate_auth_context_cache();
+            }
         }
         Ok(updated)
     }
@@ -698,6 +720,16 @@ impl AppState {
         &self,
         keys: &[provider_catalog::StoredProviderCatalogKey],
     ) -> Result<Option<Vec<provider_catalog::StoredProviderCatalogKey>>, GatewayError> {
+        let previous_by_id = self
+            .data
+            .list_provider_catalog_keys_by_ids(
+                &keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>(),
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+            .into_iter()
+            .map(|key| (key.id.clone(), key))
+            .collect::<std::collections::BTreeMap<_, _>>();
         let updated = self
             .data
             .update_provider_catalog_keys(keys)
@@ -705,6 +737,28 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.as_ref().is_some_and(|keys| !keys.is_empty()) {
             self.invalidate_provider_routing_caches();
+        }
+        if let Some(updated_keys) = updated.as_ref() {
+            let newly_disabled = updated_keys
+                .iter()
+                .filter(|updated| {
+                    previous_by_id
+                        .get(&updated.id)
+                        .is_some_and(|previous| previous.is_active && !updated.is_active)
+                })
+                .map(|key| key.id.clone())
+                .collect::<Vec<_>>();
+            if !newly_disabled.is_empty() {
+                self.data
+                    .prune_provider_key_scope_references(&newly_disabled)
+                    .await
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                self.data
+                    .prune_user_group_provider_key_scope_references(&newly_disabled)
+                    .await
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                self.invalidate_auth_context_cache();
+            }
         }
         Ok(updated)
     }
@@ -890,6 +944,9 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?
             .into_iter()
             .next();
+        // Deletes the key and prunes its id from every api_keys/user_groups
+        // key scope in one database transaction; prune failures abort the
+        // deletion and surface as an error instead of being swallowed.
         let deleted = self
             .data
             .delete_provider_catalog_key(key_id)
@@ -916,14 +973,6 @@ impl AppState {
                 }
             }
             self.invalidate_provider_routing_caches();
-        }
-        if deleted {
-            // Remove the deleted key id from every api_keys/user_groups key
-            // scope so policies never reference a deleted provider key.
-            let _ = self
-                .data
-                .prune_provider_key_scope_references(&[key_id.to_string()])
-                .await;
             self.invalidate_auth_context_cache();
         }
         Ok(deleted)

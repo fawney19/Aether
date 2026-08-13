@@ -10,7 +10,9 @@ use super::{
     StandaloneApiKeyExportListQuery, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
     UpdateStandaloneApiKeyBasicRecord, UpdateUserApiKeyBasicRecord,
 };
-use crate::repository::provider_key_scope::remove_key_ids_from_provider_key_scope;
+use crate::repository::provider_key_scope::{
+    remove_key_ids_from_provider_key_scope, ProviderKeyScope,
+};
 use crate::repository::usage::{ApiKeyUsageContribution, ApiKeyUsageDelta};
 use crate::DataLayerError;
 
@@ -1099,6 +1101,31 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
         Ok(index.export_by_api_key_id.get(api_key_id).cloned())
     }
 
+    async fn set_user_api_key_allowed_provider_key_ids(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        allowed_provider_key_ids: Option<ProviderKeyScope>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        let mut index = self
+            .index
+            .write()
+            .expect("auth api key snapshot repository lock");
+        let Some(snapshot) = index.by_api_key_id.get(api_key_id) else {
+            return Ok(None);
+        };
+        if snapshot.user_id != user_id || snapshot.api_key_is_standalone {
+            return Ok(None);
+        }
+        if let Some(snapshot) = index.by_api_key_id.get_mut(api_key_id) {
+            snapshot.api_key_allowed_provider_key_ids = allowed_provider_key_ids.clone();
+        }
+        if let Some(export) = index.export_by_api_key_id.get_mut(api_key_id) {
+            export.allowed_provider_key_ids = allowed_provider_key_ids;
+        }
+        Ok(index.export_by_api_key_id.get(api_key_id).cloned())
+    }
+
     async fn set_user_api_key_force_capabilities(
         &self,
         user_id: &str,
@@ -1498,9 +1525,13 @@ mod tests {
     #[tokio::test]
     async fn prune_provider_key_scope_references_removes_deleted_keys() {
         let mut snapshot = sample_snapshot("key-1", "user-1");
-        snapshot
-            .api_key_allowed_provider_key_ids
-            .replace([("p1".to_string(), ["key-a".to_string(), "key-b".to_string()].into())].into());
+        snapshot.api_key_allowed_provider_key_ids.replace(
+            [(
+                "p1".to_string(),
+                ["key-a".to_string(), "key-b".to_string()].into(),
+            )]
+            .into(),
+        );
         let repository = InMemoryAuthApiKeySnapshotRepository::seed(vec![(
             Some("hash-1".to_string()),
             snapshot,

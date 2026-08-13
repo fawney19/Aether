@@ -706,7 +706,11 @@ impl GatewayDataState {
         key_id: &str,
     ) -> Result<bool, DataLayerError> {
         let deleted = match &self.provider_catalog_writer {
-            Some(repository) => repository.delete_key(key_id).await,
+            Some(repository) => {
+                repository
+                    .delete_provider_api_key_and_prune_scope(key_id)
+                    .await
+            }
             None => Ok(false),
         }?;
         if deleted {

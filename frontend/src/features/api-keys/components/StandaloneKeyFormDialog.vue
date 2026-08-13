@@ -223,15 +223,18 @@
                       v-for="key in providerKeysByProvider[providerId]"
                       :key="key.id"
                       class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm hover:bg-muted/50"
+                      :class="key.is_active === false && !selectedProviderKeyIds(providerId).includes(key.id) ? 'opacity-60' : ''"
                     >
                       <input
                         :checked="selectedProviderKeyIds(providerId).includes(key.id)"
                         type="checkbox"
                         class="h-3.5 w-3.5 rounded border-gray-300 cursor-pointer"
+                        :disabled="key.is_active === false && !selectedProviderKeyIds(providerId).includes(key.id)"
                         @change="toggleProviderKey(providerId, key.id)"
                       >
                       <span class="min-w-0 flex-1 truncate">{{ key.name || key.id }}</span>
-                      <span class="text-[11px] text-muted-foreground">{{ key.api_key_masked }}</span>
+                      <span v-if="key.is_active === false" class="shrink-0 rounded bg-destructive/10 px-1.5 py-0.5 text-[11px] text-destructive">已禁用</span>
+                      <span v-else class="text-[11px] text-muted-foreground">{{ key.api_key_masked }}</span>
                     </label>
                   </div>
                   <div v-else class="px-3 py-2 text-xs text-muted-foreground">
@@ -648,9 +651,11 @@ async function loadProviderKeys(providerId: string) {
   providerKeysLoading.value = new Set([...providerKeysLoading.value, providerId])
   try {
     const keys = await getProviderKeys(providerId)
+    // Keep disabled keys in the list: keys that are already selected but
+    // became disabled must stay visible so the admin can uncheck them.
     providerKeysByProvider.value = {
       ...providerKeysByProvider.value,
-      [providerId]: keys.filter((key) => key.is_active !== false),
+      [providerId]: keys,
     }
   } catch (err) {
     log.error('加载提供商 Key 失败:', err)

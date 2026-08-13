@@ -51,9 +51,11 @@ export function useUserAccessControlOptions() {
     providerKeysLoading.value = { ...providerKeysLoading.value, [providerId]: true }
     try {
       const keys = await getProviderKeys(providerId)
+      // Keep disabled keys in the list: keys that are already selected but
+      // became disabled must stay visible so the admin can uncheck them.
       providerKeysByProvider.value = {
         ...providerKeysByProvider.value,
-        [providerId]: keys.filter((key) => key.is_active !== false),
+        [providerId]: keys,
       }
     } catch (err) {
       log.error('加载提供商 Key 失败:', err)

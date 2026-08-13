@@ -7,11 +7,12 @@ use super::shared::{
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::handlers::admin::users::{
-    default_admin_user_api_key_name, format_optional_unix_secs_iso8601,
-    generate_admin_user_api_key_plaintext, hash_admin_user_api_key, masked_user_api_key_display,
-    normalize_admin_feature_settings, normalize_admin_optional_api_key_name,
-    normalize_admin_provider_key_scope, normalize_admin_user_api_formats,
-    normalize_admin_user_ip_rules, normalize_admin_user_string_list,
+    canonicalize_admin_provider_key_scope, default_admin_user_api_key_name,
+    format_optional_unix_secs_iso8601, generate_admin_user_api_key_plaintext,
+    hash_admin_user_api_key, masked_user_api_key_display, normalize_admin_feature_settings,
+    normalize_admin_optional_api_key_name, normalize_admin_provider_key_scope,
+    normalize_admin_user_api_formats, normalize_admin_user_ip_rules,
+    normalize_admin_user_string_list,
 };
 use crate::handlers::shared::normalize_optional_api_key_concurrent_limit;
 use crate::GatewayError;
@@ -338,6 +339,22 @@ pub(super) async fn build_admin_update_api_key_response(
             state,
             effective_allowed_providers.as_deref(),
             payload.allowed_provider_key_ids,
+        )
+        .await
+        {
+            Ok(value) => Some(value),
+            Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+        }
+    } else if field_presence.contains("allowed_providers") {
+        // The provider allowlist changed without an explicit scope field:
+        // canonicalize the stored scope against the new allowlist so it can
+        // never disagree with the allowlist (entries for providers that are
+        // no longer allowed, and references to missing/disabled/foreign
+        // keys, are dropped; an unrestricted allowlist clears the scope).
+        match canonicalize_admin_provider_key_scope(
+            state,
+            effective_allowed_providers.as_deref(),
+            existing.allowed_provider_key_ids.clone(),
         )
         .await
         {

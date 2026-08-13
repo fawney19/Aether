@@ -526,6 +526,17 @@ fn memory_export_row_from_auth_user(
 
 #[async_trait]
 impl UserReadRepository for InMemoryUserReadRepository {
+    async fn prune_provider_key_scope_references(
+        &self,
+        key_ids: &[String],
+    ) -> Result<u64, crate::DataLayerError> {
+        <Self as crate::repository::provider_key_scope::ProviderKeyScopeCleanupRepository>::prune_provider_key_scope_references(
+            self,
+            key_ids,
+        )
+        .await
+    }
+
     async fn list_users_by_ids(
         &self,
         user_ids: &[String],

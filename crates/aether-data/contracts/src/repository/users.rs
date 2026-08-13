@@ -701,6 +701,18 @@ pub struct UserExportSummary {
 
 #[async_trait]
 pub trait UserReadRepository: Send + Sync {
+    /// Removes deleted/disabled `provider_api_keys.id` values from every
+    /// `allowed_provider_key_ids` value in `user_groups`. Defaults to a
+    /// no-op; SQL repositories already prune both policy tables through the
+    /// auth writer, and in-memory repositories override this for parity.
+    async fn prune_provider_key_scope_references(
+        &self,
+        key_ids: &[String],
+    ) -> Result<u64, crate::DataLayerError> {
+        let _ = key_ids;
+        Ok(0)
+    }
+
     async fn list_users_by_ids(
         &self,
         user_ids: &[String],

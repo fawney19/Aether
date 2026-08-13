@@ -275,6 +275,39 @@ pub fn remove_key_ids_from_provider_key_scope(
     normalize_provider_key_scope(Some(pruned))
 }
 
+/// One planned scope-column update produced by [`plan_provider_key_scope_prune`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderKeyScopePrunePlan {
+    pub row_id: String,
+    /// `None` means the column must be set to `NULL`.
+    pub next: Option<ProviderKeyScope>,
+}
+
+/// Plans scope-column updates for a batch of stored rows.
+///
+/// Each row is `(row_id, raw_scope_json)`. Rows are parsed with the unified
+/// compatible parser; a row that cannot be parsed is a hard error (callers
+/// must abort and roll back instead of silently keeping a stale reference).
+/// Only rows whose scope actually changes are returned.
+pub fn plan_provider_key_scope_prune(
+    rows: impl IntoIterator<Item = (String, String)>,
+    removed_key_ids: &BTreeSet<String>,
+    field_name: &str,
+) -> Result<Vec<ProviderKeyScopePrunePlan>, crate::DataLayerError> {
+    let mut plans = Vec::new();
+    for (row_id, raw) in rows {
+        let parsed = parse_provider_key_scope_value(&Value::String(raw), field_name)?;
+        let pruned = remove_key_ids_from_provider_key_scope(parsed.clone(), removed_key_ids);
+        if pruned != parsed {
+            plans.push(ProviderKeyScopePrunePlan {
+                row_id,
+                next: pruned,
+            });
+        }
+    }
+    Ok(plans)
+}
+
 /// Cross-table cleanup for deleted `provider_api_keys` rows.
 ///
 /// `allowed_provider_key_ids` lives in both `api_keys` and `user_groups` and
@@ -449,5 +482,51 @@ mod tests {
             parse_provider_key_scope(serde_json::from_str(&json).ok(), "f").expect("parse"),
             value
         );
+    }
+
+    #[test]
+    fn prune_plan_reports_unparseable_rows() {
+        let result = plan_provider_key_scope_prune(
+            [("row-1".to_string(), "{not json".to_string())],
+            &["a".to_string()].into_iter().collect(),
+            "api_keys.allowed_provider_key_ids",
+        );
+        assert!(matches!(result, Err(DataLayerError::UnexpectedValue(_))));
+    }
+
+    #[test]
+    fn prune_plan_only_returns_changed_rows() {
+        let removed = ["a".to_string()].into_iter().collect::<BTreeSet<_>>();
+        let plans = plan_provider_key_scope_prune(
+            [
+                ("row-1".to_string(), "{\"p1\":[\"a\",\"b\"]}".to_string()),
+                ("row-2".to_string(), "{\"p1\":[\"c\"]}".to_string()),
+                ("row-3".to_string(), "{}".to_string()),
+            ],
+            &removed,
+            "api_keys.allowed_provider_key_ids",
+        )
+        .expect("plans should build");
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].row_id, "row-1");
+        assert_eq!(
+            plans[0].next,
+            Some(scope(&[("p1", &["b"])]).expect("scope"))
+        );
+    }
+
+    #[test]
+    fn prune_plan_sets_null_when_scope_fully_removed() {
+        let removed = ["a".to_string()].into_iter().collect::<BTreeSet<_>>();
+        let plans = plan_provider_key_scope_prune(
+            [("row-1".to_string(), "{\"p1\":[\"a\"]}".to_string())],
+            &removed,
+            "api_keys.allowed_provider_key_ids",
+        )
+        .expect("plans should build");
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].next, None);
     }
 }
