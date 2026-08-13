@@ -2439,6 +2439,7 @@ WHERE id = $1
                 "provider catalog OAuth credential CAS delete contains empty fields".to_string(),
             ));
         }
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
         let rows_affected = sqlx::query(
             r#"
 DELETE FROM provider_api_keys
@@ -2482,11 +2483,21 @@ WHERE id = $1
                 .as_ref()
                 .and_then(|expected| expected.expected_value.as_ref()),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_postgres_err()?
         .rows_affected();
-        Ok(rows_affected > 0)
+        if rows_affected == 0 {
+            return Ok(false);
+        }
+        // The CAS condition matched: prune the key id from every
+        // api_keys/user_groups key scope inside the same transaction so no
+        // policy ever references a deleted provider key.
+        let removed =
+            std::iter::once(delete.key_id.clone()).collect::<std::collections::BTreeSet<_>>();
+        Self::prune_provider_key_scope_references_in_tx(&mut tx, &removed).await?;
+        tx.commit().await.map_err(postgres_error)?;
+        Ok(true)
     }
 
     pub async fn update_key_upstream_metadata(
@@ -3843,20 +3854,7 @@ mod tests {
             eprintln!("AETHER_TEST_POSTGRES_URL unset; skipping postgres fault-injection test");
             return;
         };
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
-            .await
-            .expect("postgres pool should connect");
-        // Reset schema for a clean run.
-        sqlx::query("DROP SCHEMA public CASCADE")
-            .execute(&pool)
-            .await
-            .expect("schema should drop");
-        sqlx::query("CREATE SCHEMA public")
-            .execute(&pool)
-            .await
-            .expect("schema should create");
+        let pool = postgres_test_pool(&database_url, "aether_test_scope").await;
         crate::migrations::run_migrations(&pool)
             .await
             .expect("migrations should run");
@@ -3935,5 +3933,144 @@ mod tests {
         .await
         .expect("scope should load");
         assert_eq!(scope, None, "no partial prune may persist");
+    }
+
+    /// OAuth/CAS key deletion must prune scopes inside the same transaction.
+    /// Requires a live PostgreSQL at AETHER_TEST_POSTGRES_URL; skipped when
+    /// the variable is unset (CI without a database).
+    #[tokio::test]
+    async fn postgres_cas_oauth_key_delete_prunes_scopes_atomically_and_rolls_back_on_corrupt_scope(
+    ) {
+        let Some(database_url) = std::env::var("AETHER_TEST_POSTGRES_URL").ok() else {
+            eprintln!("AETHER_TEST_POSTGRES_URL unset; skipping postgres CAS test");
+            return;
+        };
+        let pool = postgres_test_pool(&database_url, "aether_test_cas").await;
+        crate::migrations::run_migrations(&pool)
+            .await
+            .expect("migrations should run");
+
+        sqlx::query(
+            "INSERT INTO providers (id, name, provider_type, is_active, provider_priority, created_at, updated_at) VALUES ('provider-1', 'P1', 'custom', TRUE, 1, now(), now())",
+        )
+        .execute(&pool)
+        .await
+        .expect("provider should seed");
+        sqlx::query(
+            "INSERT INTO users (id, email, email_verified, username, password_hash, role, auth_source, is_active, is_deleted, created_at, updated_at) VALUES ('user-1', 'u@example.com', TRUE, 'alice', NULL, 'user', 'local', TRUE, FALSE, now(), now())",
+        )
+        .execute(&pool)
+        .await
+        .expect("user should seed");
+        sqlx::query(
+            r#"INSERT INTO provider_api_keys (id, provider_id, name, api_key, auth_type, is_active, internal_priority, total_tokens, total_cost_usd, created_at, updated_at) VALUES ('key-1', 'provider-1', 'one', 'enc-key', 'api_key', TRUE, 1, 0, 0, now(), now())"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("key should seed");
+        sqlx::query(
+            r#"INSERT INTO api_keys (id, user_id, key_hash, allowed_providers, allowed_provider_key_ids, rate_limit, is_active, is_standalone, total_requests, total_tokens, total_cost_usd, created_at, updated_at) VALUES ('auth-key-1', 'user-1', 'hash-1', '["provider-1"]', '{"provider-1":["key-1"]}'::jsonb, 100, TRUE, TRUE, 0, 0, 0, now(), now())"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("api key should seed");
+        sqlx::query(
+            r#"INSERT INTO user_groups (id, name, normalized_name, priority, allowed_providers, allowed_provider_key_ids, allowed_providers_mode, allowed_api_formats_mode, allowed_models_mode, rate_limit_mode, created_at, updated_at) VALUES ('group-1', 'G', 'g', 0, '["provider-1"]', '{"provider-1":["key-1"]}'::jsonb, 'specific', 'inherit', 'inherit', 'inherit', now(), now())"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("group should seed");
+
+        let repository = SqlxProviderCatalogReadRepository::new(pool.clone());
+        let cas_delete = aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyOAuthCredentialCasDelete {
+            key_id: "key-1".to_string(),
+            expected_encrypted_auth_config: None,
+            expected_credential: aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: Some("enc-key".to_string()),
+                auth_type: "api_key".to_string(),
+                provider_id: "provider-1".to_string(),
+                provider_type: "custom".to_string(),
+            },
+        };
+
+        let deleted = repository
+            .compare_and_delete_key_oauth_credential(&cas_delete)
+            .await
+            .expect("cas delete should succeed");
+        assert!(deleted);
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM provider_api_keys WHERE id = 'key-1'")
+                .fetch_one(&pool)
+                .await
+                .expect("count should load");
+        assert_eq!(remaining, 0);
+        let scope: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT allowed_provider_key_ids FROM api_keys WHERE id = 'auth-key-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("scope should load");
+        assert_eq!(scope, None);
+        let group_scope: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT allowed_provider_key_ids FROM user_groups WHERE id = 'group-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("group scope should load");
+        assert_eq!(group_scope, None);
+
+        // Corrupt scope row: the CAS delete must fail and roll back.
+        sqlx::query(
+            r#"INSERT INTO provider_api_keys (id, provider_id, name, api_key, auth_type, is_active, internal_priority, total_tokens, total_cost_usd, created_at, updated_at) VALUES ('key-2', 'provider-1', 'two', 'enc-key', 'api_key', TRUE, 1, 0, 0, now(), now())"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("key-2 should seed");
+        sqlx::query(
+            r#"UPDATE user_groups SET allowed_provider_key_ids = '{"provider-1": 42}'::jsonb WHERE id = 'group-1'"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("corrupt scope should write");
+        let mut cas_delete_2 = cas_delete;
+        cas_delete_2.key_id = "key-2".to_string();
+        let result = repository
+            .compare_and_delete_key_oauth_credential(&cas_delete_2)
+            .await;
+        assert!(result.is_err(), "corrupt scope must abort the CAS delete");
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM provider_api_keys WHERE id = 'key-2'")
+                .fetch_one(&pool)
+                .await
+                .expect("count should load");
+        assert_eq!(remaining, 1, "CAS delete must roll back");
+    }
+
+    /// Connects to a dedicated per-test database (created on demand) so the
+    /// fault-injection tests never race on a shared schema.
+    async fn postgres_test_pool(database_url: &str, database_name: &str) -> sqlx::PgPool {
+        let server_url = database_url
+            .rsplit_once('/')
+            .map(|(prefix, _)| prefix.to_string())
+            .unwrap_or_else(|| database_url.to_string());
+        let admin_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&server_url)
+            .await
+            .expect("postgres admin pool should connect");
+        sqlx::query(&format!("DROP DATABASE IF EXISTS {database_name}"))
+            .execute(&admin_pool)
+            .await
+            .expect("database should drop");
+        sqlx::query(&format!("CREATE DATABASE {database_name}"))
+            .execute(&admin_pool)
+            .await
+            .expect("database should create");
+        let pool_url = format!("{server_url}/{database_name}");
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&pool_url)
+            .await
+            .expect("postgres pool should connect")
     }
 }
