@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::auth::{
-    AuthApiKeyReadRepository, AuthApiKeyWriteRepository, InMemoryAuthApiKeySnapshotRepository,
-    StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
+    AuthApiKeyLookupKey, AuthApiKeyReadRepository, AuthApiKeyWriteRepository,
+    InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
 };
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::usage::InMemoryUsageReadRepository;
@@ -851,6 +851,81 @@ async fn gateway_admin_standalone_api_key_provider_key_scope_round_trip() {
             .await
             .expect("request should succeed");
     assert_eq!(bad_key_response.status(), StatusCode::BAD_REQUEST);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_admin_standalone_api_key_direct_null_allowlist_clears_scope() {
+    let (_upstream_url, _upstream_hits, upstream_handle) =
+        start_api_keys_upstream("/api/admin/api-keys/key-123").await;
+    let mut snapshot = sample_standalone_api_key_snapshot("key-123", "admin-user-123", true);
+    snapshot.api_key_allowed_providers = Some(vec!["provider-1".to_string()]);
+    snapshot.api_key_allowed_provider_key_ids =
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into());
+    let mut export =
+        sample_standalone_export_record("key-123", "admin-user-123", "sk-key-123-plaintext", true);
+    export.allowed_providers = Some(vec!["provider-1".to_string()]);
+    export.allowed_provider_key_ids =
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into());
+    let repository = Arc::new(
+        InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some("hash-key-123".to_string()),
+            snapshot,
+        )])
+        .with_export_records([export]),
+    );
+    let provider = super::super::helpers::sample_provider("provider-1", "Provider One", 10);
+    let catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![super::super::helpers::sample_key(
+            "key-a",
+            "provider-1",
+            "openai:chat",
+            "secret-a",
+        )],
+    ));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_auth_wallets_for_tests([sample_standalone_wallet("key-123")])
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_auth_api_key_repository_for_tests(Arc::clone(
+                    &repository,
+                ))
+                .with_provider_catalog_reader(catalog)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    // The first and only update explicitly clears the provider allowlist.
+    let response = admin_request(
+        reqwest::Client::new().put(format!("{gateway_url}/api/admin/api-keys/key-123")),
+    )
+    .json(&json!({ "allowed_providers": null }))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["allowed_providers"], serde_json::Value::Null);
+    assert_eq!(payload["allowed_provider_key_ids"], serde_json::Value::Null);
+
+    let stored_snapshot = repository
+        .find_api_key_snapshot(AuthApiKeyLookupKey::ApiKeyId("key-123"))
+        .await
+        .expect("snapshot lookup should succeed")
+        .expect("snapshot should exist");
+    assert_eq!(stored_snapshot.api_key_allowed_provider_key_ids, None);
+    let stored_export = repository
+        .find_export_standalone_api_key_by_id("key-123")
+        .await
+        .expect("export lookup should succeed")
+        .expect("export record should exist");
+    assert_eq!(stored_export.allowed_provider_key_ids, None);
 
     gateway_handle.abort();
     upstream_handle.abort();

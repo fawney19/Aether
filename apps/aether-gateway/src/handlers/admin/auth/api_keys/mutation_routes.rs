@@ -330,10 +330,13 @@ pub(super) async fn build_admin_update_api_key_response(
     } else {
         None
     };
-    let effective_allowed_providers = allowed_providers
-        .clone()
-        .flatten()
-        .or_else(|| existing.allowed_providers.clone());
+    // Keep the outer patch state intact: present null clears the allowlist,
+    // while only an absent field falls back to the stored value.
+    let effective_allowed_providers = if field_presence.contains("allowed_providers") {
+        allowed_providers.clone().unwrap_or_default()
+    } else {
+        existing.allowed_providers.clone()
+    };
     let allowed_provider_key_ids = if field_presence.contains("allowed_provider_key_ids") {
         match normalize_admin_provider_key_scope(
             state,
