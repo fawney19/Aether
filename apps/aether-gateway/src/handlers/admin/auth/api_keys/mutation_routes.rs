@@ -349,8 +349,8 @@ pub(super) async fn build_admin_update_api_key_response(
         // The provider allowlist changed without an explicit scope field:
         // canonicalize the stored scope against the new allowlist so it can
         // never disagree with the allowlist (entries for providers that are
-        // no longer allowed, and references to missing/disabled/foreign
-        // keys, are dropped; an unrestricted allowlist clears the scope).
+        // no longer allowed, and references to missing/foreign keys,
+        // are dropped; an unrestricted allowlist clears the scope).
         match canonicalize_admin_provider_key_scope(
             state,
             effective_allowed_providers.as_deref(),

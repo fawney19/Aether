@@ -223,13 +223,11 @@
                       v-for="key in providerKeysByProvider[providerId]"
                       :key="key.id"
                       class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm hover:bg-muted/50"
-                      :class="key.is_active === false && !selectedProviderKeyIds(providerId).includes(key.id) ? 'opacity-60' : ''"
                     >
                       <input
                         :checked="selectedProviderKeyIds(providerId).includes(key.id)"
                         type="checkbox"
                         class="h-3.5 w-3.5 rounded border-gray-300 cursor-pointer"
-                        :disabled="key.is_active === false && !selectedProviderKeyIds(providerId).includes(key.id)"
                         @change="toggleProviderKey(providerId, key.id)"
                       >
                       <span class="min-w-0 flex-1 truncate">{{ key.name || key.id }}</span>

@@ -36,4 +36,14 @@ describe('mobile dialog layout', () => {
     expect(accessSource).toContain('h-10 w-10')
     expect(headerSource.match(/h-10 w-10/g)).toHaveLength(2)
   })
+
+  it('renders disabled key status without disabling scope controls', () => {
+    const standaloneSource = readSource('src/features/api-keys/components/StandaloneKeyFormDialog.vue')
+    const groupSource = readSource('src/features/users/components/UserGroupAccessControlFields.vue')
+
+    for (const source of [standaloneSource, groupSource]) {
+      expect(source).not.toContain('key.is_active === false && !selectedProviderKeyIds(providerId).includes(key.id)')
+      expect(source).toContain('v-if="key.is_active === false"')
+    }
+  })
 })

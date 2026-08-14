@@ -476,9 +476,6 @@ async fn validate_group_provider_key_scope(
             let Some(key) = key_by_id.get(key_id) else {
                 return Err(format!("Key {key_id} 不存在"));
             };
-            if !key.is_active {
-                return Err(format!("Key {key_id} 已禁用，不能勾选"));
-            }
             if key.provider_id != *provider_id {
                 return Err(format!("Key {key_id} 不属于提供商 {provider_id}"));
             }

@@ -254,6 +254,30 @@ describe('StandaloneKeyFormDialog provider key scope', () => {
     expect(mounted.root.textContent).toContain('Disabled selected key')
   })
 
+  it('allows selecting a disabled unselected key and round-trips the scope', async () => {
+    const mounted = mountDialog(standaloneKey({ allowed_provider_key_ids: null }))
+    mounted.state.open = true
+    await settle()
+
+    const keyLabel = [...mounted.root.querySelectorAll('label')]
+      .find((label) => label.textContent?.includes('Disabled selected key'))
+    const keyCheckbox = keyLabel?.querySelector('input[type="checkbox"]') as HTMLInputElement
+    expect(keyCheckbox).toBeTruthy()
+    expect(keyCheckbox.checked).toBe(false)
+    expect(keyCheckbox.disabled).toBe(false)
+    keyCheckbox.dispatchEvent(new Event('change', { bubbles: true }))
+    await settle()
+
+    const updateButton = [...mounted.root.querySelectorAll('button')]
+      .find((button) => button.textContent?.includes('更新')) as HTMLButtonElement
+    updateButton.click()
+    await settle()
+
+    expect(mounted.submitted[0]?.allowed_provider_key_ids).toEqual({
+      'provider-1': ['key-disabled'],
+    })
+  })
+
   it('keeps a disabled selected key cancellable and submits unrestricted scope as null', async () => {
     const mounted = mountDialog(standaloneKey())
     mounted.state.open = true

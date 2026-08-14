@@ -309,8 +309,8 @@ pub(crate) fn normalize_admin_user_ip_rules(
 ///
 /// Returns `Ok(None)` when the payload is absent/empty (legacy provider-only
 /// behavior). A non-empty scope requires a non-empty provider allowlist; every
-/// referenced key must exist, be active, belong to the provider named by its
-/// object key, and the provider itself must be allowed by the allowlist
+/// referenced key must exist, belong to the provider named by its object key,
+/// and the provider itself must be allowed by the allowlist
 /// (matching by stable id, name, or type).
 pub(crate) async fn normalize_admin_provider_key_scope(
     state: &AdminAppState<'_>,
@@ -376,9 +376,6 @@ pub(crate) async fn normalize_admin_provider_key_scope(
             let Some(key) = key_by_id.get(key_id) else {
                 return Err(format!("Key {key_id} 不存在"));
             };
-            if !key.is_active {
-                return Err(format!("Key {key_id} 已禁用，不能勾选"));
-            }
             if key.provider_id != *provider_id {
                 return Err(format!("Key {key_id} 不属于提供商 {provider_id}"));
             }
@@ -389,11 +386,11 @@ pub(crate) async fn normalize_admin_provider_key_scope(
 
 /// Canonicalizes an existing provider key scope against a (possibly new)
 /// provider allowlist: entries whose provider is no longer allowed (matched
-/// by stable id, name, or type) and references to missing/disabled keys or
-/// keys owned by a different provider are dropped. Used when a PATCH changes
-/// the provider allowlist without sending the scope field, so the stored
-/// scope can never disagree with the allowlist. Returns `None` when the
-/// allowlist is unrestricted/empty (legacy provider-only behavior).
+/// by stable id, name, or type) and references to missing keys or keys owned
+/// by a different provider are dropped. Used when a PATCH changes the provider
+/// allowlist without sending the scope field, so the stored scope can never
+/// disagree with the allowlist. Returns `None` when the allowlist is
+/// unrestricted/empty (legacy provider-only behavior).
 pub(crate) async fn canonicalize_admin_provider_key_scope(
     state: &AdminAppState<'_>,
     allowed_providers: Option<&[String]>,
@@ -458,7 +455,7 @@ pub(crate) async fn canonicalize_admin_provider_key_scope(
             let Some(key) = key_by_id.get(&key_id) else {
                 continue;
             };
-            if !key.is_active || key.provider_id != provider_id {
+            if key.provider_id != provider_id {
                 continue;
             }
             kept.insert(key_id);

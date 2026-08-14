@@ -970,8 +970,8 @@ fn imported_standalone_key_scope(
 
 /// Remaps exported provider-key ids through the config import's id map and
 /// validates every scope in the users payload against the provider catalog
-/// (keys must exist, be active, belong to the provider named by the object
-/// key, and the provider must be allowed by the payload's own allowlist).
+/// (keys must exist, belong to the provider named by the object key, and the
+/// provider must be allowed by the payload's own allowlist).
 ///
 /// Runs before any users-part write: a failure rejects the whole import
 /// without persisting any scope-bearing row. The canonical remapped scopes
@@ -983,7 +983,7 @@ fn imported_standalone_key_scope(
 /// in the users payload is checked against the config payload (providers and
 /// keys that will be imported) plus the existing target catalog:
 /// - every referenced key must exist either in the config payload or in the
-///   target catalog, and must be active;
+///   target catalog;
 /// - the scope's provider allowlist must cover the key's provider (by the
 ///   same id/name/type case-insensitive rule as the admin write path);
 /// - a payload key must survive the config importer's format gate (its
@@ -1003,7 +1003,6 @@ async fn validate_imported_scopes_offline(
     struct PayloadKey {
         provider_name: String,
         provider_type: String,
-        is_active: bool,
         api_formats: Vec<String>,
     }
     #[derive(Clone)]
@@ -1072,16 +1071,11 @@ async fn validate_imported_scopes_offline(
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
-                    let is_active = key
-                        .get("is_active")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(true);
                     keys.insert(
                         key_id.to_string(),
                         PayloadKey {
                             provider_name: provider_name.clone(),
                             provider_type: provider_type.clone(),
-                            is_active,
                             api_formats,
                         },
                     );
@@ -1150,9 +1144,6 @@ async fn validate_imported_scopes_offline(
                     referenced_ids.insert(key_id.clone());
                     continue;
                 };
-                if !payload_key.is_active {
-                    return Err(invalid_request(format!("Key {key_id} 已禁用，不能勾选")));
-                }
                 let covered = allowed_providers.iter().any(|allowed| {
                     aether_scheduler_core::provider_matches_allowed_value(
                         allowed,
@@ -1210,9 +1201,6 @@ async fn validate_imported_scopes_offline(
             let Some(key) = key_by_id.get(&key_id) else {
                 return Err(invalid_request(format!("Key {key_id} 不存在")));
             };
-            if !key.is_active {
-                return Err(invalid_request(format!("Key {key_id} 已禁用，不能勾选")));
-            }
             let provider = provider_by_id.get(&key.provider_id);
             let covered = allowed_providers.iter().any(|allowed| match provider {
                 Some(provider) => aether_scheduler_core::provider_matches_allowed_value(
@@ -1467,8 +1455,8 @@ async fn validate_imported_provider_key_scopes(
 /// preserves key ids through `provider_key_id_map` and matches providers by
 /// name). Canonicalization therefore:
 /// 1. looks every referenced key up in the catalog and hard-fails when a key
-///    is missing or disabled, or when the keys of one entry disagree on the
-///    actual provider;
+///    is missing, or when the keys of one entry disagree on the actual
+///    provider;
 /// 2. re-keys every entry under the key's actual `provider_id`;
 /// 3. when the payload's provider allowlist resolves against the catalog
 ///    (id/name/type), requires every scope provider to be covered by it; a
@@ -1521,9 +1509,6 @@ async fn canonicalize_imported_provider_key_scope(
             let Some(key) = key_by_id.get(&key_id) else {
                 return Err(format!("Key {key_id} 不存在"));
             };
-            if !key.is_active {
-                return Err(format!("Key {key_id} 已禁用，不能勾选"));
-            }
             match actual_provider_id.as_deref() {
                 None => actual_provider_id = Some(key.provider_id.clone()),
                 Some(provider_id) if provider_id != key.provider_id => {
@@ -1920,7 +1905,7 @@ impl<'a> AdminAppState<'a> {
 
         // Validate every provider key scope in the users payload against the
         // config payload + the existing catalog BEFORE the config import runs.
-        // A scope referencing a missing/disabled key or a provider the payload
+        // A scope referencing a missing key or a provider the payload
         // does not allow rejects the whole combined import with the config
         // data left untouched (no partial import state on failure).
         let config_payload = match serde_json::from_slice::<Value>(&config_body) {

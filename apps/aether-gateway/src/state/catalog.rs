@@ -684,17 +684,6 @@ impl AppState {
         }
         if let (Some(previous), Some(updated)) = (previous.as_ref(), updated.as_ref()) {
             if previous.is_active && !updated.is_active {
-                // The key just became disabled: prune its id from every
-                // api_keys/user_groups key scope so the stored policy never
-                // references a disabled key, then refresh auth snapshots.
-                self.data
-                    .prune_provider_key_scope_references(&[key.id.clone()])
-                    .await
-                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
-                self.data
-                    .prune_user_group_provider_key_scope_references(&[key.id.clone()])
-                    .await
-                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
                 self.invalidate_auth_context_cache();
             }
         }
@@ -749,14 +738,6 @@ impl AppState {
                 .map(|key| key.id.clone())
                 .collect::<Vec<_>>();
             if !newly_disabled.is_empty() {
-                self.data
-                    .prune_provider_key_scope_references(&newly_disabled)
-                    .await
-                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
-                self.data
-                    .prune_user_group_provider_key_scope_references(&newly_disabled)
-                    .await
-                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
                 self.invalidate_auth_context_cache();
             }
         }

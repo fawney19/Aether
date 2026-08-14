@@ -971,7 +971,7 @@ async fn gateway_admin_standalone_api_key_patch_canonicalizes_scope_against_new_
 }
 
 #[tokio::test]
-async fn gateway_disabling_provider_key_prunes_scopes_and_allows_reopen_edit_save() {
+async fn gateway_disabling_provider_key_preserves_scopes_and_allows_reopen_edit_save() {
     let (upstream_url, _upstream_hits, upstream_handle) =
         start_api_keys_upstream("/api/admin/api-keys/key-123").await;
     let mut snapshot = sample_standalone_api_key_snapshot("key-123", "admin-user-123", true);
@@ -1055,21 +1055,27 @@ async fn gateway_disabling_provider_key_prunes_scopes_and_allows_reopen_edit_sav
         panic!("disable failed: {body}");
     }
 
-    // The stored scopes in both policy tables are pruned of the disabled key.
+    // Disabling a provider key must not erase references in either policy table.
     let stored = auth_repository
         .find_export_standalone_api_key_by_id("key-123")
         .await
         .expect("export should load")
         .expect("export should exist");
-    assert_eq!(stored.allowed_provider_key_ids, None);
+    assert_eq!(
+        stored.allowed_provider_key_ids,
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into())
+    );
     let stored_group = user_repository
         .find_user_group_by_id(&group_id)
         .await
         .expect("group should load")
         .expect("group should exist");
-    assert_eq!(stored_group.allowed_provider_key_ids, None);
+    assert_eq!(
+        stored_group.allowed_provider_key_ids,
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into())
+    );
 
-    // Reopen (list) shows no stale scope and a plain edit/save succeeds.
+    // Reopen (list) shows the disabled key scope instead of losing it.
     let list_response =
         admin_request(reqwest::Client::new().get(format!("{gateway_url}/api/admin/api-keys")))
             .send()
@@ -1080,13 +1086,16 @@ async fn gateway_disabling_provider_key_prunes_scopes_and_allows_reopen_edit_sav
         list_response.json().await.expect("list json should parse");
     assert_eq!(
         list_payload["api_keys"][0]["allowed_provider_key_ids"],
-        serde_json::Value::Null
+        json!({ "provider-1": ["key-a"] })
     );
 
+    // Explicit saves still accept a disabled reference.
     let update_response = admin_request(
         reqwest::Client::new().put(format!("{gateway_url}/api/admin/api-keys/key-123")),
     )
-    .json(&json!({ "name": "renamed-after-disable" }))
+    .json(&json!({
+        "allowed_provider_key_ids": { "provider-1": ["key-a"] },
+    }))
     .send()
     .await
     .expect("request should succeed");
@@ -1099,6 +1108,7 @@ async fn gateway_disabling_provider_key_prunes_scopes_and_allows_reopen_edit_sav
         "name": "Scoped Group",
         "allowed_providers": ["provider-1"],
         "allowed_providers_mode": "specific",
+        "allowed_provider_key_ids": { "provider-1": ["key-a"] },
         "allowed_api_formats_mode": "inherit",
         "allowed_models_mode": "inherit",
         "rate_limit_mode": "inherit"
@@ -1107,6 +1117,35 @@ async fn gateway_disabling_provider_key_prunes_scopes_and_allows_reopen_edit_sav
     .await
     .expect("request should succeed");
     assert_eq!(group_response.status(), StatusCode::OK);
+
+    // Re-enabling the key keeps the original scope in both policy tables.
+    let response = admin_request(
+        reqwest::Client::new().put(format!("{gateway_url}/api/admin/endpoints/keys/key-a")),
+    )
+    .json(&json!({ "is_active": true }))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let stored = auth_repository
+        .find_export_standalone_api_key_by_id("key-123")
+        .await
+        .expect("export should load")
+        .expect("export should exist");
+    assert_eq!(
+        stored.allowed_provider_key_ids,
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into())
+    );
+    let stored_group = user_repository
+        .find_user_group_by_id(&group_id)
+        .await
+        .expect("group should load")
+        .expect("group should exist");
+    assert_eq!(
+        stored_group.allowed_provider_key_ids,
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into())
+    );
 
     gateway_handle.abort();
     upstream_handle.abort();
