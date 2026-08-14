@@ -57,6 +57,7 @@ export function useUserAccessControlOptions() {
         ...providerKeysByProvider.value,
         [providerId]: keys,
       }
+      providerKeysLoaded.value = { ...providerKeysLoaded.value, [providerId]: true }
     } catch (err) {
       log.error('加载提供商 Key 失败:', err)
       providerKeysByProvider.value = { ...providerKeysByProvider.value, [providerId]: [] }
@@ -64,16 +65,18 @@ export function useUserAccessControlOptions() {
       const nextLoading = { ...providerKeysLoading.value }
       delete nextLoading[providerId]
       providerKeysLoading.value = nextLoading
-      providerKeysLoaded.value = { ...providerKeysLoaded.value, [providerId]: true }
     }
   }
 
   function clearProviderKeysCache(providerIds: string[]): void {
     const next: Record<string, EndpointAPIKey[]> = { ...providerKeysByProvider.value }
+    const nextLoaded: Record<string, boolean> = { ...providerKeysLoaded.value }
     for (const providerId of providerIds) {
       delete next[providerId]
+      delete nextLoaded[providerId]
     }
     providerKeysByProvider.value = next
+    providerKeysLoaded.value = nextLoaded
   }
 
   return {

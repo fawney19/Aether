@@ -1937,6 +1937,143 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cross_format_candidates_respect_provider_key_scope() {
+        fn candidate(key_id: &str) -> SchedulerMinimalCandidateSelectionCandidate {
+            SchedulerMinimalCandidateSelectionCandidate {
+                provider_id: "provider-1".to_string(),
+                provider_name: "Provider 1".to_string(),
+                provider_type: "custom".to_string(),
+                provider_priority: 0,
+                endpoint_id: "endpoint-1".to_string(),
+                endpoint_api_format: "openai:responses".to_string(),
+                key_id: key_id.to_string(),
+                key_name: key_id.to_string(),
+                key_auth_type: "api_key".to_string(),
+                key_internal_priority: 0,
+                key_global_priority_for_format: None,
+                key_capabilities: None,
+                model_id: "model-1".to_string(),
+                global_model_id: "global-model-1".to_string(),
+                global_model_name: "gpt-5".to_string(),
+                selected_provider_model_name: "gpt-5".to_string(),
+                supports_streaming: true,
+                mapping_matched_model: None,
+            }
+        }
+
+        let mut auth_snapshot = unrestricted_auth_snapshot();
+        auth_snapshot.api_key_allowed_provider_key_ids = Some(
+            [(
+                "provider-1".to_string(),
+                ["key-allowed".to_string()].into(),
+            )]
+            .into(),
+        );
+
+        assert!(auth_snapshot_allows_cross_format_candidate(
+            &auth_snapshot,
+            "gpt-5",
+            None,
+            &candidate("key-allowed"),
+        ));
+        assert!(!auth_snapshot_allows_cross_format_candidate(
+            &auth_snapshot,
+            "gpt-5",
+            None,
+            &candidate("key-denied"),
+        ));
+    }
+
+    #[tokio::test]
+    async fn priority_page_cache_does_not_reuse_snapshot_after_scope_restriction() {
+        let mut allowed_row = standard_candidate_row("provider-scope-cache", "openai:chat", 0);
+        allowed_row.key_id = "key-allowed".to_string();
+        let mut denied_row = allowed_row.clone();
+        denied_row.key_id = "key-denied".to_string();
+        denied_row.key_name = "denied".to_string();
+        let repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed([
+                allowed_row,
+                denied_row,
+            ]));
+        let app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_minimal_candidate_selection_reader_for_tests(repository),
+            );
+        let model_directive_policy =
+            crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
+        let mut unrestricted = unrestricted_auth_snapshot();
+        unrestricted.user_id = "scope-cache-user".to_string();
+        unrestricted.api_key_id = "scope-cache-key".to_string();
+        let mut restricted = unrestricted.clone();
+        restricted.api_key_allowed_provider_key_ids = Some(
+            [(
+                "provider-scope-cache".to_string(),
+                ["key-allowed".to_string()].into(),
+            )]
+            .into(),
+        );
+
+        let mut unrestricted_cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            &model_directive_policy,
+            "openai:chat",
+            "gpt-5",
+            None,
+            false,
+            None,
+            &unrestricted,
+            None,
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            true,
+            None,
+        )
+        .await;
+        let unrestricted_page = unrestricted_cursor
+            .next_page()
+            .await
+            .expect("unrestricted preselection should succeed")
+            .expect("unrestricted candidates should be present");
+        assert_eq!(unrestricted_page.candidates.len(), 2);
+
+        let mut restricted_cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            &model_directive_policy,
+            "openai:chat",
+            "gpt-5",
+            None,
+            false,
+            None,
+            &restricted,
+            None,
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            true,
+            None,
+        )
+        .await;
+        let restricted_page = restricted_cursor
+            .next_page()
+            .await
+            .expect("restricted preselection should succeed")
+            .expect("allowed candidate should remain present");
+        assert_eq!(
+            restricted_page
+                .candidates
+                .iter()
+                .map(|candidate| candidate.key_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-allowed"]
+        );
+    }
+
     #[tokio::test]
     async fn priority_page_cache_requires_fixed_order_or_explicit_affinity() {
         let repository: Arc<dyn MinimalCandidateSelectionReadRepository> =

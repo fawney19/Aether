@@ -291,6 +291,10 @@ impl ResolvedAuthApiKeySnapshot {
         if self.api_key_is_standalone {
             return;
         }
+        // Persisted empty scopes are normalized to `None`, but an intersection
+        // of two non-empty policies may produce an explicit empty provider
+        // set. Keep that effective deny-all entry so it cannot widen back to
+        // provider-wide access during candidate selection.
         constrain_api_key_list_policy_to_user_policy(
             &mut self.user_allowed_providers,
             &mut self.api_key_allowed_providers,
@@ -1436,6 +1440,52 @@ mod tests {
                 ("gemini".to_string(), ["key-e".to_string()].into()),
             ]))
         );
+    }
+
+    #[test]
+    fn non_standalone_snapshot_keeps_disjoint_provider_key_scope_as_deny() {
+        let snapshot = StoredAuthApiKeySnapshot::new(
+            "user-1".to_string(),
+            "alice".to_string(),
+            None,
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            None,
+            None,
+            None,
+            "key-1".to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("snapshot should build")
+        .with_api_key_provider_key_scope(Some(serde_json::json!({
+            "openai": ["key-a"],
+        })))
+        .expect("api key scope should parse")
+        .with_user_provider_key_scope(Some(serde_json::json!({
+            "openai": ["key-b"],
+        })))
+        .expect("user scope should parse");
+
+        let resolved = ResolvedAuthApiKeySnapshot::from_stored(snapshot, 150);
+        let scope = resolved
+            .effective_allowed_provider_key_ids()
+            .expect("disjoint scopes must remain an effective scope");
+
+        assert!(scope
+            .get("openai")
+            .expect("provider should remain explicit")
+            .is_empty());
     }
 
     #[test]

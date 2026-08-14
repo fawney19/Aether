@@ -10,9 +10,11 @@
 //! - A provider entry with a non-empty key set restricts that provider to the
 //!   listed keys.
 //! - A provider with no entry is unrestricted (all active keys).
-//! - Empty objects / empty arrays are normalized to `None`. There is no
-//!   "empty set = deny all" representation: the provider allowlist already
-//!   controls provider-level deny.
+//! - Empty objects / empty arrays are normalized to `None` when parsing or
+//!   persisting a policy. Runtime policy resolution may still retain an
+//!   explicit empty set for a provider when two non-empty policies intersect
+//!   to no common key; that effective-only value means "deny every key" for
+//!   that provider.
 //!
 //! Keys in the map are stable provider IDs and stable key IDs only. Provider
 //! name/type aliases are never persisted here.
@@ -140,6 +142,10 @@ fn parse_provider_key_scope_key_items(
 }
 
 /// Drops empty provider entries and returns `None` for an empty map.
+///
+/// This normalization is for persisted/standalone policy values. Runtime
+/// intersection results must not be passed through it when an explicit empty
+/// provider set represents a deny-all effective policy.
 pub fn normalize_provider_key_scope(scope: Option<ProviderKeyScope>) -> Option<ProviderKeyScope> {
     let Some(scope) = scope else {
         return None;
@@ -212,17 +218,15 @@ pub fn merge_provider_key_scopes<'a>(
 /// Intersects two scopes per provider (used to keep non-standalone keys at
 /// the intersection of the key's own scope and the user/group scope). A
 /// provider present in only one side keeps that side's keys; a provider with
-/// an empty intersection is dropped (no entry = unrestricted, matching the
-/// provider allowlist intersection which already handles provider denial).
+/// an empty intersection is retained with an explicit empty set. The latter
+/// is an effective-only deny-all value and must not be normalized into `None`.
 pub fn intersect_provider_key_scopes(
     left: Option<&ProviderKeyScope>,
     right: Option<&ProviderKeyScope>,
 ) -> Option<ProviderKeyScope> {
     match (left, right) {
         (None, None) => None,
-        (Some(scope), None) | (None, Some(scope)) => {
-            normalize_provider_key_scope(Some(scope.clone()))
-        }
+        (Some(scope), None) | (None, Some(scope)) => Some(scope.clone()),
         (Some(left), Some(right)) => {
             let mut merged = ProviderKeyScope::new();
             for (provider_id, left_keys) in left {
@@ -232,9 +236,7 @@ pub fn intersect_provider_key_scopes(
                             .intersection(right_keys)
                             .cloned()
                             .collect::<BTreeSet<_>>();
-                        if !intersection.is_empty() {
-                            merged.insert(provider_id.clone(), intersection);
-                        }
+                        merged.insert(provider_id.clone(), intersection);
                     }
                     None => {
                         merged.insert(provider_id.clone(), left_keys.clone());
@@ -246,7 +248,7 @@ pub fn intersect_provider_key_scopes(
                     merged.insert(provider_id.clone(), right_keys.clone());
                 }
             }
-            normalize_provider_key_scope(Some(merged))
+            Some(merged)
         }
     }
 }
@@ -423,12 +425,15 @@ mod tests {
     }
 
     #[test]
-    fn intersect_drops_provider_with_empty_intersection() {
+    fn intersect_preserves_provider_with_empty_intersection_as_runtime_deny() {
         let left = scope(&[("p1", &["a"])]);
         let right = scope(&[("p1", &["b"])]);
+
+        let mut expected = ProviderKeyScope::new();
+        expected.insert("p1".to_string(), BTreeSet::new());
         assert_eq!(
             intersect_provider_key_scopes(left.as_ref(), right.as_ref()),
-            None
+            Some(expected)
         );
     }
 

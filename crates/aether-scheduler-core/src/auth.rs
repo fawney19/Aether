@@ -42,7 +42,8 @@ pub fn auth_constraints_allow_provider(
 
 /// Key-level gate: the candidate row's stable `key_id` must be inside the
 /// allowlist for the row's stable `provider_id` when the scope restricts that
-/// provider. No entry (or an empty set) means all active keys are usable.
+/// provider. No entry means all active keys are usable; an explicitly present
+/// empty set is an effective deny-all policy for that provider.
 pub fn auth_constraints_allow_provider_key(
     constraints: Option<&SchedulerAuthConstraints>,
     provider_id: &str,
@@ -313,6 +314,33 @@ mod tests {
             Some(&constraints),
             "provider-2",
             "key-c",
+        ));
+    }
+
+    #[test]
+    fn provider_key_scope_empty_entry_denies_every_key_for_that_provider() {
+        let constraints = SchedulerAuthConstraints {
+            allowed_providers: Some(vec!["provider-1".to_string()]),
+            allowed_provider_key_ids: Some(
+                [(
+                    "provider-1".to_string(),
+                    std::collections::BTreeSet::<String>::new(),
+                )]
+                .into(),
+            ),
+            allowed_api_formats: None,
+            allowed_models: None,
+        };
+
+        assert!(!auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-1",
+            "key-a",
+        ));
+        assert!(auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-2",
+            "key-a",
         ));
     }
 

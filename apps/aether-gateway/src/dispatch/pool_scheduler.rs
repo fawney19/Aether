@@ -3284,6 +3284,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pool_key_cursor_filters_denied_provider_scope_keys() {
+        let provider_config = Some(json!({ "pool_advanced": { "lru_enabled": true } }));
+        let (provider, endpoint, keys, rows) = large_pool_fixture(2, provider_config.clone());
+        let data_state =
+            GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+                Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    vec![provider],
+                    vec![endpoint],
+                    keys,
+                )),
+                Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(rows)),
+            )
+            .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY);
+        let app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "pool-group",
+            10,
+            provider_config,
+        );
+        let mut cursor = PoolKeyCursor::new(
+            PlannerAppState::new(&app),
+            group,
+            None,
+            None,
+            None,
+        )
+        .with_allowed_provider_key_scope(Some(BTreeMap::from([(
+            "provider-pool".to_string(),
+            BTreeSet::from(["key-00001".to_string()]),
+        )])));
+
+        let candidate = cursor
+            .next_key()
+            .await
+            .expect("cursor should skip denied key and return allowed key");
+        assert_eq!(candidate.candidate.key_id, "key-00001");
+        assert_eq!(
+            cursor
+                .skip_reason_counts
+                .get("auth_provider_key_not_allowed"),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
     async fn pool_key_cursor_filters_expanded_keys_by_routing_profile_allowed_keys() {
         let app = AppState::new().expect("state should build");
         let provider_config = Some(json!({ "pool_advanced": { "lru_enabled": true } }));

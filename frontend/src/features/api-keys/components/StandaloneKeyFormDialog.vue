@@ -657,6 +657,7 @@ async function loadProviderKeys(providerId: string) {
       ...providerKeysByProvider.value,
       [providerId]: keys,
     }
+    providerKeysLoaded.value = new Set([...providerKeysLoaded.value, providerId])
   } catch (err) {
     log.error('加载提供商 Key 失败:', err)
     providerKeysByProvider.value = { ...providerKeysByProvider.value, [providerId]: [] }
@@ -664,7 +665,6 @@ async function loadProviderKeys(providerId: string) {
     const next = new Set(providerKeysLoading.value)
     next.delete(providerId)
     providerKeysLoading.value = next
-    providerKeysLoaded.value = new Set([...providerKeysLoaded.value, providerId])
   }
 }
 
@@ -702,14 +702,24 @@ watch(
     if (JSON.stringify(nextScope) !== JSON.stringify(form.value.provider_key_scope)) {
       form.value.provider_key_scope = nextScope
     }
-    const cached = new Set(Object.keys(providerKeysByProvider.value))
+    const cached = new Set([
+      ...Object.keys(providerKeysByProvider.value),
+      ...providerKeysLoaded.value,
+      ...providerKeysLoading.value,
+    ])
+    const next = { ...providerKeysByProvider.value }
+    const nextLoaded = new Set(providerKeysLoaded.value)
+    const nextLoading = new Set(providerKeysLoading.value)
     for (const providerId of cached) {
       if (!selected.has(providerId)) {
-        const next = { ...providerKeysByProvider.value }
         delete next[providerId]
-        providerKeysByProvider.value = next
+        nextLoaded.delete(providerId)
+        nextLoading.delete(providerId)
       }
     }
+    providerKeysByProvider.value = next
+    providerKeysLoaded.value = nextLoaded
+    providerKeysLoading.value = nextLoading
     for (const providerId of providers) {
       void loadProviderKeys(providerId)
     }
