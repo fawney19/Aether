@@ -1887,7 +1887,7 @@ impl GatewayDataState {
         } else {
             Vec::new()
         };
-        Ok(self.resolve_group_effective_list_policies(&groups).await?)
+        self.resolve_group_effective_list_policies(&groups).await
     }
 
     async fn effective_user_groups_for_user(

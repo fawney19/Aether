@@ -617,13 +617,11 @@ mod tests {
 
         let unrestricted = auth_snapshot("user-a", "key-a");
         let mut limited = unrestricted.clone();
-        limited.api_key_allowed_provider_key_ids = Some(
-            [("provider-1".to_string(), ["key-a".to_string()].into())].into(),
-        );
+        limited.api_key_allowed_provider_key_ids =
+            Some([("provider-1".to_string(), ["key-a".to_string()].into())].into());
         let mut same_scope = unrestricted.clone();
-        same_scope.api_key_allowed_provider_key_ids = Some(
-            [("provider-1".to_string(), ["key-a".to_string()].into())].into(),
-        );
+        same_scope.api_key_allowed_provider_key_ids =
+            Some([("provider-1".to_string(), ["key-a".to_string()].into())].into());
         let mut empty_deny = unrestricted.clone();
         empty_deny.api_key_allowed_provider_key_ids = Some(
             [(

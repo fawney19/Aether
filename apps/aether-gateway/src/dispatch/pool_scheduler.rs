@@ -3307,17 +3307,11 @@ mod tests {
             10,
             provider_config,
         );
-        let mut cursor = PoolKeyCursor::new(
-            PlannerAppState::new(&app),
-            group,
-            None,
-            None,
-            None,
-        )
-        .with_allowed_provider_key_scope(Some(BTreeMap::from([(
-            "provider-pool".to_string(),
-            BTreeSet::from(["key-00001".to_string()]),
-        )])));
+        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None)
+            .with_allowed_provider_key_scope(Some(BTreeMap::from([(
+                "provider-pool".to_string(),
+                BTreeSet::from(["key-00001".to_string()]),
+            )])));
 
         let candidate = cursor
             .next_key()

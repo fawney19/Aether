@@ -3931,6 +3931,7 @@ mod tests {
 
         let repository = MysqlProviderCatalogReadRepository::new(pool.clone());
         let cas_delete = aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyOAuthCredentialCasDelete {
+            expected_upstream_metadata_namespace: None,
             key_id: "key-1".to_string(),
             expected_encrypted_auth_config: None,
             expected_credential: aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyOAuthCredentialFence {

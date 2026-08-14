@@ -147,9 +147,7 @@ fn parse_provider_key_scope_key_items(
 /// intersection results must not be passed through it when an explicit empty
 /// provider set represents a deny-all effective policy.
 pub fn normalize_provider_key_scope(scope: Option<ProviderKeyScope>) -> Option<ProviderKeyScope> {
-    let Some(scope) = scope else {
-        return None;
-    };
+    let scope = scope?;
     if scope.is_empty() {
         return None;
     }
@@ -189,9 +187,7 @@ pub fn restrict_provider_key_scope_to_providers(
     scope: Option<ProviderKeyScope>,
     allowed_provider_ids: &BTreeSet<String>,
 ) -> Option<ProviderKeyScope> {
-    let Some(scope) = scope else {
-        return None;
-    };
+    let scope = scope?;
     let mut restricted = ProviderKeyScope::new();
     for (provider_id, key_ids) in scope {
         if allowed_provider_ids.contains(&provider_id) {
@@ -203,7 +199,7 @@ pub fn restrict_provider_key_scope_to_providers(
 
 /// Merges group-level scopes by unioning key sets per provider. A `None`
 /// input contributes nothing. The result is normalized.
-pub fn merge_provider_key_scopes<'a>(
+pub fn merge_provider_key_scopes(
     scopes: impl IntoIterator<Item = Option<ProviderKeyScope>>,
 ) -> Option<ProviderKeyScope> {
     let mut merged = ProviderKeyScope::new();
@@ -261,9 +257,7 @@ pub fn remove_key_ids_from_provider_key_scope(
     if removed_key_ids.is_empty() {
         return normalize_provider_key_scope(scope);
     }
-    let Some(scope) = scope else {
-        return None;
-    };
+    let scope = scope?;
     let mut pruned = ProviderKeyScope::new();
     for (provider_id, key_ids) in scope {
         let kept = key_ids

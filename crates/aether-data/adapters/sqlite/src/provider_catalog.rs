@@ -5026,6 +5026,7 @@ INSERT INTO provider_api_keys (
         let repository = SqliteProviderCatalogReadRepository::new(pool.clone());
         let cas_delete = |key_id: &str| {
             aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyOAuthCredentialCasDelete {
+            expected_upstream_metadata_namespace: None,
             key_id: key_id.to_string(),
             expected_encrypted_auth_config: None,
             expected_credential: aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyOAuthCredentialFence {
@@ -5078,6 +5079,7 @@ INSERT INTO provider_api_keys (
         .await
         .expect("scope should re-seed");
         let mismatched = aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyOAuthCredentialCasDelete {
+            expected_upstream_metadata_namespace: None,
             key_id: "key-2".to_string(),
             expected_encrypted_auth_config: None,
             expected_credential: aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyOAuthCredentialFence {

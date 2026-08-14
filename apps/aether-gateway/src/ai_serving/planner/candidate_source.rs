@@ -1963,13 +1963,8 @@ mod tests {
         }
 
         let mut auth_snapshot = unrestricted_auth_snapshot();
-        auth_snapshot.api_key_allowed_provider_key_ids = Some(
-            [(
-                "provider-1".to_string(),
-                ["key-allowed".to_string()].into(),
-            )]
-            .into(),
-        );
+        auth_snapshot.api_key_allowed_provider_key_ids =
+            Some([("provider-1".to_string(), ["key-allowed".to_string()].into())].into());
 
         assert!(auth_snapshot_allows_cross_format_candidate(
             &auth_snapshot,
