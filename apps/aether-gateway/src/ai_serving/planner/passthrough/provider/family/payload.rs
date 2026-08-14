@@ -241,6 +241,15 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
         request_redacted: _,
     } = resolved;
     let request_encoding = resolve_transport_request_encoding_policy(&transport);
+    let content_type = if transport
+        .provider
+        .provider_type
+        .eq_ignore_ascii_case("kiro")
+    {
+        provider_request_headers.get("content-type").cloned()
+    } else {
+        Some("application/json".to_string())
+    };
 
     let mut decision = build_ai_execution_decision_response(AiExecutionDecisionResponseParts {
         decision_is_stream: spec_metadata.require_streaming,
@@ -267,7 +276,7 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
         provider_request_headers,
         provider_request_body: Some(provider_request_body),
         provider_request_body_base64: None,
-        content_type: Some("application/json".to_string()),
+        content_type,
         content_encoding: request_encoding.content_encoding,
         request_gzip: request_encoding.request_gzip,
         proxy,

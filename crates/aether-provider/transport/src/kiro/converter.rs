@@ -285,9 +285,27 @@ pub fn convert_claude_messages_to_conversation_state(
 }
 
 fn extract_session_id(user_id: &str) -> Option<String> {
+    // Kiro CLI 也会将设备信息和 session_id 序列化进 user_id；仅接受真实 UUID，
+    // 避免把任意 metadata 透传为 Runtime 的 conversationId。
+    if let Some(session_id) = serde_json::from_str::<Value>(user_id)
+        .ok()
+        .and_then(|metadata| {
+            metadata
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| Uuid::parse_str(value).is_ok())
+    {
+        return Some(session_id);
+    }
+
     let position = user_id.find("session_")?;
     let candidate = user_id.get(position + "session_".len()..position + "session_".len() + 36)?;
-    (candidate.matches('-').count() == 4).then(|| candidate.to_string())
+    Uuid::parse_str(candidate)
+        .ok()
+        .map(|_| candidate.to_string())
 }
 
 fn generate_thinking_prefix(request_body: &Value) -> Option<String> {
@@ -505,6 +523,137 @@ fn clean_tool_schema(value: &Value) -> Value {
     }
 }
 
+fn normalize_kiro_tool_schema_root(schema: Value) -> Value {
+    let Value::Object(mut schema) = schema else {
+        return json!({"type": "object", "properties": {}});
+    };
+
+    // Kiro Runtime 仅接受 object 根 schema；$schema 与根组合关键字会触发 TOOL_SCHEMA_INVALID。
+    schema.remove("$schema");
+    if !schema.get("properties").is_some_and(Value::is_object) {
+        schema.remove("properties");
+    }
+    recover_kiro_tool_schema_from_top_level_combinators(&mut schema);
+    schema.insert("type".to_string(), Value::String("object".to_string()));
+
+    // 组合分支没有可恢复的 object 参数时，使用空对象保证请求仍符合 Runtime 的 schema 约束。
+    if !schema.get("properties").is_some_and(Value::is_object) {
+        schema.insert("properties".to_string(), Value::Object(Map::new()));
+    }
+
+    Value::Object(schema)
+}
+
+fn recover_kiro_tool_schema_from_top_level_combinators(schema: &mut Map<String, Value>) {
+    let had_properties = schema.get("properties").is_some_and(Value::is_object);
+
+    for combinator in ["oneOf", "anyOf", "allOf"] {
+        let Some(Value::Array(variants)) = schema.remove(combinator) else {
+            continue;
+        };
+
+        if had_properties || schema.get("properties").is_some_and(Value::is_object) {
+            continue;
+        }
+
+        // 只处理根组合关键字；嵌套 property schema 的组合语义必须原样保留。
+        let Some(variant) = variants.into_iter().find_map(|variant| {
+            let Value::Object(variant) = variant else {
+                return None;
+            };
+            (variant.get("type").and_then(Value::as_str) == Some("object")).then_some(variant)
+        }) else {
+            continue;
+        };
+
+        for key in ["properties", "required", "description"] {
+            if let Some(value) = variant.get(key) {
+                schema
+                    .entry(key.to_string())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+    }
+}
+
+fn normalize_kiro_tool_input_schema(name: &str, schema: Value) -> Value {
+    let schema = normalize_kiro_tool_schema_root(schema);
+    let Some(path_key) = kiro_read_tool_path_key(name) else {
+        return schema;
+    };
+
+    // Kiro 内置 Read 与原生 read_file 的参数名不同；注册 Schema 与历史调用必须同步。
+
+    let Some(schema) = schema.as_object() else {
+        return schema;
+    };
+    let mut schema = schema.clone();
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        if !properties.contains_key(path_key) {
+            let file_path = properties.remove("file_path").or_else(|| {
+                if path_key == "filePath" {
+                    None
+                } else {
+                    properties.remove("filePath")
+                }
+            });
+            if let Some(file_path) = file_path {
+                properties.insert(path_key.to_string(), file_path);
+            }
+        }
+        properties.remove("file_path");
+        if path_key != "filePath" {
+            properties.remove("filePath");
+        }
+    }
+    if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
+        for field in required {
+            if matches!(field.as_str(), Some("file_path") | Some("filePath")) {
+                *field = Value::String(path_key.to_string());
+            }
+        }
+    }
+    Value::Object(schema)
+}
+
+fn normalize_kiro_tool_input(name: &str, input: Value) -> Value {
+    let Some(path_key) = kiro_read_tool_path_key(name) else {
+        return input;
+    };
+
+    // 历史 tool_use 也必须满足同一契约，否则续聊仍会被 Kiro Runtime 拒绝。
+
+    let Some(input) = input.as_object() else {
+        return input;
+    };
+    let mut input = input.clone();
+    if !input.contains_key(path_key) {
+        let file_path = input.remove("file_path").or_else(|| {
+            if path_key == "filePath" {
+                None
+            } else {
+                input.remove("filePath")
+            }
+        });
+        if let Some(file_path) = file_path {
+            input.insert(path_key.to_string(), file_path);
+        }
+    }
+    input.remove("file_path");
+    if path_key != "filePath" {
+        input.remove("filePath");
+    }
+    Value::Object(input)
+}
+
+fn kiro_read_tool_path_key(name: &str) -> Option<&'static str> {
+    match name {
+        "Read" | "read" => Some("filePath"),
+        "read_file" | "readFile" => Some("path"),
+        _ => None,
+    }
+}
+
 fn convert_tools(tools: Option<&Value>) -> Vec<Value> {
     let Some(tools) = tools.and_then(Value::as_array) else {
         return Vec::new();
@@ -545,6 +694,7 @@ fn convert_tools(tools: Option<&Value>) -> Vec<Value> {
                 .filter(|value| value.is_object())
                 .map(clean_tool_schema)
                 .unwrap_or_else(|| json!({}));
+            let input_schema = normalize_kiro_tool_input_schema(name, input_schema);
 
             Some(json!({
                 "toolSpecification": {
@@ -630,6 +780,7 @@ fn convert_assistant_message(message: &Map<String, Value>) -> Option<Value> {
                             .filter(|value| value.is_object())
                             .cloned()
                             .unwrap_or_else(|| json!({}));
+                        let input = normalize_kiro_tool_input(name, input);
                         tool_uses.push(json!({
                             "toolUseId": tool_use_id,
                             "name": name,
@@ -671,8 +822,19 @@ fn convert_assistant_message(message: &Map<String, Value>) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use uuid::Uuid;
 
-    use super::convert_claude_messages_to_conversation_state;
+    use super::{convert_claude_messages_to_conversation_state, convert_tools};
+
+    fn convert_tool_schema(name: &str, input_schema: serde_json::Value) -> serde_json::Value {
+        let tools = json!([{
+            "name": name,
+            "description": "test tool",
+            "input_schema": input_schema,
+        }]);
+        let converted = convert_tools(Some(&tools));
+        converted[0]["toolSpecification"]["inputSchema"]["json"].clone()
+    }
 
     #[test]
     fn converts_simple_claude_request_into_conversation_state() {
@@ -710,5 +872,254 @@ mod tests {
                 .map(Vec::len),
             Some(1)
         );
+    }
+
+    #[test]
+    fn normalizes_array_top_level_tool_schema_to_empty_object() {
+        let schema = convert_tool_schema(
+            "list_items",
+            json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "array",
+                "items": {"type": "string"}
+            }),
+        );
+
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"], json!({}));
+        assert!(schema.get("$schema").is_none());
+    }
+
+    #[test]
+    fn strips_top_level_combinators_and_recovers_object_branch() {
+        let schema = convert_tool_schema(
+            "parallel_workflow",
+            json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "oneOf": [
+                    {"type": "string"},
+                    {
+                        "type": "object",
+                        "description": "执行并行工作流",
+                        "properties": {
+                            "locations": {
+                                "oneOf": [
+                                    {"type": "array", "items": {"type": "string"}},
+                                    {"type": "string"}
+                                ],
+                                "anyOf": [
+                                    {"type": "array", "items": {"type": "string"}},
+                                    {"type": "string"}
+                                ],
+                                "allOf": [
+                                    {"description": "保留嵌套组合语义"}
+                                ]
+                            }
+                        },
+                        "required": ["locations"]
+                    }
+                ],
+                "anyOf": [{"type": "object", "properties": {"ignored": {"type": "string"}}}],
+                "allOf": [{"type": "object", "properties": {"also_ignored": {"type": "string"}}}]
+            }),
+        );
+
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["description"], "执行并行工作流");
+        assert_eq!(schema["required"], json!(["locations"]));
+        assert!(schema["properties"].get("locations").is_some());
+        assert!(schema["properties"]["locations"].get("oneOf").is_some());
+        assert!(schema["properties"]["locations"].get("anyOf").is_some());
+        assert!(schema["properties"]["locations"].get("allOf").is_some());
+        assert!(schema.get("$schema").is_none());
+        assert!(schema.get("oneOf").is_none());
+        assert!(schema.get("anyOf").is_none());
+        assert!(schema.get("allOf").is_none());
+    }
+
+    #[test]
+    fn falls_back_to_empty_object_without_object_combinator_branch() {
+        let schema = convert_tool_schema(
+            "scalar_choice",
+            json!({
+                "type": "array",
+                "anyOf": [
+                    {"type": "string"},
+                    {"type": "number"}
+                ]
+            }),
+        );
+
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"], json!({}));
+        assert!(schema.get("anyOf").is_none());
+    }
+
+    #[test]
+    fn normalizes_title_case_read_tool_schema_for_kiro() {
+        let schema = convert_tool_schema(
+            "Read",
+            json!({
+                "type": "object",
+                "properties": {"file_path": {"type": "string"}},
+                "required": ["file_path"]
+            }),
+        );
+
+        assert_eq!(schema["required"], json!(["filePath"]));
+        assert_eq!(schema["properties"]["filePath"]["type"], "string");
+        assert!(schema["properties"].get("file_path").is_none());
+    }
+
+    #[test]
+    fn normalizes_read_tool_file_path_for_kiro() {
+        let conversation_state = convert_claude_messages_to_conversation_state(
+            &json!({
+                "messages": [
+                    {"role": "user", "content": "Read the file"},
+                    {
+                        "role": "assistant",
+                        "content": [{
+                            "type": "tool_use",
+                            "id": "tool_read_123",
+                            "name": "read",
+                            "input": {"file_path": "/tmp/a.txt", "offset": 3}
+                        }]
+                    },
+                    {
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": "tool_read_123",
+                            "content": "file contents"
+                        }]
+                    }
+                ],
+                "tools": [{
+                    "name": "read",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string"},
+                            "offset": {"type": "integer"}
+                        },
+                        "required": ["file_path"]
+                    }
+                }]
+            }),
+            "gpt-5.6-sol",
+        )
+        .expect("conversation state should build");
+
+        let context =
+            &conversation_state["currentMessage"]["userInputMessage"]["userInputMessageContext"];
+        let schema = &context["tools"][0]["toolSpecification"]["inputSchema"]["json"];
+        assert_eq!(schema["required"], json!(["filePath"]));
+        assert_eq!(schema["properties"]["filePath"]["type"], "string");
+        assert!(schema["properties"].get("file_path").is_none());
+
+        let tool_use = &conversation_state["history"][1]["assistantResponseMessage"]["toolUses"][0];
+        assert_eq!(
+            tool_use["input"]["filePath"], "/tmp/a.txt",
+            "conversation state: {conversation_state}"
+        );
+        assert_eq!(tool_use["input"]["offset"], 3);
+        assert!(tool_use["input"].get("file_path").is_none());
+    }
+
+    #[test]
+    fn normalizes_native_read_file_path_for_kiro() {
+        let conversation_state = convert_claude_messages_to_conversation_state(
+            &json!({
+                "messages": [
+                    {"role": "user", "content": "Read the file"},
+                    {
+                        "role": "assistant",
+                        "content": [{
+                            "type": "tool_use",
+                            "id": "tool_read_file_123",
+                            "name": "read_file",
+                            "input": {"file_path": "/tmp/a.txt", "offset": 3}
+                        }]
+                    },
+                    {
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": "tool_read_file_123",
+                            "content": "file contents"
+                        }]
+                    }
+                ],
+                "tools": [{
+                    "name": "read_file",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string"},
+                            "offset": {"type": "integer"}
+                        },
+                        "required": ["file_path"]
+                    }
+                }]
+            }),
+            "gpt-5.6-sol",
+        )
+        .expect("conversation state should build");
+
+        let context =
+            &conversation_state["currentMessage"]["userInputMessage"]["userInputMessageContext"];
+        let schema = &context["tools"][0]["toolSpecification"]["inputSchema"]["json"];
+        assert_eq!(schema["required"], json!(["path"]));
+        assert_eq!(schema["properties"]["path"]["type"], "string");
+        assert!(schema["properties"].get("file_path").is_none());
+
+        let tool_use = &conversation_state["history"][1]["assistantResponseMessage"]["toolUses"][0];
+        assert_eq!(
+            tool_use["input"]["path"], "/tmp/a.txt",
+            "conversation state: {conversation_state}"
+        );
+        assert_eq!(tool_use["input"]["offset"], 3);
+        assert!(tool_use["input"].get("file_path").is_none());
+    }
+
+    #[test]
+    fn restores_session_id_from_json_metadata() {
+        let conversation_state = convert_claude_messages_to_conversation_state(
+            &json!({
+                "metadata": {
+                    "user_id": "{\"device_id\":\"device\",\"session_id\":\"8bb5523b-ec7c-4540-a9ca-beb6d79f1552\"}"
+                },
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            "claude-opus-5",
+        )
+        .expect("conversation state should build");
+
+        assert_eq!(
+            conversation_state["conversationId"],
+            "8bb5523b-ec7c-4540-a9ca-beb6d79f1552"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_json_metadata_session_id() {
+        let invalid_session_id = "not-a-uuid";
+        let conversation_state = convert_claude_messages_to_conversation_state(
+            &json!({
+                "metadata": {
+                    "user_id": format!("{{\"session_id\":\"{invalid_session_id}\"}}")
+                },
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            "claude-opus-5",
+        )
+        .expect("conversation state should build");
+
+        let conversation_id = conversation_state["conversationId"]
+            .as_str()
+            .expect("conversation id should be a string");
+        assert_ne!(conversation_id, invalid_session_id);
+        assert!(Uuid::parse_str(conversation_id).is_ok());
     }
 }

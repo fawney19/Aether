@@ -9,7 +9,7 @@ use aether_provider_transport::url::{
     openai_compatible_base_includes_unversioned_api_root,
 };
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const MODEL_FETCH_FORMAT_PRIORITY: &[&[&str]] = &[
     &[
@@ -353,6 +353,9 @@ pub fn preset_models_for_provider(provider_type: &str) -> Option<Vec<Value>> {
         ],
         "kiro" => vec![
             preset_model("auto", "kiro", "Auto", "claude:messages"),
+            preset_model("claude-opus-5", "anthropic", "Claude Opus 5", "claude:messages"),
+            preset_model("claude-sonnet-5", "anthropic", "Claude Sonnet 5", "claude:messages"),
+            preset_model("claude-opus-4.8", "anthropic", "Claude Opus 4.8", "claude:messages"),
             preset_model("claude-opus-4.7", "anthropic", "Claude Opus 4.7", "claude:messages"),
             preset_model("claude-opus-4.6", "anthropic", "Claude Opus 4.6", "claude:messages"),
             preset_model("claude-sonnet-4.6", "anthropic", "Claude Sonnet 4.6", "claude:messages"),
@@ -365,6 +368,9 @@ pub fn preset_models_for_provider(provider_type: &str) -> Option<Vec<Value>> {
             preset_model("minimax-m2.1", "minimax", "MiniMax M2.1", "claude:messages"),
             preset_model("glm-5", "zhipu", "GLM 5", "claude:messages"),
             preset_model("qwen3-coder-next", "alibaba", "Qwen3 Coder Next", "claude:messages"),
+            preset_model("gpt-5.6-sol", "openai", "GPT 5.6 Sol", "claude:messages"),
+            preset_model("gpt-5.6-terra", "openai", "GPT 5.6 Terra", "claude:messages"),
+            preset_model("gpt-5.6-luna", "openai", "GPT 5.6 Luna", "claude:messages"),
         ],
         "claude_code" => vec![
             preset_model("claude-opus-4-5-20251101", "anthropic", "Claude Opus 4.5", "claude:messages"),
@@ -1278,9 +1284,11 @@ mod tests {
             merged["antigravity"]["quota_by_model"]["gemini-2.5-pro"]["reset_time"],
             "2026-04-12T00:00:00Z"
         );
-        assert!(merged["antigravity"]["quota_by_model"]
-            .get("stale-model")
-            .is_none());
+        assert!(
+            merged["antigravity"]["quota_by_model"]
+                .get("stale-model")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1343,11 +1351,13 @@ mod tests {
             .expect("Luna preset");
         assert_eq!(luna["default_reasoning_level"], "medium");
         assert_eq!(luna["multi_agent_version"], "v1");
-        assert!(!luna["supported_reasoning_levels"]
-            .as_array()
-            .expect("reasoning levels")
-            .iter()
-            .any(|level| level["effort"] == "ultra"));
+        assert!(
+            !luna["supported_reasoning_levels"]
+                .as_array()
+                .expect("reasoning levels")
+                .iter()
+                .any(|level| level["effort"] == "ultra")
+        );
 
         let auto_review = models
             .iter()
@@ -1371,6 +1381,9 @@ mod tests {
             model_ids,
             vec![
                 "auto",
+                "claude-opus-5",
+                "claude-sonnet-5",
+                "claude-opus-4.8",
                 "claude-opus-4.7",
                 "claude-opus-4.6",
                 "claude-sonnet-4.6",
@@ -1383,11 +1396,16 @@ mod tests {
                 "minimax-m2.1",
                 "glm-5",
                 "qwen3-coder-next",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
             ]
         );
-        assert!(models
-            .iter()
-            .all(|model| model["api_formats"] == json!(["claude:messages"])));
+        assert!(
+            models
+                .iter()
+                .all(|model| model["api_formats"] == json!(["claude:messages"]))
+        );
     }
 
     #[test]

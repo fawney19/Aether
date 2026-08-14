@@ -1879,7 +1879,6 @@ async fn provider_query_execute_kiro_test_candidate(
     let (parts, _) = synthetic_request.into_parts();
 
     let request_url = build_kiro_generate_assistant_response_url(
-        &transport.endpoint.base_url,
         parts.uri.query(),
         Some(kiro_auth.auth_config.effective_api_region()),
     )
@@ -1895,6 +1894,7 @@ async fn provider_query_execute_kiro_test_candidate(
         machine_id: kiro_auth.machine_id.as_str(),
     })
     .ok_or_else(|| GatewayError::Internal("kiro request headers are unavailable".to_string()))?;
+    let content_type = request_headers.get("content-type").cloned();
 
     let plan = ExecutionPlan {
         request_id: trace_id.to_string(),
@@ -1906,7 +1906,7 @@ async fn provider_query_execute_kiro_test_candidate(
         method: "POST".to_string(),
         url: request_url.clone(),
         headers: request_headers.clone(),
-        content_type: Some("application/json".to_string()),
+        content_type,
         content_encoding: None,
         body: RequestBody::from_json(provider_request_body.clone()),
         stream: true,

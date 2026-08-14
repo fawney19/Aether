@@ -54,6 +54,13 @@ fn kiro_report_context(thinking_enabled: bool) -> Value {
     context
 }
 
+fn decode_sse_payloads(text: &str) -> Vec<Value> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|payload| serde_json::from_str(payload).expect("SSE payload should be JSON"))
+        .collect()
+}
+
 #[test]
 fn kiro_stream_rewriter_converts_text_events_to_claude_sse() {
     let report_context = kiro_report_context(false);
@@ -84,6 +91,321 @@ fn kiro_stream_rewriter_converts_text_events_to_claude_sse() {
     assert!(text.contains("Hello from Kiro"));
     assert!(text.contains("\"stop_reason\":\"end_turn\""));
     assert!(text.contains("\"input_tokens\":2000"));
+}
+
+#[test]
+fn kiro_stream_rewriter_keeps_identical_assistant_deltas() {
+    let report_context = kiro_report_context(false);
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let chunk = [
+        encode_event_frame(
+            "event",
+            Some("assistantResponseEvent"),
+            &json!({"content": "repeat"}),
+        ),
+        encode_event_frame(
+            "event",
+            Some("assistantResponseEvent"),
+            &json!({"content": "repeat"}),
+        ),
+    ]
+    .concat();
+
+    let first = rewriter
+        .push_chunk(&report_context, &chunk)
+        .expect("rewrite should succeed");
+    let rest = rewriter
+        .finish(&report_context)
+        .expect("finish should succeed");
+    let events = decode_sse_payloads(
+        &String::from_utf8([first, rest].concat()).expect("utf8 should decode"),
+    );
+    let text_deltas = events
+        .iter()
+        .filter_map(|event| {
+            (event["delta"]["type"] == "text_delta")
+                .then(|| event["delta"]["text"].as_str())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(text_deltas, vec!["repeat", "repeat"]);
+}
+
+#[test]
+fn kiro_stream_rewriter_closes_native_thinking_with_real_signature_before_text() {
+    let report_context = kiro_report_context(true);
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let chunk = [
+        encode_event_frame(
+            "event",
+            Some("assistantResponseEvent"),
+            &json!({"content": "preface text that opens a text block"}),
+        ),
+        encode_event_frame(
+            "event",
+            Some("reasoningContentEvent"),
+            &json!({"signature": "native-signature"}),
+        ),
+        encode_event_frame(
+            "event",
+            Some("reasoningContentEvent"),
+            &json!({"text": "native reasoning"}),
+        ),
+        encode_event_frame(
+            "event",
+            Some("assistantResponseEvent"),
+            &json!({"content": "final answer"}),
+        ),
+    ]
+    .concat();
+
+    let first = rewriter
+        .push_chunk(&report_context, &chunk)
+        .expect("rewrite should succeed");
+    let rest = rewriter
+        .finish(&report_context)
+        .expect("finish should succeed");
+    let events = decode_sse_payloads(
+        &String::from_utf8([first, rest].concat()).expect("utf8 should decode"),
+    );
+    let thinking_index = events
+        .iter()
+        .find(|event| event["content_block"]["type"] == "thinking")
+        .and_then(|event| event["index"].as_u64())
+        .expect("native reasoning should start a thinking block");
+    let thinking_start = events
+        .iter()
+        .position(|event| {
+            event["type"] == "content_block_start"
+                && event["index"].as_u64() == Some(thinking_index)
+        })
+        .expect("thinking block start should exist");
+    let signature = events
+        .iter()
+        .position(|event| {
+            event["delta"]["type"] == "signature_delta"
+                && event["index"].as_u64() == Some(thinking_index)
+                && event["delta"]["signature"] == "native-signature"
+        })
+        .expect("native signature should be emitted");
+    let thinking_stop = events
+        .iter()
+        .position(|event| {
+            event["type"] == "content_block_stop" && event["index"].as_u64() == Some(thinking_index)
+        })
+        .expect("thinking block should stop");
+    let final_text = events
+        .iter()
+        .position(|event| event["delta"]["text"] == "final answer")
+        .expect("final text should be emitted");
+
+    assert!(
+        events[..thinking_start].iter().any(|event| {
+            event["type"] == "content_block_stop" && event["index"].as_u64() == Some(0)
+        }),
+        "native thinking must close the existing text block before it starts"
+    );
+    assert!(
+        signature < thinking_stop,
+        "signature must precede thinking stop"
+    );
+    assert!(
+        thinking_stop < final_text,
+        "thinking must stop before regular assistant text resumes"
+    );
+}
+
+#[test]
+fn kiro_stream_rewriter_keeps_native_signature_for_native_thinking_after_tag_thinking() {
+    let report_context = kiro_report_context(true);
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let chunk = [
+        encode_event_frame(
+            "event",
+            Some("reasoningContentEvent"),
+            &json!({"signature": "native-signature"}),
+        ),
+        encode_event_frame(
+            "event",
+            Some("assistantResponseEvent"),
+            &json!({"content": "<thinking>legacy</thinking>\n\n"}),
+        ),
+        encode_event_frame(
+            "event",
+            Some("reasoningContentEvent"),
+            &json!({"text": "native reasoning"}),
+        ),
+    ]
+    .concat();
+
+    let first = rewriter
+        .push_chunk(&report_context, &chunk)
+        .expect("rewrite should succeed");
+    let rest = rewriter
+        .finish(&report_context)
+        .expect("finish should succeed");
+    let events = decode_sse_payloads(
+        &String::from_utf8([first, rest].concat()).expect("utf8 should decode"),
+    );
+    let thinking_indices = events
+        .iter()
+        .filter(|event| event["content_block"]["type"] == "thinking")
+        .filter_map(|event| event["index"].as_u64())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thinking_indices.len(),
+        2,
+        "tag and native thinking each need a block"
+    );
+    let tag_signature = events.iter().find(|event| {
+        event["delta"]["type"] == "signature_delta"
+            && event["index"].as_u64() == Some(thinking_indices[0])
+    });
+    assert!(
+        tag_signature
+            .and_then(|event| event["delta"]["signature"].as_str())
+            .is_some_and(|signature| !signature.is_empty() && signature != "native-signature"),
+        "tag thinking needs its own compatibility signature"
+    );
+    assert!(events.iter().any(|event| {
+        event["delta"]["type"] == "signature_delta"
+            && event["index"].as_u64() == Some(thinking_indices[1])
+            && event["delta"]["signature"] == "native-signature"
+    }));
+}
+
+#[test]
+fn kiro_stream_rewriter_closes_empty_tag_thinking_before_tool_use() {
+    let report_context = kiro_report_context(true);
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let chunk = [
+        encode_event_frame(
+            "event",
+            Some("assistantResponseEvent"),
+            &json!({"content": "<thinking>"}),
+        ),
+        encode_event_frame(
+            "event",
+            Some("toolUseEvent"),
+            &json!({
+                "name": "get_weather",
+                "toolUseId": "tool_after_thinking",
+                "input": {"city": "SF"},
+                "stop": true
+            }),
+        ),
+    ]
+    .concat();
+
+    let first = rewriter
+        .push_chunk(&report_context, &chunk)
+        .expect("rewrite should succeed");
+    let rest = rewriter
+        .finish(&report_context)
+        .expect("finish should succeed");
+    let events = decode_sse_payloads(
+        &String::from_utf8([first, rest].concat()).expect("utf8 should decode"),
+    );
+    let thinking_index = events
+        .iter()
+        .find(|event| event["content_block"]["type"] == "thinking")
+        .and_then(|event| event["index"].as_u64())
+        .expect("tag thinking should start a block");
+    let signature = events
+        .iter()
+        .position(|event| {
+            event["delta"]["type"] == "signature_delta"
+                && event["index"].as_u64() == Some(thinking_index)
+        })
+        .expect("tag thinking needs a compatibility signature");
+    let thinking_stop = events
+        .iter()
+        .position(|event| {
+            event["type"] == "content_block_stop" && event["index"].as_u64() == Some(thinking_index)
+        })
+        .expect("tag thinking should stop");
+    let tool_start = events
+        .iter()
+        .position(|event| event["content_block"]["type"] == "tool_use")
+        .expect("tool use should start");
+
+    assert!(
+        signature < thinking_stop,
+        "signature must precede thinking stop"
+    );
+    assert!(
+        thinking_stop < tool_start,
+        "thinking must close before the tool use starts"
+    );
+}
+
+#[test]
+fn kiro_stream_rewriter_downgrades_native_reasoning_to_text_when_thinking_is_disabled() {
+    let report_context = kiro_report_context(false);
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let chunk = encode_event_frame(
+        "event",
+        Some("reasoningContentEvent"),
+        &json!({"text": "visible reasoning", "signature": "ignored"}),
+    );
+
+    let first = rewriter
+        .push_chunk(&report_context, &chunk)
+        .expect("rewrite should succeed");
+    let rest = rewriter
+        .finish(&report_context)
+        .expect("finish should succeed");
+    let text = String::from_utf8([first, rest].concat()).expect("utf8 should decode");
+
+    assert!(text.contains("visible reasoning"));
+    assert!(!text.contains("signature_delta"));
+}
+
+#[test]
+fn kiro_stream_rewriter_uses_metadata_stop_reason_and_preserves_credit_metering() {
+    let report_context = kiro_report_context(false);
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let chunk = [
+        encode_event_frame(
+            "event",
+            Some("assistantResponseEvent"),
+            &json!({"content": "Hello"}),
+        ),
+        encode_event_frame(
+            "event",
+            Some("metadataEvent"),
+            &json!({"stopReason": "MAX_TOKENS"}),
+        ),
+        encode_event_frame(
+            "event",
+            Some("meteringEvent"),
+            &json!({"unit": "credit", "unitPlural": "credits", "usage": 0.75}),
+        ),
+    ]
+    .concat();
+
+    let first = rewriter
+        .push_chunk(&report_context, &chunk)
+        .expect("rewrite should succeed");
+    let rest = rewriter
+        .finish(&report_context)
+        .expect("finish should succeed");
+    let events = decode_sse_payloads(
+        &String::from_utf8([first, rest].concat()).expect("utf8 should decode"),
+    );
+    let message_delta = events
+        .iter()
+        .find(|event| event["type"] == "message_delta")
+        .expect("final message delta should exist");
+    let usage = &message_delta["usage"];
+
+    assert_eq!(message_delta["delta"]["stop_reason"], "max_tokens");
+    assert_eq!(usage["credit_usage"], 0.75);
+    assert_eq!(usage["credit_unit"], "credit");
+    assert_eq!(usage["credit_unit_plural"], "credits");
+    assert_eq!(usage["output_tokens"], 2, "credits are not token counts");
 }
 
 #[test]
@@ -225,6 +547,180 @@ fn kiro_stream_rewriter_converts_tool_use_to_claude_events() {
     assert!(text.contains("\"name\":\"get_weather\""));
     assert!(text.contains("\"partial_json\":\"{\\\"city\\\":\\\"SF\\\"}\""));
     assert!(text.contains("\"stop_reason\":\"tool_use\""));
+}
+
+#[test]
+fn kiro_stream_rewriter_preserves_todowrite_arguments_alias() {
+    let report_context = kiro_report_context(false);
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let chunk = encode_event_frame(
+        "event",
+        Some("toolUseEvent"),
+        &json!({
+            "name": "todowrite",
+            "toolUseId": "tool_todos_123",
+            "arguments": {
+                "todos": [{
+                    "content": "Implement Kiro compatibility",
+                    "status": "in_progress",
+                    "priority": "high"
+                }]
+            },
+            "stop": true
+        }),
+    );
+
+    let first = rewriter
+        .push_chunk(&report_context, &chunk)
+        .expect("rewrite should succeed");
+    let rest = rewriter
+        .finish(&report_context)
+        .expect("finish should succeed");
+    let text = String::from_utf8([first, rest].concat()).expect("utf8 should decode");
+
+    assert!(text.contains("\"name\":\"todowrite\""));
+    assert!(text.contains(
+        "\"partial_json\":\"{\\\"todos\\\":[{\\\"content\\\":\\\"Implement Kiro compatibility\\\""
+    ));
+}
+
+#[test]
+fn kiro_stream_rewriter_prefers_arguments_over_empty_input_placeholder() {
+    let report_context = kiro_report_context(false);
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let chunk = encode_event_frame(
+        "event",
+        Some("toolUseEvent"),
+        &json!({
+            "name": "read",
+            "toolUseId": "tool_read_123",
+            "input": "",
+            "arguments": {"filePath": "/workspace/Cargo.toml"},
+            "stop": true
+        }),
+    );
+
+    let first = rewriter
+        .push_chunk(&report_context, &chunk)
+        .expect("rewrite should succeed");
+    let rest = rewriter
+        .finish(&report_context)
+        .expect("finish should succeed");
+    let text = String::from_utf8([first, rest].concat()).expect("utf8 should decode");
+
+    assert!(text.contains("\"name\":\"read\""));
+    assert!(text.contains("\"partial_json\":\"{\\\"file_path\\\":\\\"/workspace/Cargo.toml\\\"}\""));
+}
+
+#[test]
+fn kiro_stream_rewriter_reads_nested_tool_use_identity_and_arguments() {
+    let report_context = kiro_report_context(false);
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let chunk = encode_event_frame(
+        "event",
+        Some("toolUseEvent"),
+        &json!({
+            "toolUse": {
+                "name": "Read",
+                "toolUseId": "tool_nested_read",
+                "arguments": {"filePath": "/workspace/Cargo.toml"},
+                "stop": true
+            }
+        }),
+    );
+
+    let first = rewriter
+        .push_chunk(&report_context, &chunk)
+        .expect("rewrite should succeed");
+    let rest = rewriter
+        .finish(&report_context)
+        .expect("finish should succeed");
+    let text = String::from_utf8([first, rest].concat()).expect("utf8 should decode");
+
+    assert!(text.contains("\"id\":\"tool_nested_read\""));
+    assert!(text.contains("\"name\":\"Read\""));
+    assert!(text.contains("\"partial_json\":\"{\\\"file_path\\\":\\\"/workspace/Cargo.toml\\\"}\""));
+}
+
+#[test]
+fn kiro_stream_rewriter_only_rewrites_complete_read_tool_json() {
+    let report_context = kiro_report_context(false);
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let chunk = encode_event_frame(
+        "event",
+        Some("toolUseEvent"),
+        &json!({
+            "name": "read",
+            "toolUseId": "tool_read_fragment",
+            "input": "{\"filePath\":\"/workspace/Cargo",
+            "stop": true
+        }),
+    );
+
+    let first = rewriter
+        .push_chunk(&report_context, &chunk)
+        .expect("rewrite should succeed");
+    let rest = rewriter
+        .finish(&report_context)
+        .expect("finish should succeed");
+    let text = String::from_utf8([first, rest].concat()).expect("utf8 should decode");
+
+    assert!(text.contains("filePath"));
+    assert!(!text.contains("file_path"));
+}
+
+#[test]
+fn kiro_stream_rewriter_restores_native_read_file_path_after_complete_json() {
+    let report_context = kiro_report_context(false);
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let chunk = encode_event_frame(
+        "event",
+        Some("toolUseEvent"),
+        &json!({
+            "name": "read_file",
+            "toolUseId": "tool_native_read_file",
+            "input": {"path": "/workspace/Cargo.toml"},
+            "stop": true
+        }),
+    );
+
+    let first = rewriter
+        .push_chunk(&report_context, &chunk)
+        .expect("rewrite should succeed");
+    let rest = rewriter
+        .finish(&report_context)
+        .expect("finish should succeed");
+    let text = String::from_utf8([first, rest].concat()).expect("utf8 should decode");
+
+    assert!(text.contains("\"partial_json\":\"{\\\"file_path\\\":\\\"/workspace/Cargo.toml\\\"}"));
+    assert!(!text.contains("\\\"path\\\""));
+}
+
+#[test]
+fn kiro_stream_rewriter_keeps_fragmented_native_read_file_json_unchanged() {
+    let report_context = kiro_report_context(false);
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let chunk = encode_event_frame(
+        "event",
+        Some("toolUseEvent"),
+        &json!({
+            "name": "readFile",
+            "toolUseId": "tool_native_read_file_fragment",
+            "input": "{\"path\":\"/workspace/Cargo",
+            "stop": true
+        }),
+    );
+
+    let first = rewriter
+        .push_chunk(&report_context, &chunk)
+        .expect("rewrite should succeed");
+    let rest = rewriter
+        .finish(&report_context)
+        .expect("finish should succeed");
+    let text = String::from_utf8([first, rest].concat()).expect("utf8 should decode");
+
+    assert!(text.contains("\\\"path\\\""));
+    assert!(!text.contains("file_path"));
 }
 
 #[test]

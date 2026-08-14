@@ -21,7 +21,7 @@ use aether_provider_transport::{
     GatewayProviderTransportSnapshot, LocalResolvedOAuthRequestAuth,
 };
 use async_trait::async_trait;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::{build_models_fetch_url, deepseek_anthropic_models_fetch_uses_openai_auth};
 
@@ -45,7 +45,10 @@ const BROWSER_FINGERPRINT_HEADERS: &[(&str, &str)] = &[
     ("accept", "application/json"),
     ("accept-encoding", "gzip, deflate, br"),
     ("accept-language", "zh-CN"),
-    ("sec-ch-ua", "\"Not=A?Brand\";v=\"24\", \"Chromium\";v=\"140\""),
+    (
+        "sec-ch-ua",
+        "\"Not=A?Brand\";v=\"24\", \"Chromium\";v=\"140\"",
+    ),
     ("sec-ch-ua-mobile", "?0"),
     ("sec-ch-ua-platform", "\"macOS\""),
     ("sec-fetch-site", "cross-site"),
@@ -191,7 +194,7 @@ pub async fn build_antigravity_fetch_available_models_plan(
         AntigravityRequestAuthSupport::Unsupported(reason) => {
             return Err(format!(
                 "Antigravity fetch auth resolution is not supported: {reason:?}"
-            ))
+            ));
         }
     };
 
@@ -325,11 +328,9 @@ pub async fn build_kiro_list_available_models_plan(
         _ => resolve_local_kiro_request_auth(transport),
     }
     .ok_or_else(|| "Kiro models fetch requires Kiro request auth".to_string())?;
-    let url = build_kiro_list_available_models_url(
-        &transport.endpoint.base_url,
-        Some(kiro_auth.auth_config.effective_api_region()),
-    )
-    .ok_or_else(|| "Kiro models fetch URL is unavailable".to_string())?;
+    let url =
+        build_kiro_list_available_models_url(Some(kiro_auth.auth_config.effective_api_region()))
+            .ok_or_else(|| "Kiro models fetch URL is unavailable".to_string())?;
 
     let mut headers =
         build_list_available_models_headers(&kiro_auth.auth_config, &kiro_auth.machine_id);
@@ -340,7 +341,13 @@ pub async fn build_kiro_list_available_models_plan(
         kiro_auth.name,
         &kiro_auth.value,
     );
-    protected_headers.extend(["host".to_string(), "x-amz-user-agent".to_string()]);
+    // Management JSON-RPC 合同由 Runtime 固定，endpoint 规则不得覆盖这些协议头。
+    protected_headers.extend([
+        "host".to_string(),
+        "x-amz-user-agent".to_string(),
+        "content-type".to_string(),
+        "x-amz-target".to_string(),
+    ]);
     headers = apply_fetch_header_rules(transport, headers, &protected_headers)?;
     ensure_upstream_auth_header(&mut headers, kiro_auth.name, &kiro_auth.value);
 
@@ -348,14 +355,18 @@ pub async fn build_kiro_list_available_models_plan(
         runtime,
         transport,
         ModelFetchExecutionPlanRequest {
-            method: "GET".to_string(),
+            // Control Plane 固定使用抓包确认的 AWS JSON-RPC 协议。
+            method: "POST".to_string(),
             url,
             headers,
-            content_type: None,
-            body: RequestBody {
-                json_body: None,
-                body_bytes_b64: None,
-                body_ref: None,
+            content_type: Some("application/x-amz-json-1.0".to_string()),
+            body: {
+                let mut body =
+                    serde_json::Map::from_iter([("origin".to_string(), json!("AI_EDITOR"))]);
+                if let Some(profile_arn) = kiro_auth.auth_config.profile_arn.as_deref() {
+                    body.insert("profileArn".to_string(), json!(profile_arn));
+                }
+                RequestBody::from_json(Value::Object(body))
             },
             client_api_format: "claude:messages".to_string(),
             provider_api_format: KIRO_LIST_AVAILABLE_MODELS_PROVIDER_API_FORMAT.to_string(),
@@ -1163,7 +1174,11 @@ mod tests {
             proxy: None,
         };
         let mut transport = sample_transport("kiro", "claude:messages", "oauth");
-        transport.endpoint.base_url = "https://q.{region}.amazonaws.com".to_string();
+        transport.endpoint.base_url = "https://runtime.{region}.kiro.dev".to_string();
+        transport.endpoint.header_rules = Some(json!([
+            {"action":"set","key":"content-type","value":"application/json"},
+            {"action":"set","key":"x-amz-target","value":"LegacyOperation"}
+        ]));
         transport.key.decrypted_api_key = "__placeholder__".to_string();
         transport.key.decrypted_auth_config = Some(
             r#"{
@@ -1180,11 +1195,8 @@ mod tests {
             .await
             .expect("plan");
 
-        assert_eq!(plan.method, "GET");
-        assert_eq!(
-            plan.url,
-            "https://q.us-west-2.amazonaws.com/ListAvailableModels?origin=AI_EDITOR"
-        );
+        assert_eq!(plan.method, "POST");
+        assert_eq!(plan.url, "https://management.us-west-2.kiro.dev/");
         assert_eq!(plan.provider_api_format, "kiro:list_available_models");
         assert_eq!(
             plan.headers.get("authorization").map(String::as_str),
@@ -1192,12 +1204,50 @@ mod tests {
         );
         assert_eq!(
             plan.headers.get("host").map(String::as_str),
-            Some("q.us-west-2.amazonaws.com")
+            Some("management.us-west-2.kiro.dev")
         );
         assert!(plan
             .headers
             .get("x-amz-user-agent")
             .is_some_and(|value| value.starts_with("aws-sdk-js/1.0.0 KiroIDE-0.12.155-")));
+        assert_eq!(
+            plan.headers.get("x-amz-target").map(String::as_str),
+            Some("KiroControlPlaneBearerService.ListAvailableModels")
+        );
+        assert_eq!(
+            plan.headers.get("content-type").map(String::as_str),
+            Some("application/x-amz-json-1.0")
+        );
+        assert_eq!(plan.body.json_body, Some(json!({"origin": "AI_EDITOR"})));
+    }
+
+    #[tokio::test]
+    async fn uses_management_protocol_when_stored_endpoint_is_legacy() {
+        let runtime = TestRuntime {
+            oauth_auth: None,
+            proxy: None,
+        };
+        let mut transport = sample_transport("kiro", "claude:messages", "oauth");
+        transport.endpoint.base_url = "https://q.{region}.amazonaws.com".to_string();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config = Some(
+            r#"{"access_token":"cached-token","expires_at":4102444800,"api_region":"us-west-2"}"#
+                .to_string(),
+        );
+
+        let plan = build_kiro_list_available_models_plan(&runtime, &transport)
+            .await
+            .expect("plan");
+        assert_eq!(plan.method, "POST");
+        assert_eq!(plan.url, "https://management.us-west-2.kiro.dev/");
+        assert_eq!(
+            plan.content_type.as_deref(),
+            Some("application/x-amz-json-1.0")
+        );
+        assert_eq!(
+            plan.headers.get("x-amz-target").map(String::as_str),
+            Some("KiroControlPlaneBearerService.ListAvailableModels")
+        );
     }
 
     #[tokio::test]

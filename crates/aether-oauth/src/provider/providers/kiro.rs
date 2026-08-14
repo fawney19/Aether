@@ -188,6 +188,14 @@ impl KiroAuthConfig {
             .filter(|value| !value.is_empty())
     }
 
+    pub fn profile_arn_for_runtime(&self) -> Option<&str> {
+        // Runtime 抓包表明 IdC 身份同样依赖根级 profileArn；不能复用 quota 的历史规则。
+        self.profile_arn
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
     pub fn profile_arn_for_mcp(&self) -> Option<&str> {
         self.profile_arn
             .as_deref()

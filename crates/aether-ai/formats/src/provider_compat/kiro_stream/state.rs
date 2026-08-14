@@ -32,7 +32,13 @@ struct KiroClaudeStreamState {
     has_tool_use: bool,
     stop_reason_override: Option<String>,
     had_error: bool,
-    last_content: String,
+    // 原生 reasoning 的签名可能先于正文到达；只允许原生 thinking 块消费它。
+    pending_thinking_signature: Option<String>,
+    // 标签式 `<thinking>` 与 Kiro 原生 reasoning 共享 Claude thinking 块，必须显式
+    // 区分来源，避免标签式兼容签名误消费上游的真实签名。
+    native_thinking_block_open: bool,
+    // Kiro 的 meteringEvent 只表示 credit，不能套用到 token 计数。
+    metering: Option<super::KiroStreamMetering>,
 }
 
 #[derive(Default)]

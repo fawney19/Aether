@@ -593,7 +593,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
     );
     assert_eq!(
         seen_execution_runtime_request.url,
-        "https://kiro.us-east-1.example/generateAssistantResponse?tenant=demo"
+        "https://runtime.us-east-1.kiro.dev/"
     );
     assert_eq!(
         seen_execution_runtime_request.authorization,
@@ -605,7 +605,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
     );
     assert_eq!(
         seen_execution_runtime_request.host,
-        "q.us-east-1.amazonaws.com"
+        "runtime.us-east-1.kiro.dev"
     );
     assert_eq!(
         seen_execution_runtime_request.endpoint_tag,

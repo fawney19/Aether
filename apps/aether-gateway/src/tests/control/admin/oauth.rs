@@ -1749,7 +1749,7 @@ async fn gateway_handles_admin_provider_oauth_device_poll_for_kiro_social_callba
         assert_eq!(requests.len(), 1);
         assert_eq!(
             requests[0].0,
-            "KiroIDE-0.6.18-123e4567-e89b-12d3-a456-426614174000"
+            "KiroIDE-1.0.212-4256559428e357c083cf5396a7f2b9a4353a1e136c2f67a2e50e2bd4ef06a7f0"
         );
         assert!(requests[0].1.contains("\"code\":\"social-code-123\""));
         assert!(requests[0].1.contains("\"code_verifier\":\"verifier-123\""));
@@ -1809,7 +1809,7 @@ async fn gateway_handles_admin_provider_oauth_device_poll_for_kiro_social_callba
         auth_config["machine_id"],
         "123e4567-e89b-12d3-a456-426614174000"
     );
-    assert_eq!(auth_config["kiro_version"], "0.6.18");
+    assert_eq!(auth_config["kiro_version"], "1.0.212");
 
     gateway_handle.abort();
     token_handle.abort();
@@ -6783,6 +6783,17 @@ async fn gateway_manual_kiro_oauth_refresh_uses_disabled_fixed_endpoint_for_main
         "https://q.{region}.amazonaws.com",
     );
     endpoint.is_active = false;
+    endpoint.config = Some(json!({
+        "_aether_fixed_provider_template": {
+            "managed": true,
+            "provider_type": "kiro",
+            "item_key": "claude:messages",
+            "version": 1,
+            "retired": false,
+            "overrides": [],
+            "config_keys": []
+        }
+    }));
 
     run_gateway_manual_kiro_oauth_refresh_maintenance_endpoint_test(
         Some(endpoint),
@@ -6797,6 +6808,10 @@ async fn run_gateway_manual_kiro_oauth_refresh_maintenance_endpoint_test(
     expected_endpoint_id: Option<&str>,
     expected_endpoint_active: bool,
 ) {
+    let expected_endpoint_base_url = initial_endpoint
+        .as_ref()
+        .map(|endpoint| endpoint.base_url.clone())
+        .unwrap_or_else(|| "https://runtime.{region}.kiro.dev".to_string());
     let refreshed_access_token = sample_kiro_device_access_token("kiro-refresh@example.com");
     let expected_access_token = refreshed_access_token.clone();
     let refreshed_refresh_token = "s".repeat(120);
@@ -6951,7 +6966,7 @@ async fn run_gateway_manual_kiro_oauth_refresh_maintenance_endpoint_test(
         .expect("endpoints should read");
     assert_eq!(endpoints.len(), 1);
     assert_eq!(endpoints[0].api_format, "claude:messages");
-    assert_eq!(endpoints[0].base_url, "https://q.{region}.amazonaws.com");
+    assert_eq!(endpoints[0].base_url, expected_endpoint_base_url);
     assert_eq!(endpoints[0].is_active, expected_endpoint_active);
     if let Some(expected_endpoint_id) = expected_endpoint_id {
         assert_eq!(endpoints[0].id, expected_endpoint_id);

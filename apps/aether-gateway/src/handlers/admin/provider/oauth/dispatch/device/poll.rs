@@ -39,7 +39,7 @@ use serde_json::{json, Value};
 use url::{form_urlencoded, Url};
 
 const KIRO_SOCIAL_TOKEN_URL: &str = "https://prod.us-east-1.auth.desktop.kiro.dev/oauth/token";
-const KIRO_SOCIAL_AUTH_KIRO_VERSION: &str = "0.6.18";
+const KIRO_SOCIAL_AUTH_KIRO_VERSION: &str = "1.0.212";
 
 fn kiro_device_session_is_social(session: &StoredAdminProviderOAuthDeviceSession) -> bool {
     session

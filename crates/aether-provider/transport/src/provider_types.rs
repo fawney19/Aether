@@ -337,8 +337,9 @@ const CHATGPT_WEB_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProvider
 
 const KIRO_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
     provider_type: "kiro",
-    version: 1,
-    base_url: "https://q.{region}.amazonaws.com",
+    // 新建固定 Provider 使用 Runtime；存量端点由运行时派生协议，不触发数据迁移。
+    version: 2,
+    base_url: "https://runtime.{region}.kiro.dev",
     endpoints: &[FixedProviderEndpointTemplate {
         item_key: "claude:messages",
         api_format: "claude:messages",
@@ -872,6 +873,13 @@ mod tests {
         assert!(!provider_type_allows_auth_channel_mismatch_by_default(
             "custom"
         ));
+    }
+
+    #[test]
+    fn kiro_fixed_provider_template_uses_runtime_endpoint() {
+        let template = fixed_provider_template("kiro").expect("kiro template should exist");
+        assert_eq!(template.version, 2);
+        assert_eq!(template.base_url, "https://runtime.{region}.kiro.dev");
     }
 
     #[test]

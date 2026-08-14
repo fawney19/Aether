@@ -3,20 +3,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_contracts::{ExecutionPlan, ExecutionResult, RequestBody};
 use aether_provider_transport::antigravity::{
-    resolve_local_antigravity_request_auth, AntigravityRequestAuthSupport,
+    AntigravityRequestAuthSupport, resolve_local_antigravity_request_auth,
 };
 use aether_provider_transport::{
-    is_vertex_api_key_transport_context, resolve_transport_execution_timeouts,
-    resolve_transport_profile, GatewayProviderTransportSnapshot,
+    GatewayProviderTransportSnapshot, is_vertex_api_key_transport_context,
+    resolve_transport_execution_timeouts, resolve_transport_profile,
 };
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use rsa::RsaPrivateKey;
 use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
 use rsa::pkcs8::DecodePrivateKey;
 use rsa::signature::{SignatureEncoding, Signer};
-use rsa::RsaPrivateKey;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::Sha256;
 
 use crate::logic::{
@@ -24,10 +24,10 @@ use crate::logic::{
     parse_windsurf_model_configs_response, preset_models_for_provider,
 };
 use crate::transport::{
-    build_antigravity_fetch_available_models_plan, build_antigravity_load_code_assist_plan,
-    build_gemini_cli_load_code_assist_plan, build_kiro_list_available_models_plan,
-    build_standard_models_fetch_execution_plan, build_vertex_models_fetch_execution_plan,
-    build_windsurf_model_configs_execution_plan, ModelFetchTransportRuntime,
+    ModelFetchTransportRuntime, build_antigravity_fetch_available_models_plan,
+    build_antigravity_load_code_assist_plan, build_gemini_cli_load_code_assist_plan,
+    build_kiro_list_available_models_plan, build_standard_models_fetch_execution_plan,
+    build_vertex_models_fetch_execution_plan, build_windsurf_model_configs_execution_plan,
 };
 
 const ANTIGRAVITY_SANDBOX_BASE_URL: &str = "https://daily-cloudcode-pa.sandbox.googleapis.com";
@@ -964,6 +964,8 @@ fn infer_kiro_model_owner(model_id: &str) -> &'static str {
         "zhipu"
     } else if normalized.starts_with("qwen") {
         "alibaba"
+    } else if normalized.starts_with("gpt-") {
+        "openai"
     } else {
         "kiro"
     }
@@ -1417,11 +1419,11 @@ mod tests {
         GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
     };
     use async_trait::async_trait;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     use super::{
-        build_vertex_google_list_url, build_vertex_service_account_list_url,
-        select_model_fetch_strategy, ModelFetchStrategy, ModelFetchStrategyKind,
+        ModelFetchStrategy, ModelFetchStrategyKind, build_vertex_google_list_url,
+        build_vertex_service_account_list_url, select_model_fetch_strategy,
     };
     use crate::fetch_models_from_transports;
     use crate::transport::ModelFetchTransportRuntime;
@@ -1673,7 +1675,7 @@ mod tests {
         transport.endpoint.api_format = "claude:messages".to_string();
         transport.endpoint.api_family = Some("claude".to_string());
         transport.endpoint.endpoint_kind = Some("messages".to_string());
-        transport.endpoint.base_url = "https://q.{region}.amazonaws.com".to_string();
+        transport.endpoint.base_url = "https://runtime.{region}.kiro.dev".to_string();
         transport.endpoint.custom_path = None;
         transport.key.auth_type = "oauth".to_string();
         transport.key.api_formats = Some(vec!["claude:messages".to_string()]);
@@ -1810,7 +1812,9 @@ mod tests {
         let urls = executed_urls.lock().expect("executed_urls lock");
         assert_eq!(
             urls.as_slice(),
-            &["https://aiplatform.googleapis.com/v1beta1/publishers/google/models?key=vertex-secret&pageSize=100"]
+            &[
+                "https://aiplatform.googleapis.com/v1beta1/publishers/google/models?key=vertex-secret&pageSize=100"
+            ]
         );
         assert_eq!(outcome.fetched_model_ids, vec!["gemini-3.1-pro-preview"]);
         assert_eq!(outcome.cached_models.len(), 1);
@@ -2084,11 +2088,13 @@ mod tests {
                 .and_then(|value| value.pointer("/gemini_cli/paidTier/availableCredits")),
             Some(&json!(123.5))
         );
-        assert!(outcome
-            .upstream_metadata
-            .as_ref()
-            .and_then(|value| value.pointer("/gemini_cli/paidTier/privateField"))
-            .is_none());
+        assert!(
+            outcome
+                .upstream_metadata
+                .as_ref()
+                .and_then(|value| value.pointer("/gemini_cli/paidTier/privateField"))
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -2195,10 +2201,7 @@ mod tests {
             .expect("models fetch should succeed");
 
         let urls = executed_urls.lock().expect("executed_urls lock");
-        assert_eq!(
-            urls.as_slice(),
-            &["https://q.us-east-1.amazonaws.com/ListAvailableModels?origin=AI_EDITOR"]
-        );
+        assert_eq!(urls.as_slice(), &["https://management.us-east-1.kiro.dev/"]);
         assert_eq!(
             outcome.fetched_model_ids,
             vec!["auto".to_string(), "claude-opus-4.7".to_string()]
@@ -2260,7 +2263,9 @@ mod tests {
         let urls = executed_urls.lock().expect("executed_urls lock");
         assert_eq!(
             urls.as_slice(),
-            &["https://server.codeium.com/exa.api_server_pb.ApiServerService/GetCascadeModelConfigs"]
+            &[
+                "https://server.codeium.com/exa.api_server_pb.ApiServerService/GetCascadeModelConfigs"
+            ]
         );
         assert_eq!(
             outcome.fetched_model_ids,

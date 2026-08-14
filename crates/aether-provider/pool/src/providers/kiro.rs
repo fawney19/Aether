@@ -75,7 +75,10 @@ pub fn build_kiro_pool_quota_request(
     key_id: &str,
     auth: &KiroPoolQuotaAuthInput,
 ) -> ProviderPoolQuotaRequestSpec {
-    let host = format!("q.{}.amazonaws.com", normalize_region(&auth.api_region));
+    // 配额是新版 Management API，不再接受或派生旧 Q 端点。
+    let region = normalize_region(&auth.api_region);
+    let host = format!("management.{region}.kiro.dev");
+    let base_url = format!("https://{host}");
     let machine_id = auth.machine_id.trim();
     let ide_tag = if machine_id.is_empty() {
         format!("KiroIDE-{}", normalize_kiro_version(&auth.kiro_version))
@@ -103,7 +106,7 @@ pub fn build_kiro_pool_quota_request(
         provider_name: "kiro".to_string(),
         quota_kind: "kiro".to_string(),
         method: "GET".to_string(),
-        url: format!("https://{host}{KIRO_USAGE_LIMITS_PATH}?{}", serializer.finish()),
+        url: format!("{base_url}{KIRO_USAGE_LIMITS_PATH}?{}", serializer.finish()),
         headers: BTreeMap::from([
             (
                 "x-amz-user-agent".to_string(),
@@ -111,13 +114,20 @@ pub fn build_kiro_pool_quota_request(
             ),
             (
                 "user-agent".to_string(),
+                // 抓包确认 Management 的 getUsageLimits 仍校验该 SDK 指纹；这不是旧 Q 协议地址。
                 format!(
                     "aws-sdk-js/{KIRO_USAGE_SDK_VERSION} ua/2.1 os/other#unknown lang/js md/nodejs#22.21.1 api/codewhispererruntime#1.0.0 m/N,E {ide_tag}"
                 ),
             ),
             ("host".to_string(), host),
-            ("amz-sdk-invocation-id".to_string(), Uuid::new_v4().to_string()),
-            ("amz-sdk-request".to_string(), "attempt=1; max=1".to_string()),
+            (
+                "amz-sdk-invocation-id".to_string(),
+                Uuid::new_v4().to_string(),
+            ),
+            (
+                "amz-sdk-request".to_string(),
+                "attempt=1; max=1".to_string(),
+            ),
             (
                 "authorization".to_string(),
                 auth.authorization_value.clone(),

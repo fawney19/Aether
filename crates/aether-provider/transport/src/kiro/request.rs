@@ -27,7 +27,9 @@ pub fn build_kiro_provider_request_body(
 ) -> Option<Value> {
     let conversation_state =
         convert_claude_messages_to_conversation_state(body_json, mapped_model)?;
+    // Kiro 已固定为新版 Runtime，请求体始终携带 AWS JSON-RPC 所需的 agentMode。
     let mut provider_request_body = json!({
+        "agentMode": "vibe",
         "conversationState": conversation_state
     });
 
@@ -64,7 +66,15 @@ pub fn build_kiro_provider_request_body(
         );
     }
 
-    if let Some(profile_arn) = auth_config.profile_arn_for_payload() {
+    if let Some(fields) = kiro_additional_model_request_fields(body_json, mapped_model) {
+        // 新版 Kiro 会按模型校验附加字段；推理强度必须置于这里，不能作为顶层字段透传。
+        provider_request_body
+            .as_object_mut()?
+            .insert("additionalModelRequestFields".to_string(), fields);
+    }
+
+    if let Some(profile_arn) = auth_config.profile_arn_for_runtime() {
+        // Runtime 与 quota 的 profileArn 约束不同：IdC 的生成请求也必须携带真实 ARN。
         provider_request_body.as_object_mut()?.insert(
             "profileArn".to_string(),
             Value::String(profile_arn.to_string()),
@@ -81,6 +91,131 @@ pub fn build_kiro_provider_request_body(
     }
 
     Some(provider_request_body)
+}
+
+fn kiro_additional_model_request_fields(body_json: &Value, mapped_model: &str) -> Option<Value> {
+    let model = mapped_model.trim().to_ascii_lowercase();
+
+    // HAR 验证 GPT 5.6 三个模型使用 reasoning.effort；保留其既有独立 wire 格式。
+    if matches!(
+        model.as_str(),
+        "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+    ) {
+        let effort = body_json
+            .get("reasoning_effort")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| {
+                matches!(*value, "none" | "low" | "medium" | "high" | "xhigh" | "max")
+            })?;
+        return Some(json!({"reasoning": {"effort": effort}}));
+    }
+
+    kiro_claude_additional_model_request_fields(body_json, &model)
+}
+
+fn kiro_claude_additional_model_request_fields(body_json: &Value, model: &str) -> Option<Value> {
+    // 显式关闭 thinking 时绝不能因为遗留 output_config 重新开启原生推理。
+    if claude_thinking_type(body_json) == Some("disabled")
+        || !kiro_model_supports_claude_native_reasoning(model)
+        || !kiro_claude_native_reasoning_requested(body_json, model)
+    {
+        return None;
+    }
+
+    let effort = kiro_claude_reasoning_effort(body_json, model);
+    // 外层字段遵循 Kiro camelCase，内部 output_config 则由 Runtime 固定为 snake_case。
+    Some(json!({"output_config": {"effort": effort}}))
+}
+
+fn kiro_model_supports_claude_native_reasoning(model: &str) -> bool {
+    matches!(
+        model,
+        "claude-opus-4.6" | "claude-opus-4.7" | "claude-opus-4.8" | "claude-sonnet-4.6"
+    ) || model.contains("fable-5")
+        || model.contains("mythos-5")
+        || model.contains("sonnet-5")
+        || model.contains("opus-5")
+        || model.contains("claude-5")
+}
+
+fn kiro_claude_native_reasoning_requested(body_json: &Value, model: &str) -> bool {
+    let thinking_type = claude_thinking_type(body_json);
+    // Opus 4.6 只接受 adaptive thinking；纯 effort 或 enabled 都会被 Runtime 拒绝。
+    if model == "claude-opus-4.6" {
+        return thinking_type == Some("adaptive");
+    }
+
+    matches!(thinking_type, Some("enabled" | "adaptive"))
+        || claude_output_config_effort(body_json).is_some()
+}
+
+fn kiro_claude_reasoning_effort(body_json: &Value, model: &str) -> &'static str {
+    let requested = claude_output_config_effort(body_json).unwrap_or_else(|| {
+        claude_thinking_budget_tokens(body_json)
+            .map(kiro_effort_from_thinking_budget)
+            .unwrap_or("high")
+    });
+    normalize_kiro_claude_effort(requested, model)
+}
+
+fn claude_thinking_type(body_json: &Value) -> Option<&str> {
+    body_json
+        .get("thinking")
+        .and_then(Value::as_object)
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| matches!(*value, "enabled" | "adaptive" | "disabled"))
+}
+
+fn claude_output_config_effort(body_json: &Value) -> Option<&str> {
+    body_json
+        .get("output_config")
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("effort"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn claude_thinking_budget_tokens(body_json: &Value) -> Option<i64> {
+    body_json
+        .get("thinking")
+        .and_then(Value::as_object)
+        .and_then(|thinking| thinking.get("budget_tokens"))
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        })
+}
+
+fn kiro_effort_from_thinking_budget(tokens: i64) -> &'static str {
+    match tokens {
+        i64::MIN..=4_000 => "low",
+        4_001..=16_000 => "medium",
+        16_001..=64_000 => "high",
+        _ => "xhigh",
+    }
+}
+
+fn normalize_kiro_claude_effort(requested: &str, model: &str) -> &'static str {
+    let effort = match requested.trim().to_ascii_lowercase().as_str() {
+        "low" => "low",
+        "medium" => "medium",
+        "high" => "high",
+        "xhigh" | "x-high" | "x_high" => "xhigh",
+        "max" => "max",
+        _ => "high",
+    };
+
+    // 已确认的旧模型不接受 xhigh；其余已支持模型保持请求档位，避免猜测未来能力。
+    if effort == "xhigh" && matches!(model, "claude-opus-4.6" | "claude-sonnet-4.6") {
+        "high"
+    } else {
+        effort
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -214,6 +349,7 @@ mod tests {
         .expect("payload should build");
 
         assert!(payload.get("conversationState").is_some());
+        assert_eq!(payload.get("agentMode"), Some(&json!("vibe")));
         assert_eq!(
             payload
                 .get("inferenceConfig")
@@ -225,6 +361,218 @@ mod tests {
             Some(&json!("arn:aws:bedrock:demo"))
         );
         assert_eq!(payload.get("debugTag"), Some(&json!("kiro-local")));
+    }
+
+    #[test]
+    fn maps_gpt_5_6_reasoning_effort_into_runtime_model_fields() {
+        let auth_config = KiroAuthConfig {
+            auth_method: None,
+            refresh_token: None,
+            expires_at: None,
+            profile_arn: None,
+            region: None,
+            auth_region: None,
+            api_region: Some("us-east-1".to_string()),
+            client_id: None,
+            client_secret: None,
+            machine_id: None,
+            kiro_version: None,
+            system_version: None,
+            node_version: None,
+            access_token: Some("cached-token".to_string()),
+        };
+        let payload = build_kiro_provider_request_body(
+            &json!({
+                "messages": [{"role":"user","content":"hello"}],
+                "reasoning_effort": "max"
+            }),
+            "gpt-5.6-luna",
+            &auth_config,
+            None,
+            None,
+        )
+        .expect("payload should build");
+
+        assert_eq!(
+            payload.get("additionalModelRequestFields"),
+            Some(&json!({"reasoning": {"effort": "max"}}))
+        );
+    }
+
+    #[test]
+    fn maps_claude_output_config_effort_into_runtime_model_fields() {
+        let auth_config = KiroAuthConfig {
+            auth_method: None,
+            refresh_token: None,
+            expires_at: None,
+            profile_arn: None,
+            region: None,
+            auth_region: None,
+            api_region: Some("us-east-1".to_string()),
+            client_id: None,
+            client_secret: None,
+            machine_id: None,
+            kiro_version: None,
+            system_version: None,
+            node_version: None,
+            access_token: Some("cached-token".to_string()),
+        };
+        let payload = build_kiro_provider_request_body(
+            &json!({
+                "messages": [{"role":"user","content":"hello"}],
+                "output_config": {"effort": "max"}
+            }),
+            "claude-opus-5",
+            &auth_config,
+            None,
+            None,
+        )
+        .expect("payload should build");
+
+        assert_eq!(
+            payload.get("additionalModelRequestFields"),
+            Some(&json!({"output_config": {"effort": "max"}}))
+        );
+    }
+
+    #[test]
+    fn maps_claude_thinking_budget_into_runtime_model_fields() {
+        let auth_config = KiroAuthConfig {
+            auth_method: None,
+            refresh_token: None,
+            expires_at: None,
+            profile_arn: None,
+            region: None,
+            auth_region: None,
+            api_region: Some("us-east-1".to_string()),
+            client_id: None,
+            client_secret: None,
+            machine_id: None,
+            kiro_version: None,
+            system_version: None,
+            node_version: None,
+            access_token: Some("cached-token".to_string()),
+        };
+        let payload = build_kiro_provider_request_body(
+            &json!({
+                "messages": [{"role":"user","content":"hello"}],
+                "thinking": {"type": "enabled", "budget_tokens": 20_000}
+            }),
+            "claude-sonnet-5",
+            &auth_config,
+            None,
+            None,
+        )
+        .expect("payload should build");
+
+        assert_eq!(
+            payload.get("additionalModelRequestFields"),
+            Some(&json!({"output_config": {"effort": "high"}}))
+        );
+    }
+
+    #[test]
+    fn does_not_inject_output_config_for_unsupported_claude_model() {
+        let auth_config = KiroAuthConfig {
+            auth_method: None,
+            refresh_token: None,
+            expires_at: None,
+            profile_arn: None,
+            region: None,
+            auth_region: None,
+            api_region: Some("us-east-1".to_string()),
+            client_id: None,
+            client_secret: None,
+            machine_id: None,
+            kiro_version: None,
+            system_version: None,
+            node_version: None,
+            access_token: Some("cached-token".to_string()),
+        };
+        let payload = build_kiro_provider_request_body(
+            &json!({
+                "messages": [{"role":"user","content":"hello"}],
+                "thinking": {"type": "enabled", "budget_tokens": 4_096},
+                "output_config": {"effort": "max"}
+            }),
+            "claude-sonnet-4.8",
+            &auth_config,
+            None,
+            None,
+        )
+        .expect("payload should build");
+
+        assert!(payload.get("additionalModelRequestFields").is_none());
+    }
+
+    #[test]
+    fn does_not_reenable_claude_reasoning_when_thinking_is_disabled() {
+        let auth_config = KiroAuthConfig {
+            auth_method: None,
+            refresh_token: None,
+            expires_at: None,
+            profile_arn: None,
+            region: None,
+            auth_region: None,
+            api_region: Some("us-east-1".to_string()),
+            client_id: None,
+            client_secret: None,
+            machine_id: None,
+            kiro_version: None,
+            system_version: None,
+            node_version: None,
+            access_token: Some("cached-token".to_string()),
+        };
+        let payload = build_kiro_provider_request_body(
+            &json!({
+                "messages": [{"role":"user","content":"hello"}],
+                "thinking": {"type": "disabled"},
+                "output_config": {"effort": "max"}
+            }),
+            "claude-opus-5",
+            &auth_config,
+            None,
+            None,
+        )
+        .expect("payload should build");
+
+        assert!(payload.get("additionalModelRequestFields").is_none());
+    }
+
+    #[test]
+    fn downgrades_xhigh_for_older_claude_runtime_models() {
+        let auth_config = KiroAuthConfig {
+            auth_method: None,
+            refresh_token: None,
+            expires_at: None,
+            profile_arn: None,
+            region: None,
+            auth_region: None,
+            api_region: Some("us-east-1".to_string()),
+            client_id: None,
+            client_secret: None,
+            machine_id: None,
+            kiro_version: None,
+            system_version: None,
+            node_version: None,
+            access_token: Some("cached-token".to_string()),
+        };
+        let payload = build_kiro_provider_request_body(
+            &json!({
+                "messages": [{"role":"user","content":"hello"}],
+                "thinking": {"type": "enabled", "budget_tokens": 64_001}
+            }),
+            "claude-sonnet-4.6",
+            &auth_config,
+            None,
+            None,
+        )
+        .expect("payload should build");
+
+        assert_eq!(
+            payload.get("additionalModelRequestFields"),
+            Some(&json!({"output_config": {"effort": "high"}}))
+        );
     }
 
     #[test]
@@ -275,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn omits_profile_arn_for_idc_auth() {
+    fn includes_profile_arn_for_idc_runtime_auth() {
         let auth_config = KiroAuthConfig {
             auth_method: Some("identity_center".to_string()),
             refresh_token: Some("r".repeat(128)),
@@ -304,6 +652,9 @@ mod tests {
         )
         .expect("payload should build");
 
-        assert!(payload.get("profileArn").is_none());
+        assert_eq!(
+            payload.get("profileArn"),
+            Some(&json!("arn:aws:bedrock:demo"))
+        );
     }
 }

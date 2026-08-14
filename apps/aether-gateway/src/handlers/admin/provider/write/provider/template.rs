@@ -69,6 +69,7 @@ async fn reconcile_admin_fixed_provider_template_endpoints_with_adoption_provide
         .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider.id))
         .await?;
     let mut matched_endpoint_ids = BTreeSet::new();
+    let preserve_existing_kiro_endpoints = template.provider_type.eq_ignore_ascii_case("kiro");
 
     for endpoint_template in template.endpoints {
         let existing_endpoint = existing_endpoints
@@ -77,6 +78,10 @@ async fn reconcile_admin_fixed_provider_template_endpoints_with_adoption_provide
         match existing_endpoint {
             Some(existing_endpoint) => {
                 matched_endpoint_ids.insert(existing_endpoint.id.clone());
+                // Kiro 在运行时按认证区域派生新版地址；不写回存量端点，避免隐式数据迁移。
+                if preserve_existing_kiro_endpoints {
+                    continue;
+                }
                 let updated = reconcile_fixed_provider_endpoint_with_adoption_provider(
                     provider,
                     adoption_provider,
@@ -110,6 +115,10 @@ async fn reconcile_admin_fixed_provider_template_endpoints_with_adoption_provide
                 };
             }
         }
+    }
+
+    if preserve_existing_kiro_endpoints {
+        return Ok(());
     }
 
     for existing_endpoint in &existing_endpoints {

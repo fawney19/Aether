@@ -1494,7 +1494,7 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_kiro_with_trusted_ad
         .expect("execution runtime request should be captured");
     assert!(seen_execution_runtime_request
         .url
-        .starts_with("https://q.us-west-2.amazonaws.com/getUsageLimits?"),);
+        .starts_with("https://management.us-west-2.kiro.dev/getUsageLimits?"),);
     assert_eq!(
         seen_execution_runtime_request.authorization,
         "Bearer kiro-access-token"
@@ -1849,7 +1849,7 @@ async fn gateway_refresh_kiro_quota_reconciles_missing_fixed_endpoint_before_ref
         .expect("endpoints should read");
     assert_eq!(endpoints.len(), 1);
     assert_eq!(endpoints[0].api_format, "claude:messages");
-    assert_eq!(endpoints[0].base_url, "https://q.{region}.amazonaws.com");
+    assert_eq!(endpoints[0].base_url, "https://runtime.{region}.kiro.dev");
     assert_eq!(
         *seen_endpoint_id.lock().expect("mutex should lock"),
         Some(endpoints[0].id.clone())

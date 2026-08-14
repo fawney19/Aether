@@ -124,8 +124,7 @@ struct KiroMcpExecution {
 
 struct KiroMcpRequestContext {
     headers: BTreeMap<String, String>,
-    profile_arn_present: bool,
-    auth_config: Option<aether_provider_transport::kiro::KiroAuthConfig>,
+    profile_arn: Option<String>,
 }
 
 pub(crate) async fn maybe_execute_kiro_web_search_stream(
@@ -327,25 +326,31 @@ async fn execute_mcp_request(
     plan: &ExecutionPlan,
     request: &McpRequest,
 ) -> Result<KiroMcpExecution, ExecutionRuntimeTransportError> {
-    let mcp_url = aether_provider_transport::kiro::build_kiro_mcp_url_from_resolved_url(&plan.url)
-        .ok_or_else(|| {
-            ExecutionRuntimeTransportError::UpstreamRequest(format!(
-                "failed to build Kiro MCP url from {}",
-                plan.url
-            ))
-        })?;
+    let mcp_url = build_kiro_mcp_target(&plan.url).ok_or_else(|| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format!(
+            "failed to build Kiro MCP url from {}",
+            plan.url
+        ))
+    })?;
     let mut request_context = build_mcp_request_context(state, plan).await;
-    if !request_context.profile_arn_present {
-        if let Some(profile_arn) = discover_kiro_profile_arn(state, plan, &request_context).await? {
-            request_context.headers.insert(
-                aether_provider_transport::kiro::KIRO_PROFILE_ARN_HEADER.to_string(),
-                profile_arn,
-            );
-            request_context.profile_arn_present = true;
-        }
-    }
-    let body_json =
+    let mut body_json =
         serde_json::to_value(request).map_err(ExecutionRuntimeTransportError::BodyEncode)?;
+    // 新版运行时把 JSON-RPC 调用封装为 InvokeMCP，并要求 profileArn 位于请求体。
+    if let Some(profile_arn) = request_context.profile_arn.clone() {
+        body_json
+            .as_object_mut()
+            .expect("serialized MCP request must be an object")
+            .insert("profileArn".to_string(), Value::String(profile_arn));
+    }
+    request_context.headers.insert(
+        "x-amz-target".to_string(),
+        aether_provider_transport::kiro::KIRO_INVOKE_MCP_TARGET.to_string(),
+    );
+    request_context.headers.insert(
+        "content-type".to_string(),
+        "application/x-amz-json-1.0".to_string(),
+    );
+    let profile_arn_present = request_context.profile_arn.is_some();
     let mcp_plan = ExecutionPlan {
         request_id: plan.request_id.clone(),
         candidate_id: plan.candidate_id.clone(),
@@ -356,7 +361,7 @@ async fn execute_mcp_request(
         method: "POST".to_string(),
         url: mcp_url.clone(),
         headers: request_context.headers,
-        content_type: Some("application/json".to_string()),
+        content_type: Some("application/x-amz-json-1.0".to_string()),
         content_encoding: None,
         body: RequestBody::from_json(body_json),
         stream: false,
@@ -373,8 +378,13 @@ async fn execute_mcp_request(
     Ok(KiroMcpExecution {
         result,
         url: mcp_url,
-        profile_arn_present: request_context.profile_arn_present,
+        profile_arn_present,
     })
+}
+
+/// MCP 仅支持新版 Runtime 根路径，拒绝旧 Q URL 与旧 `/mcp` 路径。
+fn build_kiro_mcp_target(resolved_url: &str) -> Option<String> {
+    aether_provider_transport::kiro::build_kiro_mcp_url_from_resolved_url(resolved_url)
 }
 
 async fn build_mcp_request_context(
@@ -454,14 +464,10 @@ fn build_mcp_headers_from_transport(
             aether_provider_transport::kiro::generate_machine_id(&auth_config, fallback_secret)
         })?;
     let mut headers = aether_provider_transport::kiro::build_mcp_headers(&auth_config, &machine_id);
-    if !headers.contains_key(aether_provider_transport::kiro::KIRO_PROFILE_ARN_HEADER) {
-        if let Some(profile_arn) = body_profile_arn {
-            headers.insert(
-                aether_provider_transport::kiro::KIRO_PROFILE_ARN_HEADER.to_string(),
-                profile_arn.to_string(),
-            );
-        }
-    }
+    // profileArn 是 InvokeMCP 的请求体字段，显式请求体优先于认证配置中的默认值。
+    let profile_arn = body_profile_arn
+        .map(ToOwned::to_owned)
+        .or_else(|| auth_config.profile_arn_for_mcp().map(ToOwned::to_owned));
 
     if let Some(plan_auth_value) = header_value_case_insensitive(
         &plan.headers,
@@ -483,15 +489,10 @@ fn build_mcp_headers_from_transport(
         headers.insert("tokentype".to_string(), "API_KEY".to_string());
     }
 
-    headers.remove("x-amzn-kiro-agent-mode");
     headers.remove("content-length");
-    let profile_arn_present = headers.keys().any(|name| {
-        name.eq_ignore_ascii_case(aether_provider_transport::kiro::KIRO_PROFILE_ARN_HEADER)
-    });
     Some(KiroMcpRequestContext {
         headers,
-        profile_arn_present,
-        auth_config: Some(auth_config),
+        profile_arn,
     })
 }
 
@@ -526,181 +527,6 @@ fn stripped_bearer_token(value: &str) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-async fn discover_kiro_profile_arn(
-    _state: &AppState,
-    plan: &ExecutionPlan,
-    context: &KiroMcpRequestContext,
-) -> Result<Option<String>, ExecutionRuntimeTransportError> {
-    let Some(auth_config) = context.auth_config.as_ref() else {
-        return Ok(None);
-    };
-    for region in profile_discovery_regions(auth_config) {
-        match discover_kiro_profile_arn_in_region(plan, context, region.as_str()).await? {
-            Some(profile_arn) => {
-                debug!(
-                    event_name = "kiro_web_search_profile_arn_discovered",
-                    log_type = "debug",
-                    request_id = %plan.request_id,
-                    candidate_id = ?plan.candidate_id,
-                    region = region.as_str(),
-                    "gateway discovered Kiro profileArn for web_search MCP"
-                );
-                return Ok(Some(profile_arn));
-            }
-            None => continue,
-        }
-    }
-    warn!(
-        event_name = "kiro_web_search_profile_arn_unavailable",
-        log_type = "ops",
-        request_id = %plan.request_id,
-        candidate_id = ?plan.candidate_id,
-        provider_id = %plan.provider_id,
-        endpoint_id = %plan.endpoint_id,
-        key_id = %plan.key_id,
-        "gateway could not resolve Kiro profileArn before web_search MCP"
-    );
-    Ok(None)
-}
-
-async fn discover_kiro_profile_arn_in_region(
-    plan: &ExecutionPlan,
-    context: &KiroMcpRequestContext,
-    region: &str,
-) -> Result<Option<String>, ExecutionRuntimeTransportError> {
-    let mut next_token: Option<String> = None;
-    for _ in 0..4 {
-        let mut body = serde_json::Map::new();
-        if let Some(token) = next_token.as_deref() {
-            body.insert("nextToken".to_string(), Value::String(token.to_string()));
-        }
-        let list_plan = ExecutionPlan {
-            request_id: plan.request_id.clone(),
-            candidate_id: plan.candidate_id.clone(),
-            provider_name: plan.provider_name.clone(),
-            provider_id: plan.provider_id.clone(),
-            endpoint_id: plan.endpoint_id.clone(),
-            key_id: plan.key_id.clone(),
-            method: "POST".to_string(),
-            url: format!(
-                "{}/ListAvailableProfiles",
-                kiro_runtime_base_url_for_region(region).trim_end_matches('/')
-            ),
-            headers: build_profile_discovery_headers(&context.headers, region),
-            content_type: Some("application/json".to_string()),
-            content_encoding: None,
-            body: RequestBody::from_json(Value::Object(body)),
-            stream: false,
-            client_api_format: plan.client_api_format.clone(),
-            provider_api_format: "kiro:profiles".to_string(),
-            model_name: Some("kiro-list-available-profiles".to_string()),
-            proxy: plan.proxy.clone(),
-            transport_profile: plan.transport_profile.clone(),
-            timeouts: plan.timeouts.clone(),
-        };
-        let result = DirectSyncExecutionRuntime::new()
-            .execute_sync(&list_plan)
-            .await?;
-        if !(200..300).contains(&result.status_code) {
-            debug!(
-                event_name = "kiro_web_search_profile_arn_discovery_status",
-                log_type = "debug",
-                request_id = %plan.request_id,
-                candidate_id = ?plan.candidate_id,
-                region,
-                status_code = result.status_code,
-                "Kiro ListAvailableProfiles did not return success"
-            );
-            return Ok(None);
-        }
-        let Some(body_json) = execution_result_body_json(&result) else {
-            return Ok(None);
-        };
-        if let Some(profile_arn) = first_profile_arn(&body_json) {
-            return Ok(Some(profile_arn));
-        }
-        next_token = body_json
-            .get("nextToken")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
-        if next_token.is_none() {
-            return Ok(None);
-        }
-    }
-    Ok(None)
-}
-
-fn build_profile_discovery_headers(
-    mcp_headers: &BTreeMap<String, String>,
-    region: &str,
-) -> BTreeMap<String, String> {
-    let mut headers = mcp_headers.clone();
-    remove_header_case_insensitive(
-        &mut headers,
-        aether_provider_transport::kiro::KIRO_PROFILE_ARN_HEADER,
-    );
-    headers.insert("accept".to_string(), "application/json".to_string());
-    headers.insert("content-type".to_string(), "application/json".to_string());
-    headers.insert(
-        "host".to_string(),
-        kiro_runtime_host_for_region(region).to_string(),
-    );
-    headers
-}
-
-fn profile_discovery_regions(
-    auth_config: &aether_provider_transport::kiro::KiroAuthConfig,
-) -> Vec<String> {
-    let mut regions = Vec::new();
-    push_unique_region(&mut regions, auth_config.effective_api_region());
-    push_unique_region(&mut regions, auth_config.effective_auth_region());
-    if auth_config.is_idc_auth() {
-        push_unique_region(&mut regions, "us-east-1");
-        push_unique_region(&mut regions, "eu-central-1");
-    }
-    regions
-}
-
-fn push_unique_region(regions: &mut Vec<String>, region: &str) {
-    let region = region.trim();
-    if region.is_empty() || regions.iter().any(|value| value == region) {
-        return;
-    }
-    regions.push(region.to_string());
-}
-
-fn kiro_runtime_base_url_for_region(region: &str) -> String {
-    format!("https://{}", kiro_runtime_host_for_region(region))
-}
-
-fn kiro_runtime_host_for_region(region: &str) -> String {
-    match region {
-        "us-gov-east-1" | "us-gov-west-1" => format!("q-fips.{region}.amazonaws.com"),
-        "us-iso-east-1" => "q.us-iso-east-1.c2s.ic.gov".to_string(),
-        "us-isob-east-1" => "q.us-isob-east-1.sc2s.sgov.gov".to_string(),
-        "us-isof-south-1" => "q.us-isof-south-1.csp.hci.ic.gov".to_string(),
-        "us-isof-east-1" => "q.us-isof-east-1.csp.hci.ic.gov".to_string(),
-        _ => format!("q.{region}.amazonaws.com"),
-    }
-}
-
-fn first_profile_arn(body: &Value) -> Option<String> {
-    body.get("profiles")?
-        .as_array()?
-        .iter()
-        .find_map(|profile| {
-            profile
-                .get("arn")
-                .or_else(|| profile.get("profileArn"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-        })
-}
-
 fn build_mcp_headers_from_plan(
     plan_headers: &BTreeMap<String, String>,
     profile_arn: Option<&str>,
@@ -711,43 +537,31 @@ fn build_mcp_headers_from_plan(
         if normalized.is_empty()
             || matches!(
                 normalized.as_str(),
-                "accept" | "content-length" | "connection" | "host" | "x-amzn-kiro-agent-mode"
+                "accept"
+                    | "content-length"
+                    | "connection"
+                    | "host"
+                    | "x-amz-target"
+                    | "x-amzn-kiro-agent-mode"
+                    | "x-amzn-kiro-profile-arn"
             )
         {
             continue;
         }
         headers.insert(normalized, value.trim().to_string());
     }
-    remove_header_case_insensitive(
-        &mut headers,
-        aether_provider_transport::kiro::KIRO_PROFILE_ARN_HEADER,
-    );
     headers.insert("accept".to_string(), "application/json".to_string());
-    headers.insert("content-type".to_string(), "application/json".to_string());
-    if let Some(profile_arn) = profile_arn {
-        headers.insert(
-            aether_provider_transport::kiro::KIRO_PROFILE_ARN_HEADER.to_string(),
-            profile_arn.to_string(),
-        );
-    }
-    let profile_arn_present = headers.keys().any(|name| {
-        name.eq_ignore_ascii_case(aether_provider_transport::kiro::KIRO_PROFILE_ARN_HEADER)
-    });
+    headers.insert(
+        "content-type".to_string(),
+        "application/x-amz-json-1.0".to_string(),
+    );
+    headers.insert(
+        "x-amz-target".to_string(),
+        aether_provider_transport::kiro::KIRO_INVOKE_MCP_TARGET.to_string(),
+    );
     KiroMcpRequestContext {
         headers,
-        profile_arn_present,
-        auth_config: None,
-    }
-}
-
-fn remove_header_case_insensitive(headers: &mut BTreeMap<String, String>, target: &str) {
-    let matching_keys = headers
-        .keys()
-        .filter(|name| name.eq_ignore_ascii_case(target))
-        .cloned()
-        .collect::<Vec<_>>();
-    for key in matching_keys {
-        headers.remove(&key);
+        profile_arn: profile_arn.map(ToOwned::to_owned),
     }
 }
 
@@ -1256,8 +1070,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_mcp_headers_from_plan, build_web_search_sse_body, detect_kiro_web_search_request,
-        parse_mcp_search_results, strip_search_query_prefix, KiroPromptCacheUsage,
+        build_kiro_mcp_target, build_mcp_headers_from_plan, build_web_search_sse_body,
+        detect_kiro_web_search_request, parse_mcp_search_results, strip_search_query_prefix,
+        KiroPromptCacheUsage,
     };
 
     fn sample_plan(body: serde_json::Value) -> ExecutionPlan {
@@ -1269,17 +1084,19 @@ mod tests {
             endpoint_id: "endpoint-1".to_string(),
             key_id: "key-1".to_string(),
             method: "POST".to_string(),
-            url: "https://q.us-east-1.amazonaws.com/generateAssistantResponse?beta=true"
-                .to_string(),
+            url: "https://runtime.us-east-1.kiro.dev/?beta=true".to_string(),
             headers: BTreeMap::from([
                 ("authorization".to_string(), "Bearer token".to_string()),
                 (
                     "accept".to_string(),
                     "application/vnd.amazon.eventstream".to_string(),
                 ),
-                ("x-amzn-kiro-agent-mode".to_string(), "vibe".to_string()),
+                (
+                    "x-amz-target".to_string(),
+                    "KiroRuntimeService.GenerateAssistantResponse".to_string(),
+                ),
             ]),
-            content_type: Some("application/json".to_string()),
+            content_type: Some("application/x-amz-json-1.0".to_string()),
             content_encoding: None,
             body: RequestBody::from_json(body),
             stream: true,
@@ -1303,6 +1120,24 @@ mod tests {
             strip_search_query_prefix("Shanghai weather").as_deref(),
             Some("Shanghai weather")
         );
+    }
+
+    #[test]
+    fn selects_invoke_mcp_for_new_kiro_runtime() {
+        assert_eq!(
+            build_kiro_mcp_target(
+                "https://runtime.us-east-1.kiro.dev/generateAssistantResponse?beta=true"
+            ),
+            Some("https://runtime.us-east-1.kiro.dev".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_mcp_url() {
+        assert!(build_kiro_mcp_target(
+            "https://q.us-east-1.amazonaws.com/generateAssistantResponse?beta=true"
+        )
+        .is_none());
     }
 
     #[test]
@@ -1380,30 +1215,28 @@ mod tests {
     }
 
     #[test]
-    fn builds_mcp_headers_for_profile_and_external_idp_modes() {
+    fn builds_invoke_mcp_headers_with_body_profile() {
         let headers = BTreeMap::from([
             ("authorization".to_string(), "Bearer token".to_string()),
             (
                 "accept".to_string(),
                 "application/vnd.amazon.eventstream".to_string(),
             ),
-            ("host".to_string(), "q.us-east-1.amazonaws.com".to_string()),
-            ("x-amzn-kiro-agent-mode".to_string(), "vibe".to_string()),
+            ("host".to_string(), "runtime.us-east-1.kiro.dev".to_string()),
         ]);
         let social = build_mcp_headers_from_plan(&headers, Some("arn:profile"));
         assert_eq!(
             social.headers.get("accept").map(String::as_str),
             Some("application/json")
         );
+        assert!(!social
+            .headers
+            .contains_key("x-amzn-kiro-profile-arn"));
+        assert_eq!(social.profile_arn.as_deref(), Some("arn:profile"));
         assert_eq!(
-            social
-                .headers
-                .get(aether_provider_transport::kiro::KIRO_PROFILE_ARN_HEADER)
-                .map(String::as_str),
-            Some("arn:profile")
+            social.headers.get("x-amz-target").map(String::as_str),
+            Some(aether_provider_transport::kiro::KIRO_INVOKE_MCP_TARGET)
         );
-        assert!(!social.headers.contains_key("x-amzn-kiro-agent-mode"));
-        assert!(social.profile_arn_present);
 
         let idc = build_mcp_headers_from_plan(&headers, None);
         assert_eq!(
@@ -1411,7 +1244,7 @@ mod tests {
                 .get(aether_provider_transport::kiro::KIRO_TOKEN_TYPE_HEADER),
             None
         );
-        assert!(!idc.profile_arn_present);
+        assert!(idc.profile_arn.is_none());
     }
 
     #[test]

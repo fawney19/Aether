@@ -15,6 +15,16 @@ pub struct KiroStreamCacheUsage {
     pub cache_read_input_tokens: usize,
 }
 
+/// Kiro 上游实际下发的 credit 计量信息。
+///
+/// 该数据与 Claude 的 token usage 不是同一口径，因此只以扩展字段透传。
+#[derive(Debug, Clone, PartialEq)]
+pub struct KiroStreamMetering {
+    pub credit_usage: f64,
+    pub credit_unit: String,
+    pub credit_unit_plural: String,
+}
+
 impl KiroStreamCacheUsage {
     fn has_cache_tokens(self) -> bool {
         self.cache_creation_input_tokens > 0 || self.cache_read_input_tokens > 0
@@ -44,7 +54,7 @@ pub fn build_kiro_initial_sse_events(
     estimated_input_tokens: usize,
     cache_usage: Option<KiroStreamCacheUsage>,
 ) -> Vec<Value> {
-    let usage = build_kiro_usage_payload(estimated_input_tokens, 1, cache_usage);
+    let usage = build_kiro_usage_payload(estimated_input_tokens, 1, cache_usage, None);
     vec![json!({
         "type": "message_start",
         "message": {
@@ -75,8 +85,9 @@ pub fn build_kiro_final_message_sse_events(
     input_tokens: usize,
     output_tokens: usize,
     cache_usage: Option<KiroStreamCacheUsage>,
+    metering: Option<&KiroStreamMetering>,
 ) -> Vec<Value> {
-    let usage = build_kiro_usage_payload(input_tokens, output_tokens, cache_usage);
+    let usage = build_kiro_usage_payload(input_tokens, output_tokens, cache_usage, metering);
     vec![
         json!({
             "type": "message_delta",
@@ -94,6 +105,7 @@ fn build_kiro_usage_payload(
     input_tokens: usize,
     output_tokens: usize,
     cache_usage: Option<KiroStreamCacheUsage>,
+    metering: Option<&KiroStreamMetering>,
 ) -> Value {
     let billed_input_tokens = cache_usage
         .filter(|usage| usage.has_cache_tokens())
@@ -111,6 +123,12 @@ fn build_kiro_usage_payload(
         usage["cache_creation_input_tokens"] =
             json!(cache_usage.cache_creation_input_tokens as u64);
         usage["cache_read_input_tokens"] = json!(cache_usage.cache_read_input_tokens as u64);
+    }
+    if let Some(metering) = metering {
+        // 上游只提供 credit 计量，保留原始单位而不伪造成 token。
+        usage["credit_usage"] = json!(metering.credit_usage);
+        usage["credit_unit"] = json!(&metering.credit_unit);
+        usage["credit_unit_plural"] = json!(&metering.credit_unit_plural);
     }
     usage
 }

@@ -338,7 +338,6 @@ fn build_transport_hook_url(
 ) -> Option<String> {
     if let Some(api_region) = params.kiro_api_region {
         return crate::kiro::build_kiro_generate_assistant_response_url(
-            &transport.endpoint.base_url,
             params.request_query,
             Some(api_region),
         );
@@ -1595,7 +1594,7 @@ mod tests {
         let transport = sample_transport(
             "kiro",
             "claude:messages",
-            "https://codewhisperer.{region}.amazonaws.com/",
+            "https://q.{region}.amazonaws.com/",
             None,
         );
 
@@ -1609,9 +1608,7 @@ mod tests {
         )
         .expect("kiro url");
 
-        assert!(url.starts_with(
-            "https://codewhisperer.us-west-2.amazonaws.com/generateAssistantResponse"
-        ));
+        assert!(url.starts_with("https://runtime.us-west-2.kiro.dev/"));
         assert!(url.contains("conversationId=abc"));
         assert!(!url.contains("gateway-secret"));
     }

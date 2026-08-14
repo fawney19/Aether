@@ -356,10 +356,32 @@ mod tests {
             },
         );
 
-        assert!(spec.url.contains("q.us-west-2.amazonaws.com"));
+        assert!(spec.url.contains("management.us-west-2.kiro.dev"));
         assert!(spec
             .url
             .contains("profileArn=arn%3Aaws%3Asso%3A%3A%3Aprofile%2Fp-1"));
+    }
+
+    #[test]
+    fn kiro_quota_request_uses_management_plane_for_api_region() {
+        let spec = build_kiro_pool_quota_request(
+            "key-1",
+            &KiroPoolQuotaAuthInput {
+                authorization_value: "Bearer access".to_string(),
+                api_region: "us-west-2".to_string(),
+                kiro_version: "0.12.155".to_string(),
+                machine_id: "machine".to_string(),
+                profile_arn: None,
+            },
+        );
+
+        assert!(spec
+            .url
+            .starts_with("https://management.us-west-2.kiro.dev/getUsageLimits?"));
+        assert_eq!(
+            spec.headers.get("host").map(String::as_str),
+            Some("management.us-west-2.kiro.dev")
+        );
     }
 
     #[test]

@@ -240,11 +240,11 @@ fn build_same_format_provider_request_body_inner(
     input: SameFormatProviderRequestBodyInput<'_>,
     mut compatibility_edits: Option<&mut Vec<SameFormatProviderCompatibilityEdit>>,
 ) -> Option<Value> {
-    if let Some(kiro_auth_config) = input.kiro_auth_config {
+    if let Some(kiro_auth) = input.kiro_auth_config {
         let body = build_kiro_provider_request_body(
             input.body_json,
             input.mapped_model,
-            kiro_auth_config,
+            kiro_auth,
             input.body_rules,
             input.request_headers,
         )?;

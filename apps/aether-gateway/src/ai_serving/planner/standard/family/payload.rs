@@ -1,22 +1,22 @@
 use crate::ai_serving::build_request_trace_proxy_value;
+use crate::ai_serving::planner::CandidateFailureDiagnostic;
 use crate::ai_serving::planner::candidate_materialization::{
     mark_skipped_local_execution_candidate, mark_skipped_local_execution_candidate_with_extra_data,
     mark_skipped_local_execution_candidate_with_failure_diagnostic,
 };
 use crate::ai_serving::planner::decision_input::apply_provider_request_routing_policy_to_decision;
 use crate::ai_serving::planner::materialization_policy::{
-    build_local_candidate_persistence_policy, LocalCandidatePersistencePolicyKind,
+    LocalCandidatePersistencePolicyKind, build_local_candidate_persistence_policy,
 };
 use crate::ai_serving::planner::passthrough::maybe_build_local_same_format_provider_decision_payload_for_candidate;
 use crate::ai_serving::planner::report_context::{
-    build_local_execution_report_context, insert_native_client_envelope_name,
-    LocalExecutionReportContextParts,
+    LocalExecutionReportContextParts, build_local_execution_report_context,
+    insert_native_client_envelope_name,
 };
 use crate::ai_serving::planner::spec_metadata::local_standard_spec_metadata;
-use crate::ai_serving::planner::CandidateFailureDiagnostic;
 use crate::ai_serving::planner::{
-    build_ai_execution_decision_response, resolve_transport_request_encoding_policy,
-    AiExecutionDecisionResponseParts,
+    AiExecutionDecisionResponseParts, build_ai_execution_decision_response,
+    resolve_transport_request_encoding_policy,
 };
 use crate::ai_serving::transport::{
     resolve_transport_execution_timeouts, resolve_transport_profile,
@@ -26,8 +26,8 @@ use crate::ai_serving::{
     resolve_local_same_format_stream_spec, resolve_local_same_format_sync_spec,
 };
 use crate::{
-    append_execution_contract_fields_to_value, append_local_failover_policy_to_value,
-    AiExecutionDecision, AppState, GatewayError,
+    AiExecutionDecision, AppState, GatewayError, append_execution_contract_fields_to_value,
+    append_local_failover_policy_to_value,
 };
 
 use super::request::resolve_local_standard_candidate_payload_parts;
@@ -178,6 +178,15 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
         request_redacted: _,
     } = resolved;
     let request_encoding = resolve_transport_request_encoding_policy(&transport);
+    let content_type = if transport
+        .provider
+        .provider_type
+        .eq_ignore_ascii_case("kiro")
+    {
+        provider_request_headers.get("content-type").cloned()
+    } else {
+        Some("application/json".to_string())
+    };
 
     let mut decision = build_ai_execution_decision_response(AiExecutionDecisionResponseParts {
         decision_is_stream: spec_metadata.require_streaming,
@@ -204,7 +213,7 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
         provider_request_headers,
         provider_request_body: Some(provider_request_body),
         provider_request_body_base64: None,
-        content_type: Some("application/json".to_string()),
+        content_type,
         content_encoding: request_encoding.content_encoding,
         request_gzip: request_encoding.request_gzip,
         proxy,

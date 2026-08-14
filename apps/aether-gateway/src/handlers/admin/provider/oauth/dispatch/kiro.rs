@@ -104,7 +104,7 @@ pub(super) async fn refresh_admin_provider_oauth_kiro_auth_config(
 
 fn build_kiro_usage_url(auth: &KiroRequestAuth) -> String {
     let host = format!(
-        "q.{}.amazonaws.com",
+        "management.{}.kiro.dev",
         auth.auth_config.effective_api_region()
     );
     let mut serializer = form_urlencoded::Serializer::new(String::new());
@@ -137,6 +137,7 @@ fn build_kiro_usage_headers(
         ),
         (
             reqwest::header::USER_AGENT,
+            // getUsageLimits 仍使用 HAR 中的 SDK 指纹，主机和路径已切换为新版 Management。
             reqwest::header::HeaderValue::from_str(&format!(
                 "aws-sdk-js/{KIRO_USAGE_SDK_VERSION} ua/2.1 os/other#unknown lang/js md/nodejs#22.21.1 api/codewhispererruntime#1.0.0 m/N,E {ide_tag}"
             ))
@@ -183,7 +184,7 @@ pub(super) async fn fetch_admin_provider_oauth_kiro_email(
         .and_then(|value| value.host_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| {
             format!(
-                "q.{}.amazonaws.com",
+                "management.{}.kiro.dev",
                 request_auth.auth_config.effective_api_region()
             )
         });

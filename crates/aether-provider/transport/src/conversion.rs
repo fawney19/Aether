@@ -501,7 +501,7 @@ mod tests {
                 endpoint_kind: None,
                 is_active: true,
                 base_url: if provider_type == "kiro" {
-                    "https://q.{region}.amazonaws.com".to_string()
+                    "https://runtime.{region}.kiro.dev".to_string()
                 } else if provider_type == "vertex_ai" {
                     "https://aiplatform.googleapis.com".to_string()
                 } else {
