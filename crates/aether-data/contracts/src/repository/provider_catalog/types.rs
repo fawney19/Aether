@@ -201,6 +201,94 @@ pub struct StoredProviderCatalogProvider {
     pub updated_at_unix_secs: Option<u64>,
 }
 
+#[derive(Clone, PartialEq)]
+pub struct ProviderCatalogProviderConfigCasUpdate {
+    pub provider_id: String,
+    pub expected_config: Option<serde_json::Value>,
+    pub config: Option<serde_json::Value>,
+    pub updated_at_unix_secs: Option<u64>,
+}
+
+impl std::fmt::Debug for ProviderCatalogProviderConfigCasUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogProviderConfigCasUpdate")
+            .field("provider_id", &self.provider_id)
+            .field("expected_config", &"<redacted>")
+            .field("config", &"<redacted>")
+            .field("updated_at_unix_secs", &self.updated_at_unix_secs)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct ProviderCatalogRuntimeCredentialsCas {
+    pub provider_id: String,
+    pub expected_provider_config: Option<serde_json::Value>,
+    pub expected_provider_website: Option<String>,
+    pub expected_provider_proxy: Option<serde_json::Value>,
+    pub encrypted_credentials: serde_json::Map<String, serde_json::Value>,
+}
+
+impl std::fmt::Debug for ProviderCatalogRuntimeCredentialsCas {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderCatalogRuntimeCredentialsCas")
+            .field("provider_id", &self.provider_id)
+            .field("expected_provider_config", &"<redacted>")
+            .field("expected_provider_website", &self.expected_provider_website)
+            .field("expected_provider_proxy", &"<redacted>")
+            .field("encrypted_credentials", &"<redacted>")
+            .finish()
+    }
+}
+
+const PROVIDER_OPS_ROTATING_CREDENTIAL_FIELDS: &[&str] = &[
+    "refresh_token",
+    "_cached_access_token",
+    "_cached_token_expires_at",
+];
+
+pub fn provider_catalog_runtime_credentials_cas_matches(
+    current_config: Option<&serde_json::Value>,
+    current_website: Option<&str>,
+    current_proxy: Option<&serde_json::Value>,
+    update: &ProviderCatalogRuntimeCredentialsCas,
+) -> bool {
+    current_config == update.expected_provider_config.as_ref()
+        && current_website == update.expected_provider_website.as_deref()
+        && current_proxy == update.expected_provider_proxy.as_ref()
+}
+
+pub fn patch_provider_catalog_runtime_credentials(
+    config: &mut serde_json::Value,
+    encrypted_credentials: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), crate::DataLayerError> {
+    if encrypted_credentials
+        .keys()
+        .any(|key| !PROVIDER_OPS_ROTATING_CREDENTIAL_FIELDS.contains(&key.as_str()))
+    {
+        return Err(crate::DataLayerError::InvalidConfiguration(
+            "runtime Provider Ops credential patch contains a non-rotating field".to_string(),
+        ));
+    }
+    let credentials = config
+        .as_object_mut()
+        .and_then(|config| config.get_mut("provider_ops"))
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|provider_ops| provider_ops.get_mut("connector"))
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|connector| connector.get_mut("credentials"))
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| {
+            crate::DataLayerError::InvalidConfiguration(
+                "Provider Ops connector credentials are missing".to_string(),
+            )
+        })?;
+    credentials.extend(encrypted_credentials.clone());
+    Ok(())
+}
+
 impl StoredProviderCatalogProvider {
     pub fn new(
         id: String,
@@ -848,6 +936,20 @@ pub trait ProviderCatalogWriteRepository: Send + Sync {
         provider: &StoredProviderCatalogProvider,
     ) -> Result<StoredProviderCatalogProvider, crate::DataLayerError>;
 
+    /// CAS-replaces only the provider config document. Quota, routing, and other
+    /// provider fields must remain untouched.
+    async fn compare_and_update_provider_config(
+        &self,
+        update: &ProviderCatalogProviderConfigCasUpdate,
+    ) -> Result<bool, crate::DataLayerError>;
+
+    /// CAS-patches only rotating Provider Ops token fields without overwriting
+    /// a concurrent administrator mutation.
+    async fn compare_and_patch_provider_ops_runtime_credentials(
+        &self,
+        update: &ProviderCatalogRuntimeCredentialsCas,
+    ) -> Result<bool, crate::DataLayerError>;
+
     async fn delete_provider(&self, provider_id: &str) -> Result<bool, crate::DataLayerError>;
 
     async fn cleanup_deleted_provider_refs(
@@ -1034,7 +1136,12 @@ pub trait ProviderCatalogWriteRepository: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::StoredProviderCatalogKey;
+    use super::{
+        patch_provider_catalog_runtime_credentials,
+        provider_catalog_runtime_credentials_cas_matches, ProviderCatalogRuntimeCredentialsCas,
+        StoredProviderCatalogKey,
+    };
+    use serde_json::json;
 
     fn sample_key() -> StoredProviderCatalogKey {
         StoredProviderCatalogKey::new(
@@ -1065,6 +1172,78 @@ mod tests {
             .expect("null api key should be accepted");
 
         assert_eq!(key.encrypted_api_key, None);
+    }
+
+    #[test]
+    fn runtime_credentials_patch_updates_only_rotating_connector_fields() {
+        let mut config = json!({
+            "provider_ops": {
+                "connector": {
+                    "credentials": {
+                        "email": "encrypted-email",
+                        "refresh_token": "old-refresh"
+                    }
+                }
+            }
+        });
+        let patch = serde_json::Map::from_iter([
+            ("refresh_token".to_string(), json!("new-refresh")),
+            ("_cached_access_token".to_string(), json!("new-access")),
+            (
+                "_cached_token_expires_at".to_string(),
+                json!("2030-01-01T00:00:00Z"),
+            ),
+        ]);
+
+        patch_provider_catalog_runtime_credentials(&mut config, &patch)
+            .expect("rotating fields should patch");
+
+        let credentials = &config["provider_ops"]["connector"]["credentials"];
+        assert_eq!(credentials["email"], "encrypted-email");
+        assert_eq!(credentials["refresh_token"], "new-refresh");
+        assert_eq!(credentials["_cached_access_token"], "new-access");
+        assert_eq!(
+            credentials["_cached_token_expires_at"],
+            "2030-01-01T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn runtime_credentials_patch_rejects_root_credentials() {
+        let mut config = json!({
+            "provider_ops": {"connector": {"credentials": {}}}
+        });
+        let patch = serde_json::Map::from_iter([("email".to_string(), json!("forbidden"))]);
+
+        let error = patch_provider_catalog_runtime_credentials(&mut config, &patch)
+            .expect_err("root credentials must not rotate through runtime CAS");
+
+        assert!(error.to_string().contains("non-rotating field"));
+    }
+
+    #[test]
+    fn runtime_credentials_cas_rejects_concurrent_config_changes() {
+        let expected_config = json!({"provider_ops": {"connector": {"credentials": {}}}});
+        let update = ProviderCatalogRuntimeCredentialsCas {
+            provider_id: "provider-1".to_string(),
+            expected_provider_config: Some(expected_config.clone()),
+            expected_provider_website: Some("https://example.com".to_string()),
+            expected_provider_proxy: None,
+            encrypted_credentials: serde_json::Map::new(),
+        };
+
+        assert!(provider_catalog_runtime_credentials_cas_matches(
+            Some(&expected_config),
+            Some("https://example.com"),
+            None,
+            &update,
+        ));
+        assert!(!provider_catalog_runtime_credentials_cas_matches(
+            Some(&json!({"changed": true})),
+            Some("https://example.com"),
+            None,
+            &update,
+        ));
     }
 
     #[test]
