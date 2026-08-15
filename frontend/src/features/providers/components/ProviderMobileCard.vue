@@ -123,11 +123,26 @@
         variant="outline"
         class="text-xs font-normal border-border/50"
       >
-        {{ formatBillingType(provider.billing_type || 'pay_as_you_go') }}
+        {{ quotaMonitor?.source === 'remote_subscription'
+          ? (quotaMonitor.state === 'pending' ? legacyT('订阅额度') : t('providers.quota.localEffective'))
+          : formatBillingType(provider.billing_type || 'pay_as_you_go') }}
       </Badge>
+      <span
+        v-if="quotaMonitor"
+        data-testid="provider-mobile-quota-monitor"
+        class="text-muted-foreground"
+      >
+        <template v-if="quotaMonitor.state === 'limited'">
+          {{ legacyT('剩余') }} <span class="font-semibold text-foreground/90">${{ quotaMonitor.remainingUsd.toFixed(2) }}</span>
+          <span class="text-muted-foreground/70"> · {{ legacyT('已用') }} ${{ quotaMonitor.usedUsd.toFixed(2) }}/ ${{ quotaMonitor.limitUsd.toFixed(2) }}</span>
+        </template>
+        <template v-else-if="quotaMonitor.state === 'unlimited'">{{ legacyT('不限额') }}</template>
+        <template v-else-if="quotaMonitor.state === 'exhausted'">{{ legacyT('额度已用尽') }}</template>
+        <template v-else>{{ legacyT('等待首次同步') }}</template>
+      </span>
       <!-- 余额加载中 -->
       <span
-        v-if="provider.ops_configured && isBalanceLoading(provider.id)"
+        v-else-if="provider.ops_configured && isBalanceLoading(provider.id)"
         class="text-muted-foreground flex items-center gap-1"
       >
         <Loader2 class="h-3 w-3 animate-spin" />
@@ -165,7 +180,6 @@
       >
         {{ getProviderBalanceError(provider.id)?.message }}
       </span>
-      <!-- 本地配额 -->
       <span
         v-else-if="provider.billing_type === 'monthly_quota'"
         class="text-muted-foreground"
@@ -221,7 +235,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   Edit,
   Eye,
@@ -237,13 +251,16 @@ import {
 import Button from '@/components/ui/button.vue'
 import Badge from '@/components/ui/badge.vue'
 import { type ProviderWithEndpointsSummary, formatApiFormatShort } from '@/api/endpoints'
+import type { Sub2ApiRemoteQuotaGroup } from '@/api/providerOps'
 import { formatBillingType } from '@/utils/format'
 import { sortEndpoints, isEndpointAvailable, getEndpointDotColor, getEndpointTooltip } from '@/features/providers/composables/useEndpointStatus'
 import { isKeyManagedProviderType } from '../utils/providerTypeUtils'
+import { providerQuotaMonitor } from '../utils/providerQuotaMonitor'
 import { useI18n } from '@/i18n'
 
 const props = defineProps<{
   provider: ProviderWithEndpointsSummary
+  remoteQuotaGroup?: Sub2ApiRemoteQuotaGroup | null
   editingDescriptionId: string | null
   // Balance functions
   isBalanceLoading: (providerId: string) => boolean
@@ -271,7 +288,11 @@ const vAutoFocus = {
 }
 
 const localDescriptionValue = ref('')
-const { legacyT, locale } = useI18n()
+const quotaMonitor = computed(() => providerQuotaMonitor(
+  props.provider,
+  props.remoteQuotaGroup ?? null,
+))
+const { legacyT, locale, t } = useI18n()
 
 watch(
   () => props.editingDescriptionId,

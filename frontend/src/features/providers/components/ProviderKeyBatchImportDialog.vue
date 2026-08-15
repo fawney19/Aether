@@ -303,13 +303,6 @@ interface ReviewImportItem {
   settings: ImportSettings
 }
 
-const REVIEW_PAGE_SIZE = 50
-const steps: ReadonlyArray<{ id: WizardStep; label: string }> = [
-  { id: 1, label: '导入内容' },
-  { id: 2, label: '统一配置' },
-  { id: 3, label: '逐项确认' },
-]
-
 const props = defineProps<{
   open: boolean
   providerId: string
@@ -321,6 +314,13 @@ const emit = defineEmits<{
   close: []
   saved: []
 }>()
+
+const REVIEW_PAGE_SIZE = 50
+const steps: ReadonlyArray<{ id: WizardStep; label: string }> = [
+  { id: 1, label: '导入内容' },
+  { id: 2, label: '统一配置' },
+  { id: 3, label: '逐项确认' },
+]
 
 const { success, warning, error: showError } = useToast()
 const currentStep = ref<WizardStep>(1)

@@ -1,7 +1,45 @@
 <template>
+  <div
+    v-if="quotaMonitor"
+    data-testid="provider-quota-monitor"
+    class="space-y-0.5 text-xs"
+  >
+    <Badge
+      variant="outline"
+      class="text-[10px] font-normal border-indigo-500/30 text-indigo-600 dark:text-indigo-400"
+    >
+      {{ quotaMonitor.state === 'pending' ? legacyT('订阅额度') : t('providers.quota.localEffective') }}
+    </Badge>
+    <template v-if="quotaMonitor.state === 'limited'">
+      <div class="font-semibold text-foreground/90 tabular-nums pt-0.5">
+        {{ legacyT('剩余') }} ${{ quotaMonitor.remainingUsd.toFixed(2) }}
+      </div>
+      <div class="text-[10px] text-muted-foreground/70 tabular-nums">
+        {{ legacyT('已用') }} ${{ quotaMonitor.usedUsd.toFixed(2) }} / ${{ quotaMonitor.limitUsd.toFixed(2) }}
+      </div>
+    </template>
+    <div
+      v-else-if="quotaMonitor.state === 'unlimited'"
+      class="font-medium text-emerald-600 dark:text-emerald-400 pt-0.5"
+    >
+      {{ legacyT('不限额') }}
+    </div>
+    <div
+      v-else-if="quotaMonitor.state === 'exhausted'"
+      class="font-medium text-red-600 dark:text-red-400 pt-0.5"
+    >
+      {{ legacyT('额度已用尽') }}
+    </div>
+    <div
+      v-else
+      class="text-muted-foreground/70 pt-0.5"
+    >
+      {{ legacyT('等待首次同步') }}
+    </div>
+  </div>
   <!-- 余额正在加载中 -->
   <div
-    v-if="provider.ops_configured && isBalanceLoading(provider.id)"
+    v-else-if="provider.ops_configured && isBalanceLoading(provider.id)"
     class="flex items-center gap-1.5 text-xs text-muted-foreground"
   >
     <Loader2 class="h-3 w-3 animate-spin" />
@@ -103,7 +141,6 @@
   >
     {{ getProviderBalanceError(provider.id)?.message }}
   </div>
-  <!-- 显示本地配置的月度配额 -->
   <div
     v-else-if="provider.billing_type === 'monthly_quota'"
     class="space-y-0.5 text-xs"
@@ -128,15 +165,19 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { Loader2 } from 'lucide-vue-next'
 import Badge from '@/components/ui/badge.vue'
 import type { ProviderWithEndpointsSummary } from '@/api/endpoints'
+import type { Sub2ApiRemoteQuotaGroup } from '@/api/providerOps'
+import { providerQuotaMonitor } from '@/features/providers/utils/providerQuotaMonitor'
 import { formatBillingType } from '@/utils/format'
 import type { BalanceExtraItem } from '@/features/providers/auth-templates'
 import { useI18n } from '@/i18n'
 
-defineProps<{
+const props = defineProps<{
   provider: ProviderWithEndpointsSummary
+  remoteQuotaGroup?: Sub2ApiRemoteQuotaGroup | null
   isBalanceLoading: (providerId: string) => boolean
   getProviderBalance: (providerId: string) => { available: number | null; currency: string } | null
   getProviderBalanceBreakdown: (providerId: string) => { balance: number; points: number; currency: string } | null
@@ -149,5 +190,10 @@ defineProps<{
   getQuotaUsedColorClass: (provider: ProviderWithEndpointsSummary) => string
 }>()
 
-const { legacyT } = useI18n()
+const quotaMonitor = computed(() => providerQuotaMonitor(
+  props.provider,
+  props.remoteQuotaGroup ?? null,
+))
+
+const { legacyT, t } = useI18n()
 </script>

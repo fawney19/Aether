@@ -914,6 +914,7 @@ export interface ProviderWithEndpointsSummary {
   codex_fingerprint_convergence_enabled?: boolean
   kiro_simulated_cache_enabled?: boolean
   ops_quota_alert_enabled?: boolean
+  ops_remote_quota_enabled?: boolean
   created_at: string
   updated_at: string
 }

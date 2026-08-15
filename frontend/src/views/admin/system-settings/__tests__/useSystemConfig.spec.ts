@@ -115,6 +115,19 @@ describe('useSystemConfig', () => {
     expect(state.hasBasicConfigChanges.value).toBe(false)
   })
 
+  it('loads the remote quota sync switch and interval from system config', async () => {
+    getAllSystemConfigsMock.mockResolvedValue([
+      { key: 'enable_provider_remote_quota_sync', value: false },
+      { key: 'provider_remote_quota_sync_interval_seconds', value: 900 },
+    ])
+
+    const state = useSystemConfig()
+    await state.loadSystemConfig()
+
+    expect(state.systemConfig.value.enable_provider_remote_quota_sync).toBe(false)
+    expect(state.systemConfig.value.provider_remote_quota_sync_interval_seconds).toBe(900)
+  })
+
   it('uses backend-compatible defaults when config rows have not been persisted yet', async () => {
     getAllSystemConfigsMock.mockResolvedValue([])
 
@@ -122,6 +135,8 @@ describe('useSystemConfig', () => {
     await state.loadSystemConfig()
 
     expect(state.systemConfig.value.request_record_level).toBe('full')
+    expect(state.systemConfig.value.enable_provider_remote_quota_sync).toBe(true)
+    expect(state.systemConfig.value.provider_remote_quota_sync_interval_seconds).toBe(300)
     expect(state.systemConfig.value).not.toHaveProperty('max_request_body_size')
     expect(state.systemConfig.value).not.toHaveProperty('max_response_body_size')
   })

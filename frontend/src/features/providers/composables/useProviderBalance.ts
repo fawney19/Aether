@@ -1,6 +1,14 @@
 import { ref, onUnmounted } from 'vue'
 import type { ProviderWithEndpointsSummary } from '@/api/endpoints'
-import { batchQueryBalance, getArchitectures, type ActionResultResponse, type ArchitectureInfo } from '@/api/providerOps'
+import {
+  batchQueryBalance,
+  getArchitectures,
+  type ActionResultResponse,
+  type ArchitectureInfo,
+  type RemoteQuotaSyncStatus,
+  type Sub2ApiQuotaWindow,
+  type Sub2ApiRemoteQuotaGroup,
+} from '@/api/providerOps'
 import { formatBalanceExtraFromSchema, type CredentialsSchema } from '@/features/providers/auth-templates/schema-utils'
 import type { BalanceExtraItem } from '@/features/providers/auth-templates'
 import { log } from '@/utils/logger'
@@ -8,6 +16,106 @@ import { log } from '@/utils/logger'
 const MAX_BALANCE_RETRIES = 2
 const PENDING_BALANCE_RETRY_BASE_DELAY_MS = 12_000
 const PENDING_BALANCE_RETRY_MAX_DELAY_MS = 60_000
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function finiteNonNegativeNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+}
+
+function nullableFiniteNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  return finiteNonNegativeNumber(value)
+}
+
+function quotaWindowValue(value: unknown): Sub2ApiQuotaWindow | null {
+  return value === 'daily' || value === 'weekly' || value === 'monthly' ? value : null
+}
+
+function remoteQuotaSyncStatus(value: unknown): RemoteQuotaSyncStatus | null {
+  return value === 'applied'
+    || value === 'skipped_kill_switch'
+    || value === 'failed_keep_local'
+    || value === 'stale_window'
+    ? value
+    : null
+}
+
+export function parseProviderRemoteQuotaGroup(
+  result: ActionResultResponse | null | undefined,
+): Sub2ApiRemoteQuotaGroup | null {
+  if (!result || (result.status !== 'success' && result.status !== 'auth_expired') || !result.data) {
+    return null
+  }
+  const data = result.data as Record<string, unknown>
+  const extra = asRecord(data.extra)
+  const sync = asRecord(extra?.remote_quota_sync)
+  const subscription = asRecord(sync?.subscription)
+  const syncStatus = remoteQuotaSyncStatus(sync?.status)
+  if (!subscription || !syncStatus) return null
+
+  const groupId = stringValue(subscription.group_id)
+  const subscriptionId = stringValue(subscription.subscription_id)
+  const groupName = typeof subscription.group_name === 'string' ? subscription.group_name : ''
+  const localSyncWindow = quotaWindowValue(subscription.local_sync_window)
+  const expiresAt = nullableFiniteNumber(subscription.expires_at_unix_secs)
+  const dailyLimit = finiteNonNegativeNumber(subscription.daily_limit_usd)
+  const dailyUsed = finiteNonNegativeNumber(subscription.daily_used_usd)
+  const weeklyLimit = finiteNonNegativeNumber(subscription.weekly_limit_usd)
+  const weeklyUsed = finiteNonNegativeNumber(subscription.weekly_used_usd)
+  const monthlyLimit = finiteNonNegativeNumber(subscription.monthly_limit_usd)
+  const monthlyUsed = finiteNonNegativeNumber(subscription.monthly_used_usd)
+  const local = asRecord(sync.local)
+  const remote = asRecord(sync.remote)
+  const localBillingType = local?.billing_type === 'monthly_quota'
+    || local?.billing_type === 'pay_as_you_go'
+    ? local.billing_type
+    : null
+  const localMonthlyQuota = nullableFiniteNumber(local?.monthly_quota_usd)
+  const localMonthlyUsed = finiteNonNegativeNumber(local?.monthly_used_usd)
+  const remoteConfirmedUsed = finiteNonNegativeNumber(local?.remote_confirmed_used_usd)
+    ?? finiteNonNegativeNumber(remote?.remote_used_usd)
+  if (
+    !groupId
+    || !subscriptionId
+    || dailyLimit === null
+    || dailyUsed === null
+    || weeklyLimit === null
+    || weeklyUsed === null
+    || monthlyLimit === null
+    || monthlyUsed === null
+    || (subscription.local_sync_window != null && localSyncWindow === null)
+  ) return null
+
+  return {
+    group_id: groupId,
+    group_name: groupName,
+    subscription_id: subscriptionId,
+    daily_limit_usd: dailyLimit,
+    daily_used_usd: dailyUsed,
+    weekly_limit_usd: weeklyLimit,
+    weekly_used_usd: weeklyUsed,
+    monthly_limit_usd: monthlyLimit,
+    monthly_used_usd: monthlyUsed,
+    local_sync_window: localSyncWindow,
+    expires_at_unix_secs: expiresAt,
+    sync_status: syncStatus,
+    sync_message: stringValue(sync.message),
+    sync_executed_at: stringValue(result.executed_at),
+    local_billing_type: localBillingType,
+    local_monthly_quota_usd: localMonthlyQuota,
+    local_monthly_used_usd: localMonthlyUsed,
+    remote_confirmed_used_usd: remoteConfirmedUsed,
+  }
+}
 
 export function useProviderBalance() {
   // 余额数据缓存 {providerId: ActionResultResponse}
@@ -184,6 +292,10 @@ export function useProviderBalance() {
     }
   }
 
+  function getProviderRemoteQuotaGroup(providerId: string | null | undefined): Sub2ApiRemoteQuotaGroup | null {
+    return providerId ? parseProviderRemoteQuotaGroup(balanceCache.value[providerId]) : null
+  }
+
   // 获取 provider 余额查询的错误状态
   function getProviderBalanceError(providerId: string): { status: string; message: string } | null {
     const result = balanceCache.value[providerId]
@@ -332,6 +444,7 @@ export function useProviderBalance() {
     loadBalances,
     getProviderBalance,
     getProviderBalanceBreakdown,
+    getProviderRemoteQuotaGroup,
     getProviderBalanceError,
     isBalanceLoading,
     getProviderCheckin,
