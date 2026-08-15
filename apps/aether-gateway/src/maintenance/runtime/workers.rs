@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use aether_admin::system::PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_DEFAULT_SECONDS;
 use chrono::Utc;
 use tracing::{debug, warn};
 
@@ -11,11 +12,13 @@ use super::{
     cleanup_processed_usage_counter_deltas_once, duration_until_next_daily_run,
     duration_until_next_db_maintenance_run, duration_until_next_stats_aggregation_run,
     duration_until_next_stats_hourly_aggregation_run, maintenance_timezone, parse_hhmm_time,
-    perform_oauth_token_refresh_once, perform_provider_quota_alert_once, provider_checkin_schedule,
-    run_audit_cleanup_once, run_db_maintenance_once, run_gemini_file_mapping_cleanup_once,
-    run_pending_cleanup_once, run_pool_monitor_once, run_provider_checkin_once,
-    run_proxy_node_metrics_cleanup_once, run_proxy_node_stale_cleanup_once,
-    run_proxy_upgrade_rollout_once, run_request_candidate_cleanup_once, run_stats_aggregation_once,
+    perform_oauth_token_refresh_once, perform_provider_quota_alert_once,
+    perform_provider_remote_quota_sync_once, provider_checkin_schedule,
+    provider_remote_quota_sync_interval, run_audit_cleanup_once, run_db_maintenance_once,
+    run_gemini_file_mapping_cleanup_once, run_pending_cleanup_once, run_pool_monitor_once,
+    run_provider_checkin_once, run_proxy_node_metrics_cleanup_once,
+    run_proxy_node_stale_cleanup_once, run_proxy_upgrade_rollout_once,
+    run_request_candidate_cleanup_once, run_stats_aggregation_once,
     run_stats_hourly_aggregation_once, run_usage_cleanup_once, run_usage_counter_flush_once,
     run_wallet_daily_usage_aggregation_once, AUDIT_LOG_CLEANUP_INTERVAL,
     GEMINI_FILE_MAPPING_CLEANUP_INTERVAL, OAUTH_TOKEN_REFRESH_INTERVAL, PENDING_CLEANUP_INTERVAL,
@@ -518,6 +521,73 @@ pub(crate) fn spawn_provider_quota_alert_worker(
                 if let Err(err) = perform_provider_quota_alert_once(&state).await {
                     log_maintenance_worker_failure("provider_quota_alert", "tick", &err);
                 }
+            }
+        },
+    ))
+}
+
+const PROVIDER_REMOTE_QUOTA_CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+async fn provider_remote_quota_sync_worker_interval(state: &AppState) -> Duration {
+    match provider_remote_quota_sync_interval(&state.data).await {
+        Ok(interval) => interval,
+        Err(err) => {
+            log_maintenance_worker_failure("provider_remote_quota_sync", "interval_config", &err);
+            Duration::from_secs(PROVIDER_REMOTE_QUOTA_SYNC_INTERVAL_DEFAULT_SECONDS)
+        }
+    }
+}
+
+pub(super) fn provider_remote_quota_worker_sleep_duration(
+    last_attempt_finished_at: tokio::time::Instant,
+    now: tokio::time::Instant,
+    interval: Duration,
+) -> Option<Duration> {
+    let deadline = last_attempt_finished_at + interval;
+    (now < deadline).then(|| {
+        deadline
+            .saturating_duration_since(now)
+            .min(PROVIDER_REMOTE_QUOTA_CONFIG_POLL_INTERVAL)
+    })
+}
+
+pub(crate) fn spawn_provider_remote_quota_sync_worker(
+    state: AppState,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !state.has_provider_catalog_data_reader() || !state.has_provider_quota_data_writer() {
+        return None;
+    }
+
+    Some(crate::task_runtime::spawn_singleton_worker(
+        state,
+        crate::task_runtime::TASK_KEY_PROVIDER_REMOTE_QUOTA_SYNC,
+        |state| async move {
+            if let Err(err) = perform_provider_remote_quota_sync_once(&state).await {
+                log_maintenance_worker_failure("provider_remote_quota_sync", "startup", &err);
+            }
+            let mut last_attempt_finished_at = tokio::time::Instant::now();
+            let mut deferred_since = None;
+            loop {
+                let interval = provider_remote_quota_sync_worker_interval(&state).await;
+                if let Some(delay) = provider_remote_quota_worker_sleep_duration(
+                    last_attempt_finished_at,
+                    tokio::time::Instant::now(),
+                    interval,
+                ) {
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                if !should_defer_for_database_pressure(
+                    &state.data,
+                    "provider_remote_quota_sync",
+                    &mut deferred_since,
+                ) {
+                    if let Err(err) = perform_provider_remote_quota_sync_once(&state).await {
+                        log_maintenance_worker_failure("provider_remote_quota_sync", "tick", &err);
+                    }
+                }
+                // Delay semantics: a slow run never creates an immediate catch-up loop.
+                last_attempt_finished_at = tokio::time::Instant::now();
             }
         },
     ))

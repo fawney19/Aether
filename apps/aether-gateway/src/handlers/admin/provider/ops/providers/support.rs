@@ -22,7 +22,7 @@ pub(super) const ADMIN_PROVIDER_OPS_ACTION_RUST_ONLY_MESSAGE: &str =
 pub(super) const ADMIN_PROVIDER_OPS_VERIFY_RUST_ONLY_MESSAGE: &str =
     "认证验证仅支持 Rust execution runtime";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(super) struct AdminProviderOpsSaveConfigRequest {
     #[serde(default = "default_admin_provider_ops_architecture_id")]
     pub(crate) architecture_id: String,
@@ -35,9 +35,13 @@ pub(super) struct AdminProviderOpsSaveConfigRequest {
     pub(crate) schedule: BTreeMap<String, String>,
     #[serde(default)]
     pub(crate) quota_alert: Option<AdminProviderOpsQuotaAlertConfigRequest>,
+    #[serde(default)]
+    pub(crate) remote_quota: Option<AdminProviderOpsRemoteQuotaConfigRequest>,
+    #[serde(default)]
+    pub(crate) discover_sub2api_groups: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(super) struct AdminProviderOpsConnectorConfigRequest {
     pub(crate) auth_type: String,
     #[serde(default)]
@@ -46,7 +50,7 @@ pub(super) struct AdminProviderOpsConnectorConfigRequest {
     pub(crate) credentials: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(super) struct AdminProviderOpsActionConfigRequest {
     #[serde(default = "default_admin_provider_ops_action_enabled")]
     pub(crate) enabled: bool,
@@ -54,7 +58,7 @@ pub(super) struct AdminProviderOpsActionConfigRequest {
     pub(crate) config: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(super) struct AdminProviderOpsQuotaAlertConfigRequest {
     #[serde(default)]
     pub(crate) enabled: bool,
@@ -62,6 +66,16 @@ pub(super) struct AdminProviderOpsQuotaAlertConfigRequest {
     pub(crate) threshold_amount: Option<f64>,
     #[serde(default)]
     pub(crate) fetch_interval_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct AdminProviderOpsRemoteQuotaConfigRequest {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) group_id: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) progress_endpoint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

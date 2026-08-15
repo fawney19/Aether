@@ -23,7 +23,7 @@ use crate::data::GatewayDataState;
 use crate::{AppState, GatewayError};
 
 use super::super::affinity::build_scheduler_affinity_cache_key;
-use super::super::runtime::should_skip_provider_quota;
+use super::super::runtime::{provider_quota_blocks_requests, should_skip_provider_quota};
 use super::super::selection::{
     collect_selectable_candidates as collect_selectable_candidates_impl,
     collect_selectable_candidates_with_skip_reasons as collect_selectable_candidates_with_skip_reasons_impl,
@@ -233,6 +233,8 @@ fn skips_only_exhausted_monthly_quota_provider() {
     )
     .expect("quota should build");
     assert!(!should_skip_provider_quota(&expired, 2_000));
+    assert!(!provider_quota_blocks_requests(&expired, false, 2_000));
+    assert!(provider_quota_blocks_requests(&expired, true, 2_000));
 
     let exhausted = StoredProviderQuotaSnapshot::new(
         "provider-1".to_string(),
@@ -259,6 +261,23 @@ fn skips_only_exhausted_monthly_quota_provider() {
     )
     .expect("quota should build");
     assert!(!should_skip_provider_quota(&payg, 2_000));
+
+    let expired_remote_payg = StoredProviderQuotaSnapshot::new(
+        "provider-1".to_string(),
+        "pay_as_you_go".to_string(),
+        None,
+        10.0,
+        None,
+        None,
+        Some(1_500),
+        true,
+    )
+    .expect("quota should build");
+    assert!(provider_quota_blocks_requests(
+        &expired_remote_payg,
+        true,
+        2_000
+    ));
 }
 
 #[tokio::test]
@@ -832,41 +851,9 @@ async fn load_balance_ignores_provider_priority_and_cached_affinity() {
 
 #[tokio::test]
 async fn selects_next_candidate_when_first_provider_quota_is_exhausted() {
-    let mut first = sample_row();
-    first.provider_id = "provider-1".to_string();
-    first.provider_name = "openai-primary".to_string();
-    first.endpoint_id = "endpoint-1".to_string();
-    first.key_id = "key-1".to_string();
-    first.key_name = "primary".to_string();
-    first.model_provider_model_name = "gpt-4.1-primary".to_string();
-    first.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
-        name: "gpt-4.1-primary".to_string(),
-        priority: 1,
-        api_formats: Some(vec!["openai:chat".to_string()]),
-        endpoint_ids: None,
-        operations: None,
-    }]);
-    first.key_global_priority_by_format = Some(serde_json::json!({"openai:chat": 1}));
-
-    let mut second = sample_row();
-    second.provider_id = "provider-2".to_string();
-    second.provider_name = "openai-secondary".to_string();
-    second.endpoint_id = "endpoint-2".to_string();
-    second.key_id = "key-2".to_string();
-    second.key_name = "secondary".to_string();
-    second.model_provider_model_name = "gpt-4.1-secondary".to_string();
-    second.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
-        name: "gpt-4.1-secondary".to_string(),
-        priority: 1,
-        api_formats: Some(vec!["openai:chat".to_string()]),
-        endpoint_ids: None,
-        operations: None,
-    }]);
-    second.key_global_priority_by_format = Some(serde_json::json!({"openai:chat": 2}));
-
-    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
-        first, second,
-    ]));
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(
+        quota_failover_rows(),
+    ));
     let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![
         StoredProviderQuotaSnapshot::new(
             "provider-1".to_string(),
@@ -901,6 +888,100 @@ async fn selects_next_candidate_when_first_provider_quota_is_exhausted() {
 
     assert_eq!(selected.provider_id, "provider-2");
     assert_eq!(selected.selected_provider_model_name, "gpt-4.1-secondary");
+}
+
+#[tokio::test]
+async fn selects_next_candidate_when_first_remote_quota_is_expired() {
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(
+        quota_failover_rows(),
+    ));
+    let mut remote_provider = sample_provider("provider-1", None);
+    remote_provider.config = Some(json!({
+        "provider_ops": {
+            "architecture_id": "sub2api",
+            "remote_quota": {"enabled": true, "group_id": "42"}
+        }
+    }));
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![remote_provider, sample_provider("provider-2", None)],
+        Vec::new(),
+        Vec::new(),
+    ));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![
+        StoredProviderQuotaSnapshot::new(
+            "provider-1".to_string(),
+            "pay_as_you_go".to_string(),
+            None,
+            1.0,
+            None,
+            None,
+            Some(1_500),
+            true,
+        )
+        .expect("quota should build"),
+    ]));
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(Vec::new()));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_candidate_selection_provider_catalog_quota_and_request_candidates_for_tests(
+                candidates,
+                provider_catalog,
+                quotas,
+                request_candidates,
+            ),
+        );
+
+    let selected = select_candidate(
+        state.data.as_ref(),
+        &state,
+        "openai:chat",
+        "gpt-4.1",
+        false,
+        None,
+        2_000,
+    )
+    .await
+    .expect("selection should succeed")
+    .expect("candidate should exist");
+
+    assert_eq!(selected.provider_id, "provider-2");
+}
+
+fn quota_failover_rows() -> Vec<StoredMinimalCandidateSelectionRow> {
+    let mut first = sample_row();
+    first.provider_id = "provider-1".to_string();
+    first.provider_name = "openai-primary".to_string();
+    first.endpoint_id = "endpoint-1".to_string();
+    first.key_id = "key-1".to_string();
+    first.key_name = "primary".to_string();
+    first.model_provider_model_name = "gpt-4.1-primary".to_string();
+    first.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+        name: "gpt-4.1-primary".to_string(),
+        priority: 1,
+        api_formats: Some(vec!["openai:chat".to_string()]),
+        endpoint_ids: None,
+        operations: None,
+    }]);
+    first.key_global_priority_by_format = Some(serde_json::json!({"openai:chat": 1}));
+
+    let mut second = sample_row();
+    second.provider_id = "provider-2".to_string();
+    second.provider_name = "openai-secondary".to_string();
+    second.endpoint_id = "endpoint-2".to_string();
+    second.key_id = "key-2".to_string();
+    second.key_name = "secondary".to_string();
+    second.model_provider_model_name = "gpt-4.1-secondary".to_string();
+    second.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+        name: "gpt-4.1-secondary".to_string(),
+        priority: 1,
+        api_formats: Some(vec!["openai:chat".to_string()]),
+        endpoint_ids: None,
+        operations: None,
+    }]);
+    second.key_global_priority_by_format = Some(serde_json::json!({"openai:chat": 2}));
+
+    vec![first, second]
 }
 
 #[tokio::test]

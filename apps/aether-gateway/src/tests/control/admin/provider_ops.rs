@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aether_contracts::{
@@ -8,7 +9,12 @@ use aether_crypto::{
 };
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::proxy_nodes::InMemoryProxyNodeRepository;
+use aether_data::repository::quota::InMemoryProviderQuotaRepository;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
+use aether_data_contracts::repository::quota::{
+    ApplyRemoteProviderQuotaPatch, ProviderQuotaReadRepository, ProviderQuotaUsageObservation,
+    ProviderQuotaWriteRepository, StoredProviderQuotaSnapshot,
+};
 use aether_runtime_state::{RedisClientConfig, RuntimeState};
 use aether_test_support::ManagedRedisServer;
 use axum::body::to_bytes;
@@ -31,6 +37,7 @@ use crate::constants::{
     TRUSTED_ADMIN_USER_ROLE_HEADER,
 };
 use crate::data::{GatewayDataConfig, GatewayDataState};
+use crate::maintenance::perform_provider_remote_quota_sync_once;
 
 const PROVIDER_OPS_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
 
@@ -406,6 +413,13 @@ async fn gateway_handles_admin_provider_ops_config_locally_with_trusted_admin_pr
                                     "top-secret-password",
                                 ).expect("password should encrypt"),
                             }
+                        },
+                        "remote_quota": {
+                            "enabled": true,
+                            "group_id": "group-safe",
+                            "progress_endpoint": "/api/v1/subscriptions/progress",
+                            "Authorization": "Bearer must-not-leak",
+                            "Cookie": "session=must-not-leak"
                         }
                     }
                 })),
@@ -457,6 +471,10 @@ async fn gateway_handles_admin_provider_ops_config_locally_with_trusted_admin_pr
         "refr****1234"
     );
     assert_eq!(payload["connector"]["credentials"]["password"], "********");
+    assert_eq!(payload["remote_quota"]["enabled"], true);
+    assert_eq!(payload["remote_quota"]["group_id"], "group-safe");
+    assert!(payload["remote_quota"].get("Authorization").is_none());
+    assert!(payload["remote_quota"].get("Cookie").is_none());
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -510,6 +528,11 @@ async fn gateway_saves_admin_provider_ops_config_locally_with_trusted_admin_prin
                                 ).expect("refresh token should encrypt"),
                                 "_cached_access_token": "cached-token",
                             }
+                        },
+                        "remote_quota": {
+                            "enabled": false,
+                            "group_id": "42",
+                            "progress_endpoint": "/api/v1/subscriptions/progress"
                         }
                     }
                 })),
@@ -597,6 +620,14 @@ async fn gateway_saves_admin_provider_ops_config_locally_with_trusted_admin_prin
     assert_eq!(
         provider_ops.get("base_url"),
         Some(&json!("https://ops.example"))
+    );
+    assert_eq!(
+        provider_ops.get("remote_quota"),
+        Some(&json!({
+            "enabled": false,
+            "group_id": "42",
+            "progress_endpoint": "/api/v1/subscriptions/progress"
+        }))
     );
     let connector = provider_ops
         .get("connector")
@@ -2295,6 +2326,47 @@ async fn gateway_verifies_admin_provider_ops_sub2api_with_cached_access_token_wi
                     })),
                 )
             }),
+        )
+        .route(
+            "/api/v1/subscriptions/summary",
+            get(|headers: axum::http::HeaderMap| async move {
+                assert_eq!(
+                    headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok()),
+                    Some("Bearer cached-access-token")
+                );
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "code": 0,
+                        "data": {
+                            "subscriptions": [
+                                {
+                                    "id": 9,
+                                    "group_id": 42,
+                                    "group_name": "Pro",
+                                    "status": "active",
+                                    "daily_used_usd": 1.5,
+                                    "daily_limit_usd": 10,
+                                    "weekly_used_usd": 4.5,
+                                    "weekly_limit_usd": 50,
+                                    "monthly_used_usd": 12.5,
+                                    "monthly_limit_usd": 100,
+                                    "expires_at": "2030-02-01T00:00:00Z"
+                                },
+                                {
+                                    "id": 10,
+                                    "group_id": 7,
+                                    "group_name": "Expired",
+                                    "status": "expired",
+                                    "monthly_limit_usd": 20
+                                }
+                            ]
+                        }
+                    })),
+                )
+            }),
         );
 
     let (ops_url, ops_handle) = start_server(ops).await;
@@ -2365,6 +2437,7 @@ async fn gateway_verifies_admin_provider_ops_sub2api_with_cached_access_token_wi
             },
             "actions": {},
             "schedule": {},
+            "discover_sub2api_groups": true,
         }))
         .send()
         .await
@@ -2374,6 +2447,22 @@ async fn gateway_verifies_admin_provider_ops_sub2api_with_cached_access_token_wi
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["success"], true);
     assert_eq!(payload["data"]["username"], "sub2api-user");
+    assert_eq!(
+        payload["data"]["extra"]["sub2api_groups"],
+        json!([{
+            "group_id": "42",
+            "group_name": "Pro",
+            "subscription_id": "9",
+            "daily_limit_usd": 10.0,
+            "daily_used_usd": 1.5,
+            "weekly_limit_usd": 50.0,
+            "weekly_used_usd": 4.5,
+            "monthly_limit_usd": 100.0,
+            "monthly_used_usd": 12.5,
+            "local_sync_window": "daily",
+            "expires_at_unix_secs": 1_896_134_400_u64
+        }])
+    );
     assert_eq!(payload["updated_credentials"], serde_json::Value::Null);
     assert_eq!(*refresh_hits.lock().expect("mutex should lock"), 0);
 
@@ -3507,6 +3596,27 @@ async fn gateway_handles_admin_provider_ops_batch_balance_locally_with_trusted_a
                     }
                 })),
             ),
+            sample_provider("provider-remote", "openai", 15).with_transport_fields(
+                true,
+                false,
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(json!({
+                    "provider_ops": {
+                        "architecture_id": "sub2api",
+                        "base_url": ops_url,
+                        "remote_quota": {
+                            "enabled": true,
+                            "group_id": "3",
+                            "progress_endpoint": "/api/v1/subscriptions/progress"
+                        }
+                    }
+                })),
+            ),
             sample_provider("provider-anyrouter", "openai", 20).with_transport_fields(
                 true,
                 false,
@@ -3560,6 +3670,7 @@ async fn gateway_handles_admin_provider_ops_batch_balance_locally_with_trusted_a
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!([
             "provider-openai",
+            "provider-remote",
             "provider-anyrouter",
             "provider-missing"
         ]))
@@ -3571,6 +3682,8 @@ async fn gateway_handles_admin_provider_ops_batch_balance_locally_with_trusted_a
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["provider-openai"]["status"], "success");
     assert_eq!(payload["provider-openai"]["data"]["total_available"], 5.0);
+    assert_eq!(payload["provider-remote"]["status"], "pending");
+    assert_eq!(payload["provider-remote"]["message"], "暂无缓存的余额数据");
     assert_eq!(payload["provider-anyrouter"]["status"], "success");
     assert_eq!(
         payload["provider-anyrouter"]["data"]["total_available"],
@@ -4808,6 +4921,650 @@ async fn gateway_handles_admin_provider_ops_sub2api_balance_with_refresh_token_r
                 .expect("time should move forward")
                 .as_secs_f64()
     );
+
+    gateway_handle.abort();
+    ops_handle.abort();
+}
+
+#[test]
+fn gateway_syncs_sub2api_group_finite_quota_into_local_provider_quota() {
+    run_provider_ops_test(
+        "gateway_syncs_sub2api_group_finite_quota_into_local_provider_quota",
+        gateway_syncs_sub2api_group_finite_quota_into_local_provider_quota_impl,
+    );
+}
+
+async fn gateway_syncs_sub2api_group_finite_quota_into_local_provider_quota_impl() {
+    let now = chrono::Utc::now();
+    let daily_window_start = now - chrono::Duration::hours(12);
+    let daily_window_end = daily_window_start + chrono::Duration::days(1);
+    let weekly_window_start = now - chrono::Duration::days(3);
+    let weekly_window_end = weekly_window_start + chrono::Duration::days(7);
+    let monthly_window_start = now - chrono::Duration::days(15);
+    let monthly_window_end = monthly_window_start + chrono::Duration::days(30);
+    let subscription_expires_at = now + chrono::Duration::days(45);
+    let daily_window_start_unix_i64 = daily_window_start.timestamp().max(1);
+    let daily_window_start_unix = daily_window_start_unix_i64 as u64;
+    let daily_window_end_unix = daily_window_end.timestamp().max(1) as u64;
+    let weekly_window_start_unix = weekly_window_start.timestamp().max(1) as u64;
+    let subscription_expires_at_unix = subscription_expires_at.timestamp().max(1) as u64;
+    let daily_window_start = daily_window_start.to_rfc3339();
+    let daily_window_end = daily_window_end.to_rfc3339();
+    let weekly_window_start = weekly_window_start.to_rfc3339();
+    let weekly_window_end = weekly_window_end.to_rfc3339();
+    let monthly_window_start = monthly_window_start.to_rfc3339();
+    let monthly_window_end = monthly_window_end.to_rfc3339();
+    let subscription_expires_at = subscription_expires_at.to_rfc3339();
+
+    let progress_mode = Arc::new(AtomicUsize::new(0));
+    let progress_mode_for_route = Arc::clone(&progress_mode);
+    let summary_expires_at = subscription_expires_at.clone();
+    let ops = Router::new()
+        .route(
+            "/api/v1/auth/me",
+            get(|| async move {
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "code": 0,
+                        "data": {
+                            "username": "sub2api-user",
+                            "balance": 0,
+                            "points": 0
+                        }
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/api/v1/subscriptions/summary",
+            get(move || {
+                let expires_at = summary_expires_at.clone();
+                async move {
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "code": 0,
+                            "data": {
+                                "active_count": 1,
+                                "subscriptions": [{
+                                    "id": 9,
+                                    "group_id": 42,
+                                    "group_name": "Pro",
+                                    "status": "active",
+                                    "daily_used_usd": 3,
+                                    "daily_limit_usd": 10,
+                                    "weekly_used_usd": 8,
+                                    "weekly_limit_usd": 50,
+                                    "monthly_used_usd": 20,
+                                    "monthly_limit_usd": 100,
+                                    "expires_at": expires_at
+                                }]
+                            }
+                        })),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/api/v1/subscriptions/progress",
+            get(move || {
+                let progress_mode = Arc::clone(&progress_mode_for_route);
+                let daily_window_start = daily_window_start.clone();
+                let daily_window_end = daily_window_end.clone();
+                let weekly_window_start = weekly_window_start.clone();
+                let weekly_window_end = weekly_window_end.clone();
+                let monthly_window_start = monthly_window_start.clone();
+                let monthly_window_end = monthly_window_end.clone();
+                async move {
+                    if progress_mode.load(Ordering::SeqCst) == 1 {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({"code": 1, "message": "temporarily unavailable"})),
+                        );
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "code": 0,
+                            "data": [{
+                                "subscription": {"id": 9, "group_id": 42},
+                                "progress": {
+                                    "id": 9,
+                                    "daily": {
+                                        "limit_usd": 10,
+                                        "used_usd": 3,
+                                        "window_start": daily_window_start,
+                                        "resets_at": daily_window_end
+                                    },
+                                    "weekly": {
+                                        "limit_usd": 50,
+                                        "used_usd": 49.5,
+                                        "window_start": weekly_window_start,
+                                        "resets_at": weekly_window_end
+                                    },
+                                    "monthly": {
+                                        "limit_usd": 100,
+                                        "used_usd": 20,
+                                        "window_start": monthly_window_start,
+                                        "resets_at": monthly_window_end
+                                    }
+                                }
+                            }]
+                        })),
+                    )
+                }
+            }),
+        );
+    let (ops_url, ops_handle) = start_server(ops).await;
+    let cached_token_expiry = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time should move forward")
+        .as_secs_f64()
+        + 3600.0;
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![
+            sample_provider("provider-openai", "openai", 10).with_transport_fields(
+                true,
+                false,
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(json!({
+                    "provider_ops": {
+                        "architecture_id": "sub2api",
+                        "base_url": ops_url,
+                        "connector": {
+                            "auth_type": "api_key",
+                            "config": {},
+                            "credentials": {
+                                "refresh_token": encrypt_python_fernet_plaintext(
+                                    DEVELOPMENT_ENCRYPTION_KEY,
+                                    "refresh-token",
+                                ).expect("refresh token should encrypt"),
+                                "_cached_access_token": encrypt_python_fernet_plaintext(
+                                    DEVELOPMENT_ENCRYPTION_KEY,
+                                    "access-token",
+                                ).expect("access token should encrypt"),
+                                "_cached_token_expires_at": cached_token_expiry,
+                            }
+                        },
+                        "remote_quota": {
+                            "enabled": true,
+                            "group_id": "42",
+                            "progress_endpoint": "/api/v1/subscriptions/progress"
+                        }
+                    }
+                })),
+            ),
+        ],
+        vec![],
+        vec![],
+    ));
+    let quota_repository = Arc::new(InMemoryProviderQuotaRepository::seed(vec![
+        StoredProviderQuotaSnapshot::new(
+            "provider-openai".to_string(),
+            "monthly_quota".to_string(),
+            Some(100.0),
+            5.0,
+            None,
+            Some(daily_window_start_unix_i64),
+            None,
+            true,
+        )
+        .expect("quota should build"),
+    ]));
+    let data = GatewayDataState::with_provider_catalog_repository_for_tests(Arc::clone(
+        &provider_catalog_repository,
+    ))
+    .attach_provider_quota_repository_for_tests(Arc::clone(&quota_repository))
+    .with_system_config_values_for_tests(Vec::<(String, serde_json::Value)>::new())
+    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+    let app_state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(data);
+
+    // Reproduce the cache race: warm the scheduler cache at $5, then mutate
+    // the repository directly to $8. Reconciliation must observe the strong
+    // repository value and replace it with the remote $3, not add $3 again.
+    let cached = app_state
+        .read_provider_quota_snapshot("provider-openai")
+        .await
+        .expect("quota cache should load")
+        .expect("provider quota should exist");
+    assert_eq!(cached.monthly_used_usd, 5.0);
+    quota_repository
+        .apply_remote_provider_quota(&ApplyRemoteProviderQuotaPatch {
+            provider_id: "provider-openai".to_string(),
+            billing_type: "monthly_quota".to_string(),
+            monthly_quota_usd: Some(10.0),
+            remote_monthly_used_usd: 8.0,
+            remote_window_start_unix_secs: daily_window_start_unix,
+            remote_window_end_unix_secs: daily_window_end_unix,
+            quota_reset_day: Some(1),
+            quota_expires_at_unix_secs: Some(subscription_expires_at_unix),
+            local_usage_observation: Some(ProviderQuotaUsageObservation {
+                monthly_used_usd: 5.0,
+                quota_last_reset_at_unix_secs: Some(daily_window_start_unix),
+            }),
+            preserve_local_used_usd: false,
+        })
+        .await
+        .expect("repository quota should advance behind the cache");
+
+    let gateway = build_router_with_state(app_state.clone());
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-ops/providers/provider-openai/balance"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["status"], "success");
+    assert_eq!(
+        payload["data"]["extra"]["remote_quota_sync"]["status"],
+        "applied"
+    );
+    assert_eq!(
+        payload["data"]["extra"]["remote_quota_sync"]["local"]["monthly_used_usd"],
+        49.5
+    );
+    assert_eq!(
+        payload["data"]["extra"]["remote_quota_sync"]["local"]["remote_confirmed_used_usd"],
+        49.5
+    );
+    assert_eq!(
+        payload["data"]["extra"]["remote_quota_sync"]["local"]["pending_local_used_usd"],
+        0.0
+    );
+    let stored = quota_repository
+        .find_by_provider_id("provider-openai")
+        .await
+        .expect("quota should load")
+        .expect("quota should exist");
+    assert_eq!(
+        payload["data"]["extra"]["remote_quota_sync"]["remote"]["window"],
+        "weekly"
+    );
+    let subscription = &payload["data"]["extra"]["remote_quota_sync"]["subscription"];
+    assert_eq!(subscription["group_id"], "42");
+    assert_eq!(subscription["daily_limit_usd"], 10.0);
+    assert_eq!(subscription["daily_used_usd"], 3.0);
+    assert_eq!(subscription["weekly_limit_usd"], 50.0);
+    assert_eq!(subscription["weekly_used_usd"], 49.5);
+    assert_eq!(subscription["monthly_limit_usd"], 100.0);
+    assert_eq!(subscription["monthly_used_usd"], 20.0);
+    assert_eq!(subscription["local_sync_window"], "weekly");
+    assert_eq!(stored.monthly_quota_usd, Some(50.0));
+    assert_eq!(stored.monthly_used_usd, 49.5);
+    assert_eq!(stored.quota_reset_day, None);
+    assert_eq!(
+        stored.quota_last_reset_at_unix_secs,
+        Some(weekly_window_start_unix)
+    );
+    assert_eq!(
+        stored.quota_expires_at_unix_secs,
+        Some(subscription_expires_at_unix)
+    );
+
+    progress_mode.store(1, Ordering::SeqCst);
+    let degraded_response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-ops/providers/provider-openai/balance"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("degraded request should succeed");
+    assert_eq!(degraded_response.status(), StatusCode::OK);
+    let degraded_payload: serde_json::Value = degraded_response
+        .json()
+        .await
+        .expect("degraded json body should parse");
+    assert_eq!(degraded_payload["status"], "success");
+    assert_eq!(
+        degraded_payload["data"]["extra"]["remote_quota_sync"]["status"],
+        "failed_keep_local"
+    );
+    assert!(
+        degraded_payload["data"]["extra"]["remote_quota_sync"]["warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("HTTP 503"))
+    );
+    assert_eq!(
+        degraded_payload["data"]["extra"]["remote_quota_sync"]["subscription"]["weekly_limit_usd"],
+        50.0
+    );
+    let stored_after_failure = quota_repository
+        .find_by_provider_id("provider-openai")
+        .await
+        .expect("quota should load")
+        .expect("quota should exist");
+    assert_eq!(stored_after_failure, stored);
+
+    let held_lock = app_state
+        .runtime_state
+        .lock_try_acquire(
+            "provider_ops:remote_quota_sync:provider-openai",
+            "concurrent-sync-test",
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .expect("runtime lock should be available")
+        .expect("remote quota lock should be acquired");
+    let contended_response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-ops/providers/provider-openai/balance"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("contended request should return");
+    assert_eq!(contended_response.status(), StatusCode::OK);
+    let contended_payload: serde_json::Value = contended_response
+        .json()
+        .await
+        .expect("contended body should parse");
+    assert_eq!(contended_payload["status"], "unknown_error");
+    assert!(contended_payload["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("正在进行")));
+    app_state
+        .runtime_state
+        .lock_release(&held_lock)
+        .await
+        .expect("runtime lock should release");
+    let stored_after_contention = quota_repository
+        .find_by_provider_id("provider-openai")
+        .await
+        .expect("quota should load")
+        .expect("quota should exist");
+    assert_eq!(stored_after_contention, stored);
+
+    // Disabling quota application must not strand the balance cache in a
+    // permanent pending state. Batch balance should refresh normally while
+    // apply_remote_quota reports the kill-switch skip and leaves quota intact.
+    progress_mode.store(0, Ordering::SeqCst);
+    app_state
+        .upsert_system_config_json_value(
+            aether_admin::system::ENABLE_PROVIDER_REMOTE_QUOTA_SYNC_CONFIG_KEY,
+            &json!(false),
+            None,
+        )
+        .await
+        .expect("remote quota kill switch should update");
+    app_state
+        .runtime_state
+        .kv_delete("provider_ops:balance:provider-openai")
+        .await
+        .expect("balance cache should clear");
+    let batch_response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-ops/batch/balance"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!(["provider-openai"]))
+        .send()
+        .await
+        .expect("batch balance request should return");
+    assert_eq!(batch_response.status(), StatusCode::OK);
+    let batch_payload: serde_json::Value = batch_response
+        .json()
+        .await
+        .expect("batch balance payload should parse");
+    assert_eq!(batch_payload["provider-openai"]["status"], "success");
+    assert_eq!(
+        batch_payload["provider-openai"]["data"]["extra"]["remote_quota_sync"]["status"],
+        "skipped_kill_switch"
+    );
+    let stored_after_kill_switch = quota_repository
+        .find_by_provider_id("provider-openai")
+        .await
+        .expect("quota should load")
+        .expect("quota should exist");
+    assert_eq!(stored_after_kill_switch, stored);
+
+    gateway_handle.abort();
+    ops_handle.abort();
+}
+
+#[test]
+fn gateway_syncs_sub2api_group_unlimited_and_exhausted_keep_local_usage() {
+    run_provider_ops_test(
+        "gateway_syncs_sub2api_group_unlimited_and_exhausted_keep_local_usage",
+        gateway_syncs_sub2api_group_unlimited_and_exhausted_keep_local_usage_impl,
+    );
+}
+
+async fn gateway_syncs_sub2api_group_unlimited_and_exhausted_keep_local_usage_impl() {
+    let summary_mode = Arc::new(AtomicUsize::new(0));
+    let summary_mode_for_route = Arc::clone(&summary_mode);
+    let ops = Router::new()
+        .route(
+            "/api/v1/auth/me",
+            get(|| async move {
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "code": 0,
+                        "data": {
+                            "username": "sub2api-user",
+                            "balance": 0,
+                            "points": 0
+                        }
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/api/v1/subscriptions/summary",
+            get(move || {
+                let summary_mode = Arc::clone(&summary_mode_for_route);
+                async move {
+                    let subscriptions = match summary_mode.load(Ordering::SeqCst) {
+                        1 => json!([{
+                            "id": 11,
+                            "group_id": 99,
+                            "group_name": "Other",
+                            "status": "active",
+                            "monthly_limit_usd": 50
+                        }]),
+                        _ => json!([{
+                            "id": 9,
+                            "group_id": 42,
+                            "group_name": "Pro",
+                            "status": "active",
+                            "daily_used_usd": 3,
+                            "daily_limit_usd": 0,
+                            "weekly_used_usd": 8,
+                            "weekly_limit_usd": 0,
+                            "monthly_used_usd": 20,
+                            "monthly_limit_usd": 0,
+                            "expires_at": "2030-02-01T00:00:00Z"
+                        }]),
+                    };
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "code": 0,
+                            "data": {
+                                "active_count": 1,
+                                "subscriptions": subscriptions
+                            }
+                        })),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/api/v1/subscriptions/progress",
+            get(|| async move {
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "code": 0,
+                        "data": []
+                    })),
+                )
+            }),
+        );
+    let (ops_url, ops_handle) = start_server(ops).await;
+    let cached_token_expiry = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time should move forward")
+        .as_secs_f64()
+        + 3600.0;
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![
+            sample_provider("provider-openai", "openai", 10).with_transport_fields(
+                true,
+                false,
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(json!({
+                    "provider_ops": {
+                        "architecture_id": "sub2api",
+                        "base_url": ops_url,
+                        "connector": {
+                            "auth_type": "api_key",
+                            "config": {},
+                            "credentials": {
+                                "refresh_token": encrypt_python_fernet_plaintext(
+                                    DEVELOPMENT_ENCRYPTION_KEY,
+                                    "refresh-token",
+                                ).expect("refresh token should encrypt"),
+                                "_cached_access_token": encrypt_python_fernet_plaintext(
+                                    DEVELOPMENT_ENCRYPTION_KEY,
+                                    "access-token",
+                                ).expect("access token should encrypt"),
+                                "_cached_token_expires_at": cached_token_expiry,
+                            }
+                        },
+                        "remote_quota": {
+                            "enabled": true,
+                            "group_id": "42",
+                            "progress_endpoint": "/api/v1/subscriptions/progress"
+                        }
+                    }
+                })),
+            ),
+        ],
+        vec![],
+        vec![],
+    ));
+    let quota_repository = Arc::new(InMemoryProviderQuotaRepository::seed(vec![
+        StoredProviderQuotaSnapshot::new(
+            "provider-openai".to_string(),
+            "monthly_quota".to_string(),
+            Some(100.0),
+            5.0,
+            None,
+            Some(1_700_000_000),
+            None,
+            true,
+        )
+        .expect("quota should build"),
+    ]));
+    let data = GatewayDataState::with_provider_catalog_repository_for_tests(Arc::clone(
+        &provider_catalog_repository,
+    ))
+    .attach_provider_quota_repository_for_tests(Arc::clone(&quota_repository))
+    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+    let app_state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(data);
+
+    // Exercise the real worker path: provider discovery, eligibility, action
+    // execution, quota apply, result classification, and balance caching.
+    let worker_summary = perform_provider_remote_quota_sync_once(&app_state)
+        .await
+        .expect("remote quota worker should run");
+    assert_eq!(worker_summary.attempted, 1);
+    assert_eq!(worker_summary.applied, 1);
+    assert_eq!(worker_summary.skipped, 0);
+    assert_eq!(worker_summary.failed, 0);
+    let stored = quota_repository
+        .find_by_provider_id("provider-openai")
+        .await
+        .expect("quota should load")
+        .expect("quota should exist");
+    assert_eq!(stored.billing_type, "pay_as_you_go");
+    assert_eq!(stored.monthly_quota_usd, None);
+    assert_eq!(stored.monthly_used_usd, 5.0);
+
+    let gateway = build_router_with_state(app_state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    async fn post_balance(gateway_url: &str) -> serde_json::Value {
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{gateway_url}/api/admin/provider-ops/providers/provider-openai/balance"
+            ))
+            .header(GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        response.json().await.expect("json body should parse")
+    }
+
+    // A second unlimited sync through the manual path must not zero it either.
+    let payload = post_balance(&gateway_url).await;
+    assert_eq!(
+        payload["data"]["extra"]["remote_quota_sync"]["status"],
+        "applied"
+    );
+    let stored = quota_repository
+        .find_by_provider_id("provider-openai")
+        .await
+        .expect("quota should load")
+        .expect("quota should exist");
+    assert_eq!(stored.monthly_used_usd, 5.0);
+
+    // 3. Exhausted (Group vanishes from summary) is a state overwrite, not a
+    //    usage reset: local usage is preserved.
+    summary_mode.store(1, Ordering::SeqCst);
+    let payload = post_balance(&gateway_url).await;
+    assert_eq!(payload["status"], "success");
+    let sync = &payload["data"]["extra"]["remote_quota_sync"];
+    assert_eq!(sync["status"], "applied");
+    assert_eq!(sync["remote"]["classification"], "exhausted");
+    let stored = quota_repository
+        .find_by_provider_id("provider-openai")
+        .await
+        .expect("quota should load")
+        .expect("quota should exist");
+    assert_eq!(stored.billing_type, "monthly_quota");
+    assert_eq!(stored.monthly_quota_usd, Some(0.0));
+    assert_eq!(stored.monthly_used_usd, 5.0);
 
     gateway_handle.abort();
     ops_handle.abort();

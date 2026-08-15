@@ -556,6 +556,31 @@ impl AppState {
         Ok(updated)
     }
 
+    pub(crate) async fn compare_and_update_provider_catalog_config(
+        &self,
+        update: &provider_catalog::ProviderCatalogProviderConfigCasUpdate,
+    ) -> Result<Option<bool>, GatewayError> {
+        let updated = self
+            .data
+            .compare_and_update_provider_catalog_config(update)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if updated == Some(true) {
+            self.invalidate_provider_routing_caches();
+        }
+        Ok(updated)
+    }
+
+    pub(crate) async fn compare_and_patch_provider_ops_runtime_credentials(
+        &self,
+        update: &provider_catalog::ProviderCatalogRuntimeCredentialsCas,
+    ) -> Result<Option<bool>, GatewayError> {
+        self.data
+            .compare_and_patch_provider_ops_runtime_credentials(update)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn delete_provider_catalog_provider(
         &self,
         provider_id: &str,

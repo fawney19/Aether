@@ -27,6 +27,8 @@ pub(super) async fn admin_provider_ops_local_verify_response(
     architecture_id: &str,
     config: &serde_json::Map<String, serde_json::Value>,
     credentials: &serde_json::Map<String, serde_json::Value>,
+    discover_sub2api_groups: bool,
+    sub2api_subscription_endpoint: Option<&str>,
 ) -> serde_json::Value {
     let architecture_id = normalize_architecture_id(architecture_id);
     let Some(architecture) = get_architecture(architecture_id) else {
@@ -48,6 +50,8 @@ pub(super) async fn admin_provider_ops_local_verify_response(
             architecture.verify_endpoint,
             credentials,
             proxy_snapshot.as_ref(),
+            discover_sub2api_groups,
+            sub2api_subscription_endpoint,
         )
         .await;
     }

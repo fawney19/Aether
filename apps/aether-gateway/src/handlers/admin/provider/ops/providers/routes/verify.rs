@@ -59,6 +59,30 @@ pub(super) async fn handle_admin_provider_ops_verify(
     };
 
     let architecture_id = normalize_architecture_id(&payload.architecture_id);
+    let sub2api_subscription_endpoint = payload
+        .actions
+        .get("query_balance")
+        .and_then(|action| action.config.get("subscription_endpoint"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            existing_provider
+                .as_ref()
+                .and_then(admin_provider_ops_config_object)
+                .and_then(|provider_ops| provider_ops.get("actions"))
+                .and_then(serde_json::Value::as_object)
+                .and_then(|actions| actions.get("query_balance"))
+                .and_then(serde_json::Value::as_object)
+                .and_then(|action| action.get("config"))
+                .and_then(serde_json::Value::as_object)
+                .and_then(|config| config.get("subscription_endpoint"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        });
     let credentials = existing_provider.as_ref().map_or_else(
         || payload.connector.credentials.clone(),
         |provider| {
@@ -77,6 +101,8 @@ pub(super) async fn handle_admin_provider_ops_verify(
         architecture_id,
         &payload.connector.config,
         &credentials,
+        payload.discover_sub2api_groups,
+        sub2api_subscription_endpoint.as_deref(),
     )
     .await;
     Ok(attach_admin_audit_response(

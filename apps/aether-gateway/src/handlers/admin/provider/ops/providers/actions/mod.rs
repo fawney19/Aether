@@ -114,6 +114,21 @@ pub(crate) async fn admin_provider_ops_local_action_response(
 
     match action_type {
         "query_balance" => {
+            let remote_quota_config = if architecture_id == "sub2api" {
+                match aether_admin::provider::ops::parse_sub2api_remote_quota_config(
+                    provider_ops_config,
+                ) {
+                    Ok(config) => config,
+                    Err(message) => {
+                        return responses::admin_provider_ops_action_not_configured(
+                            action_type,
+                            message,
+                        );
+                    }
+                }
+            } else {
+                None
+            };
             query_balance::admin_provider_ops_run_query_balance_action(
                 state,
                 provider_id,
@@ -124,6 +139,7 @@ pub(crate) async fn admin_provider_ops_local_action_response(
                 &headers,
                 &credentials,
                 proxy_snapshot.as_ref(),
+                remote_quota_config.as_ref(),
             )
             .await
         }

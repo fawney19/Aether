@@ -6,7 +6,8 @@ use crate::handlers::admin::provider::ops::providers::config::persist_admin_prov
 use crate::handlers::admin::request::AdminAppState;
 use aether_admin::provider::ops::{
     admin_provider_ops_frontend_updated_credentials, admin_provider_ops_verify_failure,
-    parse_verify_payload, ADMIN_PROVIDER_OPS_USER_AGENT,
+    parse_sub2api_remote_quota_groups, parse_verify_payload, validate_sub2api_same_origin_endpoint,
+    ADMIN_PROVIDER_OPS_USER_AGENT,
 };
 use aether_contracts::ProxySnapshot;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider;
@@ -20,6 +21,8 @@ pub(super) async fn admin_provider_ops_local_sub2api_verify_response(
     verify_endpoint: &str,
     credentials: &Map<String, Value>,
     proxy_snapshot: Option<&ProxySnapshot>,
+    discover_sub2api_groups: bool,
+    subscription_endpoint: Option<&str>,
 ) -> Value {
     let (access_token, updated_credentials, frontend_updated_credentials) =
         match admin_provider_ops_sub2api_exchange_token(
@@ -64,7 +67,7 @@ pub(super) async fn admin_provider_ops_local_sub2api_verify_response(
         ),
     ]);
     let auth_headers =
-        admin_provider_ops_headers_with_transport_controls(&auth_headers, None, true);
+        admin_provider_ops_headers_with_transport_controls(&auth_headers, Some(false), true);
     let (status, response_json) = match admin_provider_ops_execute_json_request(
         state,
         "provider-ops-verify:sub2api",
@@ -85,12 +88,104 @@ pub(super) async fn admin_provider_ops_local_sub2api_verify_response(
         }
     };
 
-    parse_verify_payload(
+    let mut verify_response = parse_verify_payload(
         "sub2api",
         status,
         &response_json,
-        frontend_updated_credentials,
+        frontend_updated_credentials.clone(),
+    );
+    if !discover_sub2api_groups
+        || verify_response.get("success").and_then(Value::as_bool) != Some(true)
+    {
+        return verify_response;
+    }
+
+    let subscription_endpoint = subscription_endpoint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("/api/v1/subscriptions/summary");
+    if let Err(message) = validate_sub2api_same_origin_endpoint(subscription_endpoint) {
+        return sub2api_group_discovery_failure(message, frontend_updated_credentials.as_ref());
+    }
+    let subscription_url = admin_provider_ops_sub2api_request_url(base_url, subscription_endpoint);
+    let (subscription_status, subscription_json) = match admin_provider_ops_execute_json_request(
+        state,
+        "provider-ops-verify:sub2api:groups",
+        reqwest::Method::GET,
+        &subscription_url,
+        &auth_headers,
+        None,
+        proxy_snapshot,
     )
+    .await
+    {
+        Ok(result) => result,
+        Err(AdminProviderOpsExecuteJsonError::InvalidJson(message))
+        | Err(AdminProviderOpsExecuteJsonError::Transport(message)) => {
+            return sub2api_group_discovery_failure(
+                admin_provider_ops_verify_execution_error_message(&message),
+                frontend_updated_credentials.as_ref(),
+            );
+        }
+    };
+    if subscription_status != http::StatusCode::OK {
+        return sub2api_group_discovery_failure(
+            format!(
+                "读取 Sub2API 套餐列表失败: HTTP {}",
+                subscription_status.as_u16()
+            ),
+            frontend_updated_credentials.as_ref(),
+        );
+    }
+    let groups = match parse_sub2api_remote_quota_groups(&subscription_json) {
+        Ok(groups) => groups,
+        Err(message) => {
+            return sub2api_group_discovery_failure(
+                format!("读取 Sub2API 套餐列表失败: {message}"),
+                frontend_updated_credentials.as_ref(),
+            );
+        }
+    };
+    let Some(data) = verify_response
+        .get_mut("data")
+        .and_then(Value::as_object_mut)
+    else {
+        return sub2api_group_discovery_failure(
+            "读取 Sub2API 套餐列表失败: 验证响应格式无效".to_string(),
+            frontend_updated_credentials.as_ref(),
+        );
+    };
+    let extra = data
+        .entry("extra")
+        .or_insert_with(|| json!({}))
+        .as_object_mut();
+    let Some(extra) = extra else {
+        return sub2api_group_discovery_failure(
+            "读取 Sub2API 套餐列表失败: 验证响应格式无效".to_string(),
+            frontend_updated_credentials.as_ref(),
+        );
+    };
+    extra.insert(
+        "sub2api_groups".to_string(),
+        serde_json::to_value(groups).unwrap_or_else(|_| json!([])),
+    );
+    verify_response
+}
+
+fn sub2api_group_discovery_failure(
+    message: String,
+    frontend_updated_credentials: Option<&Map<String, Value>>,
+) -> Value {
+    let mut response = admin_provider_ops_verify_failure(message);
+    if let (Some(response), Some(updated_credentials)) =
+        (response.as_object_mut(), frontend_updated_credentials)
+    {
+        response.insert(
+            "updated_credentials".to_string(),
+            Value::Object(updated_credentials.clone()),
+        );
+    }
+    response
 }
 
 // 对齐 Python httpx.AsyncClient(base_url=...) 的行为:
