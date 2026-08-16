@@ -120,9 +120,9 @@ const USER_OPTIONS_CACHE_TTL_MS = 30 * 1000
 let dialogUsersLoadedAt = 0
 let dialogUsersLoadedVersion = -1
 
-const groupPolicyHelpText = '模型、供应商和端点会在多个用户组之间叠加授权；unrestricted 仍表示不限制，deny_all 只是不授予额外权限。速率限制按付费档位取更高额度，0 表示不限速；用户/API Key 自身限制仍会收窄最终权限。'
+const groupPolicyHelpText = '模型、供应商和端点会在多个用户组之间叠加授权；unrestricted 仍表示不限制，deny_all 只是不授予额外权限。速率限制和额度限制均按组取更高额度，任一自定义组为 0 表示不限；Key 自身限制仍可收窄最终权限。'
 const groupPolicyHelpTextLocalized = computed(() => locale.value === 'en-US'
-  ? 'Models, providers, and endpoints accumulate across multiple user groups. unrestricted still means no restriction, while deny_all grants no extra permission. Rate limits take the higher quota by tier, and 0 means unlimited. User/API key limits still narrow the final permissions.'
+  ? 'Models, providers, and endpoints accumulate across user groups. RPM and usage limits take the highest custom group value, while any custom 0 means unlimited. Key limits may narrow the result.'
   : groupPolicyHelpText)
 
 const form = ref<UserGroupFormState>(createEmptyForm())
@@ -207,6 +207,8 @@ async function selectGroup(groupId: string): Promise<void> {
     allowed_models: group.allowed_models ? [...group.allowed_models] : [],
     rate_limit_mode: normalizeRateMode(group.rate_limit_mode),
     rate_limit: group.rate_limit ?? undefined,
+    daily_usage_limit_mode: normalizeRateMode(group.daily_usage_limit_mode),
+    daily_usage_limit_usd: group.daily_usage_limit_usd ?? undefined,
   }
   try {
     const members = await usersStore.listUserGroupMembers(group.id)
@@ -236,6 +238,8 @@ function createEmptyForm(): UserGroupFormState {
     allowed_models: [],
     rate_limit_mode: 'system',
     rate_limit: undefined,
+    daily_usage_limit_mode: 'system',
+    daily_usage_limit_usd: undefined,
   }
 }
 
@@ -286,6 +290,10 @@ function buildPayload(): UpsertUserGroupRequest {
     rate_limit_mode: form.value.rate_limit_mode,
     rate_limit: form.value.rate_limit_mode === 'custom'
       ? (form.value.rate_limit ?? 0)
+      : null,
+    daily_usage_limit_mode: form.value.daily_usage_limit_mode,
+    daily_usage_limit_usd: form.value.daily_usage_limit_mode === 'custom'
+      ? (form.value.daily_usage_limit_usd ?? 0)
       : null,
   }
 }

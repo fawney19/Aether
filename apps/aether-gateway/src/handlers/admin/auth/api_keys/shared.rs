@@ -24,6 +24,7 @@ pub(super) struct AdminStandaloneApiKeyCreateRequest {
     #[serde(default, alias = "allowed_ips")]
     pub(super) ip_rules: Option<Vec<String>>,
     pub(super) rate_limit: Option<i32>,
+    pub(super) daily_usage_limit_usd: Option<f64>,
     pub(super) concurrent_limit: Option<i32>,
     pub(super) initial_balance_usd: Option<f64>,
     pub(super) unlimited_balance: Option<bool>,
@@ -46,6 +47,7 @@ pub(super) struct AdminStandaloneApiKeyUpdateRequest {
     )]
     pub(super) ip_rules: Option<Option<Vec<String>>>,
     pub(super) rate_limit: Option<i32>,
+    pub(super) daily_usage_limit_usd: Option<f64>,
     pub(super) concurrent_limit: Option<i32>,
     pub(super) initial_balance_usd: Option<f64>,
     pub(super) unlimited_balance: Option<bool>,
@@ -166,6 +168,7 @@ pub(super) fn build_admin_api_key_list_item_payload(
         "total_tokens": record.total_tokens,
         "total_cost_usd": record.total_cost_usd,
         "rate_limit": record.rate_limit,
+        "daily_usage_limit_usd": record.daily_usage_limit_usd,
         "concurrent_limit": record.concurrent_limit,
         "allowed_providers": record.allowed_providers,
         "allowed_api_formats": record.allowed_api_formats,
@@ -197,6 +200,7 @@ pub(super) fn build_admin_api_key_detail_payload(
         "total_tokens": record.total_tokens,
         "total_cost_usd": record.total_cost_usd,
         "rate_limit": record.rate_limit,
+        "daily_usage_limit_usd": record.daily_usage_limit_usd,
         "concurrent_limit": record.concurrent_limit,
         "allowed_providers": record.allowed_providers,
         "allowed_api_formats": record.allowed_api_formats,

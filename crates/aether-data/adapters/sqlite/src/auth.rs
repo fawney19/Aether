@@ -31,6 +31,7 @@ SELECT
   api_keys.is_locked AS api_key_is_locked,
   api_keys.is_standalone AS api_key_is_standalone,
   api_keys.rate_limit AS api_key_rate_limit,
+  api_keys.daily_usage_limit_usd AS api_key_daily_usage_limit_usd,
   api_keys.concurrent_limit AS api_key_concurrent_limit,
   api_keys.expires_at AS api_key_expires_at_unix_secs,
   api_keys.allowed_providers AS api_key_allowed_providers,
@@ -53,6 +54,7 @@ SELECT
   api_keys.allowed_models,
   api_keys.ip_rules,
   api_keys.rate_limit,
+  api_keys.daily_usage_limit_usd,
   api_keys.concurrent_limit,
   api_keys.force_capabilities,
   api_keys.feature_settings,
@@ -115,12 +117,13 @@ impl SqliteAuthApiKeyReadRepository {
             r#"
 INSERT INTO api_keys (
   id, user_id, key_hash, key_encrypted, name, allowed_providers,
-  allowed_api_formats, allowed_models, ip_rules, rate_limit, concurrent_limit,
+  allowed_api_formats, allowed_models, ip_rules, rate_limit, daily_usage_limit_usd,
+  concurrent_limit,
   force_capabilities, feature_settings, is_active, expires_at, auto_delete_on_expiry,
   total_requests, total_tokens, total_cost_usd, is_standalone,
   created_at, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#,
         )
         .bind(&record.api_key_id)
@@ -145,6 +148,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "api_keys.ip_rules",
         )?)
         .bind(record.rate_limit)
+        .bind(record.daily_usage_limit_usd)
         .bind(record.concurrent_limit)
         .bind(optional_json_to_string(
             &record.force_capabilities,
@@ -184,6 +188,7 @@ struct CreateApiKeyInsertRecord {
     allowed_models: Option<Vec<String>>,
     ip_rules: Option<Vec<String>>,
     rate_limit: Option<i32>,
+    daily_usage_limit_usd: Option<f64>,
     concurrent_limit: Option<i32>,
     force_capabilities: Option<serde_json::Value>,
     is_active: bool,
@@ -427,6 +432,7 @@ WHERE id = ?
             allowed_models: record.allowed_models,
             ip_rules: record.ip_rules,
             rate_limit: Some(record.rate_limit),
+            daily_usage_limit_usd: record.daily_usage_limit_usd,
             concurrent_limit: record.concurrent_limit,
             force_capabilities: record.force_capabilities,
             is_active: record.is_active,
@@ -455,6 +461,7 @@ WHERE id = ?
             allowed_models: record.allowed_models,
             ip_rules: record.ip_rules,
             rate_limit: record.rate_limit,
+            daily_usage_limit_usd: record.daily_usage_limit_usd,
             concurrent_limit: record.concurrent_limit,
             force_capabilities: record.force_capabilities,
             is_active: record.is_active,
@@ -478,6 +485,7 @@ WHERE id = ?
 UPDATE api_keys
 SET name = COALESCE(?, name),
     rate_limit = COALESCE(?, rate_limit),
+    daily_usage_limit_usd = CASE WHEN ? THEN ? ELSE daily_usage_limit_usd END,
     concurrent_limit = COALESCE(?, concurrent_limit),
     ip_rules = CASE WHEN ? THEN ? ELSE ip_rules END,
     updated_at = ?
@@ -488,6 +496,8 @@ WHERE id = ?
         )
         .bind(record.name.as_deref())
         .bind(record.rate_limit)
+        .bind(record.daily_usage_limit_present)
+        .bind(record.daily_usage_limit_usd)
         .bind(record.concurrent_limit)
         .bind(record.ip_rules.is_some())
         .bind(json_string_from_nested_string_list(
@@ -513,6 +523,7 @@ WHERE id = ?
 UPDATE api_keys
 SET name = COALESCE(?, name),
     rate_limit = CASE WHEN ? THEN ? ELSE rate_limit END,
+    daily_usage_limit_usd = CASE WHEN ? THEN ? ELSE daily_usage_limit_usd END,
     concurrent_limit = CASE WHEN ? THEN ? ELSE concurrent_limit END,
     allowed_providers = CASE WHEN ? THEN ? ELSE allowed_providers END,
     allowed_api_formats = CASE WHEN ? THEN ? ELSE allowed_api_formats END,
@@ -528,6 +539,8 @@ WHERE id = ?
         .bind(record.name.as_deref())
         .bind(record.rate_limit_present)
         .bind(record.rate_limit)
+        .bind(record.daily_usage_limit_present)
+        .bind(record.daily_usage_limit_usd)
         .bind(record.concurrent_limit_present)
         .bind(record.concurrent_limit)
         .bind(record.allowed_providers.is_some())
@@ -977,7 +990,12 @@ fn map_auth_api_key_snapshot_row(
         row.try_get("api_key_ip_rules").map_sql_err()?,
         "api_keys.ip_rules",
     )?)?;
-    Ok(snapshot.with_user_rate_limit(row.try_get("user_rate_limit").map_sql_err()?))
+    Ok(snapshot
+        .with_user_rate_limit(row.try_get("user_rate_limit").map_sql_err()?)
+        .with_daily_usage_limits(
+            None,
+            row.try_get("api_key_daily_usage_limit_usd").map_sql_err()?,
+        ))
 }
 
 fn map_auth_api_key_export_row(
@@ -1024,6 +1042,9 @@ fn map_auth_api_key_export_row(
             row.try_get("ip_rules").map_sql_err()?,
             "api_keys.ip_rules",
         )?)
+    })
+    .map(|record| {
+        record.with_daily_usage_limit(row.try_get("daily_usage_limit_usd").ok().flatten())
     })
     .map(|record| record.with_feature_settings(feature_settings))
     .and_then(|record| {
@@ -1143,6 +1164,7 @@ mod tests {
                 allowed_models: Some(vec!["gpt-4.1".to_string()]),
                 ip_rules: Some(vec!["203.0.113.10".to_string()]),
                 rate_limit: 100,
+                daily_usage_limit_usd: Some(12.5),
                 concurrent_limit: Some(5),
                 force_capabilities: Some(json!({"cache": true})),
                 is_active: true,
@@ -1157,6 +1179,7 @@ mod tests {
             .expect("user key should reload");
         assert_eq!(user_key.allowed_models, Some(vec!["gpt-4.1".to_string()]));
         assert_eq!(user_key.total_tokens, 42);
+        assert_eq!(user_key.daily_usage_limit_usd, Some(12.5));
 
         let updated_user_key = repository
             .update_user_api_key_basic(UpdateUserApiKeyBasicRecord {
@@ -1164,6 +1187,8 @@ mod tests {
                 api_key_id: "key-created-user".to_string(),
                 name: Some("Updated User".to_string()),
                 rate_limit: Some(150),
+                daily_usage_limit_present: true,
+                daily_usage_limit_usd: Some(8.0),
                 concurrent_limit: Some(6),
                 ip_rules: Some(Some(vec!["10.0.0.0/24".to_string()])),
             })
@@ -1171,7 +1196,24 @@ mod tests {
             .expect("user key should update")
             .expect("user key should reload");
         assert_eq!(updated_user_key.name, Some("Updated User".to_string()));
+        assert_eq!(updated_user_key.daily_usage_limit_usd, Some(8.0));
         assert_eq!(updated_user_key.concurrent_limit, Some(6));
+
+        let cleared_user_key = repository
+            .update_user_api_key_basic(UpdateUserApiKeyBasicRecord {
+                user_id: "user-1".to_string(),
+                api_key_id: "key-created-user".to_string(),
+                name: None,
+                rate_limit: None,
+                daily_usage_limit_present: true,
+                daily_usage_limit_usd: None,
+                concurrent_limit: None,
+                ip_rules: None,
+            })
+            .await
+            .expect("user key daily limit should clear")
+            .expect("user key should reload");
+        assert_eq!(cleared_user_key.daily_usage_limit_usd, None);
 
         assert!(repository
             .set_user_api_key_locked("user-1", "key-created-user", true)
@@ -1243,6 +1285,7 @@ mod tests {
                 allowed_models: None,
                 ip_rules: None,
                 rate_limit: None,
+                daily_usage_limit_usd: None,
                 concurrent_limit: Some(2),
                 force_capabilities: None,
                 is_active: true,
@@ -1263,6 +1306,8 @@ mod tests {
                 name: Some("Updated Standalone".to_string()),
                 rate_limit_present: true,
                 rate_limit: Some(20),
+                daily_usage_limit_present: true,
+                daily_usage_limit_usd: Some(4.0),
                 concurrent_limit_present: true,
                 concurrent_limit: None,
                 allowed_providers: Some(None),
@@ -1278,6 +1323,7 @@ mod tests {
             .expect("standalone key should update")
             .expect("standalone key should reload");
         assert_eq!(standalone.name, Some("Updated Standalone".to_string()));
+        assert_eq!(standalone.daily_usage_limit_usd, Some(4.0));
         assert_eq!(standalone.allowed_providers, None);
         assert_eq!(
             standalone.allowed_api_formats,

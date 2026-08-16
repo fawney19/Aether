@@ -290,6 +290,7 @@ const editingUserApiKey = ref<ApiKey | null>(null)
 const userApiKeyForm = ref<UserApiKeyFormState>({
   name: '',
   rate_limit: undefined,
+  daily_usage_limit_usd: undefined,
   concurrent_limit: undefined,
   ip_rules_text: '',
   chat_pii_redaction_mode: 'inherit',
@@ -402,6 +403,9 @@ const userRows = computed<UserManagementRow[]>(() =>
       rateLimitLabel: formatRateLimitInheritable(user.rate_limit),
       rateLimitSource: formatUserEffectiveRateLimitSource(user),
       rateLimitAsBadge: isRateLimitInherited(user.rate_limit) || isRateLimitUnlimited(user.rate_limit),
+      dailyUsageLimitLabel: formatUserEffectiveDailyUsageLimit(user),
+      dailyUsageLimitSource: formatUserEffectiveDailyUsageLimitSource(user),
+      dailyUsageLimitAsBadge: isUserDailyUsageLimitInherited(user) || isUserDailyUsageLimitUnlimited(user),
       createdAtLabel: formatDate(user.created_at),
       statusLabel: legacyT(user.is_active ? '活跃' : '禁用'),
       statusVariant: user.is_active ? 'success' : 'destructive',
@@ -685,6 +689,38 @@ function formatUserEffectiveRateLimitSource(user: User): string {
   return legacyT('系统默认')
 }
 
+function formatUserEffectiveDailyUsageLimit(user: User): string {
+  const policy = user.effective_policy?.daily_usage_limit_usd
+  if (!policy) return '-'
+  if (policy.mode === 'system') return legacyT('跟随系统')
+  const value = policy.value
+  if (typeof value !== 'number') return '-'
+  if (value === 0) return legacyT('无日上限')
+  return locale.value === 'en-US' ? `$${value.toFixed(2)}/day` : `$${value.toFixed(2)}/日`
+}
+
+function isUserDailyUsageLimitInherited(user: User): boolean {
+  return user.effective_policy?.daily_usage_limit_usd?.mode === 'system'
+}
+
+function isUserDailyUsageLimitUnlimited(user: User): boolean {
+  return user.effective_policy?.daily_usage_limit_usd?.mode !== 'system'
+    && user.effective_policy?.daily_usage_limit_usd?.value === 0
+}
+
+function formatUserEffectiveDailyUsageLimitSource(user: User): string {
+  const source = user.effective_policy?.daily_usage_limit_usd
+  if (!source) return ''
+  if (source.source === 'group' && source.group_name) {
+    return `${legacyT('继承自分组：')}${source.group_name}`
+  }
+  if (source.source === 'combined') {
+    const groupNames = Array.isArray(source.group_names) ? source.group_names.join(locale.value === 'en-US' ? ', ' : '、') : ''
+    return groupNames ? `${legacyT('组合分组：')}${groupNames}` : legacyT('组合分组')
+  }
+  return legacyT('系统默认')
+}
+
 function isNegativeWalletValue(value: number | null): boolean {
   return typeof value === 'number' && value < 0
 }
@@ -910,6 +946,7 @@ function openCreateUserApiKeyDialog() {
   userApiKeyForm.value = {
     name: `Key-${new Date().toISOString().split('T')[0]}`,
     rate_limit: undefined,
+    daily_usage_limit_usd: undefined,
     concurrent_limit: undefined,
     ip_rules_text: '',
     chat_pii_redaction_mode: redactionFeature.mode,
@@ -929,6 +966,7 @@ function openEditUserApiKeyDialog(apiKey: ApiKey) {
   userApiKeyForm.value = {
     name: apiKey.name || '',
     rate_limit: apiKey.rate_limit ?? undefined,
+    daily_usage_limit_usd: apiKey.daily_usage_limit_usd ?? undefined,
     concurrent_limit: apiKey.concurrent_limit ?? undefined,
     ip_rules_text: apiKey.ip_rules?.join(', ') ?? '',
     chat_pii_redaction_mode: redactionFeature.mode,
@@ -948,6 +986,7 @@ function closeUserApiKeyFormDialog() {
   userApiKeyForm.value = {
     name: '',
     rate_limit: undefined,
+    daily_usage_limit_usd: undefined,
     concurrent_limit: undefined,
     ip_rules_text: '',
     chat_pii_redaction_mode: 'inherit',
@@ -989,6 +1028,7 @@ async function submitUserApiKeyForm() {
       await usersStore.updateApiKey(targetUserId, editingApiKey.id, {
         name: form.name,
         rate_limit: form.rate_limit ?? 0,
+        daily_usage_limit_usd: form.daily_usage_limit_usd ?? 0,
         concurrent_limit: form.concurrent_limit,
         ip_rules: ipRules,
         ...featureSettingsPatch,
@@ -999,6 +1039,7 @@ async function submitUserApiKeyForm() {
       const response = await usersStore.createApiKey(targetUserId, {
         name: form.name,
         rate_limit: form.rate_limit ?? 0,
+        daily_usage_limit_usd: form.daily_usage_limit_usd ?? 0,
         concurrent_limit: form.concurrent_limit,
         ip_rules: ipRules,
         ...featureSettingsPatch,

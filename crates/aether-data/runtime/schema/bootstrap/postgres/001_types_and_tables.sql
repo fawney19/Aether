@@ -178,6 +178,7 @@ CREATE TABLE IF NOT EXISTS public.api_keys (
     allowed_models json,
     ip_rules jsonb,
     rate_limit integer DEFAULT 100,
+    daily_usage_limit_usd double precision,
     concurrent_limit integer,
     force_capabilities json,
     feature_settings jsonb,
@@ -1499,6 +1500,8 @@ CREATE TABLE IF NOT EXISTS public.user_groups (
     allowed_models_mode text DEFAULT 'inherit'::text NOT NULL,
     rate_limit integer,
     rate_limit_mode text DEFAULT 'inherit'::text NOT NULL,
+    daily_usage_limit_usd double precision,
+    daily_usage_limit_mode text DEFAULT 'inherit'::text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );

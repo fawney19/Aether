@@ -68,6 +68,13 @@
                   >
                     {{ legacyT(formatConcurrentLimit(apiKey.concurrent_limit)) }}
                   </Badge>
+                  <Badge
+                    v-if="apiKey.daily_usage_limit_usd != null && apiKey.daily_usage_limit_usd > 0"
+                    variant="secondary"
+                    class="text-xs"
+                  >
+                    ${{ apiKey.daily_usage_limit_usd.toFixed(2) }}/{{ legacyT('日') }}
+                  </Badge>
                 </div>
                 <div class="mt-0.5 flex items-center gap-1">
                   <code class="font-mono text-xs text-muted-foreground">

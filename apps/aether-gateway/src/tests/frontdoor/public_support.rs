@@ -1,13 +1,13 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{
-    hash_api_key, sample_endpoint, sample_key, sample_models_candidate_row, sample_provider,
-    sample_public_catalog_model, sample_public_global_model,
-    sample_public_global_model_with_capabilities, sample_request_candidate,
-    InMemoryAnnouncementReadRepository, InMemoryGlobalModelReadRepository,
-    InMemoryMinimalCandidateSelectionReadRepository, InMemoryProviderCatalogReadRepository,
-    InMemoryRequestCandidateRepository, RequestCandidateStatus, StoredAnnouncement,
-    StoredPublicGlobalModel,
+    hash_api_key, run_frontdoor_async_test, sample_endpoint, sample_key,
+    sample_models_candidate_row, sample_provider, sample_public_catalog_model,
+    sample_public_global_model, sample_public_global_model_with_capabilities,
+    sample_request_candidate, InMemoryAnnouncementReadRepository,
+    InMemoryGlobalModelReadRepository, InMemoryMinimalCandidateSelectionReadRepository,
+    InMemoryProviderCatalogReadRepository, InMemoryRequestCandidateRepository,
+    RequestCandidateStatus, StoredAnnouncement, StoredPublicGlobalModel,
 };
 use crate::data::GatewayDataState;
 use crate::tests::{
@@ -2846,8 +2846,16 @@ async fn gateway_handles_user_monitoring_audit_logs_locally_without_proxying_ups
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_handles_user_monitoring_rate_limit_status_locally_without_proxying_upstream() {
+#[test]
+fn gateway_handles_user_monitoring_rate_limit_status_locally_without_proxying_upstream() {
+    run_frontdoor_async_test(
+        "gateway_handles_user_monitoring_rate_limit_status_locally_without_proxying_upstream",
+        gateway_handles_user_monitoring_rate_limit_status_locally_without_proxying_upstream_impl(),
+    );
+}
+
+async fn gateway_handles_user_monitoring_rate_limit_status_locally_without_proxying_upstream_impl()
+{
     let now = Utc::now();
     let user = sample_auth_user(now);
     let access_token = build_test_auth_token(
@@ -2912,6 +2920,8 @@ async fn gateway_handles_user_monitoring_rate_limit_status_locally_without_proxy
             allowed_models_mode: "unrestricted".to_string(),
             rate_limit: Some(80),
             rate_limit_mode: "custom".to_string(),
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
         })
         .await
         .expect("group should create")
@@ -8315,6 +8325,8 @@ async fn gateway_handles_users_me_providers_locally_without_proxying_upstream() 
             allowed_models_mode: "unrestricted".to_string(),
             rate_limit: None,
             rate_limit_mode: "system".to_string(),
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
         })
         .await
         .expect("group should create")
@@ -9773,6 +9785,8 @@ async fn gateway_refreshes_users_me_available_models_after_group_assignment() {
             allowed_models_mode: "specific".to_string(),
             rate_limit: None,
             rate_limit_mode: "system".to_string(),
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
         })
         .await
         .expect("group should create")
@@ -9881,6 +9895,8 @@ async fn gateway_returns_no_users_me_available_models_when_group_denies_all_mode
             allowed_models_mode: "deny_all".to_string(),
             rate_limit: None,
             rate_limit_mode: "system".to_string(),
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
         })
         .await
         .expect("group should create")
@@ -9974,6 +9990,8 @@ async fn gateway_returns_service_unavailable_for_users_me_available_models_witho
             allowed_models_mode: "unrestricted".to_string(),
             rate_limit: None,
             rate_limit_mode: "system".to_string(),
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
         })
         .await
         .expect("group should create")

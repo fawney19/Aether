@@ -63,6 +63,28 @@
 
       <div class="space-y-2">
         <Label
+          for="admin-user-key-daily-usage-limit"
+          class="text-sm font-medium"
+        >
+          {{ legacyT('额度限制 (美元/日)') }}
+        </Label>
+        <Input
+          id="admin-user-key-daily-usage-limit"
+          :model-value="form.daily_usage_limit_usd ?? ''"
+          type="number"
+          min="0"
+          step="0.01"
+          class="h-10"
+          :placeholder="legacyT('留空不增加 Key 级限制')"
+          @update:model-value="updateField('daily_usage_limit_usd', parseNumberInput($event, { allowFloat: true, min: 0 }))"
+        />
+        <p class="text-xs text-muted-foreground">
+          {{ legacyT('正数会进一步收窄用户额度限制；0 或留空不增加 Key 级限制。') }}
+        </p>
+      </div>
+
+      <div class="space-y-2">
+        <Label
           for="admin-user-key-concurrent-limit"
           class="text-sm font-medium"
         >
@@ -186,6 +208,7 @@ import { parseNumberInput } from '@/utils/form'
 export interface UserApiKeyFormState {
   name: string
   rate_limit?: number
+  daily_usage_limit_usd?: number
   concurrent_limit?: number
   ip_rules_text: string
   chat_pii_redaction_mode: 'inherit' | 'custom'

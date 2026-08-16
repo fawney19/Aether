@@ -19,15 +19,15 @@ use aether_runtime::{
     MetricLabel, MetricSample,
 };
 use aether_runtime_state::{
-    MemoryRuntimeStateConfig, RedisRuntimeDiagnostics, RuntimeQueueStore, RuntimeSemaphore,
-    RuntimeSemaphoreError, RuntimeSemaphoreSnapshot, RuntimeState,
+    MemoryRuntimeStateConfig, RedisRuntimeDiagnostics, RuntimeSemaphore, RuntimeSemaphoreError,
+    RuntimeSemaphoreSnapshot, RuntimeState,
 };
 use aether_scheduler_core::PROVIDER_KEY_RPM_WINDOW_SECS;
 use dashmap::DashMap;
 use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
 use tracing::warn;
 
-use super::app::METRIC_SNAPSHOT_TTL;
+use super::app::{FrontdoorLimiters, METRIC_SNAPSHOT_TTL};
 use super::{
     AppState, FrontdoorCorsConfig, FrontdoorRuntimeGuardConfig, LocalExecutionRuntimeMissDiagnostic,
 };
@@ -90,6 +90,7 @@ const AUTH_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &[
     crate::constants::ANTIGRAVITY_BEARER_BRIDGE_CONFIG_KEY,
 ];
 const FRONTDOOR_RPM_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &["rate_limit_per_minute"];
+const FRONTDOOR_DAILY_USAGE_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &["daily_usage_limit_usd"];
 const CHAT_PII_REDACTION_SYSTEM_CONFIG_PREFIX: &str = "module.chat_pii_redaction.";
 const METRIC_SNAPSHOT_REFRESH_TIMEOUT: Duration = Duration::from_secs(4);
 const METRIC_SNAPSHOT_PREWARM_TIMEOUT: Duration = Duration::from_secs(12);
@@ -124,6 +125,11 @@ fn system_config_key_affects_frontdoor_rpm(key: &str) -> bool {
     FRONTDOOR_RPM_AFFECTING_SYSTEM_CONFIG_KEYS.contains(&key)
 }
 
+fn system_config_key_affects_frontdoor_daily_usage(key: &str) -> bool {
+    let key = key.trim();
+    FRONTDOOR_DAILY_USAGE_AFFECTING_SYSTEM_CONFIG_KEYS.contains(&key)
+}
+
 fn system_config_key_affects_chat_pii_redaction(key: &str) -> bool {
     key.trim()
         .starts_with(CHAT_PII_REDACTION_SYSTEM_CONFIG_PREFIX)
@@ -139,13 +145,6 @@ impl AppState {
             .await
             .map(|config| config.enabled)
             .map_err(|err| format!("{err:?}"))
-    }
-
-    fn usage_worker_queue_for(
-        runtime_state: &Arc<RuntimeState>,
-    ) -> Option<Arc<dyn RuntimeQueueStore>> {
-        let queue: Arc<dyn RuntimeQueueStore> = runtime_state.clone();
-        Some(queue)
     }
 
     fn spawn_scheduler_affinity_runtime_write(
@@ -218,7 +217,7 @@ impl AppState {
         self.background_data = Arc::new(
             (*data)
                 .clone()
-                .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
+                .with_usage_runtime_state(self.runtime_state.clone()),
         );
         self.background_data_isolated = false;
         self.replace_foreground_data_state(data);
@@ -233,7 +232,7 @@ impl AppState {
         self.background_data = Arc::new(
             (*background_data)
                 .clone()
-                .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
+                .with_usage_runtime_state(self.runtime_state.clone()),
         );
         self.background_data_isolated = background_data_isolated;
         self.replace_foreground_data_state(data);
@@ -246,11 +245,16 @@ impl AppState {
         self.candidate_row_page_cache.clear();
         self.candidate_resolved_page_cache.clear();
         self.system_config_cache.clear();
-        self.frontdoor_user_rpm.clear_system_default_cache();
+        self.frontdoor_limiters
+            .user_rpm
+            .clear_system_default_cache();
+        self.frontdoor_limiters
+            .daily_usage
+            .clear_system_default_cache();
         let data = Arc::new(
             (*data)
                 .clone()
-                .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
+                .with_usage_runtime_state(self.runtime_state.clone()),
         );
         self.candidate_row_page_cache.clear();
         self.candidate_page_cache.clear();
@@ -288,10 +292,8 @@ impl AppState {
 
     fn build(execution_runtime_override_base_url: Option<String>) -> Result<Self, reqwest::Error> {
         let runtime_state = Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
-        let data = Arc::new(
-            GatewayDataState::disabled()
-                .with_usage_worker_queue(Self::usage_worker_queue_for(&runtime_state)),
-        );
+        let data =
+            Arc::new(GatewayDataState::disabled().with_usage_runtime_state(runtime_state.clone()));
         let client = build_http_client(&HttpClientConfig {
             connect_timeout_ms: Some(10_000),
             request_timeout_ms: Some(300_000),
@@ -387,9 +389,12 @@ impl AppState {
             usage_counter_exact_health_metric_refresh: Arc::new(TokioMutex::new(())),
             request_candidate_queue: None,
             frontdoor_cors: None,
-            frontdoor_user_rpm: Arc::new(FrontdoorUserRpmLimiter::new(
-                FrontdoorUserRpmConfig::default(),
-            )),
+            frontdoor_limiters: Arc::new(FrontdoorLimiters {
+                user_rpm: Arc::new(FrontdoorUserRpmLimiter::new(
+                    FrontdoorUserRpmConfig::default(),
+                )),
+                daily_usage: Arc::new(crate::daily_usage_limit::FrontdoorDailyUsageLimiter::new()),
+            }),
             tunnel: crate::tunnel::EmbeddedTunnelState::with_data_and_runtime_state(
                 data,
                 runtime_state.clone(),
@@ -588,12 +593,12 @@ impl AppState {
         self.data = Arc::new(
             (*self.data)
                 .clone()
-                .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
+                .with_usage_runtime_state(self.runtime_state.clone()),
         );
         self.background_data = Arc::new(
             (*self.background_data)
                 .clone()
-                .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
+                .with_usage_runtime_state(self.runtime_state.clone()),
         );
         self.tunnel = crate::tunnel::EmbeddedTunnelState::with_data_and_runtime_state(
             Arc::clone(&self.data),
@@ -652,7 +657,8 @@ impl AppState {
     }
 
     pub fn with_frontdoor_user_rpm_config(mut self, config: FrontdoorUserRpmConfig) -> Self {
-        self.frontdoor_user_rpm = Arc::new(FrontdoorUserRpmLimiter::new(config));
+        Arc::make_mut(&mut self.frontdoor_limiters).user_rpm =
+            Arc::new(FrontdoorUserRpmLimiter::new(config));
         self
     }
 
@@ -677,7 +683,13 @@ impl AppState {
     }
 
     pub(crate) fn frontdoor_user_rpm(&self) -> Arc<FrontdoorUserRpmLimiter> {
-        Arc::clone(&self.frontdoor_user_rpm)
+        Arc::clone(&self.frontdoor_limiters.user_rpm)
+    }
+
+    pub(crate) fn frontdoor_daily_usage(
+        &self,
+    ) -> Arc<crate::daily_usage_limit::FrontdoorDailyUsageLimiter> {
+        Arc::clone(&self.frontdoor_limiters.daily_usage)
     }
 
     pub(crate) fn mark_provider_key_rpm_reset(&self, key_id: &str, now_unix_secs: u64) {
@@ -869,7 +881,14 @@ impl AppState {
             self.invalidate_auth_context_cache();
         }
         if deleted && system_config_key_affects_frontdoor_rpm(key) {
-            self.frontdoor_user_rpm.clear_system_default_cache();
+            self.frontdoor_limiters
+                .user_rpm
+                .clear_system_default_cache();
+        }
+        if deleted && system_config_key_affects_frontdoor_daily_usage(key) {
+            self.frontdoor_limiters
+                .daily_usage
+                .clear_system_default_cache();
         }
         if deleted && system_config_key_affects_chat_pii_redaction(key) {
             crate::privacy::clear_chat_pii_redaction_runtime_config_cache(
@@ -951,7 +970,14 @@ impl AppState {
             self.invalidate_auth_context_cache();
         }
         if system_config_key_affects_frontdoor_rpm(key) {
-            self.frontdoor_user_rpm.clear_system_default_cache();
+            self.frontdoor_limiters
+                .user_rpm
+                .clear_system_default_cache();
+        }
+        if system_config_key_affects_frontdoor_daily_usage(key) {
+            self.frontdoor_limiters
+                .daily_usage
+                .clear_system_default_cache();
         }
         if system_config_key_affects_chat_pii_redaction(key) {
             crate::privacy::clear_chat_pii_redaction_runtime_config_cache(
@@ -1574,6 +1600,12 @@ impl AppState {
             "Whether background workers use a database pool isolated from foreground traffic.",
             MetricKind::Gauge,
             u64::from(self.background_data_isolated),
+        ));
+        samples.push(MetricSample::new(
+            "frontdoor_daily_usage_runtime_failures_total",
+            "Total daily usage limit checks that failed open because runtime state was unavailable.",
+            MetricKind::Counter,
+            self.frontdoor_limiters.daily_usage.runtime_failure_count(),
         ));
         if self.background_data_isolated {
             if let Some(summary) = self.background_data.database_pool_summary() {

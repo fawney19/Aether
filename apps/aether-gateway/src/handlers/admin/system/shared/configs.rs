@@ -122,6 +122,21 @@ pub(crate) async fn apply_admin_system_config_update(
     let normalized_key = update.normalized_key;
     let description = update.description;
 
+    if normalized_key == "daily_usage_limit_usd" {
+        let limit = match &value {
+            serde_json::Value::Number(number) => number.as_f64(),
+            serde_json::Value::String(raw) => raw.trim().parse::<f64>().ok(),
+            _ => None,
+        };
+        let Some(limit) = limit.filter(|value| value.is_finite() && *value >= 0.0) else {
+            return Ok(Err((
+                http::StatusCode::BAD_REQUEST,
+                json!({ "detail": "daily_usage_limit_usd 必须是大于等于 0 的有限数值" }),
+            )));
+        };
+        value = json!(limit);
+    }
+
     if is_sensitive_admin_system_config_key(&normalized_key)
         && value.as_str().is_some_and(|raw| !raw.is_empty())
     {

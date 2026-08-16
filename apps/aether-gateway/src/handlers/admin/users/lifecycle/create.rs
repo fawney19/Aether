@@ -4,7 +4,10 @@ use super::super::{
     normalize_admin_optional_user_email, normalize_admin_user_group_ids, normalize_admin_user_role,
     normalize_admin_username, validate_admin_user_password, AdminCreateUserRequest,
 };
-use super::support::{admin_user_password_policy, build_admin_user_payload_with_groups};
+use super::support::{
+    admin_system_daily_usage_limit, admin_user_password_policy,
+    build_admin_user_payload_with_groups,
+};
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::GatewayError;
@@ -229,8 +232,15 @@ pub(in super::super) async fn build_admin_create_user_response(
         None
     };
 
-    let mut payload =
-        build_admin_user_payload_with_groups(&user, None, None, payload.unlimited, &groups);
+    let system_daily_usage_limit_usd = admin_system_daily_usage_limit(state).await?;
+    let mut payload = build_admin_user_payload_with_groups(
+        &user,
+        None,
+        None,
+        payload.unlimited,
+        &groups,
+        system_daily_usage_limit_usd,
+    );
     payload["feature_settings"] = feature_settings.unwrap_or(Value::Null);
 
     Ok(attach_admin_audit_response(

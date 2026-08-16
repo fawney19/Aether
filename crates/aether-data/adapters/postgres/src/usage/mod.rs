@@ -3,18 +3,19 @@ use aether_data_contracts::repository::usage::{
     ProxyNodeCounterDelta, StoredUsageAuditAggregation, StoredUsageAuditSummary,
     StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
     StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
-    StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
-    StoredUsageDashboardStatsSummary, StoredUsageDashboardSummary, StoredUsageErrorDistributionRow,
-    StoredUsageLeaderboardSummary, StoredUsagePerformancePercentilesRow,
-    StoredUsageProviderPerformance, StoredUsageProviderPerformanceProviderRow,
-    StoredUsageProviderPerformanceSummary, StoredUsageProviderPerformanceTimelineRow,
-    StoredUsageSettledCostSummary, StoredUsageTimeSeriesBucket, StoredUsageUserTotals,
-    UsageAuditAggregationGroupBy, UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery,
-    UsageAuditSummaryQuery, UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy,
-    UsageBreakdownSummaryQuery, UsageCacheAffinityHitSummaryQuery,
-    UsageCacheAffinityIntervalGroupBy, UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery,
-    UsageCleanupExecutionMode, UsageCleanupSummary, UsageCleanupTargets, UsageCleanupWindow,
-    UsageCostSavingsSummaryQuery, UsageDashboardDailyBreakdownQuery,
+    StoredUsageDailyActualCostRollup, StoredUsageDashboardDailyBreakdownRow,
+    StoredUsageDashboardProviderCount, StoredUsageDashboardStatsSummary,
+    StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
+    StoredUsagePerformancePercentilesRow, StoredUsageProviderPerformance,
+    StoredUsageProviderPerformanceProviderRow, StoredUsageProviderPerformanceSummary,
+    StoredUsageProviderPerformanceTimelineRow, StoredUsageSettledCostSummary,
+    StoredUsageTimeSeriesBucket, StoredUsageUserTotals, UsageAuditAggregationGroupBy,
+    UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditSummaryQuery,
+    UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
+    UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
+    UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCleanupExecutionMode,
+    UsageCleanupSummary, UsageCleanupTargets, UsageCleanupWindow, UsageCostSavingsSummaryQuery,
+    UsageDailyActualCostRollupQuery, UsageDashboardDailyBreakdownQuery,
     UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery, UsageErrorDistributionQuery,
     UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageMonitoringErrorCountQuery,
     UsageMonitoringErrorListQuery, UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery,
@@ -10249,6 +10250,54 @@ impl UsageReadRepository for SqlxUsageReadRepository {
         query: &UsageSettledCostSummaryQuery,
     ) -> Result<StoredUsageSettledCostSummary, DataLayerError> {
         Self::summarize_usage_settled_cost(self, query).await
+    }
+
+    async fn summarize_usage_daily_actual_cost_rollups(
+        &self,
+        query: &UsageDailyActualCostRollupQuery,
+    ) -> Result<Vec<StoredUsageDailyActualCostRollup>, DataLayerError> {
+        if query.finalized_from_unix_secs >= query.finalized_until_unix_secs {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            r#"
+SELECT u.user_id,
+       u.api_key_id,
+       CASE
+         WHEN (u.request_metadata->>'api_key_is_standalone') IN ('true', 'false')
+         THEN (u.request_metadata->>'api_key_is_standalone')::boolean
+         ELSE FALSE
+       END AS api_key_is_standalone,
+       SUM(CAST(u.actual_total_cost_usd AS DOUBLE PRECISION)) AS actual_total_cost_usd
+FROM "usage" AS u
+WHERE u.status = 'completed'
+  AND u.finalized_at >= TO_TIMESTAMP($1::double precision)
+  AND u.finalized_at < TO_TIMESTAMP($2::double precision)
+  AND u.api_key_id IS NOT NULL
+  AND BTRIM(u.api_key_id) <> ''
+  AND CAST(u.actual_total_cost_usd AS DOUBLE PRECISION) > 0
+GROUP BY u.user_id, u.api_key_id, 3
+"#,
+        )
+        .bind(query.finalized_from_unix_secs as f64)
+        .bind(query.finalized_until_unix_secs as f64)
+        .fetch_all(&self.pool)
+        .await
+        .map_postgres_err()?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(StoredUsageDailyActualCostRollup {
+                    user_id: row.try_get("user_id").map_postgres_err()?,
+                    api_key_id: row.try_get("api_key_id").map_postgres_err()?,
+                    api_key_is_standalone: row
+                        .try_get("api_key_is_standalone")
+                        .map_postgres_err()?,
+                    actual_total_cost_usd: row
+                        .try_get("actual_total_cost_usd")
+                        .map_postgres_err()?,
+                })
+            })
+            .collect()
     }
 
     async fn summarize_usage_cache_affinity_hit_summary(

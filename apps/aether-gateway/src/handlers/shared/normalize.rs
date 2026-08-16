@@ -327,6 +327,15 @@ where
     <Option<Vec<String>> as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
 
+pub(crate) fn deserialize_optional_f64_patch<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<f64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Option<f64> as serde::Deserialize>::deserialize(deserializer).map(Some)
+}
+
 fn normalize_chat_pii_redaction_feature_settings(
     settings: &mut Map<String, Value>,
 ) -> Result<(), String> {

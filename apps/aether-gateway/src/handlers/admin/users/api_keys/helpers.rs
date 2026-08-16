@@ -43,6 +43,7 @@ pub(super) fn build_admin_user_api_key_detail_payload(
         "total_requests": record.total_requests,
         "total_cost_usd": record.total_cost_usd,
         "rate_limit": record.rate_limit,
+        "daily_usage_limit_usd": record.daily_usage_limit_usd,
         "concurrent_limit": record.concurrent_limit,
         "ip_rules": record.ip_rules,
         "feature_settings": record.feature_settings,

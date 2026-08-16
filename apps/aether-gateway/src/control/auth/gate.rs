@@ -239,6 +239,28 @@ async fn estimate_execution_plan_cost_upper_bound_usd(
     result
 }
 
+pub(crate) async fn execution_plan_cost_is_proven_zero(
+    state: &AppState,
+    plan: &aether_contracts::ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+) -> bool {
+    let model_id = report_context_string_field(report_context, "model_id");
+    let global_model_name = report_context_string_field(report_context, "global_model_name");
+    if model_id.is_some() || global_model_name.is_some() {
+        if let Ok(Some(context)) =
+            load_execution_plan_billing_context(state, plan, model_id, global_model_name).await
+        {
+            if aether_billing::BillingModelPricingSnapshot::from(context).is_free_tier() {
+                return true;
+            }
+        }
+    }
+    matches!(
+        estimate_execution_plan_cost_upper_bound_usd(state, plan, report_context).await,
+        Ok(Some(cost)) if cost <= DAILY_QUOTA_EPSILON_USD
+    )
+}
+
 async fn estimate_execution_plan_cost_upper_bound_usd_inner(
     state: &AppState,
     plan: &aether_contracts::ExecutionPlan,
@@ -832,9 +854,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        execution_plan_balance_capacity_rejection, execution_plan_cost_upper_bound_cache_key,
-        max_output_tokens_from_request, openai_request_input_is_self_contained,
-        output_choice_count_upper_bound, request_model_local_rejection, GatewayLocalAuthRejection,
+        execution_plan_balance_capacity_rejection, execution_plan_cost_is_proven_zero,
+        execution_plan_cost_upper_bound_cache_key, max_output_tokens_from_request,
+        openai_request_input_is_self_contained, output_choice_count_upper_bound,
+        request_model_local_rejection, GatewayLocalAuthRejection,
     };
     use crate::control::{GatewayControlAuthContext, GatewayControlDecision};
     use crate::data::GatewayDataState;
@@ -919,8 +942,11 @@ mod tests {
             access_allowed: true,
             user_rate_limit: None,
             api_key_rate_limit: None,
+            user_daily_usage_limit_usd: None,
+            api_key_daily_usage_limit_usd: None,
             api_key_is_standalone: false,
             admin_bypass_limits: false,
+            ip_bypass_limits: false,
             local_rejection: None,
             allowed_models: Some(allowed_models),
             ip_rules: None,
@@ -1827,6 +1853,59 @@ mod tests {
         .expect("free tier capacity check should resolve");
 
         assert_eq!(rejection, None);
+    }
+
+    #[tokio::test]
+    async fn daily_usage_zero_cost_proof_recognizes_free_images_but_not_unknown_paid_images() {
+        let free_context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 100.0,
+                    "output_price_per_1m": 100.0
+                }]
+            })),
+            None,
+            None,
+            Some("free_tier"),
+        );
+        let paid_context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 1.0,
+                    "output_price_per_1m": 1.0
+                }]
+            })),
+            None,
+            None,
+            None,
+        );
+        let plan = execution_plan(
+            json!({
+                "model": "gpt-image-1",
+                "prompt": "a small red circle"
+            }),
+            "openai:image",
+        );
+        let report_context = billing_report_context();
+
+        assert!(
+            execution_plan_cost_is_proven_zero(
+                &state_with_quota_and_wallet(quota_availability(0.0, false), free_context,),
+                &plan,
+                Some(&report_context),
+            )
+            .await
+        );
+        assert!(
+            !execution_plan_cost_is_proven_zero(
+                &state_with_quota_and_wallet(quota_availability(0.0, false), paid_context,),
+                &plan,
+                Some(&report_context),
+            )
+            .await
+        );
     }
 
     #[tokio::test]

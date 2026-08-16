@@ -37,10 +37,10 @@ use super::{
 };
 use aether_data_contracts::repository::usage::{
     PendingUsageCleanupSummary, ProviderApiKeyWindowUsageRequest,
-    StoredProviderApiKeyWindowUsageSummary, StoredUsageDailySummary, UsageAuditListQuery,
-    UsageCleanupExecutionMode, UsageCleanupSummary, UsageCleanupTargets, UsageCleanupWindow,
-    UsageCounterFlushSummary, UsageCounterHealthSnapshot, UsageCounterPendingHealthSnapshot,
-    UsageDailyHeatmapQuery,
+    StoredProviderApiKeyWindowUsageSummary, StoredUsageDailyActualCostRollup,
+    StoredUsageDailySummary, UsageAuditListQuery, UsageCleanupExecutionMode, UsageCleanupSummary,
+    UsageCleanupTargets, UsageCleanupWindow, UsageCounterFlushSummary, UsageCounterHealthSnapshot,
+    UsageCounterPendingHealthSnapshot, UsageDailyActualCostRollupQuery, UsageDailyHeatmapQuery,
 };
 use aether_runtime_state::RuntimeQueueStore;
 use aether_video_tasks_core::read_data_backed_video_task_response;
@@ -1531,6 +1531,22 @@ impl GatewayDataState {
             None => Ok(
                 aether_data_contracts::repository::usage::StoredUsageSettledCostSummary::default(),
             ),
+        }
+    }
+
+    pub(crate) async fn summarize_usage_daily_actual_cost_rollups(
+        &self,
+        query: &UsageDailyActualCostRollupQuery,
+    ) -> Result<Vec<StoredUsageDailyActualCostRollup>, DataLayerError> {
+        match &self.usage_reader {
+            Some(repository) => {
+                repository
+                    .summarize_usage_daily_actual_cost_rollups(query)
+                    .await
+            }
+            None => Err(DataLayerError::InvalidConfiguration(
+                "daily usage recovery requires a usage reader".to_string(),
+            )),
         }
     }
 

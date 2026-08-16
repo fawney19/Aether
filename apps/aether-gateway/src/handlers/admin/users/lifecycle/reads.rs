@@ -1,7 +1,7 @@
 use super::super::{build_admin_users_bad_request_response, format_optional_datetime_iso8601};
 use super::support::{
-    admin_user_id_from_detail_path, build_admin_user_export_payload,
-    build_admin_user_payload_with_groups, find_admin_export_user,
+    admin_system_daily_usage_limit, admin_user_id_from_detail_path,
+    build_admin_user_export_payload, build_admin_user_payload_with_groups, find_admin_export_user,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{query_param_optional_bool, query_param_value};
@@ -70,13 +70,16 @@ pub(in super::super) async fn build_admin_list_users_response(
         usage_totals_result,
         memberships_result,
         groups_result,
+        system_daily_usage_limit_result,
     ) = tokio::join!(
         state.list_user_auth_by_ids(&user_ids),
         state.list_wallet_snapshots_by_user_ids(&user_ids),
         state.summarize_usage_totals_by_user_ids(&user_ids),
         state.list_user_group_memberships_by_user_ids(&user_ids),
         state.list_user_groups(),
+        admin_system_daily_usage_limit(state),
     );
+    let system_daily_usage_limit_usd = system_daily_usage_limit_result?;
     let auth_by_user_id = auth_rows_result?
         .into_iter()
         .map(|user| (user.id.clone(), user))
@@ -126,6 +129,7 @@ pub(in super::super) async fn build_admin_list_users_response(
                 .map(|item| item.total_tokens)
                 .unwrap_or_default(),
             &groups,
+            system_daily_usage_limit_usd,
         ));
     }
 
@@ -162,6 +166,7 @@ pub(in super::super) async fn build_admin_get_user_response(
         .await?;
     let export_row = find_admin_export_user(state, &user_id).await?;
     let groups = state.list_user_groups_for_user(&user_id).await?;
+    let system_daily_usage_limit_usd = admin_system_daily_usage_limit(state).await?;
     let unlimited = wallet
         .as_ref()
         .is_some_and(|wallet| wallet.limit_mode.eq_ignore_ascii_case("unlimited"));
@@ -171,6 +176,7 @@ pub(in super::super) async fn build_admin_get_user_response(
         export_row.as_ref().map(|row| row.rate_limit_mode.as_str()),
         unlimited,
         &groups,
+        system_daily_usage_limit_usd,
     );
     payload["feature_settings"] = export_row
         .as_ref()

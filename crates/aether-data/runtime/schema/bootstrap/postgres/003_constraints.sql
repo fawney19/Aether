@@ -1153,6 +1153,21 @@ END $mig$;
 
 
 --
+-- Name: user_groups user_groups_daily_usage_limit_mode_check; Type: CHECK CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $mig$ BEGIN
+  ALTER TABLE ONLY public.user_groups
+    ADD CONSTRAINT user_groups_daily_usage_limit_mode_check CHECK (daily_usage_limit_mode IN ('inherit', 'system', 'custom'));
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+  WHEN duplicate_table THEN NULL;
+  WHEN invalid_table_definition THEN NULL;
+END $mig$;
+
+
+
+--
 -- Name: user_oauth_links user_oauth_links_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 

@@ -1,4 +1,5 @@
 use super::super::format_optional_datetime_iso8601;
+use crate::data::state::resolve_group_effective_daily_usage_limit_policy;
 use crate::handlers::admin::request::AdminAppState;
 use crate::GatewayError;
 use serde_json::json;
@@ -25,6 +26,16 @@ pub(super) async fn admin_user_password_policy(
     )
 }
 
+pub(super) async fn admin_system_daily_usage_limit(
+    state: &AdminAppState<'_>,
+) -> Result<f64, GatewayError> {
+    crate::daily_usage_limit::parse_system_limit(
+        state
+            .read_system_config_json_value("daily_usage_limit_usd")
+            .await?,
+    )
+}
+
 pub(super) async fn find_admin_export_user(
     state: &AdminAppState<'_>,
     user_id: &str,
@@ -37,7 +48,7 @@ pub(super) fn build_admin_user_payload(
     rate_limit: Option<i32>,
     unlimited: bool,
 ) -> serde_json::Value {
-    build_admin_user_payload_with_groups(user, rate_limit, None, unlimited, &[])
+    build_admin_user_payload_with_groups(user, rate_limit, None, unlimited, &[], 0.0)
 }
 
 pub(super) fn build_admin_user_payload_with_groups(
@@ -46,6 +57,7 @@ pub(super) fn build_admin_user_payload_with_groups(
     rate_limit_mode: Option<&str>,
     unlimited: bool,
     groups: &[aether_data::repository::users::StoredUserGroup],
+    system_daily_usage_limit_usd: f64,
 ) -> serde_json::Value {
     json!({
         "id": user.id,
@@ -76,6 +88,7 @@ pub(super) fn build_admin_user_payload_with_groups(
             rate_limit,
             rate_limit_mode.unwrap_or("system"),
             groups,
+            system_daily_usage_limit_usd,
         ),
     })
 }
@@ -89,6 +102,7 @@ pub(super) fn build_admin_user_export_payload(
     request_count: u64,
     total_tokens: u64,
     groups: &[aether_data::repository::users::StoredUserGroup],
+    system_daily_usage_limit_usd: f64,
 ) -> serde_json::Value {
     json!({
         "id": row.id,
@@ -122,6 +136,7 @@ pub(super) fn build_admin_user_export_payload(
             row.rate_limit,
             &row.rate_limit_mode,
             groups,
+            system_daily_usage_limit_usd,
         ),
     })
 }
@@ -146,6 +161,7 @@ fn effective_policy_payload(
     rate_limit: Option<i32>,
     rate_limit_mode: &str,
     groups: &[aether_data::repository::users::StoredUserGroup],
+    system_daily_usage_limit_usd: f64,
 ) -> serde_json::Value {
     let mut sorted_groups = groups.to_vec();
     sorted_groups.sort_by(|left, right| {
@@ -173,6 +189,10 @@ fn effective_policy_payload(
             |group| (&group.allowed_models_mode, group.allowed_models.as_ref()),
         ),
         "rate_limit": effective_rate_limit_policy_payload(rate_limit, rate_limit_mode, &sorted_groups),
+        "daily_usage_limit_usd": effective_daily_usage_limit_policy_payload(
+            &sorted_groups,
+            system_daily_usage_limit_usd,
+        ),
     })
 }
 
@@ -233,6 +253,26 @@ fn effective_rate_limit_policy_payload(
     match rate_limit_policy_value(effective) {
         Some(rate_limit) => policy_payload("custom", json!(rate_limit), source, &group_sources),
         None => policy_payload("system", serde_json::Value::Null, source, &group_sources),
+    }
+}
+
+fn effective_daily_usage_limit_policy_payload(
+    groups: &[aether_data::repository::users::StoredUserGroup],
+    system_daily_usage_limit_usd: f64,
+) -> serde_json::Value {
+    let group_sources = groups
+        .iter()
+        .filter(|group| group.daily_usage_limit_mode == "custom")
+        .collect::<Vec<_>>();
+    let source = combined_policy_source(false, group_sources.len(), "system");
+    match resolve_group_effective_daily_usage_limit_policy(groups) {
+        Some(limit) => policy_payload("custom", json!(limit), source, &group_sources),
+        None => policy_payload(
+            "system",
+            json!(system_daily_usage_limit_usd),
+            source,
+            &group_sources,
+        ),
     }
 }
 
@@ -357,5 +397,55 @@ pub(super) fn admin_user_id_from_detail_path(request_path: &str) -> Option<Strin
         None
     } else {
         Some(value)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_data::repository::users::StoredUserGroup;
+
+    fn sample_group(id: &str, name: &str, rate_limit: Option<i32>) -> StoredUserGroup {
+        StoredUserGroup {
+            id: id.to_string(),
+            name: name.to_string(),
+            normalized_name: name.to_ascii_lowercase(),
+            description: None,
+            priority: 0,
+            allowed_providers: None,
+            allowed_providers_mode: "inherit".to_string(),
+            allowed_api_formats: None,
+            allowed_api_formats_mode: "inherit".to_string(),
+            allowed_models: None,
+            allowed_models_mode: "inherit".to_string(),
+            rate_limit,
+            rate_limit_mode: "custom".to_string(),
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn effective_daily_usage_payload_reports_system_value_and_custom_sources() {
+        let system = effective_daily_usage_limit_policy_payload(&[], 12.5);
+        assert_eq!(system["mode"], "system");
+        assert_eq!(system["value"], 12.5);
+        assert_eq!(system["source"], "system");
+
+        let mut basic = sample_group("group-basic", "Basic", None);
+        basic.daily_usage_limit_mode = "custom".to_string();
+        basic.daily_usage_limit_usd = Some(10.0);
+        let mut pro = sample_group("group-pro", "Pro", None);
+        pro.daily_usage_limit_mode = "custom".to_string();
+        pro.daily_usage_limit_usd = Some(25.0);
+        let custom = effective_daily_usage_limit_policy_payload(&[basic, pro], 12.5);
+        assert_eq!(custom["mode"], "custom");
+        assert_eq!(custom["value"], 25.0);
+        assert_eq!(custom["source"], "combined");
+        assert_eq!(
+            custom["group_ids"],
+            serde_json::json!(["group-basic", "group-pro"])
+        );
     }
 }

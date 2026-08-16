@@ -476,6 +476,64 @@ impl RuntimeState {
         }
     }
 
+    pub async fn increment_daily_usage_limit(
+        &self,
+        input: DailyUsageLimitIncrementInput<'_>,
+    ) -> Result<DailyUsageLimitCounts, DataLayerError> {
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => memory.increment_daily_usage_limit(
+                input.user_key,
+                input.key_key,
+                input.bucket,
+                input.amount_units,
+                Duration::from_secs(input.ttl_seconds.max(1)),
+            ),
+            RuntimeStateBackend::Redis(redis) => {
+                redis.runtime.increment_daily_usage_limit(input).await
+            }
+        }
+    }
+
+    pub async fn restore_daily_usage_limits(
+        &self,
+        input: DailyUsageLimitRestoreInput<'_>,
+    ) -> Result<(), DataLayerError> {
+        if input.entries.is_empty() {
+            return Ok(());
+        }
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => memory.restore_daily_usage_limits(
+                input.entries,
+                input.bucket,
+                Duration::from_secs(input.ttl_seconds.max(1)),
+            ),
+            RuntimeStateBackend::Redis(redis) => {
+                redis.runtime.restore_daily_usage_limits(input).await
+            }
+        }
+    }
+
+    pub async fn daily_usage_limit_counts(
+        &self,
+        input: DailyUsageLimitCountInput<'_>,
+    ) -> Result<DailyUsageLimitCounts, DataLayerError> {
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => {
+                let mut counts =
+                    memory.daily_usage_limit_counts(input.user_key, input.key_key, input.bucket)?;
+                counts.state_ready = memory
+                    .kv_get(input.state_key)
+                    .await
+                    .as_deref()
+                    .is_some_and(|value| value == "ready");
+                Ok(counts)
+            }
+            RuntimeStateBackend::Redis(redis) => {
+                redis.runtime.daily_usage_limit_counts(input).await
+            }
+        }
+    }
+
     pub async fn set_add(&self, key: &str, member: &str) -> Result<bool, DataLayerError> {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.set_add(key, member).await),
@@ -758,6 +816,47 @@ pub struct RateLimitInput<'a> {
     pub bucket: u64,
     pub user_limit: u32,
     pub key_limit: u32,
+    pub ttl_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DailyUsageLimitCounts {
+    pub user_units: u64,
+    pub key_units: u64,
+    pub user_present: bool,
+    pub key_present: bool,
+    pub state_ready: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DailyUsageLimitIncrementInput<'a> {
+    pub user_key: Option<&'a str>,
+    pub key_key: &'a str,
+    pub bucket: u64,
+    pub amount_units: u64,
+    pub ttl_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DailyUsageLimitCountInput<'a> {
+    pub state_key: &'a str,
+    pub user_key: Option<&'a str>,
+    pub key_key: &'a str,
+    pub bucket: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyUsageLimitRestoreEntry {
+    pub user_key: Option<String>,
+    pub key_key: String,
+    pub user_units: u64,
+    pub key_units: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DailyUsageLimitRestoreInput<'a> {
+    pub entries: &'a [DailyUsageLimitRestoreEntry],
+    pub bucket: u64,
     pub ttl_seconds: u64,
 }
 
@@ -1635,6 +1734,225 @@ mod tests {
                 .expect("second key count"),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn memory_daily_usage_limit_accumulates_user_and_key_scopes() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let user_key = "daily_usage_limit:user:shared:1";
+        let first_key = "daily_usage_limit:key:first:1";
+        let second_key = "daily_usage_limit:key:second:1";
+        let standalone_key = "daily_usage_limit:key:standalone:1";
+        runtime
+            .increment_daily_usage_limit(DailyUsageLimitIncrementInput {
+                user_key: Some(user_key),
+                key_key: first_key,
+                bucket: 1,
+                amount_units: 125,
+                ttl_seconds: 60,
+            })
+            .await
+            .expect("first daily usage increment");
+        runtime
+            .increment_daily_usage_limit(DailyUsageLimitIncrementInput {
+                user_key: Some(user_key),
+                key_key: second_key,
+                bucket: 1,
+                amount_units: 75,
+                ttl_seconds: 60,
+            })
+            .await
+            .expect("second daily usage increment");
+        runtime
+            .increment_daily_usage_limit(DailyUsageLimitIncrementInput {
+                user_key: None,
+                key_key: standalone_key,
+                bucket: 1,
+                amount_units: 50,
+                ttl_seconds: 60,
+            })
+            .await
+            .expect("standalone daily usage increment");
+
+        let user_counts = runtime
+            .daily_usage_limit_counts(DailyUsageLimitCountInput {
+                state_key: "daily_usage_limit:runtime_state",
+                user_key: Some(user_key),
+                key_key: first_key,
+                bucket: 1,
+            })
+            .await
+            .expect("user daily usage count");
+        assert_eq!(user_counts.user_units, 200);
+        assert_eq!(user_counts.key_units, 125);
+
+        let standalone_counts = runtime
+            .daily_usage_limit_counts(DailyUsageLimitCountInput {
+                state_key: "daily_usage_limit:runtime_state",
+                user_key: None,
+                key_key: standalone_key,
+                bucket: 1,
+            })
+            .await
+            .expect("standalone daily usage count");
+        assert_eq!(standalone_counts.user_units, 0);
+        assert_eq!(standalone_counts.key_units, 50);
+    }
+
+    #[tokio::test]
+    async fn memory_daily_usage_limit_batch_restore_preserves_higher_counts_and_marks_ready() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let user_key = "daily_usage_limit:user:restore:1";
+        let key_key = "daily_usage_limit:key:restore:1";
+
+        let missing = runtime
+            .daily_usage_limit_counts(DailyUsageLimitCountInput {
+                state_key: "daily_usage_limit:runtime_state",
+                user_key: Some(user_key),
+                key_key,
+                bucket: 1,
+            })
+            .await
+            .expect("missing daily usage counts");
+        assert!(!missing.user_present);
+        assert!(!missing.key_present);
+
+        let restored = [DailyUsageLimitRestoreEntry {
+            user_key: Some(user_key.to_string()),
+            key_key: key_key.to_string(),
+            user_units: 100,
+            key_units: 100,
+        }];
+        runtime
+            .restore_daily_usage_limits(DailyUsageLimitRestoreInput {
+                entries: &restored,
+                bucket: 1,
+                ttl_seconds: 60,
+            })
+            .await
+            .expect("restore daily usage counts");
+
+        runtime
+            .increment_daily_usage_limit(DailyUsageLimitIncrementInput {
+                user_key: Some(user_key),
+                key_key,
+                bucket: 1,
+                amount_units: 50,
+                ttl_seconds: 60,
+            })
+            .await
+            .expect("increment restored daily usage counts");
+        let stale_restore = [DailyUsageLimitRestoreEntry {
+            user_key: Some(user_key.to_string()),
+            key_key: key_key.to_string(),
+            user_units: 125,
+            key_units: 125,
+        }];
+        runtime
+            .restore_daily_usage_limits(DailyUsageLimitRestoreInput {
+                entries: &stale_restore,
+                bucket: 1,
+                ttl_seconds: 60,
+            })
+            .await
+            .expect("preserve higher daily usage counts");
+        runtime
+            .kv_set("daily_usage_limit:runtime_state", "ready", None)
+            .await
+            .expect("mark daily usage runtime ready");
+        let preserved = runtime
+            .daily_usage_limit_counts(DailyUsageLimitCountInput {
+                state_key: "daily_usage_limit:runtime_state",
+                user_key: Some(user_key),
+                key_key,
+                bucket: 1,
+            })
+            .await
+            .expect("read restored daily usage counts");
+        assert_eq!(preserved.user_units, 150);
+        assert_eq!(preserved.key_units, 150);
+        assert!(preserved.state_ready);
+    }
+
+    #[tokio::test]
+    async fn redis_daily_usage_limit_accumulates_user_and_key_scopes() {
+        let Some((_redis, runtime)) = redis_runtime_for_test("daily-usage-limit").await else {
+            return;
+        };
+        let user_key = "daily_usage_limit:user:shared:1";
+        let key_key = "daily_usage_limit:key:first:1";
+        for amount_units in [125, 75] {
+            runtime
+                .increment_daily_usage_limit(DailyUsageLimitIncrementInput {
+                    user_key: Some(user_key),
+                    key_key,
+                    bucket: 1,
+                    amount_units,
+                    ttl_seconds: 60,
+                })
+                .await
+                .expect("redis daily usage increment");
+        }
+
+        let counts = runtime
+            .daily_usage_limit_counts(DailyUsageLimitCountInput {
+                state_key: "daily_usage_limit:runtime_state",
+                user_key: Some(user_key),
+                key_key,
+                bucket: 1,
+            })
+            .await
+            .expect("redis daily usage counts");
+        assert_eq!(counts.user_units, 200);
+        assert_eq!(counts.key_units, 200);
+    }
+
+    #[tokio::test]
+    async fn redis_daily_usage_limit_batch_restore_preserves_higher_counts() {
+        let Some((_redis, runtime)) = redis_runtime_for_test("daily-usage-limit-restore").await
+        else {
+            return;
+        };
+        let user_key = "daily_usage_limit:user:restore:1";
+        let key_key = "daily_usage_limit:key:restore:1";
+        runtime
+            .increment_daily_usage_limit(DailyUsageLimitIncrementInput {
+                user_key: Some(user_key),
+                key_key,
+                bucket: 1,
+                amount_units: 150,
+                ttl_seconds: 60,
+            })
+            .await
+            .expect("redis daily usage increment");
+
+        let entries = [DailyUsageLimitRestoreEntry {
+            user_key: Some(user_key.to_string()),
+            key_key: key_key.to_string(),
+            user_units: 125,
+            key_units: 125,
+        }];
+        runtime
+            .restore_daily_usage_limits(DailyUsageLimitRestoreInput {
+                entries: &entries,
+                bucket: 1,
+                ttl_seconds: 60,
+            })
+            .await
+            .expect("redis daily usage restore");
+        let preserved = runtime
+            .daily_usage_limit_counts(DailyUsageLimitCountInput {
+                state_key: "daily_usage_limit:runtime_state",
+                user_key: Some(user_key),
+                key_key,
+                bucket: 1,
+            })
+            .await
+            .expect("redis restored daily usage counts");
+        assert_eq!(preserved.user_units, 150);
+        assert_eq!(preserved.key_units, 150);
+        assert!(preserved.user_present);
+        assert!(preserved.key_present);
     }
 
     #[tokio::test]

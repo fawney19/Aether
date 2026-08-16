@@ -1,9 +1,10 @@
 use aether_data_contracts::repository::usage::{
-    ProviderApiKeyWindowUsageRequest, StoredRequestUsageAudit, UsageAuditKeywordSearchQuery,
-    UsageAuditListQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
+    ProviderApiKeyWindowUsageRequest, StoredRequestUsageAudit, StoredUsageDailyActualCostRollup,
+    UsageAuditKeywordSearchQuery, UsageAuditListQuery, UsageDailyActualCostRollupQuery,
+    UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
 };
 use aether_data_contracts::DataLayerError;
-use sqlx::{MySql, QueryBuilder};
+use sqlx::{MySql, QueryBuilder, Row};
 
 use crate::error::SqlResultExt;
 
@@ -135,6 +136,51 @@ impl MysqlUsageReadFilter {
 }
 
 impl MysqlUsageStorage {
+    pub async fn summarize_usage_daily_actual_cost_rollups(
+        &self,
+        query: &UsageDailyActualCostRollupQuery,
+    ) -> Result<Vec<StoredUsageDailyActualCostRollup>, DataLayerError> {
+        if query.finalized_from_unix_secs >= query.finalized_until_unix_secs {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            r#"
+SELECT u.user_id,
+       u.api_key_id,
+       CASE
+         WHEN LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(
+           u.request_metadata, '$.api_key_is_standalone'
+         )), 'false')) IN ('true', '1')
+         THEN 1 ELSE 0
+       END AS api_key_is_standalone,
+       SUM(CAST(u.actual_total_cost_usd AS DOUBLE)) AS actual_total_cost_usd
+FROM `usage` AS u
+WHERE u.status = 'completed'
+  AND u.finalized_at >= ?
+  AND u.finalized_at < ?
+  AND u.api_key_id IS NOT NULL
+  AND TRIM(u.api_key_id) <> ''
+  AND CAST(u.actual_total_cost_usd AS DOUBLE) > 0
+GROUP BY u.user_id, u.api_key_id, 3
+"#,
+        )
+        .bind(query.finalized_from_unix_secs as i64)
+        .bind(query.finalized_until_unix_secs as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_sql_err()?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(StoredUsageDailyActualCostRollup {
+                    user_id: row.try_get("user_id").map_sql_err()?,
+                    api_key_id: row.try_get("api_key_id").map_sql_err()?,
+                    api_key_is_standalone: row.try_get("api_key_is_standalone").map_sql_err()?,
+                    actual_total_cost_usd: row.try_get("actual_total_cost_usd").map_sql_err()?,
+                })
+            })
+            .collect()
+    }
+
     pub async fn find_by_id(
         &self,
         id: &str,

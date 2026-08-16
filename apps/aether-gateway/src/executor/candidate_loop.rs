@@ -13,8 +13,9 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::Response;
 use futures_util::StreamExt;
+use tokio::sync::OnceCell;
 use tokio::time::{timeout, Duration, Instant};
-use tracing::{debug, warn, Instrument};
+use tracing::{debug, info, warn, Instrument};
 
 use crate::ai_serving::LocalExecutionAttemptSource;
 use crate::clock::current_unix_ms;
@@ -269,10 +270,21 @@ where
     ) -> Result<AiAttemptExecutionOutcome<Self::Response>, Self::Error> {
         let plan = attempt.execution_plan();
         let report_context = attempt.report_context();
+        let daily_usage_outcome = self
+            .transfer_tracker
+            .daily_usage_outcome
+            .get_or_init(|| async {
+                self.state
+                    .frontdoor_daily_usage()
+                    .check(self.state, self.decision)
+                    .await
+            })
+            .await;
         if let Some(response) = execution_plan_balance_capacity_response(
             self.state,
             self.trace_id,
             self.decision,
+            daily_usage_outcome,
             plan,
             report_context.as_ref(),
         )
@@ -525,6 +537,8 @@ struct ProviderTransferStateTracker {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProviderTransferTracker {
     state: std::sync::Arc<tokio::sync::Mutex<ProviderTransferStateTracker>>,
+    daily_usage_outcome:
+        std::sync::Arc<OnceCell<crate::daily_usage_limit::FrontdoorDailyUsageOutcome>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -969,6 +983,16 @@ where
     ) -> Result<AiAttemptExecutionOutcome<Self::Response>, Self::Error> {
         let plan = attempt.execution_plan();
         let report_context = attempt.report_context();
+        let daily_usage_outcome = self
+            .transfer_tracker
+            .daily_usage_outcome
+            .get_or_init(|| async {
+                self.state
+                    .frontdoor_daily_usage()
+                    .check(self.state, self.decision)
+                    .await
+            })
+            .await;
         let candidate_index = parse_request_candidate_report_context(report_context.as_ref())
             .and_then(|context| context.candidate_index)
             .map(|value| value.to_string())
@@ -991,6 +1015,7 @@ where
             self.state,
             self.trace_id,
             self.decision,
+            daily_usage_outcome,
             plan,
             report_context.as_ref(),
         )
@@ -1124,9 +1149,38 @@ async fn execution_plan_balance_capacity_response(
     state: &AppState,
     trace_id: &str,
     decision: &GatewayControlDecision,
+    daily_usage_outcome: &crate::daily_usage_limit::FrontdoorDailyUsageOutcome,
     plan: &aether_contracts::ExecutionPlan,
     report_context: Option<&serde_json::Value>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
+    if let crate::daily_usage_limit::FrontdoorDailyUsageOutcome::Rejected(rejection) =
+        daily_usage_outcome
+    {
+        if !crate::control::execution_plan_cost_is_proven_zero(state, plan, report_context).await {
+            let auth = decision.auth_context.as_ref();
+            info!(
+                event_name = "frontdoor_daily_usage_rejected",
+                log_type = "event",
+                trace_id,
+                user_id = auth.map(|auth| auth.user_id.as_str()).unwrap_or("-"),
+                api_key_id = auth.map(|auth| auth.api_key_id.as_str()).unwrap_or("-"),
+                scope = rejection.scope,
+                limit_usd = rejection.limit_usd,
+                used_usd = rejection.used_usd,
+                retry_after = rejection.retry_after,
+                "gateway rejected candidate at daily usage limit"
+            );
+            mark_unused_local_candidate(state, plan, report_context).await;
+            let mut response = crate::api::response::build_local_daily_usage_limited_response(
+                trace_id,
+                Some(decision),
+                rejection,
+            )?;
+            attach_redaction_execution_candidate(&mut response, plan.candidate_id.as_deref());
+            return Ok(Some(response));
+        }
+    }
+
     let rejection = match crate::control::execution_plan_balance_capacity_rejection(
         state,
         decision,
@@ -2005,6 +2059,22 @@ mod tests {
             ]
         );
         assert_eq!(port.unused.lock().unwrap().as_slice(), ["a-key3-retry0"]);
+    }
+
+    #[test]
+    fn cloned_tracker_shares_request_daily_usage_cache() {
+        let tracker = ProviderTransferTracker::default();
+        let cloned = tracker.clone();
+        let other_request = ProviderTransferTracker::default();
+
+        assert!(Arc::ptr_eq(
+            &tracker.daily_usage_outcome,
+            &cloned.daily_usage_outcome
+        ));
+        assert!(!Arc::ptr_eq(
+            &tracker.daily_usage_outcome,
+            &other_request.daily_usage_outcome
+        ));
     }
 
     #[tokio::test]

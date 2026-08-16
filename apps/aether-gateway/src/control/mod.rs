@@ -8,8 +8,8 @@ mod public;
 mod route;
 
 pub(crate) use auth::{
-    execution_plan_balance_capacity_rejection, extract_requested_model,
-    refresh_execution_runtime_auth_context, request_model_local_rejection,
+    execution_plan_balance_capacity_rejection, execution_plan_cost_is_proven_zero,
+    extract_requested_model, refresh_execution_runtime_auth_context, request_model_local_rejection,
     resolve_execution_runtime_auth_context, should_buffer_request_for_local_auth,
     trusted_auth_local_rejection, GatewayAdminPrincipalContext, GatewayControlAuthContext,
     GatewayCredentialCarrier, GatewayLocalAuthRejection,

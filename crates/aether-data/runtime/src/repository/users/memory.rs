@@ -276,6 +276,8 @@ fn memory_group_from_record(
 ) -> Result<StoredUserGroup, DataLayerError> {
     let now = chrono::Utc::now();
     let name = normalize_user_group_name(&record.name);
+    let daily_usage_limit_usd = record.daily_usage_limit_usd;
+    let daily_usage_limit_mode = record.daily_usage_limit_mode.clone();
     StoredUserGroup::new(
         uuid::Uuid::new_v4().to_string(),
         name.clone(),
@@ -293,6 +295,7 @@ fn memory_group_from_record(
         Some(now),
         Some(now),
     )
+    .and_then(|group| group.with_daily_usage_limit(daily_usage_limit_usd, daily_usage_limit_mode))
 }
 
 fn memory_update_group_from_record(
@@ -312,7 +315,11 @@ fn memory_update_group_from_record(
     group.allowed_models_mode = record.allowed_models_mode;
     group.rate_limit = record.rate_limit;
     group.rate_limit_mode = record.rate_limit_mode;
+    group.daily_usage_limit_usd = record.daily_usage_limit_usd;
+    group.daily_usage_limit_mode = record.daily_usage_limit_mode;
     group.updated_at = Some(chrono::Utc::now());
+    let daily_usage_limit_usd = group.daily_usage_limit_usd;
+    let daily_usage_limit_mode = group.daily_usage_limit_mode.clone();
     StoredUserGroup::new(
         group.id,
         group.name,
@@ -330,6 +337,7 @@ fn memory_update_group_from_record(
         group.created_at,
         group.updated_at,
     )
+    .and_then(|group| group.with_daily_usage_limit(daily_usage_limit_usd, daily_usage_limit_mode))
 }
 
 fn memory_group_members(

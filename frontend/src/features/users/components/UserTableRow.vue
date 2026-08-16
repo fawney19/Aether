@@ -39,6 +39,25 @@
             {{ legacyT(row.rateLimitLabel) }}
           </span>
         </div>
+        <div
+          class="flex items-center text-muted-foreground"
+          :title="legacyT(row.dailyUsageLimitSource)"
+        >
+          <span class="w-14">{{ legacyT('日限额:') }}</span>
+          <Badge
+            v-if="row.dailyUsageLimitAsBadge"
+            variant="secondary"
+            class="h-5 px-1.5 py-0 text-[10px] font-medium"
+          >
+            {{ legacyT(row.dailyUsageLimitLabel) }}
+          </Badge>
+          <span
+            v-else
+            class="font-medium text-foreground"
+          >
+            {{ legacyT(row.dailyUsageLimitLabel) }}
+          </span>
+        </div>
       </div>
     </TableCell>
     <TableCell class="py-4 text-xs text-muted-foreground">

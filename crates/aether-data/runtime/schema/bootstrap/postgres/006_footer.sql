@@ -9,7 +9,8 @@ INSERT INTO public.user_groups (
     allowed_providers_mode,
     allowed_api_formats_mode,
     allowed_models_mode,
-    rate_limit_mode
+    rate_limit_mode,
+    daily_usage_limit_mode
 )
 VALUES (
     '00000000-0000-0000-0000-000000000001',
@@ -20,6 +21,7 @@ VALUES (
     'unrestricted',
     'unrestricted',
     'unrestricted',
+    'system',
     'system'
 )
 ON CONFLICT (id) DO NOTHING;

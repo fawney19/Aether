@@ -5,17 +5,18 @@ use aether_data_contracts::repository::usage::{
     StoredProviderApiKeyWindowUsageSummary, StoredProviderUsageSummary, StoredRequestUsageAudit,
     StoredUsageAuditAggregation, StoredUsageAuditSummary, StoredUsageBreakdownSummaryRow,
     StoredUsageCacheAffinityHitSummary, StoredUsageCacheAffinityIntervalRow,
-    StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary, StoredUsageDailySummary,
-    StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
-    StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
+    StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary, StoredUsageDailyActualCostRollup,
+    StoredUsageDailySummary, StoredUsageDashboardDailyBreakdownRow,
+    StoredUsageDashboardProviderCount, StoredUsageDashboardSummary,
+    StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
     StoredUsagePerformancePercentilesRow, StoredUsageProviderPerformance,
     StoredUsageSettledCostSummary, StoredUsageTimeSeriesBucket, StoredUsageUserTotals,
     UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditListQuery,
     UsageAuditSummaryQuery, UsageBreakdownSummaryQuery, UsageCacheAffinityHitSummaryQuery,
     UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCostSavingsSummaryQuery,
-    UsageDailyHeatmapQuery, UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
-    UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageLeaderboardQuery,
-    UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
+    UsageDailyActualCostRollupQuery, UsageDailyHeatmapQuery, UsageDashboardDailyBreakdownQuery,
+    UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery, UsageErrorDistributionQuery,
+    UsageLeaderboardQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
     UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery, UsageReadRepository,
     UsageSettledCostSummaryQuery, UsageTimeSeriesQuery,
 };
@@ -165,6 +166,15 @@ impl UsageReadRepository for MysqlUsageReadRepository {
             .with_api_key_id(query.api_key_id.as_deref());
         let repository = self.materialize_read_model(filter).await?;
         repository.summarize_usage_settled_cost(query).await
+    }
+
+    async fn summarize_usage_daily_actual_cost_rollups(
+        &self,
+        query: &UsageDailyActualCostRollupQuery,
+    ) -> Result<Vec<StoredUsageDailyActualCostRollup>, DataLayerError> {
+        self.storage
+            .summarize_usage_daily_actual_cost_rollups(query)
+            .await
     }
 
     async fn summarize_usage_cache_affinity_hit_summary(

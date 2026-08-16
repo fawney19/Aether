@@ -37,6 +37,10 @@ struct AdminUserGroupPayload {
     rate_limit: Option<i32>,
     #[serde(default = "default_rate_limit_mode")]
     rate_limit_mode: String,
+    #[serde(default)]
+    daily_usage_limit_usd: Option<f64>,
+    #[serde(default = "default_rate_limit_mode")]
+    daily_usage_limit_mode: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -370,6 +374,12 @@ fn parse_group_record(
     if payload.rate_limit.is_some_and(|value| value < 0) {
         return Err("rate_limit 必须大于等于 0".to_string());
     }
+    if payload
+        .daily_usage_limit_usd
+        .is_some_and(|value| !value.is_finite() || value < 0.0)
+    {
+        return Err("daily_usage_limit_usd 必须是大于等于 0 的有限数值".to_string());
+    }
     let allowed_providers =
         normalize_admin_user_string_list(payload.allowed_providers, "allowed_providers")?;
     let allowed_api_formats = normalize_admin_user_api_formats(payload.allowed_api_formats)?;
@@ -390,6 +400,8 @@ fn parse_group_record(
         allowed_models_mode: normalize_list_mode(&payload.allowed_models_mode)?,
         rate_limit: payload.rate_limit,
         rate_limit_mode: normalize_rate_mode(&payload.rate_limit_mode)?,
+        daily_usage_limit_usd: payload.daily_usage_limit_usd,
+        daily_usage_limit_mode: normalize_rate_mode(&payload.daily_usage_limit_mode)?,
     })
 }
 
@@ -420,6 +432,8 @@ fn user_group_payload(
         "allowed_models_mode": group.allowed_models_mode,
         "rate_limit": group.rate_limit,
         "rate_limit_mode": group.rate_limit_mode,
+        "daily_usage_limit_usd": group.daily_usage_limit_usd,
+        "daily_usage_limit_mode": group.daily_usage_limit_mode,
         "is_default": default_group_id == Some(group.id.as_str()),
         "created_at": format_optional_datetime_iso8601(group.created_at),
         "updated_at": format_optional_datetime_iso8601(group.updated_at),

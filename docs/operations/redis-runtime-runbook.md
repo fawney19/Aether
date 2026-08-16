@@ -31,6 +31,28 @@ crash should restore persistence in the Redis command:
 Expect higher tail latency when Redis persistence shares disks with Postgres or
 application logs.
 
+### Daily usage limit counters
+
+Daily usage limits intentionally remain compatible with the default
+non-persistent Redis policy. Every positive finalized request updates the user
+and API key counters even when that scope is currently unlimited, so changing a
+limit only changes the threshold and never starts a database query.
+
+The gateway reads a global daily-usage runtime-state marker together with the
+applicable counters in the same Redis `MGET`. If Redis loses its runtime state,
+the missing marker makes daily limits temporarily fail open and starts one
+distributed background recovery. That recovery performs one grouped scan of
+the current `APP_TIMEZONE` day, restores counters in Redis batches without
+lowering concurrent values, and marks the runtime state ready. It does not run
+a query per user or API key, does not put SQL on the request path, and does not
+require usage-table indexes dedicated to this feature.
+
+Gateway process restarts do not trigger recovery while Redis still contains the
+marker. Redis container or host restarts do trigger recovery on the first
+limited request. A small amount of undercounting or over-limit traffic is
+acceptable while recovery overlaps in-flight settlements; this feature is a
+traffic policy, not a financial balance ledger.
+
 ### OpenAI Responses continuation history
 
 When an OpenAI Responses request is converted to an OpenAI Chat provider,

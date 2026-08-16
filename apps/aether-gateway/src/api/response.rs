@@ -10,6 +10,7 @@ use crate::ai_serving::{build_core_error_body_for_client_format, LocalCoreSyncEr
 use crate::constants::*;
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayLocalAuthRejection;
+use crate::daily_usage_limit::{DailyUsageLimitedResponse, FrontdoorDailyUsageRejection};
 use crate::headers::should_skip_response_header;
 use crate::rate_limit::FrontdoorUserRpmRejection;
 use crate::{insert_header_if_missing, GatewayError};
@@ -258,6 +259,74 @@ pub(crate) fn build_local_user_rpm_limited_response(
     )
 }
 
+pub(crate) fn build_local_daily_usage_limited_response(
+    trace_id: &str,
+    control_decision: Option<&GatewayControlDecision>,
+    rejection: &FrontdoorDailyUsageRejection,
+) -> Result<Response<Body>, GatewayError> {
+    let message = "已达到每日使用上限，请在额度重置后重试";
+    let fallback_payload = json!({
+        "error": {
+            "type": "daily_usage_limit_exceeded",
+            "message": message,
+            "details": {
+                "limit_usd": rejection.limit_usd,
+                "used_usd": rejection.used_usd,
+                "remaining_usd": rejection.remaining_usd,
+                "scope": rejection.scope,
+                "reset_at": rejection.reset_at_unix_secs,
+                "timezone": rejection.timezone,
+            }
+        }
+    });
+    let payload = if local_error_uses_claude_format(control_decision, None) {
+        build_core_error_body_for_client_format(
+            "claude:messages",
+            message,
+            Some("daily_usage_limit_exceeded"),
+            LocalCoreSyncErrorKind::RateLimit,
+        )
+        .unwrap_or(fallback_payload)
+    } else {
+        fallback_payload
+    };
+    let body =
+        serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let headers = BTreeMap::from([
+        ("content-type".to_string(), "application/json".to_string()),
+        ("Retry-After".to_string(), rejection.retry_after.to_string()),
+        (
+            "X-Daily-Usage-Limit-USD".to_string(),
+            format!("{:.8}", rejection.limit_usd),
+        ),
+        (
+            "X-Daily-Usage-Used-USD".to_string(),
+            format!("{:.8}", rejection.used_usd),
+        ),
+        (
+            "X-Daily-Usage-Remaining-USD".to_string(),
+            format!("{:.8}", rejection.remaining_usd),
+        ),
+        (
+            "X-Daily-Usage-Scope".to_string(),
+            rejection.scope.to_string(),
+        ),
+        (
+            "X-Daily-Usage-Reset".to_string(),
+            rejection.reset_at_unix_secs.to_string(),
+        ),
+    ]);
+    let mut response = build_client_response_from_parts(
+        StatusCode::TOO_MANY_REQUESTS.as_u16(),
+        &headers,
+        Body::from(body),
+        trace_id,
+        control_decision,
+    )?;
+    response.extensions_mut().insert(DailyUsageLimitedResponse);
+    Ok(response)
+}
+
 pub(crate) fn build_local_http_error_response(
     trace_id: &str,
     control_decision: Option<&GatewayControlDecision>,
@@ -455,10 +524,12 @@ fn local_error_kind_for_status(status: StatusCode) -> LocalCoreSyncErrorKind {
 mod tests {
     use super::{
         build_client_response_from_parts, build_local_auth_rejection_response,
+        build_local_daily_usage_limited_response,
         build_local_http_error_response_with_request_path, build_local_overloaded_response,
         build_local_user_rpm_limited_response,
     };
     use crate::control::{GatewayControlDecision, GatewayLocalAuthRejection};
+    use crate::daily_usage_limit::FrontdoorDailyUsageRejection;
     use crate::rate_limit::FrontdoorUserRpmRejection;
     use axum::body::{to_bytes, Body};
     use std::collections::BTreeMap;
@@ -545,6 +616,39 @@ mod tests {
         let overloaded = response_json(overloaded).await;
         assert_eq!(overloaded["type"], "error");
         assert_eq!(overloaded["error"]["type"], "overloaded_error");
+    }
+
+    #[tokio::test]
+    async fn daily_usage_limit_response_has_dedicated_error_and_reset_headers() {
+        let response = build_local_daily_usage_limited_response(
+            "trace-daily-limit",
+            None,
+            &FrontdoorDailyUsageRejection {
+                scope: "user",
+                limit_usd: 10.0,
+                used_usd: 10.25,
+                remaining_usd: 0.0,
+                retry_after: 120,
+                reset_at_unix_secs: 1_800_000_000,
+                timezone: "Asia/Shanghai".to_string(),
+            },
+        )
+        .expect("daily limit response should build");
+
+        assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()["retry-after"], "120");
+        assert_eq!(response.headers()["x-daily-usage-limit-usd"], "10.00000000");
+        assert_eq!(response.headers()["x-daily-usage-used-usd"], "10.25000000");
+        assert_eq!(
+            response.headers()["x-daily-usage-remaining-usd"],
+            "0.00000000"
+        );
+        assert_eq!(response.headers()["x-daily-usage-scope"], "user");
+        assert_eq!(response.headers()["x-daily-usage-reset"], "1800000000");
+
+        let payload = response_json(response).await;
+        assert_eq!(payload["error"]["type"], "daily_usage_limit_exceeded");
+        assert_eq!(payload["error"]["details"]["timezone"], "Asia/Shanghai");
     }
 
     #[tokio::test]

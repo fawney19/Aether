@@ -53,7 +53,7 @@ pub(crate) struct MemoryRuntimeBackend {
 
 #[derive(Debug, Clone)]
 struct MemoryCounterEntry {
-    value: u32,
+    value: u64,
     bucket: u64,
     expires_at: Instant,
 }
@@ -437,7 +437,7 @@ impl MemoryRuntimeBackend {
                 .filter(|entry| entry.bucket == bucket)
                 .map(|entry| entry.value)
                 .unwrap_or_default();
-            if user_count >= user_limit {
+            if user_count >= u64::from(user_limit) {
                 return Ok(crate::RateLimitCheck::Rejected {
                     scope: crate::RateLimitScope::User,
                     limit: user_limit,
@@ -452,7 +452,7 @@ impl MemoryRuntimeBackend {
                 .filter(|entry| entry.bucket == bucket)
                 .map(|entry| entry.value)
                 .unwrap_or_default();
-            if key_count >= key_limit {
+            if key_count >= u64::from(key_limit) {
                 return Ok(crate::RateLimitCheck::Rejected {
                     scope: crate::RateLimitScope::Key,
                     limit: key_limit,
@@ -477,7 +477,7 @@ impl MemoryRuntimeBackend {
                     expires_at,
                 })
                 .value;
-            remaining = Some(user_limit.saturating_sub(next));
+            remaining = Some(user_limit.saturating_sub(u32::try_from(next).unwrap_or(u32::MAX)));
         }
         if key_limit > 0 {
             let next = shard
@@ -494,7 +494,7 @@ impl MemoryRuntimeBackend {
                     expires_at,
                 })
                 .value;
-            let key_remaining = key_limit.saturating_sub(next);
+            let key_remaining = key_limit.saturating_sub(u32::try_from(next).unwrap_or(u32::MAX));
             remaining = Some(remaining.map_or(key_remaining, |value| value.min(key_remaining)));
         }
         Ok(crate::RateLimitCheck::Allowed {
@@ -521,11 +521,223 @@ impl MemoryRuntimeBackend {
                     .entries
                     .get(key)
                     .filter(|entry| entry.bucket == bucket)
-                    .map(|entry| entry.value)
+                    .map(|entry| u32::try_from(entry.value).unwrap_or(u32::MAX))
                     .unwrap_or_default(),
             );
         }
         Ok(total)
+    }
+
+    pub(crate) fn increment_daily_usage_limit(
+        &self,
+        user_key: Option<&str>,
+        key_key: &str,
+        bucket: u64,
+        amount_units: u64,
+        ttl: Duration,
+    ) -> Result<crate::DailyUsageLimitCounts, DataLayerError> {
+        let partition_key = user_key.unwrap_or(key_key);
+        let shard_index = memory_rate_limit_counter_shard_index(partition_key);
+        let mut shard = self.counters.shards[shard_index].lock().map_err(|_| {
+            DataLayerError::UnexpectedValue(
+                "memory daily usage limit counter lock poisoned".to_string(),
+            )
+        })?;
+        let now = Instant::now();
+        shard.amortized_prune(now);
+        if let Some(user_key) = user_key {
+            prune_rate_limit_counter(&mut shard.entries, user_key, bucket, now);
+        }
+        prune_rate_limit_counter(&mut shard.entries, key_key, bucket, now);
+
+        let expires_at = now + ttl;
+        let user_units = user_key
+            .map(|user_key| {
+                shard
+                    .entries
+                    .entry(user_key.to_string())
+                    .and_modify(|entry| {
+                        entry.bucket = bucket;
+                        entry.value = entry.value.saturating_add(amount_units);
+                        entry.expires_at = expires_at;
+                    })
+                    .or_insert(MemoryCounterEntry {
+                        value: amount_units,
+                        bucket,
+                        expires_at,
+                    })
+                    .value
+            })
+            .unwrap_or_default();
+        let key_units = shard
+            .entries
+            .entry(key_key.to_string())
+            .and_modify(|entry| {
+                entry.bucket = bucket;
+                entry.value = entry.value.saturating_add(amount_units);
+                entry.expires_at = expires_at;
+            })
+            .or_insert(MemoryCounterEntry {
+                value: amount_units,
+                bucket,
+                expires_at,
+            })
+            .value;
+        Ok(crate::DailyUsageLimitCounts {
+            user_units,
+            key_units,
+            user_present: user_key.is_some(),
+            key_present: true,
+            state_ready: false,
+        })
+    }
+
+    pub(crate) fn daily_usage_limit_counts(
+        &self,
+        user_key: Option<&str>,
+        key_key: &str,
+        bucket: u64,
+    ) -> Result<crate::DailyUsageLimitCounts, DataLayerError> {
+        let partition_key = user_key.unwrap_or(key_key);
+        let shard_index = memory_rate_limit_counter_shard_index(partition_key);
+        let mut shard = self.counters.shards[shard_index].lock().map_err(|_| {
+            DataLayerError::UnexpectedValue(
+                "memory daily usage limit counter lock poisoned".to_string(),
+            )
+        })?;
+        let now = Instant::now();
+        shard.amortized_prune(now);
+        if let Some(user_key) = user_key {
+            prune_rate_limit_counter(&mut shard.entries, user_key, bucket, now);
+        }
+        let user_present = user_key.is_some_and(|user_key| {
+            shard
+                .entries
+                .get(user_key)
+                .is_some_and(|entry| entry.bucket == bucket)
+        });
+        let user_units = user_key
+            .map(|user_key| {
+                shard
+                    .entries
+                    .get(user_key)
+                    .filter(|entry| entry.bucket == bucket)
+                    .map(|entry| entry.value)
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        prune_rate_limit_counter(&mut shard.entries, key_key, bucket, now);
+        let key_present = shard
+            .entries
+            .get(key_key)
+            .is_some_and(|entry| entry.bucket == bucket);
+        let key_units = shard
+            .entries
+            .get(key_key)
+            .filter(|entry| entry.bucket == bucket)
+            .map(|entry| entry.value)
+            .unwrap_or_default();
+        Ok(crate::DailyUsageLimitCounts {
+            user_units,
+            key_units,
+            user_present,
+            key_present,
+            state_ready: false,
+        })
+    }
+
+    fn restore_daily_usage_limit_entry(
+        &self,
+        user_key: Option<&str>,
+        key_key: &str,
+        bucket: u64,
+        user_units: u64,
+        key_units: u64,
+        ttl: Duration,
+    ) -> Result<crate::DailyUsageLimitCounts, DataLayerError> {
+        let partition_key = user_key.unwrap_or(key_key);
+        let shard_index = memory_rate_limit_counter_shard_index(partition_key);
+        let mut shard = self.counters.shards[shard_index].lock().map_err(|_| {
+            DataLayerError::UnexpectedValue(
+                "memory daily usage limit counter lock poisoned".to_string(),
+            )
+        })?;
+        let now = Instant::now();
+        shard.amortized_prune(now);
+        if let Some(user_key) = user_key {
+            prune_rate_limit_counter(&mut shard.entries, user_key, bucket, now);
+        }
+        prune_rate_limit_counter(&mut shard.entries, key_key, bucket, now);
+        let expires_at = now + ttl;
+        let (user_value, user_present) = match user_key {
+            Some(user_key) => {
+                let entry =
+                    shard
+                        .entries
+                        .entry(user_key.to_string())
+                        .or_insert(MemoryCounterEntry {
+                            value: user_units,
+                            bucket,
+                            expires_at,
+                        });
+                if entry.bucket != bucket {
+                    *entry = MemoryCounterEntry {
+                        value: user_units,
+                        bucket,
+                        expires_at,
+                    };
+                } else {
+                    entry.value = entry.value.max(user_units);
+                    entry.expires_at = expires_at;
+                }
+                (entry.value, true)
+            }
+            None => (0, false),
+        };
+        let key_entry = shard
+            .entries
+            .entry(key_key.to_string())
+            .or_insert(MemoryCounterEntry {
+                value: key_units,
+                bucket,
+                expires_at,
+            });
+        if key_entry.bucket != bucket {
+            *key_entry = MemoryCounterEntry {
+                value: key_units,
+                bucket,
+                expires_at,
+            };
+        } else {
+            key_entry.value = key_entry.value.max(key_units);
+            key_entry.expires_at = expires_at;
+        }
+        Ok(crate::DailyUsageLimitCounts {
+            user_units: user_value,
+            key_units: key_entry.value,
+            user_present,
+            key_present: true,
+            state_ready: false,
+        })
+    }
+
+    pub(crate) fn restore_daily_usage_limits(
+        &self,
+        entries: &[crate::DailyUsageLimitRestoreEntry],
+        bucket: u64,
+        ttl: Duration,
+    ) -> Result<(), DataLayerError> {
+        for entry in entries {
+            self.restore_daily_usage_limit_entry(
+                entry.user_key.as_deref(),
+                &entry.key_key,
+                bucket,
+                entry.user_units,
+                entry.key_units,
+                ttl,
+            )?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn set_add(&self, key: &str, member: &str) -> bool {

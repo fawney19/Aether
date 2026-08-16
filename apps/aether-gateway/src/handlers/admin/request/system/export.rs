@@ -244,6 +244,8 @@ impl<'a> AdminAppState<'a> {
                     "allowed_models_mode": group.allowed_models_mode.clone(),
                     "rate_limit": group.rate_limit,
                     "rate_limit_mode": group.rate_limit_mode.clone(),
+                    "daily_usage_limit_usd": group.daily_usage_limit_usd,
+                    "daily_usage_limit_mode": group.daily_usage_limit_mode.clone(),
                 })
             })
             .collect::<Vec<_>>();
@@ -365,6 +367,10 @@ impl<'a> AdminAppState<'a> {
             ),
             ("ip_rules".to_string(), json!(key.ip_rules.clone())),
             ("rate_limit".to_string(), json!(key.rate_limit)),
+            (
+                "daily_usage_limit_usd".to_string(),
+                json!(key.daily_usage_limit_usd),
+            ),
             ("concurrent_limit".to_string(), json!(key.concurrent_limit)),
             (
                 "force_capabilities".to_string(),

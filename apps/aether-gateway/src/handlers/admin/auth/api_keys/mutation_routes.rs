@@ -119,6 +119,14 @@ pub(super) async fn build_admin_create_api_key_response(
             "rate_limit 必须大于等于 0",
         ));
     }
+    if payload
+        .daily_usage_limit_usd
+        .is_some_and(|value| !value.is_finite() || value < 0.0)
+    {
+        return Ok(build_admin_api_keys_bad_request_response(
+            "daily_usage_limit_usd 必须是大于等于 0 的有限数值",
+        ));
+    }
     let concurrent_limit =
         match normalize_optional_api_key_concurrent_limit(payload.concurrent_limit) {
             Ok(value) => value,
@@ -169,6 +177,7 @@ pub(super) async fn build_admin_create_api_key_response(
                 allowed_models,
                 ip_rules,
                 rate_limit: payload.rate_limit,
+                daily_usage_limit_usd: payload.daily_usage_limit_usd,
                 concurrent_limit,
                 force_capabilities: None,
                 is_active: true,
@@ -208,6 +217,7 @@ pub(super) async fn build_admin_create_api_key_response(
             "is_standalone": true,
             "is_active": created.is_active,
             "rate_limit": created.rate_limit,
+            "daily_usage_limit_usd": created.daily_usage_limit_usd,
             "concurrent_limit": created.concurrent_limit,
             "allowed_providers": created.allowed_providers,
             "allowed_api_formats": created.allowed_api_formats,
@@ -302,6 +312,14 @@ pub(super) async fn build_admin_update_api_key_response(
     if payload.rate_limit.is_some_and(|value| value < 0) {
         return Ok(build_admin_api_keys_bad_request_response(
             "rate_limit 必须大于等于 0",
+        ));
+    }
+    if payload
+        .daily_usage_limit_usd
+        .is_some_and(|value| !value.is_finite() || value < 0.0)
+    {
+        return Ok(build_admin_api_keys_bad_request_response(
+            "daily_usage_limit_usd 必须是大于等于 0 的有限数值",
         ));
     }
     let concurrent_limit =
@@ -408,6 +426,8 @@ pub(super) async fn build_admin_update_api_key_response(
                 name,
                 rate_limit_present: field_presence.contains("rate_limit"),
                 rate_limit: payload.rate_limit,
+                daily_usage_limit_present: field_presence.contains("daily_usage_limit_usd"),
+                daily_usage_limit_usd: payload.daily_usage_limit_usd,
                 concurrent_limit_present: field_presence.contains("concurrent_limit"),
                 concurrent_limit,
                 allowed_providers,

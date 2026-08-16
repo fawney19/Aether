@@ -611,6 +611,8 @@ async fn gateway_allows_default_user_group_access_policy_updates() {
             allowed_models_mode: "specific".to_string(),
             rate_limit: Some(60),
             rate_limit_mode: "custom".to_string(),
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
         })
         .await
         .expect("user group should create")
@@ -723,6 +725,8 @@ async fn gateway_allows_removing_default_group_members_when_other_group_remains(
             allowed_models_mode: "unrestricted".to_string(),
             rate_limit: None,
             rate_limit_mode: "system".to_string(),
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
         })
         .await
         .expect("default group should create")
@@ -740,6 +744,8 @@ async fn gateway_allows_removing_default_group_members_when_other_group_remains(
             allowed_models_mode: "unrestricted".to_string(),
             rate_limit: None,
             rate_limit_mode: "system".to_string(),
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
         })
         .await
         .expect("team group should create")
@@ -1701,6 +1707,8 @@ async fn admin_created_user_keys_inherit_owner_group_policy() {
             allowed_models_mode: "specific".to_string(),
             rate_limit: Some(100),
             rate_limit_mode: "custom".to_string(),
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
         })
         .await
         .expect("admin group should create")
@@ -1723,6 +1731,8 @@ async fn admin_created_user_keys_inherit_owner_group_policy() {
             allowed_models_mode: "specific".to_string(),
             rate_limit: Some(30),
             rate_limit_mode: "custom".to_string(),
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
         })
         .await
         .expect("target group should create")
@@ -1810,6 +1820,8 @@ async fn admin_created_user_keys_inherit_owner_group_policy() {
                 allowed_models_mode: "specific".to_string(),
                 rate_limit: Some(15),
                 rate_limit_mode: "custom".to_string(),
+                daily_usage_limit_usd: None,
+                daily_usage_limit_mode: "inherit".to_string(),
             },
         )
         .await
@@ -2132,6 +2144,8 @@ async fn gateway_allows_admin_update_user_to_clear_explicit_groups() {
             allowed_models_mode: "unrestricted".to_string(),
             rate_limit: None,
             rate_limit_mode: "system".to_string(),
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
         })
         .await
         .expect("default group should create")

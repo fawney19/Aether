@@ -1083,6 +1083,20 @@ pub struct StoredUsageSettledCostSummary {
     pub last_finalized_at_unix_secs: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UsageDailyActualCostRollupQuery {
+    pub finalized_from_unix_secs: u64,
+    pub finalized_until_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredUsageDailyActualCostRollup {
+    pub user_id: Option<String>,
+    pub api_key_id: String,
+    pub api_key_is_standalone: bool,
+    pub actual_total_cost_usd: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct UsageCacheAffinityHitSummaryQuery {
     pub created_from_unix_secs: u64,
@@ -1733,6 +1747,11 @@ pub trait UsageReadRepository: Send + Sync {
         &self,
         query: &UsageSettledCostSummaryQuery,
     ) -> Result<StoredUsageSettledCostSummary, crate::DataLayerError>;
+
+    async fn summarize_usage_daily_actual_cost_rollups(
+        &self,
+        query: &UsageDailyActualCostRollupQuery,
+    ) -> Result<Vec<StoredUsageDailyActualCostRollup>, crate::DataLayerError>;
 
     async fn summarize_usage_cache_affinity_hit_summary(
         &self,

@@ -926,6 +926,8 @@ mod tests {
             allowed_models_mode: allowed_models_mode.to_string(),
             rate_limit: None,
             rate_limit_mode: "inherit".to_string(),
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
         }
     }
 
@@ -939,8 +941,11 @@ mod tests {
             access_allowed: true,
             user_rate_limit: None,
             api_key_rate_limit: None,
+            user_daily_usage_limit_usd: None,
+            api_key_daily_usage_limit_usd: None,
             api_key_is_standalone: false,
             admin_bypass_limits: false,
+            ip_bypass_limits: false,
             local_rejection: None,
             allowed_models: Some(vec!["gpt-4.1".to_string()]),
             ip_rules: None,

@@ -498,6 +498,8 @@ pub struct StoredUserGroup {
     pub allowed_models_mode: String,
     pub rate_limit: Option<i32>,
     pub rate_limit_mode: String,
+    pub daily_usage_limit_usd: Option<f64>,
+    pub daily_usage_limit_mode: String,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
 }
@@ -568,9 +570,27 @@ impl StoredUserGroup {
                 &rate_limit_mode,
                 "user_groups.rate_limit_mode",
             )?,
+            daily_usage_limit_usd: None,
+            daily_usage_limit_mode: "inherit".to_string(),
             created_at,
             updated_at,
         })
+    }
+
+    pub fn with_daily_usage_limit(
+        mut self,
+        daily_usage_limit_usd: Option<f64>,
+        daily_usage_limit_mode: String,
+    ) -> Result<Self, crate::DataLayerError> {
+        self.daily_usage_limit_usd = normalize_optional_non_negative_f64(
+            daily_usage_limit_usd,
+            "user_groups.daily_usage_limit_usd",
+        )?;
+        self.daily_usage_limit_mode = normalize_rate_limit_policy_mode(
+            &daily_usage_limit_mode,
+            "user_groups.daily_usage_limit_mode",
+        )?;
+        Ok(self)
     }
 }
 
@@ -608,6 +628,8 @@ pub struct UpsertUserGroupRecord {
     pub allowed_models_mode: String,
     pub rate_limit: Option<i32>,
     pub rate_limit_mode: String,
+    pub daily_usage_limit_usd: Option<f64>,
+    pub daily_usage_limit_mode: String,
 }
 
 impl UpsertUserGroupRecord {
@@ -1050,6 +1072,18 @@ fn normalize_optional_json(value: Option<Value>) -> Option<Value> {
 
 pub fn normalize_user_group_name(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_optional_non_negative_f64(
+    value: Option<f64>,
+    field: &str,
+) -> Result<Option<f64>, crate::DataLayerError> {
+    match value {
+        Some(value) if !value.is_finite() || value < 0.0 => Err(
+            crate::DataLayerError::UnexpectedValue(format!("invalid {field}: {value}")),
+        ),
+        value => Ok(value),
+    }
 }
 
 pub fn normalize_list_policy_mode(

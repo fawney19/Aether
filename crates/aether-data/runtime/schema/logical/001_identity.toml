@@ -237,6 +237,17 @@ length = 32
 default = "inherit"
 
 [[table.user_groups.columns]]
+name = "daily_usage_limit_usd"
+type = "float64"
+nullable = true
+
+[[table.user_groups.columns]]
+name = "daily_usage_limit_mode"
+type = "text"
+length = 32
+default = "inherit"
+
+[[table.user_groups.columns]]
 name = "created_at"
 type = "unix_seconds"
 
@@ -343,6 +354,11 @@ name = "rate_limit"
 type = "int32"
 nullable = true
 default = 100
+
+[[table.api_keys.columns]]
+name = "daily_usage_limit_usd"
+type = "float64"
+nullable = true
 
 [[table.api_keys.columns]]
 name = "concurrent_limit"

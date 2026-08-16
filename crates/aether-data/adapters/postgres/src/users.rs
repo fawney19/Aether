@@ -610,6 +610,8 @@ SELECT
   allowed_models_mode,
   rate_limit,
   rate_limit_mode,
+  daily_usage_limit_usd,
+  daily_usage_limit_mode,
   created_at,
   updated_at
 FROM user_groups
@@ -747,9 +749,9 @@ INSERT INTO user_groups (
   allowed_providers, allowed_providers_mode,
   allowed_api_formats, allowed_api_formats_mode,
   allowed_models, allowed_models_mode,
-  rate_limit, rate_limit_mode
+  rate_limit, rate_limit_mode, daily_usage_limit_usd, daily_usage_limit_mode
 )
-VALUES ($1, $2, $3, $4, $5, $6::json, $7, $8::json, $9, $10::json, $11, $12, $13)
+VALUES ($1, $2, $3, $4, $5, $6::json, $7, $8::json, $9, $10::json, $11, $12, $13, $14, $15)
 "#,
         )
         .bind(&id)
@@ -765,6 +767,8 @@ VALUES ($1, $2, $3, $4, $5, $6::json, $7, $8::json, $9, $10::json, $11, $12, $13
         .bind(record.allowed_models_mode)
         .bind(record.rate_limit)
         .bind(record.rate_limit_mode)
+        .bind(record.daily_usage_limit_usd)
+        .bind(record.daily_usage_limit_mode)
         .execute(&self.pool)
         .await;
         match result {
@@ -798,6 +802,8 @@ SET name = $2,
     allowed_models_mode = $11,
     rate_limit = $12,
     rate_limit_mode = $13,
+    daily_usage_limit_usd = $14,
+    daily_usage_limit_mode = $15,
     updated_at = now()
 WHERE id = $1
 "#,
@@ -815,6 +821,8 @@ WHERE id = $1
         .bind(record.allowed_models_mode)
         .bind(record.rate_limit)
         .bind(record.rate_limit_mode)
+        .bind(record.daily_usage_limit_usd)
+        .bind(record.daily_usage_limit_mode)
         .execute(&self.pool)
         .await;
         match result {
@@ -2285,6 +2293,12 @@ fn map_user_group_row(row: &sqlx::postgres::PgRow) -> Result<StoredUserGroup, Da
         row.try_get("created_at").map_postgres_err()?,
         row.try_get("updated_at").map_postgres_err()?,
     )
+    .and_then(|group| {
+        group.with_daily_usage_limit(
+            row.try_get("daily_usage_limit_usd").map_postgres_err()?,
+            row.try_get("daily_usage_limit_mode").map_postgres_err()?,
+        )
+    })
 }
 
 fn map_user_group_member_row(

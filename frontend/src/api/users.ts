@@ -30,6 +30,7 @@ export interface UserEffectivePolicy {
   allowed_api_formats?: EffectivePolicyField<string[]>
   allowed_models?: EffectivePolicyField<string[]>
   rate_limit?: EffectivePolicyField<number>
+  daily_usage_limit_usd?: EffectivePolicyField<number>
 }
 
 export interface User {
@@ -175,6 +176,8 @@ export interface UserGroup {
   allowed_models_mode: ListPolicyMode
   rate_limit?: number | null
   rate_limit_mode: RateLimitPolicyMode
+  daily_usage_limit_usd?: number | null
+  daily_usage_limit_mode: RateLimitPolicyMode
   is_default?: boolean
   created_at?: string | null
   updated_at?: string | null
@@ -191,6 +194,8 @@ export interface UpsertUserGroupRequest {
   allowed_models_mode?: ListPolicyMode
   rate_limit?: number | null
   rate_limit_mode?: RateLimitPolicyMode
+  daily_usage_limit_usd?: number | null
+  daily_usage_limit_mode?: RateLimitPolicyMode
 }
 
 export interface UserGroupMember {
@@ -222,6 +227,7 @@ export interface ApiKey {
   is_standalone: boolean  // 是否为独立余额Key
   feature_settings?: FeatureSettings | null
   rate_limit?: number | null  // 普通Key: 0 = 不限制，历史 null 视为跟随系统默认
+  daily_usage_limit_usd?: number | null  // 普通 Key: 0/null = 不增加 Key 级限制
   concurrent_limit?: number | null  // 普通Key: 0 = 不限制并发，历史 null 兼容
   ip_rules?: string[] | null
   total_requests?: number  // 总请求数
@@ -231,6 +237,7 @@ export interface ApiKey {
 export interface UpsertUserApiKeyRequest {
   name?: string
   rate_limit?: number | null
+  daily_usage_limit_usd?: number | null
   concurrent_limit?: number | null
   ip_rules?: string[] | null
   feature_settings?: FeatureSettings | null

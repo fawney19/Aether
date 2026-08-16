@@ -4,9 +4,10 @@ use aether_data_contracts::repository::usage::{
     ProviderApiKeyWindowUsageRequest, UpsertUsageRecord, UsageAuditAggregationGroupBy,
     UsageAuditAggregationQuery, UsageAuditListQuery, UsageAuditSummaryQuery, UsageBodyCaptureState,
     UsageBreakdownGroupBy, UsageBreakdownSummaryQuery, UsageCleanupExecutionMode,
-    UsageCleanupTargets, UsageCleanupWindow, UsageDailyHeatmapQuery,
-    UsageDashboardDailyBreakdownQuery, UsageDashboardSummaryQuery, UsageProviderPerformanceQuery,
-    UsageReadRepository, UsageTimeSeriesGranularity, UsageWriteRepository,
+    UsageCleanupTargets, UsageCleanupWindow, UsageDailyActualCostRollupQuery,
+    UsageDailyHeatmapQuery, UsageDashboardDailyBreakdownQuery, UsageDashboardSummaryQuery,
+    UsageProviderPerformanceQuery, UsageReadRepository, UsageTimeSeriesGranularity,
+    UsageWriteRepository,
 };
 use chrono::{DateTime, Utc};
 
@@ -107,6 +108,54 @@ async fn sqlite_provider_performance_can_skip_timeline() {
     assert_eq!(without_timeline.summary, with_timeline.summary);
     assert_eq!(without_timeline.providers, with_timeline.providers);
     assert!(without_timeline.timeline.is_empty());
+}
+
+#[tokio::test]
+async fn sqlite_daily_actual_cost_rollups_group_normal_and_standalone_keys() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool should connect");
+    run_migrations(&pool)
+        .await
+        .expect("sqlite migrations should run");
+    seed_stats_targets(&pool).await;
+
+    let writer = SqliteUsageWriteRepository::new(pool.clone());
+    writer
+        .upsert(sample_usage("daily-normal", "completed", "settled", 100))
+        .await
+        .expect("normal daily usage should seed");
+    let mut standalone = sample_usage("daily-standalone", "completed", "settled", 100);
+    standalone.api_key_id = Some("standalone-key".to_string());
+    standalone.actual_total_cost_usd = Some(0.6);
+    standalone.request_metadata = Some(serde_json::json!({
+        "api_key_is_standalone": true,
+    }));
+    writer
+        .upsert(standalone)
+        .await
+        .expect("standalone daily usage should seed");
+
+    let rollups = SqliteUsageReadRepository::new(pool)
+        .summarize_usage_daily_actual_cost_rollups(&UsageDailyActualCostRollupQuery {
+            finalized_from_unix_secs: 50,
+            finalized_until_unix_secs: 150,
+        })
+        .await
+        .expect("daily usage rollups should load");
+    assert_eq!(rollups.len(), 2);
+    assert!(rollups.iter().any(|rollup| {
+        rollup.api_key_id == "api-key-1"
+            && !rollup.api_key_is_standalone
+            && rollup.actual_total_cost_usd == 0.4
+    }));
+    assert!(rollups.iter().any(|rollup| {
+        rollup.api_key_id == "standalone-key"
+            && rollup.api_key_is_standalone
+            && rollup.actual_total_cost_usd == 0.6
+    }));
 }
 
 #[tokio::test]

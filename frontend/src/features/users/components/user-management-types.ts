@@ -26,6 +26,8 @@ export interface UserGroupFormState {
   allowed_models: string[]
   rate_limit_mode: RateLimitPolicyMode
   rate_limit: number | undefined
+  daily_usage_limit_mode: RateLimitPolicyMode
+  daily_usage_limit_usd: number | undefined
 }
 
 export interface UserManagementRow {
@@ -46,6 +48,9 @@ export interface UserManagementRow {
   rateLimitLabel: string
   rateLimitSource: string
   rateLimitAsBadge: boolean
+  dailyUsageLimitLabel: string
+  dailyUsageLimitSource: string
+  dailyUsageLimitAsBadge: boolean
   createdAtLabel: string
   statusLabel: string
   statusVariant: BadgeVariant

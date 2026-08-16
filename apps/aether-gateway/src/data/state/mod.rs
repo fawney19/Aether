@@ -140,14 +140,15 @@ use aether_data_contracts::repository::settlement::{
 };
 use aether_data_contracts::repository::usage::{
     ApiKeyLastUsedDelta, ManagementTokenCounterDelta, PendingUsageCleanupSummary,
-    ProxyNodeCounterDelta, StoredProviderUsageSummary, StoredRequestUsageAudit, UpsertUsageRecord,
+    ProxyNodeCounterDelta, StoredProviderUsageSummary, StoredRequestUsageAudit,
+    StoredUsageDailyActualCostRollup, UpsertUsageRecord, UsageDailyActualCostRollupQuery,
     UsageReadRepository, UsageWriteRepository,
 };
 use aether_data_contracts::repository::video_tasks::{
     StoredVideoTask, UpsertVideoTask, VideoTaskLookupKey, VideoTaskModelCount,
     VideoTaskQueryFilter, VideoTaskReadRepository, VideoTaskStatusCount, VideoTaskWriteRepository,
 };
-use aether_runtime_state::RuntimeQueueStore;
+use aether_runtime_state::{RuntimeQueueStore, RuntimeState};
 
 pub(crate) use self::referrals::{
     ReferralAdminStats, ReferralMutationStatus, ReferralRelationshipListQuery,
@@ -194,6 +195,7 @@ pub(crate) struct GatewayDataState {
     user_reader: Option<Arc<dyn UserReadRepository>>,
     user_preferences: Option<Arc<RwLock<BTreeMap<String, StoredUserPreferenceRecord>>>>,
     usage_worker_queue: Option<Arc<dyn RuntimeQueueStore>>,
+    daily_usage_runtime_state: Option<Arc<RuntimeState>>,
     video_task_reader: Option<Arc<dyn VideoTaskReadRepository>>,
     video_task_writer: Option<Arc<dyn VideoTaskWriteRepository>>,
     wallet_reader: Option<Arc<dyn WalletReadRepository>>,
@@ -376,6 +378,7 @@ impl fmt::Debug for GatewayDataState {
 }
 
 mod auth;
+pub(crate) use auth::resolve_group_effective_daily_usage_limit_policy;
 mod auth_api_key_cache;
 mod candidate_cache;
 mod catalog;

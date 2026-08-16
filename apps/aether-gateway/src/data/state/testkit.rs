@@ -78,6 +78,7 @@ impl GatewayDataState {
             user_reader: None,
             user_preferences: None,
             usage_worker_queue: None,
+            daily_usage_runtime_state: None,
             video_task_reader: None,
             video_task_writer: None,
             wallet_reader: None,

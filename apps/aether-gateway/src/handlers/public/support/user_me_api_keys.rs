@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::handlers::shared::{
-    api_key_placeholder_display, deserialize_optional_json_patch,
+    api_key_placeholder_display, deserialize_optional_f64_patch, deserialize_optional_json_patch,
     deserialize_optional_string_list_patch, generate_gateway_api_key_plaintext,
     masked_gateway_api_key_display, normalize_feature_settings, normalize_ip_rules,
     normalize_optional_api_key_concurrent_limit,
@@ -32,6 +32,8 @@ struct UsersMeCreateApiKeyRequest {
     #[serde(default)]
     rate_limit: Option<i32>,
     #[serde(default)]
+    daily_usage_limit_usd: Option<f64>,
+    #[serde(default)]
     concurrent_limit: Option<i32>,
     #[serde(default)]
     feature_settings: Option<serde_json::Value>,
@@ -45,6 +47,8 @@ struct UsersMeUpdateApiKeyRequest {
     name: Option<String>,
     #[serde(default)]
     rate_limit: Option<i32>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64_patch")]
+    daily_usage_limit_usd: Option<Option<f64>>,
     #[serde(default)]
     concurrent_limit: Option<i32>,
     #[serde(default, deserialize_with = "deserialize_optional_json_patch")]
@@ -167,6 +171,7 @@ fn build_users_me_api_key_list_payload(
         "total_requests": record.total_requests,
         "total_cost_usd": record.total_cost_usd,
         "rate_limit": record.rate_limit,
+        "daily_usage_limit_usd": record.daily_usage_limit_usd,
         "concurrent_limit": record.concurrent_limit,
         "allowed_providers": record.allowed_providers,
         "ip_rules": record.ip_rules,
@@ -191,6 +196,7 @@ fn build_users_me_api_key_detail_payload(
         "force_capabilities": record.force_capabilities,
         "feature_settings": record.feature_settings,
         "rate_limit": record.rate_limit,
+        "daily_usage_limit_usd": record.daily_usage_limit_usd,
         "concurrent_limit": record.concurrent_limit,
         "last_used_at": format_users_me_optional_unix_secs_iso8601(record.last_used_at_unix_secs),
         "expires_at": format_users_me_optional_unix_secs_iso8601(record.expires_at_unix_secs),
@@ -544,6 +550,16 @@ pub(super) async fn handle_users_me_api_key_create(
             false,
         );
     }
+    if payload
+        .daily_usage_limit_usd
+        .is_some_and(|value| !value.is_finite() || value < 0.0)
+    {
+        return build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "daily_usage_limit_usd 必须是大于等于 0 的有限数值",
+            false,
+        );
+    }
     let concurrent_limit =
         match normalize_optional_api_key_concurrent_limit(payload.concurrent_limit) {
             Ok(value) => value,
@@ -583,6 +599,7 @@ pub(super) async fn handle_users_me_api_key_create(
         allowed_models: None,
         ip_rules,
         rate_limit,
+        daily_usage_limit_usd: payload.daily_usage_limit_usd,
         concurrent_limit,
         force_capabilities: None,
         is_active: true,
@@ -635,6 +652,7 @@ pub(super) async fn handle_users_me_api_key_create(
         "is_active": created.is_active,
         "is_locked": false,
         "rate_limit": created.rate_limit,
+        "daily_usage_limit_usd": created.daily_usage_limit_usd,
         "concurrent_limit": created.concurrent_limit,
         "ip_rules": created.ip_rules,
         "feature_settings": created.feature_settings,
@@ -702,6 +720,17 @@ pub(super) async fn handle_users_me_api_key_update(
             false,
         );
     }
+    if payload
+        .daily_usage_limit_usd
+        .flatten()
+        .is_some_and(|value| !value.is_finite() || value < 0.0)
+    {
+        return build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "daily_usage_limit_usd 必须是大于等于 0 的有限数值",
+            false,
+        );
+    }
     let concurrent_limit =
         match normalize_optional_api_key_concurrent_limit(payload.concurrent_limit) {
             Ok(value) => value,
@@ -734,6 +763,8 @@ pub(super) async fn handle_users_me_api_key_update(
             api_key_id: snapshot.api_key_id.clone(),
             name,
             rate_limit,
+            daily_usage_limit_present: payload.daily_usage_limit_usd.is_some(),
+            daily_usage_limit_usd: payload.daily_usage_limit_usd.flatten(),
             concurrent_limit,
             ip_rules,
         })
@@ -1143,5 +1174,26 @@ mod tests {
                 "10.0.0.0/24".to_string(),
             ])),
         );
+    }
+
+    #[test]
+    fn update_payload_distinguishes_missing_null_and_present_daily_limit() {
+        let missing = serde_json::from_value::<UsersMeUpdateApiKeyRequest>(json!({
+            "name": "unchanged-daily-limit",
+        }))
+        .expect("missing daily limit should deserialize");
+        assert_eq!(missing.daily_usage_limit_usd, None);
+
+        let cleared = serde_json::from_value::<UsersMeUpdateApiKeyRequest>(json!({
+            "daily_usage_limit_usd": null,
+        }))
+        .expect("null daily limit should deserialize");
+        assert_eq!(cleared.daily_usage_limit_usd, Some(None));
+
+        let updated = serde_json::from_value::<UsersMeUpdateApiKeyRequest>(json!({
+            "daily_usage_limit_usd": 3.5,
+        }))
+        .expect("present daily limit should deserialize");
+        assert_eq!(updated.daily_usage_limit_usd, Some(Some(3.5)));
     }
 }

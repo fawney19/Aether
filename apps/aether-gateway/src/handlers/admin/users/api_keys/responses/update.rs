@@ -83,6 +83,17 @@ pub(crate) async fn build_admin_update_user_api_key_response(
         )
             .into_response());
     }
+    if payload
+        .daily_usage_limit_usd
+        .flatten()
+        .is_some_and(|value| !value.is_finite() || value < 0.0)
+    {
+        return Ok((
+            http::StatusCode::BAD_REQUEST,
+            Json(json!({ "detail": "daily_usage_limit_usd 必须是大于等于 0 的有限数值" })),
+        )
+            .into_response());
+    }
     let concurrent_limit =
         match normalize_optional_api_key_concurrent_limit(payload.concurrent_limit) {
             Ok(value) => value,
@@ -114,6 +125,8 @@ pub(crate) async fn build_admin_update_user_api_key_response(
             api_key_id: api_key_id.clone(),
             name,
             rate_limit: payload.rate_limit,
+            daily_usage_limit_present: payload.daily_usage_limit_usd.is_some(),
+            daily_usage_limit_usd: payload.daily_usage_limit_usd.flatten(),
             concurrent_limit,
             ip_rules,
         })

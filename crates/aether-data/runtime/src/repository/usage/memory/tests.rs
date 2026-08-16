@@ -15,9 +15,9 @@ use crate::repository::usage::{
 };
 use aether_data_contracts::repository::usage::{
     usage_body_ref, ProviderApiKeyWindowUsageRequest, UsageAuditAggregationGroupBy,
-    UsageAuditAggregationQuery, UsageBodyCaptureState, UsageBodyField, UsageDashboardSummaryQuery,
-    UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageProviderPerformanceQuery,
-    UsageTimeSeriesGranularity,
+    UsageAuditAggregationQuery, UsageBodyCaptureState, UsageBodyField,
+    UsageDailyActualCostRollupQuery, UsageDashboardSummaryQuery, UsageLeaderboardGroupBy,
+    UsageLeaderboardQuery, UsageProviderPerformanceQuery, UsageTimeSeriesGranularity,
 };
 use serde_json::json;
 
@@ -133,6 +133,55 @@ fn sample_upsert_usage_record(request_id: &str) -> UpsertUsageRecord {
         created_at_unix_ms: Some(1_700_000_000),
         updated_at_unix_secs: 1_700_000_000,
     }
+}
+
+#[tokio::test]
+async fn daily_actual_cost_rollups_filter_window_status_and_group_scopes() {
+    let mut normal = sample_usage("normal", 1_000);
+    normal.finalized_at_unix_secs = Some(100);
+    normal.updated_at_unix_secs = 100;
+    normal.actual_total_cost_usd = 0.75;
+
+    let mut standalone = sample_usage("standalone", 1_000);
+    standalone.finalized_at_unix_secs = Some(100);
+    standalone.updated_at_unix_secs = 100;
+    standalone.actual_total_cost_usd = 0.5;
+    standalone.api_key_id = Some("standalone-key".to_string());
+    standalone.request_metadata = Some(json!({ "api_key_is_standalone": true }));
+
+    let mut pending = sample_usage("pending", 1_000);
+    pending.finalized_at_unix_secs = Some(100);
+    pending.updated_at_unix_secs = 100;
+    pending.actual_total_cost_usd = 9.0;
+    pending.status = "pending".to_string();
+
+    let mut outside_window = sample_usage("outside", 1_000);
+    outside_window.finalized_at_unix_secs = Some(200);
+    outside_window.updated_at_unix_secs = 200;
+    outside_window.actual_total_cost_usd = 7.0;
+
+    let repository =
+        InMemoryUsageReadRepository::seed([normal, standalone, pending, outside_window]);
+    let rollups = repository
+        .summarize_usage_daily_actual_cost_rollups(&UsageDailyActualCostRollupQuery {
+            finalized_from_unix_secs: 50,
+            finalized_until_unix_secs: 150,
+        })
+        .await
+        .expect("daily usage rollups");
+    assert_eq!(rollups.len(), 2);
+    let normal = rollups
+        .iter()
+        .find(|rollup| rollup.api_key_id == "api-key-1")
+        .expect("normal key rollup");
+    assert!(!normal.api_key_is_standalone);
+    assert_eq!(normal.actual_total_cost_usd, 0.75);
+    let standalone = rollups
+        .iter()
+        .find(|rollup| rollup.api_key_id == "standalone-key")
+        .expect("standalone key rollup");
+    assert!(standalone.api_key_is_standalone);
+    assert_eq!(standalone.actual_total_cost_usd, 0.5);
 }
 
 #[tokio::test]

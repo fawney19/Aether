@@ -2,7 +2,7 @@ use aether_data::{DataBackends, DataLayerError, DatabaseDriver};
 use aether_data_contracts::repository::candidate_selection::MinimalCandidateSelectionReadRepository;
 use aether_data_contracts::repository::candidates::RequestCandidateReadRepository;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
-use aether_runtime_state::RuntimeQueueStore;
+use aether_runtime_state::{RuntimeQueueStore, RuntimeState};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -433,6 +433,7 @@ impl GatewayDataState {
                 user_reader: None,
                 user_preferences: None,
                 usage_worker_queue: None,
+                daily_usage_runtime_state: None,
                 video_task_reader: None,
                 video_task_writer: None,
                 wallet_reader: None,
@@ -550,6 +551,7 @@ impl GatewayDataState {
             user_reader,
             user_preferences: None,
             usage_worker_queue,
+            daily_usage_runtime_state: None,
             video_task_reader,
             video_task_writer,
             wallet_reader,
@@ -565,11 +567,10 @@ impl GatewayDataState {
         self.backends.is_some()
     }
 
-    pub(crate) fn with_usage_worker_queue(
-        mut self,
-        queue: Option<Arc<dyn RuntimeQueueStore>>,
-    ) -> Self {
-        self.usage_worker_queue = queue;
+    pub(crate) fn with_usage_runtime_state(mut self, runtime_state: Arc<RuntimeState>) -> Self {
+        let queue: Arc<dyn RuntimeQueueStore> = runtime_state.clone();
+        self.usage_worker_queue = Some(queue);
+        self.daily_usage_runtime_state = Some(runtime_state);
         self
     }
 

@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS user_groups (
     allowed_models_mode TEXT NOT NULL DEFAULT 'inherit',
     rate_limit INTEGER,
     rate_limit_mode TEXT NOT NULL DEFAULT 'inherit',
+    daily_usage_limit_usd REAL,
+    daily_usage_limit_mode TEXT NOT NULL DEFAULT 'inherit',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     UNIQUE (normalized_name)
@@ -75,6 +77,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     allowed_api_formats TEXT,
     ip_rules TEXT,
     rate_limit INTEGER DEFAULT 100,
+    daily_usage_limit_usd REAL,
     concurrent_limit INTEGER,
     force_capabilities TEXT,
     feature_settings TEXT,

@@ -19,6 +19,7 @@ use super::super::cache::{
     AuthContextCache, AuthSnapshotCache, DashboardResponseCache, DirectPlanBypassCache,
     JsonValueCache, SchedulerAffinityCache, SystemConfigCache, ValueCache,
 };
+use super::super::daily_usage_limit::FrontdoorDailyUsageLimiter;
 use super::super::data::GatewayDataState;
 use super::super::fallback_metrics;
 use super::super::maintenance::UsageCounterFlushRuntimeMetrics;
@@ -362,6 +363,12 @@ fn soft_fd_limit() -> Option<usize> {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct FrontdoorLimiters {
+    pub(crate) user_rpm: Arc<FrontdoorUserRpmLimiter>,
+    pub(crate) daily_usage: Arc<FrontdoorDailyUsageLimiter>,
+}
+
+#[derive(Debug, Clone)]
 pub struct AppState {
     #[cfg(test)]
     pub(crate) execution_runtime_override_base_url: Option<String>,
@@ -428,7 +435,7 @@ pub struct AppState {
     pub(crate) usage_counter_exact_health_metric_refresh: Arc<TokioMutex<()>>,
     pub(crate) request_candidate_queue: Option<Arc<RequestCandidateQueueRuntime>>,
     pub(crate) frontdoor_cors: Option<Arc<FrontdoorCorsConfig>>,
-    pub(crate) frontdoor_user_rpm: Arc<FrontdoorUserRpmLimiter>,
+    pub(crate) frontdoor_limiters: Arc<FrontdoorLimiters>,
     pub(crate) tunnel: crate::tunnel::EmbeddedTunnelState,
     pub(crate) provider_transport_snapshot_cache:
         Arc<DashMap<ProviderTransportSnapshotCacheKey, CachedProviderTransportSnapshot>>,

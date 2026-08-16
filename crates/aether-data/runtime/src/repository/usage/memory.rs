@@ -7,8 +7,9 @@ use aether_data_contracts::repository::usage::{
     parse_usage_body_ref, usage_body_ref, StoredUsageAuditAggregation, StoredUsageAuditSummary,
     StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
     StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
-    StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
-    StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
+    StoredUsageDailyActualCostRollup, StoredUsageDashboardDailyBreakdownRow,
+    StoredUsageDashboardProviderCount, StoredUsageDashboardSummary,
+    StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
     StoredUsagePerformancePercentilesRow, StoredUsageProviderPerformance,
     StoredUsageProviderPerformanceProviderRow, StoredUsageProviderPerformanceSummary,
     StoredUsageProviderPerformanceTimelineRow, StoredUsageSettledCostSummary,
@@ -17,13 +18,13 @@ use aether_data_contracts::repository::usage::{
     UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
     UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
     UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCostSavingsSummaryQuery,
-    UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
-    UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageLeaderboardGroupBy,
-    UsageLeaderboardQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
-    UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery, UsageSettledCostSummaryQuery,
-    UsageTimeSeriesGranularity, UsageTimeSeriesQuery, PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY,
-    PROVIDER_REASONING_EFFORT_METADATA_KEY, PROVIDER_SERVICE_TIER_METADATA_KEY,
-    REQUESTED_REASONING_EFFORT_METADATA_KEY,
+    UsageDailyActualCostRollupQuery, UsageDashboardDailyBreakdownQuery,
+    UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery, UsageErrorDistributionQuery,
+    UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageMonitoringErrorCountQuery,
+    UsageMonitoringErrorListQuery, UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery,
+    UsageSettledCostSummaryQuery, UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
+    PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY, PROVIDER_REASONING_EFFORT_METADATA_KEY,
+    PROVIDER_SERVICE_TIER_METADATA_KEY, REQUESTED_REASONING_EFFORT_METADATA_KEY,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -1555,6 +1556,64 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             }
         }
         Ok(summary)
+    }
+
+    async fn summarize_usage_daily_actual_cost_rollups(
+        &self,
+        query: &UsageDailyActualCostRollupQuery,
+    ) -> Result<Vec<StoredUsageDailyActualCostRollup>, DataLayerError> {
+        let mut rollups = BTreeMap::<(Option<String>, String, bool), f64>::new();
+        for item in self
+            .by_request_id
+            .read()
+            .expect("usage repository lock")
+            .values()
+        {
+            let finalized_at = item
+                .finalized_at_unix_secs
+                .unwrap_or(item.updated_at_unix_secs);
+            if finalized_at < query.finalized_from_unix_secs
+                || finalized_at >= query.finalized_until_unix_secs
+            {
+                continue;
+            }
+            let Some(api_key_id) = item
+                .api_key_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if item.status != "completed"
+                || !item.actual_total_cost_usd.is_finite()
+                || item.actual_total_cost_usd <= 0.0
+            {
+                continue;
+            }
+            let is_standalone = item
+                .request_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("api_key_is_standalone"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            *rollups
+                .entry((item.user_id.clone(), api_key_id.to_string(), is_standalone))
+                .or_default() += item.actual_total_cost_usd;
+        }
+        Ok(rollups
+            .into_iter()
+            .map(
+                |((user_id, api_key_id, api_key_is_standalone), actual_total_cost_usd)| {
+                    StoredUsageDailyActualCostRollup {
+                        user_id,
+                        api_key_id,
+                        api_key_is_standalone,
+                        actual_total_cost_usd,
+                    }
+                },
+            )
+            .collect())
     }
 
     async fn summarize_dashboard_usage(

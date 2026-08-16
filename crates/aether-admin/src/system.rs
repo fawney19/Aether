@@ -1689,6 +1689,7 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "site_name" => Some(json!("Aether")),
         "site_subtitle" => Some(json!("AI Gateway")),
         "default_user_initial_gift_usd" => Some(json!(10.0)),
+        "daily_usage_limit_usd" => Some(json!(0.0)),
         "password_policy_level" => Some(json!("weak")),
         REQUEST_RECORD_LEVEL_KEY => Some(json!("full")),
         "max_request_body_size" => Some(json!(0)),

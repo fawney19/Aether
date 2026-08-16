@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS public.user_groups (
     allowed_models_mode character varying(32) DEFAULT 'inherit' NOT NULL,
     rate_limit integer,
     rate_limit_mode character varying(32) DEFAULT 'inherit' NOT NULL,
+    daily_usage_limit_usd double precision,
+    daily_usage_limit_mode character varying(32) DEFAULT 'inherit' NOT NULL,
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL
 );
@@ -80,6 +82,7 @@ CREATE TABLE IF NOT EXISTS public.api_keys (
     allowed_api_formats jsonb,
     ip_rules jsonb,
     rate_limit integer DEFAULT 100,
+    daily_usage_limit_usd double precision,
     concurrent_limit integer,
     force_capabilities jsonb,
     feature_settings jsonb,

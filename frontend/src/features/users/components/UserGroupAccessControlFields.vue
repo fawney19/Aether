@@ -128,6 +128,33 @@
         </div>
       </div>
     </div>
+
+    <div class="space-y-2">
+      <Label class="text-sm font-medium">{{ legacyT('额度限制 (美元/日)') }}</Label>
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div class="flex min-h-10 w-full items-center gap-2 sm:w-auto sm:shrink-0">
+          <Switch
+            :model-value="form.daily_usage_limit_mode === 'system'"
+            @update:model-value="setSystemDailyUsageLimit"
+          />
+          <span class="text-xs text-muted-foreground sm:sr-only">
+            {{ legacyT(form.daily_usage_limit_mode === 'system' ? '系统默认' : '自定义') }}
+          </span>
+        </div>
+        <div class="min-w-0 flex-1">
+          <Input
+            :model-value="form.daily_usage_limit_usd ?? ''"
+            type="number"
+            min="0"
+            step="0.01"
+            class="h-10"
+            :disabled="form.daily_usage_limit_mode === 'system'"
+            :placeholder="legacyT(form.daily_usage_limit_mode === 'system' ? '使用系统默认' : '0 = 不限制')"
+            @update:model-value="updateDailyUsageLimit"
+          />
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -183,5 +210,13 @@ function setSystemRateLimit(value: boolean): void {
 
 function updateRateLimit(value: string | number): void {
   updateForm({ rate_limit: parseNumberInput(value, { min: 0, max: 10000 }) })
+}
+
+function setSystemDailyUsageLimit(value: boolean): void {
+  updateForm({ daily_usage_limit_mode: value ? 'system' : 'custom' })
+}
+
+function updateDailyUsageLimit(value: string | number): void {
+  updateForm({ daily_usage_limit_usd: parseNumberInput(value, { allowFloat: true, min: 0 }) })
 }
 </script>
