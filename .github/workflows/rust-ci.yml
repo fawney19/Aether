@@ -391,6 +391,7 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
+          RUST_MIN_STACK: "16777216"
         run: cargo test -p aether-integration-tests --bins
 
       - name: Show sccache stats
