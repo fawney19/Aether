@@ -10,6 +10,9 @@ use super::{
     StandaloneApiKeyExportListQuery, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
     UpdateStandaloneApiKeyBasicRecord, UpdateUserApiKeyBasicRecord,
 };
+use crate::repository::provider_key_scope::{
+    remove_key_ids_from_provider_key_scope, ProviderKeyScope,
+};
 use crate::repository::usage::{ApiKeyUsageContribution, ApiKeyUsageDelta};
 use crate::DataLayerError;
 
@@ -85,6 +88,14 @@ impl InMemoryAuthApiKeySnapshotRepository {
                     record.with_ip_rules(
                         snapshot
                             .api_key_ip_rules
+                            .as_ref()
+                            .map(|value| serde_json::json!(value)),
+                    )
+                })
+                .and_then(|record| {
+                    record.with_provider_key_scope(
+                        snapshot
+                            .api_key_allowed_provider_key_ids
                             .as_ref()
                             .map(|value| serde_json::json!(value)),
                     )
@@ -499,6 +510,44 @@ impl AuthApiKeyReadRepository for InMemoryAuthApiKeySnapshotRepository {
 
 #[async_trait]
 impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
+    async fn prune_provider_key_scope_references(
+        &self,
+        key_ids: &[String],
+    ) -> Result<u64, crate::DataLayerError> {
+        if key_ids.is_empty() {
+            return Ok(0);
+        }
+        let removed = key_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut index = self
+            .index
+            .write()
+            .expect("auth api key snapshot repository lock");
+        let mut updated = 0u64;
+        for snapshot in index.by_api_key_id.values_mut() {
+            let pruned = remove_key_ids_from_provider_key_scope(
+                snapshot.api_key_allowed_provider_key_ids.clone(),
+                &removed,
+            );
+            if pruned != snapshot.api_key_allowed_provider_key_ids {
+                snapshot.api_key_allowed_provider_key_ids = pruned;
+                updated += 1;
+            }
+        }
+        for export in index.export_by_api_key_id.values_mut() {
+            let pruned = remove_key_ids_from_provider_key_scope(
+                export.allowed_provider_key_ids.clone(),
+                &removed,
+            );
+            if pruned != export.allowed_provider_key_ids {
+                export.allowed_provider_key_ids = pruned;
+                updated += 1;
+            }
+        }
+        Ok(updated)
+    }
     async fn touch_last_used_at(&self, api_key_id: &str) -> Result<bool, DataLayerError> {
         let mut index = self
             .index
@@ -552,6 +601,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 api_key_concurrent_limit: record.concurrent_limit,
                 api_key_expires_at_unix_secs: record.expires_at_unix_secs,
                 api_key_allowed_providers: record.allowed_providers.clone(),
+                api_key_allowed_provider_key_ids: record.allowed_provider_key_ids.clone(),
                 api_key_allowed_api_formats: record.allowed_api_formats.clone(),
                 api_key_allowed_models: record.allowed_models.clone(),
                 api_key_ip_rules: record.ip_rules.clone(),
@@ -599,6 +649,12 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                     .as_ref()
                     .map(|value| serde_json::json!(value)),
             )?
+            .with_api_key_provider_key_scope(
+                record
+                    .allowed_provider_key_ids
+                    .as_ref()
+                    .map(|value| serde_json::json!(value)),
+            )?
         };
 
         let now_unix_secs = current_unix_secs() as i64;
@@ -634,6 +690,12 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
         .with_ip_rules(
             record
                 .ip_rules
+                .as_ref()
+                .map(|value| serde_json::json!(value)),
+        )?
+        .with_provider_key_scope(
+            record
+                .allowed_provider_key_ids
                 .as_ref()
                 .map(|value| serde_json::json!(value)),
         )?
@@ -688,6 +750,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 api_key_concurrent_limit: record.concurrent_limit,
                 api_key_expires_at_unix_secs: record.expires_at_unix_secs,
                 api_key_allowed_providers: record.allowed_providers.clone(),
+                api_key_allowed_provider_key_ids: record.allowed_provider_key_ids.clone(),
                 api_key_allowed_api_formats: record.allowed_api_formats.clone(),
                 api_key_allowed_models: record.allowed_models.clone(),
                 api_key_ip_rules: record.ip_rules.clone(),
@@ -735,6 +798,12 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                     .as_ref()
                     .map(|value| serde_json::json!(value)),
             )?
+            .with_api_key_provider_key_scope(
+                record
+                    .allowed_provider_key_ids
+                    .as_ref()
+                    .map(|value| serde_json::json!(value)),
+            )?
         };
 
         let now_unix_secs = current_unix_secs() as i64;
@@ -770,6 +839,12 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
         .with_ip_rules(
             record
                 .ip_rules
+                .as_ref()
+                .map(|value| serde_json::json!(value)),
+        )?
+        .with_provider_key_scope(
+            record
+                .allowed_provider_key_ids
                 .as_ref()
                 .map(|value| serde_json::json!(value)),
         )?
@@ -898,6 +973,14 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 export.allowed_models = allowed_models;
             }
         }
+        if let Some(allowed_provider_key_ids) = record.allowed_provider_key_ids {
+            if let Some(snapshot) = index.by_api_key_id.get_mut(&record.api_key_id) {
+                snapshot.api_key_allowed_provider_key_ids = allowed_provider_key_ids.clone();
+            }
+            if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
+                export.allowed_provider_key_ids = allowed_provider_key_ids;
+            }
+        }
         if let Some(ip_rules) = record.ip_rules {
             if let Some(snapshot) = index.by_api_key_id.get_mut(&record.api_key_id) {
                 snapshot.api_key_ip_rules = ip_rules.clone();
@@ -1014,6 +1097,31 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
         }
         if let Some(export) = index.export_by_api_key_id.get_mut(api_key_id) {
             export.allowed_providers = allowed_providers;
+        }
+        Ok(index.export_by_api_key_id.get(api_key_id).cloned())
+    }
+
+    async fn set_user_api_key_allowed_provider_key_ids(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        allowed_provider_key_ids: Option<ProviderKeyScope>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        let mut index = self
+            .index
+            .write()
+            .expect("auth api key snapshot repository lock");
+        let Some(snapshot) = index.by_api_key_id.get(api_key_id) else {
+            return Ok(None);
+        };
+        if snapshot.user_id != user_id || snapshot.api_key_is_standalone {
+            return Ok(None);
+        }
+        if let Some(snapshot) = index.by_api_key_id.get_mut(api_key_id) {
+            snapshot.api_key_allowed_provider_key_ids = allowed_provider_key_ids.clone();
+        }
+        if let Some(export) = index.export_by_api_key_id.get_mut(api_key_id) {
+            export.allowed_provider_key_ids = allowed_provider_key_ids;
         }
         Ok(index.export_by_api_key_id.get(api_key_id).cloned())
     }
@@ -1392,6 +1500,7 @@ mod tests {
                 concurrent_limit_present: true,
                 concurrent_limit: Some(13),
                 allowed_providers: None,
+                allowed_provider_key_ids: None,
                 allowed_api_formats: None,
                 allowed_models: None,
                 ip_rules: None,
@@ -1411,5 +1520,61 @@ mod tests {
             .expect("find should succeed")
             .expect("snapshot should exist");
         assert_eq!(snapshot.api_key_concurrent_limit, Some(13));
+    }
+
+    #[tokio::test]
+    async fn prune_provider_key_scope_references_removes_deleted_keys() {
+        let mut snapshot = sample_snapshot("key-1", "user-1");
+        snapshot.api_key_allowed_provider_key_ids.replace(
+            [(
+                "p1".to_string(),
+                ["key-a".to_string(), "key-b".to_string()].into(),
+            )]
+            .into(),
+        );
+        let repository = InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some("hash-1".to_string()),
+            snapshot,
+        )]);
+
+        let updated = repository
+            .prune_provider_key_scope_references(&["key-a".to_string()])
+            .await
+            .expect("prune should succeed");
+
+        assert_eq!(updated, 2);
+        let snapshot = repository
+            .find_api_key_snapshot(AuthApiKeyLookupKey::ApiKeyId("key-1"))
+            .await
+            .expect("find should succeed")
+            .expect("snapshot should exist");
+        assert_eq!(
+            snapshot.api_key_allowed_provider_key_ids,
+            Some([("p1".to_string(), ["key-b".to_string()].into())].into())
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_provider_key_scope_references_clears_fully_removed_provider_entries() {
+        let mut snapshot = sample_snapshot("key-1", "user-1");
+        snapshot
+            .api_key_allowed_provider_key_ids
+            .replace([("p1".to_string(), ["key-a".to_string()].into())].into());
+        let repository = InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some("hash-1".to_string()),
+            snapshot,
+        )]);
+
+        repository
+            .prune_provider_key_scope_references(&["key-a".to_string()])
+            .await
+            .expect("prune should succeed");
+
+        let snapshot = repository
+            .find_api_key_snapshot(AuthApiKeyLookupKey::ApiKeyId("key-1"))
+            .await
+            .expect("find should succeed")
+            .expect("snapshot should exist");
+        assert_eq!(snapshot.api_key_allowed_provider_key_ids, None);
     }
 }

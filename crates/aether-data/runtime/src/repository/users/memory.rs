@@ -43,6 +43,41 @@ pub struct InMemoryUserReadRepository {
     read_only: bool,
 }
 
+#[async_trait]
+impl crate::repository::provider_key_scope::ProviderKeyScopeCleanupRepository
+    for InMemoryUserReadRepository
+{
+    async fn prune_provider_key_scope_references(
+        &self,
+        key_ids: &[String],
+    ) -> Result<u64, crate::DataLayerError> {
+        if key_ids.is_empty() {
+            return Ok(0);
+        }
+        let removed = key_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut groups = self
+            .groups_by_id
+            .write()
+            .expect("user group repository lock");
+        let mut updated = 0u64;
+        for group in groups.values_mut() {
+            let pruned =
+                crate::repository::provider_key_scope::remove_key_ids_from_provider_key_scope(
+                    group.allowed_provider_key_ids.clone(),
+                    &removed,
+                );
+            if pruned != group.allowed_provider_key_ids {
+                group.allowed_provider_key_ids = pruned;
+                updated += 1;
+            }
+        }
+        Ok(updated)
+    }
+}
+
 impl InMemoryUserReadRepository {
     pub fn seed<I>(items: I) -> Self
     where
@@ -283,6 +318,9 @@ fn memory_group_from_record(
         record.description,
         record.priority,
         record.allowed_providers.map(serde_json::Value::from),
+        record
+            .allowed_provider_key_ids
+            .map(|scope| serde_json::to_value(scope).expect("provider key scope serializes")),
         record.allowed_providers_mode,
         record.allowed_api_formats.map(serde_json::Value::from),
         record.allowed_api_formats_mode,
@@ -305,6 +343,7 @@ fn memory_update_group_from_record(
     group.description = record.description;
     group.priority = record.priority;
     group.allowed_providers = record.allowed_providers;
+    group.allowed_provider_key_ids = record.allowed_provider_key_ids;
     group.allowed_providers_mode = record.allowed_providers_mode;
     group.allowed_api_formats = record.allowed_api_formats;
     group.allowed_api_formats_mode = record.allowed_api_formats_mode;
@@ -320,6 +359,9 @@ fn memory_update_group_from_record(
         group.description,
         group.priority,
         group.allowed_providers.map(serde_json::Value::from),
+        group
+            .allowed_provider_key_ids
+            .map(|scope| serde_json::to_value(scope).expect("provider key scope serializes")),
         group.allowed_providers_mode,
         group.allowed_api_formats.map(serde_json::Value::from),
         group.allowed_api_formats_mode,
@@ -484,6 +526,17 @@ fn memory_export_row_from_auth_user(
 
 #[async_trait]
 impl UserReadRepository for InMemoryUserReadRepository {
+    async fn prune_provider_key_scope_references(
+        &self,
+        key_ids: &[String],
+    ) -> Result<u64, crate::DataLayerError> {
+        <Self as crate::repository::provider_key_scope::ProviderKeyScopeCleanupRepository>::prune_provider_key_scope_references(
+            self,
+            key_ids,
+        )
+        .await
+    }
+
     async fn list_users_by_ids(
         &self,
         user_ids: &[String],

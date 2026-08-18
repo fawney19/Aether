@@ -660,6 +660,7 @@ export interface AdminApiKey {
   rate_limit?: number | null  // null = 跟随系统默认，0 = 不限制
   concurrent_limit?: number | null  // null = 跟随系统默认，0 = 不限制
   allowed_providers?: string[] | null  // 允许的提供商列表
+  allowed_provider_key_ids?: Record<string, string[]> | null  // 提供商下允许的具体 Key（provider_id -> key_id 列表）
   allowed_api_formats?: string[] | null  // 允许的 API 格式列表
   allowed_models?: string[] | null  // 允许的模型列表
   ip_rules?: string[] | null  // IP 限制规则
@@ -675,6 +676,7 @@ export interface AdminApiKey {
 export interface CreateStandaloneApiKeyRequest {
   name?: string
   allowed_providers?: string[] | null
+  allowed_provider_key_ids?: Record<string, string[]> | null
   allowed_api_formats?: string[] | null
   allowed_models?: string[] | null
   ip_rules?: string[] | null

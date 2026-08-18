@@ -4,6 +4,7 @@ use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY}
 use aether_data::repository::auth::{
     InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
 };
+use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::usage::InMemoryUsageReadRepository;
 use aether_data::repository::users::{
     InMemoryUserReadRepository, StoredUserAuthRecord, StoredUserExportRow, UpsertUserGroupRecord,
@@ -604,6 +605,7 @@ async fn gateway_allows_default_user_group_access_policy_updates() {
             description: None,
             priority: 0,
             allowed_providers: Some(vec!["openai".to_string()]),
+            allowed_provider_key_ids: None,
             allowed_providers_mode: "specific".to_string(),
             allowed_api_formats: Some(vec!["openai:chat".to_string()]),
             allowed_api_formats_mode: "specific".to_string(),
@@ -716,6 +718,7 @@ async fn gateway_allows_removing_default_group_members_when_other_group_remains(
             description: None,
             priority: 0,
             allowed_providers: None,
+            allowed_provider_key_ids: None,
             allowed_providers_mode: "unrestricted".to_string(),
             allowed_api_formats: None,
             allowed_api_formats_mode: "unrestricted".to_string(),
@@ -733,6 +736,7 @@ async fn gateway_allows_removing_default_group_members_when_other_group_remains(
             description: None,
             priority: 0,
             allowed_providers: None,
+            allowed_provider_key_ids: None,
             allowed_providers_mode: "unrestricted".to_string(),
             allowed_api_formats: None,
             allowed_api_formats_mode: "unrestricted".to_string(),
@@ -1694,6 +1698,7 @@ async fn admin_created_user_keys_inherit_owner_group_policy() {
             description: None,
             priority: 10,
             allowed_providers: Some(vec!["openai".to_string()]),
+            allowed_provider_key_ids: None,
             allowed_providers_mode: "specific".to_string(),
             allowed_api_formats: Some(vec!["openai:responses".to_string()]),
             allowed_api_formats_mode: "specific".to_string(),
@@ -1716,6 +1721,7 @@ async fn admin_created_user_keys_inherit_owner_group_policy() {
             description: None,
             priority: 10,
             allowed_providers: Some(vec!["anthropic".to_string()]),
+            allowed_provider_key_ids: None,
             allowed_providers_mode: "specific".to_string(),
             allowed_api_formats: Some(vec!["claude:messages".to_string()]),
             allowed_api_formats_mode: "specific".to_string(),
@@ -1803,6 +1809,7 @@ async fn admin_created_user_keys_inherit_owner_group_policy() {
                 description: None,
                 priority: 10,
                 allowed_providers: Some(vec!["google".to_string()]),
+                allowed_provider_key_ids: None,
                 allowed_providers_mode: "specific".to_string(),
                 allowed_api_formats: Some(vec!["gemini:generate-content".to_string()]),
                 allowed_api_formats_mode: "specific".to_string(),
@@ -2125,6 +2132,7 @@ async fn gateway_allows_admin_update_user_to_clear_explicit_groups() {
             description: None,
             priority: 0,
             allowed_providers: None,
+            allowed_provider_key_ids: None,
             allowed_providers_mode: "unrestricted".to_string(),
             allowed_api_formats: None,
             allowed_api_formats_mode: "unrestricted".to_string(),
@@ -2653,6 +2661,148 @@ async fn gateway_reveals_admin_user_full_key_locally_with_trusted_admin_principa
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["key"], "sk-user-1");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_user_group_provider_key_scope_round_trip_and_rejection() {
+    let upstream = Router::new().fallback(any(|_request: Request| async {
+        (StatusCode::OK, Body::from("unexpected upstream hit"))
+    }));
+    let user_repository = Arc::new(
+        InMemoryUserReadRepository::seed_auth_users(vec![sample_admin_user_with_role(
+            "admin-1",
+            "admin",
+            "admin@example.com",
+            "admin",
+        )])
+        .with_export_users(vec![sample_admin_export_user_with(
+            "admin",
+            true,
+            "admin-1",
+            "admin@example.com",
+            "admin",
+        )]),
+    );
+    let provider = super::super::helpers::sample_provider("provider-1", "Provider One", 10);
+    let other_provider = super::super::helpers::sample_provider("provider-2", "Provider Two", 20);
+    let catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider, other_provider],
+        Vec::new(),
+        vec![
+            super::super::helpers::sample_key("key-a", "provider-1", "openai:chat", "secret-a"),
+            super::super::helpers::sample_key("key-b", "provider-1", "openai:chat", "secret-b"),
+            super::super::helpers::sample_key("key-c", "provider-2", "openai:chat", "secret-c"),
+        ],
+    ));
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_user_reader_for_tests(user_repository.clone())
+                    .with_provider_catalog_reader(catalog)
+                    .with_system_config_values_for_tests(Vec::<(String, serde_json::Value)>::new()),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{gateway_url}/api/admin/user-groups"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "name": "Scoped Group",
+            "allowed_providers": ["provider-1", "provider-2"],
+            "allowed_providers_mode": "specific",
+            "allowed_provider_key_ids": {
+                "provider-1": ["key-a", "key-b"],
+            },
+            "allowed_api_formats_mode": "unrestricted",
+            "allowed_models_mode": "unrestricted",
+            "rate_limit_mode": "inherit"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(created["name"], json!("Scoped Group"));
+    assert_eq!(
+        created["allowed_provider_key_ids"],
+        json!({ "provider-1": ["key-a", "key-b"] })
+    );
+    let group_id = created["id"]
+        .as_str()
+        .expect("group id should exist")
+        .to_string();
+
+    // The stored group keeps the scope.
+    let stored = user_repository
+        .find_user_group_by_id(&group_id)
+        .await
+        .expect("group should load")
+        .expect("group should exist");
+    assert_eq!(
+        stored.allowed_provider_key_ids,
+        Some(
+            [(
+                "provider-1".to_string(),
+                ["key-a".to_string(), "key-b".to_string()].into()
+            )]
+            .into()
+        )
+    );
+
+    // A scope referencing another provider's key is rejected with 400.
+    let bad_response = client
+        .put(format!("{gateway_url}/api/admin/user-groups/{group_id}"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "name": "Scoped Group",
+            "allowed_providers": ["provider-1"],
+            "allowed_providers_mode": "specific",
+            "allowed_provider_key_ids": { "provider-1": ["key-c"] },
+            "allowed_api_formats_mode": "unrestricted",
+            "allowed_models_mode": "unrestricted",
+            "rate_limit_mode": "inherit"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(bad_response.status(), StatusCode::BAD_REQUEST);
+
+    // A scope without a provider allowlist is rejected with 400.
+    let bad_response = client
+        .post(format!("{gateway_url}/api/admin/user-groups"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "name": "Bad Group",
+            "allowed_providers_mode": "unrestricted",
+            "allowed_provider_key_ids": { "provider-1": ["key-a"] },
+            "allowed_api_formats_mode": "unrestricted",
+            "allowed_models_mode": "unrestricted",
+            "rate_limit_mode": "inherit"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(bad_response.status(), StatusCode::BAD_REQUEST);
 
     gateway_handle.abort();
     upstream_handle.abort();

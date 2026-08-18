@@ -1,5 +1,9 @@
 use async_trait::async_trait;
 
+use super::provider_key_scope::{
+    intersect_provider_key_scopes, parse_provider_key_scope, ProviderKeyScope,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredAuthApiKeySnapshot {
     pub user_id: String,
@@ -11,6 +15,7 @@ pub struct StoredAuthApiKeySnapshot {
     pub user_is_deleted: bool,
     pub user_rate_limit: Option<i32>,
     pub user_allowed_providers: Option<Vec<String>>,
+    pub user_allowed_provider_key_ids: Option<ProviderKeyScope>,
     pub user_allowed_api_formats: Option<Vec<String>>,
     pub user_allowed_models: Option<Vec<String>>,
     pub api_key_id: String,
@@ -22,6 +27,7 @@ pub struct StoredAuthApiKeySnapshot {
     pub api_key_concurrent_limit: Option<i32>,
     pub api_key_expires_at_unix_secs: Option<u64>,
     pub api_key_allowed_providers: Option<Vec<String>>,
+    pub api_key_allowed_provider_key_ids: Option<ProviderKeyScope>,
     pub api_key_allowed_api_formats: Option<Vec<String>>,
     pub api_key_allowed_models: Option<Vec<String>>,
     pub api_key_ip_rules: Option<Vec<String>>,
@@ -65,6 +71,7 @@ impl StoredAuthApiKeySnapshot {
                 user_allowed_providers,
                 "users.allowed_providers",
             )?,
+            user_allowed_provider_key_ids: None,
             user_allowed_api_formats: parse_string_list(
                 user_allowed_api_formats,
                 "users.allowed_api_formats",
@@ -90,6 +97,7 @@ impl StoredAuthApiKeySnapshot {
                 api_key_allowed_providers,
                 "api_keys.allowed_providers",
             )?,
+            api_key_allowed_provider_key_ids: None,
             api_key_allowed_api_formats: parse_string_list(
                 api_key_allowed_api_formats,
                 "api_keys.allowed_api_formats",
@@ -100,6 +108,28 @@ impl StoredAuthApiKeySnapshot {
             )?,
             api_key_ip_rules: None,
         })
+    }
+
+    pub fn with_user_provider_key_scope(
+        mut self,
+        user_allowed_provider_key_ids: Option<serde_json::Value>,
+    ) -> Result<Self, crate::DataLayerError> {
+        self.user_allowed_provider_key_ids = parse_provider_key_scope(
+            user_allowed_provider_key_ids,
+            "users.allowed_provider_key_ids",
+        )?;
+        Ok(self)
+    }
+
+    pub fn with_api_key_provider_key_scope(
+        mut self,
+        api_key_allowed_provider_key_ids: Option<serde_json::Value>,
+    ) -> Result<Self, crate::DataLayerError> {
+        self.api_key_allowed_provider_key_ids = parse_provider_key_scope(
+            api_key_allowed_provider_key_ids,
+            "api_keys.allowed_provider_key_ids",
+        )?;
+        Ok(self)
     }
 
     pub fn with_api_key_ip_rules(
@@ -145,6 +175,7 @@ pub struct ResolvedAuthApiKeySnapshot {
     pub user_is_deleted: bool,
     pub user_rate_limit: Option<i32>,
     pub user_allowed_providers: Option<Vec<String>>,
+    pub user_allowed_provider_key_ids: Option<ProviderKeyScope>,
     pub user_allowed_api_formats: Option<Vec<String>>,
     pub user_allowed_models: Option<Vec<String>>,
     pub api_key_id: String,
@@ -156,6 +187,7 @@ pub struct ResolvedAuthApiKeySnapshot {
     pub api_key_concurrent_limit: Option<i32>,
     pub api_key_expires_at_unix_secs: Option<u64>,
     pub api_key_allowed_providers: Option<Vec<String>>,
+    pub api_key_allowed_provider_key_ids: Option<ProviderKeyScope>,
     pub api_key_allowed_api_formats: Option<Vec<String>>,
     pub api_key_allowed_models: Option<Vec<String>>,
     pub api_key_ip_rules: Option<Vec<String>>,
@@ -175,6 +207,7 @@ impl ResolvedAuthApiKeySnapshot {
             user_is_deleted: snapshot.user_is_deleted,
             user_rate_limit: snapshot.user_rate_limit,
             user_allowed_providers: snapshot.user_allowed_providers,
+            user_allowed_provider_key_ids: snapshot.user_allowed_provider_key_ids,
             user_allowed_api_formats: snapshot.user_allowed_api_formats,
             user_allowed_models: snapshot.user_allowed_models,
             api_key_id: snapshot.api_key_id,
@@ -186,6 +219,7 @@ impl ResolvedAuthApiKeySnapshot {
             api_key_concurrent_limit: snapshot.api_key_concurrent_limit,
             api_key_expires_at_unix_secs: snapshot.api_key_expires_at_unix_secs,
             api_key_allowed_providers: snapshot.api_key_allowed_providers,
+            api_key_allowed_provider_key_ids: snapshot.api_key_allowed_provider_key_ids,
             api_key_allowed_api_formats: snapshot.api_key_allowed_api_formats,
             api_key_allowed_models: snapshot.api_key_allowed_models,
             api_key_ip_rules: snapshot.api_key_ip_rules,
@@ -203,6 +237,18 @@ impl ResolvedAuthApiKeySnapshot {
         self.api_key_allowed_providers
             .as_deref()
             .or(self.user_allowed_providers.as_deref())
+    }
+
+    /// Effective provider-scoped key allowlist. `None` means no key-level
+    /// restriction (all active keys of every allowed provider are usable).
+    pub fn effective_allowed_provider_key_ids(&self) -> Option<&ProviderKeyScope> {
+        if self.api_key_is_standalone {
+            return self.api_key_allowed_provider_key_ids.as_ref();
+        }
+
+        self.api_key_allowed_provider_key_ids
+            .as_ref()
+            .or(self.user_allowed_provider_key_ids.as_ref())
     }
 
     pub fn effective_allowed_api_formats(&self) -> Option<&[String]> {
@@ -228,11 +274,13 @@ impl ResolvedAuthApiKeySnapshot {
     pub fn apply_user_policy(
         &mut self,
         allowed_providers: Option<Vec<String>>,
+        allowed_provider_key_ids: Option<ProviderKeyScope>,
         allowed_api_formats: Option<Vec<String>>,
         allowed_models: Option<Vec<String>>,
         rate_limit: Option<i32>,
     ) {
         self.user_allowed_providers = allowed_providers;
+        self.user_allowed_provider_key_ids = allowed_provider_key_ids;
         self.user_allowed_api_formats = allowed_api_formats;
         self.user_allowed_models = allowed_models;
         self.user_rate_limit = rate_limit;
@@ -243,10 +291,24 @@ impl ResolvedAuthApiKeySnapshot {
         if self.api_key_is_standalone {
             return;
         }
+        // Persisted empty scopes are normalized to `None`, but an intersection
+        // of two non-empty policies may produce an explicit empty provider
+        // set. Keep that effective deny-all entry so it cannot widen back to
+        // provider-wide access during candidate selection.
         constrain_api_key_list_policy_to_user_policy(
             &mut self.user_allowed_providers,
             &mut self.api_key_allowed_providers,
         );
+        if self.api_key_allowed_provider_key_ids.is_some()
+            || self.user_allowed_provider_key_ids.is_some()
+        {
+            let effective = intersect_provider_key_scopes(
+                self.user_allowed_provider_key_ids.as_ref(),
+                self.api_key_allowed_provider_key_ids.as_ref(),
+            );
+            self.user_allowed_provider_key_ids = effective.clone();
+            self.api_key_allowed_provider_key_ids = effective;
+        }
         constrain_api_key_api_format_policy_to_user_policy(
             &mut self.user_allowed_api_formats,
             &mut self.api_key_allowed_api_formats,
@@ -358,6 +420,7 @@ pub struct StoredAuthApiKeyExportRecord {
     pub key_encrypted: Option<String>,
     pub name: Option<String>,
     pub allowed_providers: Option<Vec<String>>,
+    pub allowed_provider_key_ids: Option<ProviderKeyScope>,
     pub allowed_api_formats: Option<Vec<String>>,
     pub allowed_models: Option<Vec<String>>,
     pub ip_rules: Option<Vec<String>>,
@@ -427,6 +490,7 @@ impl StoredAuthApiKeyExportRecord {
             key_encrypted,
             name,
             allowed_providers: parse_string_list(allowed_providers, "api_keys.allowed_providers")?,
+            allowed_provider_key_ids: None,
             allowed_api_formats: parse_string_list(
                 allowed_api_formats,
                 "api_keys.allowed_api_formats",
@@ -482,6 +546,17 @@ impl StoredAuthApiKeyExportRecord {
         self.ip_rules = parse_string_list(ip_rules, "api_keys.ip_rules")?;
         Ok(self)
     }
+
+    pub fn with_provider_key_scope(
+        mut self,
+        allowed_provider_key_ids: Option<serde_json::Value>,
+    ) -> Result<Self, crate::DataLayerError> {
+        self.allowed_provider_key_ids = parse_provider_key_scope(
+            allowed_provider_key_ids,
+            "api_keys.allowed_provider_key_ids",
+        )?;
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -505,6 +580,7 @@ pub struct CreateUserApiKeyRecord {
     pub key_encrypted: Option<String>,
     pub name: Option<String>,
     pub allowed_providers: Option<Vec<String>>,
+    pub allowed_provider_key_ids: Option<ProviderKeyScope>,
     pub allowed_api_formats: Option<Vec<String>>,
     pub allowed_models: Option<Vec<String>>,
     pub ip_rules: Option<Vec<String>>,
@@ -537,6 +613,7 @@ pub struct CreateStandaloneApiKeyRecord {
     pub key_encrypted: Option<String>,
     pub name: Option<String>,
     pub allowed_providers: Option<Vec<String>>,
+    pub allowed_provider_key_ids: Option<ProviderKeyScope>,
     pub allowed_api_formats: Option<Vec<String>>,
     pub allowed_models: Option<Vec<String>>,
     pub ip_rules: Option<Vec<String>>,
@@ -560,6 +637,7 @@ pub struct UpdateStandaloneApiKeyBasicRecord {
     pub concurrent_limit_present: bool,
     pub concurrent_limit: Option<i32>,
     pub allowed_providers: Option<Option<Vec<String>>>,
+    pub allowed_provider_key_ids: Option<Option<ProviderKeyScope>>,
     pub allowed_api_formats: Option<Option<Vec<String>>>,
     pub allowed_models: Option<Option<Vec<String>>>,
     pub ip_rules: Option<Option<Vec<String>>>,
@@ -650,6 +728,18 @@ pub trait AuthApiKeyReadRepository: Send + Sync {
 pub trait AuthApiKeyWriteRepository: Send + Sync {
     async fn touch_last_used_at(&self, api_key_id: &str) -> Result<bool, crate::DataLayerError>;
 
+    /// Removes deleted `provider_api_keys.id` values from every
+    /// `allowed_provider_key_ids` policy stored in `api_keys` and
+    /// `user_groups`. Defaults to a no-op for repositories that do not own
+    /// provider key scope storage.
+    async fn prune_provider_key_scope_references(
+        &self,
+        key_ids: &[String],
+    ) -> Result<u64, crate::DataLayerError> {
+        let _ = key_ids;
+        Ok(0)
+    }
+
     async fn create_user_api_key(
         &self,
         record: CreateUserApiKeyRecord,
@@ -695,6 +785,13 @@ pub trait AuthApiKeyWriteRepository: Send + Sync {
         user_id: &str,
         api_key_id: &str,
         allowed_providers: Option<Vec<String>>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError>;
+
+    async fn set_user_api_key_allowed_provider_key_ids(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        allowed_provider_key_ids: Option<ProviderKeyScope>,
     ) -> Result<Option<StoredAuthApiKeyExportRecord>, crate::DataLayerError>;
 
     async fn set_user_api_key_force_capabilities(
@@ -1059,6 +1156,7 @@ mod tests {
         let mut resolved = ResolvedAuthApiKeySnapshot::from_stored(snapshot, 150);
         resolved.apply_user_policy(
             Some(vec!["openai".to_string(), "gemini".to_string()]),
+            None,
             Some(vec!["openai:chat".to_string()]),
             Some(vec!["gpt-5".to_string()]),
             Some(60),
@@ -1229,6 +1327,206 @@ mod tests {
         assert_eq!(resolved.effective_allowed_providers(), Some(&[][..]));
         assert_eq!(resolved.effective_allowed_api_formats(), Some(&[][..]));
         assert_eq!(resolved.effective_allowed_models(), Some(&[][..]));
+    }
+
+    #[test]
+    fn standalone_snapshot_uses_its_own_provider_key_scope() {
+        let snapshot = StoredAuthApiKeySnapshot::new(
+            "admin-user".to_string(),
+            "admin".to_string(),
+            None,
+            "admin".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            Some(serde_json::json!(["openai"])),
+            None,
+            None,
+            "standalone-key".to_string(),
+            Some("standalone".to_string()),
+            true,
+            false,
+            true,
+            None,
+            None,
+            None,
+            Some(serde_json::json!(["openai"])),
+            Some(serde_json::json!(["openai:chat"])),
+            Some(serde_json::json!(["gpt-4.1"])),
+        )
+        .expect("snapshot should build")
+        .with_api_key_provider_key_scope(Some(serde_json::json!({
+            "openai": ["key-a", "key-b"]
+        })))
+        .expect("scope should parse");
+
+        let resolved = ResolvedAuthApiKeySnapshot::from_stored(snapshot, 150);
+
+        assert!(resolved.api_key_is_standalone);
+        assert_eq!(
+            resolved.effective_allowed_provider_key_ids(),
+            Some(&super::super::provider_key_scope::ProviderKeyScope::from([
+                (
+                    "openai".to_string(),
+                    ["key-a".to_string(), "key-b".to_string()].into()
+                )
+            ]))
+        );
+    }
+
+    #[test]
+    fn non_standalone_snapshot_intersects_key_and_user_provider_key_scopes() {
+        let snapshot = StoredAuthApiKeySnapshot::new(
+            "user-1".to_string(),
+            "alice".to_string(),
+            None,
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            None,
+            None,
+            None,
+            "key-1".to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            Some(5),
+            Some(200),
+            Some(serde_json::json!(["openai", "anthropic"])),
+            Some(serde_json::json!(["openai:chat", "claude:messages"])),
+            Some(serde_json::json!(["gpt-4.1"])),
+        )
+        .expect("snapshot should build")
+        .with_api_key_provider_key_scope(Some(serde_json::json!({
+            "openai": ["key-a", "key-b"],
+            "anthropic": ["key-c"]
+        })))
+        .expect("scope should parse")
+        .with_user_provider_key_scope(Some(serde_json::json!({
+            "openai": ["key-b", "key-d"],
+            "gemini": ["key-e"]
+        })))
+        .expect("scope should parse");
+
+        let mut resolved = ResolvedAuthApiKeySnapshot::from_stored(snapshot, 150);
+        resolved.apply_user_policy(
+            Some(vec![
+                "openai".to_string(),
+                "anthropic".to_string(),
+                "gemini".to_string(),
+            ]),
+            Some(super::super::provider_key_scope::ProviderKeyScope::from([
+                (
+                    "openai".to_string(),
+                    ["key-b".to_string(), "key-d".to_string()].into(),
+                ),
+                ("gemini".to_string(), ["key-e".to_string()].into()),
+            ])),
+            None,
+            None,
+            None,
+        );
+
+        // api_key scope {openai:[a,b], anthropic:[c]} ∩ user scope
+        // {openai:[b,d], gemini:[e]} = {openai:[b], anthropic:[c], gemini:[e]}
+        assert_eq!(
+            resolved.effective_allowed_provider_key_ids(),
+            Some(&super::super::provider_key_scope::ProviderKeyScope::from([
+                ("openai".to_string(), ["key-b".to_string()].into()),
+                ("anthropic".to_string(), ["key-c".to_string()].into()),
+                ("gemini".to_string(), ["key-e".to_string()].into()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn non_standalone_snapshot_keeps_disjoint_provider_key_scope_as_deny() {
+        let snapshot = StoredAuthApiKeySnapshot::new(
+            "user-1".to_string(),
+            "alice".to_string(),
+            None,
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            None,
+            None,
+            None,
+            "key-1".to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("snapshot should build")
+        .with_api_key_provider_key_scope(Some(serde_json::json!({
+            "openai": ["key-a"],
+        })))
+        .expect("api key scope should parse")
+        .with_user_provider_key_scope(Some(serde_json::json!({
+            "openai": ["key-b"],
+        })))
+        .expect("user scope should parse");
+
+        let resolved = ResolvedAuthApiKeySnapshot::from_stored(snapshot, 150);
+        let scope = resolved
+            .effective_allowed_provider_key_ids()
+            .expect("disjoint scopes must remain an effective scope");
+
+        assert!(scope
+            .get("openai")
+            .expect("provider should remain explicit")
+            .is_empty());
+    }
+
+    #[test]
+    fn non_standalone_snapshot_without_key_scope_inherits_user_scope() {
+        let snapshot = StoredAuthApiKeySnapshot::new(
+            "user-1".to_string(),
+            "alice".to_string(),
+            None,
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            None,
+            None,
+            None,
+            "key-1".to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("snapshot should build")
+        .with_user_provider_key_scope(Some(serde_json::json!({
+            "openai": ["key-a"]
+        })))
+        .expect("scope should parse");
+
+        let resolved = ResolvedAuthApiKeySnapshot::from_stored(snapshot, 150);
+
+        assert_eq!(
+            resolved.effective_allowed_provider_key_ids(),
+            Some(&super::super::provider_key_scope::ProviderKeyScope::from([
+                ("openai".to_string(), ["key-a".to_string()].into())
+            ]))
+        );
     }
 
     #[test]

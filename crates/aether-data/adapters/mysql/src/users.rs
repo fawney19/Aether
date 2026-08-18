@@ -152,6 +152,7 @@ SELECT
   description,
   priority,
   allowed_providers,
+  allowed_provider_key_ids,
   allowed_providers_mode,
   allowed_api_formats,
   allowed_api_formats_mode,
@@ -477,12 +478,12 @@ WHERE is_deleted = 0
             r#"
 INSERT INTO user_groups (
   id, name, normalized_name, description, priority,
-  allowed_providers, allowed_providers_mode,
+  allowed_providers, allowed_provider_key_ids, allowed_providers_mode,
   allowed_api_formats, allowed_api_formats_mode,
   allowed_models, allowed_models_mode,
   rate_limit, rate_limit_mode, created_at, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#,
         )
         .bind(&id)
@@ -493,6 +494,12 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         .bind(json_string_from_option_vec(
             record.allowed_providers.as_ref(),
         ))
+        .bind(
+            aether_data_contracts::repository::provider_key_scope::serialize_provider_key_scope(
+                record.allowed_provider_key_ids.as_ref(),
+                "user_groups.allowed_provider_key_ids",
+            )?,
+        )
         .bind(record.allowed_providers_mode)
         .bind(json_string_from_option_vec(
             record.allowed_api_formats.as_ref(),
@@ -531,6 +538,7 @@ SET name = ?,
     description = ?,
     priority = ?,
     allowed_providers = ?,
+    allowed_provider_key_ids = ?,
     allowed_providers_mode = ?,
     allowed_api_formats = ?,
     allowed_api_formats_mode = ?,
@@ -549,6 +557,12 @@ WHERE id = ?
         .bind(json_string_from_option_vec(
             record.allowed_providers.as_ref(),
         ))
+        .bind(
+            aether_data_contracts::repository::provider_key_scope::serialize_provider_key_scope(
+                record.allowed_provider_key_ids.as_ref(),
+                "user_groups.allowed_provider_key_ids",
+            )?,
+        )
         .bind(record.allowed_providers_mode)
         .bind(json_string_from_option_vec(
             record.allowed_api_formats.as_ref(),
@@ -2019,6 +2033,10 @@ fn map_user_group_row(row: &MySqlRow) -> Result<StoredUserGroup, DataLayerError>
         optional_json_from_string(
             row.try_get("allowed_providers").map_sql_err()?,
             "user_groups.allowed_providers",
+        )?,
+        optional_json_from_string(
+            row.try_get("allowed_provider_key_ids").map_sql_err()?,
+            "user_groups.allowed_provider_key_ids",
         )?,
         row.try_get("allowed_providers_mode").map_sql_err()?,
         optional_json_from_string(

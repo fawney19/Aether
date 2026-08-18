@@ -8,6 +8,9 @@ use aether_data_contracts::repository::auth::{
     StandaloneApiKeyExportListQuery, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
     UpdateStandaloneApiKeyBasicRecord, UpdateUserApiKeyBasicRecord,
 };
+use aether_data_contracts::repository::provider_key_scope::{
+    plan_provider_key_scope_prune, ProviderKeyScope,
+};
 use aether_data_contracts::DataLayerError;
 
 use crate::error::{postgres_error, SqlxResultExt};
@@ -34,6 +37,7 @@ SELECT
   api_keys.concurrent_limit AS api_key_concurrent_limit,
   CAST(EXTRACT(EPOCH FROM api_keys.expires_at) AS BIGINT) AS api_key_expires_at_unix_secs,
   api_keys.allowed_providers AS api_key_allowed_providers,
+  api_keys.allowed_provider_key_ids AS api_key_allowed_provider_key_ids,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
   api_keys.ip_rules AS api_key_ip_rules
@@ -65,6 +69,7 @@ SELECT
   api_keys.concurrent_limit AS api_key_concurrent_limit,
   CAST(EXTRACT(EPOCH FROM api_keys.expires_at) AS BIGINT) AS api_key_expires_at_unix_secs,
   api_keys.allowed_providers AS api_key_allowed_providers,
+  api_keys.allowed_provider_key_ids AS api_key_allowed_provider_key_ids,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
   api_keys.ip_rules AS api_key_ip_rules
@@ -96,6 +101,7 @@ SELECT
   api_keys.concurrent_limit AS api_key_concurrent_limit,
   CAST(EXTRACT(EPOCH FROM api_keys.expires_at) AS BIGINT) AS api_key_expires_at_unix_secs,
   api_keys.allowed_providers AS api_key_allowed_providers,
+  api_keys.allowed_provider_key_ids AS api_key_allowed_provider_key_ids,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
   api_keys.ip_rules AS api_key_ip_rules
@@ -127,6 +133,7 @@ SELECT
   api_keys.concurrent_limit AS api_key_concurrent_limit,
   CAST(EXTRACT(EPOCH FROM api_keys.expires_at) AS BIGINT) AS api_key_expires_at_unix_secs,
   api_keys.allowed_providers AS api_key_allowed_providers,
+  api_keys.allowed_provider_key_ids AS api_key_allowed_provider_key_ids,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
   api_keys.ip_rules AS api_key_ip_rules
@@ -144,6 +151,7 @@ SELECT
   api_keys.key_encrypted,
   api_keys.name,
   api_keys.allowed_providers,
+  api_keys.allowed_provider_key_ids,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
   api_keys.ip_rules,
@@ -175,6 +183,7 @@ SELECT
   api_keys.key_encrypted,
   api_keys.name,
   api_keys.allowed_providers,
+  api_keys.allowed_provider_key_ids,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
   api_keys.ip_rules,
@@ -205,6 +214,7 @@ SELECT
   api_keys.key_encrypted,
   api_keys.name,
   api_keys.allowed_providers,
+  api_keys.allowed_provider_key_ids,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
   api_keys.ip_rules,
@@ -235,6 +245,7 @@ SELECT
   api_keys.key_encrypted,
   api_keys.name,
   api_keys.allowed_providers,
+  api_keys.allowed_provider_key_ids,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
   api_keys.ip_rules,
@@ -265,6 +276,7 @@ SELECT
   api_keys.key_encrypted,
   api_keys.name,
   api_keys.allowed_providers,
+  api_keys.allowed_provider_key_ids,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
   api_keys.ip_rules,
@@ -339,6 +351,7 @@ SELECT
   api_keys.key_encrypted,
   api_keys.name,
   api_keys.allowed_providers,
+  api_keys.allowed_provider_key_ids,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
   api_keys.ip_rules,
@@ -376,6 +389,7 @@ INSERT INTO api_keys (
   key_encrypted,
   name,
   allowed_providers,
+  allowed_provider_key_ids,
   allowed_api_formats,
   allowed_models,
   ip_rules,
@@ -416,6 +430,7 @@ VALUES (
   $16,
   $17,
   $18,
+  $19,
   NOW(),
   NOW()
 )
@@ -426,6 +441,7 @@ RETURNING
   key_encrypted,
   name,
   allowed_providers,
+  allowed_provider_key_ids,
   allowed_api_formats,
   allowed_models,
   ip_rules,
@@ -453,6 +469,7 @@ INSERT INTO api_keys (
   key_encrypted,
   name,
   allowed_providers,
+  allowed_provider_key_ids,
   allowed_api_formats,
   allowed_models,
   ip_rules,
@@ -493,6 +510,7 @@ VALUES (
   $16,
   $17,
   $18,
+  $19,
   NOW(),
   NOW()
 )
@@ -503,6 +521,7 @@ RETURNING
   key_encrypted,
   name,
   allowed_providers,
+  allowed_provider_key_ids,
   allowed_api_formats,
   allowed_models,
   ip_rules,
@@ -540,6 +559,7 @@ RETURNING
   key_encrypted,
   name,
   allowed_providers,
+  allowed_provider_key_ids,
   allowed_api_formats,
   allowed_models,
   ip_rules,
@@ -571,6 +591,7 @@ SET
   ip_rules = CASE WHEN $13 THEN $14::jsonb ELSE ip_rules END,
   expires_at = CASE WHEN $15 THEN $16::timestamptz ELSE expires_at END,
   auto_delete_on_expiry = CASE WHEN $17 THEN $18 ELSE auto_delete_on_expiry END,
+  allowed_provider_key_ids = CASE WHEN $19 THEN $20::jsonb ELSE allowed_provider_key_ids END,
   updated_at = NOW()
 WHERE id = $1
   AND is_standalone = TRUE
@@ -581,6 +602,7 @@ RETURNING
   key_encrypted,
   name,
   allowed_providers,
+  allowed_provider_key_ids,
   allowed_api_formats,
   allowed_models,
   ip_rules,
@@ -615,6 +637,7 @@ RETURNING
   key_encrypted,
   name,
   allowed_providers,
+  allowed_provider_key_ids,
   allowed_api_formats,
   allowed_models,
   ip_rules,
@@ -648,6 +671,7 @@ RETURNING
   key_encrypted,
   name,
   allowed_providers,
+  allowed_provider_key_ids,
   allowed_api_formats,
   allowed_models,
   ip_rules,
@@ -682,6 +706,7 @@ RETURNING
   key_encrypted,
   name,
   allowed_providers,
+  allowed_provider_key_ids,
   allowed_api_formats,
   allowed_models,
   ip_rules,
@@ -726,6 +751,7 @@ RETURNING
   key_encrypted,
   name,
   allowed_providers,
+  allowed_provider_key_ids,
   allowed_api_formats,
   allowed_models,
   ip_rules,
@@ -760,6 +786,7 @@ RETURNING
   key_encrypted,
   name,
   allowed_providers,
+  allowed_provider_key_ids,
   allowed_api_formats,
   allowed_models,
   rate_limit,
@@ -1138,6 +1165,76 @@ impl AuthApiKeyReadRepository for SqlxAuthApiKeySnapshotReadRepository {
 
 #[async_trait]
 impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
+    async fn prune_provider_key_scope_references(
+        &self,
+        key_ids: &[String],
+    ) -> Result<u64, DataLayerError> {
+        if key_ids.is_empty() {
+            return Ok(0);
+        }
+        let removed = key_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut updated = 0u64;
+        for table in ["api_keys", "user_groups"] {
+            let rows = sqlx::query(&format!(
+                "SELECT id, allowed_provider_key_ids FROM {table} WHERE allowed_provider_key_ids IS NOT NULL"
+            ))
+            .fetch_all(&self.pool)
+            .await
+            .map_postgres_err()?;
+            for row in rows {
+                let id: String = row_get(&row, "id")?;
+                let Some(original_value): Option<serde_json::Value> =
+                    row_get(&row, "allowed_provider_key_ids")?
+                else {
+                    continue;
+                };
+                let raw = serde_json::to_string(&original_value).map_err(|err| {
+                    DataLayerError::UnexpectedValue(format!(
+                        "{table}.allowed_provider_key_ids contains unserializable JSON: {err}"
+                    ))
+                })?;
+                let field_name = format!("{table}.allowed_provider_key_ids");
+                let plans = plan_provider_key_scope_prune(
+                    std::iter::once((id.clone(), raw)),
+                    &removed,
+                    &field_name,
+                )?;
+                for plan in plans {
+                    match plan.next {
+                        None => {
+                            sqlx::query(&format!(
+                                "UPDATE {table} SET allowed_provider_key_ids = NULL WHERE id = $1"
+                            ))
+                            .bind(&plan.row_id)
+                            .execute(&self.pool)
+                            .await
+                            .map_postgres_err()?;
+                        }
+                        Some(next) => {
+                            let next_value = serde_json::to_value(&next).map_err(|err| {
+                                DataLayerError::UnexpectedValue(format!(
+                                    "{table}.allowed_provider_key_ids contains unserializable scope: {err}"
+                                ))
+                            })?;
+                            sqlx::query(&format!(
+                                "UPDATE {table} SET allowed_provider_key_ids = $2 WHERE id = $1"
+                            ))
+                            .bind(&plan.row_id)
+                            .bind(next_value)
+                            .execute(&self.pool)
+                            .await
+                            .map_postgres_err()?;
+                        }
+                    }
+                    updated += 1;
+                }
+            }
+        }
+        Ok(updated)
+    }
     async fn touch_last_used_at(&self, api_key_id: &str) -> Result<bool, DataLayerError> {
         let result = sqlx::query(TOUCH_LAST_USED_AT_SQL)
             .bind(api_key_id)
@@ -1153,6 +1250,11 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
     ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
         let allowed_providers = record
             .allowed_providers
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let allowed_provider_key_ids = record
+            .allowed_provider_key_ids
             .map(serde_json::to_value)
             .transpose()
             .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
@@ -1186,6 +1288,7 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(record.key_encrypted)
             .bind(record.name)
             .bind(allowed_providers)
+            .bind(allowed_provider_key_ids)
             .bind(allowed_api_formats)
             .bind(allowed_models)
             .bind(ip_rules)
@@ -1210,6 +1313,11 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
     ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
         let allowed_providers = record
             .allowed_providers
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let allowed_provider_key_ids = record
+            .allowed_provider_key_ids
             .map(serde_json::to_value)
             .transpose()
             .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
@@ -1243,6 +1351,7 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(record.key_encrypted)
             .bind(record.name)
             .bind(allowed_providers)
+            .bind(allowed_provider_key_ids)
             .bind(allowed_api_formats)
             .bind(allowed_models)
             .bind(ip_rules)
@@ -1297,6 +1406,13 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .map(serde_json::to_value)
             .transpose()
             .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let allowed_provider_key_ids = record
+            .allowed_provider_key_ids
+            .clone()
+            .flatten()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
         let allowed_api_formats = record
             .allowed_api_formats
             .clone()
@@ -1345,6 +1461,8 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(expires_at)
             .bind(record.auto_delete_on_expiry_present)
             .bind(record.auto_delete_on_expiry)
+            .bind(record.allowed_provider_key_ids.is_some())
+            .bind(allowed_provider_key_ids)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -1414,6 +1532,60 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
+        row.as_ref().map(map_auth_api_key_export_row).transpose()
+    }
+
+    async fn set_user_api_key_allowed_provider_key_ids(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        allowed_provider_key_ids: Option<ProviderKeyScope>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        let allowed_provider_key_ids = allowed_provider_key_ids
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let row = sqlx::query(
+            r#"
+UPDATE api_keys
+SET allowed_provider_key_ids = $3,
+    updated_at = now()
+WHERE user_id = $1
+  AND id = $2
+  AND is_standalone = FALSE
+RETURNING
+  user_id,
+  id AS api_key_id,
+  key_hash,
+  key_encrypted,
+  name,
+  allowed_providers,
+  allowed_provider_key_ids,
+  allowed_api_formats,
+  allowed_models,
+  ip_rules,
+  rate_limit,
+  concurrent_limit,
+  force_capabilities,
+  feature_settings,
+  is_active,
+  CAST(EXTRACT(EPOCH FROM expires_at) AS BIGINT) AS expires_at_unix_secs,
+  auto_delete_on_expiry,
+  total_requests,
+  COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
+  COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
+  is_standalone
+"#,
+        )
+        .bind(user_id)
+        .bind(api_key_id)
+        .bind(allowed_provider_key_ids)
+        .fetch_optional(&self.pool)
+        .await
+        .map_postgres_err()?;
         row.as_ref().map(map_auth_api_key_export_row).transpose()
     }
 
@@ -1568,7 +1740,8 @@ fn map_auth_api_key_snapshot_row(
         row_get(row, "api_key_allowed_api_formats")?,
         row_get(row, "api_key_allowed_models")?,
     )?
-    .with_api_key_ip_rules(row_get(row, "api_key_ip_rules")?)?;
+    .with_api_key_ip_rules(row_get(row, "api_key_ip_rules")?)?
+    .with_api_key_provider_key_scope(row_get(row, "api_key_allowed_provider_key_ids")?)?;
     Ok(snapshot.with_user_rate_limit(row_get(row, "user_rate_limit")?))
 }
 
@@ -1597,6 +1770,7 @@ fn map_auth_api_key_export_row(
         row_get(row, "is_standalone")?,
     )
     .and_then(|record| record.with_ip_rules(row_get(row, "ip_rules")?))
+    .and_then(|record| record.with_provider_key_scope(row_get(row, "allowed_provider_key_ids")?))
     .map(|record| record.with_feature_settings(feature_settings))
     .and_then(|record| {
         record.with_activity_timestamps(

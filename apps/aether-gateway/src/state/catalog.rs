@@ -609,6 +609,12 @@ impl AppState {
         if !endpoint_ids.is_empty() || !key_ids.is_empty() {
             self.invalidate_provider_routing_caches();
         }
+        if !key_ids.is_empty() {
+            // The adapter prunes the deleted key ids from every
+            // api_keys/user_groups key scope inside the same transaction as
+            // the provider ref cleanup; failures abort that transaction.
+            self.invalidate_auth_context_cache();
+        }
         Ok(())
     }
 
@@ -661,6 +667,13 @@ impl AppState {
         &self,
         key: &provider_catalog::StoredProviderCatalogKey,
     ) -> Result<Option<provider_catalog::StoredProviderCatalogKey>, GatewayError> {
+        let previous = self
+            .data
+            .list_provider_catalog_keys_by_ids(std::slice::from_ref(&key.id))
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+            .into_iter()
+            .next();
         let updated = self
             .data
             .update_provider_catalog_key(key)
@@ -668,6 +681,11 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.is_some() {
             self.invalidate_provider_routing_caches();
+        }
+        if let (Some(previous), Some(updated)) = (previous.as_ref(), updated.as_ref()) {
+            if previous.is_active && !updated.is_active {
+                self.invalidate_auth_context_cache();
+            }
         }
         Ok(updated)
     }
@@ -691,6 +709,16 @@ impl AppState {
         &self,
         keys: &[provider_catalog::StoredProviderCatalogKey],
     ) -> Result<Option<Vec<provider_catalog::StoredProviderCatalogKey>>, GatewayError> {
+        let previous_by_id = self
+            .data
+            .list_provider_catalog_keys_by_ids(
+                &keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>(),
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+            .into_iter()
+            .map(|key| (key.id.clone(), key))
+            .collect::<std::collections::BTreeMap<_, _>>();
         let updated = self
             .data
             .update_provider_catalog_keys(keys)
@@ -698,6 +726,20 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         if updated.as_ref().is_some_and(|keys| !keys.is_empty()) {
             self.invalidate_provider_routing_caches();
+        }
+        if let Some(updated_keys) = updated.as_ref() {
+            let newly_disabled = updated_keys
+                .iter()
+                .filter(|updated| {
+                    previous_by_id
+                        .get(&updated.id)
+                        .is_some_and(|previous| previous.is_active && !updated.is_active)
+                })
+                .map(|key| key.id.clone())
+                .collect::<Vec<_>>();
+            if !newly_disabled.is_empty() {
+                self.invalidate_auth_context_cache();
+            }
         }
         Ok(updated)
     }
@@ -883,6 +925,9 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?
             .into_iter()
             .next();
+        // Deletes the key and prunes its id from every api_keys/user_groups
+        // key scope in one database transaction; prune failures abort the
+        // deletion and surface as an error instead of being swallowed.
         let deleted = self
             .data
             .delete_provider_catalog_key(key_id)
@@ -909,6 +954,7 @@ impl AppState {
                 }
             }
             self.invalidate_provider_routing_caches();
+            self.invalidate_auth_context_cache();
         }
         Ok(deleted)
     }
@@ -1217,6 +1263,7 @@ mod tests {
             user_allowed_providers: None,
             user_allowed_api_formats: None,
             user_allowed_models: None,
+            user_allowed_provider_key_ids: None,
             api_key_id: "api-key-1".to_string(),
             api_key_name: Some("default".to_string()),
             api_key_is_active: true,
@@ -1228,6 +1275,7 @@ mod tests {
             api_key_allowed_providers: None,
             api_key_allowed_api_formats: None,
             api_key_allowed_models: None,
+            api_key_allowed_provider_key_ids: None,
             api_key_ip_rules: None,
             currently_usable: true,
         }

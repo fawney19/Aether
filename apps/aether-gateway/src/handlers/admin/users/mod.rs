@@ -55,7 +55,8 @@ use self::shared::{
     AdminCreateUserRequest, AdminToggleUserApiKeyLockRequest, AdminUpdateUserApiKeyRequest,
 };
 pub(crate) use self::shared::{
-    normalize_admin_list_policy_mode, normalize_admin_rate_limit_policy_mode,
+    canonicalize_admin_provider_key_scope, normalize_admin_list_policy_mode,
+    normalize_admin_provider_key_scope, normalize_admin_rate_limit_policy_mode,
     normalize_admin_user_api_formats, normalize_admin_user_ip_rules,
     normalize_admin_user_string_list,
 };

@@ -408,6 +408,8 @@ pub struct AdminSystemConfigEndpoint {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminSystemConfigProviderKey {
     #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
     pub auth_type: Option<String>,

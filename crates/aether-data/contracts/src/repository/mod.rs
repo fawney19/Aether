@@ -12,6 +12,7 @@ pub mod management_tokens;
 pub mod oauth_providers;
 pub mod pool_scores;
 pub mod provider_catalog;
+pub mod provider_key_scope;
 pub mod proxy_nodes;
 pub mod quota;
 pub mod routing_profiles;

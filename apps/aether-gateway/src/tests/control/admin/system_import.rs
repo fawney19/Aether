@@ -5,6 +5,7 @@ use aether_crypto::{
     decrypt_python_fernet_ciphertext, encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY,
 };
 use aether_data::repository::auth::{
+    AuthApiKeyReadRepository as _, AuthApiKeyWriteRepository as _,
     InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
 };
 use aether_data::repository::auth_modules::{
@@ -16,7 +17,9 @@ use aether_data::repository::oauth_providers::{
 };
 use aether_data::repository::pool_scores::InMemoryPoolMemberScoreRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
-use aether_data::repository::users::{StoredUserAuthRecord, UserReadRepository};
+use aether_data::repository::users::{
+    InMemoryUserReadRepository, StoredUserAuthRecord, UserReadRepository,
+};
 use aether_data::repository::wallet::{StoredWalletSnapshot, WalletLookupKey};
 use aether_data_contracts::repository::global_models::{
     AdminGlobalModelListQuery, AdminProviderModelListQuery, GlobalModelReadRepository,
@@ -2678,4 +2681,400 @@ async fn gateway_preserves_manual_proxy_configs_while_skipping_proxy_nodes_durin
     );
 
     gateway_handle.abort();
+}
+
+#[test]
+fn gateway_combined_import_round_trips_provider_key_scopes_with_remap_and_rejects_invalid_refs() {
+    run_admin_system_import_test(
+        "gateway_combined_import_round_trips_provider_key_scopes_with_remap_and_rejects_invalid_refs",
+        gateway_combined_import_round_trips_provider_key_scopes_with_remap_and_rejects_invalid_refs_impl,
+    );
+}
+
+async fn gateway_combined_import_round_trips_provider_key_scopes_with_remap_and_rejects_invalid_refs_impl(
+) {
+    let upstream = Router::new().fallback(any(|_request: Request| async {
+        (StatusCode::OK, Body::from("unexpected upstream hit"))
+    }));
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::default());
+    let user_repository =
+        Arc::new(aether_data::repository::users::InMemoryUserReadRepository::default());
+    let global_model_repository = Arc::new(
+        aether_data::repository::global_models::InMemoryGlobalModelReadRepository::default(),
+    );
+    let auth_module_repository = Arc::new(
+        aether_data::repository::auth_modules::InMemoryAuthModuleReadRepository::default(),
+    );
+    let oauth_provider_repository = Arc::new(InMemoryOAuthProviderRepository::seed(Vec::<
+        StoredOAuthProviderConfig,
+    >::new()));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ));
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_auth_api_key_repository_for_tests(Arc::clone(&auth_repository))
+                .with_user_reader(Arc::clone(&user_repository) as Arc<dyn UserReadRepository>)
+                .attach_provider_catalog_repository_for_tests(Arc::clone(
+                    &provider_catalog_repository,
+                ))
+                .with_global_model_repository_for_tests(Arc::clone(&global_model_repository))
+                .attach_auth_module_repository_for_tests(Arc::clone(&auth_module_repository))
+                .attach_oauth_provider_repository_for_tests(Arc::clone(&oauth_provider_repository))
+                .with_system_config_values_for_tests(Vec::<(String, Value)>::new())
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        )
+        .with_auth_users_for_tests([sample_import_admin_user("admin-user-123")])
+        .with_auth_wallets_for_tests(Vec::<StoredWalletSnapshot>::new());
+    let gateway = build_router_with_state(state.clone());
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let payload = json!({
+        "version": "1.0",
+        "merge_mode": "overwrite",
+        "config_data": {
+            "version": "2.2",
+            "merge_mode": "overwrite",
+            "global_models": [],
+            "providers": [{
+                "name": "import-openai",
+                "provider_type": "custom",
+                "billing_type": "pay_as_you_go",
+                "provider_priority": 10,
+                "is_active": true,
+                "endpoints": [{
+                    "api_format": "openai:chat",
+                    "base_url": "https://api.example.com",
+                    "is_active": true
+                }],
+                "api_keys": [{
+                    "id": "key-exported-1",
+                    "name": "primary",
+                    "api_formats": ["openai:chat"],
+                    "auth_type": "api_key",
+                    "api_key": "sk-import-123",
+                    "internal_priority": 5,
+                    "is_active": false
+                }]
+            }]
+        },
+        "user_data": {
+            "version": "1.4",
+            "merge_mode": "overwrite",
+            "user_groups": [{
+                "id": "source-group-1",
+                "name": "GPT Import",
+                "allowed_providers": ["import-openai"],
+                "allowed_providers_mode": "specific",
+                "allowed_provider_key_ids": { "source-provider-id": ["key-exported-1"] },
+                "allowed_api_formats_mode": "unrestricted",
+                "allowed_models_mode": "unrestricted",
+                "rate_limit_mode": "inherit"
+            }],
+            "users": [{
+                "email": "alice@example.com",
+                "email_verified": true,
+                "username": "alice",
+                "password_hash": "argon2:imported-user-hash",
+                "role": "user",
+                "allowed_models_mode": "unrestricted",
+                "rate_limit_mode": "inherit",
+                "group_names": ["GPT Import"],
+                "is_active": true,
+                "api_keys": [{
+                    "key": "sk-user-import-1",
+                    "name": "Alice CLI",
+                    "allowed_providers": ["import-openai"],
+                    "allowed_provider_key_ids": { "source-provider-id": ["key-exported-1"] },
+                    "allowed_api_formats": ["openai:chat"],
+                    "rate_limit": 60,
+                    "is_active": true
+                }]
+            }],
+            "standalone_keys": [{
+                "key": "sk-standalone-import-1",
+                "name": "Imported Standalone",
+                "allowed_providers": ["import-openai"],
+                "allowed_provider_key_ids": { "source-provider-id": ["key-exported-1"] },
+                "allowed_api_formats": ["openai:chat"],
+                "rate_limit": 90,
+                "is_active": true,
+                "wallet": {
+                    "balance": 30.0,
+                    "recharge_balance": 20.0,
+                    "gift_balance": 10.0,
+                    "limit_mode": "finite",
+                    "currency": "EUR",
+                    "status": "active",
+                    "total_recharged": 0.0,
+                    "total_consumed": 0.0,
+                    "total_refunded": 0.0,
+                    "total_adjusted": 0.0
+                }
+            }]
+        }
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/system/data/import"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&payload)
+        .send()
+        .await
+        .expect("request should succeed");
+    let status = response.status();
+    let body: Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={body}");
+
+    // The imported provider key exists under the imported provider (with a
+    // fresh id); scope references from the source system must be remapped to
+    // this actual key id during import.
+    let providers = provider_catalog_repository
+        .list_providers(false)
+        .await
+        .expect("providers should list");
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].name, "import-openai");
+    let provider_id = providers[0].id.clone();
+    let keys = provider_catalog_repository
+        .list_keys_by_provider_ids(&[provider_id.clone()])
+        .await
+        .expect("keys should list");
+    assert_eq!(keys.len(), 1);
+    let actual_key_id = keys[0].id.clone();
+    assert_ne!(
+        actual_key_id, "key-exported-1",
+        "imported keys get fresh ids"
+    );
+    assert!(
+        !keys[0].is_active,
+        "disabled imported key must remain disabled"
+    );
+
+    // ... and every imported scope was canonicalized to the actual provider
+    // and key ids instead of the source-system references.
+    let groups = user_repository
+        .list_user_groups()
+        .await
+        .expect("groups should list");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(
+        keys[0].provider_id, provider_id,
+        "imported key must belong to the imported provider"
+    );
+    assert_eq!(
+        groups[0].allowed_provider_key_ids,
+        Some([(provider_id.clone(), [actual_key_id.clone()].into())].into())
+    );
+
+    let standalone = auth_repository
+        .list_export_standalone_api_keys()
+        .await
+        .expect("standalone keys should list");
+    assert_eq!(standalone.len(), 1);
+    assert_eq!(
+        standalone[0].allowed_provider_key_ids,
+        Some([(provider_id.clone(), [actual_key_id.clone()].into())].into())
+    );
+
+    let user = state
+        .find_user_auth_by_identifier("alice@example.com")
+        .await
+        .expect("user lookup should succeed")
+        .expect("imported user should exist");
+    let user_keys = auth_repository
+        .list_export_api_keys_by_user_ids(std::slice::from_ref(&user.id))
+        .await
+        .expect("user keys should list");
+    assert_eq!(user_keys.len(), 1);
+    assert_eq!(
+        user_keys[0].allowed_provider_key_ids,
+        Some([(provider_id, [actual_key_id.clone()].into())].into())
+    );
+
+    // Invalid references reject the whole users import before any write.
+    let mut bad_payload = payload.clone();
+    bad_payload["user_data"]["standalone_keys"][0]["allowed_provider_key_ids"] =
+        json!({ "source-provider-id": ["missing-key"] });
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/system/data/import"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&bad_payload)
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[test]
+fn gateway_combined_import_rejects_invalid_scope_before_config_writes() {
+    run_admin_system_import_test(
+        "gateway_combined_import_rejects_invalid_scope_before_config_writes",
+        gateway_combined_import_rejects_invalid_scope_before_config_writes_impl,
+    );
+}
+
+async fn gateway_combined_import_rejects_invalid_scope_before_config_writes_impl() {
+    let upstream = Router::new().fallback(any(|_request: Request| async {
+        (StatusCode::OK, Body::from("unexpected upstream hit"))
+    }));
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::default());
+    let user_repository = Arc::new(InMemoryUserReadRepository::default());
+    let global_model_repository = Arc::new(
+        aether_data::repository::global_models::InMemoryGlobalModelReadRepository::default(),
+    );
+    let auth_module_repository = Arc::new(
+        aether_data::repository::auth_modules::InMemoryAuthModuleReadRepository::default(),
+    );
+    let oauth_provider_repository = Arc::new(InMemoryOAuthProviderRepository::seed(Vec::<
+        StoredOAuthProviderConfig,
+    >::new()));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ));
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_auth_api_key_repository_for_tests(Arc::clone(&auth_repository))
+                .with_user_reader(Arc::clone(&user_repository) as Arc<dyn UserReadRepository>)
+                .attach_provider_catalog_repository_for_tests(Arc::clone(
+                    &provider_catalog_repository,
+                ))
+                .with_global_model_repository_for_tests(Arc::clone(&global_model_repository))
+                .attach_auth_module_repository_for_tests(Arc::clone(&auth_module_repository))
+                .attach_oauth_provider_repository_for_tests(Arc::clone(&oauth_provider_repository))
+                .with_system_config_values_for_tests(Vec::<(String, Value)>::new())
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        )
+        .with_auth_users_for_tests([sample_import_admin_user("admin-user-123")])
+        .with_auth_wallets_for_tests(Vec::<StoredWalletSnapshot>::new());
+    let gateway = build_router_with_state(state.clone());
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let payload = json!({
+        "version": "1.0",
+        "merge_mode": "overwrite",
+        "config_data": {
+            "version": "2.2",
+            "merge_mode": "overwrite",
+            "global_models": [{
+                "name": "gpt-5",
+                "display_name": "GPT 5",
+                "default_price_per_request": 0.03,
+                "supported_capabilities": ["streaming"],
+                "config": { "quality": "high" },
+                "is_active": true
+            }],
+            "providers": [{
+                "name": "import-openai",
+                "provider_type": "custom",
+                "billing_type": "pay_as_you_go",
+                "provider_priority": 10,
+                "is_active": true,
+                "endpoints": [{
+                    "api_format": "openai:chat",
+                    "base_url": "https://api.example.com",
+                    "is_active": true
+                }],
+                "api_keys": [{
+                    "id": "key-exported-1",
+                    "name": "primary",
+                    "api_formats": ["openai:chat"],
+                    "auth_type": "api_key",
+                    "api_key": "sk-import-123",
+                    "internal_priority": 5,
+                    "is_active": true
+                }]
+            }]
+        },
+        "user_data": {
+            "version": "1.4",
+            "merge_mode": "overwrite",
+            "user_groups": [],
+            "users": [],
+            "standalone_keys": [{
+                "key": "sk-standalone-import-1",
+                "name": "Imported Standalone",
+                "allowed_providers": ["import-openai"],
+                "allowed_provider_key_ids": { "source-provider-id": ["missing-key"] },
+                "allowed_api_formats": ["openai:chat"],
+                "rate_limit": 90,
+                "is_active": true,
+                "wallet": {
+                    "balance": 30.0,
+                    "recharge_balance": 20.0,
+                    "gift_balance": 10.0,
+                    "limit_mode": "finite",
+                    "currency": "EUR",
+                    "status": "active",
+                    "total_recharged": 0.0,
+                    "total_consumed": 0.0,
+                    "total_refunded": 0.0,
+                    "total_adjusted": 0.0
+                }
+            }]
+        }
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/system/data/import"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&payload)
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // The config part must NOT have been persisted: the failed users-scope
+    // validation happened before the config import ran.
+    let providers = provider_catalog_repository
+        .list_providers(false)
+        .await
+        .expect("providers should list");
+    assert!(
+        providers.is_empty(),
+        "config must be unchanged after a failed combined import"
+    );
+    let global_models = global_model_repository
+        .list_admin_global_models(&AdminGlobalModelListQuery {
+            offset: 0,
+            limit: 10_000,
+            is_active: None,
+            search: None,
+        })
+        .await
+        .expect("global models should list");
+    assert!(global_models.items.is_empty());
+    let groups = user_repository
+        .list_user_groups()
+        .await
+        .expect("groups should list");
+    assert!(groups.is_empty());
+    let standalone = auth_repository
+        .list_export_standalone_api_keys()
+        .await
+        .expect("standalone keys should list");
+    assert!(standalone.is_empty());
+
+    gateway_handle.abort();
+    upstream_handle.abort();
 }

@@ -7,9 +7,10 @@ use super::shared::{
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::handlers::admin::users::{
-    default_admin_user_api_key_name, format_optional_unix_secs_iso8601,
-    generate_admin_user_api_key_plaintext, hash_admin_user_api_key, masked_user_api_key_display,
-    normalize_admin_feature_settings, normalize_admin_optional_api_key_name,
+    canonicalize_admin_provider_key_scope, default_admin_user_api_key_name,
+    format_optional_unix_secs_iso8601, generate_admin_user_api_key_plaintext,
+    hash_admin_user_api_key, masked_user_api_key_display, normalize_admin_feature_settings,
+    normalize_admin_optional_api_key_name, normalize_admin_provider_key_scope,
     normalize_admin_user_api_formats, normalize_admin_user_ip_rules,
     normalize_admin_user_string_list,
 };
@@ -101,6 +102,16 @@ pub(super) async fn build_admin_create_api_key_response(
             Ok(value) => value,
             Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
         };
+    let allowed_provider_key_ids = match normalize_admin_provider_key_scope(
+        state,
+        allowed_providers.as_deref(),
+        payload.allowed_provider_key_ids,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+    };
     let allowed_api_formats = match normalize_admin_user_api_formats(payload.allowed_api_formats) {
         Ok(value) => value,
         Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
@@ -165,6 +176,7 @@ pub(super) async fn build_admin_create_api_key_response(
                 key_encrypted: Some(key_encrypted),
                 name: Some(name),
                 allowed_providers,
+                allowed_provider_key_ids,
                 allowed_api_formats,
                 allowed_models,
                 ip_rules,
@@ -210,6 +222,7 @@ pub(super) async fn build_admin_create_api_key_response(
             "rate_limit": created.rate_limit,
             "concurrent_limit": created.concurrent_limit,
             "allowed_providers": created.allowed_providers,
+            "allowed_provider_key_ids": created.allowed_provider_key_ids,
             "allowed_api_formats": created.allowed_api_formats,
             "allowed_models": created.allowed_models,
             "expires_at": format_optional_unix_secs_iso8601(created.expires_at_unix_secs),
@@ -317,6 +330,43 @@ pub(super) async fn build_admin_update_api_key_response(
     } else {
         None
     };
+    // Keep the outer patch state intact: present null clears the allowlist,
+    // while only an absent field falls back to the stored value.
+    let effective_allowed_providers = if field_presence.contains("allowed_providers") {
+        allowed_providers.clone().unwrap_or_default()
+    } else {
+        existing.allowed_providers.clone()
+    };
+    let allowed_provider_key_ids = if field_presence.contains("allowed_provider_key_ids") {
+        match normalize_admin_provider_key_scope(
+            state,
+            effective_allowed_providers.as_deref(),
+            payload.allowed_provider_key_ids,
+        )
+        .await
+        {
+            Ok(value) => Some(value),
+            Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+        }
+    } else if field_presence.contains("allowed_providers") {
+        // The provider allowlist changed without an explicit scope field:
+        // canonicalize the stored scope against the new allowlist so it can
+        // never disagree with the allowlist (entries for providers that are
+        // no longer allowed, and references to missing/foreign keys,
+        // are dropped; an unrestricted allowlist clears the scope).
+        match canonicalize_admin_provider_key_scope(
+            state,
+            effective_allowed_providers.as_deref(),
+            existing.allowed_provider_key_ids.clone(),
+        )
+        .await
+        {
+            Ok(value) => Some(value),
+            Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+        }
+    } else {
+        None
+    };
     let allowed_api_formats = if field_presence.contains("allowed_api_formats") {
         match normalize_admin_user_api_formats(payload.allowed_api_formats) {
             Ok(value) => Some(value),
@@ -411,6 +461,7 @@ pub(super) async fn build_admin_update_api_key_response(
                 concurrent_limit_present: field_presence.contains("concurrent_limit"),
                 concurrent_limit,
                 allowed_providers,
+                allowed_provider_key_ids,
                 allowed_api_formats,
                 allowed_models,
                 ip_rules,

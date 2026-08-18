@@ -19,6 +19,7 @@ const ADMIN_API_KEYS_DATA_UNAVAILABLE_DETAIL: &str = "Admin standalone API key d
 pub(super) struct AdminStandaloneApiKeyCreateRequest {
     pub(super) name: Option<String>,
     pub(super) allowed_providers: Option<Vec<String>>,
+    pub(super) allowed_provider_key_ids: Option<serde_json::Value>,
     pub(super) allowed_api_formats: Option<Vec<String>>,
     pub(super) allowed_models: Option<Vec<String>>,
     #[serde(default, alias = "allowed_ips")]
@@ -37,6 +38,7 @@ pub(super) struct AdminStandaloneApiKeyCreateRequest {
 pub(super) struct AdminStandaloneApiKeyUpdateRequest {
     pub(super) name: Option<String>,
     pub(super) allowed_providers: Option<Vec<String>>,
+    pub(super) allowed_provider_key_ids: Option<serde_json::Value>,
     pub(super) allowed_api_formats: Option<Vec<String>>,
     pub(super) allowed_models: Option<Vec<String>>,
     #[serde(
@@ -168,6 +170,7 @@ pub(super) fn build_admin_api_key_list_item_payload(
         "rate_limit": record.rate_limit,
         "concurrent_limit": record.concurrent_limit,
         "allowed_providers": record.allowed_providers,
+        "allowed_provider_key_ids": record.allowed_provider_key_ids,
         "allowed_api_formats": record.allowed_api_formats,
         "allowed_models": record.allowed_models,
         "ip_rules": record.ip_rules,
@@ -199,6 +202,7 @@ pub(super) fn build_admin_api_key_detail_payload(
         "rate_limit": record.rate_limit,
         "concurrent_limit": record.concurrent_limit,
         "allowed_providers": record.allowed_providers,
+        "allowed_provider_key_ids": record.allowed_provider_key_ids,
         "allowed_api_formats": record.allowed_api_formats,
         "allowed_models": record.allowed_models,
         "ip_rules": record.ip_rules,

@@ -237,6 +237,7 @@ impl<'a> AdminAppState<'a> {
                     "name": group.name.clone(),
                     "description": group.description.clone(),
                     "allowed_providers": group.allowed_providers.clone(),
+                    "allowed_provider_key_ids": group.allowed_provider_key_ids.clone(),
                     "allowed_providers_mode": group.allowed_providers_mode.clone(),
                     "allowed_api_formats": group.allowed_api_formats.clone(),
                     "allowed_api_formats_mode": group.allowed_api_formats_mode.clone(),
@@ -354,6 +355,10 @@ impl<'a> AdminAppState<'a> {
             (
                 "allowed_providers".to_string(),
                 json!(key.allowed_providers.clone()),
+            ),
+            (
+                "allowed_provider_key_ids".to_string(),
+                json!(key.allowed_provider_key_ids.clone()),
             ),
             (
                 "allowed_api_formats".to_string(),

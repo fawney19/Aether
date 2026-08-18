@@ -1,7 +1,7 @@
 use super::{
     build_admin_users_bad_request_response, build_admin_users_read_only_response,
-    format_optional_datetime_iso8601, normalize_admin_user_api_formats,
-    normalize_admin_user_string_list,
+    format_optional_datetime_iso8601, normalize_admin_provider_key_scope,
+    normalize_admin_user_api_formats, normalize_admin_user_string_list,
 };
 use crate::constants::DEFAULT_USER_GROUP_CONFIG_KEY;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -23,6 +23,8 @@ struct AdminUserGroupPayload {
     description: Option<String>,
     #[serde(default)]
     allowed_providers: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_provider_key_ids: Option<serde_json::Value>,
     #[serde(default = "default_list_mode")]
     allowed_providers_mode: String,
     #[serde(default)]
@@ -80,6 +82,9 @@ pub(in super::super) async fn build_admin_create_user_group_response(
         Ok(value) => value,
         Err(detail) => return Ok(bad_request_owned(detail)),
     };
+    if let Err(detail) = validate_group_provider_key_scope(state, &record).await {
+        return Ok(bad_request_owned(detail));
+    }
     let group = match state.create_user_group(record).await {
         Ok(Some(group)) => group,
         Ok(None) => {
@@ -119,6 +124,9 @@ pub(in super::super) async fn build_admin_update_user_group_response(
         Ok(value) => value,
         Err(detail) => return Ok(bad_request_owned(detail)),
     };
+    if let Err(detail) = validate_group_provider_key_scope(state, &record).await {
+        return Ok(bad_request_owned(detail));
+    }
     let group = match state.update_user_group(&group_id, record).await {
         Ok(Some(group)) => group,
         Ok(None) => return Ok(not_found("用户分组不存在")),
@@ -372,6 +380,12 @@ fn parse_group_record(
     }
     let allowed_providers =
         normalize_admin_user_string_list(payload.allowed_providers, "allowed_providers")?;
+    let allowed_provider_key_ids =
+        aether_data::repository::provider_key_scope::parse_provider_key_scope(
+            payload.allowed_provider_key_ids,
+            "allowed_provider_key_ids",
+        )
+        .map_err(|err| err.to_string())?;
     let allowed_api_formats = normalize_admin_user_api_formats(payload.allowed_api_formats)?;
     let allowed_models =
         normalize_admin_user_string_list(payload.allowed_models, "allowed_models")?;
@@ -383,6 +397,7 @@ fn parse_group_record(
             .filter(|value| !value.is_empty()),
         priority: 0,
         allowed_providers,
+        allowed_provider_key_ids,
         allowed_providers_mode: normalize_list_mode(&payload.allowed_providers_mode)?,
         allowed_api_formats,
         allowed_api_formats_mode: normalize_list_mode(&payload.allowed_api_formats_mode)?,
@@ -391,6 +406,82 @@ fn parse_group_record(
         rate_limit: payload.rate_limit,
         rate_limit_mode: normalize_rate_mode(&payload.rate_limit_mode)?,
     })
+}
+
+async fn validate_group_provider_key_scope(
+    state: &AdminAppState<'_>,
+    record: &aether_data::repository::users::UpsertUserGroupRecord,
+) -> Result<(), String> {
+    let Some(scope) = record.allowed_provider_key_ids.as_ref() else {
+        return Ok(());
+    };
+    let allowed_providers = match record.allowed_providers_mode.as_str() {
+        "specific" => record.allowed_providers.as_deref().unwrap_or(&[]),
+        "unrestricted" => {
+            return Err("设置 allowed_provider_key_ids 前必须先选择允许的提供商".to_string());
+        }
+        "inherit" | "deny_all" => {
+            return Err("仅在 specific 提供商模式下可以勾选具体 Key".to_string());
+        }
+        _ => {
+            return Err("权限列表模式不合法".to_string());
+        }
+    };
+    if allowed_providers.is_empty() {
+        return Err("设置 allowed_provider_key_ids 前必须先选择允许的提供商".to_string());
+    }
+
+    let key_ids = scope
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let keys = state
+        .read_provider_catalog_keys_by_ids(&key_ids)
+        .await
+        .map_err(|err| format!("校验 Key 失败: {:?}", err))?;
+    let key_by_id = keys
+        .into_iter()
+        .map(|key| (key.id.clone(), key))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let provider_ids = scope.keys().cloned().collect::<Vec<_>>();
+    let providers = state
+        .read_provider_catalog_providers_by_ids(&provider_ids)
+        .await
+        .map_err(|err| format!("校验提供商失败: {:?}", err))?;
+    let provider_by_id = providers
+        .into_iter()
+        .map(|provider| (provider.id.clone(), provider))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    for (provider_id, key_ids) in scope {
+        let Some(provider) = provider_by_id.get(provider_id) else {
+            return Err(format!("提供商 {provider_id} 不存在"));
+        };
+        let provider_allowed = allowed_providers.iter().any(|allowed| {
+            aether_scheduler_core::provider_matches_allowed_value(
+                allowed,
+                &provider.id,
+                &provider.name,
+                &provider.provider_type,
+            )
+        });
+        if !provider_allowed {
+            return Err(format!("提供商 {} 未在允许的提供商列表中", provider.name));
+        }
+        for key_id in key_ids {
+            let Some(key) = key_by_id.get(key_id) else {
+                return Err(format!("Key {key_id} 不存在"));
+            };
+            if key.provider_id != *provider_id {
+                return Err(format!("Key {key_id} 不属于提供商 {provider_id}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_members_payload(
@@ -413,6 +504,7 @@ fn user_group_payload(
         "normalized_name": group.normalized_name,
         "description": group.description,
         "allowed_providers": group.allowed_providers,
+        "allowed_provider_key_ids": group.allowed_provider_key_ids,
         "allowed_providers_mode": group.allowed_providers_mode,
         "allowed_api_formats": group.allowed_api_formats,
         "allowed_api_formats_mode": group.allowed_api_formats_mode,

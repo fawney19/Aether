@@ -2,9 +2,14 @@ use std::sync::{Arc, Mutex};
 
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::auth::{
+    AuthApiKeyLookupKey, AuthApiKeyReadRepository, AuthApiKeyWriteRepository,
     InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
 };
+use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::usage::InMemoryUsageReadRepository;
+use aether_data::repository::users::{
+    InMemoryUserReadRepository, StoredUserExportRow, UpsertUserGroupRecord, UserReadRepository,
+};
 use aether_data::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
 use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
 use axum::body::Body;
@@ -734,6 +739,488 @@ async fn gateway_handles_admin_api_keys_delete_locally_with_trusted_admin_princi
     .await
     .expect("detail request should succeed");
     assert_eq!(detail_response.status(), StatusCode::NOT_FOUND);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_admin_standalone_api_key_provider_key_scope_round_trip() {
+    let (upstream_url, _upstream_hits, upstream_handle) =
+        start_api_keys_upstream("/api/admin/api-keys").await;
+    let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(Vec::<(
+        Option<String>,
+        StoredAuthApiKeySnapshot,
+    )>::new()));
+    let provider = super::super::helpers::sample_provider("provider-1", "Provider One", 10);
+    let other_provider = super::super::helpers::sample_provider("provider-2", "Provider Two", 20);
+    let catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider, other_provider],
+        Vec::new(),
+        vec![
+            super::super::helpers::sample_key("key-a", "provider-1", "openai:chat", "secret-a"),
+            super::super::helpers::sample_key("key-b", "provider-1", "openai:chat", "secret-b"),
+            super::super::helpers::sample_key("key-c", "provider-2", "openai:chat", "secret-c"),
+        ],
+    ));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_auth_api_key_repository_for_tests(Arc::clone(
+                    &repository,
+                ))
+                .with_provider_catalog_reader(catalog)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    // Create with a provider-scoped key allowlist.
+    let response =
+        admin_request(reqwest::Client::new().post(format!("{gateway_url}/api/admin/api-keys")))
+            .json(&json!({
+                "name": "scoped-key",
+                "initial_balance_usd": 5.0,
+                "allowed_providers": ["provider-1"],
+                "allowed_provider_key_ids": { "provider-1": ["key-a"] },
+                "allowed_api_formats": ["openai:chat"],
+            }))
+            .send()
+            .await
+            .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["allowed_providers"], json!(["provider-1"]));
+    assert_eq!(
+        payload["allowed_provider_key_ids"],
+        json!({ "provider-1": ["key-a"] })
+    );
+
+    // The list endpoint echoes the scope back.
+    let list_response =
+        admin_request(reqwest::Client::new().get(format!("{gateway_url}/api/admin/api-keys")))
+            .send()
+            .await
+            .expect("list request should succeed");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_payload: serde_json::Value =
+        list_response.json().await.expect("list json should parse");
+    assert_eq!(
+        list_payload["api_keys"][0]["allowed_provider_key_ids"],
+        json!({ "provider-1": ["key-a"] })
+    );
+
+    // A key belonging to a different provider is rejected.
+    let bad_provider_response =
+        admin_request(reqwest::Client::new().post(format!("{gateway_url}/api/admin/api-keys")))
+            .json(&json!({
+                "name": "bad-scope",
+                "initial_balance_usd": 5.0,
+                "allowed_providers": ["provider-1"],
+                "allowed_provider_key_ids": { "provider-1": ["key-c"] },
+            }))
+            .send()
+            .await
+            .expect("request should succeed");
+    assert_eq!(bad_provider_response.status(), StatusCode::BAD_REQUEST);
+
+    // A scope without a provider allowlist is rejected.
+    let bad_provider_response =
+        admin_request(reqwest::Client::new().post(format!("{gateway_url}/api/admin/api-keys")))
+            .json(&json!({
+                "name": "bad-scope",
+                "initial_balance_usd": 5.0,
+                "allowed_provider_key_ids": { "provider-1": ["key-a"] },
+            }))
+            .send()
+            .await
+            .expect("request should succeed");
+    assert_eq!(bad_provider_response.status(), StatusCode::BAD_REQUEST);
+
+    // A scope referencing a missing key is rejected.
+    let bad_key_response =
+        admin_request(reqwest::Client::new().post(format!("{gateway_url}/api/admin/api-keys")))
+            .json(&json!({
+                "name": "bad-scope",
+                "initial_balance_usd": 5.0,
+                "allowed_providers": ["provider-1"],
+                "allowed_provider_key_ids": { "provider-1": ["missing-key"] },
+            }))
+            .send()
+            .await
+            .expect("request should succeed");
+    assert_eq!(bad_key_response.status(), StatusCode::BAD_REQUEST);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_admin_standalone_api_key_direct_null_allowlist_clears_scope() {
+    let (_upstream_url, _upstream_hits, upstream_handle) =
+        start_api_keys_upstream("/api/admin/api-keys/key-123").await;
+    let mut snapshot = sample_standalone_api_key_snapshot("key-123", "admin-user-123", true);
+    snapshot.api_key_allowed_providers = Some(vec!["provider-1".to_string()]);
+    snapshot.api_key_allowed_provider_key_ids =
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into());
+    let mut export =
+        sample_standalone_export_record("key-123", "admin-user-123", "sk-key-123-plaintext", true);
+    export.allowed_providers = Some(vec!["provider-1".to_string()]);
+    export.allowed_provider_key_ids =
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into());
+    let repository = Arc::new(
+        InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some("hash-key-123".to_string()),
+            snapshot,
+        )])
+        .with_export_records([export]),
+    );
+    let provider = super::super::helpers::sample_provider("provider-1", "Provider One", 10);
+    let catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![super::super::helpers::sample_key(
+            "key-a",
+            "provider-1",
+            "openai:chat",
+            "secret-a",
+        )],
+    ));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_auth_wallets_for_tests([sample_standalone_wallet("key-123")])
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_auth_api_key_repository_for_tests(Arc::clone(
+                    &repository,
+                ))
+                .with_provider_catalog_reader(catalog)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    // The first and only update explicitly clears the provider allowlist.
+    let response = admin_request(
+        reqwest::Client::new().put(format!("{gateway_url}/api/admin/api-keys/key-123")),
+    )
+    .json(&json!({ "allowed_providers": null }))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["allowed_providers"], serde_json::Value::Null);
+    assert_eq!(payload["allowed_provider_key_ids"], serde_json::Value::Null);
+
+    let stored_snapshot = repository
+        .find_api_key_snapshot(AuthApiKeyLookupKey::ApiKeyId("key-123"))
+        .await
+        .expect("snapshot lookup should succeed")
+        .expect("snapshot should exist");
+    assert_eq!(stored_snapshot.api_key_allowed_provider_key_ids, None);
+    let stored_export = repository
+        .find_export_standalone_api_key_by_id("key-123")
+        .await
+        .expect("export lookup should succeed")
+        .expect("export record should exist");
+    assert_eq!(stored_export.allowed_provider_key_ids, None);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_admin_standalone_api_key_patch_canonicalizes_scope_against_new_allowlist() {
+    let (upstream_url, _upstream_hits, upstream_handle) =
+        start_api_keys_upstream("/api/admin/api-keys/key-123").await;
+    let mut snapshot = sample_standalone_api_key_snapshot("key-123", "admin-user-123", true);
+    snapshot.api_key_allowed_providers = Some(vec!["provider-1".to_string()]);
+    snapshot.api_key_allowed_provider_key_ids =
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into());
+    let mut export =
+        sample_standalone_export_record("key-123", "admin-user-123", "sk-key-123-plaintext", true);
+    export.allowed_providers = Some(vec!["provider-1".to_string()]);
+    export.allowed_provider_key_ids =
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into());
+    let repository = Arc::new(
+        InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some("hash-key-123".to_string()),
+            snapshot,
+        )])
+        .with_export_records([export]),
+    );
+    let provider = super::super::helpers::sample_provider("provider-1", "Provider One", 10);
+    let other_provider = super::super::helpers::sample_provider("provider-2", "Provider Two", 20);
+    let catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider, other_provider],
+        Vec::new(),
+        vec![
+            super::super::helpers::sample_key("key-a", "provider-1", "openai:chat", "secret-a"),
+            super::super::helpers::sample_key("key-b", "provider-2", "openai:chat", "secret-b"),
+        ],
+    ));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_auth_wallets_for_tests([sample_standalone_wallet("key-123")])
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_auth_api_key_repository_for_tests(Arc::clone(
+                    &repository,
+                ))
+                .with_provider_catalog_reader(catalog)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    // PATCH that changes the allowlist to a provider whose keys are not in the
+    // stored scope: the stored scope must be canonicalized away (no stale
+    // P1 -> K1 entry survives), even though the scope field is absent.
+    let response = admin_request(
+        reqwest::Client::new().put(format!("{gateway_url}/api/admin/api-keys/key-123")),
+    )
+    .json(&json!({
+        "allowed_providers": ["provider-2"],
+    }))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["allowed_providers"], json!(["provider-2"]));
+    assert_eq!(payload["allowed_provider_key_ids"], serde_json::Value::Null);
+
+    // PATCH that switches to unrestricted providers clears the scope too.
+    let response = admin_request(
+        reqwest::Client::new().put(format!("{gateway_url}/api/admin/api-keys/key-123")),
+    )
+    .json(&json!({
+        "allowed_providers": null,
+    }))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["allowed_provider_key_ids"], serde_json::Value::Null);
+
+    // PATCH that keeps the scope consistent with the allowlist preserves it.
+    let response = admin_request(
+        reqwest::Client::new().put(format!("{gateway_url}/api/admin/api-keys/key-123")),
+    )
+    .json(&json!({
+        "allowed_providers": ["provider-2"],
+        "allowed_provider_key_ids": { "provider-2": ["key-b"] },
+    }))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(
+        payload["allowed_provider_key_ids"],
+        json!({ "provider-2": ["key-b"] })
+    );
+
+    // A later name-only PATCH keeps the scope intact.
+    let response = admin_request(
+        reqwest::Client::new().put(format!("{gateway_url}/api/admin/api-keys/key-123")),
+    )
+    .json(&json!({
+        "name": "renamed",
+    }))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(
+        payload["allowed_provider_key_ids"],
+        json!({ "provider-2": ["key-b"] })
+    );
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_disabling_provider_key_preserves_scopes_and_allows_reopen_edit_save() {
+    let (upstream_url, _upstream_hits, upstream_handle) =
+        start_api_keys_upstream("/api/admin/api-keys/key-123").await;
+    let mut snapshot = sample_standalone_api_key_snapshot("key-123", "admin-user-123", true);
+    snapshot.api_key_allowed_providers = Some(vec!["provider-1".to_string()]);
+    snapshot.api_key_allowed_provider_key_ids =
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into());
+    let mut export =
+        sample_standalone_export_record("key-123", "admin-user-123", "sk-key-123-plaintext", true);
+    export.allowed_providers = Some(vec!["provider-1".to_string()]);
+    export.allowed_provider_key_ids =
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into());
+    let auth_repository = Arc::new(
+        InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some("hash-key-123".to_string()),
+            snapshot,
+        )])
+        .with_export_records([export]),
+    );
+
+    let user_repository = Arc::new(
+        InMemoryUserReadRepository::seed_auth_users(vec![])
+            .with_export_users(Vec::<StoredUserExportRow>::new()),
+    );
+    let group = user_repository
+        .create_user_group(UpsertUserGroupRecord {
+            name: "Scoped Group".to_string(),
+            description: None,
+            priority: 0,
+            allowed_providers: Some(vec!["provider-1".to_string()]),
+            allowed_provider_key_ids: Some(
+                [("provider-1".to_string(), ["key-a".to_string()].into())].into(),
+            ),
+            allowed_providers_mode: "specific".to_string(),
+            allowed_api_formats: None,
+            allowed_api_formats_mode: "inherit".to_string(),
+            allowed_models: None,
+            allowed_models_mode: "inherit".to_string(),
+            rate_limit: None,
+            rate_limit_mode: "inherit".to_string(),
+        })
+        .await
+        .expect("group should create")
+        .expect("group should exist");
+    let group_id = group.id.clone();
+
+    let provider = super::super::helpers::sample_provider("provider-1", "Provider One", 10);
+    let catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![
+            super::super::helpers::sample_key("key-a", "provider-1", "openai:chat", "secret-a"),
+            super::super::helpers::sample_key("key-b", "provider-1", "openai:chat", "secret-b"),
+        ],
+    ));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_auth_wallets_for_tests([sample_standalone_wallet("key-123")])
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_auth_api_key_repository_for_tests(Arc::clone(
+                    &auth_repository,
+                ))
+                .with_user_reader(user_repository.clone())
+                .attach_provider_catalog_repository_for_tests(catalog)
+                .with_system_config_values_for_tests(Vec::<(String, serde_json::Value)>::new())
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    // Disable provider key key-a through the admin API.
+    let response = admin_request(
+        reqwest::Client::new().put(format!("{gateway_url}/api/admin/endpoints/keys/key-a")),
+    )
+    .json(&json!({ "is_active": false }))
+    .send()
+    .await
+    .expect("request should succeed");
+    if response.status() != StatusCode::OK {
+        let body: serde_json::Value = response.json().await.expect("json body should parse");
+        panic!("disable failed: {body}");
+    }
+
+    // Disabling a provider key must not erase references in either policy table.
+    let stored = auth_repository
+        .find_export_standalone_api_key_by_id("key-123")
+        .await
+        .expect("export should load")
+        .expect("export should exist");
+    assert_eq!(
+        stored.allowed_provider_key_ids,
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into())
+    );
+    let stored_group = user_repository
+        .find_user_group_by_id(&group_id)
+        .await
+        .expect("group should load")
+        .expect("group should exist");
+    assert_eq!(
+        stored_group.allowed_provider_key_ids,
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into())
+    );
+
+    // Reopen (list) shows the disabled key scope instead of losing it.
+    let list_response =
+        admin_request(reqwest::Client::new().get(format!("{gateway_url}/api/admin/api-keys")))
+            .send()
+            .await
+            .expect("list request should succeed");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_payload: serde_json::Value =
+        list_response.json().await.expect("list json should parse");
+    assert_eq!(
+        list_payload["api_keys"][0]["allowed_provider_key_ids"],
+        json!({ "provider-1": ["key-a"] })
+    );
+
+    // Explicit saves still accept a disabled reference.
+    let update_response = admin_request(
+        reqwest::Client::new().put(format!("{gateway_url}/api/admin/api-keys/key-123")),
+    )
+    .json(&json!({
+        "allowed_provider_key_ids": { "provider-1": ["key-a"] },
+    }))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(update_response.status(), StatusCode::OK);
+
+    let group_response = admin_request(
+        reqwest::Client::new().put(format!("{gateway_url}/api/admin/user-groups/{group_id}")),
+    )
+    .json(&json!({
+        "name": "Scoped Group",
+        "allowed_providers": ["provider-1"],
+        "allowed_providers_mode": "specific",
+        "allowed_provider_key_ids": { "provider-1": ["key-a"] },
+        "allowed_api_formats_mode": "inherit",
+        "allowed_models_mode": "inherit",
+        "rate_limit_mode": "inherit"
+    }))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(group_response.status(), StatusCode::OK);
+
+    // Re-enabling the key keeps the original scope in both policy tables.
+    let response = admin_request(
+        reqwest::Client::new().put(format!("{gateway_url}/api/admin/endpoints/keys/key-a")),
+    )
+    .json(&json!({ "is_active": true }))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let stored = auth_repository
+        .find_export_standalone_api_key_by_id("key-123")
+        .await
+        .expect("export should load")
+        .expect("export should exist");
+    assert_eq!(
+        stored.allowed_provider_key_ids,
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into())
+    );
+    let stored_group = user_repository
+        .find_user_group_by_id(&group_id)
+        .await
+        .expect("group should load")
+        .expect("group should exist");
+    assert_eq!(
+        stored_group.allowed_provider_key_ids,
+        Some([("provider-1".to_string(), ["key-a".to_string()].into())].into())
+    );
 
     gateway_handle.abort();
     upstream_handle.abort();

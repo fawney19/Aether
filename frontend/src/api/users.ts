@@ -168,6 +168,7 @@ export interface UserGroup {
   normalized_name?: string
   description?: string | null
   allowed_providers?: string[] | null
+  allowed_provider_key_ids?: Record<string, string[]> | null
   allowed_providers_mode: ListPolicyMode
   allowed_api_formats?: string[] | null
   allowed_api_formats_mode: ListPolicyMode
@@ -184,6 +185,7 @@ export interface UpsertUserGroupRequest {
   name: string
   description?: string | null
   allowed_providers?: string[] | null
+  allowed_provider_key_ids?: Record<string, string[]> | null
   allowed_providers_mode?: ListPolicyMode
   allowed_api_formats?: string[] | null
   allowed_api_formats_mode?: ListPolicyMode

@@ -914,6 +914,7 @@ mod tests {
             description: None,
             priority: 0,
             allowed_providers: None,
+            allowed_provider_key_ids: None,
             allowed_providers_mode: "unrestricted".to_string(),
             allowed_api_formats: None,
             allowed_api_formats_mode: "unrestricted".to_string(),

@@ -347,6 +347,13 @@
   * {
     @apply border-border;
   }
+
+  /* Native checkbox/radio follow the theme primary color instead of the
+     browser default blue so selected states match the UI accent. */
+  input[type="checkbox"],
+  input[type="radio"] {
+    accent-color: var(--primary);
+  }
 }
 
 * {

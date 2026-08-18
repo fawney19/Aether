@@ -95,6 +95,7 @@ pub(crate) struct CandidatePageCacheKey {
     request_operation: String,
     client_api_format: String,
     auth_identity: CandidatePageAuthIdentity,
+    allowed_provider_key_scope_hash: String,
     require_streaming: bool,
     required_capabilities_hash: String,
     routing_policy_hash: String,
@@ -176,6 +177,9 @@ impl CandidatePageCacheKey {
             request_operation: normalize_text_key(request_operation.unwrap_or_default()),
             client_api_format: normalize_api_format(client_api_format),
             auth_identity: CandidatePageAuthIdentity::from_auth_snapshot(auth_snapshot),
+            allowed_provider_key_scope_hash: stable_json_hash(
+                auth_snapshot.effective_allowed_provider_key_ids(),
+            ),
             require_streaming,
             required_capabilities_hash: stable_json_hash(required_capabilities),
             routing_policy_hash: stable_json_hash(routing_policy),
@@ -545,6 +549,7 @@ mod tests {
             user_allowed_providers: None,
             user_allowed_api_formats: None,
             user_allowed_models: None,
+            user_allowed_provider_key_ids: None,
             api_key_id: api_key_id.to_string(),
             api_key_name: None,
             api_key_is_active: true,
@@ -556,6 +561,7 @@ mod tests {
             api_key_allowed_providers: None,
             api_key_allowed_api_formats: None,
             api_key_allowed_models: None,
+            api_key_allowed_provider_key_ids: None,
             api_key_ip_rules: None,
             currently_usable: true,
         }
@@ -587,6 +593,55 @@ mod tests {
             Duration::from_secs(60)
         );
         std::env::remove_var(CANDIDATE_PAGE_CACHE_STALE_TTL_ENV);
+    }
+
+    #[test]
+    fn candidate_page_cache_key_fingerprint_tracks_effective_provider_key_scope() {
+        fn cache_key(snapshot: &ResolvedAuthApiKeySnapshot) -> CandidatePageCacheKey {
+            CandidatePageCacheKey::new(
+                "gpt-4o",
+                None,
+                "openai:chat",
+                true,
+                snapshot,
+                None,
+                None,
+                None,
+                7,
+                "provider_endpoint_key_model",
+                true,
+                None,
+                "policy-a",
+            )
+        }
+
+        let unrestricted = auth_snapshot("user-a", "key-a");
+        let mut limited = unrestricted.clone();
+        limited.api_key_allowed_provider_key_ids =
+            Some([("provider-1".to_string(), ["key-a".to_string()].into())].into());
+        let mut same_scope = unrestricted.clone();
+        same_scope.api_key_allowed_provider_key_ids =
+            Some([("provider-1".to_string(), ["key-a".to_string()].into())].into());
+        let mut empty_deny = unrestricted.clone();
+        empty_deny.api_key_allowed_provider_key_ids = Some(
+            [(
+                "provider-1".to_string(),
+                std::collections::BTreeSet::<String>::new(),
+            )]
+            .into(),
+        );
+
+        let unrestricted_key = cache_key(&unrestricted);
+        let limited_key = cache_key(&limited);
+        let same_scope_key = cache_key(&same_scope);
+        let empty_deny_key = cache_key(&empty_deny);
+
+        assert_eq!(limited_key, same_scope_key);
+        assert_ne!(unrestricted_key, limited_key);
+        assert_ne!(unrestricted_key, empty_deny_key);
+        assert_ne!(limited_key, empty_deny_key);
+        assert!(!limited_key.allowed_provider_key_scope_hash.is_empty());
+        assert!(!empty_deny_key.allowed_provider_key_scope_hash.is_empty());
     }
 
     #[test]

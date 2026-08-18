@@ -932,6 +932,19 @@ pub trait ProviderCatalogWriteRepository: Send + Sync {
 
     async fn delete_key(&self, key_id: &str) -> Result<bool, crate::DataLayerError>;
 
+    /// Deletes a provider key and removes its id from every
+    /// `allowed_provider_key_ids` policy in `api_keys` and `user_groups`
+    /// atomically. The default implementation performs the plain delete
+    /// without scope pruning (in-memory repositories); SQL repositories
+    /// override this with a single transaction so a prune failure rolls the
+    /// key deletion back.
+    async fn delete_provider_api_key_and_prune_scope(
+        &self,
+        key_id: &str,
+    ) -> Result<bool, crate::DataLayerError> {
+        self.delete_key(key_id).await
+    }
+
     async fn compare_and_delete_key_oauth_credential(
         &self,
         _delete: &ProviderCatalogKeyOAuthCredentialCasDelete,

@@ -896,6 +896,7 @@ async fn data_state_reads_minimal_candidate_selection_with_auth_filters() {
         allowed_providers: auth_snapshot
             .effective_allowed_providers()
             .map(|items| items.to_vec()),
+        allowed_provider_key_ids: None,
         allowed_api_formats: auth_snapshot
             .effective_allowed_api_formats()
             .map(|items| items.to_vec()),

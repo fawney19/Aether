@@ -407,6 +407,13 @@ pub(crate) async fn read_global_model_names_for_api_format(
         ) {
             continue;
         }
+        if !aether_scheduler_core::auth_constraints_allow_provider_key(
+            auth_constraints.as_ref(),
+            &row.provider_id,
+            &row.key_id,
+        ) {
+            continue;
+        }
         if !aether_scheduler_core::auth_constraints_allow_model(
             auth_constraints.as_ref(),
             &row.global_model_name,
@@ -427,6 +434,7 @@ pub(crate) fn auth_snapshot_constraints(
         allowed_providers: snapshot
             .effective_allowed_providers()
             .map(|items| items.to_vec()),
+        allowed_provider_key_ids: snapshot.effective_allowed_provider_key_ids().cloned(),
         allowed_api_formats: snapshot
             .effective_allowed_api_formats()
             .map(|items| items.to_vec()),
@@ -668,5 +676,63 @@ mod tests {
         assert_eq!(page.rows.len(), 1);
         assert_eq!(source.fast_calls.load(Ordering::SeqCst), 1);
         assert_eq!(source.fallback_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn auth_snapshot_constraints_carries_provider_key_scope() {
+        use crate::data::auth::GatewayAuthApiKeySnapshot as Snapshot;
+        use aether_data::repository::auth::ResolvedAuthApiKeySnapshot as Resolved;
+
+        let stored = aether_data::repository::auth::StoredAuthApiKeySnapshot::new(
+            "user-1".to_string(),
+            "alice".to_string(),
+            None,
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            None,
+            None,
+            None,
+            "key-1".to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("snapshot should build")
+        .with_api_key_provider_key_scope(Some(serde_json::json!({
+            "provider-1": ["key-a", "key-b"]
+        })))
+        .expect("scope should parse");
+        let resolved: Snapshot = Resolved::from_stored(stored, 150);
+
+        let constraints = super::auth_snapshot_constraints(&resolved);
+        assert_eq!(
+            constraints.allowed_provider_key_ids,
+            Some(
+                [(
+                    "provider-1".to_string(),
+                    ["key-a".to_string(), "key-b".to_string()].into()
+                )]
+                .into()
+            )
+        );
+        assert!(aether_scheduler_core::auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-1",
+            "key-a",
+        ));
+        assert!(!aether_scheduler_core::auth_constraints_allow_provider_key(
+            Some(&constraints),
+            "provider-1",
+            "key-c",
+        ));
     }
 }

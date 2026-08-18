@@ -16,8 +16,9 @@ use crate::handlers::admin::shared::{
 use crate::handlers::admin::system::shared::configs::apply_admin_system_config_update;
 use crate::handlers::admin::users::{
     hash_admin_user_api_key, normalize_admin_feature_settings, normalize_admin_list_policy_mode,
-    normalize_admin_rate_limit_policy_mode, normalize_admin_user_api_formats,
-    normalize_admin_user_ip_rules, normalize_admin_user_string_list,
+    normalize_admin_provider_key_scope, normalize_admin_rate_limit_policy_mode,
+    normalize_admin_user_api_formats, normalize_admin_user_ip_rules,
+    normalize_admin_user_string_list,
 };
 use crate::handlers::public::normalize_admin_base_url;
 use crate::GatewayError;
@@ -944,6 +945,655 @@ fn normalize_imported_user_string_list(
     )
 }
 
+/// Parses an imported `allowed_provider_key_ids` payload. Catalog validation
+/// is intentionally skipped during import (provider keys may be imported
+/// later in the same transaction batch); the scope is only syntactically
+/// normalized and dropped when the provider allowlist is unrestricted.
+fn imported_standalone_key_scope(
+    key: &Map<String, Value>,
+) -> Result<Option<aether_data::repository::provider_key_scope::ProviderKeyScope>, String> {
+    let scope = aether_data::repository::provider_key_scope::parse_provider_key_scope(
+        key.get("allowed_provider_key_ids").cloned(),
+        "allowed_provider_key_ids",
+    )
+    .map_err(|err| err.to_string())?;
+    let allowed_providers = normalize_imported_user_string_list(key, "allowed_providers")?;
+    if scope.is_some()
+        && allowed_providers
+            .as_ref()
+            .is_none_or(|items| items.is_empty())
+    {
+        return Err("allowed_provider_key_ids 需要非空的 allowed_providers".to_string());
+    }
+    Ok(scope)
+}
+
+/// Remaps exported provider-key ids through the config import's id map and
+/// validates every scope in the users payload against the provider catalog
+/// (keys must exist, belong to the provider named by the object key, and the
+/// provider must be allowed by the payload's own allowlist).
+///
+/// Runs before any users-part write: a failure rejects the whole import
+/// without persisting any scope-bearing row. The canonical remapped scopes
+/// replace the payload values so the write paths below persist exactly what
+/// was validated.
+/// Offline pre-validation for the combined config+users import.
+///
+/// Runs BEFORE the config import commits anything. Every provider key scope
+/// in the users payload is checked against the config payload (providers and
+/// keys that will be imported) plus the existing target catalog:
+/// - every referenced key must exist either in the config payload or in the
+///   target catalog;
+/// - the scope's provider allowlist must cover the key's provider (by the
+///   same id/name/type case-insensitive rule as the admin write path);
+/// - a payload key must survive the config importer's format gate (its
+///   api_formats must intersect the payload provider's endpoint formats),
+///   otherwise it would be skipped and the online validation would fail after
+///   the config part already committed.
+///
+/// A failure rejects the combined import with the config data untouched.
+async fn validate_imported_scopes_offline(
+    state: &AdminAppState<'_>,
+    config_body: &Value,
+    users_body: &Value,
+) -> Result<(), (http::StatusCode, Value)> {
+    use aether_data::repository::provider_key_scope as scope;
+
+    #[derive(Clone)]
+    struct PayloadKey {
+        provider_name: String,
+        provider_type: String,
+        api_formats: Vec<String>,
+    }
+    #[derive(Clone)]
+    struct PayloadProvider {
+        name: String,
+        provider_type: String,
+        endpoint_formats: std::collections::BTreeSet<String>,
+        keys: std::collections::BTreeMap<String, PayloadKey>,
+    }
+
+    let mut payload_providers = Vec::<PayloadProvider>::new();
+    if let Some(Value::Array(providers)) = config_body.get("providers") {
+        for raw_provider in providers {
+            let Some(provider) = raw_provider.as_object() else {
+                continue;
+            };
+            let provider_name = provider
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let provider_type = provider
+                .get("provider_type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let mut endpoint_formats = std::collections::BTreeSet::new();
+            if let Some(Value::Array(endpoints)) = provider.get("endpoints") {
+                for raw_endpoint in endpoints {
+                    if let Some(format) = raw_endpoint
+                        .get("api_format")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .and_then(|value| normalize_import_endpoint_format(value).ok())
+                    {
+                        endpoint_formats.insert(format);
+                    }
+                }
+            }
+            let mut keys = std::collections::BTreeMap::new();
+            if let Some(Value::Array(raw_keys)) = provider.get("api_keys") {
+                for raw_key in raw_keys {
+                    let Some(key) = raw_key.as_object() else {
+                        continue;
+                    };
+                    let Some(key_id) = key
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    else {
+                        continue;
+                    };
+                    let api_formats = key
+                        .get("api_formats")
+                        .or_else(|| key.get("supported_endpoints"))
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(ToOwned::to_owned)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    keys.insert(
+                        key_id.to_string(),
+                        PayloadKey {
+                            provider_name: provider_name.clone(),
+                            provider_type: provider_type.clone(),
+                            api_formats,
+                        },
+                    );
+                }
+            }
+            payload_providers.push(PayloadProvider {
+                name: provider_name,
+                provider_type,
+                endpoint_formats,
+                keys,
+            });
+        }
+    }
+    let payload_keys = payload_providers
+        .iter()
+        .flat_map(|provider| provider.keys.keys().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    // Existing target catalog providers (for allowlist coverage of keys that
+    // are not part of the config payload).
+    let existing_providers = state
+        .list_provider_catalog_providers(false)
+        .await
+        .map_err(|err| invalid_request(format!("校验提供商失败: {:?}", err)))?;
+
+    async fn validate_scope(
+        state: &AdminAppState<'_>,
+        payload_providers: &[PayloadProvider],
+        payload_keys: &std::collections::BTreeSet<String>,
+        existing_providers: &[aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider],
+        object: &Map<String, Value>,
+    ) -> Result<(), (http::StatusCode, Value)> {
+        let allowed_providers = normalize_imported_user_string_list(object, "allowed_providers")
+            .map_err(invalid_request)?;
+        let Some(raw_scope) = object.get("allowed_provider_key_ids").cloned() else {
+            return Ok(());
+        };
+        let Some(parsed) =
+            scope::parse_provider_key_scope(Some(raw_scope), "allowed_provider_key_ids")
+                .map_err(|err| invalid_request(err.to_string()))?
+        else {
+            return Ok(());
+        };
+        let allowed_providers = allowed_providers
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| item.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if allowed_providers.is_empty() {
+            return Err(invalid_request(
+                "allowed_provider_key_ids 需要非空的 allowed_providers",
+            ));
+        }
+        let mut referenced_ids = std::collections::BTreeSet::new();
+        for (provider_id, key_ids) in &parsed {
+            for key_id in key_ids {
+                let payload_key = payload_keys.contains(key_id).then(|| {
+                    payload_providers
+                        .iter()
+                        .find_map(|provider| provider.keys.get(key_id).map(|key| (provider, key)))
+                });
+                let Some((payload_provider, payload_key)) = payload_key.flatten() else {
+                    referenced_ids.insert(key_id.clone());
+                    continue;
+                };
+                let covered = allowed_providers.iter().any(|allowed| {
+                    aether_scheduler_core::provider_matches_allowed_value(
+                        allowed,
+                        provider_id,
+                        &payload_key.provider_name,
+                        &payload_key.provider_type,
+                    )
+                });
+                if !covered {
+                    return Err(invalid_request(format!(
+                        "Key {key_id} 的提供商 {} 未在允许的提供商列表中",
+                        payload_key.provider_name
+                    )));
+                }
+                // Mirror the config importer's format gate: a key whose
+                // formats do not intersect the provider's endpoint formats
+                // would be skipped by the config import, making the scope
+                // reference fail online after the config part committed.
+                let importable = if payload_key.api_formats.is_empty() {
+                    !payload_provider.endpoint_formats.is_empty()
+                } else {
+                    payload_key.api_formats.iter().any(|raw| {
+                        normalize_import_endpoint_format(raw.trim())
+                            .ok()
+                            .is_some_and(|format| {
+                                payload_provider.endpoint_formats.is_empty()
+                                    || payload_provider.endpoint_formats.contains(&format)
+                            })
+                    })
+                };
+                if !importable {
+                    return Err(invalid_request(format!(
+                        "Key {key_id} 的 api_formats 未配置对应 Endpoint，导入后无法引用"
+                    )));
+                }
+            }
+        }
+        if referenced_ids.is_empty() {
+            return Ok(());
+        }
+        let referenced_ids = referenced_ids.into_iter().collect::<Vec<_>>();
+        let keys = state
+            .read_provider_catalog_keys_by_ids(&referenced_ids)
+            .await
+            .map_err(|err| invalid_request(format!("校验 Key 失败: {:?}", err)))?;
+        let key_by_id = keys
+            .into_iter()
+            .map(|key| (key.id.clone(), key))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let provider_by_id = existing_providers
+            .iter()
+            .map(|provider| (provider.id.clone(), provider))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for key_id in referenced_ids {
+            let Some(key) = key_by_id.get(&key_id) else {
+                return Err(invalid_request(format!("Key {key_id} 不存在")));
+            };
+            let provider = provider_by_id.get(&key.provider_id);
+            let covered = allowed_providers.iter().any(|allowed| match provider {
+                Some(provider) => aether_scheduler_core::provider_matches_allowed_value(
+                    allowed,
+                    &provider.id,
+                    &provider.name,
+                    &provider.provider_type,
+                ),
+                None => allowed == &key.provider_id,
+            });
+            if !covered {
+                return Err(invalid_request(format!(
+                    "Key {key_id} 的提供商未在允许的提供商列表中"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    if let Some(Value::Array(groups)) = users_body.get("user_groups") {
+        for (index, raw_group) in groups.iter().enumerate() {
+            let Some(group) = raw_group.as_object() else {
+                continue;
+            };
+            let has_scope = group.contains_key("allowed_provider_key_ids");
+            if has_scope {
+                let mode = group
+                    .get("allowed_providers_mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("inherit")
+                    .trim()
+                    .to_ascii_lowercase();
+                if mode != "specific" {
+                    return Err(invalid_request(format!(
+                        "user_groups[{index}] 的 allowed_provider_key_ids 仅在 specific 提供商模式下允许"
+                    )));
+                }
+            }
+            if let Err(err) = validate_scope(
+                state,
+                &payload_providers,
+                &payload_keys,
+                &existing_providers,
+                group,
+            )
+            .await
+            {
+                return Err(invalid_request(format!(
+                    "user_groups[{index}] 的 allowed_provider_key_ids 无效: {}",
+                    err_detail(&err)
+                )));
+            }
+        }
+    }
+    if let Some(Value::Array(standalone_keys)) = users_body.get("standalone_keys") {
+        for (index, raw_key) in standalone_keys.iter().enumerate() {
+            let Some(key) = raw_key.as_object() else {
+                continue;
+            };
+            if let Err(err) = validate_scope(
+                state,
+                &payload_providers,
+                &payload_keys,
+                &existing_providers,
+                key,
+            )
+            .await
+            {
+                return Err(invalid_request(format!(
+                    "standalone_keys[{index}] 的 allowed_provider_key_ids 无效: {}",
+                    err_detail(&err)
+                )));
+            }
+        }
+    }
+    if let Some(Value::Array(users)) = users_body.get("users") {
+        for (user_index, raw_user) in users.iter().enumerate() {
+            let Some(user) = raw_user.as_object() else {
+                continue;
+            };
+            let Some(Value::Array(api_keys)) = user.get("api_keys") else {
+                continue;
+            };
+            for (key_index, raw_key) in api_keys.iter().enumerate() {
+                let Some(key) = raw_key.as_object() else {
+                    continue;
+                };
+                if let Err(err) = validate_scope(
+                    state,
+                    &payload_providers,
+                    &payload_keys,
+                    &existing_providers,
+                    key,
+                )
+                .await
+                {
+                    return Err(invalid_request(format!(
+                        "users[{user_index}].api_keys[{key_index}] 的 allowed_provider_key_ids 无效: {}",
+                        err_detail(&err)
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn state_read_keys(
+    state: &AdminAppState<'_>,
+    key_ids: &[String],
+) -> Result<
+    Vec<aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey>,
+    GatewayError,
+> {
+    state.read_provider_catalog_keys_by_ids(key_ids).await
+}
+
+async fn validate_imported_provider_key_scopes(
+    state: &AdminAppState<'_>,
+    root: &mut Map<String, Value>,
+    provider_key_id_map: &BTreeMap<String, String>,
+) -> Result<(), (http::StatusCode, Value)> {
+    use aether_data::repository::provider_key_scope as scope;
+
+    fn remap_scope(
+        raw: Option<Value>,
+        provider_key_id_map: &BTreeMap<String, String>,
+    ) -> Result<Option<Value>, String> {
+        let Some(parsed) = scope::parse_provider_key_scope(raw, "allowed_provider_key_ids")
+            .map_err(|err| err.to_string())?
+        else {
+            return Ok(None);
+        };
+        let mut remapped = scope::ProviderKeyScope::new();
+        for (provider_id, key_ids) in parsed {
+            let mapped = key_ids
+                .into_iter()
+                .map(|key_id| provider_key_id_map.get(&key_id).cloned().unwrap_or(key_id))
+                .collect();
+            remapped.insert(provider_id, mapped);
+        }
+        Ok(Some(
+            serde_json::to_value(remapped).map_err(|err| err.to_string())?,
+        ))
+    }
+
+    async fn validate_one(
+        state: &AdminAppState<'_>,
+        object: &mut Map<String, Value>,
+        provider_key_id_map: &BTreeMap<String, String>,
+        requires_specific_mode: bool,
+    ) -> Result<(), (http::StatusCode, Value)> {
+        let allowed_providers = normalize_imported_user_string_list(object, "allowed_providers")
+            .map_err(invalid_request)?;
+        let scope_raw = remap_scope(
+            object.get("allowed_provider_key_ids").cloned(),
+            provider_key_id_map,
+        )
+        .map_err(invalid_request)?;
+        if scope_raw.is_none() {
+            return Ok(());
+        }
+        if requires_specific_mode {
+            let mode = object
+                .get("allowed_providers_mode")
+                .and_then(Value::as_str)
+                .unwrap_or("inherit")
+                .trim()
+                .to_ascii_lowercase();
+            if mode != "specific" {
+                return Err(invalid_request(
+                    "allowed_provider_key_ids 仅在 specific 提供商模式下允许",
+                ));
+            }
+        }
+        let canonical = canonicalize_imported_provider_key_scope(
+            state,
+            allowed_providers.as_deref(),
+            scope_raw,
+        )
+        .await
+        .map_err(invalid_request)?;
+        match canonical {
+            Some(canonical) => {
+                object.insert(
+                    "allowed_provider_key_ids".to_string(),
+                    serde_json::to_value(canonical)
+                        .map_err(|err| invalid_request(err.to_string()))?,
+                );
+            }
+            None => {
+                object.remove("allowed_provider_key_ids");
+            }
+        }
+        Ok(())
+    }
+
+    if let Some(Value::Array(standalone_keys)) = root.get_mut("standalone_keys") {
+        for (index, raw_key) in standalone_keys.iter_mut().enumerate() {
+            let Some(key) = raw_key.as_object_mut() else {
+                continue;
+            };
+            if let Err(err) = validate_one(state, key, provider_key_id_map, false).await {
+                return Err(invalid_request(format!(
+                    "standalone_keys[{index}] 的 allowed_provider_key_ids 无效: {}",
+                    err_detail(&err)
+                )));
+            }
+        }
+    }
+    if let Some(Value::Array(groups)) = root.get_mut("user_groups") {
+        for (index, raw_group) in groups.iter_mut().enumerate() {
+            let Some(group) = raw_group.as_object_mut() else {
+                continue;
+            };
+            if let Err(err) = validate_one(state, group, provider_key_id_map, true).await {
+                return Err(invalid_request(format!(
+                    "user_groups[{index}] 的 allowed_provider_key_ids 无效: {}",
+                    err_detail(&err)
+                )));
+            }
+        }
+    }
+    if let Some(Value::Array(users)) = root.get_mut("users") {
+        for (user_index, raw_user) in users.iter_mut().enumerate() {
+            let Some(user) = raw_user.as_object_mut() else {
+                continue;
+            };
+            let Some(Value::Array(api_keys)) = user.get_mut("api_keys") else {
+                continue;
+            };
+            for (key_index, raw_key) in api_keys.iter_mut().enumerate() {
+                let Some(key) = raw_key.as_object_mut() else {
+                    continue;
+                };
+                if let Err(err) = validate_one(state, key, provider_key_id_map, false).await {
+                    return Err(invalid_request(format!(
+                        "users[{user_index}].api_keys[{key_index}] 的 allowed_provider_key_ids 无效: {}",
+                        err_detail(&err)
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Canonicalizes an imported provider key scope against the target catalog.
+///
+/// Scope entries are keyed by the source system's provider ids; the target
+/// may have re-created the providers/keys with fresh ids (the config import
+/// preserves key ids through `provider_key_id_map` and matches providers by
+/// name). Canonicalization therefore:
+/// 1. looks every referenced key up in the catalog and hard-fails when a key
+///    is missing, or when the keys of one entry disagree on the actual
+///    provider;
+/// 2. re-keys every entry under the key's actual `provider_id`;
+/// 3. when the payload's provider allowlist resolves against the catalog
+///    (id/name/type), requires every scope provider to be covered by it; a
+///    fully unresolvable allowlist (source-system ids) is stored as-is — the
+///    same legacy behavior as `allowed_providers` itself — and runtime
+///    provider policy still governs. An empty allowlist with a scope is
+///    rejected.
+async fn canonicalize_imported_provider_key_scope(
+    state: &AdminAppState<'_>,
+    allowed_providers: Option<&[String]>,
+    raw_scope: Option<Value>,
+) -> Result<Option<aether_data::repository::provider_key_scope::ProviderKeyScope>, String> {
+    use aether_data::repository::provider_key_scope::{
+        normalize_provider_key_scope, parse_provider_key_scope, ProviderKeyScope,
+    };
+
+    let Some(scope) = parse_provider_key_scope(raw_scope, "allowed_provider_key_ids")
+        .map_err(|err| err.to_string())?
+    else {
+        return Ok(None);
+    };
+    let allowed_providers = allowed_providers
+        .map(|items| items.iter().map(|item| item.as_str()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if allowed_providers.is_empty() {
+        return Err("allowed_provider_key_ids 需要非空的 allowed_providers".to_string());
+    }
+
+    let key_ids = scope
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let keys = state
+        .read_provider_catalog_keys_by_ids(&key_ids)
+        .await
+        .map_err(|err| format!("校验 Key 失败: {:?}", err))?;
+    let key_by_id = keys
+        .into_iter()
+        .map(|key| (key.id.clone(), key))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let mut canonical = ProviderKeyScope::new();
+    for (_source_provider_id, key_ids) in scope {
+        let mut actual_provider_id: Option<String> = None;
+        let mut kept = std::collections::BTreeSet::new();
+        for key_id in key_ids {
+            let Some(key) = key_by_id.get(&key_id) else {
+                return Err(format!("Key {key_id} 不存在"));
+            };
+            match actual_provider_id.as_deref() {
+                None => actual_provider_id = Some(key.provider_id.clone()),
+                Some(provider_id) if provider_id != key.provider_id => {
+                    return Err(format!("Key {key_id} 与同条目 Key 不属于同一提供商"));
+                }
+                _ => {}
+            }
+            kept.insert(key_id);
+        }
+        let Some(actual_provider_id) = actual_provider_id else {
+            continue;
+        };
+        canonical.insert(actual_provider_id, kept);
+    }
+
+    // Provider allowlist coverage: resolve the payload's allowlist entries
+    // against the catalog. If any entry resolves, every scope provider must
+    // be covered. If none resolves (source-system provider ids), the
+    // allowlist is stored as-is and the scope is kept for round-trip parity.
+    let scope_provider_ids = canonical.keys().cloned().collect::<Vec<_>>();
+    let providers = state
+        .read_provider_catalog_providers_by_ids(&scope_provider_ids)
+        .await
+        .map_err(|err| format!("校验提供商失败: {:?}", err))?;
+    let provider_by_id = providers
+        .into_iter()
+        .map(|provider| (provider.id.clone(), provider))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut allowlist_resolves = false;
+    for allowed in &allowed_providers {
+        if provider_by_id.values().any(|provider| {
+            aether_scheduler_core::provider_matches_allowed_value(
+                allowed,
+                &provider.id,
+                &provider.name,
+                &provider.provider_type,
+            )
+        }) {
+            allowlist_resolves = true;
+            break;
+        }
+    }
+    if allowlist_resolves {
+        for provider_id in &scope_provider_ids {
+            let Some(provider) = provider_by_id.get(provider_id) else {
+                return Err(format!("提供商 {provider_id} 不存在"));
+            };
+            let covered = allowed_providers.iter().any(|allowed| {
+                aether_scheduler_core::provider_matches_allowed_value(
+                    allowed,
+                    &provider.id,
+                    &provider.name,
+                    &provider.provider_type,
+                )
+            });
+            if !covered {
+                return Err(format!("提供商 {} 未在允许的提供商列表中", provider.name));
+            }
+        }
+    }
+
+    Ok(normalize_provider_key_scope(Some(canonical)))
+}
+
+fn err_detail(err: &(http::StatusCode, Value)) -> String {
+    err.1
+        .get("detail")
+        .and_then(Value::as_str)
+        .unwrap_or("校验失败")
+        .to_string()
+}
+
+/// Parses a user (non-standalone) api key's provider key scope. The payload
+/// has already been validated and canonicalized by the import pre-pass, so
+/// this only re-parses the canonical value.
+fn imported_user_key_scope(
+    key: &Map<String, Value>,
+) -> Result<Option<aether_data::repository::provider_key_scope::ProviderKeyScope>, String> {
+    aether_data::repository::provider_key_scope::parse_provider_key_scope(
+        key.get("allowed_provider_key_ids").cloned(),
+        "allowed_provider_key_ids",
+    )
+    .map_err(|err| err.to_string())
+}
+
 fn normalize_imported_user_api_formats(
     object: &Map<String, Value>,
     field_name: &str,
@@ -1052,6 +1702,12 @@ fn build_imported_user_group_record(
             description,
             priority: 0,
             allowed_providers,
+            allowed_provider_key_ids:
+                aether_data::repository::provider_key_scope::parse_provider_key_scope(
+                    group.get("allowed_provider_key_ids").cloned(),
+                    "user_groups.allowed_provider_key_ids",
+                )
+                .map_err(|err| format!("user_groups.allowed_provider_key_ids 无效: {err}"))?,
             allowed_providers_mode,
             allowed_api_formats,
             allowed_api_formats_mode,
@@ -1247,12 +1903,34 @@ impl<'a> AdminAppState<'a> {
                 Err(err) => return Ok(Err(err)),
             };
 
-        let config_result = match self.import_admin_system_config(&config_body).await? {
-            Ok(payload) => payload,
+        // Validate every provider key scope in the users payload against the
+        // config payload + the existing catalog BEFORE the config import runs.
+        // A scope referencing a missing key or a provider the payload
+        // does not allow rejects the whole combined import with the config
+        // data left untouched (no partial import state on failure).
+        let config_payload = match serde_json::from_slice::<Value>(&config_body) {
+            Ok(value) => value,
+            Err(_) => return Ok(Err(invalid_request("config_data 解析失败"))),
+        };
+        let users_payload = match serde_json::from_slice::<Value>(&users_body) {
+            Ok(value) => value,
+            Err(_) => return Ok(Err(invalid_request("user_data 解析失败"))),
+        };
+        if let Err(err) =
+            validate_imported_scopes_offline(self, &config_payload, &users_payload).await
+        {
+            return Ok(Err(err));
+        }
+
+        let (config_result, provider_key_id_map) = match self
+            .import_admin_system_config_with_key_map(&config_body)
+            .await?
+        {
+            Ok((payload, key_map)) => (payload, key_map),
             Err(err) => return Ok(Err(err)),
         };
         let users_result = match self
-            .import_admin_system_users(&users_body, operator_id)
+            .import_admin_system_users_with_key_map(&users_body, operator_id, &provider_key_id_map)
             .await?
         {
             Ok(payload) => payload,
@@ -1270,6 +1948,23 @@ impl<'a> AdminAppState<'a> {
         &self,
         request_body: &Bytes,
     ) -> Result<Result<Value, (http::StatusCode, Value)>, GatewayError> {
+        match self
+            .import_admin_system_config_with_key_map(request_body)
+            .await?
+        {
+            Ok((payload, _key_map)) => Ok(Ok(payload)),
+            Err(err) => Ok(Err(err)),
+        }
+    }
+
+    /// Config import that also returns the exported provider-key id -> actual
+    /// id map, so a combined users import can remap `allowed_provider_key_ids`
+    /// references to the ids that actually exist after the import.
+    pub(crate) async fn import_admin_system_config_with_key_map(
+        &self,
+        request_body: &Bytes,
+    ) -> Result<Result<(Value, BTreeMap<String, String>), (http::StatusCode, Value)>, GatewayError>
+    {
         macro_rules! invalid {
             ($expr:expr) => {
                 match $expr {
@@ -1514,6 +2209,7 @@ impl<'a> AdminAppState<'a> {
             .map(|provider| (provider.name.clone(), provider))
             .collect::<BTreeMap<_, _>>();
 
+        let mut provider_key_id_map = BTreeMap::<String, String>::new();
         for imported_provider_item in imported_providers {
             let (raw_provider, imported_provider) = imported_provider_item.into_parts();
             let provider_name = invalid!(trim_required(&imported_provider.name, "name"));
@@ -1885,6 +2581,14 @@ impl<'a> AdminAppState<'a> {
                             aether_admin::provider::quota::codex_credential_generation(Some(codex))
                         })
                         .map(ToOwned::to_owned);
+                    if let Some(exported_key_id) = imported_key.id.as_deref() {
+                        if !exported_key_id.trim().is_empty() {
+                            provider_key_id_map.insert(
+                                exported_key_id.trim().to_string(),
+                                existing_key.id.clone(),
+                            );
+                        }
+                    }
                     match merge_mode {
                         AdminImportMergeMode::Skip => {
                             stats.keys.skipped += 1;
@@ -2050,6 +2754,12 @@ impl<'a> AdminAppState<'a> {
                 if oauth_credentials_supplied {
                     seed_imported_oauth_pool_score(self, &provider.id, &created, now_unix_secs)
                         .await?;
+                }
+                if let Some(exported_key_id) = imported_key.id.as_deref() {
+                    if !exported_key_id.trim().is_empty() {
+                        provider_key_id_map
+                            .insert(exported_key_id.trim().to_string(), created.id.clone());
+                    }
                 }
                 existing_keys.push(created);
                 stats.keys.created += 1;
@@ -2411,16 +3121,29 @@ impl<'a> AdminAppState<'a> {
             }
         }
 
-        Ok(Ok(json!({
-            "message": "配置导入成功",
-            "stats": stats,
-        })))
+        Ok(Ok((
+            json!({
+                "message": "配置导入成功",
+                "stats": stats,
+            }),
+            provider_key_id_map,
+        )))
     }
 
     pub(crate) async fn import_admin_system_users(
         &self,
         request_body: &Bytes,
         operator_id: Option<&str>,
+    ) -> Result<Result<Value, (http::StatusCode, Value)>, GatewayError> {
+        self.import_admin_system_users_with_key_map(request_body, operator_id, &BTreeMap::new())
+            .await
+    }
+
+    pub(crate) async fn import_admin_system_users_with_key_map(
+        &self,
+        request_body: &Bytes,
+        operator_id: Option<&str>,
+        provider_key_id_map: &BTreeMap<String, String>,
     ) -> Result<Result<Value, (http::StatusCode, Value)>, GatewayError> {
         if !self.has_auth_user_write_capability()
             || !self.has_auth_wallet_write_capability()
@@ -2431,10 +3154,15 @@ impl<'a> AdminAppState<'a> {
                 json!({ "detail": "Admin system data unavailable" }),
             )));
         }
-        let root = match serde_json::from_slice::<Value>(request_body) {
+        let mut root = match serde_json::from_slice::<Value>(request_body) {
             Ok(Value::Object(map)) => map,
             _ => return Ok(Err(invalid_request("请求数据验证失败"))),
         };
+        if let Err(err) =
+            validate_imported_provider_key_scopes(self, &mut root, provider_key_id_map).await
+        {
+            return Ok(Err(err));
+        }
         let merge_mode = match serde_json::from_value::<AdminImportMergeMode>(
             root.get("merge_mode").cloned().unwrap_or(Value::Null),
         ) {
@@ -3045,6 +3773,13 @@ impl<'a> AdminAppState<'a> {
                                 )
                                 .await?;
                             let _ = self
+                                .set_user_api_key_allowed_provider_key_ids(
+                                    &user_id,
+                                    &existing_key.api_key_id,
+                                    invalid_value!(imported_user_key_scope(key)),
+                                )
+                                .await?;
+                            let _ = self
                                 .set_user_api_key_force_capabilities(
                                     &user_id,
                                     &existing_key.api_key_id,
@@ -3116,6 +3851,7 @@ impl<'a> AdminAppState<'a> {
                         key_encrypted,
                         name,
                         allowed_providers,
+                        allowed_provider_key_ids: invalid_value!(imported_user_key_scope(key)),
                         allowed_api_formats,
                         allowed_models,
                         ip_rules,
@@ -3286,6 +4022,9 @@ impl<'a> AdminAppState<'a> {
                                     concurrent_limit_present: key.contains_key("concurrent_limit"),
                                     concurrent_limit,
                                     allowed_providers: Some(allowed_providers.clone()),
+                                    allowed_provider_key_ids: Some(invalid_value!(
+                                        imported_standalone_key_scope(key)
+                                    )),
                                     allowed_api_formats: Some(allowed_api_formats.clone()),
                                     allowed_models: Some(allowed_models.clone()),
                                     ip_rules: imported_ip_rules_present(key)
@@ -3371,6 +4110,9 @@ impl<'a> AdminAppState<'a> {
                             key_encrypted,
                             name,
                             allowed_providers,
+                            allowed_provider_key_ids: invalid_value!(
+                                imported_standalone_key_scope(key)
+                            ),
                             allowed_api_formats,
                             allowed_models,
                             ip_rules,
@@ -3730,6 +4472,7 @@ mod tests {
             .map(ToOwned::to_owned)
             .collect();
         let item = ImportedProviderKey {
+            id: None,
             api_key: None,
             auth_type: None,
             auth_config: None,

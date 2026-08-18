@@ -7,6 +7,9 @@ use aether_data_contracts::repository::auth::{
     StandaloneApiKeyExportListQuery, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
     UpdateStandaloneApiKeyBasicRecord, UpdateUserApiKeyBasicRecord,
 };
+use aether_data_contracts::repository::provider_key_scope::{
+    plan_provider_key_scope_prune, serialize_provider_key_scope, ProviderKeyScope,
+};
 use aether_data_contracts::DataLayerError;
 
 use crate::error::SqlResultExt;
@@ -34,6 +37,7 @@ SELECT
   api_keys.concurrent_limit AS api_key_concurrent_limit,
   api_keys.expires_at AS api_key_expires_at_unix_secs,
   api_keys.allowed_providers AS api_key_allowed_providers,
+  api_keys.allowed_provider_key_ids AS api_key_allowed_provider_key_ids,
   api_keys.allowed_api_formats AS api_key_allowed_api_formats,
   api_keys.allowed_models AS api_key_allowed_models,
   api_keys.ip_rules AS api_key_ip_rules
@@ -49,6 +53,7 @@ SELECT
   api_keys.key_encrypted,
   api_keys.name,
   api_keys.allowed_providers,
+  api_keys.allowed_provider_key_ids,
   api_keys.allowed_api_formats,
   api_keys.allowed_models,
   api_keys.ip_rules,
@@ -115,12 +120,13 @@ impl MysqlAuthApiKeyReadRepository {
             r#"
 INSERT INTO api_keys (
   id, user_id, key_hash, key_encrypted, name, allowed_providers,
+  allowed_provider_key_ids,
   allowed_api_formats, allowed_models, ip_rules, rate_limit, concurrent_limit,
   force_capabilities, feature_settings, is_active, expires_at, auto_delete_on_expiry,
   total_requests, total_tokens, total_cost_usd, is_standalone,
   created_at, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#,
         )
         .bind(&record.api_key_id)
@@ -132,6 +138,12 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             record.allowed_providers.as_ref(),
             "api_keys.allowed_providers",
         )?)
+        .bind(
+            aether_data_contracts::repository::provider_key_scope::serialize_provider_key_scope(
+                record.allowed_provider_key_ids.as_ref(),
+                "api_keys.allowed_provider_key_ids",
+            )?,
+        )
         .bind(json_string_from_string_list(
             record.allowed_api_formats.as_ref(),
             "api_keys.allowed_api_formats",
@@ -180,6 +192,8 @@ struct CreateApiKeyInsertRecord {
     key_encrypted: Option<String>,
     name: Option<String>,
     allowed_providers: Option<Vec<String>>,
+    allowed_provider_key_ids:
+        Option<aether_data_contracts::repository::provider_key_scope::ProviderKeyScope>,
     allowed_api_formats: Option<Vec<String>>,
     allowed_models: Option<Vec<String>>,
     ip_rules: Option<Vec<String>>,
@@ -393,6 +407,68 @@ FROM api_keys
 
 #[async_trait]
 impl AuthApiKeyWriteRepository for MysqlAuthApiKeyReadRepository {
+    async fn prune_provider_key_scope_references(
+        &self,
+        key_ids: &[String],
+    ) -> Result<u64, DataLayerError> {
+        if key_ids.is_empty() {
+            return Ok(0);
+        }
+        let removed = key_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut updated = 0u64;
+        for table in ["api_keys", "user_groups"] {
+            let rows = sqlx::query(&format!(
+                "SELECT id, allowed_provider_key_ids FROM {table} WHERE allowed_provider_key_ids IS NOT NULL"
+            ))
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+            for row in rows {
+                let id: String = row.try_get("id").map_sql_err()?;
+                let Some(raw) = row
+                    .try_get::<Option<String>, _>("allowed_provider_key_ids")
+                    .map_sql_err()?
+                else {
+                    continue;
+                };
+                let field_name = format!("{table}.allowed_provider_key_ids");
+                let plans = plan_provider_key_scope_prune(
+                    std::iter::once((id.clone(), raw)),
+                    &removed,
+                    &field_name,
+                )?;
+                for plan in plans {
+                    match plan.next {
+                        None => {
+                            sqlx::query(&format!(
+                                "UPDATE {table} SET allowed_provider_key_ids = NULL WHERE id = ?"
+                            ))
+                            .bind(&plan.row_id)
+                            .execute(&self.pool)
+                            .await
+                            .map_sql_err()?;
+                        }
+                        Some(next) => {
+                            let next_raw = serialize_provider_key_scope(Some(&next), &field_name)?;
+                            sqlx::query(&format!(
+                                "UPDATE {table} SET allowed_provider_key_ids = ? WHERE id = ?"
+                            ))
+                            .bind(&next_raw)
+                            .bind(&plan.row_id)
+                            .execute(&self.pool)
+                            .await
+                            .map_sql_err()?;
+                        }
+                    }
+                    updated += 1;
+                }
+            }
+        }
+        Ok(updated)
+    }
     async fn touch_last_used_at(&self, api_key_id: &str) -> Result<bool, DataLayerError> {
         let now = current_unix_secs() as i64;
         let rows_affected = sqlx::query(
@@ -423,6 +499,7 @@ WHERE id = ?
             key_encrypted: record.key_encrypted,
             name: record.name,
             allowed_providers: record.allowed_providers,
+            allowed_provider_key_ids: record.allowed_provider_key_ids,
             allowed_api_formats: record.allowed_api_formats,
             allowed_models: record.allowed_models,
             ip_rules: record.ip_rules,
@@ -451,6 +528,7 @@ WHERE id = ?
             key_encrypted: record.key_encrypted,
             name: record.name,
             allowed_providers: record.allowed_providers,
+            allowed_provider_key_ids: record.allowed_provider_key_ids,
             allowed_api_formats: record.allowed_api_formats,
             allowed_models: record.allowed_models,
             ip_rules: record.ip_rules,
@@ -515,6 +593,7 @@ SET name = COALESCE(?, name),
     rate_limit = CASE WHEN ? THEN ? ELSE rate_limit END,
     concurrent_limit = CASE WHEN ? THEN ? ELSE concurrent_limit END,
     allowed_providers = CASE WHEN ? THEN ? ELSE allowed_providers END,
+    allowed_provider_key_ids = CASE WHEN ? THEN ? ELSE allowed_provider_key_ids END,
     allowed_api_formats = CASE WHEN ? THEN ? ELSE allowed_api_formats END,
     allowed_models = CASE WHEN ? THEN ? ELSE allowed_models END,
     ip_rules = CASE WHEN ? THEN ? ELSE ip_rules END,
@@ -534,6 +613,11 @@ WHERE id = ?
         .bind(json_string_from_nested_string_list(
             &record.allowed_providers,
             "api_keys.allowed_providers",
+        )?)
+        .bind(record.allowed_provider_key_ids.is_some())
+        .bind(serialize_nested_provider_key_scope(
+            &record.allowed_provider_key_ids,
+            "api_keys.allowed_provider_key_ids",
         )?)
         .bind(record.allowed_api_formats.is_some())
         .bind(json_string_from_nested_string_list(
@@ -627,6 +711,34 @@ WHERE id = ?
         .bind(json_string_from_string_list(
             allowed_providers.as_ref(),
             "api_keys.allowed_providers",
+        )?)
+        .bind(current_unix_secs() as i64)
+        .bind(api_key_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map_sql_err()?;
+        self.reload_export_by_id(api_key_id).await
+    }
+
+    async fn set_user_api_key_allowed_provider_key_ids(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        allowed_provider_key_ids: Option<ProviderKeyScope>,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        sqlx::query(
+            r#"
+UPDATE api_keys
+SET allowed_provider_key_ids = ?, updated_at = ?
+WHERE id = ?
+  AND user_id = ?
+  AND is_standalone = 0
+"#,
+        )
+        .bind(serialize_provider_key_scope(
+            allowed_provider_key_ids.as_ref(),
+            "api_keys.allowed_provider_key_ids",
         )?)
         .bind(current_unix_secs() as i64)
         .bind(api_key_id)
@@ -929,6 +1041,21 @@ fn json_string_from_nested_string_list(
     }
 }
 
+fn serialize_nested_provider_key_scope(
+    value: &Option<Option<aether_data_contracts::repository::provider_key_scope::ProviderKeyScope>>,
+    field_name: &str,
+) -> Result<Option<String>, DataLayerError> {
+    match value {
+        Some(Some(scope)) => {
+            aether_data_contracts::repository::provider_key_scope::serialize_provider_key_scope(
+                Some(scope),
+                field_name,
+            )
+        }
+        Some(None) | None => Ok(None),
+    }
+}
+
 fn map_auth_api_key_snapshot_row(
     row: &MySqlRow,
 ) -> Result<StoredAuthApiKeySnapshot, DataLayerError> {
@@ -976,6 +1103,11 @@ fn map_auth_api_key_snapshot_row(
     .with_api_key_ip_rules(optional_json_from_string(
         row.try_get("api_key_ip_rules").map_sql_err()?,
         "api_keys.ip_rules",
+    )?)?
+    .with_api_key_provider_key_scope(optional_json_from_string(
+        row.try_get("api_key_allowed_provider_key_ids")
+            .map_sql_err()?,
+        "api_keys.allowed_provider_key_ids",
     )?)?;
     Ok(snapshot.with_user_rate_limit(row.try_get("user_rate_limit").map_sql_err()?))
 }
@@ -1023,6 +1155,12 @@ fn map_auth_api_key_export_row(
         record.with_ip_rules(optional_json_from_string(
             row.try_get("ip_rules").map_sql_err()?,
             "api_keys.ip_rules",
+        )?)
+    })
+    .and_then(|record| {
+        record.with_provider_key_scope(optional_json_from_string(
+            row.try_get("allowed_provider_key_ids").map_sql_err()?,
+            "api_keys.allowed_provider_key_ids",
         )?)
     })
     .map(|record| record.with_feature_settings(feature_settings))

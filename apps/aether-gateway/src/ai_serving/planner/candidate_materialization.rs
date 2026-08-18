@@ -443,6 +443,7 @@ where
             self.sticky_session_token,
             self.requested_model,
             self.request_auth_channel,
+            self.auth_snapshot,
             &self.build_available_extra_data,
         )
         .await)
@@ -720,6 +721,7 @@ where
         requested_model,
         request_auth_channel,
         routing_policy,
+        auth_snapshot,
         Some(PoolGroupExhaustionPersistenceContext::new(
             state.app().clone(),
             trace_id,
@@ -750,6 +752,7 @@ fn build_logical_candidate_items<'a>(
     requested_model: Option<&str>,
     request_auth_channel: Option<&str>,
     routing_policy: Option<&ResolvedRoutingPolicy>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     pool_exhaustion_persistence: Option<PoolGroupExhaustionPersistenceContext>,
 ) -> (VecDeque<LocalExecutionCandidateAttemptSourceItem<'a>>, u32) {
     let mut items = VecDeque::new();
@@ -770,7 +773,7 @@ fn build_logical_candidate_items<'a>(
                 }
             }
             LocalExecutionCandidateKind::PoolGroup => {
-                let cursor = PoolKeyCursor::new_with_routing_policy(
+                let mut cursor = PoolKeyCursor::new_with_routing_policy(
                     state,
                     candidate,
                     sticky_session_token,
@@ -778,6 +781,11 @@ fn build_logical_candidate_items<'a>(
                     request_auth_channel,
                     routing_policy,
                 );
+                if let Some(snapshot) = auth_snapshot {
+                    cursor = cursor.with_allowed_provider_key_scope(
+                        snapshot.effective_allowed_provider_key_ids().cloned(),
+                    );
+                }
                 let cursor = if let Some(trace_id) = trace_id {
                     cursor.with_runtime_miss_diagnostic(trace_id, record_runtime_miss_diagnostic)
                 } else {
@@ -1044,6 +1052,7 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                 Some(&self.requested_model),
                 self.request_auth_channel.as_deref(),
                 self.routing_policy.as_ref(),
+                Some(&self.auth_snapshot),
                 Some(PoolGroupExhaustionPersistenceContext {
                     app: self.state.app().clone(),
                     trace_id: self.trace_id.clone(),
@@ -1522,6 +1531,7 @@ async fn materialize_logical_local_execution_candidate_attempts<F>(
     sticky_session_token: Option<&str>,
     requested_model: Option<&str>,
     request_auth_channel: Option<&str>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     build_extra_data: &F,
 ) -> Vec<LocalExecutionCandidateAttempt>
 where
@@ -1555,8 +1565,14 @@ where
                     requested_model,
                     request_auth_channel,
                     routing_policy,
-                )
-                .with_runtime_miss_diagnostic(trace_id, record_runtime_miss_diagnostic);
+                );
+                if let Some(snapshot) = auth_snapshot {
+                    cursor = cursor.with_allowed_provider_key_scope(
+                        snapshot.effective_allowed_provider_key_ids().cloned(),
+                    );
+                }
+                let mut cursor =
+                    cursor.with_runtime_miss_diagnostic(trace_id, record_runtime_miss_diagnostic);
                 let attempt_count_before_pool = attempts.len();
                 while let Some(candidate) = cursor.next_key().await {
                     attempts.extend(build_unpersisted_local_execution_candidate_attempts(
@@ -2616,6 +2632,7 @@ mod tests {
             "openai:chat",
             None,
             Some("gpt-5"),
+            None,
             None,
             &|_| None,
         )

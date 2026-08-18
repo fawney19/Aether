@@ -358,6 +358,8 @@ pub(crate) struct PoolKeyCursor<'a> {
     request_auth_channel: Option<String>,
     routing_overlay: Option<RankingOverlay>,
     routing_allowed_key_ids: Option<Vec<String>>,
+    allowed_provider_key_ids:
+        Option<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>,
     effective_pool_config: Option<AdminProviderPoolConfig>,
     runtime_miss_trace_id: Option<String>,
     record_runtime_miss_diagnostic: bool,
@@ -456,6 +458,7 @@ impl<'a> PoolKeyCursor<'a> {
             request_auth_channel: request_auth_channel.map(str::to_string),
             routing_overlay,
             routing_allowed_key_ids,
+            allowed_provider_key_ids: None,
             effective_pool_config,
             runtime_miss_trace_id: None,
             record_runtime_miss_diagnostic: false,
@@ -494,6 +497,16 @@ impl<'a> PoolKeyCursor<'a> {
             self.runtime_miss_trace_id = Some(trace_id.to_string());
             self.record_runtime_miss_diagnostic = true;
         }
+        self
+    }
+
+    pub(crate) fn with_allowed_provider_key_scope(
+        mut self,
+        allowed_provider_key_ids: Option<
+            std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+        >,
+    ) -> Self {
+        self.allowed_provider_key_ids = allowed_provider_key_ids;
         self
     }
 
@@ -1277,6 +1290,14 @@ impl<'a> PoolKeyCursor<'a> {
         &mut self,
         candidate: aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate,
     ) -> Option<EligibleLocalExecutionCandidate> {
+        if let Some(scope) = self.allowed_provider_key_ids.as_ref() {
+            if let Some(allowed_key_ids) = scope.get(candidate.provider_id.as_str()) {
+                if !allowed_key_ids.contains(candidate.key_id.as_str()) {
+                    self.record_skip_reason("auth_provider_key_not_allowed");
+                    return None;
+                }
+            }
+        }
         if self
             .routing_overlay
             .as_ref()
@@ -3259,6 +3280,49 @@ mod tests {
                 .map(|item| (item.candidate.key_id.as_str(), item.skip_reason))
                 .collect::<Vec<_>>(),
             vec![("key-b", "pool_cooldown")]
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_key_cursor_filters_denied_provider_scope_keys() {
+        let provider_config = Some(json!({ "pool_advanced": { "lru_enabled": true } }));
+        let (provider, endpoint, keys, rows) = large_pool_fixture(2, provider_config.clone());
+        let data_state =
+            GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+                Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    vec![provider],
+                    vec![endpoint],
+                    keys,
+                )),
+                Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(rows)),
+            )
+            .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY);
+        let app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "pool-group",
+            10,
+            provider_config,
+        );
+        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None)
+            .with_allowed_provider_key_scope(Some(BTreeMap::from([(
+                "provider-pool".to_string(),
+                BTreeSet::from(["key-00001".to_string()]),
+            )])));
+
+        let candidate = cursor
+            .next_key()
+            .await
+            .expect("cursor should skip denied key and return allowed key");
+        assert_eq!(candidate.candidate.key_id, "key-00001");
+        assert_eq!(
+            cursor
+                .skip_reason_counts
+                .get("auth_provider_key_not_allowed"),
+            Some(&1)
         );
     }
 

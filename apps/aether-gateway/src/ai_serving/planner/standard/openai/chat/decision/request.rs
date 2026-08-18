@@ -2143,6 +2143,7 @@ mod tests {
             user_allowed_providers: None,
             user_allowed_api_formats: None,
             user_allowed_models: None,
+            user_allowed_provider_key_ids: None,
             api_key_id: "api-key-1".to_string(),
             api_key_name: Some("default".to_string()),
             api_key_is_active: true,
@@ -2154,6 +2155,7 @@ mod tests {
             api_key_allowed_providers: None,
             api_key_allowed_api_formats: None,
             api_key_allowed_models: None,
+            api_key_allowed_provider_key_ids: None,
             api_key_ip_rules: None,
             currently_usable: true,
         }

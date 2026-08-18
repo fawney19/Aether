@@ -1583,6 +1583,7 @@ async fn seed_client_api_key(backends: &DataBackends, user_id: &str) -> Result<(
             key_encrypted: Some(CLIENT_API_KEY.to_string()),
             name: Some("Responses WebSocket E2E".to_string()),
             allowed_providers: Some(vec![PROVIDER_ID.to_string()]),
+            allowed_provider_key_ids: None,
             allowed_api_formats: Some(vec!["openai:responses".to_string()]),
             allowed_models: Some(vec![PUBLIC_MODEL.to_string()]),
             ip_rules: None,

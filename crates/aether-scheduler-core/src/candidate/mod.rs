@@ -193,6 +193,7 @@ mod tests {
 
         let constraints = SchedulerAuthConstraints {
             allowed_providers: Some(vec!["provider-1".to_string()]),
+            allowed_provider_key_ids: None,
             allowed_api_formats: Some(vec!["OPENAI:CHAT".to_string()]),
             allowed_models: Some(vec!["gpt-5".to_string()]),
         };
@@ -270,6 +271,7 @@ mod tests {
 
         let constraints = SchedulerAuthConstraints {
             allowed_providers: Some(vec!["provider-1".to_string()]),
+            allowed_provider_key_ids: None,
             allowed_api_formats: Some(vec!["openai:chat".to_string()]),
             allowed_models: Some(vec!["gpt-5".to_string()]),
         };
@@ -713,5 +715,78 @@ mod tests {
             "api-key-1",
             2,
         ));
+    }
+
+    #[test]
+    fn enumeration_enforces_provider_key_scope_allowlists() {
+        let mut allowed_key = sample_row("1");
+        allowed_key.key_id = "key-a".to_string();
+        let mut blocked_key = sample_row("2");
+        blocked_key.key_id = "key-b".to_string();
+        blocked_key.provider_id = "provider-1".to_string();
+        blocked_key.provider_name = "Provider One".to_string();
+        let mut unrelated_provider_key = sample_row("3");
+        unrelated_provider_key.key_id = "key-x".to_string();
+        unrelated_provider_key.provider_id = "provider-2".to_string();
+        unrelated_provider_key.provider_name = "Provider Two".to_string();
+
+        let constraints = SchedulerAuthConstraints {
+            allowed_providers: Some(vec!["provider-1".to_string(), "provider-2".to_string()]),
+            allowed_provider_key_ids: Some(
+                [("provider-1".to_string(), ["key-a".to_string()].into())].into(),
+            ),
+            allowed_api_formats: None,
+            allowed_models: None,
+        };
+
+        let candidates =
+            super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
+                rows: vec![allowed_key, blocked_key, unrelated_provider_key],
+                normalized_api_format: "openai:chat",
+                request_operation: None,
+                requested_model_name: "gpt-5",
+                resolved_global_model_name: "gpt-5",
+                require_streaming: false,
+                required_capabilities: None,
+                auth_constraints: Some(&constraints),
+            })
+            .expect("candidate selection should build");
+
+        // key-a (allowed) and provider-2's key-x (no entry -> unrestricted)
+        // survive; key-b of provider-1 is excluded.
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].key_id, "key-a");
+        assert_eq!(candidates[1].key_id, "key-x");
+    }
+
+    #[test]
+    fn enumeration_without_key_scope_keeps_all_provider_keys() {
+        let mut first = sample_row("1");
+        first.key_id = "key-a".to_string();
+        let mut second = sample_row("2");
+        second.key_id = "key-b".to_string();
+        second.provider_id = "provider-1".to_string();
+
+        let constraints = SchedulerAuthConstraints {
+            allowed_providers: Some(vec!["provider-1".to_string()]),
+            allowed_provider_key_ids: None,
+            allowed_api_formats: None,
+            allowed_models: None,
+        };
+
+        let candidates =
+            super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
+                rows: vec![first, second],
+                normalized_api_format: "openai:chat",
+                request_operation: None,
+                requested_model_name: "gpt-5",
+                resolved_global_model_name: "gpt-5",
+                require_streaming: false,
+                required_capabilities: None,
+                auth_constraints: Some(&constraints),
+            })
+            .expect("candidate selection should build");
+
+        assert_eq!(candidates.len(), 2);
     }
 }

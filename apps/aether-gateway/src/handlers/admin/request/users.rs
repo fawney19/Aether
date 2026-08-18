@@ -682,6 +682,24 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn set_user_api_key_allowed_provider_key_ids(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        allowed_provider_key_ids: Option<
+            aether_data::repository::provider_key_scope::ProviderKeyScope,
+        >,
+    ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
+    {
+        self.app
+            .set_user_api_key_allowed_provider_key_ids(
+                user_id,
+                api_key_id,
+                allowed_provider_key_ids,
+            )
+            .await
+    }
+
     pub(crate) async fn set_user_api_key_force_capabilities(
         &self,
         user_id: &str,
