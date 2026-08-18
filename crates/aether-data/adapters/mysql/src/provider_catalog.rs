@@ -69,7 +69,8 @@ SELECT
   adjustment_history, utilization_samples,
   last_probe_increase_at AS last_probe_increase_at_unix_secs,
   last_rpm_peak, request_count, total_tokens, total_cost_usd,
-  success_count, error_count, total_response_time_ms,
+  success_count, sla_eligible_count, error_count, user_error_count,
+  total_response_time_ms,
   last_used_at AS last_used_at_unix_secs, auto_fetch_models,
   last_models_fetch_at AS last_models_fetch_at_unix_secs,
   last_models_fetch_error, locked_models, model_include_patterns,
@@ -120,7 +121,9 @@ SELECT
   CAST(0 AS SIGNED) AS total_tokens,
   CAST(0 AS DOUBLE) AS total_cost_usd,
   NULL AS success_count,
+  NULL AS sla_eligible_count,
   NULL AS error_count,
+  NULL AS user_error_count,
   NULL AS total_response_time_ms,
   NULL AS last_used_at_unix_secs,
   FALSE AS auto_fetch_models,
@@ -855,7 +858,9 @@ WHERE id = ?
             })?)
             .bind(key.total_cost_usd)
             .bind(optional_i64_from_u32(key.success_count).unwrap_or(0))
+            .bind(optional_i64_from_u32(key.sla_eligible_count).unwrap_or(0))
             .bind(optional_i64_from_u32(key.error_count).unwrap_or(0))
+            .bind(optional_i64_from_u32(key.user_error_count).unwrap_or(0))
             .bind(
                 optional_i64_from_u64(
                     key.total_response_time_ms,
@@ -2584,7 +2589,8 @@ INSERT INTO provider_api_keys (
   learned_rpm_limit, concurrent_429_count, rpm_429_count, last_429_at,
   last_429_type, adjustment_history, utilization_samples,
   last_probe_increase_at, last_rpm_peak, request_count, total_tokens,
-  total_cost_usd, success_count, error_count, total_response_time_ms,
+  total_cost_usd, success_count, sla_eligible_count, error_count,
+  user_error_count, total_response_time_ms,
   last_used_at, auto_fetch_models, last_models_fetch_at,
   last_models_fetch_error, locked_models, model_include_patterns,
   model_exclude_patterns, upstream_metadata, oauth_invalid_at,
@@ -2594,7 +2600,7 @@ INSERT INTO provider_api_keys (
 VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?, ?, ?, ?, ?
+  ?, ?, ?, ?, ?, ?, ?
 )
 "#
 }
@@ -3113,6 +3119,16 @@ fn map_key_row(row: &MySqlRow) -> Result<StoredProviderCatalogKey, DataLayerErro
                 optional_u64(
                     row.try_get("total_response_time_ms").map_sql_err()?,
                     "provider_api_keys.total_response_time_ms",
+                )?,
+            )
+            .with_sla_usage_fields(
+                optional_u32(
+                    row.try_get("sla_eligible_count").map_sql_err()?,
+                    "provider_api_keys.sla_eligible_count",
+                )?,
+                optional_u32(
+                    row.try_get("user_error_count").map_sql_err()?,
+                    "provider_api_keys.user_error_count",
                 )?,
             )
             .with_usage_totals(

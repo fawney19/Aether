@@ -186,7 +186,13 @@ fn accumulate_provider_api_key_usage_contribution(
     entry.success_count = entry
         .success_count
         .saturating_add(contribution.success_count);
+    entry.sla_eligible_count = entry
+        .sla_eligible_count
+        .saturating_add(contribution.sla_eligible_count);
     entry.error_count = entry.error_count.saturating_add(contribution.error_count);
+    entry.user_error_count = entry
+        .user_error_count
+        .saturating_add(contribution.user_error_count);
     entry.total_tokens = entry.total_tokens.saturating_add(contribution.total_tokens);
     entry.total_cost_usd += contribution.total_cost_usd;
     entry.total_response_time_ms = entry
@@ -310,16 +316,9 @@ fn usage_matches_list_query(item: &StoredRequestUsageAudit, query: &UsageAuditLi
             return false;
         }
     }
-    if query.error_only
-        && item.status != "failed"
-        && item.status_code.unwrap_or_default() < 400
-        && item
-            .error_message
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
-    {
+    // `error_only` is a service-error view.  Keep HTTP 400/user errors out even
+    // when the legacy status/error-message mirrors still say "failed".
+    if query.error_only && !item.outcome_class().is_service_error() {
         return false;
     }
 
@@ -391,16 +390,7 @@ fn usage_matches_keyword_search_query(
             return false;
         }
     }
-    if query.error_only
-        && item.status != "failed"
-        && item.status_code.unwrap_or_default() < 400
-        && item
-            .error_message
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
-    {
+    if query.error_only && !item.outcome_class().is_service_error() {
         return false;
     }
 
@@ -626,21 +616,7 @@ fn usage_matches_breakdown_summary_query(
 }
 
 fn usage_is_monitoring_error(item: &StoredRequestUsageAudit) -> bool {
-    let status = item.status.trim();
-    status.eq_ignore_ascii_case("error")
-        || status.eq_ignore_ascii_case("failed")
-        || item
-            .error_category
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
-        || (status.is_empty()
-            && (item.status_code.unwrap_or_default() >= 400
-                || item
-                    .error_message
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|value| !value.is_empty())))
+    item.outcome_class().is_service_error()
 }
 
 fn usage_matches_monitoring_error_count_query(
@@ -670,10 +646,12 @@ fn usage_matches_error_distribution_query(
     {
         return false;
     }
-    item.error_category
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|value| !value.is_empty())
+    item.outcome_class().is_service_error()
+        && item
+            .error_category
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
 }
 
 fn usage_matches_performance_percentiles_query(
@@ -682,7 +660,11 @@ fn usage_matches_performance_percentiles_query(
 ) -> bool {
     item.created_at_unix_ms >= query.created_from_unix_secs
         && item.created_at_unix_ms < query.created_until_unix_secs
-        && item.status == "completed"
+        // StoredRequestUsageAudit derives the canonical class from the normalized status/code
+        // fields. Keep the explicit <400 guard here as the in-memory equivalent of the SQL
+        // legacy fallback; 5xx and HTTP 400 rows must never enter success percentiles.
+        && item.outcome_class().is_success()
+        && item.status_code.is_none_or(|code| code < 400)
 }
 
 fn usage_reserved_provider_label(value: &str) -> bool {
@@ -1052,10 +1034,7 @@ fn usage_total_tokens(item: &StoredRequestUsageAudit) -> u64 {
 }
 
 fn usage_is_success(item: &StoredRequestUsageAudit) -> bool {
-    matches!(
-        item.status.as_str(),
-        "completed" | "success" | "ok" | "billed" | "settled"
-    ) && item.status_code.is_none_or(|code| code < 400)
+    item.outcome_class().is_success()
 }
 
 fn usage_output_tps_uses_generation_time(item: &StoredRequestUsageAudit) -> bool {
@@ -1287,7 +1266,9 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             total_cost_usd: f64,
             actual_total_cost_usd: f64,
             response_time_ms_sum: u64,
+            sla_eligible_count: u64,
             success_count: u64,
+            user_error_count: u64,
         }
 
         let mut grouped: BTreeMap<String, AggregateBucket> = BTreeMap::new();
@@ -1375,9 +1356,16 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             bucket.response_time_ms_sum = bucket
                 .response_time_ms_sum
                 .saturating_add(item.response_time_ms.unwrap_or_default());
+            let outcome = item.outcome_class();
+            bucket.sla_eligible_count = bucket
+                .sla_eligible_count
+                .saturating_add(u64::from(outcome.is_sla_eligible()));
             bucket.success_count = bucket
                 .success_count
-                .saturating_add(if usage_is_success(item) { 1 } else { 0 });
+                .saturating_add(u64::from(outcome.is_success()));
+            bucket.user_error_count = bucket
+                .user_error_count
+                .saturating_add(u64::from(outcome.is_user_error()));
         }
 
         let mut items = grouped
@@ -1408,8 +1396,16 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                     }
                     _ => None,
                 },
+                sla_eligible_count: match query.group_by {
+                    UsageAuditAggregationGroupBy::Provider => Some(bucket.sla_eligible_count),
+                    _ => None,
+                },
                 success_count: match query.group_by {
                     UsageAuditAggregationGroupBy::Provider => Some(bucket.success_count),
+                    _ => None,
+                },
+                user_error_count: match query.group_by {
+                    UsageAuditAggregationGroupBy::Provider => Some(bucket.user_error_count),
                     _ => None,
                 },
             })
@@ -1462,8 +1458,15 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             summary.cache_creation_cost_usd += item.cache_creation_cost_usd;
             summary.cache_read_cost_usd += item.cache_read_cost_usd;
             summary.total_response_time_ms += item.response_time_ms.unwrap_or(0) as f64;
-            if item.status_code.is_some_and(|value| value >= 400) || item.error_message.is_some() {
+            let outcome = item.outcome_class();
+            summary.sla_eligible_requests = summary
+                .sla_eligible_requests
+                .saturating_add(u64::from(outcome.is_sla_eligible()));
+            if outcome.is_service_error() {
                 summary.error_requests = summary.error_requests.saturating_add(1);
+            }
+            if outcome.is_user_error() {
+                summary.user_error_requests = summary.user_error_requests.saturating_add(1);
             }
         }
         Ok(summary)
@@ -1572,6 +1575,10 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                 continue;
             }
             summary.total_requests = summary.total_requests.saturating_add(1);
+            let outcome = item.outcome_class();
+            summary.sla_eligible_requests = summary
+                .sla_eligible_requests
+                .saturating_add(u64::from(outcome.is_sla_eligible()));
             summary.input_tokens = summary.input_tokens.saturating_add(item.input_tokens);
             summary.effective_input_tokens = summary
                 .effective_input_tokens
@@ -1593,10 +1600,11 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             summary.cache_read_cost_usd += item.cache_read_cost_usd;
             summary.total_cost_usd += item.total_cost_usd;
             summary.actual_total_cost_usd += item.actual_total_cost_usd;
-            if item.status_code.is_some_and(|value| value >= 400)
-                || item.status.eq_ignore_ascii_case("failed")
-            {
+            if outcome.is_service_error() {
                 summary.error_requests = summary.error_requests.saturating_add(1);
+            }
+            if outcome.is_user_error() {
+                summary.user_error_requests = summary.user_error_requests.saturating_add(1);
             }
             if let Some(response_time_ms) = item.response_time_ms {
                 summary.response_time_sum_ms += response_time_ms as f64;
@@ -1713,7 +1721,9 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             cache_read_tokens: u64,
             total_cost_usd: f64,
             actual_total_cost_usd: f64,
+            sla_eligible_count: u64,
             success_count: u64,
+            user_error_count: u64,
             response_time_sum_ms: f64,
             response_time_samples: u64,
             overall_response_time_sum_ms: f64,
@@ -1736,9 +1746,14 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                 UsageBreakdownGroupBy::ApiFormat => item.api_format.clone().unwrap_or_default(),
             };
             let bucket = grouped.entry(group_key).or_default();
-            let is_success = item.status != "failed"
-                && item.status_code.is_none_or(|status| status < 400)
-                && item.error_message.is_none();
+            let outcome = item.outcome_class();
+            let is_success = outcome.is_success();
+            bucket.sla_eligible_count = bucket
+                .sla_eligible_count
+                .saturating_add(u64::from(outcome.is_sla_eligible()));
+            bucket.user_error_count = bucket
+                .user_error_count
+                .saturating_add(u64::from(outcome.is_user_error()));
 
             bucket.request_count = bucket.request_count.saturating_add(1);
             bucket.input_tokens = bucket.input_tokens.saturating_add(item.input_tokens);
@@ -1794,7 +1809,9 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                 cache_read_tokens: bucket.cache_read_tokens,
                 total_cost_usd: bucket.total_cost_usd,
                 actual_total_cost_usd: bucket.actual_total_cost_usd,
+                sla_eligible_count: bucket.sla_eligible_count,
                 success_count: bucket.success_count,
+                user_error_count: bucket.user_error_count,
                 response_time_sum_ms: bucket.response_time_sum_ms,
                 response_time_samples: bucket.response_time_samples,
                 overall_response_time_sum_ms: bucket.overall_response_time_sum_ms,
@@ -1927,7 +1944,9 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
         struct ProviderPerformanceBucket {
             provider: String,
             request_count: u64,
+            sla_eligible_count: u64,
             success_count: u64,
+            user_error_count: u64,
             output_tokens: u64,
             tps_output_tokens: u64,
             tps_response_time_ms_sum: u64,
@@ -1944,6 +1963,13 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
         impl ProviderPerformanceBucket {
             fn add(&mut self, item: &StoredRequestUsageAudit, slow_threshold_ms: u64) {
                 self.request_count = self.request_count.saturating_add(1);
+                let outcome = item.outcome_class();
+                self.sla_eligible_count = self
+                    .sla_eligible_count
+                    .saturating_add(u64::from(outcome.is_sla_eligible()));
+                self.user_error_count = self
+                    .user_error_count
+                    .saturating_add(u64::from(outcome.is_user_error()));
                 self.output_tokens = self.output_tokens.saturating_add(item.output_tokens);
                 if item
                     .response_time_ms
@@ -2027,7 +2053,9 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
         let mut summary_first_byte_times = summary_bucket.first_byte_times.clone();
         let summary = StoredUsageProviderPerformanceSummary {
             request_count: summary_bucket.request_count,
+            sla_eligible_count: summary_bucket.sla_eligible_count,
             success_count: summary_bucket.success_count,
+            user_error_count: summary_bucket.user_error_count,
             avg_output_tps: avg_tps(
                 summary_bucket.tps_output_tokens,
                 summary_bucket.tps_response_time_ms_sum,
@@ -2063,7 +2091,9 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                     provider_id,
                     provider: bucket.provider,
                     request_count: bucket.request_count,
+                    sla_eligible_count: bucket.sla_eligible_count,
                     success_count: bucket.success_count,
+                    user_error_count: bucket.user_error_count,
                     output_tokens: bucket.output_tokens,
                     avg_output_tps: avg_tps(
                         bucket.tps_output_tokens,
@@ -2134,7 +2164,9 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                         provider_id,
                         provider: bucket.provider,
                         request_count: bucket.request_count,
+                        sla_eligible_count: bucket.sla_eligible_count,
                         success_count: bucket.success_count,
+                        user_error_count: bucket.user_error_count,
                         output_tokens: bucket.output_tokens,
                         avg_output_tps: avg_tps(
                             bucket.tps_output_tokens,
@@ -2539,30 +2571,77 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
         provider_id: &str,
         since_unix_secs: u64,
     ) -> Result<StoredProviderUsageSummary, DataLayerError> {
-        let windows = self
-            .provider_usage_windows
-            .read()
-            .expect("provider usage repository lock");
-
+        // Usage rows are the canonical source for provider health metrics.  The
+        // legacy provider_usage_windows cache is intentionally not consulted:
+        // it predates outcome_class/sla_eligible and cannot distinguish HTTP
+        // 400 user errors from service failures.
+        let usage = self.by_request_id.read().expect("usage repository lock");
         let mut summary = StoredProviderUsageSummary::default();
-        let mut response_time_samples = 0u64;
-        for window in windows.iter().filter(|window| {
-            window.provider_id == provider_id && window.window_start_unix_secs >= since_unix_secs
+        let mut response_time_sum_ms = 0.0_f64;
+        let mut response_time_samples = 0_u64;
+        for item in usage.values().filter(|item| {
+            item.provider_id.as_deref() == Some(provider_id)
+                && item.created_at_unix_ms >= since_unix_secs
         }) {
-            summary.total_requests = summary.total_requests.saturating_add(window.total_requests);
+            let outcome = item.outcome_class();
+            summary.total_requests = summary.total_requests.saturating_add(1);
+            summary.sla_eligible_requests = summary
+                .sla_eligible_requests
+                .saturating_add(u64::from(outcome.is_sla_eligible()));
             summary.successful_requests = summary
                 .successful_requests
-                .saturating_add(window.successful_requests);
+                .saturating_add(u64::from(outcome.is_success()));
             summary.failed_requests = summary
                 .failed_requests
-                .saturating_add(window.failed_requests);
-            summary.total_cost_usd += window.total_cost_usd;
-            summary.avg_response_time_ms += window.avg_response_time_ms;
-            response_time_samples = response_time_samples.saturating_add(1);
+                .saturating_add(u64::from(outcome.is_service_error()));
+            summary.user_error_requests = summary
+                .user_error_requests
+                .saturating_add(u64::from(outcome.is_user_error()));
+            summary.total_cost_usd += item.total_cost_usd;
+            if let Some(response_time_ms) = item.response_time_ms {
+                response_time_sum_ms += response_time_ms as f64;
+                response_time_samples = response_time_samples.saturating_add(1);
+            }
         }
 
         if response_time_samples > 0 {
-            summary.avg_response_time_ms /= response_time_samples as f64;
+            summary.avg_response_time_ms = response_time_sum_ms / response_time_samples as f64;
+        }
+
+        // Keep the old in-memory fixture/API useful when no usage rows are
+        // available (for example, callers that only seed the compatibility
+        // tracking windows).  Never merge it with usage rows, so the canonical
+        // usage projection cannot be double-counted.
+        if summary.total_requests == 0 {
+            let windows = self
+                .provider_usage_windows
+                .read()
+                .expect("provider usage repository lock");
+            let mut window_samples = 0_u64;
+            for window in windows.iter().filter(|window| {
+                window.provider_id == provider_id
+                    && window.window_start_unix_secs >= since_unix_secs
+            }) {
+                summary.total_requests =
+                    summary.total_requests.saturating_add(window.total_requests);
+                summary.sla_eligible_requests = summary.sla_eligible_requests.saturating_add(
+                    window
+                        .successful_requests
+                        .saturating_add(window.failed_requests),
+                );
+                summary.successful_requests = summary
+                    .successful_requests
+                    .saturating_add(window.successful_requests);
+                summary.failed_requests = summary
+                    .failed_requests
+                    .saturating_add(window.failed_requests);
+                summary.total_cost_usd += window.total_cost_usd;
+                summary.avg_response_time_ms += window.avg_response_time_ms;
+                window_samples = window_samples.saturating_add(1);
+            }
+            if window_samples > 0 {
+                summary.avg_response_time_ms /= window_samples as f64;
+            }
         }
 
         Ok(summary)

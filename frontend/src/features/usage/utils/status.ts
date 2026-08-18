@@ -1,12 +1,21 @@
-import type { RequestStatus, UsageRecord } from '../types'
+import type { RequestOutcomeClass, RequestStatus, UsageRecord } from '../types'
 
-export type TimelineFinalStatus = 'success' | 'failed' | 'streaming' | 'pending' | 'cancelled'
+export type TimelineFinalStatus =
+  | 'success'
+  | 'user_error'
+  | 'failed'
+  | 'streaming'
+  | 'pending'
+  | 'cancelled'
 
 type RequestStatusLike = RequestStatus | string | null | undefined
 
 type UsageFailureSignal = {
+  status?: RequestStatusLike
   status_code?: number | null
   error_message?: string | null
+  outcome_class?: RequestOutcomeClass | string | null
+  sla_eligible?: boolean | null
   image_progress?: {
     phase?: string | null
   } | null
@@ -20,8 +29,43 @@ type UsageDisplayStatusRecord = UsageFailureSignal & {
 function hasLegacyFailureSignal(
   record: UsageFailureSignal
 ): boolean {
+  if (record.status_code === 400) return false
   return (typeof record.status_code === 'number' && record.status_code >= 400) ||
     (typeof record.error_message === 'string' && record.error_message.trim().length > 0)
+}
+
+export function normalizeRequestOutcomeClass(
+  outcomeClass: RequestOutcomeClass | string | null | undefined
+): RequestOutcomeClass | undefined {
+  const normalized = typeof outcomeClass === 'string'
+    ? outcomeClass.trim().toLowerCase()
+    : ''
+  switch (normalized) {
+    case 'success':
+    case 'user_error':
+    case 'service_error':
+    case 'cancelled':
+    case 'in_flight':
+      return normalized
+    default:
+      return undefined
+  }
+}
+
+function outcomeClassImpliesFailure(record: UsageFailureSignal): boolean | undefined {
+  const outcomeClass = normalizeRequestOutcomeClass(record.outcome_class)
+  if (!outcomeClass) return undefined
+  if (outcomeClass === 'service_error') return true
+
+  // User errors are intentionally excluded from SLA and success-rate
+  // denominators, but they still represent a failed request lifecycle when
+  // the persisted record says it terminated as `failed`.
+  if (outcomeClass === 'user_error') {
+    const status = normalizeRequestStatus(record.status)
+    return status === 'failed' || (status == null && record.status_code === 400)
+  }
+
+  return false
 }
 
 function hasImageProgressFailureSignal(
@@ -184,6 +228,14 @@ function hasTerminalSuccessStatusCode(
 }
 
 export function isUsageRecordFailed(record: UsageFailureSignal & Pick<UsageRecord, 'status'>): boolean {
+  const outcomeFailure = outcomeClassImpliesFailure(record)
+  if (outcomeFailure !== undefined) {
+    return outcomeFailure
+  }
+  // Legacy rows may not have `outcome_class`; HTTP 400 still represents a
+  // terminal user-request failure and must remain visible in the failed view.
+  if (record.status_code === 400) return true
+
   const status = typeof record.status === 'string' ? record.status.trim().toLowerCase() : ''
   if (status) {
     if (status === 'pending' || status === 'streaming') {
@@ -209,6 +261,12 @@ export function isUsageRecordFailed(record: UsageFailureSignal & Pick<UsageRecor
 }
 
 export function isUsageRecordSuccessful(record: UsageFailureSignal & Pick<UsageRecord, 'status'>): boolean {
+  const outcomeClass = normalizeRequestOutcomeClass(record.outcome_class)
+  if (outcomeClass) {
+    return outcomeClass === 'success'
+  }
+  if (record.status_code === 400) return false
+
   const status = typeof record.status === 'string' ? record.status.trim().toLowerCase() : ''
   if (status) {
     if (status === 'completed') {
@@ -240,6 +298,18 @@ export function normalizeRequestStatus(status: RequestStatusLike): RequestStatus
 }
 
 export function resolveDisplayRequestStatus(record: UsageDisplayStatusRecord): RequestStatus | undefined {
+  const outcomeClass = normalizeRequestOutcomeClass(record.outcome_class)
+  if (outcomeClass === 'service_error') return 'failed'
+  if (outcomeClass === 'cancelled') return 'cancelled'
+  if (outcomeClass === 'success') return 'completed'
+  if (outcomeClass === 'user_error') {
+    const status = normalizeRequestStatus(record.status)
+    if (status === 'failed') return 'failed'
+    if (status === 'cancelled') return 'cancelled'
+    return status == null && record.status_code === 400 ? 'failed' : 'completed'
+  }
+  if (record.status_code === 400) return 'failed'
+
   const status = normalizeRequestStatus(record.status)
   if ((status === 'pending' || status === 'streaming') &&
     !hasTerminalSuccessStatusCode(record) &&
@@ -275,6 +345,7 @@ function normalizeTimelineFinalStatus(status: string | null | undefined): Timeli
   const normalized = typeof status === 'string' ? status.trim().toLowerCase() : ''
   switch (normalized) {
     case 'success':
+    case 'user_error':
     case 'failed':
     case 'streaming':
     case 'pending':
@@ -290,7 +361,22 @@ export function resolveTimelineFinalStatus(params: {
   traceFinalStatus?: string | null
   requestStatus?: RequestStatusLike
   statusCode?: number
+  outcomeClass?: RequestOutcomeClass | string | null
 }): TimelineFinalStatus {
+  const outcomeClass = normalizeRequestOutcomeClass(params.outcomeClass)
+  if (outcomeClass === 'success') return 'success'
+  if (outcomeClass === 'user_error') return 'user_error'
+  if (outcomeClass === 'service_error') return 'failed'
+  if (outcomeClass === 'cancelled') return 'cancelled'
+
+  if (params.statusCode === 400) return 'user_error'
+
+  if (outcomeClass === 'in_flight') {
+    const requestStatus = mapRequestStatusToTimelineStatus(params.requestStatus)
+    if (requestStatus === 'streaming') return 'streaming'
+    return 'pending'
+  }
+
   const hasTerminalSuccessStatusCode = typeof params.statusCode === 'number'
     ? params.statusCode >= 200 && params.statusCode < 300
     : undefined
@@ -307,7 +393,7 @@ export function resolveTimelineFinalStatus(params: {
   }
 
   const traceStatus = normalizeTimelineFinalStatus(params.traceFinalStatus)
-  if (traceStatus === 'success' || traceStatus === 'failed' || traceStatus === 'cancelled') {
+  if (traceStatus === 'success' || traceStatus === 'user_error' || traceStatus === 'failed' || traceStatus === 'cancelled') {
     if (traceStatus === 'success' && hasTerminalSuccessStatusCode === false) {
       return 'failed'
     }

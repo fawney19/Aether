@@ -148,7 +148,7 @@
               Monthly
             </Badge>
           </div>
-          <div class="grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-4">
+          <div class="grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-5">
             <Card class="relative p-3 sm:p-4 border-book-cloth/30">
               <Clock
                 class="absolute top-3 right-3 h-3.5 w-3.5 sm:h-4 sm:w-4 text-muted-foreground"
@@ -174,17 +174,38 @@
                 <p
                   class="text-[9px] sm:text-[10px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-muted-foreground"
                 >
-                  错误率
+                  服务错误率
                 </p>
                 <p
                   class="mt-1.5 sm:mt-2 text-lg sm:text-xl font-semibold"
                   :class="
-                    systemHealth.error_rate > 5
+                    serviceErrorRate > 5
                       ? 'text-destructive'
                       : 'text-foreground'
                   "
                 >
-                  {{ systemHealth.error_rate }}%
+                  {{ formatOutcomeRate(serviceErrorRate) }}
+                </p>
+                <p class="mt-1 text-[9px] sm:text-[10px] text-muted-foreground">
+                  {{ formatOutcomeCount(serviceErrorCount) }} 次服务错误
+                </p>
+              </div>
+            </Card>
+            <Card class="relative p-3 sm:p-4 border-muted-foreground/20">
+              <AlertCircle
+                class="absolute top-3 right-3 h-3.5 w-3.5 sm:h-4 sm:w-4 text-muted-foreground"
+              />
+              <div class="pr-6">
+                <p
+                  class="text-[9px] sm:text-[10px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.3em] text-muted-foreground"
+                >
+                  用户错误
+                </p>
+                <p class="mt-1.5 sm:mt-2 text-lg sm:text-xl font-semibold text-foreground">
+                  {{ formatOutcomeCount(userErrorCount) }}
+                </p>
+                <p class="mt-1 text-[9px] sm:text-[10px] text-muted-foreground">
+                  占全部请求 {{ formatOutcomeRate(userErrorRate) }}
                 </p>
               </div>
             </Card>
@@ -900,6 +921,7 @@ import {
   type DashboardStat,
   type DailyStat,
   type ProviderSummary,
+  type SystemHealth,
 } from "@/api/dashboard";
 import { getDateRangeFromPeriod } from "@/features/usage/composables";
 import type { DateRangeParams } from "@/features/usage/types";
@@ -940,6 +962,12 @@ import {
   Shuffle,
 } from "lucide-vue-next";
 import { formatTokens, formatCurrency } from "@/utils/format";
+import {
+  resolveServiceErrorCount,
+  resolveServiceErrorRate,
+  resolveUserErrorCount,
+  resolveUserErrorRate,
+} from "@/utils/outcomeMetrics";
 import { parseDateLike } from "@/utils/date";
 import { marked } from "marked";
 import { sanitizeMarkdown } from "@/utils/sanitize";
@@ -1089,13 +1117,28 @@ const todayStats = ref<{
   cache_read_tokens?: number;
 }>({ requests: 0, tokens: 0, cost: 0 });
 
-const systemHealth = ref<{
-  avg_response_time: number;
-  error_rate: number;
-  error_requests: number;
-  fallback_count: number;
-  total_requests: number;
-} | null>(null);
+const systemHealth = ref<SystemHealth | null>(null);
+
+const serviceErrorCount = computed(() =>
+  systemHealth.value ? resolveServiceErrorCount(systemHealth.value) : null,
+);
+const serviceErrorRate = computed(() =>
+  systemHealth.value ? resolveServiceErrorRate(systemHealth.value) ?? 0 : 0,
+);
+const userErrorCount = computed(() =>
+  systemHealth.value ? resolveUserErrorCount(systemHealth.value) : null,
+);
+const userErrorRate = computed(() =>
+  systemHealth.value ? resolveUserErrorRate(systemHealth.value) : null,
+);
+
+function formatOutcomeCount(value: number | null): string {
+  return value == null ? "-" : value.toLocaleString("zh-CN");
+}
+
+function formatOutcomeRate(value: number | null): string {
+  return value == null ? "-" : `${value.toFixed(2)}%`;
+}
 
 const costStats = ref<{
   total_cost: number;

@@ -239,9 +239,12 @@ pub fn admin_usage_matches_api_format(
 }
 
 pub fn admin_usage_is_failed(item: &StoredRequestUsageAudit) -> bool {
-    let has_failure_signal = item
-        .status_code
-        .is_some_and(|value| !(200..300).contains(&value))
+    // This helper drives the usage-record lifecycle/filter presentation.  It
+    // must not be used as the SLA/service-error counter (those projections use
+    // `outcome_class` directly).  A 400 is therefore still a failed request in
+    // the lifecycle view, while an explicitly completed row keeps its
+    // terminal status even if legacy error fields are populated.
+    let has_failure_signal = item.status_code.is_some_and(|value| value >= 400)
         || item
             .error_message
             .as_deref()
@@ -270,9 +273,19 @@ pub fn admin_usage_matches_status(item: &StoredRequestUsageAudit, status: Option
         "stream" => item.is_stream,
         "standard" => !item.is_stream,
         "error" => {
-            item.status_code
-                .is_some_and(|value| !(200..300).contains(&value))
-                || item.error_message.is_some()
+            // `error` is the service/transport-error view.  Preserve legacy
+            // non-2xx diagnostics (including redirects), but never classify a
+            // canonical HTTP 400 user error as a service error.
+            (!matches!(item.status_code, Some(400))
+                && item
+                    .status_code
+                    .is_some_and(|value| !(200..300).contains(&value)))
+                || (!item.outcome_class().is_user_error()
+                    && item
+                        .error_message
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty()))
+                || item.outcome_class().is_service_error()
         }
         "pending" | "streaming" | "completed" | "cancelled" => item.status == status,
         "failed" => admin_usage_is_failed(item),
@@ -1323,6 +1336,8 @@ pub fn admin_usage_record_json(
         "status_code": item.status_code,
         "error_message": item.error_message,
         "status": item.status,
+        "outcome_class": item.outcome_class().as_str(),
+        "sla_eligible": item.sla_eligible(),
         "request_type": item.request_type,
         "has_fallback": admin_usage_has_fallback(item),
         "has_retry": false,
@@ -1649,6 +1664,8 @@ pub fn admin_usage_aggregation_by_provider_json(
             f64,
             u64,
             u64,
+            u64,
+            u64,
         ),
     > = BTreeMap::new();
     for item in usage {
@@ -1672,6 +1689,8 @@ pub fn admin_usage_aggregation_by_provider_json(
             0,
             0.0,
             0.0,
+            0,
+            0,
             0,
             0,
         ));
@@ -1705,7 +1724,25 @@ pub fn admin_usage_aggregation_by_provider_json(
             .saturating_add(item.response_time_ms.unwrap_or_default());
         entry.14 = entry
             .14
-            .saturating_add(if admin_usage_is_success(item) { 1 } else { 0 });
+            // Provider aggregation is a metrics projection; use the
+            // canonical outcome classifier rather than the lifecycle/display
+            // helper below (which intentionally treats only 2xx as a visible
+            // success and keeps redirects out of the success badge).
+            .saturating_add(if item.outcome_class().is_success() {
+                1
+            } else {
+                0
+            });
+        entry.15 = entry
+            .15
+            .saturating_add(if item.sla_eligible() { 1 } else { 0 });
+        entry.16 = entry
+            .16
+            .saturating_add(if item.outcome_class().is_user_error() {
+                1
+            } else {
+                0
+            });
     }
 
     let mut items: Vec<Value> = grouped
@@ -1729,6 +1766,8 @@ pub fn admin_usage_aggregation_by_provider_json(
                     actual_cost,
                     response_time_ms_sum,
                     success_count,
+                    sla_eligible_count,
+                    user_error_count,
                 ),
             )| {
                 let avg_response_time_ms = if request_count == 0 {
@@ -1736,16 +1775,17 @@ pub fn admin_usage_aggregation_by_provider_json(
                 } else {
                     round_to(response_time_ms_sum as f64 / request_count as f64, 2)
                 };
-                let error_count = request_count.saturating_sub(success_count);
-                let success_rate = if request_count == 0 {
+                let service_error_count = sla_eligible_count.saturating_sub(success_count);
+                let success_rate = if sla_eligible_count == 0 {
                     0.0
                 } else {
-                    round_to(success_count as f64 / request_count as f64 * 100.0, 2)
+                    round_to(success_count as f64 / sla_eligible_count as f64 * 100.0, 2)
                 };
                 json!({
                     "provider_id": provider_id,
                     "provider": provider_name,
                     "request_count": request_count,
+                    "sla_eligible_count": sla_eligible_count,
                     "total_tokens": total_tokens,
                     "effective_input_tokens": effective_input_tokens,
                     "total_input_context": total_input_context,
@@ -1754,7 +1794,16 @@ pub fn admin_usage_aggregation_by_provider_json(
                     "actual_cost": round_to(actual_cost, 6),
                     "avg_response_time_ms": avg_response_time_ms,
                     "success_rate": success_rate,
-                    "error_count": error_count,
+                    "success_count": success_count,
+                    "error_count": service_error_count,
+                    "service_error_count": service_error_count,
+                    "user_error_count": user_error_count,
+                    "service_error_rate": if sla_eligible_count == 0 { 0.0 } else {
+                        round_to(service_error_count as f64 / sla_eligible_count as f64 * 100.0, 2)
+                    },
+                    "user_error_rate": if request_count == 0 { 0.0 } else {
+                        round_to(user_error_count as f64 / request_count as f64 * 100.0, 2)
+                    },
                     "cache_creation_tokens": cache_creation_tokens,
                     "cache_creation_ephemeral_5m_tokens": cache_creation_ephemeral_5m_tokens,
                     "cache_creation_ephemeral_1h_tokens": cache_creation_ephemeral_1h_tokens,
@@ -1960,12 +2009,21 @@ pub fn admin_usage_heatmap_json(usage: &[StoredRequestUsageAudit]) -> Value {
 }
 
 pub fn admin_usage_is_success(item: &StoredRequestUsageAudit) -> bool {
+    // This helper is consumed by usage-record presentation.  Keep the
+    // historical UI contract that a terminal success must carry a 2xx
+    // response; SLA/aggregate math uses `outcome_class().is_success()` above
+    // and in the repository rollups.
+    let status = item.status.trim().to_ascii_lowercase();
     matches!(
-        item.status.as_str(),
+        status.as_str(),
         "completed" | "success" | "ok" | "billed" | "settled"
     ) && item
         .status_code
         .is_none_or(|code| (200..300).contains(&code))
+        && item
+            .error_message
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
 }
 
 pub fn admin_usage_matches_optional_id(value: Option<&str>, expected: Option<&str>) -> bool {
@@ -2239,6 +2297,7 @@ fn summarize_admin_usage_stats(usage: &[StoredRequestUsageAudit]) -> StoredUsage
     let aggregate = aggregate_usage_stats(usage);
     StoredUsageAuditSummary {
         total_requests: aggregate.total_requests,
+        sla_eligible_requests: aggregate.sla_eligible_requests,
         input_tokens: usage.iter().map(|item| item.input_tokens).sum(),
         output_tokens: usage.iter().map(|item| item.output_tokens).sum(),
         recorded_total_tokens: aggregate.total_tokens,
@@ -2258,6 +2317,7 @@ fn summarize_admin_usage_stats(usage: &[StoredRequestUsageAudit]) -> StoredUsage
         cache_read_cost_usd: usage.iter().map(|item| item.cache_read_cost_usd).sum(),
         total_response_time_ms: aggregate.total_response_time_ms,
         error_requests: aggregate.error_requests,
+        user_error_requests: aggregate.user_error_requests,
     }
 }
 
@@ -2277,23 +2337,49 @@ pub fn build_admin_usage_summary_stats_response_from_summary(
             2,
         )
     };
-    let error_rate = if summary.total_requests == 0 {
+    let service_error_rate = if summary.sla_eligible_requests == 0 {
         0.0
     } else {
         round_to(
-            (summary.error_requests as f64 / summary.total_requests as f64) * 100.0,
+            (summary.error_requests as f64 / summary.sla_eligible_requests as f64) * 100.0,
+            2,
+        )
+    };
+    let user_error_rate = if summary.total_requests == 0 {
+        0.0
+    } else {
+        round_to(
+            (summary.user_error_requests as f64 / summary.total_requests as f64) * 100.0,
+            2,
+        )
+    };
+    let success_count = summary
+        .sla_eligible_requests
+        .saturating_sub(summary.error_requests);
+    let success_rate = if summary.sla_eligible_requests == 0 {
+        0.0
+    } else {
+        round_to(
+            success_count as f64 / summary.sla_eligible_requests as f64 * 100.0,
             2,
         )
     };
 
     Json(json!({
         "total_requests": summary.total_requests,
+        "sla_eligible_count": summary.sla_eligible_requests,
         "total_tokens": total_tokens,
         "total_cost": round_to(summary.total_cost_usd, 6),
         "total_actual_cost": round_to(summary.actual_total_cost_usd, 6),
         "avg_response_time": avg_response_time,
         "error_count": summary.error_requests,
-        "error_rate": error_rate,
+        "service_error_count": summary.error_requests,
+        "user_error_count": summary.user_error_requests,
+        "success_count": success_count,
+        "error_rate": service_error_rate,
+        "service_error_rate": service_error_rate,
+        "user_error_rate": user_error_rate,
+        "success_rate": success_rate,
         "cache_stats": {
             "cache_creation_tokens": summary.cache_creation_tokens,
             "cache_creation_ephemeral_5m_tokens": summary.cache_creation_ephemeral_5m_tokens,
@@ -3079,6 +3165,18 @@ mod tests {
         assert!(admin_usage_matches_status(&item, Some("failed")));
         assert!(admin_usage_matches_status(&item, Some("error")));
         assert!(!admin_usage_is_success(&item));
+    }
+
+    #[test]
+    fn failed_user_error_is_lifecycle_failed_but_not_service_error() {
+        let item = sample_usage("failed", Some(400), Some("invalid request"));
+
+        assert!(admin_usage_is_failed(&item));
+        assert!(admin_usage_matches_status(&item, Some("failed")));
+        assert!(!admin_usage_matches_status(&item, Some("error")));
+        assert!(!admin_usage_is_success(&item));
+        assert_eq!(item.outcome_class().as_str(), "user_error");
+        assert!(!item.sla_eligible());
     }
 
     #[test]

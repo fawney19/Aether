@@ -561,6 +561,7 @@
                   :request-id="traceTimelineRequestId"
                   :override-status-code="detail.status_code"
                   :request-status="detail.status"
+                  :outcome-class="detail.outcome_class"
                   :request-api-format="detail.api_format || null"
                   :request-metadata="traceRequestMetadata"
                   @trace-state="handleTraceState"
@@ -848,7 +849,7 @@ import TabsContent from '@/components/ui/tabs-content.vue'
 import { AlertTriangle, Check, Columns2, RefreshCw, X, Monitor, Server, MessageSquareText, Code2, Terminal, Play } from 'lucide-vue-next'
 import { dashboardApi, type RequestDetail } from '@/api/dashboard'
 import type { ImageProgress, RequestTrace } from '@/api/requestTrace'
-import type { UsageRecord } from '../types'
+import type { RequestOutcomeClass, UsageRecord } from '../types'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import {
   formatByteSize,
@@ -919,6 +920,8 @@ const emit = defineEmits<{
     id: string
     requestId?: string | null
     status?: RequestStateStatus
+    outcomeClass?: RequestOutcomeClass | null
+    slaEligible?: boolean | null
     statusCode?: number | null
     inputTokens?: number | null
     effectiveInputTokens?: number | null
@@ -1032,6 +1035,10 @@ function mapTraceFinalStatusToRequestStatus(
   switch (status) {
     case 'success':
       return 'completed'
+    case 'user_error':
+      // The trace uses user_error for the outcome label, while the request
+      // lifecycle remains failed. Keep those two dimensions separate.
+      return 'failed'
     case 'failed':
       return 'failed'
     case 'cancelled':
@@ -1060,8 +1067,20 @@ function hasRequestFailureSignal(statusCode?: number | null, errorMessage?: stri
 function resolveRequestStateStatus(
   status: unknown,
   statusCode?: number | null,
-  errorMessage?: string | null
+  errorMessage?: string | null,
+  outcomeClass?: RequestOutcomeClass | null,
 ): RequestStateStatus | undefined {
+  if (outcomeClass === 'service_error') return 'failed'
+  if (outcomeClass === 'cancelled') return 'cancelled'
+  if (outcomeClass === 'success') return 'completed'
+  if (outcomeClass === 'user_error') {
+    const normalized = normalizeRequestStateStatus(status)
+    if (normalized === 'failed') return 'failed'
+    if (normalized === 'cancelled') return 'cancelled'
+    return normalized == null && statusCode === 400 ? 'failed' : 'completed'
+  }
+  if (statusCode === 400) return 'failed'
+
   const normalized = normalizeRequestStateStatus(status)
   if ((normalized == null || normalized === 'pending' || normalized === 'streaming') &&
     hasRequestFailureSignal(statusCode, errorMessage)) {
@@ -1070,8 +1089,13 @@ function resolveRequestStateStatus(
   return normalized
 }
 
-function resolveRequestStateStatusFromDetail(nextDetail: Pick<RequestDetail, 'status' | 'status_code' | 'error_message'>): RequestStateStatus | undefined {
-  return resolveRequestStateStatus(nextDetail.status, nextDetail.status_code, nextDetail.error_message)
+function resolveRequestStateStatusFromDetail(nextDetail: Pick<RequestDetail, 'status' | 'status_code' | 'error_message' | 'outcome_class'>): RequestStateStatus | undefined {
+  return resolveRequestStateStatus(
+    nextDetail.status,
+    nextDetail.status_code,
+    nextDetail.error_message,
+    nextDetail.outcome_class,
+  )
 }
 
 type HeaderModelTextField =
@@ -1223,6 +1247,8 @@ function emitDetailRequestState(nextDetail: RequestDetail) {
     id,
     requestId: nextDetail.request_id || nextDetail.id || null,
     status: resolveRequestStateStatusFromDetail(nextDetail),
+    outcomeClass: nextDetail.outcome_class ?? null,
+    slaEligible: nextDetail.sla_eligible ?? null,
     statusCode: nextDetail.status_code ?? undefined,
     inputTokens: nextDetail.input_tokens ?? nextDetail.tokens?.input ?? null,
     effectiveInputTokens: displayInputTokens.value,
@@ -1270,7 +1296,8 @@ function handleTraceState(state: {
   const status = resolveRequestStateStatus(
     mapTraceFinalStatusToRequestStatus(state.finalStatus),
     state.statusCode,
-    state.errorMessage
+    state.errorMessage,
+    detail.value?.outcome_class,
   )
   const imageFailed = state.imageProgress?.phase === 'failed'
   if (!status && !state.imageProgress && state.statusCode == null && state.latencyMs == null) return
@@ -1279,6 +1306,8 @@ function handleTraceState(state: {
     id,
     requestId: detail.value?.request_id || detail.value?.id || null,
     status: imageFailed ? 'failed' : status,
+    outcomeClass: detail.value?.outcome_class ?? null,
+    slaEligible: detail.value?.sla_eligible ?? null,
     statusCode: state.statusCode ?? undefined,
     responseTimeMs: state.latencyMs ?? undefined,
     imageProgress: state.imageProgress ?? null,
@@ -1465,8 +1494,13 @@ function isTerminalRequestState(status: RequestStateStatus | undefined): boolean
   return status === 'completed' || status === 'failed' || status === 'cancelled'
 }
 
-function isSuccessfulTerminalRequestState(status: RequestStateStatus | undefined): boolean {
-  return status === 'completed' || status === 'cancelled'
+function isSuccessfulTerminalRequestState(
+  status: RequestStateStatus | undefined,
+  source?: Pick<RequestDetail, 'outcome_class' | 'status_code'> | Pick<UsageRecord, 'outcome_class' | 'status_code'>,
+): boolean {
+  if (status === 'cancelled') return true
+  if (status !== 'completed') return false
+  return source?.outcome_class !== 'user_error' && source?.status_code !== 400
 }
 
 const authoritativeErrorSource = computed<AuthoritativeErrorSource>(() => {
@@ -1478,6 +1512,7 @@ const authoritativeErrorSource = computed<AuthoritativeErrorSource>(() => {
     summary.status,
     summary.status_code,
     summary.error_message,
+    summary.outcome_class,
   )
   const detailStatus = resolveRequestStateStatusFromDetail(currentDetail)
   const summaryUpdatedAtMs = usageSnapshotUpdatedAtMs(summary)
@@ -1497,8 +1532,8 @@ const authoritativeErrorSource = computed<AuthoritativeErrorSource>(() => {
   // still has to clear a failure from the other source. Generic failed detail
   // remains non-authoritative so opening the drawer cannot flash away a Cyber
   // refusal already resolved by the list.
-  const detailSucceeded = isSuccessfulTerminalRequestState(detailStatus)
-  const summarySucceeded = isSuccessfulTerminalRequestState(summaryStatus)
+  const detailSucceeded = isSuccessfulTerminalRequestState(detailStatus, currentDetail)
+  const summarySucceeded = isSuccessfulTerminalRequestState(summaryStatus, summary)
   if (detailSucceeded && !summarySucceeded) return 'detail'
   if (summarySucceeded && !detailSucceeded) return 'summary'
   if (detailSucceeded && summarySucceeded) {

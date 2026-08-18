@@ -273,8 +273,14 @@ export interface EndpointAPIKey {
   consecutive_failures: number
   last_failure_at?: string
   request_count: number
+  sla_eligible_count?: number
   success_count: number
+  /** 兼容字段：语义为服务错误数。 */
   error_count: number
+  service_error_count?: number
+  user_error_count?: number
+  service_error_rate?: number
+  user_error_rate?: number
   success_rate: number
   avg_response_time_ms: number
   is_active: boolean
@@ -517,7 +523,13 @@ export interface UpstreamMetadata {
 // 按格式的健康度数据
 export interface FormatHealthData {
   health_score: number
+  /** 服务错误率；用户错误不影响健康分。 */
   error_rate: number
+  service_error_rate?: number
+  service_error_count?: number
+  user_error_rate?: number
+  user_error_count?: number
+  sla_eligible_count?: number
   window_size: number
   consecutive_failures: number
   last_failure_at?: string | null
@@ -581,7 +593,7 @@ export interface EndpointHealthDetail {
 
 export interface EndpointHealthEvent {
   timestamp: string
-  status: 'success' | 'failed' | 'skipped' | 'started'
+  status: 'success' | 'failed' | 'user_error' | 'skipped' | 'started'
   status_code?: number | null
   latency_ms?: number | null
   error_type?: string | null
@@ -594,8 +606,11 @@ export interface HealthTimelineDetail {
   time_range_start?: string | null
   time_range_end?: string | null
   total_attempts?: number | null
+  sla_eligible_count?: number | null
   success_count?: number | null
   failed_count?: number | null
+  service_error_count?: number | null
+  user_error_count?: number | null
   success_rate?: number | null
   avg_latency_ms?: number | null
   avg_first_byte_ms?: number | null
@@ -605,8 +620,11 @@ export interface HealthTimelineDetail {
 export interface EndpointStatusMonitor {
   api_format: string
   total_attempts: number
+  sla_eligible_count?: number
   success_count: number
   failed_count: number
+  service_error_count?: number
+  user_error_count?: number
   skipped_count: number
   success_rate: number
   avg_latency_ms?: number | null
@@ -641,8 +659,11 @@ export interface PublicEndpointStatusMonitor {
   api_format: string
   api_path: string  // 本站入口路径
   total_attempts: number
+  sla_eligible_count?: number
   success_count: number
   failed_count: number
+  service_error_count?: number
+  user_error_count?: number
   skipped_count: number
   success_rate: number
   avg_latency_ms?: number | null
@@ -663,7 +684,7 @@ export interface PublicEndpointStatusMonitorResponse {
 
 export interface ModelHealthEvent {
   timestamp: string
-  status: 'success' | 'failed'
+  status: 'success' | 'failed' | 'user_error'
   status_code?: number | null
   latency_ms?: number | null
   first_byte_time_ms?: number | null
@@ -674,8 +695,11 @@ export interface ModelStatusMonitor {
   model: string
   display_name?: string | null
   total_attempts: number
+  sla_eligible_count?: number
   success_count: number
   failed_count: number
+  service_error_count?: number
+  user_error_count?: number
   success_rate: number
   avg_latency_ms?: number | null
   avg_first_byte_ms?: number | null
@@ -700,8 +724,11 @@ export interface ProviderStatusMonitor {
   provider_type?: string | null
   is_active: boolean
   total_attempts: number
+  sla_eligible_count?: number
   success_count: number
   failed_count: number
+  service_error_count?: number
+  user_error_count?: number
   success_rate: number
   avg_latency_ms?: number | null
   avg_first_byte_ms?: number | null
@@ -728,8 +755,11 @@ export interface HealthRelatedMonitor {
   display_name: string
   meta_text?: string | null
   total_attempts: number
+  sla_eligible_count?: number
   success_count: number
   failed_count: number
+  service_error_count?: number
+  user_error_count?: number
   success_rate: number
   avg_latency_ms?: number | null
   avg_first_byte_ms?: number | null

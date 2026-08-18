@@ -28,8 +28,10 @@ const USER_CANCELLED_STATUS_CODE: u16 = 499;
 #[derive(Clone, Copy, Debug, Default)]
 struct HealthTimelineMetricBucket {
     total_count: u64,
+    sla_eligible_count: u64,
     success_count: u64,
     failed_count: u64,
+    user_error_count: u64,
     latency_sum_ms: u64,
     latency_samples: u64,
     first_byte_sum_ms: u64,
@@ -42,8 +44,10 @@ struct HealthTimelineMetricBucket {
 struct HealthTimelineDetailCounts {
     status: &'static str,
     total_attempts: u64,
+    sla_eligible_count: u64,
     success_count: u64,
     failed_count: u64,
+    user_error_count: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -56,10 +60,16 @@ struct HealthTimelineWindow {
 impl HealthTimelineMetricBucket {
     fn add_usage_event(&mut self, event: &StoredRequestUsageAudit) {
         self.total_count = self.total_count.saturating_add(1);
-        if model_health_event_success(event) {
+        let outcome = event.outcome_class();
+        if outcome.is_sla_eligible() {
+            self.sla_eligible_count = self.sla_eligible_count.saturating_add(1);
+        }
+        if outcome.is_success() {
             self.success_count = self.success_count.saturating_add(1);
-        } else {
+        } else if outcome.is_service_error() {
             self.failed_count = self.failed_count.saturating_add(1);
+        } else if outcome.is_user_error() {
+            self.user_error_count = self.user_error_count.saturating_add(1);
         }
         if let Some(response_time_ms) = event.response_time_ms {
             self.latency_sum_ms = self.latency_sum_ms.saturating_add(response_time_ms);
@@ -508,15 +518,23 @@ pub(crate) async fn build_api_format_health_monitor_payload(
         .await
         .ok()
         .unwrap_or_default();
-    let mut status_totals = BTreeMap::<String, (u64, u64, u64)>::new();
+    let mut status_totals = BTreeMap::<String, (u64, u64, u64, u64)>::new();
     for row in status_counts {
         let Some(api_format) = endpoint_to_format.get(&row.endpoint_id) else {
             continue;
         };
-        let entry = status_totals.entry(api_format.clone()).or_insert((0, 0, 0));
+        let entry = status_totals
+            .entry(api_format.clone())
+            .or_insert((0, 0, 0, 0));
         match row.status {
-            RequestCandidateStatus::Success => entry.0 += row.count,
-            RequestCandidateStatus::Failed => entry.1 += row.count,
+            RequestCandidateStatus::Success => {
+                entry.0 += row.sla_eligible_count;
+                entry.3 += row.user_error_count;
+            }
+            RequestCandidateStatus::Failed => {
+                entry.1 += row.sla_eligible_count;
+                entry.3 += row.user_error_count;
+            }
             RequestCandidateStatus::Skipped => entry.2 += row.count,
             _ => {}
         }
@@ -546,14 +564,18 @@ pub(crate) async fn build_api_format_health_monitor_payload(
                 endpoint_id: api_format.clone(),
                 segment_idx: row.segment_idx,
                 total_count: 0,
+                sla_eligible_count: 0,
                 success_count: 0,
                 failed_count: 0,
+                user_error_count: 0,
                 min_created_at_unix_ms: None,
                 max_created_at_unix_ms: None,
             });
         bucket.total_count += row.total_count;
+        bucket.sla_eligible_count += row.sla_eligible_count;
         bucket.success_count += row.success_count;
         bucket.failed_count += row.failed_count;
+        bucket.user_error_count += row.user_error_count;
         bucket.min_created_at_unix_ms =
             match (bucket.min_created_at_unix_ms, row.min_created_at_unix_ms) {
                 (Some(left), Some(right)) => Some(left.min(right)),
@@ -579,9 +601,12 @@ pub(crate) async fn build_api_format_health_monitor_payload(
             .await
             .ok()
             .unwrap_or_default();
-        let (success_count, failed_count, skipped_count) =
-            status_totals.get(&api_format).copied().unwrap_or((0, 0, 0));
-        let total_attempts = success_count + failed_count + skipped_count;
+        let (success_count, failed_count, skipped_count, user_error_count) = status_totals
+            .get(&api_format)
+            .copied()
+            .unwrap_or((0, 0, 0, 0));
+        let sla_eligible_count = success_count + failed_count;
+        let total_attempts = sla_eligible_count + skipped_count + user_error_count;
         let actual_completed = success_count + failed_count;
         let success_rate = if actual_completed > 0 {
             success_count as f64 / actual_completed as f64
@@ -628,7 +653,11 @@ pub(crate) async fn build_api_format_health_monitor_payload(
                     .unwrap_or(candidate.created_at_unix_ms);
                 Some(json!({
                     "timestamp": unix_ms_to_rfc3339(timestamp)?,
-                    "status": request_candidate_status_label(candidate.status),
+                    "status": if candidate.outcome_class().is_user_error() {
+                        "user_error"
+                    } else {
+                        request_candidate_status_label(candidate.status)
+                    },
                     "status_code": candidate.status_code,
                     "latency_ms": candidate.latency_ms,
                     "error_type": candidate.error_type,
@@ -652,8 +681,11 @@ pub(crate) async fn build_api_format_health_monitor_payload(
         let mut format_payload = json!({
             "api_format": api_format.clone(),
             "total_attempts": total_attempts,
+            "sla_eligible_count": sla_eligible_count,
             "success_count": success_count,
             "failed_count": failed_count,
+            "service_error_count": failed_count,
+            "user_error_count": user_error_count,
             "skipped_count": skipped_count,
             "success_rate": success_rate,
             "avg_latency_ms": avg_latency_ms,
@@ -766,10 +798,11 @@ pub(crate) async fn build_model_health_monitor_payload(
             .collect::<Vec<_>>();
 
         let total_attempts = row.request_count;
-        let success_count = row.success_count.min(total_attempts);
-        let failed_count = total_attempts.saturating_sub(success_count);
-        let success_rate = if total_attempts > 0 {
-            success_count as f64 / total_attempts as f64
+        let sla_eligible_count = row.sla_eligible_count;
+        let success_count = row.success_count.min(sla_eligible_count);
+        let failed_count = sla_eligible_count.saturating_sub(success_count);
+        let success_rate = if sla_eligible_count > 0 {
+            success_count as f64 / sla_eligible_count as f64
         } else {
             1.0
         };
@@ -780,8 +813,11 @@ pub(crate) async fn build_model_health_monitor_payload(
             "model": model_name,
             "display_name": model_health_display_name(&row.group_key),
             "total_attempts": total_attempts,
+            "sla_eligible_count": sla_eligible_count,
             "success_count": success_count,
             "failed_count": failed_count,
+            "service_error_count": failed_count,
+            "user_error_count": row.user_error_count,
             "success_rate": success_rate,
             "avg_latency_ms": avg_latency_ms,
             "avg_first_byte_ms": first_byte_average,
@@ -1279,10 +1315,11 @@ fn related_health_item_payload(
         MODEL_HEALTH_TIMELINE_SEGMENTS,
     );
     let total_attempts = row.request_count;
-    let success_count = row.success_count.min(total_attempts);
-    let failed_count = total_attempts.saturating_sub(success_count);
-    let success_rate = if total_attempts > 0 {
-        success_count as f64 / total_attempts as f64
+    let sla_eligible_count = row.sla_eligible_count;
+    let success_count = row.success_count.min(sla_eligible_count);
+    let failed_count = sla_eligible_count.saturating_sub(success_count);
+    let success_rate = if sla_eligible_count > 0 {
+        success_count as f64 / sla_eligible_count as f64
     } else {
         1.0
     };
@@ -1296,8 +1333,11 @@ fn related_health_item_payload(
         "display_name": display_name,
         "meta_text": meta_text,
         "total_attempts": total_attempts,
+        "sla_eligible_count": sla_eligible_count,
         "success_count": success_count,
         "failed_count": failed_count,
+        "service_error_count": failed_count,
+        "user_error_count": row.user_error_count,
         "success_rate": success_rate,
         "avg_latency_ms": model_health_average_latency_ms(row),
         "avg_first_byte_ms": model_health_average_first_byte_ms(events),
@@ -1341,11 +1381,11 @@ fn related_endpoint_display_meta(
 }
 
 fn related_health_sort_rank(row: &StoredUsageBreakdownSummaryRow) -> u8 {
-    if row.request_count == 0 {
+    if row.sla_eligible_count == 0 {
         return 3;
     }
-    let success_count = row.success_count.min(row.request_count);
-    let success_rate = success_count as f64 / row.request_count as f64;
+    let success_count = row.success_count.min(row.sla_eligible_count);
+    let success_rate = success_count as f64 / row.sla_eligible_count as f64;
     if success_rate < 0.8 {
         0
     } else if success_rate < 0.95 {
@@ -1427,10 +1467,11 @@ async fn build_provider_health_payload(
     let (total_attempts, success_count, failed_count, success_rate, avg_latency_ms, avg_tps) =
         if let Some(row) = provider_stats {
             let total_attempts = row.request_count;
-            let success_count = row.success_count.min(total_attempts);
-            let failed_count = total_attempts.saturating_sub(success_count);
-            let success_rate = if total_attempts > 0 {
-                success_count as f64 / total_attempts as f64
+            let sla_eligible_count = row.sla_eligible_count;
+            let success_count = row.success_count.min(sla_eligible_count);
+            let failed_count = sla_eligible_count.saturating_sub(success_count);
+            let success_rate = if sla_eligible_count > 0 {
+                success_count as f64 / sla_eligible_count as f64
             } else {
                 1.0
             };
@@ -1469,8 +1510,11 @@ async fn build_provider_health_payload(
         "provider_type": provider.provider_type,
         "is_active": provider.is_active,
         "total_attempts": total_attempts,
+        "sla_eligible_count": provider_stats.map_or(0, |row| row.sla_eligible_count),
         "success_count": success_count,
         "failed_count": failed_count,
+        "service_error_count": failed_count,
+        "user_error_count": provider_stats.map_or(0, |row| row.user_error_count),
         "success_rate": success_rate,
         "avg_latency_ms": avg_latency_ms,
         "avg_first_byte_ms": model_health_average_first_byte_ms(&provider_events),
@@ -1486,11 +1530,11 @@ async fn build_provider_health_payload(
 }
 
 fn provider_health_sort_rank(provider: &serde_json::Value) -> u8 {
-    let total_attempts = provider
-        .get("total_attempts")
+    let sla_eligible_count = provider
+        .get("sla_eligible_count")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    if total_attempts == 0 {
+    if sla_eligible_count == 0 {
         return 3;
     }
     let success_rate = provider
@@ -1535,10 +1579,11 @@ fn model_health_payload_from_row(
         .collect::<Vec<_>>();
 
     let total_attempts = row.request_count;
-    let success_count = row.success_count.min(total_attempts);
-    let failed_count = total_attempts.saturating_sub(success_count);
-    let success_rate = if total_attempts > 0 {
-        success_count as f64 / total_attempts as f64
+    let sla_eligible_count = row.sla_eligible_count;
+    let success_count = row.success_count.min(sla_eligible_count);
+    let failed_count = sla_eligible_count.saturating_sub(success_count);
+    let success_rate = if sla_eligible_count > 0 {
+        success_count as f64 / sla_eligible_count as f64
     } else {
         1.0
     };
@@ -1547,8 +1592,11 @@ fn model_health_payload_from_row(
         "model": row.group_key.clone(),
         "display_name": model_health_display_name(&row.group_key),
         "total_attempts": total_attempts,
+        "sla_eligible_count": sla_eligible_count,
         "success_count": success_count,
         "failed_count": failed_count,
+        "service_error_count": failed_count,
+        "user_error_count": row.user_error_count,
         "success_rate": success_rate,
         "avg_latency_ms": model_health_average_latency_ms(row),
         "avg_first_byte_ms": model_health_average_first_byte_ms(events),
@@ -1639,22 +1687,17 @@ fn model_health_event_payload(event: &StoredRequestUsageAudit) -> serde_json::Va
 }
 
 fn model_health_event_status(event: &StoredRequestUsageAudit) -> &'static str {
-    if model_health_event_success(event) {
-        "success"
-    } else {
-        "failed"
+    match event.outcome_class() {
+        aether_data_contracts::repository::usage::RequestOutcomeClass::Success => "success",
+        aether_data_contracts::repository::usage::RequestOutcomeClass::UserError => "user_error",
+        aether_data_contracts::repository::usage::RequestOutcomeClass::ServiceError => "failed",
+        aether_data_contracts::repository::usage::RequestOutcomeClass::Cancelled => "cancelled",
+        aether_data_contracts::repository::usage::RequestOutcomeClass::InFlight => "in_flight",
     }
 }
 
 fn model_health_event_success(event: &StoredRequestUsageAudit) -> bool {
-    !event.status.eq_ignore_ascii_case("failed")
-        && event.status_code.is_none_or(|status| status < 400)
-        && event
-            .error_message
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
+    event.outcome_class().is_success()
 }
 
 fn health_timeline_status(success_count: u64, failed_count: u64) -> &'static str {
@@ -1766,8 +1809,11 @@ fn health_timeline_detail_payload(
         "time_range_start": unix_secs_to_rfc3339(range_start),
         "time_range_end": unix_secs_to_rfc3339(range_end),
         "total_attempts": counts.total_attempts,
+        "sla_eligible_count": counts.sla_eligible_count,
         "success_count": counts.success_count,
         "failed_count": counts.failed_count,
+        "service_error_count": counts.failed_count,
+        "user_error_count": counts.user_error_count,
         "success_rate": health_timeline_success_rate(counts.success_count, counts.failed_count),
         "avg_latency_ms": metrics.avg_latency_ms(),
         "avg_first_byte_ms": metrics.avg_first_byte_ms(),
@@ -1805,14 +1851,22 @@ pub(crate) fn build_public_health_timeline_details(
             let failed_count = count_bucket
                 .map(|bucket| bucket.failed_count)
                 .unwrap_or(metrics.failed_count);
+            let sla_eligible_count = count_bucket
+                .map(|bucket| bucket.sla_eligible_count)
+                .unwrap_or(metrics.sla_eligible_count);
+            let user_error_count = count_bucket
+                .map(|bucket| bucket.user_error_count)
+                .unwrap_or(metrics.user_error_count);
             let status = health_timeline_status(success_count, failed_count);
             health_timeline_detail_payload(
                 segment_idx,
                 HealthTimelineDetailCounts {
                     status,
                     total_attempts,
+                    sla_eligible_count,
                     success_count,
                     failed_count,
+                    user_error_count,
                 },
                 metrics,
                 window,
@@ -1844,8 +1898,10 @@ fn build_usage_health_timeline_details(
                 HealthTimelineDetailCounts {
                     status,
                     total_attempts: metrics.total_count,
+                    sla_eligible_count: metrics.sla_eligible_count,
                     success_count: metrics.success_count,
                     failed_count: metrics.failed_count,
+                    user_error_count: metrics.user_error_count,
                 },
                 metrics,
                 window,
@@ -1880,9 +1936,10 @@ fn build_model_health_timeline(
             segment_idx = segments.saturating_sub(1) as usize;
         }
         let bucket = &mut buckets[segment_idx];
-        if model_health_event_success(event) {
+        let outcome = event.outcome_class();
+        if outcome.is_success() {
             bucket.success_count = bucket.success_count.saturating_add(1);
-        } else {
+        } else if outcome.is_service_error() {
             bucket.failed_count = bucket.failed_count.saturating_add(1);
         }
     }
@@ -1929,11 +1986,11 @@ pub(crate) fn build_public_health_timeline(
         };
 
         let actual_completed = bucket.success_count + bucket.failed_count;
-        let success_rate = if actual_completed > 0 {
-            bucket.success_count as f64 / actual_completed as f64
-        } else {
-            1.0
-        };
+        if actual_completed == 0 {
+            timeline.push("unknown");
+            continue;
+        }
+        let success_rate = bucket.success_count as f64 / actual_completed as f64;
         if success_rate >= 0.95 {
             timeline.push("healthy");
         } else if success_rate >= 0.7 {

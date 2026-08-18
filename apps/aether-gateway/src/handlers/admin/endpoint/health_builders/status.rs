@@ -147,14 +147,18 @@ pub(crate) async fn build_admin_endpoint_health_status_payload(
                 endpoint_id: api_format.clone(),
                 segment_idx: row.segment_idx,
                 total_count: 0,
+                sla_eligible_count: 0,
                 success_count: 0,
                 failed_count: 0,
+                user_error_count: 0,
                 min_created_at_unix_ms: None,
                 max_created_at_unix_ms: None,
             });
         bucket.total_count += row.total_count;
+        bucket.sla_eligible_count += row.sla_eligible_count;
         bucket.success_count += row.success_count;
         bucket.failed_count += row.failed_count;
+        bucket.user_error_count += row.user_error_count;
         bucket.min_created_at_unix_ms =
             match (bucket.min_created_at_unix_ms, row.min_created_at_unix_ms) {
                 (Some(left), Some(right)) => Some(left.min(right)),

@@ -189,8 +189,13 @@ export const MOCK_DASHBOARD_STATS: DashboardStatsResponse = {
     avg_response_time: 1.23,
     error_rate: 0.8,
     error_requests: 10,
+    sla_eligible_count: 1240,
+    service_error_count: 10,
+    service_error_rate: 0.8,
+    user_error_count: 8,
+    user_error_rate: 0.64,
     fallback_count: 5,
-    total_requests: 1234
+    total_requests: 1250
   },
   cost_stats: {
     total_cost: 45.67,

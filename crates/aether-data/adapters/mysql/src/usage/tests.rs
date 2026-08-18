@@ -62,12 +62,8 @@ fn mysql_usage_stat_rebuilds_aggregate_in_sql() {
     assert!(source.contains("UPDATE provider_api_keys\nJOIN ("));
     assert!(source.contains("GROUP BY provider_api_key_id"));
     assert!(!source.contains("struct ProviderKeyStats"));
-    assert!(super::MYSQL_PROVIDER_KEY_SUCCESS_FLAG_EXPR
-        .contains("status IN ('completed', 'success', 'ok', 'billed', 'settled')"));
-    assert!(super::MYSQL_PROVIDER_KEY_SUCCESS_FLAG_EXPR
-        .contains("error_message IS NULL OR TRIM(error_message) = ''"));
-    assert!(super::MYSQL_PROVIDER_KEY_ERROR_FLAG_EXPR
-        .contains("status NOT IN ('pending', 'streaming')"));
+    assert!(super::MYSQL_PROVIDER_KEY_SUCCESS_FLAG_EXPR.contains("outcome_class = 'success'"));
+    assert!(super::MYSQL_PROVIDER_KEY_ERROR_FLAG_EXPR.contains("outcome_class = 'service_error'"));
     assert!(super::MYSQL_USAGE_CANONICAL_TOTAL_TOKENS_EXPR.contains(
         "COALESCE(`usage`.input_tokens, 0) - COALESCE(`usage`.cache_read_input_tokens, 0)"
     ));

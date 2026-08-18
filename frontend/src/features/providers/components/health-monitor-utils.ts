@@ -15,8 +15,11 @@ export interface HealthMonitorDetailSource {
   title: string
   metaText?: string | null
   totalAttempts: number
+  slaEligibleCount?: number | null
   successCount: number
   failedCount: number
+  serviceErrorCount?: number | null
+  userErrorCount?: number | null
   successRate: number
   avgLatencyMs?: number | null
   avgFirstByteMs?: number | null
@@ -34,6 +37,11 @@ export interface HealthMonitorDetailTarget {
 
 export interface HealthMonitorAvailability {
   total_attempts: number
+  sla_eligible_count?: number | null
+  success_count?: number | null
+  failed_count?: number | null
+  service_error_count?: number | null
+  user_error_count?: number | null
   success_rate: number
 }
 
@@ -41,8 +49,11 @@ export interface HealthTimelineTooltipMetrics {
   time_range_start?: string | null
   time_range_end?: string | null
   total_attempts?: number | null
+  sla_eligible_count?: number | null
   success_count?: number | null
   failed_count?: number | null
+  service_error_count?: number | null
+  user_error_count?: number | null
   success_rate?: number | null
   avg_latency_ms?: number | null
   avg_first_byte_ms?: number | null
@@ -64,7 +75,7 @@ export function summarizeHealthMonitorItems(
   return items.reduce<HealthMonitorSectionSummary>((summary, item) => {
     summary.total += 1
     summary.attempts += item.total_attempts
-    if (item.total_attempts <= 0) {
+    if (!hasSlaSamples(item)) {
       summary.empty += 1
     } else if (item.success_rate >= 0.95) {
       summary.healthy += 1
@@ -92,7 +103,9 @@ export function getHealthLabel(
   item: HealthMonitorAvailability,
   emptyLabel = '暂无请求'
 ) {
-  if (item.total_attempts <= 0) return emptyLabel
+  if (!hasSlaSamples(item)) {
+    return item.total_attempts > 0 ? '暂无 SLA 样本' : emptyLabel
+  }
   if (item.success_rate >= 0.95) return '正常'
   if (item.success_rate >= 0.8) return '波动'
   return '异常'
@@ -101,7 +114,7 @@ export function getHealthLabel(
 export function getHealthBadgeVariant(
   item: HealthMonitorAvailability
 ): HealthBadgeVariant {
-  if (item.total_attempts <= 0) return 'outline'
+  if (!hasSlaSamples(item)) return 'outline'
   if (item.success_rate >= 0.95) return 'success'
   if (item.success_rate >= 0.8) return 'warning'
   return 'destructive'
@@ -114,7 +127,7 @@ export function getSuccessRateClass(rate: number) {
 }
 
 export function getAvailabilityClass(item: HealthMonitorAvailability) {
-  if (item.total_attempts <= 0) return ''
+  if (!hasSlaSamples(item)) return ''
   return getSuccessRateClass(item.success_rate)
 }
 
@@ -138,8 +151,15 @@ export function formatPercent(value: number) {
 }
 
 export function formatAvailability(item: HealthMonitorAvailability) {
-  if (item.total_attempts <= 0) return '-'
+  if (!hasSlaSamples(item)) return '-'
   return formatPercent(item.success_rate)
+}
+
+function hasSlaSamples(item: HealthMonitorAvailability): boolean {
+  if (typeof item.sla_eligible_count === 'number' && Number.isFinite(item.sla_eligible_count)) {
+    return item.sla_eligible_count > 0
+  }
+  return item.total_attempts > 0
 }
 
 export function formatTps(value?: number | null) {
@@ -170,7 +190,7 @@ export function formatTimelineTooltip(input: {
 }) {
   const metrics = input.metrics
   const lines = [
-    `总请求/成功/失败/可用率/状态：${formatTimelineRequestBreakdown(metrics, input.status)}`,
+    `总请求/SLA样本/成功/服务错误/用户错误/SLA可用率/状态：${formatTimelineRequestBreakdown(metrics, input.status)}`,
     `平均耗时/TTFB/速度：${formatTimelineAverageMetrics(metrics)}`,
     `时间范围：${formatFullTimestamp(input.timeRangeStart)} - ${formatFullTimestamp(input.timeRangeEnd)}`
   ]
@@ -194,10 +214,14 @@ function formatTimelineRequestBreakdown(
 ) {
   if (!metrics) return '-'
   const total = formatTimelineCount(metrics.total_attempts)
+  const eligible = formatTimelineCount(metrics.sla_eligible_count)
   const success = formatTimelineCount(metrics.success_count)
-  const failed = formatTimelineCount(metrics.failed_count)
+  const serviceError = formatTimelineCount(
+    metrics.service_error_count ?? metrics.failed_count,
+  )
+  const userError = formatTimelineCount(metrics.user_error_count)
   const availability = formatTimelineMetricAvailability(metrics)
-  return `${total}/${success}/${failed}/${availability}/${getTimelineLabel(status)}`
+  return `${total}/${eligible}/${success}/${serviceError}/${userError}/${availability}/${getTimelineLabel(status)}`
 }
 
 function formatTimelineCount(value?: number | null) {
@@ -207,6 +231,9 @@ function formatTimelineCount(value?: number | null) {
 
 function formatTimelineMetricAvailability(metrics?: HealthTimelineTooltipMetrics | null) {
   if (!metrics) return '-'
+  if (typeof metrics.sla_eligible_count === 'number' &&
+    Number.isFinite(metrics.sla_eligible_count) &&
+    metrics.sla_eligible_count <= 0) return '-'
   if (typeof metrics.total_attempts === 'number' && metrics.total_attempts <= 0) return '-'
   if (typeof metrics.success_rate !== 'number' || Number.isNaN(metrics.success_rate)) return '-'
   return formatPercent(metrics.success_rate)
@@ -240,6 +267,8 @@ export function getTimelineColor(status: string) {
       return 'bg-amber-400/80 dark:bg-amber-300/80'
     case 'unhealthy':
       return 'bg-red-500/80 dark:bg-red-400/90'
+    case 'user_error':
+      return 'bg-slate-400/80 dark:bg-slate-500/80'
     default:
       return 'bg-gray-300 dark:bg-gray-600'
   }
@@ -253,6 +282,8 @@ export function getTimelineLabel(status: string) {
       return '波动'
     case 'unhealthy':
       return '异常'
+    case 'user_error':
+      return '用户错误'
     default:
       return '无请求'
   }

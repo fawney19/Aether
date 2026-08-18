@@ -693,23 +693,27 @@
             SLA 与错误
           </h2>
           <p class="text-xs text-muted-foreground">
-            请求错误、上游错误与熔断风险
+            SLA 服务错误、用户错误与熔断风险
           </p>
         </div>
         <div class="space-y-4 p-4">
           <div class="grid grid-cols-2 gap-3">
             <MetricCell
-              label="成功率"
-              :value="formatPercent(providerPerformance?.summary.success_rate)"
+              label="SLA 成功率"
+              :value="formatPercentagePoints(slaRate)"
               :value-class="slaValueClass"
             />
             <MetricCell
-              label="错误率"
-              :value="formatErrorRate(providerPerformance?.summary.success_rate)"
+              label="服务错误率"
+              :value="formatPercentagePoints(serviceErrorRate)"
               :value-class="errorRateValueClass"
             />
             <MetricCell
-              label="已分类错误"
+              label="用户错误"
+              :value="formatOutcomeCountAndRate(userErrorCount, userErrorRate)"
+            />
+            <MetricCell
+              label="已分类服务错误"
               :value="formatMetricNumber(classifiedErrorCount)"
             />
             <MetricCell
@@ -720,7 +724,7 @@
 
           <div>
             <div class="mb-2 flex items-center justify-between gap-3">
-              <span class="text-xs font-medium text-muted-foreground">错误分类</span>
+              <span class="text-xs font-medium text-muted-foreground">服务错误分类</span>
               <RouterLink
                 to="/admin/audit-logs"
                 class="text-xs font-medium text-primary hover:underline"
@@ -768,7 +772,10 @@
                   请求
                 </TableHead>
                 <TableHead class="text-right">
-                  成功率
+                  SLA 成功率
+                </TableHead>
+                <TableHead class="text-right">
+                  用户错误
                 </TableHead>
                 <TableHead class="text-right">
                   TPS
@@ -799,9 +806,12 @@
                 </TableCell>
                 <TableCell
                   class="text-right tabular-nums"
-                  :class="successRateClass(provider.success_rate)"
+                  :class="successRateClass(resolveSlaSuccessRate(provider))"
                 >
-                  {{ formatPercent(provider.success_rate) }}
+                  {{ formatPercentagePoints(resolveSlaSuccessRate(provider)) }}
+                </TableCell>
+                <TableCell class="text-right tabular-nums text-muted-foreground">
+                  {{ formatOutcomeCountAndRate(provider.user_error_count, resolveUserErrorRate(provider)) }}
                 </TableCell>
                 <TableCell class="text-right tabular-nums">
                   {{ formatTps(provider.avg_output_tps) }}
@@ -818,7 +828,7 @@
               </TableRow>
               <TableRow v-if="providerRows.length === 0">
                 <TableCell
-                  colspan="7"
+                  colspan="8"
                   class="py-8 text-center text-sm text-muted-foreground"
                 >
                   当前时间窗口暂无上游样本
@@ -946,10 +956,10 @@
           <div class="flex items-center justify-between gap-3">
             <div>
               <h2 class="text-sm font-semibold">
-                错误审计
+                服务错误审计
               </h2>
               <p class="text-xs text-muted-foreground">
-                最近错误、熔断事件和可疑活动入口
+                最近服务错误、熔断事件和可疑活动入口
               </p>
             </div>
             <RouterLink
@@ -985,7 +995,7 @@
             v-if="recentErrors.length === 0"
             class="px-4 py-8 text-center text-sm text-muted-foreground"
           >
-            当前没有近期错误
+            当前没有近期服务错误
           </div>
         </div>
       </Card>
@@ -1047,6 +1057,11 @@ import { getDateRangeFromPeriod } from '@/features/usage/composables'
 import type { DateRangeParams } from '@/features/usage/types'
 import { formatByteSize, formatCurrency, formatNumber, formatTokens } from '@/utils/format'
 import { log } from '@/utils/logger'
+import {
+  resolveServiceErrorRate,
+  resolveSlaSuccessRate,
+  resolveUserErrorRate,
+} from '@/utils/outcomeMetrics'
 
 interface MetricCellProps {
   label: string
@@ -1207,10 +1222,17 @@ function formatPercent(value: number | null | undefined): string {
   return `${ratio.toFixed(2)}%`
 }
 
-function formatErrorRate(successRate: number | null | undefined): string {
-  if (successRate == null || Number.isNaN(successRate)) return '-'
-  const rate = successRate <= 1 ? successRate * 100 : successRate
-  return `${Math.max(0, 100 - rate).toFixed(2)}%`
+function formatOutcomeCountAndRate(
+  count: number | null | undefined,
+  rate: number | null | undefined,
+): string {
+  if (count == null && rate == null) return '-'
+  return `${formatMetricNumber(count)} / ${formatPercentagePoints(rate)}`
+}
+
+function formatPercentagePoints(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '-'
+  return `${value.toFixed(2)}%`
 }
 
 function formatMs(value: number | null | undefined): string {
@@ -1310,9 +1332,8 @@ function formatShortDate(value?: string | null): string {
 
 function successRateClass(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return ''
-  const rate = value <= 1 ? value * 100 : value
-  if (rate >= 95) return 'text-green-600 dark:text-green-400'
-  if (rate >= 80) return 'text-amber-600 dark:text-amber-400'
+  if (value >= 95) return 'text-green-600 dark:text-green-400'
+  if (value >= 80) return 'text-amber-600 dark:text-amber-400'
   return 'text-red-600 dark:text-red-400'
 }
 
@@ -1546,7 +1567,19 @@ const windowSeconds = computed(() => {
 const qps = computed(() => totalRequests.value / windowSeconds.value)
 const rpm = computed(() => qps.value * 60)
 const tokensPerMinute = computed(() => totalTokens.value / Math.max(1, windowSeconds.value / 60))
-const slaRate = computed(() => providerPerformance.value?.summary.success_rate ?? null)
+const slaRate = computed(() => {
+  const summary = providerPerformance.value?.summary
+  return summary ? resolveSlaSuccessRate(summary) : null
+})
+const serviceErrorRate = computed(() => {
+  const summary = providerPerformance.value?.summary
+  return summary ? resolveServiceErrorRate(summary) : null
+})
+const userErrorCount = computed(() => providerPerformance.value?.summary.user_error_count ?? null)
+const userErrorRate = computed(() => {
+  const summary = providerPerformance.value?.summary
+  return summary ? resolveUserErrorRate(summary) : null
+})
 
 const kpiCards = computed<Array<{
   title: string
@@ -1572,8 +1605,8 @@ const kpiCards = computed<Array<{
   },
   {
     title: 'SLA',
-    value: formatPercent(slaRate.value),
-    hint: `错误率 ${formatErrorRate(slaRate.value)}`,
+    value: formatPercentagePoints(slaRate.value),
+    hint: `服务错误率 ${formatPercentagePoints(serviceErrorRate.value)}`,
     icon: ShieldCheck,
     iconClass: 'text-emerald-500',
     valueClass: successRateClass(slaRate.value),
@@ -1600,7 +1633,7 @@ const kpiCards = computed<Array<{
     iconClass: 'text-cyan-500',
   },
   {
-    title: '上游错误',
+    title: '服务错误',
     value: formatMetricNumber(resilienceStatus.value?.error_statistics.total_errors),
     hint: `打开熔断 ${formatMetricNumber(resilienceStatus.value?.error_statistics.open_circuit_breakers)}`,
     icon: AlertTriangle,
@@ -2110,12 +2143,11 @@ const tunnelQueueUtilizationWidth = computed(() => (
   tunnelQueueUtilization.value == null ? '0%' : `${tunnelQueueUtilization.value}%`
 ))
 
-const slaValueClass = computed(() => successRateClass(providerPerformance.value?.summary.success_rate))
+const slaValueClass = computed(() => successRateClass(slaRate.value))
 const errorRateValueClass = computed(() => {
-  const rate = providerPerformance.value?.summary.success_rate
+  const rate = serviceErrorRate.value
   if (rate == null) return ''
-  const successPercent = rate <= 1 ? rate * 100 : rate
-  const errorPercent = Math.max(0, 100 - successPercent)
+  const errorPercent = rate
   if (errorPercent <= 5) return 'text-green-600 dark:text-green-400'
   if (errorPercent <= 20) return 'text-amber-600 dark:text-amber-400'
   return 'text-red-600 dark:text-red-400'

@@ -871,6 +871,8 @@ fn build_imported_user_usage_total_aggregates(
             total_requests,
             success_requests: total_requests,
             error_requests: 0,
+            sla_eligible_requests: total_requests,
+            user_error_requests: 0,
             input_tokens,
             output_tokens: 0,
             cache_creation_tokens: 0,
@@ -3485,6 +3487,12 @@ impl<'a> AdminAppState<'a> {
                     existing_row.total_requests.saturating_add(request_delta);
                 existing_row.success_requests =
                     existing_row.success_requests.saturating_add(request_delta);
+                // Supplemental legacy rows represent successful requests. Keep the
+                // canonical SLA denominator in sync when merging them into a newer
+                // snapshot row.
+                existing_row.sla_eligible_requests = existing_row
+                    .sla_eligible_requests
+                    .saturating_add(request_delta);
                 existing_row.input_tokens = existing_row.input_tokens.saturating_add(token_delta);
             } else {
                 let mut row = row.clone();

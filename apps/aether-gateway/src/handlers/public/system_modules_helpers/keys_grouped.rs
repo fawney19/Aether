@@ -111,9 +111,10 @@ pub(crate) async fn build_admin_keys_grouped_by_format_payload(
             continue;
         };
         let request_count = u64::from(key.request_count.unwrap_or(0));
+        let sla_eligible_count = u64::from(key.sla_eligible_count.unwrap_or(0));
         let success_count = u64::from(key.success_count.unwrap_or(0));
-        let success_rate = if request_count > 0 {
-            Some(success_count as f64 / request_count as f64)
+        let success_rate = if sla_eligible_count > 0 {
+            Some(success_count as f64 / sla_eligible_count as f64)
         } else {
             None
         };
@@ -179,6 +180,10 @@ pub(crate) async fn build_admin_keys_grouped_by_format_payload(
                 "success_rate": success_rate,
                 "avg_response_time_ms": avg_response_time_ms,
                 "request_count": request_count,
+                "sla_eligible_count": sla_eligible_count,
+                "success_count": success_count,
+                "service_error_count": key.error_count.unwrap_or(0),
+                "user_error_count": key.user_error_count.unwrap_or(0),
                 "api_format": api_format,
                 "endpoint_base_url": endpoint_base_url_by_provider_and_format
                     .get(&(key.provider_id.clone(), api_format.clone()))

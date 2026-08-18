@@ -34,6 +34,12 @@ pub struct AdminSystemStatsDailyAggregate {
     pub total_requests: u64,
     pub success_requests: u64,
     pub error_requests: u64,
+    /// Requests included in the service SLA denominator.
+    #[serde(alias = "sla_eligible_count", default)]
+    pub sla_eligible_requests: u64,
+    /// Caller-caused HTTP 400 requests, excluded from the service SLA denominator.
+    #[serde(alias = "user_error_count", default)]
+    pub user_error_requests: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
@@ -52,6 +58,10 @@ pub struct AdminSystemStatsUserDailyAggregate {
     pub total_requests: u64,
     pub success_requests: u64,
     pub error_requests: u64,
+    #[serde(alias = "sla_eligible_count", default)]
+    pub sla_eligible_requests: u64,
+    #[serde(alias = "user_error_count", default)]
+    pub user_error_requests: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
@@ -67,6 +77,10 @@ pub struct AdminSystemStatsDailyApiKeyAggregate {
     pub total_requests: u64,
     pub success_requests: u64,
     pub error_requests: u64,
+    #[serde(alias = "sla_eligible_count", default)]
+    pub sla_eligible_requests: u64,
+    #[serde(alias = "user_error_count", default)]
+    pub user_error_requests: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,

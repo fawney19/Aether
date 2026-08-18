@@ -1,8 +1,10 @@
 UPDATE provider_api_keys
 SET
   request_count = 0,
+  sla_eligible_count = 0,
   success_count = 0,
   error_count = 0,
+  user_error_count = 0,
   total_tokens = 0,
   total_cost_usd = 0,
   total_response_time_ms = 0,

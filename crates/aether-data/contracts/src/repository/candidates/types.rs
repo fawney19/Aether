@@ -74,6 +74,24 @@ pub struct StoredRequestCandidate {
 }
 
 impl StoredRequestCandidate {
+    pub fn outcome_class(&self) -> crate::repository::usage::RequestOutcomeClass {
+        let status = match self.status {
+            RequestCandidateStatus::Pending => "pending",
+            RequestCandidateStatus::Streaming => "streaming",
+            RequestCandidateStatus::Success => "success",
+            RequestCandidateStatus::Cancelled => "cancelled",
+            RequestCandidateStatus::Failed => "failed",
+            RequestCandidateStatus::Available
+            | RequestCandidateStatus::Unused
+            | RequestCandidateStatus::Skipped => "cancelled",
+        };
+        crate::repository::usage::classify_request_outcome(
+            status,
+            self.status_code,
+            self.error_message.as_deref(),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
@@ -195,10 +213,29 @@ impl StoredRequestCandidate {
 #[serde(rename_all = "snake_case")]
 pub enum RequestCandidateFinalStatus {
     Success,
+    UserError,
     Failed,
     Cancelled,
     Streaming,
     Pending,
+}
+
+impl RequestCandidateFinalStatus {
+    pub const fn outcome_class(self) -> crate::repository::usage::RequestOutcomeClass {
+        match self {
+            Self::Success => crate::repository::usage::RequestOutcomeClass::Success,
+            Self::UserError => crate::repository::usage::RequestOutcomeClass::UserError,
+            Self::Failed => crate::repository::usage::RequestOutcomeClass::ServiceError,
+            Self::Cancelled => crate::repository::usage::RequestOutcomeClass::Cancelled,
+            Self::Streaming | Self::Pending => {
+                crate::repository::usage::RequestOutcomeClass::InFlight
+            }
+        }
+    }
+
+    pub const fn sla_eligible(self) -> bool {
+        self.outcome_class().is_sla_eligible()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -271,16 +308,23 @@ pub fn derive_request_candidate_final_status(
 ) -> RequestCandidateFinalStatus {
     let has_success = candidates
         .iter()
-        .any(|candidate| candidate.status == RequestCandidateStatus::Success);
+        .any(|candidate| candidate.outcome_class().is_success());
     if has_success {
         return RequestCandidateFinalStatus::Success;
     }
 
     let has_failed = candidates
         .iter()
-        .any(|candidate| candidate.status == RequestCandidateStatus::Failed);
+        .any(|candidate| candidate.outcome_class().is_service_error());
     if has_failed {
         return RequestCandidateFinalStatus::Failed;
+    }
+
+    let has_user_error = candidates
+        .iter()
+        .any(|candidate| candidate.outcome_class().is_user_error());
+    if has_user_error {
+        return RequestCandidateFinalStatus::UserError;
     }
 
     let has_cancelled = candidates
@@ -430,6 +474,8 @@ pub struct PublicHealthStatusCount {
     pub endpoint_id: String,
     pub status: RequestCandidateStatus,
     pub count: u64,
+    pub sla_eligible_count: u64,
+    pub user_error_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -437,8 +483,10 @@ pub struct PublicHealthTimelineBucket {
     pub endpoint_id: String,
     pub segment_idx: u32,
     pub total_count: u64,
+    pub sla_eligible_count: u64,
     pub success_count: u64,
     pub failed_count: u64,
+    pub user_error_count: u64,
     pub min_created_at_unix_ms: Option<u64>,
     pub max_created_at_unix_ms: Option<u64>,
 }
@@ -674,6 +722,33 @@ mod tests {
             derive_request_candidate_final_status(&candidates),
             RequestCandidateFinalStatus::Failed
         );
+    }
+
+    #[test]
+    fn failed_candidate_with_http_400_has_user_error_final_status() {
+        let candidates = vec![candidate(
+            "cand-1",
+            RequestCandidateStatus::Failed,
+            Some(400),
+        )];
+
+        let final_status = derive_request_candidate_final_status(&candidates);
+        assert_eq!(final_status, RequestCandidateFinalStatus::UserError);
+        assert_eq!(final_status.outcome_class().as_str(), "user_error");
+        assert!(!final_status.sla_eligible());
+    }
+
+    #[test]
+    fn service_error_wins_over_user_error_in_mixed_attempts() {
+        let candidates = vec![
+            candidate("cand-user", RequestCandidateStatus::Failed, Some(400)),
+            candidate("cand-service", RequestCandidateStatus::Failed, Some(503)),
+        ];
+
+        let final_status = derive_request_candidate_final_status(&candidates);
+        assert_eq!(final_status, RequestCandidateFinalStatus::Failed);
+        assert_eq!(final_status.outcome_class().as_str(), "service_error");
+        assert!(final_status.sla_eligible());
     }
 
     #[test]

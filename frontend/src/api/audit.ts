@@ -33,6 +33,30 @@ export interface AuditFilters {
   offset?: number
 }
 
+/**
+ * Canonical request-outcome metrics returned by the admin user-behavior endpoint.
+ *
+ * `failed_requests` and `success_requests` are retained by the API as legacy
+ * aliases, but the service SLA denominator is always `sla_eligible_count`.
+ */
+export interface AdminUserBehaviorResponse {
+  user_id: string
+  period_days: number
+  event_counts: Record<string, number>
+  total_requests: number
+  sla_eligible_count: number
+  success_count: number
+  service_error_count: number
+  user_error_count: number
+  failed_requests: number
+  success_requests: number
+  success_rate: number
+  service_error_rate: number
+  user_error_rate: number
+  suspicious_activities: number
+  analysis_time: string
+}
+
 function normalizeAuditResponse(data: Record<string, unknown>): AuditLogsResponse {
   const items: AuditLog[] = (data.items ?? data.logs ?? []) as AuditLog[]
   const meta: PaginationMeta = (data.meta as PaginationMeta) ?? {
@@ -79,10 +103,7 @@ export const auditApi = {
   },
 
   // 分析用户行为 (管理员)
-  async analyzeUserBehavior(userId: number, days: number = 7): Promise<{
-    analysis: Record<string, unknown>
-    recommendations: string[]
-  }> {
+  async analyzeUserBehavior(userId: number | string, days: number = 7): Promise<AdminUserBehaviorResponse> {
     const response = await apiClient.get(`/api/admin/monitoring/user-behavior/${userId}`, {
       params: { days }
     })

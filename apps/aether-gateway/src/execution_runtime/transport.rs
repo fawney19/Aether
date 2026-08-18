@@ -1041,7 +1041,7 @@ pub(crate) async fn record_manual_proxy_request_outcome(
     plan: &ExecutionPlan,
     status_code: u16,
 ) {
-    let failed_requests_delta = i64::from(status_code >= 400);
+    let failed_requests_delta = i64::from(status_code >= 400 && status_code != 400);
     record_manual_proxy_traffic(state, plan, 1, failed_requests_delta, 0, 0).await;
 }
 

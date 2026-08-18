@@ -27,7 +27,9 @@ SELECT
   request_count_delta,
   total_requests_delta,
   success_count_delta,
+  sla_eligible_count_delta,
   error_count_delta,
+  user_error_count_delta,
   dns_failures_delta,
   stream_errors_delta,
   total_tokens_delta,
@@ -52,7 +54,9 @@ struct DeltaRow {
     request_count_delta: i64,
     total_requests_delta: i64,
     success_count_delta: i64,
+    sla_eligible_count_delta: i64,
     error_count_delta: i64,
+    user_error_count_delta: i64,
     dns_failures_delta: i64,
     stream_errors_delta: i64,
     total_tokens_delta: i64,
@@ -111,7 +115,9 @@ impl Aggregates {
                         .or_default();
                     entry.request_count += row.request_count_delta;
                     entry.success_count += row.success_count_delta;
+                    entry.sla_eligible_count += row.sla_eligible_count_delta;
                     entry.error_count += row.error_count_delta;
+                    entry.user_error_count += row.user_error_count_delta;
                     entry.total_tokens += row.total_tokens_delta;
                     entry.total_cost_usd += row.total_cost_usd_delta;
                     entry.total_response_time_ms += row.total_response_time_ms_delta;
@@ -713,7 +719,9 @@ async fn enqueue_provider_api_key_delta(
             target_id,
             request_count_delta: delta.request_count,
             success_count_delta: delta.success_count,
+            sla_eligible_count_delta: delta.sla_eligible_count,
             error_count_delta: delta.error_count,
+            user_error_count_delta: delta.user_error_count,
             total_tokens_delta: delta.total_tokens,
             total_cost_usd_delta: finite_or_zero(delta.total_cost_usd),
             total_response_time_ms_delta: delta.total_response_time_ms,
@@ -734,7 +742,9 @@ struct DeltaInsert<'a> {
     request_count_delta: i64,
     total_requests_delta: i64,
     success_count_delta: i64,
+    sla_eligible_count_delta: i64,
     error_count_delta: i64,
+    user_error_count_delta: i64,
     dns_failures_delta: i64,
     stream_errors_delta: i64,
     total_tokens_delta: i64,
@@ -760,11 +770,12 @@ async fn insert_delta(
         r#"
 INSERT INTO usage_counter_deltas (
   id, request_id, kind, target_id, request_count_delta, total_requests_delta,
-  success_count_delta, error_count_delta, dns_failures_delta, stream_errors_delta,
+  success_count_delta, sla_eligible_count_delta, error_count_delta,
+  user_error_count_delta, dns_failures_delta, stream_errors_delta,
   total_tokens_delta, total_cost_usd_delta, total_response_time_ms_delta,
   last_used_at_unix_secs, last_used_ip, candidate_last_used_at_unix_secs,
   removed_last_used_at_unix_secs, usage_created_at_unix_secs, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 "#,
     )
     .bind(uuid::Uuid::new_v4().to_string())
@@ -774,7 +785,9 @@ INSERT INTO usage_counter_deltas (
     .bind(input.request_count_delta)
     .bind(input.total_requests_delta)
     .bind(input.success_count_delta)
+    .bind(input.sla_eligible_count_delta)
     .bind(input.error_count_delta)
+    .bind(input.user_error_count_delta)
     .bind(input.dns_failures_delta)
     .bind(input.stream_errors_delta)
     .bind(input.total_tokens_delta)
@@ -817,7 +830,9 @@ fn map_row(row: &sqlx::mysql::MySqlRow) -> Result<DeltaRow, DataLayerError> {
         request_count_delta: row.try_get("request_count_delta").map_sql_err()?,
         total_requests_delta: row.try_get("total_requests_delta").map_sql_err()?,
         success_count_delta: row.try_get("success_count_delta").map_sql_err()?,
+        sla_eligible_count_delta: row.try_get("sla_eligible_count_delta").map_sql_err()?,
         error_count_delta: row.try_get("error_count_delta").map_sql_err()?,
+        user_error_count_delta: row.try_get("user_error_count_delta").map_sql_err()?,
         dns_failures_delta: row.try_get("dns_failures_delta").map_sql_err()?,
         stream_errors_delta: row.try_get("stream_errors_delta").map_sql_err()?,
         total_tokens_delta: row.try_get("total_tokens_delta").map_sql_err()?,
@@ -935,7 +950,9 @@ async fn apply_provider_api_key(
 UPDATE provider_api_keys
 SET request_count = GREATEST(COALESCE(request_count, 0) + ?, 0),
     success_count = GREATEST(COALESCE(success_count, 0) + ?, 0),
+    sla_eligible_count = GREATEST(COALESCE(sla_eligible_count, 0) + ?, 0),
     error_count = GREATEST(COALESCE(error_count, 0) + ?, 0),
+    user_error_count = GREATEST(COALESCE(user_error_count, 0) + ?, 0),
     total_tokens = GREATEST(COALESCE(total_tokens, 0) + ?, 0),
     total_cost_usd = GREATEST(COALESCE(total_cost_usd, 0) + ?, 0),
     total_response_time_ms = GREATEST(COALESCE(total_response_time_ms, 0) + ?, 0),
@@ -953,7 +970,9 @@ WHERE id = ?
     )
     .bind(delta.request_count)
     .bind(delta.success_count)
+    .bind(delta.sla_eligible_count)
     .bind(delta.error_count)
+    .bind(delta.user_error_count)
     .bind(delta.total_tokens)
     .bind(finite_or_zero(delta.total_cost_usd))
     .bind(delta.total_response_time_ms)

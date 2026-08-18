@@ -7,7 +7,14 @@ export interface UsageStatsState {
   total_cost: number
   total_actual_cost?: number  // 倍率消耗（仅管理员可见）
   avg_response_time: number
+  sla_eligible_count?: number
+  service_error_count?: number
+  service_error_rate?: number
+  user_error_count?: number
+  user_error_rate?: number
+  /** 兼容字段：语义为服务错误数。 */
   error_count?: number
+  /** 兼容字段：语义为服务错误率。 */
   error_rate?: number
   cache_stats?: {
     cache_creation_tokens: number
@@ -55,7 +62,12 @@ export interface ProviderStatsItem {
   cacheHitRate?: number
   totalCost: number
   actualCost?: number
-  successRate: number
+  successRate: number | null
+  slaEligibleCount?: number
+  serviceErrorCount?: number
+  serviceErrorRate?: number
+  userErrorCount?: number
+  userErrorRate?: number
   avgResponseTime: string
 }
 
@@ -78,6 +90,12 @@ export interface ApiFormatStatsItem {
 // 请求记录
 // 请求状态类型
 export type RequestStatus = 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
+export type RequestOutcomeClass =
+  | 'success'
+  | 'user_error'
+  | 'service_error'
+  | 'cancelled'
+  | 'in_flight'
 
 export interface UsageRecord {
   id: string
@@ -132,6 +150,8 @@ export interface UsageRecord {
   status_code?: number
   error_message?: string
   status?: RequestStatus  // 请求状态: pending, streaming, completed, failed
+  outcome_class?: RequestOutcomeClass
+  sla_eligible?: boolean
   created_at: string
   updated_at?: string | null
   response_time_updated_at?: string | null
@@ -172,6 +192,11 @@ export function createDefaultStats(): UsageStatsState {
     total_cost: 0,
     total_actual_cost: undefined,
     avg_response_time: 0,
+    sla_eligible_count: undefined,
+    service_error_count: undefined,
+    service_error_rate: undefined,
+    user_error_count: undefined,
+    user_error_rate: undefined,
     error_count: undefined,
     error_rate: undefined,
     cache_stats: undefined,

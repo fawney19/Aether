@@ -1,4 +1,12 @@
 import type { UsageByProvider } from '@/api/usage'
+import {
+  resolveServiceErrorCount,
+  resolveServiceErrorRate,
+  resolveSlaEligibleCount,
+  resolveSlaSuccessRate,
+  resolveUserErrorCount,
+  resolveUserErrorRate,
+} from '@/utils/outcomeMetrics'
 import type { ProviderStatsItem } from '../types'
 
 function metricValue(value: number | null | undefined): number {
@@ -35,7 +43,12 @@ export function normalizeUsageProviderStats(providerData: UsageByProvider[]): Pr
       actualCost: typeof item.actual_cost === 'number' && Number.isFinite(item.actual_cost)
         ? item.actual_cost
         : undefined,
-      successRate: metricValue(item.success_rate),
+      successRate: resolveSlaSuccessRate(item),
+      slaEligibleCount: resolveSlaEligibleCount(item) ?? undefined,
+      serviceErrorCount: resolveServiceErrorCount(item) ?? undefined,
+      serviceErrorRate: resolveServiceErrorRate(item) ?? undefined,
+      userErrorCount: resolveUserErrorCount(item) ?? undefined,
+      userErrorRate: resolveUserErrorRate(item) ?? undefined,
       avgResponseTime: formatProviderAverageResponseTime(item.avg_response_time_ms),
     }))
 }

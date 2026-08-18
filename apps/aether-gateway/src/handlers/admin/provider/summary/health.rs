@@ -101,19 +101,24 @@ pub(crate) async fn build_admin_provider_health_monitor_payload(
             let candidates = attempts_by_endpoint.remove(&endpoint.id).unwrap_or_default();
             let success_count = candidates
                 .iter()
-                .filter(|candidate| candidate.status == RequestCandidateStatus::Success)
+                .filter(|candidate| candidate.outcome_class().is_success())
                 .count();
             let failed_count = candidates
                 .iter()
-                .filter(|candidate| candidate.status == RequestCandidateStatus::Failed)
+                .filter(|candidate| candidate.outcome_class().is_service_error())
+                .count();
+            let user_error_count = candidates
+                .iter()
+                .filter(|candidate| candidate.outcome_class().is_user_error())
                 .count();
             let skipped_count = candidates
                 .iter()
                 .filter(|candidate| candidate.status == RequestCandidateStatus::Skipped)
                 .count();
             let total_attempts = candidates.len();
-            let success_rate = if total_attempts > 0 {
-                success_count as f64 / total_attempts as f64
+            let sla_eligible_count = success_count + failed_count;
+            let success_rate = if sla_eligible_count > 0 {
+                success_count as f64 / sla_eligible_count as f64
             } else {
                 1.0
             };
@@ -125,7 +130,11 @@ pub(crate) async fn build_admin_provider_health_monitor_payload(
                 .filter_map(|candidate| {
                     Some(json!({
                         "timestamp": unix_ms_to_rfc3339(request_candidate_event_unix_ms(&candidate))?,
-                        "status": request_candidate_status_label(candidate.status),
+                        "status": if candidate.outcome_class().is_user_error() {
+                            "user_error"
+                        } else {
+                            request_candidate_status_label(candidate.status)
+                        },
                         "status_code": candidate.status_code,
                         "latency_ms": candidate.latency_ms,
                         "error_type": candidate.error_type,
@@ -139,8 +148,11 @@ pub(crate) async fn build_admin_provider_health_monitor_payload(
                 "api_format": endpoint.api_format,
                 "is_active": endpoint.is_active,
                 "total_attempts": total_attempts,
+                "sla_eligible_count": sla_eligible_count,
                 "success_count": success_count,
                 "failed_count": failed_count,
+                "service_error_count": failed_count,
+                "user_error_count": user_error_count,
                 "skipped_count": skipped_count,
                 "success_rate": success_rate,
                 "last_event_at": last_event_at,

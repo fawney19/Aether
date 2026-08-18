@@ -558,6 +558,7 @@ import { formatTokens } from '@/utils/format'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { resolveTimelineFinalStatus } from '../utils/status'
+import type { RequestOutcomeClass } from '../types'
 import {
   buildPoolGroupVisibleAttempts,
   buildPoolParticipatedCandidates,
@@ -591,6 +592,7 @@ interface AttemptTimeRange {
 // 用量数据类型
 interface UsageData {
   status?: string | null
+  outcome_class?: RequestOutcomeClass | null
   tokens: {
     input: number
     output: number
@@ -620,6 +622,8 @@ const props = defineProps<{
   overrideStatusCode?: number
   /** 外部传入的请求状态，用于识别已失败/取消的终态请求 */
   requestStatus?: string | null
+  /** 后端统一请求结果分类，优先于旧 status/status_code 推断。 */
+  outcomeClass?: RequestOutcomeClass | null
   /** 请求侧 API 格式（客户端入口格式） */
   requestApiFormat?: string | null
   /** 用量和费用数据 */
@@ -655,6 +659,7 @@ const formatNumber = (num: number): string => {
 const getFinalStatusLabel = (status: string) => {
   const labels: Record<string, string> = {
     success: '最终成功',
+    user_error: '用户请求错误',
     failed: '最终失败',
     cancelled: '已取消',
     streaming: '流式传输中',
@@ -669,6 +674,7 @@ type BadgeVariant = 'default' | 'secondary' | 'destructive' | 'outline' | 'succe
 const getFinalStatusBadgeVariant = (status: string): BadgeVariant => {
   const variants: Record<string, BadgeVariant> = {
     success: 'success',
+    user_error: 'outline',
     failed: 'destructive',
     cancelled: 'warning',
     streaming: 'secondary',
@@ -798,6 +804,7 @@ const computedFinalStatus = computed(() => {
     hasPendingCandidates: hasPending,
     statusCode: props.overrideStatusCode,
     requestStatus: props.requestStatus ?? usageData.value?.status,
+    outcomeClass: props.outcomeClass ?? usageData.value?.outcome_class ?? trace.value?.outcome_class,
     traceFinalStatus: trace.value?.final_status,
   })
 })
@@ -2140,7 +2147,7 @@ const traceHasActiveCandidate = computed(() => {
 
 const traceFinalIsTerminal = computed(() => {
   const status = trace.value?.final_status
-  return status === 'success' || status === 'failed' || status === 'cancelled'
+  return status === 'success' || status === 'user_error' || status === 'failed' || status === 'cancelled'
 })
 
 const shouldPollTrace = computed(() => {

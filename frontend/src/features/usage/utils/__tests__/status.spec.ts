@@ -8,6 +8,7 @@ import {
   isUsageRecordSuccessful,
   isUsageWebSocket,
   mapRequestStatusToTimelineStatus,
+  normalizeRequestOutcomeClass,
   normalizeRequestStatus,
   resolveDisplayRequestStatus,
   resolveTimelineFinalStatus,
@@ -61,6 +62,45 @@ describe('usage status helpers', () => {
 
     expect(isUsageRecordFailed(record)).toBe(true)
     expect(isUsageRecordSuccessful(record)).toBe(false)
+  })
+
+  it('keeps HTTP 400 user-error records failed in the lifecycle view', () => {
+    const record = buildUsageRecord({
+      status: 'failed',
+      status_code: 400,
+      error_message: 'invalid user request',
+      outcome_class: 'user_error',
+      sla_eligible: false,
+    })
+
+    expect(normalizeRequestOutcomeClass(' USER_ERROR ')).toBe('user_error')
+    expect(isUsageRecordFailed(record)).toBe(true)
+    expect(isUsageRecordSuccessful(record)).toBe(false)
+    expect(resolveDisplayRequestStatus(record)).toBe('failed')
+  })
+
+  it('keeps a legacy exact HTTP 400 failed in the lifecycle view', () => {
+    const record = buildUsageRecord({
+      status: 'failed',
+      status_code: 400,
+      error_message: 'invalid user request',
+      outcome_class: undefined,
+    })
+
+    expect(isUsageRecordFailed(record)).toBe(true)
+    expect(isUsageRecordSuccessful(record)).toBe(false)
+    expect(resolveDisplayRequestStatus(record)).toBe('failed')
+  })
+
+  it('does not overwrite an explicit completed lifecycle with user-error metadata', () => {
+    const record = buildUsageRecord({
+      status: 'completed',
+      status_code: 400,
+      outcome_class: 'user_error',
+    })
+
+    expect(isUsageRecordFailed(record)).toBe(false)
+    expect(resolveDisplayRequestStatus(record)).toBe('completed')
   })
 
   it('normalizes request status strings before mapping timeline status', () => {
@@ -254,7 +294,25 @@ describe('usage status helpers', () => {
       statusCode: 302,
     })).toBe('failed')
     expect(resolveTimelineFinalStatus({
+      statusCode: 400,
+    })).toBe('user_error')
+    expect(resolveTimelineFinalStatus({
       statusCode: 503,
+    })).toBe('failed')
+  })
+
+  it('uses outcome class before a conflicting timeline lifecycle status', () => {
+    expect(resolveTimelineFinalStatus({
+      outcomeClass: 'user_error',
+      requestStatus: 'failed',
+      traceFinalStatus: 'failed',
+      statusCode: 400,
+    })).toBe('user_error')
+
+    expect(resolveTimelineFinalStatus({
+      outcomeClass: 'service_error',
+      requestStatus: 'completed',
+      statusCode: 200,
     })).toBe('failed')
   })
 })

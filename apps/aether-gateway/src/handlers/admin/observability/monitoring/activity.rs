@@ -94,20 +94,21 @@ pub(super) async fn build_admin_monitoring_user_behavior_response(
         Err(detail) => return Ok(admin_monitoring_bad_request_response(detail)),
     };
 
-    let cutoff_time = chrono::Utc::now() - chrono::Duration::days(days);
+    let now = chrono::Utc::now();
+    let cutoff_time = now - chrono::Duration::days(days);
+    let created_from_unix_secs = cutoff_time.timestamp().max(0) as u64;
+    let created_until_unix_secs = now.timestamp().max(0) as u64;
 
     let event_counts = state
         .read_admin_user_behavior_event_counts(&user_id, cutoff_time)
-        .await?;
-
-    let failed_requests = event_counts
-        .get("request_failed")
-        .copied()
-        .unwrap_or_default();
-    let success_requests = event_counts
-        .get("request_success")
-        .copied()
-        .unwrap_or_default();
+        .await?
+        .into_iter()
+        // Request outcomes come from the canonical usage read model below. Keep this map for
+        // non-request activity only so legacy audit rows cannot double-count request metrics.
+        .filter(|(event_type, _)| {
+            !matches!(event_type.as_str(), "request_success" | "request_failed")
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     let suspicious_activities = event_counts
         .get("suspicious_activity")
         .copied()
@@ -119,12 +120,21 @@ pub(super) async fn build_admin_monitoring_user_behavior_response(
                 .unwrap_or_default(),
         );
 
+    let summary = state
+        .summarize_usage_audits(&UsageAuditSummaryQuery {
+            created_from_unix_secs,
+            created_until_unix_secs: created_until_unix_secs.saturating_add(1),
+            user_id: Some(user_id.clone()),
+            provider_name: None,
+            model: None,
+        })
+        .await?;
+
     Ok(build_admin_monitoring_user_behavior_payload_response(
         user_id,
         days,
         event_counts,
-        failed_requests,
-        success_requests,
+        &summary,
         suspicious_activities,
     ))
 }

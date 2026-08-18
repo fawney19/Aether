@@ -169,7 +169,7 @@ import {
   normalizeRequestStatus,
   resolveDisplayRequestStatus,
 } from '@/features/usage/utils/status'
-import type { DateRangeParams, FilterStatusValue, RequestStatus, UsageRecord } from '@/features/usage/types'
+import type { DateRangeParams, FilterStatusValue, RequestOutcomeClass, RequestStatus, UsageRecord } from '@/features/usage/types'
 import type { UserOption } from '@/features/usage/components/UsageRecordsTable.vue'
 import { log } from '@/utils/logger'
 import type { ActivityHeatmap } from '@/types/activity'
@@ -508,8 +508,12 @@ async function pollActiveRequests() {
         updateUpdatedAtMs < currentUpdatedAtMs
       const shouldApply = !updateSnapshotIsOlder && newRank >= currentRank
       const updateHasFailureSignal =
-        (typeof update.status_code === 'number' && update.status_code >= 400) ||
-        (typeof update.error_message === 'string' && update.error_message.trim().length > 0) ||
+        update.outcome_class === 'service_error' ||
+        update.outcome_class === 'user_error' ||
+        (update.outcome_class == null && typeof update.status_code === 'number' &&
+          update.status_code >= 400) ||
+        (update.outcome_class == null &&
+          typeof update.error_message === 'string' && update.error_message.trim().length > 0) ||
         update.image_progress?.phase === 'failed'
       const shouldApplyData = shouldApply || (
         !updateSnapshotIsOlder && currentRank < 2 && updateHasFailureSignal
@@ -517,6 +521,10 @@ async function pollActiveRequests() {
 
       if (shouldApply && record.status !== update.status) {
         record.status = update.status
+      }
+      if (shouldApply) {
+        record.outcome_class = update.outcome_class ?? undefined
+        record.sla_eligible = update.sla_eligible ?? undefined
       }
       if (shouldApplyData) {
         if ('image_progress' in update) {
@@ -1064,6 +1072,8 @@ function sameImageProgress(left?: ImageProgress | null, right?: ImageProgress | 
 function handleDetailRequestState(update: {
   id: string
   status?: RequestStatus
+  outcomeClass?: RequestOutcomeClass | null
+  slaEligible?: boolean | null
   statusCode?: number | null
   inputTokens?: number | null
   effectiveInputTokens?: number | null
@@ -1107,6 +1117,12 @@ function handleDetailRequestState(update: {
   record.status_code = lifecycle.status_code
   record.error_message = lifecycle.error_message
   record.updated_at = lifecycle.updated_at
+  if ('outcomeClass' in update) {
+    record.outcome_class = update.outcomeClass ?? undefined
+  }
+  if ('slaEligible' in update) {
+    record.sla_eligible = update.slaEligible ?? undefined
+  }
   if (!lifecycle.accepted) return
 
   if ('inputTokens' in update && update.inputTokens != null) {
@@ -1216,14 +1232,27 @@ function handleDetailRequestState(update: {
 
 function resolveDetailUpdateStatus(update: {
   status?: RequestStatus
+  outcomeClass?: RequestOutcomeClass | null
   statusCode?: number | null
   imageProgress?: ImageProgress | null
   errorMessage?: string | null
 }): RequestStatus | undefined {
+  if (update.outcomeClass === 'service_error') return 'failed'
+  if (update.outcomeClass === 'cancelled') return 'cancelled'
+  if (update.outcomeClass === 'success') return 'completed'
+  if (update.outcomeClass === 'user_error') {
+    const status = normalizeRequestStatus(update.status)
+    if (status === 'failed') return 'failed'
+    if (status === 'cancelled') return 'cancelled'
+    return status == null && update.statusCode === 400 ? 'failed' : 'completed'
+  }
+  if (update.statusCode === 400) return 'failed'
+
   const status = normalizeRequestStatus(update.status)
   const hasFailureSignal =
     (typeof update.statusCode === 'number' && update.statusCode >= 400) ||
-    (typeof update.errorMessage === 'string' && update.errorMessage.trim().length > 0) ||
+    (typeof update.errorMessage === 'string' &&
+      update.errorMessage.trim().length > 0) ||
     update.imageProgress?.phase === 'failed'
 
   if ((status == null || status === 'pending' || status === 'streaming') && hasFailureSignal) {

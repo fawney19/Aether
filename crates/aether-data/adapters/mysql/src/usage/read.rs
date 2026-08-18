@@ -21,15 +21,14 @@ const EFFECTIVE_PROVIDER_API_KEY_ID_EXPR: &str = r#"CASE
   ELSE `usage`.provider_api_key_id
 END"#;
 
-const MONITORING_ERROR_PREDICATE: &str = r#"(
-  LOWER(TRIM(COALESCE(`usage`.status, ''))) IN ('failed', 'error')
-  OR (`usage`.error_category IS NOT NULL AND TRIM(`usage`.error_category) <> '')
+const MONITORING_ERROR_PREDICATE: &str = "`usage`.outcome_class = 'service_error'";
+const SUCCESS_PERCENTILE_PREDICATE: &str = r#"(
+  `usage`.outcome_class = 'success'
   OR (
-    TRIM(COALESCE(`usage`.status, '')) = ''
-    AND (
-      COALESCE(`usage`.status_code, 0) >= 400
-      OR (`usage`.error_message IS NOT NULL AND TRIM(`usage`.error_message) <> '')
-    )
+    `usage`.outcome_class = 'in_flight'
+    AND LOWER(TRIM(COALESCE(`usage`.status, ''))) = 'completed'
+    AND (`usage`.status_code IS NULL OR `usage`.status_code < 400)
+    AND TRIM(COALESCE(`usage`.error_message, '')) = ''
   )
 )"#;
 
@@ -53,6 +52,7 @@ pub struct MysqlUsageReadFilter {
     has_format_conversion: Option<bool>,
     finalized_only: bool,
     completed_only: bool,
+    success_only: bool,
 }
 
 impl MysqlUsageReadFilter {
@@ -71,6 +71,7 @@ impl MysqlUsageReadFilter {
             has_format_conversion: None,
             finalized_only: false,
             completed_only: false,
+            success_only: false,
         }
     }
 
@@ -126,6 +127,15 @@ impl MysqlUsageReadFilter {
 
     pub fn completed_only(mut self) -> Self {
         self.completed_only = true;
+        self
+    }
+
+    /// Restrict the SQL-side read model to canonical successful requests.
+    ///
+    /// This is intentionally separate from `completed_only`: a completed HTTP 400 is a
+    /// terminal user error and must not enter latency percentile samples.
+    pub fn success_only(mut self) -> Self {
+        self.success_only = true;
         self
     }
 
@@ -505,6 +515,9 @@ AND `usage`.provider_name NOT IN ('unknown', 'pending')",
     if filter.completed_only {
         builder.push(" AND `usage`.status = 'completed'");
     }
+    if filter.success_only {
+        builder.push(" AND ").push(SUCCESS_PERCENTILE_PREDICATE);
+    }
     builder.push(" ORDER BY `usage`.created_at_unix_ms ASC, `usage`.request_id ASC");
     Ok(builder)
 }
@@ -585,11 +598,7 @@ AND LOWER(TRIM(COALESCE(`usage`.provider_name, ''))) NOT IN ('unknown', 'unknow'
     }
     if query.error_only {
         push_where(builder, has_where);
-        builder.push(
-            "(`usage`.status = 'failed' \
-OR COALESCE(`usage`.status_code, 0) >= 400 \
-OR (`usage`.error_message IS NOT NULL AND TRIM(`usage`.error_message) <> ''))",
-        );
+        builder.push("`usage`.outcome_class = 'service_error'");
     }
     Ok(())
 }
@@ -767,6 +776,17 @@ mod tests {
         assert!(sql.contains("created_at_unix_ms < ?"));
         assert!(sql.contains("`usage`.user_id = ?"));
         assert!(sql.contains("status NOT IN ('pending', 'streaming')"));
+    }
+
+    #[test]
+    fn success_only_keeps_legacy_completed_non_400_rows_but_excludes_400() {
+        let filter = MysqlUsageReadFilter::new(100, 200).success_only();
+        let query = build_range_query(&filter).expect("range query should build");
+        let sql = query.sql();
+        assert!(sql.contains("outcome_class = 'success'"));
+        assert!(sql.contains("outcome_class = 'in_flight'"));
+        assert!(sql.contains("status_code IS NULL OR `usage`.status_code < 400"));
+        assert!(sql.contains("error_message"));
     }
 
     #[test]

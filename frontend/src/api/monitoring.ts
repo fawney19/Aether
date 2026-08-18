@@ -50,6 +50,7 @@ export interface AdminMonitoringCircuitBreakerSummary {
 }
 
 export interface AdminMonitoringErrorStatistics {
+  /** 服务错误总数；用户错误不计入韧性健康。 */
   total_errors: number
   active_keys: number
   degraded_keys: number
@@ -59,6 +60,7 @@ export interface AdminMonitoringErrorStatistics {
 }
 
 export interface AdminMonitoringRecentError {
+  /** 服务错误样本；用户错误不进入此列表。 */
   error_id: string
   error_type: string
   operation: string

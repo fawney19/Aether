@@ -73,7 +73,7 @@
         </div>
         <div
           v-else
-          class="grid grid-cols-2 gap-3 text-sm"
+          class="grid grid-cols-2 gap-3 text-sm lg:grid-cols-3"
         >
           <div>
             <div class="text-xs text-muted-foreground">
@@ -101,10 +101,26 @@
           </div>
           <div>
             <div class="text-xs text-muted-foreground">
-              错误率
+              SLA 成功率
             </div>
             <div class="font-semibold">
-              {{ userSummary?.error_rate ?? 0 }}%
+              {{ formatPercent(userSlaSuccessRate) }}
+            </div>
+          </div>
+          <div>
+            <div class="text-xs text-muted-foreground">
+              服务错误
+            </div>
+            <div class="font-semibold">
+              {{ formatOutcome(userServiceErrorCount, userServiceErrorRate) }}
+            </div>
+          </div>
+          <div>
+            <div class="text-xs text-muted-foreground">
+              用户错误
+            </div>
+            <div class="font-semibold text-muted-foreground">
+              {{ formatOutcome(userErrorCount, userErrorRate) }}
             </div>
           </div>
         </div>
@@ -151,10 +167,17 @@ import { LoadingState, TimeRangePicker } from '@/components/common'
 import { LeaderboardTable } from '@/components/stats'
 import { adminApi, type LeaderboardItem } from '@/api/admin'
 import { usersApi, type User } from '@/api/users'
-import { usageApi } from '@/api/usage'
+import { usageApi, type UsageStats } from '@/api/usage'
 import { formatCurrency, formatTokens } from '@/utils/format'
 import { getDateRangeFromPeriod } from '@/features/usage/composables'
 import type { DateRangeParams } from '@/features/usage/types'
+import {
+  resolveServiceErrorCount,
+  resolveServiceErrorRate,
+  resolveSlaSuccessRate,
+  resolveUserErrorCount,
+  resolveUserErrorRate,
+} from '@/utils/outcomeMetrics'
 
 const timeRange = ref<DateRangeParams>(getDateRangeFromPeriod('last7days'))
 const metric = ref<'requests' | 'tokens' | 'cost'>('requests')
@@ -166,20 +189,39 @@ const compareUserId = ref<string>('__none__')
 const leaderboard = ref<LeaderboardItem[]>([])
 const leaderboardLoading = ref(false)
 
-interface UsageSummary {
-  total_requests: number
-  total_tokens: number
-  total_cost: number
-  error_rate: number
-}
-
 interface TimeSeriesItem {
   date: string
   total_cost: number
 }
 
-const userSummary = ref<UsageSummary | null>(null)
+const userSummary = ref<UsageStats | null>(null)
 const summaryLoading = ref(false)
+
+const userSlaSuccessRate = computed(() => (
+  userSummary.value ? resolveSlaSuccessRate(userSummary.value) : null
+))
+const userServiceErrorCount = computed(() => (
+  userSummary.value ? resolveServiceErrorCount(userSummary.value) : null
+))
+const userServiceErrorRate = computed(() => (
+  userSummary.value ? resolveServiceErrorRate(userSummary.value) : null
+))
+const userErrorCount = computed(() => (
+  userSummary.value ? resolveUserErrorCount(userSummary.value) : null
+))
+const userErrorRate = computed(() => (
+  userSummary.value ? resolveUserErrorRate(userSummary.value) : null
+))
+
+function formatPercent(value: number | null): string {
+  return value == null ? '-' : `${value.toFixed(2)}%`
+}
+
+function formatOutcome(count: number | null, rate: number | null): string {
+  if (count == null && rate == null) return '-'
+  const countText = count == null ? '-' : count.toLocaleString('zh-CN')
+  return `${countText} / ${formatPercent(rate)}`
+}
 
 const series = ref<TimeSeriesItem[]>([])
 const comparisonSeries = ref<TimeSeriesItem[]>([])

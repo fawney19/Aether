@@ -33,6 +33,7 @@ struct DashboardDateRange {
 #[derive(Debug, Default, Clone)]
 struct DashboardUsageTotals {
     requests: u64,
+    sla_eligible_requests: u64,
     input_tokens: u64,
     effective_input_tokens: u64,
     output_tokens: u64,
@@ -45,6 +46,7 @@ struct DashboardUsageTotals {
     total_cost_usd: f64,
     actual_total_cost_usd: f64,
     error_requests: u64,
+    user_error_requests: u64,
     response_time_sum_ms: f64,
     response_time_samples: u64,
 }
@@ -82,6 +84,9 @@ pub(super) fn decision_route_kind(request_context: &GatewayPublicRequestContext)
 impl DashboardUsageTotals {
     fn absorb_summary(&mut self, summary: &StoredUsageDashboardSummary) {
         self.requests = self.requests.saturating_add(summary.total_requests);
+        self.sla_eligible_requests = self
+            .sla_eligible_requests
+            .saturating_add(summary.sla_eligible_requests);
         self.input_tokens = self.input_tokens.saturating_add(summary.input_tokens);
         self.effective_input_tokens = self
             .effective_input_tokens
@@ -102,6 +107,9 @@ impl DashboardUsageTotals {
         self.total_cost_usd += summary.total_cost_usd;
         self.actual_total_cost_usd += summary.actual_total_cost_usd;
         self.error_requests = self.error_requests.saturating_add(summary.error_requests);
+        self.user_error_requests = self
+            .user_error_requests
+            .saturating_add(summary.user_error_requests);
         self.response_time_sum_ms += summary.response_time_sum_ms;
         self.response_time_samples = self
             .response_time_samples
@@ -1064,13 +1072,13 @@ pub(super) async fn handle_dashboard_stats_get(
                     );
                 }
             };
-        let success_rate = if today_totals.requests == 0 {
+        let success_rate = if today_totals.sla_eligible_requests == 0 {
             0.0
         } else {
             (today_totals
-                .requests
+                .sla_eligible_requests
                 .saturating_sub(today_totals.error_requests)) as f64
-                / today_totals.requests as f64
+                / today_totals.sla_eligible_requests as f64
                 * 100.0
         };
         let (period_cost_savings_summary, today_cost_savings_summary) =
@@ -1134,10 +1142,16 @@ pub(super) async fn handle_dashboard_stats_get(
             },
             "system_health": {
                 "avg_response_time": period_totals.avg_response_time_seconds(),
-                "error_rate": if period_totals.requests == 0 { 0.0 } else { dashboard_round_f64(period_totals.error_requests as f64 / period_totals.requests as f64 * 100.0, 4) },
+                "success_rate": if period_totals.sla_eligible_requests == 0 { 0.0 } else { dashboard_round_f64((period_totals.sla_eligible_requests.saturating_sub(period_totals.error_requests)) as f64 / period_totals.sla_eligible_requests as f64 * 100.0, 4) },
+                "error_rate": if period_totals.sla_eligible_requests == 0 { 0.0 } else { dashboard_round_f64(period_totals.error_requests as f64 / period_totals.sla_eligible_requests as f64 * 100.0, 4) },
+                "service_error_rate": if period_totals.sla_eligible_requests == 0 { 0.0 } else { dashboard_round_f64(period_totals.error_requests as f64 / period_totals.sla_eligible_requests as f64 * 100.0, 4) },
+                "user_error_rate": if period_totals.requests == 0 { 0.0 } else { dashboard_round_f64(period_totals.user_error_requests as f64 / period_totals.requests as f64 * 100.0, 4) },
                 "error_requests": period_totals.error_requests,
+                "service_error_requests": period_totals.error_requests,
+                "user_error_requests": period_totals.user_error_requests,
                 "fallback_count": 0,
                 "total_requests": period_totals.requests,
+                "sla_eligible_requests": period_totals.sla_eligible_requests,
             },
             "cost_stats": {
                 "total_cost": dashboard_round_f64(period_totals.total_cost_usd, 4),

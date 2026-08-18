@@ -1,5 +1,6 @@
 import apiClient from './client'
 import { cachedRequest, buildCacheKey } from '@/utils/cache'
+import type { RequestOutcomeClass } from '@/features/usage/types'
 
 const REQUEST_DETAIL_PREFETCH_TTL_MS = 5_000
 
@@ -30,8 +31,15 @@ export interface ProviderStatus {
 // 系统健康指标（管理员专用）
 export interface SystemHealth {
   avg_response_time: number
+  /** 兼容字段：语义为服务错误率，不包含用户错误。 */
   error_rate: number
+  /** 兼容字段：语义为服务错误数，不包含用户错误。 */
   error_requests: number
+  sla_eligible_count?: number
+  service_error_count?: number
+  service_error_rate?: number
+  user_error_count?: number
+  user_error_rate?: number
   fallback_count: number
   total_requests: number
 }
@@ -256,6 +264,8 @@ export interface RequestDetail {
   client_is_stream?: boolean
   status_code: number
   status?: string  // pending, streaming, completed, failed, cancelled
+  outcome_class?: RequestOutcomeClass
+  sla_eligible?: boolean
   error_message?: string
   request_error?: RequestErrorDomain | null
   upstream_error?: RequestErrorDomain | null

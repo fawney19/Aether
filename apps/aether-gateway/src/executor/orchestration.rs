@@ -796,8 +796,25 @@ fn standard_text_sync_heartbeat_applies_to_plan_kind(plan_kind: &str) -> bool {
 }
 
 async fn standard_text_sync_heartbeat_should_wrap(state: &AppState, plan_kind: &str) -> bool {
-    standard_text_sync_heartbeat_applies_to_plan_kind(plan_kind)
-        && standard_text_sync_heartbeat_enabled(state).await
+    // A heartbeat response has to commit its HTTP headers before the upstream
+    // request finishes.  The shell therefore hard-codes a 200 status, which
+    // would turn an upstream 4xx (for example OpenAI's
+    // `invalid_request_error`) into a successful HTTP response.  Keep the
+    // configuration reader above for backwards-compatible config handling,
+    // but do not enter this protocol until we have a way to preserve the
+    // terminal status code.
+    let _ = (state, plan_kind);
+    false
+}
+
+/// Whether the synchronous image heartbeat protocol may be used.
+///
+/// This is deliberately disabled for now.  The heartbeat shell commits a
+/// fixed 200 response before the provider result is available, so it cannot
+/// faithfully expose provider/client 4xx statuses.  The legacy config reader
+/// remains available for compatibility and diagnostics.
+async fn openai_image_sync_heartbeat_should_wrap(_state: &AppState) -> bool {
+    false
 }
 
 fn standard_text_sync_heartbeat_client_api_format_for_plan_kind(plan_kind: &str) -> &'static str {
@@ -1329,7 +1346,7 @@ pub(crate) async fn maybe_execute_sync_via_local_image_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    if openai_image_sync_heartbeat_enabled(state).await {
+    if openai_image_sync_heartbeat_should_wrap(state).await {
         let mut attempts = Vec::new();
         while let Some(attempt) = attempt_source.next_execution_attempt().await? {
             attempts.push(attempt);
@@ -1855,6 +1872,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openai_image_sync_heartbeat_config_true_cannot_force_fixed_200_mode() {
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::disabled().with_system_config_values_for_tests([(
+                    ENABLE_OPENAI_IMAGE_SYNC_HEARTBEAT_CONFIG_KEY.to_string(),
+                    json!(true),
+                )]),
+            );
+
+        assert!(!openai_image_sync_heartbeat_should_wrap(&state).await);
+    }
+
+    #[tokio::test]
     async fn openai_image_sync_heartbeat_error_body_includes_upstream_status() {
         let response = Response::builder()
             .status(StatusCode::TOO_MANY_REQUESTS)
@@ -2049,6 +2080,23 @@ mod tests {
         let state = AppState::new().expect("state should build");
 
         assert!(!standard_text_sync_heartbeat_enabled(&state).await);
+    }
+
+    #[tokio::test]
+    async fn standard_text_sync_heartbeat_config_true_cannot_force_fixed_200_mode() {
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::disabled().with_system_config_values_for_tests([(
+                    ENABLE_STANDARD_TEXT_SYNC_HEARTBEAT_CONFIG_KEY.to_string(),
+                    json!(true),
+                )]),
+            );
+
+        assert!(
+            !standard_text_sync_heartbeat_should_wrap(&state, TEST_STANDARD_TEXT_SYNC_PLAN_KIND,)
+                .await
+        );
     }
 
     #[tokio::test]

@@ -294,7 +294,7 @@ impl UsageReadRepository for MysqlUsageReadRepository {
         let repository = self
             .materialize_read_model(
                 Self::range(query.created_from_unix_secs, query.created_until_unix_secs)
-                    .completed_only(),
+                    .success_only(),
             )
             .await?;
         repository

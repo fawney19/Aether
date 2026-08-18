@@ -37,10 +37,11 @@ pub(crate) async fn build_admin_key_health_payload(
         .unwrap_or_default();
 
     let request_count = key.request_count.unwrap_or(0);
+    let sla_eligible_count = key.sla_eligible_count.unwrap_or(0);
     let success_count = key.success_count.unwrap_or(0);
     let error_count = key
         .error_count
-        .unwrap_or(request_count.saturating_sub(success_count));
+        .unwrap_or(sla_eligible_count.saturating_sub(success_count));
     let avg_response_time_ms = match (key.total_response_time_ms, success_count) {
         (Some(total), successes) if successes > 0 => total as f64 / successes as f64,
         _ => 0.0,
@@ -51,10 +52,13 @@ pub(crate) async fn build_admin_key_health_payload(
         "key_is_active": key.is_active,
         "key_statistics": {
             "request_count": request_count,
+            "sla_eligible_count": sla_eligible_count,
             "success_count": success_count,
             "error_count": error_count,
-            "success_rate": if request_count > 0 {
-                success_count as f64 / request_count as f64
+            "service_error_count": error_count,
+            "user_error_count": key.user_error_count.unwrap_or(0),
+            "success_rate": if sla_eligible_count > 0 {
+                success_count as f64 / sla_eligible_count as f64
             } else {
                 0.0
             },

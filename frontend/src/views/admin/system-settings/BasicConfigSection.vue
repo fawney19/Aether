@@ -166,7 +166,7 @@
               同步生图心跳
             </Label>
             <p class="text-xs text-muted-foreground">
-              开启后同步生图外层 HTTP 状态固定为 200，上游失败需读取响应体 error.upstream_status
+              当前为保证错误透传，已停用同步生图心跳；错误使用真实 HTTP 4xx/5xx 状态码
             </p>
           </div>
         </div>
@@ -187,7 +187,7 @@
               标准文本非流式心跳
             </Label>
             <p class="text-xs text-muted-foreground">
-              开启后标准文本非流式接口外层 HTTP 状态固定为 200，上游失败需读取响应体 error.upstream_status
+              当前为保证错误透传，已停用标准文本非流式心跳；错误使用真实 HTTP 4xx/5xx 状态码
             </p>
           </div>
         </div>

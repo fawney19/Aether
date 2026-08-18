@@ -36,6 +36,9 @@
       :avg-first-byte-ms="monitor.avg_first_byte_ms"
       :avg-tps="monitor.avg_tps"
       :total-attempts="monitor.total_attempts"
+      :sla-eligible-count="monitor.sla_eligible_count"
+      :service-error-count="monitor.service_error_count ?? monitor.failed_count"
+      :user-error-count="monitor.user_error_count"
       :success-rate="monitor.success_rate"
     />
 

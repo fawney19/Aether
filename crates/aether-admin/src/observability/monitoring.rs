@@ -1,7 +1,7 @@
 use aether_data_contracts::repository::{
     candidates::{DecisionTrace, DecisionTraceCandidate, RequestCandidateStatus},
     provider_catalog::StoredProviderCatalogKey,
-    usage::StoredRequestUsageAudit,
+    usage::{StoredRequestUsageAudit, StoredUsageAuditSummary},
 };
 use axum::{
     body::Body,
@@ -107,24 +107,48 @@ pub fn build_admin_monitoring_user_behavior_payload_response(
     user_id: String,
     days: i64,
     event_counts: BTreeMap<String, u64>,
-    failed_requests: u64,
-    success_requests: u64,
+    summary: &StoredUsageAuditSummary,
     suspicious_activities: u64,
 ) -> Response<Body> {
-    let total_requests = success_requests.saturating_add(failed_requests);
-    let success_rate = if total_requests == 0 {
+    // Request metrics must come from the usage outcome read model. In particular, HTTP 400 is a
+    // user error: it contributes to total/user-error counts, but is excluded from the SLA
+    // denominator and service-error rate.
+    let total_requests = summary.total_requests;
+    let sla_eligible_count = summary.sla_eligible_requests;
+    let service_error_count = summary.error_requests;
+    let user_error_count = summary.user_error_requests;
+    let success_count = sla_eligible_count.saturating_sub(service_error_count);
+    let success_rate = if sla_eligible_count == 0 {
         0.0
     } else {
-        success_requests as f64 / total_requests as f64
+        success_count as f64 / sla_eligible_count as f64
+    };
+    let service_error_rate = if sla_eligible_count == 0 {
+        0.0
+    } else {
+        service_error_count as f64 / sla_eligible_count as f64
+    };
+    let user_error_rate = if total_requests == 0 {
+        0.0
+    } else {
+        user_error_count as f64 / total_requests as f64
     };
 
     Json(json!({
         "user_id": user_id,
         "period_days": days,
         "event_counts": event_counts,
-        "failed_requests": failed_requests,
-        "success_requests": success_requests,
+        "total_requests": total_requests,
+        "sla_eligible_count": sla_eligible_count,
+        "success_count": success_count,
+        "service_error_count": service_error_count,
+        "user_error_count": user_error_count,
+        // Compatibility aliases used by existing admin monitoring clients.
+        "failed_requests": service_error_count,
+        "success_requests": success_count,
         "success_rate": success_rate,
+        "service_error_rate": service_error_rate,
+        "user_error_rate": user_error_rate,
         "suspicious_activities": suspicious_activities,
         "analysis_time": chrono::Utc::now().to_rfc3339(),
     }))
@@ -243,6 +267,7 @@ pub fn build_admin_monitoring_trace_provider_stats_payload_response(
     total_attempts: usize,
     success_count: usize,
     failed_count: usize,
+    user_error_count: usize,
     cancelled_count: usize,
     skipped_count: usize,
     pending_count: usize,
@@ -256,6 +281,9 @@ pub fn build_admin_monitoring_trace_provider_stats_payload_response(
         "total_attempts": total_attempts,
         "success_count": success_count,
         "failed_count": failed_count,
+        "service_error_count": failed_count,
+        "user_error_count": user_error_count,
+        "sla_eligible_count": success_count.saturating_add(failed_count),
         "cancelled_count": cancelled_count,
         "skipped_count": skipped_count,
         "pending_count": pending_count,
@@ -283,6 +311,7 @@ pub fn build_admin_monitoring_trace_request_payload_response_with_key_accounts(
     usage: Option<&StoredRequestUsageAudit>,
     key_accounts: &BTreeMap<String, AdminMonitoringKeyAccountDisplay>,
 ) -> Response<Body> {
+    let outcome = trace.final_status.outcome_class();
     let usage_candidate_id =
         usage.and_then(|item| resolve_admin_monitoring_usage_candidate_id(trace, item));
     let candidates = trace
@@ -307,6 +336,8 @@ pub fn build_admin_monitoring_trace_request_payload_response_with_key_accounts(
         "request_path_and_query": admin_monitoring_trace_request_path_and_query(usage),
         "total_candidates": trace.total_candidates,
         "final_status": trace.final_status,
+        "outcome_class": outcome.as_str(),
+        "sla_eligible": outcome.is_sla_eligible(),
         "total_latency_ms": trace.total_latency_ms,
         "candidates": candidates,
     }))
@@ -330,6 +361,14 @@ pub fn build_admin_monitoring_trace_request_candidate_payload_with_key_accounts(
     key_accounts: &BTreeMap<String, AdminMonitoringKeyAccountDisplay>,
 ) -> Value {
     let candidate = &item.candidate;
+    let outcome = candidate.outcome_class();
+    let display_status = if outcome.is_user_error() {
+        json!("user_error")
+    } else if outcome.is_service_error() {
+        json!("failed")
+    } else {
+        json!(candidate.status)
+    };
     let key_account = candidate
         .key_id
         .as_deref()
@@ -361,7 +400,9 @@ pub fn build_admin_monitoring_trace_request_candidate_payload_with_key_accounts(
         "key_oauth_plan_type": key_account.and_then(|item| item.oauth_plan_type.clone()),
         "key_capabilities": item.provider_key_capabilities,
         "required_capabilities": candidate.required_capabilities,
-        "status": candidate.status,
+        "status": display_status,
+        "outcome_class": outcome.as_str(),
+        "sla_eligible": outcome.is_sla_eligible(),
         "skip_reason": candidate.skip_reason,
         "is_cached": candidate.is_cached,
         "status_code": candidate.status_code,

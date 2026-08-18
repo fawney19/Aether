@@ -28,6 +28,16 @@ type = "int64"
 default = 0
 
 [[table.stats_hourly.columns]]
+name = "sla_eligible_requests"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "user_error_requests"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
 name = "input_tokens"
 type = "int64"
 default = 0
@@ -110,6 +120,16 @@ default = 0
 
 [[table.stats_summary.columns]]
 name = "all_time_error_requests"
+type = "int64"
+default = 0
+
+[[table.stats_summary.columns]]
+name = "all_time_sla_eligible_requests"
+type = "int64"
+default = 0
+
+[[table.stats_summary.columns]]
+name = "all_time_user_error_requests"
 type = "int64"
 default = 0
 
@@ -202,6 +222,16 @@ default = 0
 
 [[table.stats_hourly_user.columns]]
 name = "error_requests"
+type = "int64"
+default = 0
+
+[[table.stats_hourly_user.columns]]
+name = "sla_eligible_requests"
+type = "int64"
+default = 0
+
+[[table.stats_hourly_user.columns]]
+name = "user_error_requests"
 type = "int64"
 default = 0
 
@@ -466,6 +496,16 @@ default = 0
 
 [[table.stats_daily.columns]]
 name = "error_requests"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "sla_eligible_requests"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "user_error_requests"
 type = "int64"
 default = 0
 
@@ -753,6 +793,16 @@ type = "int64"
 default = 0
 
 [[table.stats_daily_api_key.columns]]
+name = "sla_eligible_requests"
+type = "int64"
+default = 0
+
+[[table.stats_daily_api_key.columns]]
+name = "user_error_requests"
+type = "int64"
+default = 0
+
+[[table.stats_daily_api_key.columns]]
 name = "input_tokens"
 type = "int64"
 default = 0
@@ -874,6 +924,16 @@ default = 0
 
 [[table.stats_user_daily.columns]]
 name = "error_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "sla_eligible_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "user_error_requests"
 type = "int64"
 default = 0
 
@@ -1372,6 +1432,16 @@ type = "int64"
 default = 0
 
 [[table.stats_user_summary.columns]]
+name = "all_time_sla_eligible_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_summary.columns]]
+name = "all_time_user_error_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_summary.columns]]
 name = "all_time_input_tokens"
 type = "int64"
 default = 0
@@ -1469,6 +1539,16 @@ default = 0
 
 [[table.stats_user_daily_model.columns]]
 name = "success_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "sla_eligible_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "user_error_requests"
 type = "int64"
 default = 0
 
@@ -1608,6 +1688,16 @@ type = "int64"
 default = 0
 
 [[table.stats_user_daily_provider.columns]]
+name = "sla_eligible_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "user_error_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
 name = "input_tokens"
 type = "int64"
 default = 0
@@ -1739,6 +1829,16 @@ default = 0
 
 [[table.stats_user_daily_api_format.columns]]
 name = "success_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "sla_eligible_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "user_error_requests"
 type = "int64"
 default = 0
 

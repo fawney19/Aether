@@ -2368,11 +2368,12 @@ fn usage_sql_rebuild_matches_online_api_key_usage_semantics() {
 fn usage_sql_rebuild_matches_online_provider_key_usage_semantics() {
     let sql = normalize_newlines(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL);
     assert!(sql.contains("COUNT(*)::BIGINT"));
-    assert!(sql.contains("NULLIF(BTRIM(error_message), '') IS NULL"));
+    assert!(sql.contains("outcome_class = 'success'"));
+    assert!(sql.contains("outcome_class = 'service_error'"));
+    assert!(sql.contains("outcome_class = 'user_error'"));
     assert!(sql.contains("GREATEST(\n          COALESCE(total_tokens, 0),"));
     assert!(!sql.contains("COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)"));
     assert!(sql.contains("AND BTRIM(provider_api_key_id) <> ''"));
-    assert!(sql.contains("WHEN status NOT IN ('pending', 'streaming')"));
     assert!(sql.contains("WHEN status IN ('pending', 'streaming') THEN 0"));
 }
 
@@ -2451,6 +2452,7 @@ fn usage_sql_summarize_usage_error_distribution_supports_daily_aggregates() {
     assert!(
         source.contains("split_dashboard_daily_aggregate_range(start_utc, end_utc, cutoff_utc)")
     );
+    assert!(source.contains("\"usage\".outcome_class = 'service_error'"));
 }
 
 #[test]
@@ -2459,6 +2461,8 @@ fn usage_sql_summarize_usage_performance_percentiles_supports_daily_aggregates()
     assert!(source.contains("summarize_usage_performance_percentiles_from_daily_aggregates"));
     assert!(source.contains("FROM stats_daily"));
     assert!(source.contains("p50_response_time_ms"));
+    assert!(source.contains("SUCCESS_PERCENTILE_PREDICATE"));
+    assert!(source.contains("status_code IS NULL OR \"usage\".status_code < 400"));
     assert!(
         source.contains("split_dashboard_daily_aggregate_range(start_utc, end_utc, cutoff_utc)")
     );
@@ -3719,7 +3723,9 @@ fn first_byte_provider_counter_batch_prepares_all_columns_before_query_building(
         request_count_delta: 1,
         total_requests_delta: 2,
         success_count_delta: 3,
+        sla_eligible_count_delta: 0,
         error_count_delta: 4,
+        user_error_count_delta: 0,
         dns_failures_delta: 5,
         stream_errors_delta: 6,
         total_tokens_delta: 7,
@@ -3772,7 +3778,9 @@ fn first_byte_provider_counter_batch_prepares_all_columns_before_query_building(
         request_count_delta: 0,
         total_requests_delta: 0,
         success_count_delta: 0,
+        sla_eligible_count_delta: 0,
         error_count_delta: 0,
+        user_error_count_delta: 0,
         dns_failures_delta: 0,
         stream_errors_delta: 0,
         total_tokens_delta: 0,

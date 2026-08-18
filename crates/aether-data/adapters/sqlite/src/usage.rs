@@ -309,6 +309,8 @@ INSERT INTO "usage" (
   response_time_ms,
   first_byte_time_ms,
   status,
+  outcome_class,
+  sla_eligible,
   billing_status,
   request_metadata,
   candidate_id,
@@ -325,7 +327,7 @@ INSERT INTO "usage" (
 ) VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?
+  ?, ?, ?
 )
 ON CONFLICT (request_id) DO UPDATE SET
   user_id = excluded.user_id,
@@ -399,6 +401,16 @@ ON CONFLICT (request_id) DO UPDATE SET
         WHEN "usage".status = 'streaming' AND excluded.status = 'pending' THEN "usage".status_code
         WHEN "usage".status = 'streaming' AND excluded.status = 'streaming' AND excluded.status_code IS NULL THEN "usage".status_code
         ELSE excluded.status_code
+    END,
+    outcome_class = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".outcome_class
+        WHEN "usage".status = 'streaming' AND excluded.status = 'pending' THEN "usage".outcome_class
+        ELSE excluded.outcome_class
+    END,
+    sla_eligible = CASE
+        WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".sla_eligible
+        WHEN "usage".status = 'streaming' AND excluded.status = 'pending' THEN "usage".sla_eligible
+        ELSE excluded.sla_eligible
     END,
     error_message = CASE
         WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND excluded.status IN ('pending', 'streaming') THEN "usage".error_message
@@ -475,6 +487,8 @@ INSERT INTO "usage" (
   response_time_ms,
   first_byte_time_ms,
   status,
+  outcome_class,
+  sla_eligible,
   billing_status,
   request_metadata,
   created_at,
@@ -533,6 +547,8 @@ const UPSERT_FIRST_BYTE_BATCH_UPDATE_SUFFIX_SQL: &str = r#",
     ELSE excluded.first_byte_time_ms
   END,
   status = 'streaming',
+  outcome_class = 'in_flight',
+  sla_eligible = 0,
   request_metadata = COALESCE("usage".request_metadata, excluded.request_metadata),
   updated_at_unix_secs = MAX(
     COALESCE(NULLIF("usage".updated_at_unix_secs, 0), 0),
@@ -760,50 +776,38 @@ MAX(
 
 const SQLITE_USAGE_SUCCESS_FLAG_EXPR: &str = r#"
 CASE
-  WHEN status <> 'failed'
-       AND (status_code IS NULL OR status_code < 400)
-       AND error_message IS NULL
-  THEN 1
+  WHEN outcome_class = 'success' THEN 1
   ELSE 0
 END
 "#;
 
 const SQLITE_PROVIDER_KEY_SUCCESS_FLAG_EXPR: &str = r#"
 CASE
-  WHEN status IN ('completed', 'success', 'ok', 'billed', 'settled')
-       AND (status_code IS NULL OR status_code < 400)
-       AND (error_message IS NULL OR TRIM(error_message) = '')
-  THEN 1
+  WHEN outcome_class = 'success' THEN 1
   ELSE 0
 END
 "#;
 
 const SQLITE_PROVIDER_KEY_ERROR_FLAG_EXPR: &str = r#"
 CASE
-  WHEN status NOT IN ('pending', 'streaming')
-       AND NOT (
-         status IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
-         AND (error_message IS NULL OR TRIM(error_message) = '')
-       )
-  THEN 1
+  WHEN outcome_class = 'service_error' THEN 1
   ELSE 0
 END
 "#;
 
-const SQLITE_MONITORING_ERROR_PREDICATE: &str = r#"
-(
-  LOWER(TRIM(COALESCE(status, ''))) IN ('failed', 'error')
-  OR (error_category IS NOT NULL AND TRIM(error_category) <> '')
+const SQLITE_MONITORING_ERROR_PREDICATE: &str = "outcome_class = 'service_error'";
+
+// Preserve percentile samples for pre-migration completed rows while excluding HTTP 400/user
+// errors. New rows use the canonical outcome class directly.
+const SQLITE_SUCCESS_PERCENTILE_PREDICATE: &str = r#"(
+  outcome_class = 'success'
   OR (
-    TRIM(COALESCE(status, '')) = ''
-    AND (
-      COALESCE(status_code, 0) >= 400
-      OR (error_message IS NOT NULL AND TRIM(error_message) <> '')
-    )
+    outcome_class = 'in_flight'
+    AND LOWER(TRIM(COALESCE(status, ''))) = 'completed'
+    AND (status_code IS NULL OR status_code < 400)
+    AND TRIM(COALESCE(error_message, '')) = ''
   )
-)
-"#;
+)"#;
 
 const SQLITE_FINALIZED_USAGE_PREDICATE: &str = r#"
 status NOT IN ('pending', 'streaming')
@@ -887,11 +891,7 @@ AND LOWER(TRIM(COALESCE(provider_name, ''))) NOT IN ('unknown', 'unknow'))",
     }
     if query.error_only {
         push_sqlite_usage_where(builder, has_where);
-        builder.push(
-            "(status = 'failed' \
-OR COALESCE(status_code, 0) >= 400 \
-OR (error_message IS NOT NULL AND TRIM(error_message) <> ''))",
-        );
+        builder.push("outcome_class = 'service_error'");
     }
 }
 
@@ -1139,6 +1139,7 @@ fn decode_sqlite_usage_audit_summary_row(
 ) -> Result<StoredUsageAuditSummary, DataLayerError> {
     Ok(StoredUsageAuditSummary {
         total_requests: sqlite_aggregate_u64(row, "total_requests")?,
+        sla_eligible_requests: sqlite_aggregate_u64(row, "sla_eligible_requests")?,
         input_tokens: sqlite_aggregate_u64(row, "input_tokens")?,
         output_tokens: sqlite_aggregate_u64(row, "output_tokens")?,
         recorded_total_tokens: sqlite_aggregate_u64(row, "recorded_total_tokens")?,
@@ -1158,6 +1159,7 @@ fn decode_sqlite_usage_audit_summary_row(
         cache_read_cost_usd: sqlite_real(row, "cache_read_cost_usd")?,
         total_response_time_ms: sqlite_real(row, "total_response_time_ms")?,
         error_requests: sqlite_aggregate_u64(row, "error_requests")?,
+        user_error_requests: sqlite_aggregate_u64(row, "user_error_requests")?,
     })
 }
 
@@ -1186,8 +1188,16 @@ fn decode_sqlite_usage_aggregation_row(
         total_cost_usd: sqlite_real(row, "total_cost_usd")?,
         actual_total_cost_usd: sqlite_real(row, "actual_total_cost_usd")?,
         avg_response_time_ms: sqlite_optional_real(row, "avg_response_time_ms")?,
+        sla_eligible_count: row
+            .try_get::<Option<i64>, _>("sla_eligible_count")
+            .map_sql_err()?
+            .map(|value| value.max(0) as u64),
         success_count: row
             .try_get::<Option<i64>, _>("success_count")
+            .map_sql_err()?
+            .map(|value| value.max(0) as u64),
+        user_error_count: row
+            .try_get::<Option<i64>, _>("user_error_count")
             .map_sql_err()?
             .map(|value| value.max(0) as u64),
     })
@@ -1558,8 +1568,7 @@ WITH filtered_usage AS (
     response_time_ms IS NOT NULL AS has_response_time,
     first_byte_time_ms IS NOT NULL AS has_first_byte_time,
     CASE
-      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND (status_code IS NULL OR status_code < 400)
+      WHEN outcome_class = 'success'
       THEN 1
       ELSE 0
     END AS success_flag
@@ -1691,8 +1700,7 @@ WITH filtered_usage AS (
     response_time_ms IS NOT NULL AS has_response_time,
     first_byte_time_ms IS NOT NULL AS has_first_byte_time,
     CASE
-      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND (status_code IS NULL OR status_code < 400)
+      WHEN outcome_class = 'success'
       THEN 1
       ELSE 0
     END AS success_flag
@@ -1915,6 +1923,7 @@ LEFT JOIN first_byte_percentiles ON first_byte_percentiles.provider_id = provide
             r#"
 SELECT
   COUNT(*) AS total_requests,
+  COALESCE(SUM(CASE WHEN sla_eligible <> 0 THEN 1 ELSE 0 END), 0) AS sla_eligible_requests,
   COALESCE(SUM(MAX(COALESCE(input_tokens, 0), 0)), 0) AS input_tokens,
   COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
   COALESCE(SUM({total_tokens_expr}), 0) AS recorded_total_tokens,
@@ -1932,13 +1941,8 @@ SELECT
   COALESCE(SUM(COALESCE(CAST(cache_read_cost_usd AS REAL), 0)), 0)
     AS cache_read_cost_usd,
   COALESCE(SUM(MAX(COALESCE(response_time_ms, 0), 0)), 0) AS total_response_time_ms,
-  COALESCE(SUM(
-    CASE
-      WHEN COALESCE(status_code, 0) >= 400
-        OR (error_message IS NOT NULL AND TRIM(error_message) <> '')
-      THEN 1 ELSE 0
-    END
-  ), 0) AS error_requests
+  COALESCE(SUM(CASE WHEN outcome_class = 'service_error' THEN 1 ELSE 0 END), 0) AS error_requests,
+  COALESCE(SUM(CASE WHEN outcome_class = 'user_error' THEN 1 ELSE 0 END), 0) AS user_error_requests
 FROM "usage"
 LEFT JOIN usage_settlement_snapshots AS settlement
   ON settlement.request_id = "usage".request_id
@@ -1978,10 +1982,22 @@ LEFT JOIN usage_settlement_snapshots AS settlement
         };
         let success_count_expr = if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider)
         {
-            "COALESCE(SUM(CASE WHEN status IN ('completed', 'success', 'ok', 'billed', 'settled') AND (status_code IS NULL OR status_code < 400) THEN 1 ELSE 0 END), 0)"
+            "COALESCE(SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END), 0)"
         } else {
             "NULL"
         };
+        let sla_eligible_count_expr =
+            if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider) {
+                "COALESCE(SUM(CASE WHEN sla_eligible <> 0 THEN 1 ELSE 0 END), 0)"
+            } else {
+                "NULL"
+            };
+        let user_error_count_expr =
+            if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider) {
+                "COALESCE(SUM(CASE WHEN outcome_class = 'user_error' THEN 1 ELSE 0 END), 0)"
+            } else {
+                "NULL"
+            };
 
         let mut builder = QueryBuilder::<Sqlite>::new(format!(
             r#"
@@ -2004,7 +2020,9 @@ SELECT
   COALESCE(SUM(COALESCE(CAST(actual_total_cost_usd AS REAL), 0)), 0)
     AS actual_total_cost_usd,
   {avg_response_expr} AS avg_response_time_ms,
-  {success_count_expr} AS success_count
+  {sla_eligible_count_expr} AS sla_eligible_count,
+  {success_count_expr} AS success_count,
+  {user_error_count_expr} AS user_error_count
 FROM "usage"
 LEFT JOIN usage_settlement_snapshots AS settlement
   ON settlement.request_id = "usage".request_id
@@ -2167,6 +2185,7 @@ ORDER BY "usage".user_id ASC
                 r#"
 SELECT
   COALESCE(SUM(total_requests), 0) AS total_requests,
+  COALESCE(SUM(sla_eligible_requests), 0) AS sla_eligible_requests,
   COALESCE(SUM(input_tokens), 0) AS input_tokens,
   COALESCE(SUM(input_tokens), 0) AS effective_input_tokens,
   COALESCE(SUM(output_tokens), 0) AS output_tokens,
@@ -2179,6 +2198,7 @@ SELECT
   COALESCE(SUM(COALESCE(CAST(total_cost AS REAL), 0)), 0) AS total_cost_usd,
   COALESCE(SUM(COALESCE(CAST(total_cost AS REAL), 0)), 0) AS actual_total_cost_usd,
   COALESCE(SUM(error_requests), 0) AS error_requests,
+  COALESCE(SUM(user_error_requests), 0) AS user_error_requests,
   0.0 AS response_time_sum_ms,
   0 AS response_time_samples
 FROM stats_user_daily
@@ -2198,6 +2218,7 @@ WHERE user_id = ?
                 r#"
 SELECT
   COALESCE(SUM(total_requests), 0) AS total_requests,
+  COALESCE(SUM(sla_eligible_requests), 0) AS sla_eligible_requests,
   COALESCE(SUM(input_tokens), 0) AS input_tokens,
   COALESCE(SUM(input_tokens), 0) AS effective_input_tokens,
   COALESCE(SUM(output_tokens), 0) AS output_tokens,
@@ -2210,6 +2231,7 @@ SELECT
   COALESCE(SUM(COALESCE(CAST(total_cost AS REAL), 0)), 0) AS total_cost_usd,
   COALESCE(SUM(COALESCE(CAST(actual_total_cost AS REAL), 0)), 0) AS actual_total_cost_usd,
   COALESCE(SUM(error_requests), 0) AS error_requests,
+  COALESCE(SUM(user_error_requests), 0) AS user_error_requests,
   0.0 AS response_time_sum_ms,
   0 AS response_time_samples
 FROM stats_daily
@@ -2231,6 +2253,7 @@ WHERE "date" >= ?
 
         Ok(Some(StoredUsageDashboardSummary {
             total_requests,
+            sla_eligible_requests: sqlite_aggregate_u64(&row, "sla_eligible_requests")?,
             input_tokens: sqlite_aggregate_u64(&row, "input_tokens")?,
             effective_input_tokens: sqlite_aggregate_u64(&row, "effective_input_tokens")?,
             output_tokens: sqlite_aggregate_u64(&row, "output_tokens")?,
@@ -2243,6 +2266,7 @@ WHERE "date" >= ?
             total_cost_usd: sqlite_real(&row, "total_cost_usd")?,
             actual_total_cost_usd: sqlite_real(&row, "actual_total_cost_usd")?,
             error_requests: sqlite_aggregate_u64(&row, "error_requests")?,
+            user_error_requests: sqlite_aggregate_u64(&row, "user_error_requests")?,
             response_time_sum_ms: sqlite_real(&row, "response_time_sum_ms")?,
             response_time_samples: sqlite_aggregate_u64(&row, "response_time_samples")?,
         }))
@@ -2695,6 +2719,7 @@ ORDER BY created_at_unix_ms ASC, id ASC
             r#"
 SELECT
   COUNT(*) AS total_requests,
+  COALESCE(SUM(CASE WHEN sla_eligible <> 0 THEN 1 ELSE 0 END), 0) AS sla_eligible_requests,
   COALESCE(SUM(MAX(COALESCE(input_tokens, 0), 0)), 0) AS input_tokens,
   COALESCE(SUM({effective_input_expr}), 0) AS effective_input_tokens,
   COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
@@ -2709,8 +2734,10 @@ SELECT
   COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd,
   COALESCE(SUM(COALESCE(CAST(actual_total_cost_usd AS REAL), 0)), 0)
     AS actual_total_cost_usd,
-  COALESCE(SUM(CASE WHEN COALESCE(status_code, 0) >= 400 OR status = 'failed' THEN 1 ELSE 0 END), 0)
+  COALESCE(SUM(CASE WHEN outcome_class = 'service_error' THEN 1 ELSE 0 END), 0)
     AS error_requests,
+  COALESCE(SUM(CASE WHEN outcome_class = 'user_error' THEN 1 ELSE 0 END), 0)
+    AS user_error_requests,
   COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL THEN MAX(COALESCE(response_time_ms, 0), 0) ELSE 0 END), 0)
     AS response_time_sum_ms,
   COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL THEN 1 ELSE 0 END), 0)
@@ -2742,6 +2769,7 @@ LEFT JOIN usage_settlement_snapshots AS settlement
         let row = builder.build().fetch_one(&self.pool).await.map_sql_err()?;
         Ok(StoredUsageDashboardSummary {
             total_requests: sqlite_aggregate_u64(&row, "total_requests")?,
+            sla_eligible_requests: sqlite_aggregate_u64(&row, "sla_eligible_requests")?,
             input_tokens: sqlite_aggregate_u64(&row, "input_tokens")?,
             effective_input_tokens: sqlite_aggregate_u64(&row, "effective_input_tokens")?,
             output_tokens: sqlite_aggregate_u64(&row, "output_tokens")?,
@@ -2754,6 +2782,7 @@ LEFT JOIN usage_settlement_snapshots AS settlement
             total_cost_usd: sqlite_real(&row, "total_cost_usd")?,
             actual_total_cost_usd: sqlite_real(&row, "actual_total_cost_usd")?,
             error_requests: sqlite_aggregate_u64(&row, "error_requests")?,
+            user_error_requests: sqlite_aggregate_u64(&row, "user_error_requests")?,
             response_time_sum_ms: sqlite_real(&row, "response_time_sum_ms")?,
             response_time_samples: sqlite_aggregate_u64(&row, "response_time_samples")?,
         })
@@ -2894,6 +2923,7 @@ ORDER BY request_count DESC, provider_name ASC
 SELECT
   {group_expr} AS group_key,
   COUNT(*) AS request_count,
+  COALESCE(SUM(CASE WHEN sla_eligible <> 0 THEN 1 ELSE 0 END), 0) AS sla_eligible_count,
   COALESCE(SUM(MAX(COALESCE(input_tokens, 0), 0)), 0) AS input_tokens,
   COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens,
   COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
@@ -2909,6 +2939,7 @@ SELECT
   COALESCE(SUM(COALESCE(CAST(actual_total_cost_usd AS REAL), 0)), 0)
     AS actual_total_cost_usd,
   COALESCE(SUM({success_flag_expr}), 0) AS success_count,
+  COALESCE(SUM(CASE WHEN outcome_class = 'user_error' THEN 1 ELSE 0 END), 0) AS user_error_count,
   COALESCE(SUM(CASE WHEN {success_flag_expr} = 1 AND response_time_ms IS NOT NULL THEN MAX(COALESCE(response_time_ms, 0), 0) ELSE 0 END), 0)
     AS response_time_sum_ms,
   COALESCE(SUM(CASE WHEN {success_flag_expr} = 1 AND response_time_ms IS NOT NULL THEN 1 ELSE 0 END), 0)
@@ -2976,6 +3007,7 @@ LEFT JOIN usage_settlement_snapshots AS settlement
                 Ok(StoredUsageBreakdownSummaryRow {
                     group_key: row.try_get("group_key").map_sql_err()?,
                     request_count: sqlite_aggregate_u64(row, "request_count")?,
+                    sla_eligible_count: sqlite_aggregate_u64(row, "sla_eligible_count")?,
                     input_tokens: sqlite_aggregate_u64(row, "input_tokens")?,
                     total_tokens: sqlite_aggregate_u64(row, "total_tokens")?,
                     output_tokens: sqlite_aggregate_u64(row, "output_tokens")?,
@@ -2994,6 +3026,7 @@ LEFT JOIN usage_settlement_snapshots AS settlement
                     total_cost_usd: sqlite_real(row, "total_cost_usd")?,
                     actual_total_cost_usd: sqlite_real(row, "actual_total_cost_usd")?,
                     success_count: sqlite_aggregate_u64(row, "success_count")?,
+                    user_error_count: sqlite_aggregate_u64(row, "user_error_count")?,
                     response_time_sum_ms: sqlite_real(row, "response_time_sum_ms")?,
                     response_time_samples: sqlite_aggregate_u64(row, "response_time_samples")?,
                     overall_response_time_sum_ms: sqlite_real(row, "overall_response_time_sum_ms")?,
@@ -3075,7 +3108,9 @@ FROM "usage"
             query.created_until_unix_secs,
         );
         push_sqlite_usage_where(&mut builder, &mut has_where);
-        builder.push("error_category IS NOT NULL AND TRIM(error_category) <> ''");
+        builder.push(
+            "error_category IS NOT NULL AND TRIM(error_category) <> '' AND outcome_class = 'service_error'",
+        );
         builder.push(
             r#"
 GROUP BY date, error_category
@@ -3122,7 +3157,9 @@ WITH filtered_usage AS (
             query.created_until_unix_secs,
         );
         push_sqlite_usage_where(&mut builder, &mut has_where);
-        builder.push("status = 'completed'");
+        // Percentiles describe successful service latency only. HTTP 400/user-error rows
+        // must not influence the sample population or its SLA-facing performance metrics.
+        builder.push(SQLITE_SUCCESS_PERCENTILE_PREDICATE);
         builder.push(
             r#"
 ),
@@ -3304,29 +3341,27 @@ ORDER BY dates.date ASC
             r#"
 SELECT
   COUNT(*) AS request_count,
+  COALESCE(SUM(CASE WHEN sla_eligible <> 0 THEN 1 ELSE 0 END), 0) AS sla_eligible_count,
   COALESCE(SUM(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
     THEN 1 ELSE 0 END), 0) AS success_count,
+  COALESCE(SUM(CASE WHEN outcome_class = 'user_error' THEN 1 ELSE 0 END), 0) AS user_error_count,
   CASE
     WHEN COALESCE(SUM(CASE
-      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND (status_code IS NULL OR status_code < 400)
+      WHEN outcome_class = 'success'
            AND COALESCE(response_time_ms, 0) > 0
            AND COALESCE(output_tokens, 0) > 0
       THEN MAX(COALESCE(response_time_ms, 0), 0)
       ELSE 0
     END), 0) > 0
     THEN COALESCE(SUM(CASE
-      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND (status_code IS NULL OR status_code < 400)
+      WHEN outcome_class = 'success'
            AND COALESCE(response_time_ms, 0) > 0
            AND COALESCE(output_tokens, 0) > 0
       THEN MAX(COALESCE(output_tokens, 0), 0)
       ELSE 0
     END), 0) * 1000.0 / COALESCE(SUM(CASE
-      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND (status_code IS NULL OR status_code < 400)
+      WHEN outcome_class = 'success'
            AND COALESCE(response_time_ms, 0) > 0
            AND COALESCE(output_tokens, 0) > 0
       THEN MAX(COALESCE(response_time_ms, 0), 0)
@@ -3335,33 +3370,28 @@ SELECT
     ELSE NULL
   END AS avg_output_tps,
   AVG(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
          AND first_byte_time_ms IS NOT NULL
     THEN MAX(COALESCE(first_byte_time_ms, 0), 0)
     ELSE NULL
   END) AS avg_first_byte_time_ms,
   AVG(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
          AND response_time_ms IS NOT NULL
     THEN MAX(COALESCE(response_time_ms, 0), 0)
     ELSE NULL
   END) AS avg_response_time_ms,
   COALESCE(SUM(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
          AND COALESCE(response_time_ms, 0) > 0
          AND COALESCE(output_tokens, 0) > 0
     THEN 1 ELSE 0 END), 0) AS tps_sample_count,
   COALESCE(SUM(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
          AND response_time_ms IS NOT NULL
     THEN 1 ELSE 0 END), 0) AS response_time_sample_count,
   COALESCE(SUM(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
          AND first_byte_time_ms IS NOT NULL
     THEN 1 ELSE 0 END), 0) AS first_byte_sample_count,
   COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL AND response_time_ms >= {slow_threshold} THEN 1 ELSE 0 END), 0)
@@ -3396,7 +3426,9 @@ AND LOWER(TRIM(COALESCE(provider_name, ''))) NOT IN ('unknown', 'pending')",
             .await?;
         let summary = StoredUsageProviderPerformanceSummary {
             request_count: sqlite_aggregate_u64(&summary_row, "request_count")?,
+            sla_eligible_count: sqlite_aggregate_u64(&summary_row, "sla_eligible_count")?,
             success_count: sqlite_aggregate_u64(&summary_row, "success_count")?,
+            user_error_count: sqlite_aggregate_u64(&summary_row, "user_error_count")?,
             avg_output_tps: sqlite_optional_real(&summary_row, "avg_output_tps")?,
             avg_first_byte_time_ms: sqlite_optional_real(&summary_row, "avg_first_byte_time_ms")?,
             avg_response_time_ms: sqlite_optional_real(&summary_row, "avg_response_time_ms")?,
@@ -3419,30 +3451,28 @@ SELECT
   provider_id,
   COALESCE(MAX(NULLIF(TRIM(provider_name), '')), provider_id) AS provider,
   COUNT(*) AS request_count,
+  COALESCE(SUM(CASE WHEN sla_eligible <> 0 THEN 1 ELSE 0 END), 0) AS sla_eligible_count,
   COALESCE(SUM(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
     THEN 1 ELSE 0 END), 0) AS success_count,
+  COALESCE(SUM(CASE WHEN outcome_class = 'user_error' THEN 1 ELSE 0 END), 0) AS user_error_count,
   COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
   CASE
     WHEN COALESCE(SUM(CASE
-      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND (status_code IS NULL OR status_code < 400)
+      WHEN outcome_class = 'success'
            AND COALESCE(response_time_ms, 0) > 0
            AND COALESCE(output_tokens, 0) > 0
       THEN MAX(COALESCE(response_time_ms, 0), 0)
       ELSE 0
     END), 0) > 0
     THEN COALESCE(SUM(CASE
-      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND (status_code IS NULL OR status_code < 400)
+      WHEN outcome_class = 'success'
            AND COALESCE(response_time_ms, 0) > 0
            AND COALESCE(output_tokens, 0) > 0
       THEN MAX(COALESCE(output_tokens, 0), 0)
       ELSE 0
     END), 0) * 1000.0 / COALESCE(SUM(CASE
-      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND (status_code IS NULL OR status_code < 400)
+      WHEN outcome_class = 'success'
            AND COALESCE(response_time_ms, 0) > 0
            AND COALESCE(output_tokens, 0) > 0
       THEN MAX(COALESCE(response_time_ms, 0), 0)
@@ -3451,33 +3481,28 @@ SELECT
     ELSE NULL
   END AS avg_output_tps,
   AVG(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
          AND first_byte_time_ms IS NOT NULL
     THEN MAX(COALESCE(first_byte_time_ms, 0), 0)
     ELSE NULL
   END) AS avg_first_byte_time_ms,
   AVG(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
          AND response_time_ms IS NOT NULL
     THEN MAX(COALESCE(response_time_ms, 0), 0)
     ELSE NULL
   END) AS avg_response_time_ms,
   COALESCE(SUM(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
          AND COALESCE(response_time_ms, 0) > 0
          AND COALESCE(output_tokens, 0) > 0
     THEN 1 ELSE 0 END), 0) AS tps_sample_count,
   COALESCE(SUM(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
          AND response_time_ms IS NOT NULL
     THEN 1 ELSE 0 END), 0) AS response_time_sample_count,
   COALESCE(SUM(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
          AND first_byte_time_ms IS NOT NULL
     THEN 1 ELSE 0 END), 0) AS first_byte_sample_count,
   COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL AND response_time_ms >= {slow_threshold} THEN 1 ELSE 0 END), 0)
@@ -3533,7 +3558,9 @@ AND LOWER(TRIM(COALESCE(provider_name, ''))) NOT IN ('unknown', 'pending')",
                     provider_id,
                     provider: row.try_get("provider").map_sql_err()?,
                     request_count: sqlite_aggregate_u64(row, "request_count")?,
+                    sla_eligible_count: sqlite_aggregate_u64(row, "sla_eligible_count")?,
                     success_count: sqlite_aggregate_u64(row, "success_count")?,
+                    user_error_count: sqlite_aggregate_u64(row, "user_error_count")?,
                     output_tokens: sqlite_aggregate_u64(row, "output_tokens")?,
                     avg_output_tps: sqlite_optional_real(row, "avg_output_tps")?,
                     avg_first_byte_time_ms: sqlite_optional_real(row, "avg_first_byte_time_ms")?,
@@ -3563,30 +3590,28 @@ SELECT
   provider_id,
   COALESCE(MAX(NULLIF(TRIM(provider_name), '')), provider_id) AS provider,
   COUNT(*) AS request_count,
+  COALESCE(SUM(CASE WHEN sla_eligible <> 0 THEN 1 ELSE 0 END), 0) AS sla_eligible_count,
   COALESCE(SUM(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
     THEN 1 ELSE 0 END), 0) AS success_count,
+  COALESCE(SUM(CASE WHEN outcome_class = 'user_error' THEN 1 ELSE 0 END), 0) AS user_error_count,
   COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
   CASE
     WHEN COALESCE(SUM(CASE
-      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND (status_code IS NULL OR status_code < 400)
+      WHEN outcome_class = 'success'
            AND COALESCE(response_time_ms, 0) > 0
            AND COALESCE(output_tokens, 0) > 0
       THEN MAX(COALESCE(response_time_ms, 0), 0)
       ELSE 0
     END), 0) > 0
     THEN COALESCE(SUM(CASE
-      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND (status_code IS NULL OR status_code < 400)
+      WHEN outcome_class = 'success'
            AND COALESCE(response_time_ms, 0) > 0
            AND COALESCE(output_tokens, 0) > 0
       THEN MAX(COALESCE(output_tokens, 0), 0)
       ELSE 0
     END), 0) * 1000.0 / COALESCE(SUM(CASE
-      WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND (status_code IS NULL OR status_code < 400)
+      WHEN outcome_class = 'success'
            AND COALESCE(response_time_ms, 0) > 0
            AND COALESCE(output_tokens, 0) > 0
       THEN MAX(COALESCE(response_time_ms, 0), 0)
@@ -3595,15 +3620,13 @@ SELECT
     ELSE NULL
   END AS avg_output_tps,
   AVG(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
          AND first_byte_time_ms IS NOT NULL
     THEN MAX(COALESCE(first_byte_time_ms, 0), 0)
     ELSE NULL
   END) AS avg_first_byte_time_ms,
   AVG(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
          AND response_time_ms IS NOT NULL
     THEN MAX(COALESCE(response_time_ms, 0), 0)
     ELSE NULL
@@ -3655,7 +3678,9 @@ AND LOWER(TRIM(COALESCE(provider_name, ''))) NOT IN ('unknown', 'pending')",
                         provider_id: row.try_get("provider_id").map_sql_err()?,
                         provider: row.try_get("provider").map_sql_err()?,
                         request_count: sqlite_aggregate_u64(row, "request_count")?,
+                        sla_eligible_count: sqlite_aggregate_u64(row, "sla_eligible_count")?,
                         success_count: sqlite_aggregate_u64(row, "success_count")?,
+                        user_error_count: sqlite_aggregate_u64(row, "user_error_count")?,
                         output_tokens: sqlite_aggregate_u64(row, "output_tokens")?,
                         avg_output_tps: sqlite_optional_real(row, "avg_output_tps")?,
                         avg_first_byte_time_ms: sqlite_optional_real(
@@ -4046,17 +4071,12 @@ WHERE "usage".provider_api_key_id = ?
             r#"
 SELECT
   COUNT(*) AS total_requests,
+  COALESCE(SUM(CASE WHEN sla_eligible <> 0 THEN 1 ELSE 0 END), 0) AS sla_eligible_requests,
   COALESCE(SUM(CASE
-    WHEN LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
+    WHEN outcome_class = 'success'
     THEN 1 ELSE 0 END), 0) AS successful_requests,
-  COALESCE(SUM(CASE
-    WHEN status NOT IN ('pending', 'streaming')
-         AND NOT (
-           LOWER(COALESCE(status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND (status_code IS NULL OR status_code < 400)
-         )
-    THEN 1 ELSE 0 END), 0) AS failed_requests,
+  COALESCE(SUM(CASE WHEN outcome_class = 'service_error' THEN 1 ELSE 0 END), 0) AS failed_requests,
+  COALESCE(SUM(CASE WHEN outcome_class = 'user_error' THEN 1 ELSE 0 END), 0) AS user_error_requests,
   COALESCE(AVG(CASE WHEN response_time_ms IS NOT NULL THEN MAX(COALESCE(response_time_ms, 0), 0) ELSE NULL END), 0)
     AS avg_response_time_ms,
   COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd
@@ -4073,8 +4093,10 @@ WHERE provider_id = ?
 
         Ok(StoredProviderUsageSummary {
             total_requests: sqlite_aggregate_u64(&row, "total_requests")?,
+            sla_eligible_requests: sqlite_aggregate_u64(&row, "sla_eligible_requests")?,
             successful_requests: sqlite_aggregate_u64(&row, "successful_requests")?,
             failed_requests: sqlite_aggregate_u64(&row, "failed_requests")?,
+            user_error_requests: sqlite_aggregate_u64(&row, "user_error_requests")?,
             avg_response_time_ms: sqlite_real(&row, "avg_response_time_ms")?,
             total_cost_usd: sqlite_real(&row, "total_cost_usd")?,
         })
@@ -4279,6 +4301,8 @@ impl SqliteUsageWriteRepository {
                 .push_bind(row.response_time_ms)
                 .push_bind(row.first_byte_time_ms)
                 .push("'streaming'")
+                .push("'in_flight'")
+                .push("0")
                 .push("'pending'")
                 .push_bind(row.request_metadata_json.clone())
                 .push_bind(row.created_at_unix_secs)
@@ -4531,7 +4555,9 @@ WHERE id = ?
 UPDATE provider_api_keys
 SET request_count = 0,
     success_count = 0,
+    sla_eligible_count = 0,
     error_count = 0,
+    user_error_count = 0,
     total_tokens = 0,
     total_cost_usd = 0.0,
     total_response_time_ms = 0,
@@ -4548,7 +4574,9 @@ SELECT
   "usage".provider_api_key_id,
   COUNT(*) AS request_count,
   COALESCE(SUM({success_flag_expr}), 0) AS success_count,
+  COALESCE(SUM(CASE WHEN "usage".sla_eligible <> 0 THEN 1 ELSE 0 END), 0) AS sla_eligible_count,
   COALESCE(SUM({error_flag_expr}), 0) AS error_count,
+  COALESCE(SUM(CASE WHEN "usage".outcome_class = 'user_error' THEN 1 ELSE 0 END), 0) AS user_error_count,
   COALESCE(SUM(CASE
     WHEN "usage".status IN ('pending', 'streaming') THEN 0
     ELSE {total_tokens_expr}
@@ -4584,7 +4612,9 @@ GROUP BY "usage".provider_api_key_id
 UPDATE provider_api_keys
 SET request_count = ?,
     success_count = ?,
+    sla_eligible_count = ?,
     error_count = ?,
+    user_error_count = ?,
     total_tokens = ?,
     total_cost_usd = ?,
     total_response_time_ms = ?,
@@ -4594,7 +4624,9 @@ WHERE id = ?
             )
             .bind(row.try_get::<i64, _>("request_count").map_sql_err()?)
             .bind(row.try_get::<i64, _>("success_count").map_sql_err()?)
+            .bind(row.try_get::<i64, _>("sla_eligible_count").map_sql_err()?)
             .bind(row.try_get::<i64, _>("error_count").map_sql_err()?)
+            .bind(row.try_get::<i64, _>("user_error_count").map_sql_err()?)
             .bind(row.try_get::<i64, _>("total_tokens").map_sql_err()?)
             .bind(sqlite_real(row, "total_cost_usd")?)
             .bind(
@@ -4671,7 +4703,9 @@ WHERE id = ?
 UPDATE "usage"
 SET status = 'completed',
     status_code = 200,
-    error_message = NULL
+    error_message = NULL,
+    outcome_class = 'success',
+    sla_eligible = 1
 WHERE request_id = ?
 "#,
                     )
@@ -4712,6 +4746,8 @@ UPDATE "usage"
 SET status = 'failed',
     status_code = ?,
     error_message = ?,
+    outcome_class = ?,
+    sla_eligible = ?,
     billing_status = 'void',
     finalized_at = ?,
     total_cost_usd = 0.0,
@@ -4721,6 +4757,12 @@ WHERE request_id = ?
                     )
                     .bind(status_code_i64)
                     .bind(&error_message)
+                    .bind(if status_code == 400 {
+                        "user_error"
+                    } else {
+                        "service_error"
+                    })
+                    .bind(status_code != 400)
                     .bind(to_i64(now_unix_secs, "usage finalized_at")?)
                     .bind(&row.request_id)
                     .execute(&mut *tx)
@@ -4738,12 +4780,20 @@ WHERE request_id = ?
 UPDATE "usage"
 SET status = 'failed',
     status_code = ?,
-    error_message = ?
+    error_message = ?,
+    outcome_class = ?,
+    sla_eligible = ?
 WHERE request_id = ?
 "#,
                     )
                     .bind(status_code_i64)
                     .bind(&error_message)
+                    .bind(if status_code == 400 {
+                        "user_error"
+                    } else {
+                        "service_error"
+                    })
+                    .bind(status_code != 400)
                     .bind(&row.request_id)
                     .execute(&mut *tx)
                     .await
@@ -5104,6 +5154,8 @@ fn bind_upsert<'q>(
         .bind(usage.response_time_ms.map(|value| value as i64))
         .bind(usage.first_byte_time_ms.map(|value| value as i64))
         .bind(&usage.status)
+        .bind(usage.outcome_class().as_str())
+        .bind(usage.sla_eligible())
         .bind(&usage.billing_status)
         .bind(request_metadata)
         .bind(usage.candidate_id.as_deref())

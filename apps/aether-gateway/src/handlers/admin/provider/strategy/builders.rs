@@ -202,8 +202,8 @@ pub(crate) async fn build_provider_strategy_stats_response(
     let quota_remaining_usd = provider
         .monthly_quota_usd
         .map(|value| value - monthly_used_usd);
-    let success_rate = if summary.total_requests > 0 {
-        summary.successful_requests as f64 / summary.total_requests as f64
+    let success_rate = if summary.sla_eligible_requests > 0 {
+        summary.successful_requests as f64 / summary.sla_eligible_requests as f64
     } else {
         0.0
     };
@@ -221,8 +221,11 @@ pub(crate) async fn build_provider_strategy_stats_response(
         },
         "usage_stats": {
             "total_requests": summary.total_requests,
+            "sla_eligible_requests": summary.sla_eligible_requests,
             "successful_requests": summary.successful_requests,
             "failed_requests": summary.failed_requests,
+            "service_error_requests": summary.failed_requests,
+            "user_error_requests": summary.user_error_requests,
             "success_rate": success_rate,
             "avg_response_time_ms": (summary.avg_response_time_ms * 100.0).round() / 100.0,
             "total_cost_usd": (summary.total_cost_usd * 10_000.0).round() / 10_000.0,

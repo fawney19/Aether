@@ -152,14 +152,35 @@ impl RequestCandidateReadRepository for MysqlRequestCandidateRepository {
             return Ok(Vec::new());
         }
         let mut builder = QueryBuilder::<MySql>::new(
-            "SELECT endpoint_id, status, COUNT(id) AS count FROM request_candidates",
+            "SELECT endpoint_id, \
+             CASE \
+               WHEN status = 'skipped' THEN 'skipped' \
+               WHEN status_code = 400 THEN 'failed' \
+               WHEN status = 'success' \
+                 AND (status_code IS NULL OR status_code < 400) \
+                 AND TRIM(COALESCE(error_message, '')) = '' THEN 'success' \
+               ELSE 'failed' \
+             END AS status, \
+             COUNT(id) AS count, \
+             SUM(CASE WHEN status <> 'skipped' AND status_code = 400 THEN 1 ELSE 0 END) AS user_error_count, \
+             SUM(CASE WHEN status <> 'skipped' AND (status_code IS NULL OR status_code <> 400) THEN 1 ELSE 0 END) AS sla_eligible_count \
+             FROM request_candidates",
         );
         push_endpoint_in_clause(&mut builder, endpoint_ids);
         builder
             .push(" AND created_at >= ")
             .push_bind(unix_secs_to_ms_i64(since_unix_secs)?)
             .push(" AND status IN ('success', 'failed', 'skipped')")
-            .push(" GROUP BY endpoint_id, status");
+            .push(
+                " GROUP BY endpoint_id, CASE \
+               WHEN status = 'skipped' THEN 'skipped' \
+               WHEN status_code = 400 THEN 'failed' \
+               WHEN status = 'success' \
+                 AND (status_code IS NULL OR status_code < 400) \
+                 AND TRIM(COALESCE(error_message, '')) = '' THEN 'success' \
+               ELSE 'failed' \
+             END",
+            );
         let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
         rows.iter()
             .map(|row| {
@@ -175,6 +196,22 @@ impl RequestCandidateReadRepository for MysqlRequestCandidateRepository {
                             )
                         },
                     )?,
+                    sla_eligible_count: u64::try_from(
+                        row.try_get::<i64, _>("sla_eligible_count").map_sql_err()?,
+                    )
+                    .map_err(|_| {
+                        DataLayerError::UnexpectedValue(
+                            "public health SLA eligible count out of range".to_string(),
+                        )
+                    })?,
+                    user_error_count: u64::try_from(
+                        row.try_get::<i64, _>("user_error_count").map_sql_err()?,
+                    )
+                    .map_err(|_| {
+                        DataLayerError::UnexpectedValue(
+                            "public health user error count out of range".to_string(),
+                        )
+                    })?,
                 })
             })
             .collect()
@@ -706,18 +743,27 @@ fn aggregate_timeline(
                 endpoint_id,
                 segment_idx,
                 total_count: 0,
+                sla_eligible_count: 0,
                 success_count: 0,
                 failed_count: 0,
+                user_error_count: 0,
                 min_created_at_unix_ms: Some(candidate.created_at_unix_ms),
                 max_created_at_unix_ms: Some(candidate.created_at_unix_ms),
             },
         );
         bucket.total_count += 1;
-        if candidate.status == RequestCandidateStatus::Success {
+        let outcome = candidate.outcome_class();
+        if outcome.is_sla_eligible() {
+            bucket.sla_eligible_count += 1;
+        }
+        if outcome.is_success() {
             bucket.success_count += 1;
         }
-        if candidate.status == RequestCandidateStatus::Failed {
+        if outcome.is_service_error() {
             bucket.failed_count += 1;
+        }
+        if outcome.is_user_error() {
+            bucket.user_error_count += 1;
         }
         bucket.min_created_at_unix_ms = bucket
             .min_created_at_unix_ms
@@ -733,8 +779,10 @@ fn aggregate_timeline(
                     endpoint_id: endpoint_id.clone(),
                     segment_idx,
                     total_count: 0,
+                    sla_eligible_count: 0,
                     success_count: 0,
                     failed_count: 0,
+                    user_error_count: 0,
                     min_created_at_unix_ms: None,
                     max_created_at_unix_ms: None,
                 },

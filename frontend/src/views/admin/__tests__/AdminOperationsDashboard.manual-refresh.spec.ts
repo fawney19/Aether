@@ -54,7 +54,7 @@ describe('AdminOperationsDashboard refresh behavior', () => {
     expect(source).toContain('numeric(item.cache_creation_tokens)')
     expect(source).toContain('numeric(item.cache_read_tokens)')
     expect(source).toContain('timeSeries.value.map(seriesTokenTotal)')
-    expect(source).toContain('label="已分类错误"')
+    expect(source).toContain('label="已分类服务错误"')
     expect(source).toContain('errorDistribution.value.reduce(')
   })
 })

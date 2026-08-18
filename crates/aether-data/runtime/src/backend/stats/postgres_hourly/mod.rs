@@ -73,7 +73,9 @@ async fn perform_stats_hourly_aggregation_for_hour(
         .await?;
     let total_requests = row.try_get::<i64, _>("total_requests")?;
     let error_requests = row.try_get::<i64, _>("error_requests")?;
-    let success_requests = total_requests.saturating_sub(error_requests);
+    let sla_eligible_requests = row.try_get::<i64, _>("sla_eligible_requests")?;
+    let user_error_requests = row.try_get::<i64, _>("user_error_requests")?;
+    let success_requests = sla_eligible_requests.saturating_sub(error_requests);
     sqlx::query(UPSERT_STATS_HOURLY_SQL)
         .bind(Uuid::new_v4().to_string())
         .bind(hour_utc)
@@ -111,6 +113,8 @@ async fn perform_stats_hourly_aggregation_for_hour(
         .bind(aggregated_at)
         .bind(aggregated_at)
         .bind(aggregated_at)
+        .bind(sla_eligible_requests)
+        .bind(user_error_requests)
         .execute(&mut *tx)
         .await?;
 

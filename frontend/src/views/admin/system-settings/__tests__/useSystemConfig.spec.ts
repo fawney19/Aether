@@ -89,7 +89,7 @@ describe('useSystemConfig', () => {
     expect(updateSystemConfigMock).toHaveBeenCalledWith(
       'enable_standard_text_sync_heartbeat',
       true,
-      '标准文本非流式心跳开关：开启后外层 HTTP 状态固定为 200，上游失败写入响应体'
+      '标准文本非流式心跳已停用：错误透传真实 HTTP 4xx/5xx 状态码'
     )
     expect(state.hasBasicConfigChanges.value).toBe(false)
   })

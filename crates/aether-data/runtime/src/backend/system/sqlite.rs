@@ -30,6 +30,8 @@ SELECT
     total_requests,
     success_requests,
     error_requests,
+    sla_eligible_requests,
+    user_error_requests,
     input_tokens,
     output_tokens,
     cache_creation_tokens,
@@ -45,6 +47,8 @@ WHERE total_requests <> 0
    OR cache_creation_tokens <> 0
    OR cache_read_tokens <> 0
    OR total_cost <> 0
+   OR sla_eligible_requests <> 0
+   OR user_error_requests <> 0
 ORDER BY "date" ASC
 "#,
     )
@@ -64,6 +68,8 @@ SELECT
     total_requests,
     success_requests,
     error_requests,
+    sla_eligible_requests,
+    user_error_requests,
     input_tokens,
     output_tokens,
     cache_creation_tokens,
@@ -76,6 +82,8 @@ WHERE total_requests <> 0
    OR cache_creation_tokens <> 0
    OR cache_read_tokens <> 0
    OR total_cost <> 0
+   OR sla_eligible_requests <> 0
+   OR user_error_requests <> 0
 ORDER BY user_id ASC, "date" ASC
 "#,
     )
@@ -97,6 +105,8 @@ SELECT
     total_requests,
     success_requests,
     error_requests,
+    sla_eligible_requests,
+    user_error_requests,
     input_tokens,
     output_tokens,
     cache_creation_tokens,
@@ -109,6 +119,8 @@ WHERE total_requests <> 0
    OR cache_creation_tokens <> 0
    OR cache_read_tokens <> 0
    OR total_cost <> 0
+   OR sla_eligible_requests <> 0
+   OR user_error_requests <> 0
 ORDER BY api_key_id ASC, "date" ASC
 "#,
     )
@@ -155,14 +167,17 @@ async fn import_sqlite_admin_system_usage_aggregates(
             r#"
 INSERT INTO stats_daily (
     id, "date", total_requests, success_requests, error_requests,
+    sla_eligible_requests, user_error_requests,
     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
     total_cost, actual_total_cost, is_complete, aggregated_at, created_at, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT ("date") DO UPDATE
 SET total_requests = excluded.total_requests,
     success_requests = excluded.success_requests,
     error_requests = excluded.error_requests,
+    sla_eligible_requests = excluded.sla_eligible_requests,
+    user_error_requests = excluded.user_error_requests,
     input_tokens = excluded.input_tokens,
     output_tokens = excluded.output_tokens,
     cache_creation_tokens = excluded.cache_creation_tokens,
@@ -187,6 +202,14 @@ SET total_requests = excluded.total_requests,
         .bind(i64_from_u64(
             row.error_requests,
             "stats_daily.error_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.sla_eligible_requests,
+            "stats_daily.sla_eligible_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.user_error_requests,
+            "stats_daily.user_error_requests",
         )?)
         .bind(i64_from_u64(row.input_tokens, "stats_daily.input_tokens")?)
         .bind(i64_from_u64(
@@ -247,15 +270,18 @@ SET total_requests = excluded.total_requests,
             r#"
 INSERT INTO stats_user_daily (
     id, user_id, username, "date", total_requests, success_requests, error_requests,
+    sla_eligible_requests, user_error_requests,
     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
     total_cost, created_at, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT ("date", user_id) DO UPDATE
 SET username = excluded.username,
     total_requests = excluded.total_requests,
     success_requests = excluded.success_requests,
     error_requests = excluded.error_requests,
+    sla_eligible_requests = excluded.sla_eligible_requests,
+    user_error_requests = excluded.user_error_requests,
     input_tokens = excluded.input_tokens,
     output_tokens = excluded.output_tokens,
     cache_creation_tokens = excluded.cache_creation_tokens,
@@ -279,6 +305,14 @@ SET username = excluded.username,
         .bind(i64_from_u64(
             row.error_requests,
             "stats_user_daily.error_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.sla_eligible_requests,
+            "stats_user_daily.sla_eligible_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.user_error_requests,
+            "stats_user_daily.user_error_requests",
         )?)
         .bind(i64_from_u64(
             row.input_tokens,
@@ -335,15 +369,18 @@ SET username = excluded.username,
             r#"
 INSERT INTO stats_daily_api_key (
     id, api_key_id, api_key_name, "date", total_requests, success_requests, error_requests,
+    sla_eligible_requests, user_error_requests,
     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
     total_cost, created_at, updated_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT ("date", api_key_id) DO UPDATE
 SET api_key_name = excluded.api_key_name,
     total_requests = excluded.total_requests,
     success_requests = excluded.success_requests,
     error_requests = excluded.error_requests,
+    sla_eligible_requests = excluded.sla_eligible_requests,
+    user_error_requests = excluded.user_error_requests,
     input_tokens = excluded.input_tokens,
     output_tokens = excluded.output_tokens,
     cache_creation_tokens = excluded.cache_creation_tokens,
@@ -370,6 +407,14 @@ SET api_key_name = excluded.api_key_name,
         .bind(i64_from_u64(
             row.error_requests,
             "stats_daily_api_key.error_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.sla_eligible_requests,
+            "stats_daily_api_key.sla_eligible_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.user_error_requests,
+            "stats_daily_api_key.user_error_requests",
         )?)
         .bind(i64_from_u64(
             row.input_tokens,
@@ -1208,6 +1253,8 @@ pub(super) fn map_stats_daily_aggregate(
         total_requests: u64_from_i64(row.try_get("total_requests").map_sql_err()?),
         success_requests: u64_from_i64(row.try_get("success_requests").map_sql_err()?),
         error_requests: u64_from_i64(row.try_get("error_requests").map_sql_err()?),
+        sla_eligible_requests: u64_from_i64(row.try_get("sla_eligible_requests").map_sql_err()?),
+        user_error_requests: u64_from_i64(row.try_get("user_error_requests").map_sql_err()?),
         input_tokens: u64_from_i64(row.try_get("input_tokens").map_sql_err()?),
         output_tokens: u64_from_i64(row.try_get("output_tokens").map_sql_err()?),
         cache_creation_tokens: u64_from_i64(row.try_get("cache_creation_tokens").map_sql_err()?),
@@ -1232,6 +1279,8 @@ pub(super) fn map_stats_user_daily_aggregate(
         total_requests: u64_from_i64(row.try_get("total_requests").map_sql_err()?),
         success_requests: u64_from_i64(row.try_get("success_requests").map_sql_err()?),
         error_requests: u64_from_i64(row.try_get("error_requests").map_sql_err()?),
+        sla_eligible_requests: u64_from_i64(row.try_get("sla_eligible_requests").map_sql_err()?),
+        user_error_requests: u64_from_i64(row.try_get("user_error_requests").map_sql_err()?),
         input_tokens: u64_from_i64(row.try_get("input_tokens").map_sql_err()?),
         output_tokens: u64_from_i64(row.try_get("output_tokens").map_sql_err()?),
         cache_creation_tokens: u64_from_i64(row.try_get("cache_creation_tokens").map_sql_err()?),
@@ -1250,6 +1299,8 @@ pub(super) fn map_stats_daily_api_key_aggregate(
         total_requests: u64_from_i64(row.try_get("total_requests").map_sql_err()?),
         success_requests: u64_from_i64(row.try_get("success_requests").map_sql_err()?),
         error_requests: u64_from_i64(row.try_get("error_requests").map_sql_err()?),
+        sla_eligible_requests: u64_from_i64(row.try_get("sla_eligible_requests").map_sql_err()?),
+        user_error_requests: u64_from_i64(row.try_get("user_error_requests").map_sql_err()?),
         input_tokens: u64_from_i64(row.try_get("input_tokens").map_sql_err()?),
         output_tokens: u64_from_i64(row.try_get("output_tokens").map_sql_err()?),
         cache_creation_tokens: u64_from_i64(row.try_get("cache_creation_tokens").map_sql_err()?),

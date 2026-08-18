@@ -6,7 +6,7 @@
     <HealthMonitorHeader
       v-model:lookback-hours="lookbackHours"
       :title="title"
-      description="基于真实请求统计端点可用率、平均耗时、平均TTFB 与平均速度"
+      description="基于真实请求统计端点 SLA 可用率；用户错误单列且不影响服务健康"
       :loading="loading"
       @refresh="refreshData"
     />
@@ -70,6 +70,9 @@
             :avg-first-byte-ms="monitor.avg_first_byte_ms"
             :avg-tps="monitor.avg_tps"
             :total-attempts="monitor.total_attempts"
+            :sla-eligible-count="monitor.sla_eligible_count"
+            :service-error-count="monitor.service_error_count ?? monitor.failed_count"
+            :user-error-count="monitor.user_error_count"
             :success-rate="monitor.success_rate"
           />
 
@@ -203,8 +206,11 @@ function openDetails(monitor: EndpointMonitor) {
       title: formatApiFormat(monitor.api_format),
       metaText: getEndpointDetailMetaText(monitor),
       totalAttempts: monitor.total_attempts,
+      slaEligibleCount: monitor.sla_eligible_count,
       successCount: monitor.success_count,
       failedCount: monitor.failed_count,
+      serviceErrorCount: monitor.service_error_count ?? monitor.failed_count,
+      userErrorCount: monitor.user_error_count,
       successRate: monitor.success_rate,
       avgLatencyMs: monitor.avg_latency_ms,
       avgFirstByteMs: monitor.avg_first_byte_ms,

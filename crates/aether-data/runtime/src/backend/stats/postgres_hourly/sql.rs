@@ -136,20 +136,21 @@ SELECT
               AND usage.provider_name NOT IN ('unknown', 'pending')
         ) AS BIGINT
     ) AS total_requests,
-    CAST(COALESCE(
-        SUM(
-            CASE
-                WHEN usage.status_code >= 400
-                     OR lower(COALESCE(usage.status, '')) = 'failed'
-                     OR usage.error_message IS NOT NULL THEN 1
-                ELSE 0
-            END
-        ) FILTER (
-            WHERE usage.status NOT IN ('pending', 'streaming')
-              AND usage.provider_name NOT IN ('unknown', 'pending')
-        ),
-        0
+    CAST(COUNT(usage.id) FILTER (
+        WHERE usage.status NOT IN ('pending', 'streaming')
+          AND usage.provider_name NOT IN ('unknown', 'pending')
+          AND usage.outcome_class = 'service_error'
     ) AS BIGINT) AS error_requests,
+    CAST(COUNT(usage.id) FILTER (
+        WHERE usage.status NOT IN ('pending', 'streaming')
+          AND usage.provider_name NOT IN ('unknown', 'pending')
+          AND usage.sla_eligible
+    ) AS BIGINT) AS sla_eligible_requests,
+    CAST(COUNT(usage.id) FILTER (
+        WHERE usage.status NOT IN ('pending', 'streaming')
+          AND usage.provider_name NOT IN ('unknown', 'pending')
+          AND usage.outcome_class = 'user_error'
+    ) AS BIGINT) AS user_error_requests,
     CAST(
         COALESCE(
             SUM(usage.input_tokens) FILTER (
@@ -279,14 +280,16 @@ INSERT INTO stats_hourly (
     is_complete,
     aggregated_at,
     created_at,
-    updated_at
+    updated_at,
+    sla_eligible_requests,
+    user_error_requests
 )
 VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8,
     $9, $10, $11, $12, $13, $14, $15, $16,
     $17, $18, $19, $20, $21, $22, $23, $24,
     $25, $26, $27, $28, $29, $30, $31, $32,
-    $33, $34, $35, $36
+    $33, $34, $35, $36, $37, $38
 )
 ON CONFLICT (hour_utc)
 DO UPDATE SET
@@ -323,23 +326,17 @@ DO UPDATE SET
     is_complete = EXCLUDED.is_complete,
     aggregated_at = EXCLUDED.aggregated_at,
     updated_at = EXCLUDED.updated_at
+    ,sla_eligible_requests = EXCLUDED.sla_eligible_requests
+    ,user_error_requests = EXCLUDED.user_error_requests
 "#;
 pub(super) const UPSERT_STATS_HOURLY_USER_SQL: &str = r#"
 WITH aggregated AS (
     SELECT
         user_id,
         CAST(COUNT(id) AS BIGINT) AS total_requests,
-        CAST(COALESCE(
-            SUM(
-                CASE
-                    WHEN status_code >= 400
-                         OR lower(COALESCE(status, '')) = 'failed'
-                         OR error_message IS NOT NULL THEN 1
-                    ELSE 0
-                END
-            ),
-            0
-        ) AS BIGINT) AS error_requests,
+        CAST(COUNT(id) FILTER (WHERE outcome_class = 'service_error') AS BIGINT) AS error_requests,
+        CAST(COUNT(id) FILTER (WHERE sla_eligible) AS BIGINT) AS sla_eligible_requests,
+        CAST(COUNT(id) FILTER (WHERE outcome_class = 'user_error') AS BIGINT) AS user_error_requests,
         CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
         CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
         CAST(COALESCE(
@@ -486,14 +483,16 @@ INSERT INTO stats_hourly_user (
     response_time_sum_ms,
     response_time_samples,
     created_at,
-    updated_at
+    updated_at,
+    sla_eligible_requests,
+    user_error_requests
 )
 SELECT
     md5(CONCAT('stats-hourly-user:', aggregated.user_id, ':', CAST($1 AS TEXT))),
     $1,
     aggregated.user_id,
     aggregated.total_requests,
-    GREATEST(aggregated.total_requests - aggregated.error_requests, 0),
+    GREATEST(aggregated.sla_eligible_requests - aggregated.error_requests, 0),
     aggregated.error_requests,
     aggregated.input_tokens,
     aggregated.output_tokens,
@@ -512,7 +511,9 @@ SELECT
     aggregated.response_time_sum_ms,
     aggregated.response_time_samples,
     $3,
-    $3
+    $3,
+    aggregated.sla_eligible_requests,
+    aggregated.user_error_requests
 FROM aggregated
 ON CONFLICT (hour_utc, user_id)
 DO UPDATE SET
@@ -536,6 +537,8 @@ DO UPDATE SET
     response_time_sum_ms = EXCLUDED.response_time_sum_ms,
     response_time_samples = EXCLUDED.response_time_samples,
     updated_at = EXCLUDED.updated_at
+    ,sla_eligible_requests = EXCLUDED.sla_eligible_requests
+    ,user_error_requests = EXCLUDED.user_error_requests
 "#;
 pub(super) const UPSERT_STATS_HOURLY_MODEL_SQL: &str = r#"
 WITH aggregated AS (
@@ -766,12 +769,12 @@ mod tests {
         assert_eq!(
             sql.matches("usage.status NOT IN ('pending', 'streaming')")
                 .count(),
-            11
+            13
         );
         assert_eq!(
             sql.matches("usage.provider_name NOT IN ('unknown', 'pending')")
                 .count(),
-            11
+            13
         );
 
         let first_aggregate = sql

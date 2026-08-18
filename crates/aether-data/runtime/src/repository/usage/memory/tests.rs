@@ -16,8 +16,8 @@ use crate::repository::usage::{
 use aether_data_contracts::repository::usage::{
     usage_body_ref, ProviderApiKeyWindowUsageRequest, UsageAuditAggregationGroupBy,
     UsageAuditAggregationQuery, UsageBodyCaptureState, UsageBodyField, UsageDashboardSummaryQuery,
-    UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageProviderPerformanceQuery,
-    UsageTimeSeriesGranularity,
+    UsageErrorDistributionQuery, UsageLeaderboardGroupBy, UsageLeaderboardQuery,
+    UsageProviderPerformanceQuery, UsageTimeSeriesGranularity,
 };
 use serde_json::json;
 
@@ -133,6 +133,33 @@ fn sample_upsert_usage_record(request_id: &str) -> UpsertUsageRecord {
         created_at_unix_ms: Some(1_700_000_000),
         updated_at_unix_secs: 1_700_000_000,
     }
+}
+
+#[tokio::test]
+async fn error_distribution_excludes_http_400_user_errors() {
+    let mut user_error = sample_usage("req-error-distribution-400", 100);
+    user_error.status = "failed".to_string();
+    user_error.status_code = Some(400);
+    user_error.error_category = Some("client_error".to_string());
+
+    let mut service_error = sample_usage("req-error-distribution-500", 200);
+    service_error.status = "failed".to_string();
+    service_error.status_code = Some(500);
+    service_error.error_category = Some("provider_error".to_string());
+
+    let repository = InMemoryUsageReadRepository::seed([user_error, service_error]);
+    let rows = repository
+        .summarize_usage_error_distribution(&UsageErrorDistributionQuery {
+            created_from_unix_secs: 0,
+            created_until_unix_secs: 1_000,
+            tz_offset_minutes: 0,
+        })
+        .await
+        .expect("error distribution should summarize");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].error_category, "provider_error");
+    assert_eq!(rows[0].count, 1);
 }
 
 #[tokio::test]

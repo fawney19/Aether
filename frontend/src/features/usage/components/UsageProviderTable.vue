@@ -28,7 +28,13 @@
               缓存命中率
             </TableHead>
             <TableHead class="h-8 px-2 text-right">
-              成功率
+              SLA 成功率
+            </TableHead>
+            <TableHead class="h-8 px-2 text-right">
+              <div class="flex flex-col text-xs gap-0.5 whitespace-nowrap">
+                <span>服务错误</span>
+                <span class="text-muted-foreground font-normal">用户错误</span>
+              </div>
             </TableHead>
             <TableHead class="h-8 px-2 text-right">
               平均响应
@@ -38,7 +44,7 @@
         <TableBody>
           <TableRow v-if="data.length === 0">
             <TableCell
-              :colspan="7"
+              :colspan="8"
               class="text-center py-6 text-muted-foreground px-2"
             >
               暂无提供商统计数据
@@ -75,7 +81,19 @@
               <span>{{ formatHitRate(provider.cacheHitRate) }}</span>
             </TableCell>
             <TableCell class="text-right py-2 px-2">
-              <span :class="getSuccessRateClass(provider.successRate)">{{ provider.successRate }}%</span>
+              <span :class="getSuccessRateClass(provider.successRate)">
+                {{ provider.successRate == null ? '-' : `${provider.successRate}%` }}
+              </span>
+            </TableCell>
+            <TableCell class="text-right py-2 px-2">
+              <div class="flex flex-col items-end text-xs gap-0.5 whitespace-nowrap">
+                <span :class="getServiceErrorRateClass(provider.serviceErrorRate)">
+                  {{ formatOutcome(provider.serviceErrorCount, provider.serviceErrorRate) }}
+                </span>
+                <span class="text-muted-foreground">
+                  {{ formatOutcome(provider.userErrorCount, provider.userErrorRate) }}
+                </span>
+              </div>
             </TableCell>
             <TableCell class="text-right text-muted-foreground py-2 px-2">
               {{ provider.avgResponseTime }}
@@ -104,8 +122,19 @@ defineProps<{
 }>()
 
 // 成功率样式 - 简化为两种状态
-function getSuccessRateClass(rate: number): string {
-  if (rate < 90) return 'text-destructive'
+function getSuccessRateClass(rate: number | null): string {
+  if (rate != null && rate < 90) return 'text-destructive'
   return ''  // 默认颜色
+}
+
+function getServiceErrorRateClass(rate: number | undefined): string {
+  return rate != null && rate > 10 ? 'text-destructive' : ''
+}
+
+function formatOutcome(count: number | undefined, rate: number | undefined): string {
+  if (count == null && rate == null) return '-'
+  const countText = count == null ? '-' : count.toLocaleString('zh-CN')
+  const rateText = rate == null ? '-' : `${rate.toFixed(2)}%`
+  return `${countText} / ${rateText}`
 }
 </script>

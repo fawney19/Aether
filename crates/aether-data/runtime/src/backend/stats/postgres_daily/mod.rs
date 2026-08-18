@@ -73,7 +73,9 @@ async fn perform_stats_aggregation_for_day(
         .await?;
     let total_requests = aggregate_row.try_get::<i64, _>("total_requests")?;
     let error_requests = aggregate_row.try_get::<i64, _>("error_requests")?;
-    let success_requests = total_requests.saturating_sub(error_requests);
+    let sla_eligible_requests = aggregate_row.try_get::<i64, _>("sla_eligible_requests")?;
+    let user_error_requests = aggregate_row.try_get::<i64, _>("user_error_requests")?;
+    let success_requests = sla_eligible_requests.saturating_sub(error_requests);
     let fallback_count = sqlx::query(SELECT_STATS_DAILY_FALLBACK_COUNT_SQL)
         .bind(day_start_utc)
         .bind(day_end_utc)
@@ -150,6 +152,8 @@ async fn perform_stats_aggregation_for_day(
         .bind(now_utc)
         .bind(now_utc)
         .bind(now_utc)
+        .bind(sla_eligible_requests)
+        .bind(user_error_requests)
         .execute(&mut *tx)
         .await?;
 
@@ -563,8 +567,12 @@ async fn refresh_stats_summary_row(
         .await?;
 
     let all_time_requests = totals_row.try_get::<i64, _>("all_time_requests")?;
+    let all_time_sla_eligible_requests =
+        totals_row.try_get::<i64, _>("all_time_sla_eligible_requests")?;
     let all_time_success_requests = totals_row.try_get::<i64, _>("all_time_success_requests")?;
     let all_time_error_requests = totals_row.try_get::<i64, _>("all_time_error_requests")?;
+    let all_time_user_error_requests =
+        totals_row.try_get::<i64, _>("all_time_user_error_requests")?;
     let all_time_input_tokens = totals_row.try_get::<i64, _>("all_time_input_tokens")?;
     let all_time_output_tokens = totals_row.try_get::<i64, _>("all_time_output_tokens")?;
     let all_time_cache_creation_tokens =
@@ -582,8 +590,10 @@ async fn refresh_stats_summary_row(
             .bind(summary_id)
             .bind(cutoff_date)
             .bind(all_time_requests)
+            .bind(all_time_sla_eligible_requests)
             .bind(all_time_success_requests)
             .bind(all_time_error_requests)
+            .bind(all_time_user_error_requests)
             .bind(all_time_input_tokens)
             .bind(all_time_output_tokens)
             .bind(all_time_cache_creation_tokens)
@@ -602,8 +612,10 @@ async fn refresh_stats_summary_row(
             .bind(Uuid::new_v4().to_string())
             .bind(cutoff_date)
             .bind(all_time_requests)
+            .bind(all_time_sla_eligible_requests)
             .bind(all_time_success_requests)
             .bind(all_time_error_requests)
+            .bind(all_time_user_error_requests)
             .bind(all_time_input_tokens)
             .bind(all_time_output_tokens)
             .bind(all_time_cache_creation_tokens)

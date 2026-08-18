@@ -438,8 +438,10 @@ mod tests {
         let provider_contribution = super::ProviderApiKeyUsageContribution {
             key_id: "provider-key-1".to_string(),
             request_count: 1,
+            sla_eligible_count: 1,
             success_count: 1,
             error_count: 0,
+            user_error_count: 0,
             total_tokens: 20,
             total_cost_usd: 0.25,
             total_response_time_ms: 120,

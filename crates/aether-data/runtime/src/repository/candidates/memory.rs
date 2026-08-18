@@ -157,7 +157,7 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
         }
 
         let endpoint_ids = endpoint_ids.iter().cloned().collect::<BTreeSet<_>>();
-        let mut counts = BTreeMap::<(String, &'static str), u64>::new();
+        let mut counts = BTreeMap::<(String, &'static str), (u64, u64, u64)>::new();
         for row in self
             .by_id
             .read()
@@ -186,24 +186,34 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
                 RequestCandidateStatus::Skipped => "skipped",
                 _ => continue,
             };
-            *counts.entry((endpoint_id.clone(), status_key)).or_insert(0) += 1;
+            let outcome = row.outcome_class();
+            let entry = counts
+                .entry((endpoint_id.clone(), status_key))
+                .or_insert((0, 0, 0));
+            entry.0 += 1;
+            entry.1 += u64::from(outcome.is_sla_eligible());
+            entry.2 += u64::from(outcome.is_user_error());
         }
 
         Ok(counts
             .into_iter()
-            .map(|((endpoint_id, status_key), count)| {
-                let status = match status_key {
-                    "success" => RequestCandidateStatus::Success,
-                    "failed" => RequestCandidateStatus::Failed,
-                    "skipped" => RequestCandidateStatus::Skipped,
-                    _ => unreachable!("filtered status should stay finalized"),
-                };
-                PublicHealthStatusCount {
-                    endpoint_id,
-                    status,
-                    count,
-                }
-            })
+            .map(
+                |((endpoint_id, status_key), (count, sla_eligible_count, user_error_count))| {
+                    let status = match status_key {
+                        "success" => RequestCandidateStatus::Success,
+                        "failed" => RequestCandidateStatus::Failed,
+                        "skipped" => RequestCandidateStatus::Skipped,
+                        _ => unreachable!("filtered status should stay finalized"),
+                    };
+                    PublicHealthStatusCount {
+                        endpoint_id,
+                        status,
+                        count,
+                        sla_eligible_count,
+                        user_error_count,
+                    }
+                },
+            )
             .collect())
     }
 
@@ -261,16 +271,24 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
                     endpoint_id: endpoint_id.clone(),
                     segment_idx,
                     total_count: 0,
+                    sla_eligible_count: 0,
                     success_count: 0,
                     failed_count: 0,
+                    user_error_count: 0,
                     min_created_at_unix_ms: None,
                     max_created_at_unix_ms: None,
                 });
             bucket.total_count += 1;
-            if row.status == RequestCandidateStatus::Success {
+            let outcome = row.outcome_class();
+            if outcome.is_sla_eligible() {
+                bucket.sla_eligible_count += 1;
+            }
+            if outcome.is_success() {
                 bucket.success_count += 1;
-            } else if row.status == RequestCandidateStatus::Failed {
+            } else if outcome.is_service_error() {
                 bucket.failed_count += 1;
+            } else if outcome.is_user_error() {
+                bucket.user_error_count += 1;
             }
             bucket.min_created_at_unix_ms = Some(
                 bucket
@@ -564,6 +582,41 @@ mod tests {
             .expect("attempt list should succeed");
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].id, "cand-2");
+    }
+
+    #[tokio::test]
+    async fn excludes_http_400_candidates_from_service_health() {
+        let mut user_error = sample_candidate("cand-user-error", "req-user-error", 100_000);
+        user_error.status = RequestCandidateStatus::Failed;
+        user_error.status_code = Some(400);
+        user_error.error_message = Some("invalid user request".to_string());
+        let repository = InMemoryRequestCandidateRepository::seed(vec![user_error]);
+
+        let counts = repository
+            .count_finalized_statuses_by_endpoint_ids_since(&["endpoint-1".to_string()], 0)
+            .await
+            .expect("count should succeed");
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts[0].sla_eligible_count, 0);
+        assert_eq!(counts[0].user_error_count, 1);
+
+        let timeline = repository
+            .aggregate_finalized_timeline_by_endpoint_ids_since(
+                &["endpoint-1".to_string()],
+                0,
+                300,
+                3,
+            )
+            .await
+            .expect("timeline should succeed");
+        let populated = timeline
+            .iter()
+            .find(|bucket| bucket.total_count > 0)
+            .expect("user error bucket should exist");
+        assert_eq!(populated.sla_eligible_count, 0);
+        assert_eq!(populated.success_count, 0);
+        assert_eq!(populated.failed_count, 0);
+        assert_eq!(populated.user_error_count, 1);
     }
 
     #[tokio::test]

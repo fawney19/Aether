@@ -2,6 +2,7 @@ import apiClient from './client'
 import { cachedRequest, dedupedRequest, buildCacheKey } from '@/utils/cache'
 import type { ActivityHeatmap } from '@/types/activity'
 import type { ImageProgress } from './requestTrace'
+import type { RequestOutcomeClass } from '@/features/usage/types'
 
 const ACTIVITY_HEATMAP_CACHE_TTL_MS = 30 * 60 * 1000
 const USAGE_ANALYTICS_CACHE_TTL_MS = 30 * 1000
@@ -38,6 +39,8 @@ export interface UsageRecord {
   updated_at?: string | null
   response_time_updated_at?: string | null
   has_fallback?: boolean // 🆕 是否发生了 fallback
+  outcome_class?: RequestOutcomeClass
+  sla_eligible?: boolean
   client_family?: string | null
   client_ip?: string | null
   user_agent?: string | null
@@ -51,8 +54,15 @@ export interface UsageStats {
   total_cost: number
   total_actual_cost?: number
   avg_response_time: number
+  /** 兼容字段：语义为服务错误数，不包含用户错误。 */
   error_count?: number
+  /** 兼容字段：语义为服务错误率，不包含用户错误。 */
   error_rate?: number
+  sla_eligible_count?: number
+  service_error_count?: number
+  service_error_rate?: number
+  user_error_count?: number
+  user_error_rate?: number
   today?: {
     requests: number
     tokens: number
@@ -98,8 +108,15 @@ export interface UsageByProvider {
   total_cost: number
   actual_cost: number
   avg_response_time_ms: number
+  /** SLA 成功率（0-100），用户错误不进入分母。 */
   success_rate: number
+  /** 兼容字段：语义为服务错误数。 */
   error_count: number
+  sla_eligible_count?: number
+  service_error_count?: number
+  service_error_rate?: number
+  user_error_count?: number
+  user_error_rate?: number
   cache_read_tokens?: number
   cache_hit_rate?: number
 }
@@ -483,7 +500,9 @@ export const usageApi = {
     model?: string
     provider?: string
     api_format?: string  // API 格式筛选（如 openai:chat, claude:messages）
-    status?: string // 'stream' | 'standard' | 'error'
+    // `failed` is the lifecycle view (includes user-error/HTTP 400 rows);
+    // `error` remains the service-error-only operational view.
+    status?: string // 'stream' | 'standard' | 'active' | 'failed' | 'cancelled' | 'error'
     client_family?: string
     hide_unknown?: boolean
     include_total?: boolean
@@ -565,6 +584,8 @@ export const usageApi = {
       response_time_updated_at?: string | null
       status_code?: number | null
       error_message?: string | null
+      outcome_class?: RequestOutcomeClass | null
+      sla_eligible?: boolean | null
       provider?: string | null
       api_key_name?: string | null
       provider_key_name?: string | null

@@ -107,19 +107,9 @@ SELECT
         WHERE billing_status = 'settled' AND COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) > 0
     ) AS settled_last_finalized_at_unix_secs,
     CAST(COUNT(id) FILTER (WHERE status NOT IN ('pending', 'streaming') AND provider_name NOT IN ('unknown', 'pending')) AS BIGINT) AS total_requests,
-    CAST(
-        COALESCE(
-            SUM(
-                CASE
-                    WHEN status_code >= 400
-                         OR lower(COALESCE(status, '')) = 'failed'
-                         OR error_message IS NOT NULL THEN 1
-                    ELSE 0
-                END
-            ) FILTER (WHERE status NOT IN ('pending', 'streaming') AND provider_name NOT IN ('unknown', 'pending')),
-            0
-        ) AS BIGINT
-    ) AS error_requests,
+    CAST(COUNT(id) FILTER (WHERE status NOT IN ('pending', 'streaming') AND provider_name NOT IN ('unknown', 'pending') AND outcome_class = 'service_error') AS BIGINT) AS error_requests,
+    CAST(COUNT(id) FILTER (WHERE status NOT IN ('pending', 'streaming') AND provider_name NOT IN ('unknown', 'pending') AND sla_eligible) AS BIGINT) AS sla_eligible_requests,
+    CAST(COUNT(id) FILTER (WHERE status NOT IN ('pending', 'streaming') AND provider_name NOT IN ('unknown', 'pending') AND outcome_class = 'user_error') AS BIGINT) AS user_error_requests,
     CAST(
         COALESCE(SUM(input_tokens) FILTER (WHERE status NOT IN ('pending', 'streaming') AND provider_name NOT IN ('unknown', 'pending')), 0) AS BIGINT
     ) AS input_tokens,
@@ -244,7 +234,15 @@ SELECT
 FROM usage_billing_facts AS usage
 WHERE created_at >= $1
   AND created_at < $2
-  AND status = 'completed'
+  AND (
+      outcome_class = 'success'
+      OR (
+          outcome_class = 'in_flight'
+          AND LOWER(BTRIM(COALESCE(status, ''))) = 'completed'
+          AND (status_code IS NULL OR status_code < 400)
+          AND NULLIF(BTRIM(COALESCE(error_message, '')), '') IS NULL
+      )
+  )
   AND provider_name NOT IN ('unknown', 'pending')
   AND response_time_ms IS NOT NULL
 "#;
@@ -257,7 +255,15 @@ SELECT
 FROM usage_billing_facts AS usage
 WHERE created_at >= $1
   AND created_at < $2
-  AND status = 'completed'
+  AND (
+      outcome_class = 'success'
+      OR (
+          outcome_class = 'in_flight'
+          AND LOWER(BTRIM(COALESCE(status, ''))) = 'completed'
+          AND (status_code IS NULL OR status_code < 400)
+          AND NULLIF(BTRIM(COALESCE(error_message, '')), '') IS NULL
+      )
+  )
   AND provider_name NOT IN ('unknown', 'pending')
   AND first_byte_time_ms IS NOT NULL
 "#;
@@ -316,6 +322,8 @@ INSERT INTO stats_daily (
     aggregated_at,
     created_at,
     updated_at
+    ,sla_eligible_requests,
+    user_error_requests
 )
 VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8,
@@ -324,7 +332,7 @@ VALUES (
     $25, $26, $27, $28, $29, $30, $31, $32,
     $33, $34, $35, $36, $37, $38, $39, $40,
     $41, $42, $43, $44, $45, $46, $47, $48,
-    $49, $50, $51, $52, $53
+    $49, $50, $51, $52, $53, $54, $55
 )
 ON CONFLICT (date)
 DO UPDATE SET
@@ -378,6 +386,8 @@ DO UPDATE SET
     is_complete = EXCLUDED.is_complete,
     aggregated_at = EXCLUDED.aggregated_at,
     updated_at = EXCLUDED.updated_at
+    ,sla_eligible_requests = EXCLUDED.sla_eligible_requests
+    ,user_error_requests = EXCLUDED.user_error_requests
 "#;
 pub(super) const UPSERT_STATS_DAILY_MODEL_SQL: &str = r#"
 WITH aggregated AS (
@@ -916,17 +926,9 @@ WITH aggregated AS (
         api_key_id,
         MAX(api_key_name) AS api_key_name,
         CAST(COUNT(id) AS BIGINT) AS total_requests,
-        CAST(
-            COALESCE(
-                SUM(
-                    CASE
-                        WHEN status_code >= 400 OR error_message IS NOT NULL THEN 1
-                        ELSE 0
-                    END
-                ),
-                0
-            ) AS BIGINT
-        ) AS error_requests,
+        CAST(COUNT(id) FILTER (WHERE outcome_class = 'service_error') AS BIGINT) AS error_requests,
+        CAST(COUNT(id) FILTER (WHERE sla_eligible) AS BIGINT) AS sla_eligible_requests,
+        CAST(COUNT(id) FILTER (WHERE outcome_class = 'user_error') AS BIGINT) AS user_error_requests,
         CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
         CAST(COALESCE(SUM(effective_input_tokens), 0) AS BIGINT) AS effective_input_tokens,
         CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
@@ -954,6 +956,8 @@ INSERT INTO stats_daily_api_key (
     total_cost,
     created_at,
     updated_at
+    ,sla_eligible_requests,
+    user_error_requests
 )
 SELECT
     md5(CONCAT('stats-daily-api-key:', aggregated.api_key_id, ':', CAST($1 AS TEXT))),
@@ -961,7 +965,7 @@ SELECT
     aggregated.api_key_name,
     $1,
     aggregated.total_requests,
-    GREATEST(aggregated.total_requests - aggregated.error_requests, 0),
+    GREATEST(aggregated.sla_eligible_requests - aggregated.error_requests, 0),
     aggregated.error_requests,
     aggregated.input_tokens,
     aggregated.output_tokens,
@@ -969,7 +973,9 @@ SELECT
     aggregated.cache_read_tokens,
     aggregated.total_cost,
     $3,
-    $3
+    $3,
+    aggregated.sla_eligible_requests,
+    aggregated.user_error_requests
 FROM aggregated
 ON CONFLICT (api_key_id, date)
 DO UPDATE SET
@@ -983,6 +989,8 @@ DO UPDATE SET
     cache_read_tokens = EXCLUDED.cache_read_tokens,
     total_cost = EXCLUDED.total_cost,
     updated_at = EXCLUDED.updated_at
+    ,sla_eligible_requests = EXCLUDED.sla_eligible_requests
+    ,user_error_requests = EXCLUDED.user_error_requests
 "#;
 pub(super) const DELETE_STATS_DAILY_ERRORS_FOR_DATE_SQL: &str = r#"
 DELETE FROM stats_daily_error
@@ -999,6 +1007,7 @@ WITH aggregated AS (
     WHERE created_at >= $1
       AND created_at < $2
       AND error_category IS NOT NULL
+      AND outcome_class = 'service_error'
     GROUP BY error_category, provider_name, model
 )
 INSERT INTO stats_daily_error (
@@ -1039,19 +1048,9 @@ WITH aggregated AS (
         user_id,
         MAX(username) AS username,
         CAST(COUNT(id) AS BIGINT) AS total_requests,
-        CAST(
-            COALESCE(
-                SUM(
-                    CASE
-                        WHEN status_code >= 400
-                             OR lower(COALESCE(status, '')) = 'failed'
-                             OR error_message IS NOT NULL THEN 1
-                        ELSE 0
-                    END
-                ),
-                0
-            ) AS BIGINT
-        ) AS error_requests,
+    CAST(COUNT(id) FILTER (WHERE outcome_class = 'service_error') AS BIGINT) AS error_requests,
+    CAST(COUNT(id) FILTER (WHERE sla_eligible) AS BIGINT) AS sla_eligible_requests,
+    CAST(COUNT(id) FILTER (WHERE outcome_class = 'user_error') AS BIGINT) AS user_error_requests,
         CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
         CAST(COALESCE(SUM(effective_input_tokens), 0) AS BIGINT) AS effective_input_tokens,
         CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
@@ -1199,6 +1198,8 @@ INSERT INTO stats_user_daily (
     total_requests,
     success_requests,
     error_requests,
+    sla_eligible_requests,
+    user_error_requests,
     input_tokens,
     effective_input_tokens,
     output_tokens,
@@ -1230,8 +1231,10 @@ SELECT
     aggregated.username,
     $1,
     aggregated.total_requests,
-    GREATEST(aggregated.total_requests - aggregated.error_requests, 0),
+    GREATEST(aggregated.sla_eligible_requests - aggregated.error_requests, 0),
     aggregated.error_requests,
+    aggregated.sla_eligible_requests,
+    aggregated.user_error_requests,
     aggregated.input_tokens,
     aggregated.effective_input_tokens,
     aggregated.output_tokens,
@@ -1294,20 +1297,9 @@ WITH aggregated AS (
         MAX(username) AS username,
         model,
         CAST(COUNT(id) AS BIGINT) AS total_requests,
-        CAST(
-            COALESCE(
-                SUM(
-                    CASE
-                        WHEN status <> 'failed'
-                             AND (status_code IS NULL OR status_code < 400)
-                             AND error_message IS NULL
-                        THEN 1
-                        ELSE 0
-                    END
-                ),
-                0
-            ) AS BIGINT
-        ) AS success_requests,
+        CAST(COUNT(id) FILTER (WHERE outcome_class = 'success') AS BIGINT) AS success_requests,
+        CAST(COUNT(id) FILTER (WHERE sla_eligible) AS BIGINT) AS sla_eligible_requests,
+        CAST(COUNT(id) FILTER (WHERE outcome_class = 'user_error') AS BIGINT) AS user_error_requests,
         CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
         CAST(COALESCE(SUM(effective_input_tokens), 0) AS BIGINT) AS effective_input_tokens,
         CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
@@ -1346,9 +1338,7 @@ WITH aggregated AS (
         COALESCE(
             SUM(
                 CASE
-                    WHEN status <> 'failed'
-                         AND (status_code IS NULL OR status_code < 400)
-                         AND error_message IS NULL
+                    WHEN outcome_class = 'success'
                          AND response_time_ms IS NOT NULL
                     THEN GREATEST(COALESCE(response_time_ms, 0), 0)::DOUBLE PRECISION
                     ELSE 0
@@ -1360,9 +1350,7 @@ WITH aggregated AS (
             COALESCE(
                 SUM(
                     CASE
-                        WHEN status <> 'failed'
-                             AND (status_code IS NULL OR status_code < 400)
-                             AND error_message IS NULL
+                        WHEN outcome_class = 'success'
                              AND response_time_ms IS NOT NULL
                         THEN 1
                         ELSE 0
@@ -1389,6 +1377,8 @@ INSERT INTO stats_user_daily_model (
     model,
     total_requests,
     success_requests,
+    sla_eligible_requests,
+    user_error_requests,
     input_tokens,
     effective_input_tokens,
     output_tokens,
@@ -1415,6 +1405,8 @@ SELECT
     aggregated.model,
     aggregated.total_requests,
     aggregated.success_requests,
+    aggregated.sla_eligible_requests,
+    aggregated.user_error_requests,
     aggregated.input_tokens,
     aggregated.effective_input_tokens,
     aggregated.output_tokens,
@@ -1438,6 +1430,8 @@ DO UPDATE SET
     username = COALESCE(EXCLUDED.username, stats_user_daily_model.username),
     total_requests = EXCLUDED.total_requests,
     success_requests = EXCLUDED.success_requests,
+    sla_eligible_requests = EXCLUDED.sla_eligible_requests,
+    user_error_requests = EXCLUDED.user_error_requests,
     input_tokens = EXCLUDED.input_tokens,
     effective_input_tokens = EXCLUDED.effective_input_tokens,
     output_tokens = EXCLUDED.output_tokens,
@@ -1462,20 +1456,9 @@ WITH aggregated AS (
         MAX(username) AS username,
         provider_name,
         CAST(COUNT(id) AS BIGINT) AS total_requests,
-        CAST(
-            COALESCE(
-                SUM(
-                    CASE
-                        WHEN status <> 'failed'
-                             AND (status_code IS NULL OR status_code < 400)
-                             AND error_message IS NULL
-                        THEN 1
-                        ELSE 0
-                    END
-                ),
-                0
-            ) AS BIGINT
-        ) AS success_requests,
+        CAST(COUNT(id) FILTER (WHERE outcome_class = 'success') AS BIGINT) AS success_requests,
+        CAST(COUNT(id) FILTER (WHERE sla_eligible) AS BIGINT) AS sla_eligible_requests,
+        CAST(COUNT(id) FILTER (WHERE outcome_class = 'user_error') AS BIGINT) AS user_error_requests,
         CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
         CAST(COALESCE(SUM(effective_input_tokens), 0) AS BIGINT) AS effective_input_tokens,
         CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
@@ -1513,9 +1496,7 @@ WITH aggregated AS (
         COALESCE(
             SUM(
                 CASE
-                    WHEN status <> 'failed'
-                         AND (status_code IS NULL OR status_code < 400)
-                         AND error_message IS NULL
+                    WHEN outcome_class = 'success'
                          AND response_time_ms IS NOT NULL
                     THEN GREATEST(COALESCE(response_time_ms, 0), 0)::DOUBLE PRECISION
                     ELSE 0
@@ -1527,9 +1508,7 @@ WITH aggregated AS (
             COALESCE(
                 SUM(
                     CASE
-                        WHEN status <> 'failed'
-                             AND (status_code IS NULL OR status_code < 400)
-                             AND error_message IS NULL
+                        WHEN outcome_class = 'success'
                              AND response_time_ms IS NOT NULL
                         THEN 1
                         ELSE 0
@@ -1556,6 +1535,8 @@ INSERT INTO stats_user_daily_provider (
     provider_name,
     total_requests,
     success_requests,
+    sla_eligible_requests,
+    user_error_requests,
     input_tokens,
     effective_input_tokens,
     output_tokens,
@@ -1582,6 +1563,8 @@ SELECT
     aggregated.provider_name,
     aggregated.total_requests,
     aggregated.success_requests,
+    aggregated.sla_eligible_requests,
+    aggregated.user_error_requests,
     aggregated.input_tokens,
     aggregated.effective_input_tokens,
     aggregated.output_tokens,
@@ -1605,6 +1588,8 @@ DO UPDATE SET
     username = COALESCE(EXCLUDED.username, stats_user_daily_provider.username),
     total_requests = EXCLUDED.total_requests,
     success_requests = EXCLUDED.success_requests,
+    sla_eligible_requests = EXCLUDED.sla_eligible_requests,
+    user_error_requests = EXCLUDED.user_error_requests,
     input_tokens = EXCLUDED.input_tokens,
     effective_input_tokens = EXCLUDED.effective_input_tokens,
     output_tokens = EXCLUDED.output_tokens,
@@ -1629,20 +1614,9 @@ WITH aggregated AS (
         MAX(username) AS username,
         api_format,
         CAST(COUNT(id) AS BIGINT) AS total_requests,
-        CAST(
-            COALESCE(
-                SUM(
-                    CASE
-                        WHEN status <> 'failed'
-                             AND (status_code IS NULL OR status_code < 400)
-                             AND error_message IS NULL
-                        THEN 1
-                        ELSE 0
-                    END
-                ),
-                0
-            ) AS BIGINT
-        ) AS success_requests,
+        CAST(COUNT(id) FILTER (WHERE outcome_class = 'success') AS BIGINT) AS success_requests,
+        CAST(COUNT(id) FILTER (WHERE sla_eligible) AS BIGINT) AS sla_eligible_requests,
+        CAST(COUNT(id) FILTER (WHERE outcome_class = 'user_error') AS BIGINT) AS user_error_requests,
         CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
         CAST(COALESCE(SUM(effective_input_tokens), 0) AS BIGINT) AS effective_input_tokens,
         CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
@@ -1680,9 +1654,7 @@ WITH aggregated AS (
         COALESCE(
             SUM(
                 CASE
-                    WHEN status <> 'failed'
-                         AND (status_code IS NULL OR status_code < 400)
-                         AND error_message IS NULL
+                    WHEN outcome_class = 'success'
                          AND response_time_ms IS NOT NULL
                     THEN GREATEST(COALESCE(response_time_ms, 0), 0)::DOUBLE PRECISION
                     ELSE 0
@@ -1694,9 +1666,7 @@ WITH aggregated AS (
             COALESCE(
                 SUM(
                     CASE
-                        WHEN status <> 'failed'
-                             AND (status_code IS NULL OR status_code < 400)
-                             AND error_message IS NULL
+                        WHEN outcome_class = 'success'
                              AND response_time_ms IS NOT NULL
                         THEN 1
                         ELSE 0
@@ -1722,6 +1692,8 @@ INSERT INTO stats_user_daily_api_format (
     api_format,
     total_requests,
     success_requests,
+    sla_eligible_requests,
+    user_error_requests,
     input_tokens,
     effective_input_tokens,
     output_tokens,
@@ -1748,6 +1720,8 @@ SELECT
     aggregated.api_format,
     aggregated.total_requests,
     aggregated.success_requests,
+    aggregated.sla_eligible_requests,
+    aggregated.user_error_requests,
     aggregated.input_tokens,
     aggregated.effective_input_tokens,
     aggregated.output_tokens,
@@ -1771,6 +1745,8 @@ DO UPDATE SET
     username = COALESCE(EXCLUDED.username, stats_user_daily_api_format.username),
     total_requests = EXCLUDED.total_requests,
     success_requests = EXCLUDED.success_requests,
+    sla_eligible_requests = EXCLUDED.sla_eligible_requests,
+    user_error_requests = EXCLUDED.user_error_requests,
     input_tokens = EXCLUDED.input_tokens,
     effective_input_tokens = EXCLUDED.effective_input_tokens,
     output_tokens = EXCLUDED.output_tokens,
@@ -2238,8 +2214,10 @@ LIMIT 1
 pub(super) const SELECT_STATS_SUMMARY_TOTALS_SQL: &str = r#"
 SELECT
     CAST(COALESCE(SUM(total_requests), 0) AS BIGINT) AS all_time_requests,
+    CAST(COALESCE(SUM(sla_eligible_requests), 0) AS BIGINT) AS all_time_sla_eligible_requests,
     CAST(COALESCE(SUM(success_requests), 0) AS BIGINT) AS all_time_success_requests,
     CAST(COALESCE(SUM(error_requests), 0) AS BIGINT) AS all_time_error_requests,
+    CAST(COALESCE(SUM(user_error_requests), 0) AS BIGINT) AS all_time_user_error_requests,
     CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS all_time_input_tokens,
     CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS all_time_output_tokens,
     CAST(COALESCE(SUM(cache_creation_tokens), 0) AS BIGINT) AS all_time_cache_creation_tokens,
@@ -2261,8 +2239,10 @@ INSERT INTO stats_summary (
     id,
     cutoff_date,
     all_time_requests,
+    all_time_sla_eligible_requests,
     all_time_success_requests,
     all_time_error_requests,
+    all_time_user_error_requests,
     all_time_input_tokens,
     all_time_output_tokens,
     all_time_cache_creation_tokens,
@@ -2277,27 +2257,29 @@ INSERT INTO stats_summary (
     updated_at
 )
 VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8,
-    $9, $10, $11, $12, $13, $14, $15, $16, $17
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+    $11, $12, $13, $14, $15, $16, $17, $18, $19
 )
 "#;
 pub(super) const UPDATE_STATS_SUMMARY_SQL: &str = r#"
 UPDATE stats_summary
 SET cutoff_date = $2,
     all_time_requests = $3,
-    all_time_success_requests = $4,
-    all_time_error_requests = $5,
-    all_time_input_tokens = $6,
-    all_time_output_tokens = $7,
-    all_time_cache_creation_tokens = $8,
-    all_time_cache_read_tokens = $9,
-    all_time_cost = $10,
-    all_time_actual_cost = $11,
-    total_users = $12,
-    active_users = $13,
-    total_api_keys = $14,
-    active_api_keys = $15,
-    updated_at = $16
+    all_time_sla_eligible_requests = $4,
+    all_time_success_requests = $5,
+    all_time_error_requests = $6,
+    all_time_user_error_requests = $7,
+    all_time_input_tokens = $8,
+    all_time_output_tokens = $9,
+    all_time_cache_creation_tokens = $10,
+    all_time_cache_read_tokens = $11,
+    all_time_cost = $12,
+    all_time_actual_cost = $13,
+    total_users = $14,
+    active_users = $15,
+    total_api_keys = $16,
+    active_api_keys = $17,
+    updated_at = $18
 WHERE id = $1
 "#;
 pub(super) const UPSERT_STATS_USER_SUMMARY_SQL: &str = r#"
@@ -2306,8 +2288,10 @@ WITH aggregated AS (
         user_id,
         MAX(username) AS username,
         CAST(COALESCE(SUM(total_requests), 0) AS BIGINT) AS all_time_requests,
+        CAST(COALESCE(SUM(sla_eligible_requests), 0) AS BIGINT) AS all_time_sla_eligible_requests,
         CAST(COALESCE(SUM(success_requests), 0) AS BIGINT) AS all_time_success_requests,
         CAST(COALESCE(SUM(error_requests), 0) AS BIGINT) AS all_time_error_requests,
+        CAST(COALESCE(SUM(user_error_requests), 0) AS BIGINT) AS all_time_user_error_requests,
         CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS all_time_input_tokens,
         CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS all_time_output_tokens,
         CAST(COALESCE(SUM(cache_creation_tokens), 0) AS BIGINT) AS all_time_cache_creation_tokens,
@@ -2338,8 +2322,10 @@ INSERT INTO stats_user_summary (
     username,
     cutoff_date,
     all_time_requests,
+    all_time_sla_eligible_requests,
     all_time_success_requests,
     all_time_error_requests,
+    all_time_user_error_requests,
     all_time_input_tokens,
     all_time_output_tokens,
     all_time_cache_creation_tokens,
@@ -2358,8 +2344,10 @@ SELECT
     aggregated.username,
     $1,
     aggregated.all_time_requests,
+    aggregated.all_time_sla_eligible_requests,
     aggregated.all_time_success_requests,
     aggregated.all_time_error_requests,
+    aggregated.all_time_user_error_requests,
     aggregated.all_time_input_tokens,
     aggregated.all_time_output_tokens,
     aggregated.all_time_cache_creation_tokens,
@@ -2377,8 +2365,10 @@ DO UPDATE SET
     username = COALESCE(EXCLUDED.username, stats_user_summary.username),
     cutoff_date = EXCLUDED.cutoff_date,
     all_time_requests = EXCLUDED.all_time_requests,
+    all_time_sla_eligible_requests = EXCLUDED.all_time_sla_eligible_requests,
     all_time_success_requests = EXCLUDED.all_time_success_requests,
     all_time_error_requests = EXCLUDED.all_time_error_requests,
+    all_time_user_error_requests = EXCLUDED.all_time_user_error_requests,
     all_time_input_tokens = EXCLUDED.all_time_input_tokens,
     all_time_output_tokens = EXCLUDED.all_time_output_tokens,
     all_time_cache_creation_tokens = EXCLUDED.all_time_cache_creation_tokens,
@@ -2439,15 +2429,28 @@ mod tests {
         assert_eq!(
             sql.matches("status NOT IN ('pending', 'streaming')")
                 .count(),
-            21
+            23
         );
         assert_eq!(
             sql.matches("provider_name NOT IN ('unknown', 'pending')")
                 .count(),
-            21
+            23
         );
         assert!(sql.contains("MIN(CAST(EXTRACT(EPOCH FROM finalized_at) AS BIGINT)) FILTER ("));
         assert!(sql.contains("MAX(CAST(EXTRACT(EPOCH FROM finalized_at) AS BIGINT)) FILTER ("));
+    }
+
+    #[test]
+    fn percentile_sql_excludes_legacy_http_400_rows() {
+        for sql in [
+            super::SELECT_STATS_DAILY_RESPONSE_TIME_PERCENTILES_SQL,
+            super::SELECT_STATS_DAILY_FIRST_BYTE_PERCENTILES_SQL,
+        ] {
+            assert!(sql.contains("outcome_class = 'success'"));
+            assert!(sql.contains("outcome_class = 'in_flight'"));
+            assert!(sql.contains("status_code IS NULL OR status_code < 400"));
+            assert!(sql.contains("error_message"));
+        }
     }
 
     #[test]

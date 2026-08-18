@@ -173,15 +173,23 @@ fn build_admin_monitoring_usage_routing_snapshot_trace(
     }
 
     let status = admin_monitoring_usage_candidate_status(usage);
-    let final_status = match status {
-        RequestCandidateStatus::Success => RequestCandidateFinalStatus::Success,
-        RequestCandidateStatus::Cancelled => RequestCandidateFinalStatus::Cancelled,
-        RequestCandidateStatus::Streaming => RequestCandidateFinalStatus::Streaming,
-        RequestCandidateStatus::Pending => RequestCandidateFinalStatus::Pending,
-        RequestCandidateStatus::Available
-        | RequestCandidateStatus::Unused
-        | RequestCandidateStatus::Failed
-        | RequestCandidateStatus::Skipped => RequestCandidateFinalStatus::Failed,
+    let final_status = match usage.outcome_class() {
+        aether_data_contracts::repository::usage::RequestOutcomeClass::Success => {
+            RequestCandidateFinalStatus::Success
+        }
+        aether_data_contracts::repository::usage::RequestOutcomeClass::UserError => {
+            RequestCandidateFinalStatus::UserError
+        }
+        aether_data_contracts::repository::usage::RequestOutcomeClass::ServiceError => {
+            RequestCandidateFinalStatus::Failed
+        }
+        aether_data_contracts::repository::usage::RequestOutcomeClass::Cancelled => {
+            RequestCandidateFinalStatus::Cancelled
+        }
+        aether_data_contracts::repository::usage::RequestOutcomeClass::InFlight => match status {
+            RequestCandidateStatus::Streaming => RequestCandidateFinalStatus::Streaming,
+            _ => RequestCandidateFinalStatus::Pending,
+        },
     };
     let latency_ms = usage.response_time_ms.unwrap_or_default();
     let candidate = StoredRequestCandidate {
@@ -275,15 +283,25 @@ fn admin_monitoring_usage_candidate_status(
         return RequestCandidateStatus::Cancelled;
     }
 
-    match usage.status_code {
-        Some(status_code) if (200..300).contains(&status_code) => RequestCandidateStatus::Success,
-        Some(_) => RequestCandidateStatus::Failed,
-        None if usage.status.trim().eq_ignore_ascii_case("completed")
-            || usage.status.trim().eq_ignore_ascii_case("success") =>
-        {
+    match usage.outcome_class() {
+        aether_data_contracts::repository::usage::RequestOutcomeClass::Success => {
             RequestCandidateStatus::Success
         }
-        None => RequestCandidateStatus::Failed,
+        aether_data_contracts::repository::usage::RequestOutcomeClass::UserError
+        | aether_data_contracts::repository::usage::RequestOutcomeClass::ServiceError => {
+            RequestCandidateStatus::Failed
+        }
+        aether_data_contracts::repository::usage::RequestOutcomeClass::Cancelled => {
+            RequestCandidateStatus::Cancelled
+        }
+        aether_data_contracts::repository::usage::RequestOutcomeClass::InFlight
+            if usage.status.trim().eq_ignore_ascii_case("streaming") =>
+        {
+            RequestCandidateStatus::Streaming
+        }
+        aether_data_contracts::repository::usage::RequestOutcomeClass::InFlight => {
+            RequestCandidateStatus::Pending
+        }
     }
 }
 
@@ -524,11 +542,15 @@ pub(super) async fn build_admin_monitoring_trace_provider_stats_response(
     let total_attempts = candidates.len();
     let success_count = candidates
         .iter()
-        .filter(|item| item.status == RequestCandidateStatus::Success)
+        .filter(|item| item.outcome_class().is_success())
         .count();
     let failed_count = candidates
         .iter()
-        .filter(|item| item.status == RequestCandidateStatus::Failed)
+        .filter(|item| item.outcome_class().is_service_error())
+        .count();
+    let user_error_count = candidates
+        .iter()
+        .filter(|item| item.outcome_class().is_user_error())
         .count();
     let cancelled_count = candidates
         .iter()
@@ -573,6 +595,7 @@ pub(super) async fn build_admin_monitoring_trace_provider_stats_response(
             total_attempts,
             success_count,
             failed_count,
+            user_error_count,
             cancelled_count,
             skipped_count,
             pending_count,

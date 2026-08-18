@@ -590,7 +590,13 @@ fn provider_key_load_ratio(current_usage: usize, effective_limit: usize) -> f64 
 }
 
 fn provider_key_reservation_confidence(key: &StoredProviderCatalogKey, now_unix_secs: u64) -> f64 {
-    let request_count = key.request_count.unwrap_or_default() as f64;
+    let request_count = key
+        .sla_eligible_count
+        .or_else(|| {
+            key.request_count
+                .map(|total| total.saturating_sub(key.user_error_count.unwrap_or_default()))
+        })
+        .unwrap_or_default() as f64;
     let success_count = key.success_count.unwrap_or_default() as f64;
 
     let success_score = if request_count >= SUCCESS_COUNT_FOR_FULL_CONFIDENCE as f64 {
@@ -681,8 +687,9 @@ mod tests {
         count_recent_rpm_requests_for_provider_key_since, effective_provider_key_health_score,
         effective_provider_key_rpm_limit, is_candidate_in_recent_failure_cooldown,
         is_provider_key_circuit_open, is_provider_key_circuit_open_at, provider_key_health_bucket,
-        provider_key_health_score, provider_key_rpm_allows_request,
-        provider_key_rpm_allows_request_since, ProviderKeyHealthBucket,
+        provider_key_health_score, provider_key_reservation_confidence,
+        provider_key_rpm_allows_request, provider_key_rpm_allows_request_since,
+        ProviderKeyHealthBucket,
     };
 
     fn stored_candidate(
@@ -1349,6 +1356,29 @@ mod tests {
             false,
             Some(97),
         ));
+    }
+
+    #[test]
+    fn reservation_confidence_fallback_excludes_user_errors_from_denominator() {
+        let legacy_key = provider_catalog_key("key-a")
+            .with_rate_limit_fields(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(100),
+                Some(90),
+            )
+            .with_sla_usage_fields(None, Some(10));
+        let canonical_key = legacy_key.clone().with_sla_usage_fields(Some(90), Some(10));
+
+        assert_eq!(
+            provider_key_reservation_confidence(&legacy_key, 100),
+            provider_key_reservation_confidence(&canonical_key, 100)
+        );
     }
 
     #[test]

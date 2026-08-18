@@ -456,7 +456,17 @@ type = "int64"
 default = 0
 
 [[table.provider_api_keys.columns]]
+name = "sla_eligible_count"
+type = "int64"
+default = 0
+
+[[table.provider_api_keys.columns]]
 name = "error_count"
+type = "int64"
+default = 0
+
+[[table.provider_api_keys.columns]]
+name = "user_error_count"
 type = "int64"
 default = 0
 

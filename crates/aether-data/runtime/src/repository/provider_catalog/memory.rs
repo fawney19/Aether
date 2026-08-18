@@ -87,6 +87,14 @@ impl InMemoryProviderCatalogReadRepository {
             key.error_count.unwrap_or_default(),
             delta.error_count,
         ));
+        key.sla_eligible_count = Some(apply_i64_delta_to_u32(
+            key.sla_eligible_count.unwrap_or_default(),
+            delta.sla_eligible_count,
+        ));
+        key.user_error_count = Some(apply_i64_delta_to_u32(
+            key.user_error_count.unwrap_or_default(),
+            delta.user_error_count,
+        ));
         key.total_tokens = apply_i64_delta_to_u64(key.total_tokens, delta.total_tokens);
         key.total_cost_usd = apply_f64_delta(key.total_cost_usd, delta.total_cost_usd);
         key.total_response_time_ms = Some(apply_i64_delta_to_u64(
@@ -121,6 +129,8 @@ impl InMemoryProviderCatalogReadRepository {
             key.request_count = Some(0);
             key.success_count = Some(0);
             key.error_count = Some(0);
+            key.sla_eligible_count = Some(0);
+            key.user_error_count = Some(0);
             key.total_tokens = 0;
             key.total_cost_usd = 0.0;
             key.total_response_time_ms = Some(0);
@@ -134,6 +144,8 @@ impl InMemoryProviderCatalogReadRepository {
             key.request_count = Some(clamp_i64_to_u32(contribution.request_count));
             key.success_count = Some(clamp_i64_to_u32(contribution.success_count));
             key.error_count = Some(clamp_i64_to_u32(contribution.error_count));
+            key.sla_eligible_count = Some(clamp_i64_to_u32(contribution.sla_eligible_count));
+            key.user_error_count = Some(clamp_i64_to_u32(contribution.user_error_count));
             key.total_tokens = clamp_i64_to_u64(contribution.total_tokens);
             key.total_cost_usd = contribution.total_cost_usd.max(0.0);
             key.total_response_time_ms =
@@ -1359,6 +1371,8 @@ fn merge_admin_key_update(
     merged.total_cost_usd = stored.total_cost_usd;
     merged.success_count = stored.success_count;
     merged.error_count = stored.error_count;
+    merged.sla_eligible_count = stored.sla_eligible_count;
+    merged.user_error_count = stored.user_error_count;
     merged.total_response_time_ms = stored.total_response_time_ms;
     merged.last_used_at_unix_secs = stored.last_used_at_unix_secs;
     merged.created_at_unix_ms = stored.created_at_unix_ms;

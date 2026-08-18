@@ -26,7 +26,9 @@ INSERT INTO "usage" (
   billing_status,
   request_metadata,
   created_at,
-  updated_at_unix_secs
+  updated_at_unix_secs,
+  outcome_class,
+  sla_eligible
 ) VALUES (
   $1,
   $2,
@@ -65,7 +67,9 @@ INSERT INTO "usage" (
   COALESCE(
     NULLIF($24::bigint, 0),
     CAST(EXTRACT(EPOCH FROM COALESCE(TO_TIMESTAMP($23::double precision), NOW())) AS BIGINT)
-  )
+  ),
+  'in_flight',
+  FALSE
 )
 ON CONFLICT (request_id)
 DO UPDATE SET
@@ -110,6 +114,8 @@ DO UPDATE SET
     ELSE EXCLUDED.first_byte_time_ms
   END,
   status = 'streaming',
+  outcome_class = 'in_flight',
+  sla_eligible = FALSE,
   request_metadata = COALESCE("usage".request_metadata, EXCLUDED.request_metadata),
   updated_at_unix_secs = GREATEST(
     COALESCE(NULLIF("usage".updated_at_unix_secs, 0), 0),

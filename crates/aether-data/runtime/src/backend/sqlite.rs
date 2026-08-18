@@ -499,9 +499,11 @@ VALUES ('target-key-1', 'target-user-1', 'hash-target-key', 'target key', 1, 1)
         let snapshot = AdminSystemUsageAggregateSnapshot {
             stats_daily: vec![AdminSystemStatsDailyAggregate {
                 date_unix_secs: 86_400,
-                total_requests: 9,
+                total_requests: 10,
                 success_requests: 8,
                 error_requests: 1,
+                sla_eligible_requests: 9,
+                user_error_requests: 1,
                 input_tokens: 100,
                 output_tokens: 200,
                 cache_creation_tokens: 3,
@@ -518,6 +520,8 @@ VALUES ('target-key-1', 'target-user-1', 'hash-target-key', 'target key', 1, 1)
                 total_requests: 5,
                 success_requests: 5,
                 error_requests: 0,
+                sla_eligible_requests: 5,
+                user_error_requests: 0,
                 input_tokens: 50,
                 output_tokens: 60,
                 cache_creation_tokens: 1,
@@ -531,6 +535,8 @@ VALUES ('target-key-1', 'target-user-1', 'hash-target-key', 'target key', 1, 1)
                 total_requests: 4,
                 success_requests: 3,
                 error_requests: 1,
+                sla_eligible_requests: 4,
+                user_error_requests: 0,
                 input_tokens: 40,
                 output_tokens: 30,
                 cache_creation_tokens: 2,
@@ -561,7 +567,9 @@ VALUES ('target-key-1', 'target-user-1', 'hash-target-key', 'target key', 1, 1)
             .await
             .expect("usage aggregates should export");
         assert_eq!(exported.stats_daily.len(), 1);
-        assert_eq!(exported.stats_daily[0].total_requests, 9);
+        assert_eq!(exported.stats_daily[0].total_requests, 10);
+        assert_eq!(exported.stats_daily[0].sla_eligible_requests, 9);
+        assert_eq!(exported.stats_daily[0].user_error_requests, 1);
         assert_eq!(exported.stats_daily[0].actual_total_cost, 1.0);
         assert_eq!(exported.stats_user_daily.len(), 1);
         assert_eq!(exported.stats_user_daily[0].user_id, "target-user-1");
@@ -827,6 +835,7 @@ WHERE billing_date = '2026-05-03'
             r#"
 INSERT INTO "usage" (
   request_id, user_id, api_key_id, provider_name, model, api_format, status, billing_status,
+  outcome_class, sla_eligible,
   status_code, error_category, input_tokens, output_tokens,
   cache_creation_input_tokens, cache_read_input_tokens, total_cost_usd,
   actual_total_cost_usd, cache_creation_cost_usd, cache_read_cost_usd,
@@ -834,13 +843,13 @@ INSERT INTO "usage" (
   created_at_unix_ms, updated_at_unix_secs
 ) VALUES
   ('stats-1', 'user-1', 'key-1', 'provider-a', 'model-a', 'openai', 'completed', 'settled',
-   200, NULL, 10, 20, 1, 2, 0.30, 0.25, 0.01, 0.02, 10.0, 100, 50, 3600, 3600),
+   'success', 1, 200, NULL, 10, 20, 1, 2, 0.30, 0.25, 0.01, 0.02, 10.0, 100, 50, 3600, 3600),
   ('stats-2', 'user-2', 'key-2', 'provider-b', 'model-b', 'claude', 'failed', 'void',
-   500, 'upstream_error', 5, 7, 0, 1, 0.20, 0.20, 0.00, 0.01, 20.0, 300, 200, 3610, 3610),
+   'service_error', 1, 500, 'upstream_error', 5, 7, 0, 1, 0.20, 0.20, 0.00, 0.01, 20.0, 300, 200, 3610, 3610),
   ('stats-pending', 'user-3', 'key-3', 'provider-a', 'model-a', 'openai', 'pending', 'pending',
-   NULL, NULL, 100, 100, 0, 0, 9.99, 9.99, 0.00, 0.00, 0.0, 50, 25, 3620, 3620),
+   'in_flight', 0, NULL, NULL, 100, 100, 0, 0, 9.99, 9.99, 0.00, 0.00, 0.0, 50, 25, 3620, 3620),
   ('stats-unknown-provider', 'user-4', 'key-4', 'unknown', 'model-a', 'openai', 'completed', 'settled',
-   200, NULL, 100, 100, 0, 0, 9.99, 9.99, 0.00, 0.00, 0.0, 50, 25, 3630, 3630)
+   'success', 1, 200, NULL, 100, 100, 0, 0, 9.99, 9.99, 0.00, 0.00, 0.0, 50, 25, 3630, 3630)
 "#,
         )
         .execute(backend.pool())

@@ -122,7 +122,7 @@ function generateHealthEvents(
       statusCode = 200
     } else if (rand < successRate + failRate) {
       status = 'failed'
-      statusCode = [500, 502, 503, 429, 400][Math.floor(Math.random() * 5)]
+      statusCode = [500, 502, 503, 429][Math.floor(Math.random() * 4)]
     } else {
       status = 'skipped'
       statusCode = 0
@@ -181,8 +181,11 @@ function generateHealthTimelineDetails(
       time_range_start: new Date(rangeStart + index * interval).toISOString(),
       time_range_end: new Date(rangeStart + (index + 1) * interval).toISOString(),
       total_attempts: totalAttempts,
+      sla_eligible_count: totalAttempts,
       success_count: successCount,
       failed_count: failedCount,
+      service_error_count: failedCount,
+      user_error_count: 0,
       success_rate: successRate,
       avg_latency_ms: avgLatencyMs == null || totalAttempts === 0
         ? null
@@ -835,6 +838,17 @@ function generateMockUsageRecords(count: number = 100) {
     const baseResponseTime = model.name.includes('opus') ? 2000 : model.name.includes('haiku') ? 500 : 1000
     const responseTime = status === 'failed' ? null : baseResponseTime + Math.floor(Math.random() * outputTokens * 0.5)
 
+    const statusCode = status === 'failed'
+      ? [500, 502, 429, 400][Math.floor(Math.random() * 4)]
+      : 200
+    const outcomeClass = statusCode === 400
+      ? 'user_error'
+      : status === 'failed'
+        ? 'service_error'
+        : status === 'streaming'
+          ? 'in_flight'
+          : 'success'
+
     records.push({
       id: `usage-${String(i + 1).padStart(4, '0')}`,
       user_id: user.id,
@@ -860,9 +874,11 @@ function generateMockUsageRecords(count: number = 100) {
       actual_cost: actualCost,
       response_time_ms: responseTime,
       is_stream: apiFormat.includes(':cli'),
-      status_code: status === 'failed' ? [500, 502, 429, 400][Math.floor(Math.random() * 4)] : 200,
+      status_code: statusCode,
       error_message: status === 'failed' ? ['Rate limit exceeded', 'Internal server error', 'Model overloaded'][Math.floor(Math.random() * 3)] : undefined,
       status,
+      outcome_class: outcomeClass,
+      sla_eligible: outcomeClass === 'success' || outcomeClass === 'service_error',
       created_at: createdAt.toISOString(),
       has_fallback: Math.random() > 0.9,
       model_version: model.provider === 'google' ? 'gemini-3-pro-preview-2025-01' : undefined
@@ -904,6 +920,8 @@ function generateMockUsageRecords(count: number = 100) {
     status_code: 400,
     error_message: MOCK_CYBER_POLICY_ERROR_MESSAGE,
     status: 'failed',
+    outcome_class: 'user_error',
+    sla_eligible: false,
     created_at: new Date(now).toISOString(),
     updated_at: new Date(now).toISOString(),
     has_fallback: false,
@@ -1518,6 +1536,10 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
         is_stream: r.is_stream,
         created_at: r.created_at,
         status_code: r.status_code,
+        status: r.status,
+        outcome_class: r.outcome_class,
+        sla_eligible: r.sla_eligible,
+        error_message: r.error_message,
         input_price_per_1m: 3,
         output_price_per_1m: 15
       }))
@@ -1910,6 +1932,10 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     const totalCost = records.reduce((sum, r) => sum + r.cost, 0)
     const totalActualCost = records.reduce((sum, r) => sum + (r.actual_cost || 0), 0)
     const avgResponseTime = records.filter(r => r.response_time_ms).reduce((sum, r) => sum + (r.response_time_ms || 0), 0) / records.filter(r => r.response_time_ms).length / 1000
+    const userErrorCount = records.filter(r => r.status_code === 400).length
+    const serviceErrorCount = records.filter(r => r.status === 'failed' && r.status_code !== 400).length
+    const successCount = records.filter(r => r.status !== 'failed').length
+    const slaEligibleCount = successCount + serviceErrorCount
 
     // 今日数据
     const today = new Date().toISOString().split('T')[0]
@@ -1921,6 +1947,13 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
       total_cost: Number((totalCost * 100).toFixed(2)),
       total_actual_cost: Number((totalActualCost * 100).toFixed(2)),
       avg_response_time: Number(avgResponseTime.toFixed(2)),
+      sla_eligible_count: slaEligibleCount * 100,
+      error_count: serviceErrorCount * 100,
+      error_rate: slaEligibleCount > 0 ? Number((serviceErrorCount / slaEligibleCount * 100).toFixed(2)) : 0,
+      service_error_count: serviceErrorCount * 100,
+      service_error_rate: slaEligibleCount > 0 ? Number((serviceErrorCount / slaEligibleCount * 100).toFixed(2)) : 0,
+      user_error_count: userErrorCount * 100,
+      user_error_rate: totalRequests > 0 ? Number((userErrorCount / totalRequests * 100).toFixed(2)) : 0,
       today: {
         requests: todayRecords.length * 10,
         tokens: todayRecords.reduce((sum, r) => sum + r.total_tokens, 0) * 10,
@@ -1989,19 +2022,23 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     }
 
     if (groupBy === 'provider') {
-      const providerStats = new Map<string, { request_count: number; total_tokens: number; total_cost: number; actual_cost: number; response_times: number[]; errors: number }>()
+      const providerStats = new Map<string, { request_count: number; total_tokens: number; total_cost: number; actual_cost: number; response_times: number[]; serviceErrors: number; userErrors: number; successes: number }>()
       for (const r of records) {
-        const existing = providerStats.get(r.provider) || { request_count: 0, total_tokens: 0, total_cost: 0, actual_cost: 0, response_times: [], errors: 0 }
+        const existing = providerStats.get(r.provider) || { request_count: 0, total_tokens: 0, total_cost: 0, actual_cost: 0, response_times: [], serviceErrors: 0, userErrors: 0, successes: 0 }
         existing.request_count++
         existing.total_tokens += r.total_tokens
         existing.total_cost += r.cost
         existing.actual_cost += r.actual_cost || 0
         if (r.response_time_ms) existing.response_times.push(r.response_time_ms)
-        if (r.status === 'failed') existing.errors++
+        if (r.status_code === 400) existing.userErrors++
+        else if (r.status === 'failed') existing.serviceErrors++
+        else existing.successes++
         providerStats.set(r.provider, existing)
       }
       return createMockResponse(
-        Array.from(providerStats.entries()).map(([provider, stats]) => ({
+        Array.from(providerStats.entries()).map(([provider, stats]) => {
+          const slaEligibleCount = stats.successes + stats.serviceErrors
+          return ({
           provider_id: `provider-${provider}`,
           provider,
           request_count: stats.request_count * 50,
@@ -2009,9 +2046,14 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
           total_cost: Number((stats.total_cost * 50).toFixed(2)),
           actual_cost: Number((stats.actual_cost * 50).toFixed(2)),
           avg_response_time_ms: Math.round(stats.response_times.reduce((a, b) => a + b, 0) / stats.response_times.length || 0),
-          success_rate: (stats.request_count - stats.errors) / stats.request_count,
-          error_count: stats.errors * 50
-        }))
+          sla_eligible_count: slaEligibleCount * 50,
+          success_rate: slaEligibleCount > 0 ? Number((stats.successes / slaEligibleCount * 100).toFixed(2)) : 100,
+          error_count: stats.serviceErrors * 50,
+          service_error_count: stats.serviceErrors * 50,
+          service_error_rate: slaEligibleCount > 0 ? Number((stats.serviceErrors / slaEligibleCount * 100).toFixed(2)) : 0,
+          user_error_count: stats.userErrors * 50,
+          user_error_rate: stats.request_count > 0 ? Number((stats.userErrors / stats.request_count * 100).toFixed(2)) : 0
+        })})
       )
     }
 
@@ -4134,6 +4176,9 @@ registerDynamicRoute('GET', '/api/admin/usage/:requestId', async (config, params
     request_type: record.is_stream ? 'stream' : 'standard',
     is_stream: record.is_stream,
     status_code: record.status_code,
+    status: record.status,
+    outcome_class: record.outcome_class,
+    sla_eligible: record.sla_eligible,
     error_message: record.error_message,
     response_time_ms: record.response_time_ms,
     created_at: record.created_at,
@@ -4415,7 +4460,15 @@ registerDynamicRoute('GET', '/api/admin/monitoring/trace/:requestId', async (_co
   return createMockResponse({
     request_id: requestId,
     total_candidates: candidates.length,
-    final_status: record.status === 'completed' ? 'success' : record.status === 'failed' ? 'failed' : 'streaming',
+    final_status: record.outcome_class === 'user_error'
+      ? 'user_error'
+      : record.status === 'completed'
+        ? 'success'
+        : record.status === 'failed'
+          ? 'failed'
+          : 'streaming',
+    outcome_class: record.outcome_class,
+    sla_eligible: record.sla_eligible,
     total_latency_ms: totalLatency,
     candidates
   })

@@ -109,11 +109,100 @@ async fn admin_monitoring_user_behavior_returns_empty_local_payload_without_post
     assert_eq!(payload["user_id"], json!("user-123"));
     assert_eq!(payload["period_days"], json!(30));
     assert_eq!(payload["event_counts"], json!({}));
+    assert_eq!(payload["total_requests"], json!(0));
+    assert_eq!(payload["sla_eligible_count"], json!(0));
+    assert_eq!(payload["success_count"], json!(0));
+    assert_eq!(payload["service_error_count"], json!(0));
+    assert_eq!(payload["user_error_count"], json!(0));
     assert_eq!(payload["failed_requests"], json!(0));
     assert_eq!(payload["success_requests"], json!(0));
     assert_eq!(payload["success_rate"], json!(0.0));
+    assert_eq!(payload["service_error_rate"], json!(0.0));
+    assert_eq!(payload["user_error_rate"], json!(0.0));
     assert_eq!(payload["suspicious_activities"], json!(0));
     assert!(payload["analysis_time"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn admin_monitoring_user_behavior_uses_canonical_usage_outcomes() {
+    let now = chrono::Utc::now().timestamp();
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        sample_usage(
+            "request-success",
+            "provider-1",
+            "OpenAI",
+            10,
+            0.10,
+            "completed",
+            Some(200),
+            now - 60,
+        ),
+        sample_usage(
+            "request-user-error",
+            "provider-1",
+            "OpenAI",
+            0,
+            0.0,
+            "failed",
+            Some(400),
+            now - 50,
+        ),
+        sample_usage(
+            "request-service-error",
+            "provider-1",
+            "OpenAI",
+            0,
+            0.0,
+            "failed",
+            Some(503),
+            now - 40,
+        ),
+        {
+            let mut other_user = sample_usage(
+                "request-other-user",
+                "provider-1",
+                "OpenAI",
+                10,
+                0.10,
+                "completed",
+                Some(200),
+                now - 30,
+            );
+            other_user.user_id = Some("user-2".to_string());
+            other_user
+        },
+    ]));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(crate::data::GatewayDataState::with_usage_reader_for_tests(
+            usage_repository,
+        ));
+    let context = request_context(
+        http::Method::GET,
+        "/api/admin/monitoring/user-behavior/user-1?days=30",
+    );
+
+    let response = local_monitoring_response(&state, &context)
+        .await
+        .expect("handler should not error")
+        .expect("user behavior route should be handled locally");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+
+    assert_eq!(payload["total_requests"], json!(3));
+    assert_eq!(payload["sla_eligible_count"], json!(2));
+    assert_eq!(payload["success_count"], json!(1));
+    assert_eq!(payload["service_error_count"], json!(1));
+    assert_eq!(payload["user_error_count"], json!(1));
+    assert_eq!(payload["failed_requests"], json!(1));
+    assert_eq!(payload["success_requests"], json!(1));
+    assert_eq!(payload["success_rate"], json!(0.5));
+    assert_eq!(payload["service_error_rate"], json!(0.5));
+    assert_eq!(payload["user_error_rate"], json!(1.0 / 3.0));
 }
 
 #[tokio::test]

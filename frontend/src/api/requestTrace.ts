@@ -1,4 +1,5 @@
 import apiClient from './client'
+import type { RequestOutcomeClass } from '@/features/usage/types'
 
 export interface CandidateRankingMetadata {
   mode?: string
@@ -58,7 +59,9 @@ export interface CandidateRecord {
   key_oauth_plan_type?: string  // OAuth 账号套餐类型（free/plus/team/enterprise）
   key_capabilities?: Record<string, boolean> | null  // Key 支持的能力
   required_capabilities?: Record<string, boolean> | null  // 请求实际需要的能力标签
-  status: 'pending' | 'streaming' | 'success' | 'failed' | 'skipped' | 'cancelled' | 'available' | 'unused' | 'stream_interrupted'
+  status: 'pending' | 'streaming' | 'success' | 'user_error' | 'failed' | 'skipped' | 'cancelled' | 'available' | 'unused' | 'stream_interrupted'
+  outcome_class?: RequestOutcomeClass
+  sla_eligible?: boolean
   skip_reason?: string
   is_cached: boolean
   // 执行结果字段
@@ -84,15 +87,20 @@ export interface RequestTrace {
   request_query_string?: string
   request_path_and_query?: string
   total_candidates: number
-  final_status: 'success' | 'failed' | 'streaming' | 'pending' | 'cancelled'
+  final_status: 'success' | 'user_error' | 'failed' | 'streaming' | 'pending' | 'cancelled'
+  outcome_class?: RequestOutcomeClass
+  sla_eligible?: boolean
   total_latency_ms: number
   candidates: CandidateRecord[]
 }
 
 export interface ProviderStats {
   total_attempts: number
+  sla_eligible_count?: number
   success_count: number
   failed_count: number
+  service_error_count?: number
+  user_error_count?: number
   cancelled_count: number
   skipped_count: number
   pending_count: number

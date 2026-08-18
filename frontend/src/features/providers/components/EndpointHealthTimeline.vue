@@ -133,18 +133,21 @@ const segments = computed(() => {
 
     const successCount = cellEvents.filter(e => e.status === 'success').length
     const failedCount = cellEvents.filter(e => e.status === 'failed').length
+    const userErrorCount = cellEvents.filter(e => e.status === 'user_error').length
     const skippedCount = cellEvents.filter(e => e.status === 'skipped').length
-    const total = cellEvents.length
+    const slaEligibleCount = successCount + failedCount
 
     let color: string
     if (failedCount > 0) {
-      const failRate = failedCount / total
+      const failRate = failedCount / Math.max(slaEligibleCount, 1)
       color = failRate > 0.5 ? 'bg-red-500' : 'bg-red-400/80'
     } else if (successCount > 0) {
-      const successRate = successCount / total
+      const successRate = successCount / Math.max(slaEligibleCount, 1)
       color = successRate > 0.7 ? 'bg-green-500/80' : 'bg-green-400/80'
     } else if (skippedCount > 0) {
       color = 'bg-amber-400/80'
+    } else if (userErrorCount > 0) {
+      color = 'bg-slate-400/80 dark:bg-slate-500/80'
     } else {
       color = 'bg-gray-300 dark:bg-gray-600'
     }
@@ -169,6 +172,8 @@ function getStatusColor(status: string) {
       return 'bg-green-500/80 dark:bg-green-400/90'
     case 'failed':
       return 'bg-red-500/80 dark:bg-red-400/90'
+    case 'user_error':
+      return 'bg-slate-400/80 dark:bg-slate-500/80'
     case 'skipped':
       return 'bg-amber-400/80 dark:bg-amber-300/80'
     case 'started':
@@ -203,6 +208,7 @@ function buildSegmentTooltip(
 ) {
   const successCount = cellEvents.filter(event => event.status === 'success').length
   const failedCount = cellEvents.filter(event => event.status === 'failed').length
+  const userErrorCount = cellEvents.filter(event => event.status === 'user_error').length
   const completedCount = successCount + failedCount
   const latencyValues = cellEvents
     .map(event => event.latency_ms)
@@ -217,8 +223,11 @@ function buildSegmentTooltip(
     timeRangeEnd: cellEndTime.toISOString(),
     metrics: {
       total_attempts: cellEvents.length,
+      sla_eligible_count: completedCount,
       success_count: successCount,
       failed_count: failedCount,
+      service_error_count: failedCount,
+      user_error_count: userErrorCount,
       success_rate: completedCount > 0 ? successCount / completedCount : null,
       avg_latency_ms: avgLatencyMs,
       avg_first_byte_ms: null,
@@ -234,8 +243,9 @@ function getTimelineStatusFromEvents(
 ) {
   const successCount = cellEvents.filter(event => event.status === 'success').length
   const failedCount = cellEvents.filter(event => event.status === 'failed').length
+  const userErrorCount = cellEvents.filter(event => event.status === 'user_error').length
   const completedCount = successCount + failedCount
-  if (completedCount === 0) return 'unknown'
+  if (completedCount === 0) return userErrorCount > 0 ? 'user_error' : 'unknown'
   const successRate = successCount / completedCount
   if (successRate >= 0.95) return 'healthy'
   if (successRate >= 0.7) return 'warning'

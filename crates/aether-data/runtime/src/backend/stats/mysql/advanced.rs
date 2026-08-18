@@ -28,11 +28,17 @@ const EFFECTIVE_INPUT: &str = r#"CASE
     ELSE GREATEST(COALESCE(usage.input_tokens, 0), 0)
 END"#;
 const SUCCESS: &str = r#"CASE
-    WHEN usage.status <> 'failed'
-      AND (usage.status_code IS NULL OR usage.status_code < 400)
-      AND usage.error_message IS NULL
-    THEN 1 ELSE 0
+    WHEN usage.outcome_class = 'success' THEN 1 ELSE 0
 END"#;
+const SUCCESS_PERCENTILE_PREDICATE: &str = r#"(
+    usage.outcome_class = 'success'
+    OR (
+        usage.outcome_class = 'in_flight'
+        AND LOWER(TRIM(COALESCE(usage.status, ''))) = 'completed'
+        AND (usage.status_code IS NULL OR usage.status_code < 400)
+        AND TRIM(COALESCE(usage.error_message, '')) = ''
+    )
+)"#;
 const AGGREGATABLE: &str = r#"usage.status NOT IN ('pending', 'streaming')
     AND usage.provider_name NOT IN ('unknown', 'pending')"#;
 const SETTLED: &str = r#"COALESCE(settlement.billing_status, usage.billing_status) = 'settled'
@@ -88,7 +94,7 @@ async fn load_percentiles(
 SELECT {column}
 FROM `usage`
 WHERE created_at_unix_ms >= ? AND created_at_unix_ms < ?
-  AND status = 'completed'
+  AND {SUCCESS_PERCENTILE_PREDICATE}
   AND provider_name NOT IN ('unknown', 'pending')
   AND {column} IS NOT NULL
 ORDER BY {column}
@@ -558,6 +564,7 @@ async fn upsert_user_dimension(
         r#"
 INSERT INTO {table} (
   id, user_id, username, `date`, {dimension_column}, total_requests, success_requests,
+  sla_eligible_requests, user_error_requests,
   input_tokens, effective_input_tokens, output_tokens, total_tokens, total_input_context,
   cache_creation_tokens, cache_creation_ephemeral_5m_tokens,
   cache_creation_ephemeral_1h_tokens, cache_read_tokens, total_cost, actual_total_cost,
@@ -567,6 +574,8 @@ INSERT INTO {table} (
 SELECT SHA2(UUID(), 256), usage.user_id,
   MAX(COALESCE(usage.username, users.username)), ?, {dimension_expr}, COUNT(*),
   COALESCE(SUM({SUCCESS}), 0),
+  COALESCE(SUM(CASE WHEN usage.sla_eligible <> 0 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.outcome_class = 'user_error' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(GREATEST(COALESCE(usage.input_tokens, 0), 0)), 0),
   COALESCE(SUM({EFFECTIVE_INPUT}), 0),
   COALESCE(SUM(GREATEST(COALESCE(usage.output_tokens, 0), 0)), 0),
@@ -591,6 +600,8 @@ GROUP BY usage.user_id, {dimension_expr}
 ON DUPLICATE KEY UPDATE
   username = COALESCE(VALUES(username), {table}.username),
   total_requests = VALUES(total_requests), success_requests = VALUES(success_requests),
+  sla_eligible_requests = VALUES(sla_eligible_requests),
+  user_error_requests = VALUES(user_error_requests),
   input_tokens = VALUES(input_tokens), effective_input_tokens = VALUES(effective_input_tokens),
   output_tokens = VALUES(output_tokens), total_tokens = VALUES(total_tokens),
   total_input_context = VALUES(total_input_context),
@@ -872,14 +883,16 @@ async fn refresh_user_summary(
         r#"
 INSERT INTO stats_user_summary (
   id, user_id, username, cutoff_date, all_time_requests, all_time_success_requests,
-  all_time_error_requests, all_time_input_tokens, all_time_output_tokens,
+  all_time_error_requests, all_time_sla_eligible_requests, all_time_user_error_requests,
+  all_time_input_tokens, all_time_output_tokens,
   all_time_cache_creation_tokens, all_time_cache_read_tokens, all_time_cost,
   all_time_actual_cost, active_days, first_active_date, last_active_date,
   created_at, updated_at
 )
 SELECT SHA2(UUID(), 256), user_id, MAX(username), ?,
   COALESCE(SUM(total_requests), 0), COALESCE(SUM(success_requests), 0),
-  COALESCE(SUM(error_requests), 0), COALESCE(SUM(input_tokens), 0),
+  COALESCE(SUM(error_requests), 0), COALESCE(SUM(sla_eligible_requests), 0),
+  COALESCE(SUM(user_error_requests), 0), COALESCE(SUM(input_tokens), 0),
   COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_creation_tokens), 0),
   COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(total_cost), 0),
   COALESCE(SUM(actual_total_cost), 0),
@@ -894,6 +907,8 @@ ON DUPLICATE KEY UPDATE
   cutoff_date = VALUES(cutoff_date), all_time_requests = VALUES(all_time_requests),
   all_time_success_requests = VALUES(all_time_success_requests),
   all_time_error_requests = VALUES(all_time_error_requests),
+  all_time_sla_eligible_requests = VALUES(all_time_sla_eligible_requests),
+  all_time_user_error_requests = VALUES(all_time_user_error_requests),
   all_time_input_tokens = VALUES(all_time_input_tokens),
   all_time_output_tokens = VALUES(all_time_output_tokens),
   all_time_cache_creation_tokens = VALUES(all_time_cache_creation_tokens),
@@ -929,13 +944,15 @@ async fn refresh_global_summary(
         r#"
 INSERT INTO stats_summary (
   id, cutoff_date, all_time_requests, all_time_success_requests,
-  all_time_error_requests, all_time_input_tokens, all_time_output_tokens,
+  all_time_error_requests, all_time_sla_eligible_requests, all_time_user_error_requests,
+  all_time_input_tokens, all_time_output_tokens,
   all_time_cache_creation_tokens, all_time_cache_read_tokens, all_time_cost,
   all_time_actual_cost, total_users, active_users, total_api_keys,
   active_api_keys, created_at, updated_at
 )
 SELECT ?, ?, COALESCE(SUM(total_requests), 0), COALESCE(SUM(success_requests), 0),
-  COALESCE(SUM(error_requests), 0), COALESCE(SUM(input_tokens), 0),
+  COALESCE(SUM(error_requests), 0), COALESCE(SUM(sla_eligible_requests), 0),
+  COALESCE(SUM(user_error_requests), 0), COALESCE(SUM(input_tokens), 0),
   COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_creation_tokens), 0),
   COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(total_cost), 0),
   COALESCE(SUM(actual_total_cost), 0),
@@ -950,6 +967,8 @@ ON DUPLICATE KEY UPDATE
   all_time_requests = VALUES(all_time_requests),
   all_time_success_requests = VALUES(all_time_success_requests),
   all_time_error_requests = VALUES(all_time_error_requests),
+  all_time_sla_eligible_requests = VALUES(all_time_sla_eligible_requests),
+  all_time_user_error_requests = VALUES(all_time_user_error_requests),
   all_time_input_tokens = VALUES(all_time_input_tokens),
   all_time_output_tokens = VALUES(all_time_output_tokens),
   all_time_cache_creation_tokens = VALUES(all_time_cache_creation_tokens),

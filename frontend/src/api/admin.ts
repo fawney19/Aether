@@ -197,7 +197,10 @@ export interface StatsDailyAggregateExport {
   date_unix_secs: number
   total_requests: number
   success_requests: number
+  /** 服务错误数；用户错误不包含在内。 */
   error_requests: number
+  sla_eligible_requests?: number
+  user_error_requests?: number
   input_tokens: number
   output_tokens: number
   cache_creation_tokens: number
@@ -214,7 +217,10 @@ export interface StatsUserDailyAggregateExport {
   date_unix_secs: number
   total_requests: number
   success_requests: number
+  /** 服务错误数；用户错误不包含在内。 */
   error_requests: number
+  sla_eligible_requests?: number
+  user_error_requests?: number
   input_tokens: number
   output_tokens: number
   cache_creation_tokens: number
@@ -228,7 +234,10 @@ export interface StatsDailyApiKeyAggregateExport {
   date_unix_secs: number
   total_requests: number
   success_requests: number
+  /** 服务错误数；用户错误不包含在内。 */
   error_requests: number
+  sla_eligible_requests?: number
+  user_error_requests?: number
   input_tokens: number
   output_tokens: number
   cache_creation_tokens: number
@@ -760,7 +769,14 @@ export interface PercentileItem {
 
 export interface ProviderPerformanceSummary {
   request_count: number
+  sla_eligible_count?: number
+  success_count?: number
+  service_error_count?: number
+  user_error_count?: number
+  /** SLA 成功率（0-100），用户错误不进入分母。 */
   success_rate: number
+  service_error_rate?: number
+  user_error_rate?: number
   avg_output_tps: number | null
   avg_first_byte_time_ms: number | null
   avg_response_time_ms: number | null
@@ -778,9 +794,16 @@ export interface ProviderPerformanceItem {
   provider_id: string
   provider: string
   request_count: number
+  sla_eligible_count?: number
   success_count: number
+  /** 兼容字段：语义为服务错误数。 */
   error_count: number
+  service_error_count?: number
+  user_error_count?: number
+  /** SLA 成功率（0-100），用户错误不进入分母。 */
   success_rate: number
+  service_error_rate?: number
+  user_error_rate?: number
   output_tokens: number
   avg_output_tps: number | null
   avg_first_byte_time_ms: number | null
@@ -800,11 +823,17 @@ export interface ProviderPerformanceTimelineItem {
   provider_id: string
   provider: string
   request_count: number
+  sla_eligible_count?: number
+  success_count?: number
+  service_error_count?: number
+  user_error_count?: number
   output_tokens: number
   avg_output_tps: number | null
   avg_first_byte_time_ms: number | null
   avg_response_time_ms: number | null
   success_rate: number
+  service_error_rate?: number
+  user_error_rate?: number
   slow_request_count?: number
 }
 
@@ -836,7 +865,11 @@ export interface ComparisonMetric {
   total_cost: number
   actual_total_cost: number
   avg_response_time_ms: number
+  /** 服务错误数；用户错误不包含在内。 */
   error_requests: number
+  sla_eligible_count?: number
+  service_error_count?: number
+  user_error_count?: number
 }
 
 export interface ComparisonResponse {

@@ -2473,11 +2473,13 @@ pub(crate) fn build_admin_provider_key_response(
     now_unix_secs: u64,
 ) -> serde_json::Value {
     let request_count = u64::from(key.request_count.unwrap_or(0));
+    let sla_eligible_count = u64::from(key.sla_eligible_count.unwrap_or(0));
     let success_count = u64::from(key.success_count.unwrap_or(0));
     let error_count = u64::from(key.error_count.unwrap_or(0));
+    let user_error_count = u64::from(key.user_error_count.unwrap_or(0));
     let total_response_time_ms = key.total_response_time_ms.unwrap_or(0) as f64;
-    let success_rate = if request_count > 0 {
-        success_count as f64 / request_count as f64
+    let success_rate = if sla_eligible_count > 0 {
+        success_count as f64 / sla_eligible_count as f64
     } else {
         0.0
     };
@@ -2758,8 +2760,11 @@ pub(crate) fn build_admin_provider_key_response(
             .unwrap_or(serde_json::Value::Null),
     );
     payload.insert("request_count".to_string(), json!(request_count));
+    payload.insert("sla_eligible_count".to_string(), json!(sla_eligible_count));
     payload.insert("success_count".to_string(), json!(success_count));
     payload.insert("error_count".to_string(), json!(error_count));
+    payload.insert("service_error_count".to_string(), json!(error_count));
+    payload.insert("user_error_count".to_string(), json!(user_error_count));
     payload.insert("success_rate".to_string(), json!(success_rate));
     payload.insert(
         "avg_response_time_ms".to_string(),

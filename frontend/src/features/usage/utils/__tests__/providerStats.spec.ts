@@ -23,6 +23,11 @@ describe('usage provider stats normalization', () => {
         avg_response_time_ms: 1250,
         success_rate: 91.67,
         error_count: 1,
+        sla_eligible_count: 12,
+        service_error_count: 1,
+        service_error_rate: 8.33,
+        user_error_count: 2,
+        user_error_rate: 14.29,
       },
     ])
 
@@ -43,6 +48,11 @@ describe('usage provider stats normalization', () => {
         totalCost: 0.123456,
         actualCost: 0.2,
         successRate: 91.67,
+        slaEligibleCount: 12,
+        serviceErrorCount: 1,
+        serviceErrorRate: 8.33,
+        userErrorCount: 2,
+        userErrorRate: 14.29,
         avgResponseTime: '1.25s',
       },
     ])
@@ -54,5 +64,27 @@ describe('usage provider stats normalization', () => {
     expect(isUsageProviderVisible('unknow')).toBe(false)
     expect(isUsageProviderVisible('pending')).toBe(false)
     expect(isUsageProviderVisible(' ')).toBe(false)
+  })
+
+  it('keeps user-error-only providers without inventing a 0% SLA rate', () => {
+    const [row] = normalizeUsageProviderStats([{
+      provider: 'OpenAI',
+      request_count: 4,
+      total_tokens: 0,
+      total_cost: 0,
+      actual_cost: 0,
+      avg_response_time_ms: 0,
+      success_rate: 100,
+      error_count: 0,
+      sla_eligible_count: 0,
+      service_error_count: 0,
+      service_error_rate: 0,
+      user_error_count: 4,
+      user_error_rate: 100,
+    }])
+
+    expect(row?.successRate).toBeNull()
+    expect(row?.serviceErrorRate).toBeUndefined()
+    expect(row?.userErrorCount).toBe(4)
   })
 })

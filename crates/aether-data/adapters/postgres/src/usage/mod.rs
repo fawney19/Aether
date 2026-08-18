@@ -61,6 +61,18 @@ pub mod cleanup;
 // newly captured bodies always spill to usage_body_blobs and resolve through usage_http_audits.
 const MAX_INLINE_USAGE_BODY_BYTES: usize = 0;
 const MAX_SUPPORTED_UNIX_SECS: u64 = 253_402_300_799;
+// New rows persist `outcome_class = 'success'`. Rows written before the outcome migration keep
+// the default `in_flight` value, so retain only normalized completed/non-400 rows from that
+// legacy population. In particular, HTTP 400 must never enter latency percentiles.
+const SUCCESS_PERCENTILE_PREDICATE: &str = r#"(
+  "usage".outcome_class = 'success'
+  OR (
+    "usage".outcome_class = 'in_flight'
+    AND LOWER(BTRIM(COALESCE("usage".status, ''))) = 'completed'
+    AND ("usage".status_code IS NULL OR "usage".status_code < 400)
+    AND NULLIF(BTRIM(COALESCE("usage".error_message, '')), '') IS NULL
+  )
+)"#;
 const FIND_USAGE_BODY_BLOB_BY_REF_SQL: &str =
     r#"SELECT payload_gzip FROM usage_body_blobs WHERE body_ref = $1 LIMIT 1"#;
 const UPSERT_USAGE_BODY_BLOB_SQL: &str = include_str!("queries/upsert_usage_body_blob_sql.sql");
@@ -233,6 +245,9 @@ fn absorb_dashboard_summary(
     part: &StoredUsageDashboardSummary,
 ) {
     target.total_requests = target.total_requests.saturating_add(part.total_requests);
+    target.sla_eligible_requests = target
+        .sla_eligible_requests
+        .saturating_add(part.sla_eligible_requests);
     target.input_tokens = target.input_tokens.saturating_add(part.input_tokens);
     target.effective_input_tokens = target
         .effective_input_tokens
@@ -253,6 +268,9 @@ fn absorb_dashboard_summary(
     target.total_cost_usd += part.total_cost_usd;
     target.actual_total_cost_usd += part.actual_total_cost_usd;
     target.error_requests = target.error_requests.saturating_add(part.error_requests);
+    target.user_error_requests = target
+        .user_error_requests
+        .saturating_add(part.user_error_requests);
     target.response_time_sum_ms += part.response_time_sum_ms;
     target.response_time_samples = target
         .response_time_samples
@@ -306,6 +324,10 @@ fn decode_dashboard_summary_row(
             .try_get::<i64, _>("total_requests")
             .map_postgres_err()?
             .max(0) as u64,
+        sla_eligible_requests: row
+            .try_get::<i64, _>("sla_eligible_requests")
+            .map_postgres_err()?
+            .max(0) as u64,
         input_tokens: row
             .try_get::<i64, _>("input_tokens")
             .map_postgres_err()?
@@ -346,6 +368,10 @@ fn decode_dashboard_summary_row(
             .map_postgres_err()?,
         error_requests: row
             .try_get::<i64, _>("error_requests")
+            .map_postgres_err()?
+            .max(0) as u64,
+        user_error_requests: row
+            .try_get::<i64, _>("user_error_requests")
             .map_postgres_err()?
             .max(0) as u64,
         response_time_sum_ms: row
@@ -413,6 +439,9 @@ fn absorb_usage_breakdown_rows(
                     ..Default::default()
                 });
         entry.request_count = entry.request_count.saturating_add(row.request_count);
+        entry.sla_eligible_count = entry
+            .sla_eligible_count
+            .saturating_add(row.sla_eligible_count);
         entry.input_tokens = entry.input_tokens.saturating_add(row.input_tokens);
         entry.total_tokens = entry.total_tokens.saturating_add(row.total_tokens);
         entry.output_tokens = entry.output_tokens.saturating_add(row.output_tokens);
@@ -437,6 +466,7 @@ fn absorb_usage_breakdown_rows(
         entry.total_cost_usd += row.total_cost_usd;
         entry.actual_total_cost_usd += row.actual_total_cost_usd;
         entry.success_count = entry.success_count.saturating_add(row.success_count);
+        entry.user_error_count = entry.user_error_count.saturating_add(row.user_error_count);
         entry.response_time_sum_ms += row.response_time_sum_ms;
         entry.response_time_samples = entry
             .response_time_samples
@@ -486,7 +516,9 @@ fn absorb_usage_audit_aggregation_rows(
                     total_cost_usd: 0.0,
                     actual_total_cost_usd: 0.0,
                     avg_response_time_ms: None,
+                    sla_eligible_count: row.sla_eligible_count.map(|_| 0),
                     success_count: row.success_count.map(|_| 0),
+                    user_error_count: row.user_error_count.map(|_| 0),
                 });
 
         if entry.display_name.is_none() {
@@ -527,6 +559,18 @@ fn absorb_usage_audit_aggregation_rows(
             (None, Some(right)) => Some(right),
             (None, None) => None,
         };
+        entry.sla_eligible_count = match (entry.sla_eligible_count, row.sla_eligible_count) {
+            (Some(left), Some(right)) => Some(left.saturating_add(right)),
+            (Some(left), None) => Some(left),
+            (None, Some(right)) => Some(right),
+            (None, None) => None,
+        };
+        entry.user_error_count = match (entry.user_error_count, row.user_error_count) {
+            (Some(left), Some(right)) => Some(left.saturating_add(right)),
+            (Some(left), None) => Some(left),
+            (None, Some(right)) => Some(right),
+            (None, None) => None,
+        };
         entry.avg_response_time_ms = match (entry.avg_response_time_ms, row.avg_response_time_ms) {
             (Some(left), Some(right)) if entry.request_count > 0 => Some(
                 ((left * existing_request_count as f64) + (right * next_request_count as f64))
@@ -561,6 +605,10 @@ fn decode_usage_breakdown_summary_row(
         group_key: row.try_get::<String, _>("group_key").map_postgres_err()?,
         request_count: row
             .try_get::<i64, _>("request_count")
+            .map_postgres_err()?
+            .max(0) as u64,
+        sla_eligible_count: row
+            .try_get::<i64, _>("sla_eligible_count")
             .map_postgres_err()?
             .max(0) as u64,
         input_tokens: row
@@ -605,6 +653,10 @@ fn decode_usage_breakdown_summary_row(
             .map_postgres_err()?,
         success_count: row
             .try_get::<i64, _>("success_count")
+            .map_postgres_err()?
+            .max(0) as u64,
+        user_error_count: row
+            .try_get::<i64, _>("user_error_count")
             .map_postgres_err()?
             .max(0) as u64,
         response_time_sum_ms: row
@@ -678,8 +730,16 @@ fn decode_usage_audit_aggregation_row(
         avg_response_time_ms: row
             .try_get::<Option<f64>, _>("avg_response_time_ms")
             .map_postgres_err()?,
+        sla_eligible_count: row
+            .try_get::<Option<i64>, _>("sla_eligible_count")
+            .map_postgres_err()?
+            .map(|value| value.max(0) as u64),
         success_count: row
             .try_get::<Option<i64>, _>("success_count")
+            .map_postgres_err()?
+            .map(|value| value.max(0) as u64),
+        user_error_count: row
+            .try_get::<Option<i64>, _>("user_error_count")
             .map_postgres_err()?
             .map(|value| value.max(0) as u64),
     })
@@ -687,6 +747,9 @@ fn decode_usage_audit_aggregation_row(
 
 fn absorb_usage_audit_summary(target: &mut StoredUsageAuditSummary, row: StoredUsageAuditSummary) {
     target.total_requests = target.total_requests.saturating_add(row.total_requests);
+    target.sla_eligible_requests = target
+        .sla_eligible_requests
+        .saturating_add(row.sla_eligible_requests);
     target.input_tokens = target.input_tokens.saturating_add(row.input_tokens);
     target.output_tokens = target.output_tokens.saturating_add(row.output_tokens);
     target.recorded_total_tokens = target
@@ -710,6 +773,9 @@ fn absorb_usage_audit_summary(target: &mut StoredUsageAuditSummary, row: StoredU
     target.cache_read_cost_usd += row.cache_read_cost_usd;
     target.total_response_time_ms += row.total_response_time_ms;
     target.error_requests = target.error_requests.saturating_add(row.error_requests);
+    target.user_error_requests = target
+        .user_error_requests
+        .saturating_add(row.user_error_requests);
 }
 
 fn absorb_usage_cache_hit_summary(
@@ -902,6 +968,10 @@ fn decode_usage_audit_summary_row(row: &PgRow) -> Result<StoredUsageAuditSummary
             .try_get::<i64, _>("total_requests")
             .map_postgres_err()?
             .max(0) as u64,
+        sla_eligible_requests: row
+            .try_get::<i64, _>("sla_eligible_requests")
+            .map_postgres_err()?
+            .max(0) as u64,
         input_tokens: row
             .try_get::<i64, _>("input_tokens")
             .map_postgres_err()?
@@ -945,6 +1015,10 @@ fn decode_usage_audit_summary_row(row: &PgRow) -> Result<StoredUsageAuditSummary
             .map_postgres_err()?,
         error_requests: row
             .try_get::<i64, _>("error_requests")
+            .map_postgres_err()?
+            .max(0) as u64,
+        user_error_requests: row
+            .try_get::<i64, _>("user_error_requests")
             .map_postgres_err()?
             .max(0) as u64,
     })
@@ -1035,8 +1109,16 @@ fn decode_usage_provider_performance_summary(
             .try_get::<i64, _>("request_count")
             .map_postgres_err()?
             .max(0) as u64,
+        sla_eligible_count: row
+            .try_get::<i64, _>("sla_eligible_count")
+            .map_postgres_err()?
+            .max(0) as u64,
         success_count: row
             .try_get::<i64, _>("success_count")
+            .map_postgres_err()?
+            .max(0) as u64,
+        user_error_count: row
+            .try_get::<i64, _>("user_error_count")
             .map_postgres_err()?
             .max(0) as u64,
         avg_output_tps: row
@@ -1093,8 +1175,16 @@ fn decode_usage_provider_performance_provider_row(
             .try_get::<i64, _>("request_count")
             .map_postgres_err()?
             .max(0) as u64,
+        sla_eligible_count: row
+            .try_get::<i64, _>("sla_eligible_count")
+            .map_postgres_err()?
+            .max(0) as u64,
         success_count: row
             .try_get::<i64, _>("success_count")
+            .map_postgres_err()?
+            .max(0) as u64,
+        user_error_count: row
+            .try_get::<i64, _>("user_error_count")
             .map_postgres_err()?
             .max(0) as u64,
         output_tokens: row
@@ -1156,8 +1246,16 @@ fn decode_usage_provider_performance_timeline_row(
             .try_get::<i64, _>("request_count")
             .map_postgres_err()?
             .max(0) as u64,
+        sla_eligible_count: row
+            .try_get::<i64, _>("sla_eligible_count")
+            .map_postgres_err()?
+            .max(0) as u64,
         success_count: row
             .try_get::<i64, _>("success_count")
+            .map_postgres_err()?
+            .max(0) as u64,
+        user_error_count: row
+            .try_get::<i64, _>("user_error_count")
             .map_postgres_err()?
             .max(0) as u64,
         output_tokens: row
@@ -1421,7 +1519,9 @@ INSERT INTO usage_counter_deltas (
   request_count_delta,
   total_requests_delta,
   success_count_delta,
+  sla_eligible_count_delta,
   error_count_delta,
+  user_error_count_delta,
   dns_failures_delta,
   stream_errors_delta,
   total_tokens_delta,
@@ -1433,7 +1533,7 @@ INSERT INTO usage_counter_deltas (
   removed_last_used_at_unix_secs,
   usage_created_at_unix_secs
 ) VALUES (
-  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
 )
 "#;
 const INSERT_USAGE_COUNTER_DELTAS_PREFIX_SQL: &str = r#"
@@ -1445,7 +1545,9 @@ INSERT INTO usage_counter_deltas (
   request_count_delta,
   total_requests_delta,
   success_count_delta,
+  sla_eligible_count_delta,
   error_count_delta,
+  user_error_count_delta,
   dns_failures_delta,
   stream_errors_delta,
   total_tokens_delta,
@@ -1457,7 +1559,7 @@ INSERT INTO usage_counter_deltas (
   removed_last_used_at_unix_secs,
   usage_created_at_unix_secs
 ) "#;
-const USAGE_COUNTER_DELTA_INSERT_BINDS_PER_ROW: usize = 18;
+const USAGE_COUNTER_DELTA_INSERT_BINDS_PER_ROW: usize = 20;
 const USAGE_COUNTER_DELTA_INSERT_BATCH_SIZE: usize =
     u16::MAX as usize / USAGE_COUNTER_DELTA_INSERT_BINDS_PER_ROW;
 
@@ -1477,7 +1579,9 @@ SELECT
   delta.request_count_delta,
   delta.total_requests_delta,
   delta.success_count_delta,
+  delta.sla_eligible_count_delta,
   delta.error_count_delta,
+  delta.user_error_count_delta,
   delta.dns_failures_delta,
   delta.stream_errors_delta,
   delta.total_tokens_delta,
@@ -1727,7 +1831,9 @@ struct UsageAuditAggregationSqlFragments {
     aggregate_display_name_expr: &'static str,
     aggregate_secondary_name_expr: &'static str,
     avg_response_time_expr: &'static str,
+    sla_eligible_count_expr: &'static str,
     success_count_expr: &'static str,
+    user_error_count_expr: &'static str,
 }
 
 fn usage_audit_aggregation_sql_fragments(
@@ -1745,7 +1851,9 @@ fn usage_audit_aggregation_sql_fragments(
             aggregate_display_name_expr: "NULL::varchar",
             aggregate_secondary_name_expr: "NULL::varchar",
             avg_response_time_expr: "NULL::DOUBLE PRECISION",
-            success_count_expr: "NULL::BIGINT",
+            sla_eligible_count_expr: "COALESCE(SUM(sla_eligible_flag), 0)::BIGINT",
+            success_count_expr: "COALESCE(SUM(success_flag), 0)::BIGINT",
+            user_error_count_expr: "COALESCE(SUM(user_error_flag), 0)::BIGINT",
         },
         UsageAuditAggregationGroupBy::Provider => UsageAuditAggregationSqlFragments {
             provider_identity_join: USAGE_PROVIDER_IDENTITY_JOIN_SQL,
@@ -1758,7 +1866,9 @@ fn usage_audit_aggregation_sql_fragments(
             aggregate_display_name_expr: "MAX(display_name)",
             aggregate_secondary_name_expr: "CASE WHEN COUNT(*) FILTER (WHERE secondary_name = 'provider_id') > 0 THEN 'provider_id' WHEN COUNT(*) FILTER (WHERE secondary_name = 'legacy_name') > 0 THEN 'legacy_name' ELSE NULL END",
             avg_response_time_expr: "AVG(response_time_ms::DOUBLE PRECISION)",
+            sla_eligible_count_expr: "COALESCE(SUM(sla_eligible_flag), 0)::BIGINT",
             success_count_expr: "COALESCE(SUM(success_flag), 0)::BIGINT",
+            user_error_count_expr: "COALESCE(SUM(user_error_flag), 0)::BIGINT",
         },
         UsageAuditAggregationGroupBy::ApiFormat => UsageAuditAggregationSqlFragments {
             provider_identity_join: "",
@@ -1771,7 +1881,9 @@ fn usage_audit_aggregation_sql_fragments(
             aggregate_display_name_expr: "NULL::varchar",
             aggregate_secondary_name_expr: "NULL::varchar",
             avg_response_time_expr: "AVG(response_time_ms::DOUBLE PRECISION)",
-            success_count_expr: "NULL::BIGINT",
+            sla_eligible_count_expr: "COALESCE(SUM(sla_eligible_flag), 0)::BIGINT",
+            success_count_expr: "COALESCE(SUM(success_flag), 0)::BIGINT",
+            user_error_count_expr: "COALESCE(SUM(user_error_flag), 0)::BIGINT",
         },
         UsageAuditAggregationGroupBy::User => UsageAuditAggregationSqlFragments {
             provider_identity_join: "",
@@ -1784,7 +1896,9 @@ fn usage_audit_aggregation_sql_fragments(
             aggregate_display_name_expr: "NULL::varchar",
             aggregate_secondary_name_expr: "NULL::varchar",
             avg_response_time_expr: "NULL::DOUBLE PRECISION",
-            success_count_expr: "NULL::BIGINT",
+            sla_eligible_count_expr: "COALESCE(SUM(sla_eligible_flag), 0)::BIGINT",
+            success_count_expr: "COALESCE(SUM(success_flag), 0)::BIGINT",
+            user_error_count_expr: "COALESCE(SUM(user_error_flag), 0)::BIGINT",
         },
     }
 }
@@ -1883,7 +1997,9 @@ INSERT INTO "usage" (
   request_metadata,
   finalized_at,
   created_at,
-  updated_at_unix_secs
+  updated_at_unix_secs,
+  outcome_class,
+  sla_eligible
 )
 "#;
 const UPSERT_FIRST_BYTE_BATCH_PREFIX_SQL: &str = r#"
@@ -1915,7 +2031,9 @@ INSERT INTO "usage" (
   billing_status,
   request_metadata,
   created_at,
-  updated_at_unix_secs
+  updated_at_unix_secs,
+  outcome_class,
+  sla_eligible
 )
 "#;
 
@@ -1951,7 +2069,9 @@ const UPDATE_RECOVERED_STALE_USAGE_SQL: &str = r#"
 UPDATE usage
 SET status = 'completed',
     status_code = 200,
-    error_message = NULL
+    error_message = NULL,
+    outcome_class = 'success',
+    sla_eligible = TRUE
 WHERE request_id = $1
 "#;
 
@@ -1974,7 +2094,9 @@ const UPDATE_FAILED_STALE_USAGE_SQL: &str = r#"
 UPDATE usage
 SET status = 'failed',
     status_code = $3,
-    error_message = $2
+    error_message = $2,
+    outcome_class = CASE WHEN $3 = 400 THEN 'user_error' ELSE 'service_error' END,
+    sla_eligible = CASE WHEN $3 = 400 THEN FALSE ELSE TRUE END
 WHERE request_id = $1
 "#;
 
@@ -1984,6 +2106,8 @@ WITH updated_usage AS (
     SET status = 'failed',
         status_code = $4,
         error_message = $2,
+        outcome_class = CASE WHEN $4 = 400 THEN 'user_error' ELSE 'service_error' END,
+        sla_eligible = CASE WHEN $4 = 400 THEN FALSE ELSE TRUE END,
         billing_status = 'void',
         finalized_at = $3,
         total_cost_usd = 0,
@@ -2345,6 +2469,7 @@ WHERE is_complete IS TRUE
                 r#"
 SELECT
   COALESCE(SUM(total_requests), 0)::BIGINT AS total_requests,
+  COALESCE(SUM(sla_eligible_requests), 0)::BIGINT AS sla_eligible_requests,
   COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
   COALESCE(SUM(
     CASE
@@ -2370,6 +2495,7 @@ SELECT
   COALESCE(SUM(total_cost), 0)::DOUBLE PRECISION AS total_cost_usd,
   COALESCE(SUM(actual_total_cost), 0)::DOUBLE PRECISION AS actual_total_cost_usd,
   COALESCE(SUM(error_requests), 0)::BIGINT AS error_requests,
+  COALESCE(SUM(user_error_requests), 0)::BIGINT AS user_error_requests,
   COALESCE(SUM(response_time_sum_ms), 0)::DOUBLE PRECISION AS response_time_sum_ms,
   COALESCE(SUM(response_time_samples), 0)::BIGINT AS response_time_samples
 FROM stats_user_daily
@@ -2389,6 +2515,7 @@ WHERE user_id = $1
                 r#"
 SELECT
   COALESCE(SUM(total_requests), 0)::BIGINT AS total_requests,
+  COALESCE(SUM(sla_eligible_requests), 0)::BIGINT AS sla_eligible_requests,
   COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
   COALESCE(SUM(
     CASE
@@ -2414,6 +2541,7 @@ SELECT
   COALESCE(SUM(total_cost), 0)::DOUBLE PRECISION AS total_cost_usd,
   COALESCE(SUM(actual_total_cost), 0)::DOUBLE PRECISION AS actual_total_cost_usd,
   COALESCE(SUM(error_requests), 0)::BIGINT AS error_requests,
+  COALESCE(SUM(user_error_requests), 0)::BIGINT AS user_error_requests,
   COALESCE(SUM(response_time_sum_ms), 0)::DOUBLE PRECISION AS response_time_sum_ms,
   COALESCE(SUM(response_time_samples), 0)::BIGINT AS response_time_samples
 FROM stats_daily
@@ -2514,6 +2642,9 @@ ORDER BY date ASC
             r#"
 SELECT
   COUNT(*) FILTER (WHERE "usage".dashboard_eligible)::BIGINT AS total_requests,
+  COUNT(*) FILTER (
+    WHERE "usage".dashboard_eligible AND "usage".sla_eligible
+  )::BIGINT AS sla_eligible_requests,
   COALESCE(
     SUM("usage".input_tokens)
       FILTER (WHERE "usage".dashboard_eligible),
@@ -2561,14 +2692,12 @@ SELECT
     0
   )
     AS actual_total_cost_usd,
-  COALESCE(SUM(
-    CASE
-      WHEN COALESCE("usage".status_code, 0) >= 400
-           OR lower(COALESCE("usage".status, '')) = 'failed'
-      THEN 1
-      ELSE 0
-    END
-  ) FILTER (WHERE "usage".dashboard_eligible), 0)::BIGINT AS error_requests,
+  COUNT(*) FILTER (
+    WHERE "usage".dashboard_eligible AND "usage".outcome_class = 'service_error'
+  )::BIGINT AS error_requests,
+  COUNT(*) FILTER (
+    WHERE "usage".dashboard_eligible AND "usage".outcome_class = 'user_error'
+  )::BIGINT AS user_error_requests,
   COALESCE(SUM(
     CASE
       WHEN "usage".response_time_ms IS NOT NULL
@@ -2917,8 +3046,16 @@ ORDER BY request_count DESC, "usage".provider_name ASC
                 .try_get::<i64, _>("total_requests")
                 .map_postgres_err()?
                 .max(0) as u64,
+            sla_eligible_requests: row
+                .try_get::<i64, _>("sla_eligible_requests")
+                .map_postgres_err()?
+                .max(0) as u64,
             successful_requests: row
                 .try_get::<i64, _>("successful_requests")
+                .map_postgres_err()?
+                .max(0) as u64,
+            user_error_requests: row
+                .try_get::<i64, _>("user_error_requests")
                 .map_postgres_err()?
                 .max(0) as u64,
             failed_requests: row
@@ -3017,11 +3154,7 @@ ORDER BY request_count DESC, "usage".provider_name ASC
         }
         if query.error_only {
             builder.push(if has_where { " AND " } else { " WHERE " });
-            builder.push(
-                "(\"usage\".status = 'failed' \
-OR COALESCE(\"usage\".status_code, 0) >= 400 \
-OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''))",
-            );
+            builder.push("\"usage\".outcome_class = 'service_error'");
         }
 
         if query.newest_first {
@@ -3130,11 +3263,7 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
         if query.error_only {
             builder.push(if has_where { " AND " } else { " WHERE " });
             has_where = true;
-            builder.push(
-                "(\"usage\".status = 'failed' \
-OR COALESCE(\"usage\".status_code, 0) >= 400 \
-OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''))",
-            );
+            builder.push("\"usage\".outcome_class = 'service_error'");
         }
         for (index, keyword) in query.keywords.iter().enumerate() {
             let keyword = keyword.trim();
@@ -3322,11 +3451,7 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
         }
         if query.error_only {
             builder.push(if has_where { " AND " } else { " WHERE " });
-            builder.push(
-                "(\"usage\".status = 'failed' \
-OR COALESCE(\"usage\".status_code, 0) >= 400 \
-OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''))",
-            );
+            builder.push("\"usage\".outcome_class = 'service_error'");
         }
 
         let row = builder
@@ -3424,11 +3549,7 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
         if query.error_only {
             builder.push(if has_where { " AND " } else { " WHERE " });
             has_where = true;
-            builder.push(
-                "(\"usage\".status = 'failed' \
-OR COALESCE(\"usage\".status_code, 0) >= 400 \
-OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''))",
-            );
+            builder.push("\"usage\".outcome_class = 'service_error'");
         }
         for (index, keyword) in query.keywords.iter().enumerate() {
             let keyword = keyword.trim();
@@ -3533,6 +3654,7 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
                 r#"
 SELECT
   COALESCE(SUM(total_requests), 0)::BIGINT AS total_requests,
+  COALESCE(SUM(sla_eligible_requests), 0)::BIGINT AS sla_eligible_requests,
   COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
   COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
   COALESCE(SUM(
@@ -3554,7 +3676,8 @@ SELECT
   COALESCE(SUM(cache_creation_cost), 0)::DOUBLE PRECISION AS cache_creation_cost_usd,
   COALESCE(SUM(cache_read_cost), 0)::DOUBLE PRECISION AS cache_read_cost_usd,
   COALESCE(SUM(response_time_sum_ms), 0)::DOUBLE PRECISION AS total_response_time_ms,
-  COALESCE(SUM(error_requests), 0)::BIGINT AS error_requests
+  COALESCE(SUM(error_requests), 0)::BIGINT AS error_requests,
+  COALESCE(SUM(user_error_requests), 0)::BIGINT AS user_error_requests
 FROM stats_user_daily
 WHERE user_id = $1
   AND date >= $2
@@ -3572,6 +3695,7 @@ WHERE user_id = $1
                 r#"
 SELECT
   COALESCE(SUM(total_requests), 0)::BIGINT AS total_requests,
+  COALESCE(SUM(sla_eligible_requests), 0)::BIGINT AS sla_eligible_requests,
   COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
   COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
   COALESCE(SUM(
@@ -3593,7 +3717,8 @@ SELECT
   COALESCE(SUM(cache_creation_cost), 0)::DOUBLE PRECISION AS cache_creation_cost_usd,
   COALESCE(SUM(cache_read_cost), 0)::DOUBLE PRECISION AS cache_read_cost_usd,
   COALESCE(SUM(response_time_sum_ms), 0)::DOUBLE PRECISION AS total_response_time_ms,
-  COALESCE(SUM(error_requests), 0)::BIGINT AS error_requests
+  COALESCE(SUM(error_requests), 0)::BIGINT AS error_requests,
+  COALESCE(SUM(user_error_requests), 0)::BIGINT AS user_error_requests
 FROM stats_daily
 WHERE date >= $1
   AND date < $2
@@ -3625,6 +3750,7 @@ WHERE date >= $1
             r#"
 SELECT
   COUNT(*)::BIGINT AS total_requests,
+  COUNT(*) FILTER (WHERE "usage".sla_eligible)::BIGINT AS sla_eligible_requests,
   COALESCE(SUM(GREATEST(COALESCE("usage".input_tokens, 0), 0)), 0)::BIGINT AS input_tokens,
   COALESCE(SUM(GREATEST(COALESCE("usage".output_tokens, 0), 0)), 0)::BIGINT AS output_tokens,
   COALESCE(SUM(GREATEST(COALESCE("usage".total_tokens, 0), 0)), 0)::BIGINT AS recorded_total_tokens,
@@ -3646,12 +3772,8 @@ SELECT
     AS cache_read_cost_usd,
   COALESCE(SUM(GREATEST(COALESCE("usage".response_time_ms, 0), 0)::DOUBLE PRECISION), 0)
     AS total_response_time_ms,
-  COALESCE(SUM(
-    CASE
-      WHEN COALESCE("usage".status_code, 0) >= 400 OR "usage".error_message IS NOT NULL THEN 1
-      ELSE 0
-    END
-  ), 0)::BIGINT AS error_requests
+  COUNT(*) FILTER (WHERE "usage".outcome_class = 'service_error')::BIGINT AS error_requests,
+  COUNT(*) FILTER (WHERE "usage".outcome_class = 'user_error')::BIGINT AS user_error_requests
 FROM usage_billing_facts AS "usage"
 "#,
         );
@@ -5177,6 +5299,7 @@ ORDER BY date ASC, total_cost_usd DESC, "usage".model ASC, "usage".provider_name
 SELECT
   {group_column} AS group_key,
   COALESCE(SUM(total_requests), 0)::BIGINT AS request_count,
+  COALESCE(SUM(sla_eligible_requests), 0)::BIGINT AS sla_eligible_count,
   COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
   COALESCE(SUM(total_tokens), 0)::BIGINT AS total_tokens,
   COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
@@ -5191,6 +5314,7 @@ SELECT
   COALESCE(SUM(total_cost), 0)::DOUBLE PRECISION AS total_cost_usd,
   COALESCE(SUM(actual_total_cost), 0)::DOUBLE PRECISION AS actual_total_cost_usd,
   COALESCE(SUM(success_requests), 0)::BIGINT AS success_count,
+  COALESCE(SUM(user_error_requests), 0)::BIGINT AS user_error_count,
   COALESCE(SUM(successful_response_time_sum_ms), 0) AS response_time_sum_ms,
   COALESCE(SUM(successful_response_time_samples), 0)::BIGINT AS response_time_samples,
   COALESCE(SUM(response_time_sum_ms), 0) AS overall_response_time_sum_ms,
@@ -5247,13 +5371,9 @@ WITH filtered_usage AS (
     GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0) AS cache_read_tokens,
     COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
     COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
-    CASE
-      WHEN "usage".status <> 'failed'
-           AND ("usage".status_code IS NULL OR "usage".status_code < 400)
-           AND "usage".error_message IS NULL
-      THEN 1
-      ELSE 0
-    END AS success_flag,
+    CASE WHEN "usage".sla_eligible THEN 1 ELSE 0 END AS sla_eligible_flag,
+    CASE WHEN "usage".outcome_class = 'success' THEN 1 ELSE 0 END AS success_flag,
+    CASE WHEN "usage".outcome_class = 'user_error' THEN 1 ELSE 0 END AS user_error_flag,
     CASE
       WHEN "usage".response_time_ms IS NOT NULL
       THEN GREATEST(COALESCE("usage".response_time_ms, 0), 0)::DOUBLE PRECISION
@@ -5265,17 +5385,13 @@ WITH filtered_usage AS (
       ELSE 0
     END AS response_time_samples,
     CASE
-      WHEN "usage".status <> 'failed'
-           AND ("usage".status_code IS NULL OR "usage".status_code < 400)
-           AND "usage".error_message IS NULL
+      WHEN "usage".outcome_class = 'success'
            AND "usage".response_time_ms IS NOT NULL
       THEN GREATEST(COALESCE("usage".response_time_ms, 0), 0)::DOUBLE PRECISION
       ELSE 0
     END AS successful_response_time_ms,
     CASE
-      WHEN "usage".status <> 'failed'
-           AND ("usage".status_code IS NULL OR "usage".status_code < 400)
-           AND "usage".error_message IS NULL
+      WHEN "usage".outcome_class = 'success'
            AND "usage".response_time_ms IS NOT NULL
       THEN 1
       ELSE 0
@@ -5347,7 +5463,9 @@ normalized_usage AS (
     cache_read_tokens,
     total_cost_usd,
     actual_total_cost_usd,
+    sla_eligible_flag,
     success_flag,
+    user_error_flag,
     response_time_ms,
     response_time_samples,
     successful_response_time_ms,
@@ -5357,6 +5475,7 @@ normalized_usage AS (
 SELECT
   group_key,
   COUNT(*)::BIGINT AS request_count,
+  COALESCE(SUM(sla_eligible_flag), 0)::BIGINT AS sla_eligible_count,
   COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
   COALESCE(SUM(total_tokens), 0)::BIGINT AS total_tokens,
   COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
@@ -5371,6 +5490,7 @@ SELECT
   COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd,
   COALESCE(SUM(actual_total_cost_usd), 0) AS actual_total_cost_usd,
   COALESCE(SUM(success_flag), 0)::BIGINT AS success_count,
+  COALESCE(SUM(user_error_flag), 0)::BIGINT AS user_error_count,
   COALESCE(SUM(successful_response_time_ms), 0) AS response_time_sum_ms,
   COALESCE(SUM(successful_response_time_samples), 0)::BIGINT AS response_time_samples,
   COALESCE(SUM(response_time_ms), 0) AS overall_response_time_sum_ms,
@@ -5475,17 +5595,7 @@ SELECT COUNT(*)::BIGINT AS total
 FROM "usage"
 WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)
   AND "usage".created_at < TO_TIMESTAMP($2::double precision)
-  AND (
-    lower(BTRIM(COALESCE("usage".status, ''))) IN ('failed', 'error')
-    OR ("usage".error_category IS NOT NULL AND BTRIM("usage".error_category) <> '')
-    OR (
-      BTRIM(COALESCE("usage".status, '')) = ''
-      AND (
-        COALESCE("usage".status_code, 0) >= 400
-        OR ("usage".error_message IS NOT NULL AND BTRIM("usage".error_message) <> '')
-      )
-    )
-  )
+  AND "usage".outcome_class = 'service_error'
 "#,
         )
         .bind(query.created_from_unix_secs as f64)
@@ -5517,17 +5627,7 @@ WHERE "usage".created_at >= TO_TIMESTAMP(
             .push_bind(query.created_until_unix_secs as f64)
             .push(
                 r#"::double precision)
-  AND (
-    lower(BTRIM(COALESCE("usage".status, ''))) IN ('failed', 'error')
-    OR ("usage".error_category IS NOT NULL AND BTRIM("usage".error_category) <> '')
-    OR (
-      BTRIM(COALESCE("usage".status, '')) = ''
-      AND (
-        COALESCE("usage".status_code, 0) >= 400
-        OR ("usage".error_message IS NOT NULL AND BTRIM("usage".error_message) <> '')
-      )
-    )
-  )
+  AND "usage".outcome_class = 'service_error'
 ORDER BY "usage".created_at DESC, "usage".id ASC
 "#,
             );
@@ -5575,6 +5675,7 @@ WHERE "usage".created_at >= TO_TIMESTAMP("#,
             r#"::double precision)
   AND "usage".error_category IS NOT NULL
   AND BTRIM("usage".error_category) <> ''
+  AND "usage".outcome_class = 'service_error'
 GROUP BY date, "usage".error_category
 ORDER BY date ASC, count DESC, "usage".error_category ASC
 "#,
@@ -5706,7 +5807,11 @@ WITH filtered_usage AS (
         builder.push_bind(query.created_until_unix_secs as f64);
         builder.push(
             r#"::double precision)
-    AND "usage".status = 'completed'
+    AND "#,
+        );
+        builder.push(SUCCESS_PERCENTILE_PREDICATE);
+        builder.push(
+            r#"
 )
 SELECT
   date,
@@ -5893,12 +5998,9 @@ WITH filtered_usage AS (
       END
       ELSE GREATEST(COALESCE("usage".response_time_ms, 0), 0)
     END AS output_tps_duration_ms,
-    CASE
-      WHEN lower(COALESCE("usage".status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND ("usage".status_code IS NULL OR "usage".status_code < 400)
-      THEN 1
-      ELSE 0
-    END AS success_flag
+    CASE WHEN "usage".sla_eligible THEN 1 ELSE 0 END AS sla_eligible_flag,
+    CASE WHEN "usage".outcome_class = 'success' THEN 1 ELSE 0 END AS success_flag,
+    CASE WHEN "usage".outcome_class = 'user_error' THEN 1 ELSE 0 END AS user_error_flag
   FROM usage_billing_facts AS "usage"
   WHERE "usage".created_at >= TO_TIMESTAMP("#,
         );
@@ -5922,7 +6024,9 @@ WITH filtered_usage AS (
 )
 SELECT
   COUNT(*)::BIGINT AS request_count,
+  COALESCE(SUM(sla_eligible_flag), 0)::BIGINT AS sla_eligible_count,
   COALESCE(SUM(success_flag), 0)::BIGINT AS success_count,
+  COALESCE(SUM(user_error_flag), 0)::BIGINT AS user_error_count,
   CASE
     WHEN COALESCE(SUM(CASE
       WHEN success_flag = 1 AND response_time_ms > 0 AND output_tokens > 0
@@ -6031,12 +6135,9 @@ WITH filtered_usage AS (
       END
       ELSE GREATEST(COALESCE("usage".response_time_ms, 0), 0)
     END AS output_tps_duration_ms,
-    CASE
-      WHEN lower(COALESCE("usage".status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND ("usage".status_code IS NULL OR "usage".status_code < 400)
-      THEN 1
-      ELSE 0
-    END AS success_flag
+    CASE WHEN "usage".sla_eligible THEN 1 ELSE 0 END AS sla_eligible_flag,
+    CASE WHEN "usage".outcome_class = 'success' THEN 1 ELSE 0 END AS success_flag,
+    CASE WHEN "usage".outcome_class = 'user_error' THEN 1 ELSE 0 END AS user_error_flag
   FROM usage_billing_facts AS "usage"
   WHERE "usage".created_at >= TO_TIMESTAMP("#,
         );
@@ -6065,7 +6166,9 @@ WITH filtered_usage AS (
             r#"  provider_id,
   COALESCE(MAX(NULLIF(provider, '')), provider_id) AS provider,
   COUNT(*)::BIGINT AS request_count,
+  COALESCE(SUM(sla_eligible_flag), 0)::BIGINT AS sla_eligible_count,
   COALESCE(SUM(success_flag), 0)::BIGINT AS success_count,
+  COALESCE(SUM(user_error_flag), 0)::BIGINT AS user_error_count,
   COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
   CASE
     WHEN COALESCE(SUM(CASE
@@ -6204,12 +6307,9 @@ ORDER BY request_count DESC, provider_id ASC
       END
       ELSE GREATEST(COALESCE("usage".response_time_ms, 0), 0)
     END AS output_tps_duration_ms,
-    CASE
-      WHEN lower(COALESCE("usage".status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND ("usage".status_code IS NULL OR "usage".status_code < 400)
-      THEN 1
-      ELSE 0
-    END AS success_flag
+    CASE WHEN "usage".sla_eligible THEN 1 ELSE 0 END AS sla_eligible_flag,
+    CASE WHEN "usage".outcome_class = 'success' THEN 1 ELSE 0 END AS success_flag,
+    CASE WHEN "usage".outcome_class = 'user_error' THEN 1 ELSE 0 END AS user_error_flag
   FROM usage_billing_facts AS "usage"
   WHERE "usage".created_at >= TO_TIMESTAMP("#,
         );
@@ -6241,7 +6341,9 @@ SELECT
   provider_id,
   COALESCE(MAX(NULLIF(provider, '')), provider_id) AS provider,
   COUNT(*)::BIGINT AS request_count,
+  COALESCE(SUM(sla_eligible_flag), 0)::BIGINT AS sla_eligible_count,
   COALESCE(SUM(success_flag), 0)::BIGINT AS success_count,
+  COALESCE(SUM(user_error_flag), 0)::BIGINT AS user_error_count,
   COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
   CASE
     WHEN COALESCE(SUM(CASE
@@ -7416,7 +7518,9 @@ WHERE stats_daily_api_key.date >=
             group_column,
             display_name_expr,
             avg_response_time_expr,
+            sla_eligible_count_expr,
             success_count_expr,
+            user_error_count_expr,
             join_clause,
         ) = match group_by {
             UsageAuditAggregationGroupBy::Model => (
@@ -7424,7 +7528,9 @@ WHERE stats_daily_api_key.date >=
                 "model",
                 "NULL::varchar",
                 "NULL::DOUBLE PRECISION",
-                "NULL::BIGINT",
+                "COALESCE(SUM(sla_eligible_requests), 0)::BIGINT",
+                "COALESCE(SUM(success_requests), 0)::BIGINT",
+                "COALESCE(SUM(user_error_requests), 0)::BIGINT",
                 "",
             ),
             UsageAuditAggregationGroupBy::Provider => (
@@ -7432,7 +7538,9 @@ WHERE stats_daily_api_key.date >=
                 "provider_name",
                 "MAX(provider_name)",
                 "CASE WHEN COALESCE(SUM(response_time_samples), 0) > 0 THEN COALESCE(SUM(response_time_sum_ms), 0) / COALESCE(SUM(response_time_samples), 0) ELSE NULL END",
+                "COALESCE(SUM(sla_eligible_requests), 0)::BIGINT",
                 "COALESCE(SUM(success_requests), 0)::BIGINT",
+                "COALESCE(SUM(user_error_requests), 0)::BIGINT",
                 "",
             ),
             UsageAuditAggregationGroupBy::ApiFormat => (
@@ -7440,7 +7548,9 @@ WHERE stats_daily_api_key.date >=
                 "api_format",
                 "NULL::varchar",
                 "CASE WHEN COALESCE(SUM(response_time_samples), 0) > 0 THEN COALESCE(SUM(response_time_sum_ms), 0) / COALESCE(SUM(response_time_samples), 0) ELSE NULL END",
-                "NULL::BIGINT",
+                "COALESCE(SUM(sla_eligible_requests), 0)::BIGINT",
+                "COALESCE(SUM(success_requests), 0)::BIGINT",
+                "COALESCE(SUM(user_error_requests), 0)::BIGINT",
                 "",
             ),
             UsageAuditAggregationGroupBy::User => {
@@ -7474,6 +7584,8 @@ SELECT
   COALESCE(SUM(total_cost), 0)::DOUBLE PRECISION AS total_cost_usd,
   COALESCE(SUM(actual_total_cost), 0)::DOUBLE PRECISION AS actual_total_cost_usd,
   {avg_response_time_expr} AS avg_response_time_ms,
+  {sla_eligible_count_expr} AS sla_eligible_count,
+  {user_error_count_expr} AS user_error_count,
   {success_count_expr} AS success_count
 FROM {table_name}
 {join_clause}
@@ -7486,7 +7598,9 @@ ORDER BY request_count DESC, group_key ASC
             group_column = group_column,
             display_name_expr = display_name_expr,
             avg_response_time_expr = avg_response_time_expr,
+            sla_eligible_count_expr = sla_eligible_count_expr,
             success_count_expr = success_count_expr,
+            user_error_count_expr = user_error_count_expr,
             table_name = table_name,
             join_clause = join_clause,
             provider_extra_where = provider_extra_where,
@@ -7539,12 +7653,9 @@ WITH filtered_usage AS (
     COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
     COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
     GREATEST(COALESCE("usage".response_time_ms, 0), 0) AS response_time_ms,
-    CASE
-      WHEN "usage".status IN ('completed', 'success', 'ok', 'billed', 'settled')
-           AND ("usage".status_code IS NULL OR "usage".status_code < 400)
-      THEN 1
-      ELSE 0
-    END AS success_flag
+    CASE WHEN "usage".sla_eligible THEN 1 ELSE 0 END AS sla_eligible_flag,
+    CASE WHEN "usage".outcome_class = 'success' THEN 1 ELSE 0 END AS success_flag,
+    CASE WHEN "usage".outcome_class = 'user_error' THEN 1 ELSE 0 END AS user_error_flag
   FROM usage_billing_facts AS "usage"
 {provider_identity_join}
   WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)
@@ -7569,6 +7680,8 @@ normalized_usage AS (
     total_cost_usd,
     actual_total_cost_usd,
     response_time_ms,
+    sla_eligible_flag,
+    user_error_flag,
     success_flag
   FROM filtered_usage
 ),
@@ -7591,6 +7704,8 @@ aggregated_usage AS (
     COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd,
     COALESCE(SUM(actual_total_cost_usd), 0) AS actual_total_cost_usd,
     {avg_response_time_expr} AS avg_response_time_ms,
+    {sla_eligible_count_expr} AS sla_eligible_count,
+    {user_error_count_expr} AS user_error_count,
     {success_count_expr} AS success_count
   FROM normalized_usage
   GROUP BY group_key
@@ -7611,6 +7726,8 @@ SELECT
   total_cost_usd,
   actual_total_cost_usd,
   avg_response_time_ms,
+  sla_eligible_count,
+  user_error_count,
   success_count
 FROM aggregated_usage
 ORDER BY request_count DESC, group_key ASC
@@ -7628,7 +7745,9 @@ LIMIT $3
             aggregate_display_name_expr = fragments.aggregate_display_name_expr,
             aggregate_secondary_name_expr = fragments.aggregate_secondary_name_expr,
             avg_response_time_expr = fragments.avg_response_time_expr,
+            sla_eligible_count_expr = fragments.sla_eligible_count_expr,
             success_count_expr = fragments.success_count_expr,
+            user_error_count_expr = fragments.user_error_count_expr,
         );
 
         let mut rows = sqlx::query(&sql)
@@ -8353,6 +8472,8 @@ ORDER BY "usage".user_id ASC
         self.tx_runner
             .run_read_write(|tx| {
                 let PreparedUsageUpsert {
+                    outcome_class,
+                    sla_eligible,
                     request_headers_json,
                     provider_request_headers_json,
                     response_headers_json,
@@ -8510,6 +8631,8 @@ ORDER BY "usage".user_id ASC
                                 || clear_client_response_body,
                         )
                         .bind(capture_update_allowed)
+                        .bind(outcome_class)
+                        .bind(sla_eligible)
                         .fetch_one(&mut **tx)
                         .await
                         .map_postgres_err()?;
@@ -8988,7 +9111,9 @@ ORDER BY "usage".user_id ASC
                 .push_bind_unseparated(row.updated_at_unix_secs)
                 .push_unseparated("::bigint, 0), CAST(EXTRACT(EPOCH FROM COALESCE(TO_TIMESTAMP(")
                 .push_bind_unseparated(row.created_at_unix_ms)
-                .push_unseparated("::double precision), NOW())) AS BIGINT))");
+                .push_unseparated("::double precision), NOW())) AS BIGINT))")
+                .push_bind(row.prepared.outcome_class)
+                .push_bind(row.prepared.sla_eligible);
         });
         builder.push(
             r#"
@@ -9378,7 +9503,8 @@ ON CONFLICT (request_id) DO UPDATE SET
         let mut builder = QueryBuilder::<Postgres>::new(
             r#"INSERT INTO usage_counter_deltas (
 id, request_id, kind, target_id, request_count_delta, total_requests_delta,
-success_count_delta, error_count_delta, dns_failures_delta, stream_errors_delta,
+success_count_delta, sla_eligible_count_delta, error_count_delta,
+user_error_count_delta, dns_failures_delta, stream_errors_delta,
 total_tokens_delta, total_cost_usd_delta, total_response_time_ms_delta,
 last_used_at_unix_secs, last_used_ip, candidate_last_used_at_unix_secs,
 removed_last_used_at_unix_secs, usage_created_at_unix_secs
@@ -9398,6 +9524,8 @@ removed_last_used_at_unix_secs, usage_created_at_unix_secs
                         .to_string(),
                 )
                 .push_bind(1_i64)
+                .push_bind(0_i64)
+                .push_bind(0_i64)
                 .push_bind(0_i64)
                 .push_bind(0_i64)
                 .push_bind(0_i64)
@@ -9592,7 +9720,9 @@ removed_last_used_at_unix_secs, usage_created_at_unix_secs
                 .push_bind_unseparated(row.updated_at_unix_secs)
                 .push_unseparated("::bigint, 0), CAST(EXTRACT(EPOCH FROM COALESCE(TO_TIMESTAMP(")
                 .push_bind_unseparated(row.created_at_unix_ms)
-                .push_unseparated("::double precision), NOW())) AS BIGINT))");
+                .push_unseparated("::double precision), NOW())) AS BIGINT))")
+                .push("'in_flight'")
+                .push("FALSE");
         });
         builder.push(
             r#"
@@ -9650,6 +9780,8 @@ DO UPDATE SET
     ELSE EXCLUDED.first_byte_time_ms
   END,
   status = 'streaming',
+  outcome_class = 'in_flight',
+  sla_eligible = FALSE,
   request_metadata = COALESCE("usage".request_metadata, EXCLUDED.request_metadata),
   updated_at_unix_secs = GREATEST(
     COALESCE(NULLIF("usage".updated_at_unix_secs, 0), 0),
@@ -9767,7 +9899,9 @@ RETURNING
                             request_count_delta: 0,
                             total_requests_delta: delta.total_requests_delta,
                             success_count_delta: 0,
+                            sla_eligible_count_delta: 0,
                             error_count_delta: delta.failed_requests_delta,
+                            user_error_count_delta: 0,
                             dns_failures_delta: delta.dns_failures_delta,
                             stream_errors_delta: delta.stream_errors_delta,
                             total_tokens_delta: 0,
@@ -9817,7 +9951,9 @@ RETURNING
                             request_count_delta: delta.usage_count_delta,
                             total_requests_delta: 0,
                             success_count_delta: 0,
+                            sla_eligible_count_delta: 0,
                             error_count_delta: 0,
+                            user_error_count_delta: 0,
                             dns_failures_delta: 0,
                             stream_errors_delta: 0,
                             total_tokens_delta: 0,
@@ -9858,7 +9994,9 @@ RETURNING
                             request_count_delta: 0,
                             total_requests_delta: 0,
                             success_count_delta: 0,
+                            sla_eligible_count_delta: 0,
                             error_count_delta: 0,
+                            user_error_count_delta: 0,
                             dns_failures_delta: 0,
                             stream_errors_delta: 0,
                             total_tokens_delta: 0,
@@ -10673,8 +10811,10 @@ fn pending_provider_api_key_contribution(
     Some(ProviderApiKeyUsageContribution {
         key_id,
         request_count: 1,
+        sla_eligible_count: 0,
         success_count: 0,
         error_count: 0,
+        user_error_count: 0,
         total_tokens: 0,
         total_cost_usd: 0.0,
         total_response_time_ms: 0,
@@ -10752,7 +10892,9 @@ fn prepare_first_byte_provider_contribution_transitions(
                 request_count_delta: transition.delta.request_count,
                 total_requests_delta: 0,
                 success_count_delta: transition.delta.success_count,
+                sla_eligible_count_delta: transition.delta.sla_eligible_count,
                 error_count_delta: transition.delta.error_count,
+                user_error_count_delta: transition.delta.user_error_count,
                 dns_failures_delta: 0,
                 stream_errors_delta: 0,
                 total_tokens_delta: transition.delta.total_tokens,
@@ -10814,7 +10956,9 @@ struct UsageCounterDeltaRow {
     request_count_delta: i64,
     total_requests_delta: i64,
     success_count_delta: i64,
+    sla_eligible_count_delta: i64,
     error_count_delta: i64,
+    user_error_count_delta: i64,
     dns_failures_delta: i64,
     stream_errors_delta: i64,
     total_tokens_delta: i64,
@@ -10872,8 +11016,10 @@ impl UsageCounterDeltaAggregates {
                         .entry(row.target_id.clone())
                         .or_default();
                     entry.request_count += row.request_count_delta;
+                    entry.sla_eligible_count += row.sla_eligible_count_delta;
                     entry.success_count += row.success_count_delta;
                     entry.error_count += row.error_count_delta;
+                    entry.user_error_count += row.user_error_count_delta;
                     entry.total_tokens += row.total_tokens_delta;
                     entry.total_cost_usd += row.total_cost_usd_delta;
                     entry.total_response_time_ms += row.total_response_time_ms_delta;
@@ -11039,7 +11185,9 @@ async fn enqueue_api_key_usage_delta_in_tx(
             request_count_delta: 0,
             total_requests_delta: delta.total_requests,
             success_count_delta: 0,
+            sla_eligible_count_delta: 0,
             error_count_delta: 0,
+            user_error_count_delta: 0,
             dns_failures_delta: 0,
             stream_errors_delta: 0,
             total_tokens_delta: delta.total_tokens,
@@ -11073,7 +11221,9 @@ async fn enqueue_model_usage_delta_in_tx(
             request_count_delta: delta.request_count,
             total_requests_delta: 0,
             success_count_delta: 0,
+            sla_eligible_count_delta: 0,
             error_count_delta: 0,
+            user_error_count_delta: 0,
             dns_failures_delta: 0,
             stream_errors_delta: 0,
             total_tokens_delta: 0,
@@ -11112,7 +11262,9 @@ async fn enqueue_provider_api_key_usage_delta_in_tx(
             request_count_delta: delta.request_count,
             total_requests_delta: 0,
             success_count_delta: delta.success_count,
+            sla_eligible_count_delta: delta.sla_eligible_count,
             error_count_delta: delta.error_count,
+            user_error_count_delta: delta.user_error_count,
             dns_failures_delta: 0,
             stream_errors_delta: 0,
             total_tokens_delta: delta.total_tokens,
@@ -11135,7 +11287,9 @@ struct UsageCounterDeltaInsert<'a> {
     request_count_delta: i64,
     total_requests_delta: i64,
     success_count_delta: i64,
+    sla_eligible_count_delta: i64,
     error_count_delta: i64,
+    user_error_count_delta: i64,
     dns_failures_delta: i64,
     stream_errors_delta: i64,
     total_tokens_delta: i64,
@@ -11157,7 +11311,9 @@ struct PreparedUsageCounterDeltaInsert {
     request_count_delta: i64,
     total_requests_delta: i64,
     success_count_delta: i64,
+    sla_eligible_count_delta: i64,
     error_count_delta: i64,
+    user_error_count_delta: i64,
     dns_failures_delta: i64,
     stream_errors_delta: i64,
     total_tokens_delta: i64,
@@ -11208,7 +11364,9 @@ fn prepare_usage_counter_delta_insert(
         request_count_delta: input.request_count_delta,
         total_requests_delta: input.total_requests_delta,
         success_count_delta: input.success_count_delta,
+        sla_eligible_count_delta: input.sla_eligible_count_delta,
         error_count_delta: input.error_count_delta,
+        user_error_count_delta: input.user_error_count_delta,
         dns_failures_delta: input.dns_failures_delta,
         stream_errors_delta: input.stream_errors_delta,
         total_tokens_delta: input.total_tokens_delta,
@@ -11242,7 +11400,9 @@ async fn insert_usage_counter_delta_in_tx(
         .bind(input.request_count_delta)
         .bind(input.total_requests_delta)
         .bind(input.success_count_delta)
+        .bind(input.sla_eligible_count_delta)
         .bind(input.error_count_delta)
+        .bind(input.user_error_count_delta)
         .bind(input.dns_failures_delta)
         .bind(input.stream_errors_delta)
         .bind(input.total_tokens_delta)
@@ -11274,7 +11434,9 @@ async fn insert_usage_counter_deltas_batch_in_tx(
                 .push_bind(input.request_count_delta)
                 .push_bind(input.total_requests_delta)
                 .push_bind(input.success_count_delta)
+                .push_bind(input.sla_eligible_count_delta)
                 .push_bind(input.error_count_delta)
+                .push_bind(input.user_error_count_delta)
                 .push_bind(input.dns_failures_delta)
                 .push_bind(input.stream_errors_delta)
                 .push_bind(input.total_tokens_delta)
@@ -11330,8 +11492,14 @@ fn map_usage_counter_delta_row(row: &PgRow) -> Result<UsageCounterDeltaRow, Data
         success_count_delta: row
             .try_get::<i64, _>("success_count_delta")
             .map_postgres_err()?,
+        sla_eligible_count_delta: row
+            .try_get::<i64, _>("sla_eligible_count_delta")
+            .map_postgres_err()?,
         error_count_delta: row
             .try_get::<i64, _>("error_count_delta")
+            .map_postgres_err()?,
+        user_error_count_delta: row
+            .try_get::<i64, _>("user_error_count_delta")
             .map_postgres_err()?,
         dns_failures_delta: row
             .try_get::<i64, _>("dns_failures_delta")
@@ -12036,6 +12204,8 @@ impl UsageSettlementPricingSnapshot {
 
 #[derive(Debug)]
 struct PreparedUsageUpsert {
+    outcome_class: &'static str,
+    sla_eligible: bool,
     request_headers_json: Option<String>,
     provider_request_headers_json: Option<String>,
     response_headers_json: Option<String>,
@@ -12379,6 +12549,8 @@ fn prepare_usage_upsert_context(
     let request_metadata_json = json_bind_text(request_metadata_value.as_ref())?;
 
     Ok(PreparedUsageUpsert {
+        outcome_class: usage.outcome_class().as_str(),
+        sla_eligible: usage.sla_eligible(),
         request_headers_json,
         provider_request_headers_json,
         response_headers_json,

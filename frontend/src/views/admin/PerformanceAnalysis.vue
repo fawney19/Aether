@@ -346,7 +346,7 @@
             <section class="flex h-full flex-col rounded-xl border border-border/70 bg-card/60 p-4">
               <div class="flex items-center justify-between gap-3">
                 <h3 class="text-sm font-semibold">
-                  最近错误
+                  最近服务错误
                 </h3>
                 <div class="flex items-center gap-2">
                   <Button
@@ -354,7 +354,7 @@
                     variant="ghost"
                     size="sm"
                     class="h-7 gap-1 px-2 text-xs"
-                    :title="recentErrorsExpanded ? '收起最近错误' : '展开最近错误'"
+                    :title="recentErrorsExpanded ? '收起最近服务错误' : '展开最近服务错误'"
                     @click="recentErrorsExpanded = !recentErrorsExpanded"
                   >
                     <component
@@ -364,7 +364,7 @@
                     {{ recentErrorsExpanded ? '收起' : `展开 ${recentErrors.length}` }}
                   </Button>
                   <span class="text-xs text-muted-foreground">
-                    {{ formatMetricNumber(resilienceStatus?.error_statistics.total_errors) }} / 24h
+                    {{ formatMetricNumber(resilienceStatus?.error_statistics.total_errors) }} 次 / 24h
                   </span>
                 </div>
               </div>
@@ -373,7 +373,7 @@
                 v-if="!recentErrors.length"
                 class="mt-4 flex-1 rounded-lg border border-dashed border-border/70 px-3 py-4 text-sm text-muted-foreground"
               >
-                当前没有最近错误。
+                当前没有最近服务错误。
               </div>
 
               <div
@@ -644,10 +644,13 @@
                   请求
                 </th>
                 <th class="px-3 py-2 text-right font-medium">
-                  成功率
+                  SLA 成功率
                 </th>
                 <th class="px-3 py-2 text-right font-medium">
-                  错误率
+                  服务错误率
+                </th>
+                <th class="px-3 py-2 text-right font-medium">
+                  用户错误
                 </th>
                 <th class="px-3 py-2 text-right font-medium">
                   输出 TPS
@@ -690,10 +693,13 @@
                   {{ formatMetricNumber(provider.request_count) }}
                 </td>
                 <td class="px-3 py-2 text-right">
-                  {{ formatProviderPerformanceMetric(provider.success_rate, '%') }}
+                  {{ formatProviderPerformanceMetric(resolveSlaSuccessRate(provider), '%') }}
                 </td>
                 <td class="px-3 py-2 text-right">
-                  {{ formatErrorRate(provider.success_rate) }}
+                  {{ formatProviderPerformanceMetric(resolveServiceErrorRate(provider), '%') }}
+                </td>
+                <td class="px-3 py-2 text-right text-muted-foreground">
+                  {{ formatOutcomeMetric(provider.user_error_count, resolveUserErrorRate(provider)) }}
                 </td>
                 <td class="px-3 py-2 text-right">
                   {{ formatProviderPerformanceMetric(provider.avg_output_tps, ' tps') }}
@@ -799,14 +805,14 @@
     <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <Card class="p-4">
         <ErrorDistributionChart
-          title="错误分布"
+          title="服务错误分布"
           :distribution="errorDistribution"
           :loading="errorLoading"
         />
       </Card>
       <Card class="space-y-3 p-4">
         <h3 class="text-sm font-semibold">
-          错误趋势
+          服务错误趋势
         </h3>
         <div
           v-if="errorLoading"
@@ -874,6 +880,11 @@ import { getDateRangeFromPeriod } from '@/features/usage/composables'
 import type { DateRangeParams } from '@/features/usage/types'
 import { formatDate, formatNumber } from '@/utils/format'
 import { log } from '@/utils/logger'
+import {
+  resolveServiceErrorRate,
+  resolveSlaSuccessRate,
+  resolveUserErrorRate,
+} from '@/utils/outcomeMetrics'
 import {
   buildProviderPerformanceChartData,
   formatDurationMs,
@@ -1061,11 +1072,14 @@ function formatMetricNumber(value: number | null | undefined): string {
   return formatNumber(value)
 }
 
-function formatErrorRate(successRate: number | null | undefined): string {
-  if (successRate == null || Number.isNaN(successRate)) {
-    return '-'
-  }
-  return `${Math.max(0, 100 - successRate).toFixed(2)}%`
+function formatOutcomeMetric(
+  count: number | null | undefined,
+  rate: number | null | undefined,
+): string {
+  if (count == null && rate == null) return '-'
+  const countText = count == null ? '-' : formatMetricNumber(count)
+  const rateText = formatProviderPerformanceMetric(rate, '%')
+  return `${countText} / ${rateText}`
 }
 
 function providerSampleCoverageText(provider: ProviderPerformanceItem): string {
@@ -1359,11 +1373,18 @@ const providerPerformanceSummaryCards = computed(() => {
       iconClass: 'text-blue-500',
     },
     {
-      title: '成功率',
-      value: formatProviderPerformanceMetric(summary?.success_rate, '%'),
-      hint: `错误率 ${formatErrorRate(summary?.success_rate)}`,
+      title: 'SLA 成功率',
+      value: formatProviderPerformanceMetric(summary ? resolveSlaSuccessRate(summary) : null, '%'),
+      hint: `服务错误率 ${formatProviderPerformanceMetric(summary ? resolveServiceErrorRate(summary) : null, '%')}`,
       icon: CheckCircle2,
       iconClass: 'text-emerald-500',
+    },
+    {
+      title: '用户错误',
+      value: formatMetricNumber(summary?.user_error_count),
+      hint: `全部请求占比 ${formatProviderPerformanceMetric(summary ? resolveUserErrorRate(summary) : null, '%')}`,
+      icon: AlertTriangle,
+      iconClass: 'text-slate-500',
     },
     {
       title: 'P99 响应',
@@ -1455,9 +1476,9 @@ const liveSummaryCards = computed(() => [
     iconClass: 'text-emerald-500',
   },
   {
-    title: '最近 1 小时错误',
+    title: '最近 1 小时服务错误',
     value: formatMetricNumber(systemStatus.value?.recent_errors),
-    hint: `24h 总错误 ${formatMetricNumber(resilienceStatus.value?.error_statistics.total_errors)}`,
+    hint: `24h 服务错误 ${formatMetricNumber(resilienceStatus.value?.error_statistics.total_errors)}`,
     icon: AlertTriangle,
     iconClass: 'text-yellow-500',
   },

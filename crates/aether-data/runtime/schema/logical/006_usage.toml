@@ -333,6 +333,17 @@ length = 64
 default = "completed"
 
 [[table.usage.columns]]
+name = "outcome_class"
+type = "text"
+length = 32
+default = "in_flight"
+
+[[table.usage.columns]]
+name = "sla_eligible"
+type = "bool"
+default = false
+
+[[table.usage.columns]]
 name = "billing_status"
 type = "text"
 length = 64
@@ -847,7 +858,17 @@ type = "int64"
 default = 0
 
 [[table.usage_counter_deltas.columns]]
+name = "sla_eligible_count_delta"
+type = "int64"
+default = 0
+
+[[table.usage_counter_deltas.columns]]
 name = "error_count_delta"
+type = "int64"
+default = 0
+
+[[table.usage_counter_deltas.columns]]
+name = "user_error_count_delta"
 type = "int64"
 default = 0
 

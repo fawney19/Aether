@@ -448,10 +448,14 @@ pub struct StoredProviderCatalogKey {
     pub last_probe_increase_at_unix_secs: Option<u64>,
     pub last_rpm_peak: Option<u32>,
     pub request_count: Option<u32>,
+    /// Requests included in the service SLA denominator.
+    pub sla_eligible_count: Option<u32>,
     pub total_tokens: u64,
     pub total_cost_usd: f64,
     pub success_count: Option<u32>,
+    /// Service errors only. Caller-caused HTTP 400 responses are tracked separately.
     pub error_count: Option<u32>,
+    pub user_error_count: Option<u32>,
     pub total_response_time_ms: Option<u64>,
     pub last_used_at_unix_secs: Option<u64>,
     pub auto_fetch_models: bool,
@@ -532,10 +536,12 @@ impl StoredProviderCatalogKey {
             last_probe_increase_at_unix_secs: None,
             last_rpm_peak: None,
             request_count: None,
+            sla_eligible_count: None,
             total_tokens: 0,
             total_cost_usd: 0.0,
             success_count: None,
             error_count: None,
+            user_error_count: None,
             total_response_time_ms: None,
             last_used_at_unix_secs: None,
             auto_fetch_models: false,
@@ -622,6 +628,16 @@ impl StoredProviderCatalogKey {
     ) -> Self {
         self.error_count = error_count;
         self.total_response_time_ms = total_response_time_ms;
+        self
+    }
+
+    pub fn with_sla_usage_fields(
+        mut self,
+        sla_eligible_count: Option<u32>,
+        user_error_count: Option<u32>,
+    ) -> Self {
+        self.sla_eligible_count = sla_eligible_count;
+        self.user_error_count = user_error_count;
         self
     }
 

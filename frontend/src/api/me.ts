@@ -5,6 +5,7 @@ import { cachedRequest, buildCacheKey } from '@/utils/cache'
 import type { BillingSummary } from './auth'
 import type { UserSession } from '@/types/session'
 import type { FeatureSettingsMap } from '@/utils/featureSettings'
+import type { RequestOutcomeClass, RequestStatus } from '@/features/usage/types'
 
 const ACTIVITY_HEATMAP_CACHE_TTL_MS = 30 * 60 * 1000
 
@@ -89,6 +90,9 @@ export interface UsageRecordDetail {
   cache_read_input_tokens?: number
   status_code: number
   error_message?: string
+  status?: RequestStatus
+  outcome_class?: RequestOutcomeClass
+  sla_eligible?: boolean
   input_price_per_1m: number
   output_price_per_1m: number
   cache_creation_price_per_1m?: number
@@ -130,6 +134,12 @@ export interface ProviderSummary {
   total_input_context?: number
   cache_hit_rate?: number
   total_cost_usd: number
+  sla_eligible_count?: number
+  success_count?: number
+  service_error_count?: number
+  service_error_rate?: number
+  user_error_count?: number
+  user_error_rate?: number
   success_rate: number | null
   avg_response_time_ms: number | null
 }
@@ -368,6 +378,8 @@ export const meApi = {
       response_time_updated_at?: string | null
       status_code?: number | null
       error_message?: string | null
+      outcome_class?: RequestOutcomeClass | null
+      sla_eligible?: boolean | null
       api_format?: string | null
       endpoint_api_format?: string | null
       is_stream?: boolean | null

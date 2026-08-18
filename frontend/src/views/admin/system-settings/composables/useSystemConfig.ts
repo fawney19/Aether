@@ -493,12 +493,12 @@ export function useSystemConfig() {
         {
           key: 'enable_openai_image_sync_heartbeat',
           value: systemConfig.value.enable_openai_image_sync_heartbeat,
-          description: '同步生图心跳开关：开启后外层 HTTP 状态固定为 200，上游失败写入响应体',
+          description: '同步生图心跳已停用：错误透传真实 HTTP 4xx/5xx 状态码',
         },
         {
           key: 'enable_standard_text_sync_heartbeat',
           value: systemConfig.value.enable_standard_text_sync_heartbeat,
-          description: '标准文本非流式心跳开关：开启后外层 HTTP 状态固定为 200，上游失败写入响应体',
+          description: '标准文本非流式心跳已停用：错误透传真实 HTTP 4xx/5xx 状态码',
         },
         {
           key: 'cyber_continue_failover',

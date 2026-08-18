@@ -51,11 +51,13 @@ pub struct AdminStatsUsageFilter {
 #[derive(Clone, Debug, Default)]
 pub struct AdminStatsAggregate {
     pub total_requests: u64,
+    pub sla_eligible_requests: u64,
     pub total_tokens: u64,
     pub total_cost: f64,
     pub actual_total_cost: f64,
     pub total_response_time_ms: f64,
     pub error_requests: u64,
+    pub user_error_requests: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -625,19 +627,25 @@ pub fn admin_stats_comparison_empty_response(
     Json(json!({
         "current": {
             "total_requests": 0,
+            "sla_eligible_requests": 0,
             "total_tokens": 0,
             "total_cost": 0.0,
             "actual_total_cost": 0.0,
             "avg_response_time_ms": 0.0,
             "error_requests": 0,
+            "service_error_requests": 0,
+            "user_error_requests": 0,
         },
         "comparison": {
             "total_requests": 0,
+            "sla_eligible_requests": 0,
             "total_tokens": 0,
             "total_cost": 0.0,
             "actual_total_cost": 0.0,
             "avg_response_time_ms": 0.0,
             "error_requests": 0,
+            "service_error_requests": 0,
+            "user_error_requests": 0,
         },
         "change_percent": {
             "total_requests": serde_json::Value::Null,
@@ -646,6 +654,8 @@ pub fn admin_stats_comparison_empty_response(
             "actual_total_cost": serde_json::Value::Null,
             "avg_response_time_ms": serde_json::Value::Null,
             "error_requests": serde_json::Value::Null,
+            "service_error_requests": serde_json::Value::Null,
+            "user_error_requests": serde_json::Value::Null,
         },
         "current_start": current_range.start_date.to_string(),
         "current_end": current_range.end_date.to_string(),
@@ -673,7 +683,14 @@ pub fn admin_stats_provider_performance_empty_response(
     Json(json!({
         "summary": {
             "request_count": 0,
+            "sla_eligible_count": 0,
+            "success_count": 0,
+            "error_count": 0,
+            "service_error_count": 0,
+            "user_error_count": 0,
             "success_rate": 0.0,
+            "service_error_rate": 0.0,
+            "user_error_rate": 0.0,
             "avg_output_tps": serde_json::Value::Null,
             "avg_first_byte_time_ms": serde_json::Value::Null,
             "avg_response_time_ms": serde_json::Value::Null,
@@ -866,19 +883,25 @@ pub fn build_admin_stats_comparison_response_from_aggregates(
     Json(json!({
         "current": {
             "total_requests": current.total_requests,
+            "sla_eligible_requests": current.sla_eligible_requests,
             "total_tokens": current.total_tokens,
             "total_cost": round_to(current.total_cost, 6),
             "actual_total_cost": round_to(current.actual_total_cost, 6),
             "avg_response_time_ms": round_to(current.avg_response_time_ms(), 2),
             "error_requests": current.error_requests,
+            "service_error_requests": current.error_requests,
+            "user_error_requests": current.user_error_requests,
         },
         "comparison": {
             "total_requests": comparison.total_requests,
+            "sla_eligible_requests": comparison.sla_eligible_requests,
             "total_tokens": comparison.total_tokens,
             "total_cost": round_to(comparison.total_cost, 6),
             "actual_total_cost": round_to(comparison.actual_total_cost, 6),
             "avg_response_time_ms": round_to(comparison.avg_response_time_ms(), 2),
             "error_requests": comparison.error_requests,
+            "service_error_requests": comparison.error_requests,
+            "user_error_requests": comparison.user_error_requests,
         },
         "change_percent": {
             "total_requests": pct_change_value(current.total_requests as f64, comparison.total_requests as f64),
@@ -887,6 +910,8 @@ pub fn build_admin_stats_comparison_response_from_aggregates(
             "actual_total_cost": pct_change_value(current.actual_total_cost, comparison.actual_total_cost),
             "avg_response_time_ms": pct_change_value(current.avg_response_time_ms(), comparison.avg_response_time_ms()),
             "error_requests": pct_change_value(current.error_requests as f64, comparison.error_requests as f64),
+            "service_error_requests": pct_change_value(current.error_requests as f64, comparison.error_requests as f64),
+            "user_error_requests": pct_change_value(current.user_error_requests as f64, comparison.user_error_requests as f64),
         },
         "current_start": current_range.start_date.to_string(),
         "current_end": current_range.end_date.to_string(),
@@ -906,6 +931,9 @@ pub fn build_admin_stats_error_distribution_response(
         std::collections::BTreeMap::new();
 
     for item in usage {
+        if !item.outcome_class().is_service_error() {
+            continue;
+        }
         let Some(category) = item
             .error_category
             .as_ref()
@@ -1031,7 +1059,9 @@ pub fn build_admin_stats_performance_percentiles_response(
         .collect();
 
     for item in usage {
-        if item.status != "completed" {
+        // Percentiles are service performance metrics.  Keep the raw fallback aligned with
+        // summary SQL and exclude caller-caused HTTP 400/user-error completions.
+        if !item.outcome_class().is_success() {
             continue;
         }
         let Some(local_day) = time_range.local_date_string_for_unix_secs(item.created_at_unix_ms)
@@ -1103,13 +1133,19 @@ pub fn build_admin_stats_provider_performance_response(
         .providers
         .iter()
         .map(|row| {
+            let service_error_count = row.sla_eligible_count.saturating_sub(row.success_count);
             json!({
                 "provider_id": row.provider_id.as_str(),
                 "provider": row.provider.as_str(),
                 "request_count": row.request_count,
+                "sla_eligible_count": row.sla_eligible_count,
                 "success_count": row.success_count,
-                "error_count": row.request_count.saturating_sub(row.success_count),
-                "success_rate": success_rate(row.request_count, row.success_count),
+                "error_count": service_error_count,
+                "service_error_count": service_error_count,
+                "user_error_count": row.user_error_count,
+                "success_rate": success_rate(row.sla_eligible_count, row.success_count),
+                "service_error_rate": success_rate(row.sla_eligible_count, service_error_count),
+                "user_error_rate": success_rate(row.request_count, row.user_error_count),
                 "output_tokens": row.output_tokens,
                 "avg_output_tps": rounded_option(row.avg_output_tps, 2),
                 "avg_first_byte_time_ms": rounded_option(row.avg_first_byte_time_ms, 2),
@@ -1129,17 +1165,25 @@ pub fn build_admin_stats_provider_performance_response(
         .timeline
         .iter()
         .map(|row| {
+            let service_error_count = row.sla_eligible_count.saturating_sub(row.success_count);
             json!({
                 "date": row.date.as_str(),
                 "provider_id": row.provider_id.as_str(),
                 "provider": row.provider.as_str(),
                 "request_count": row.request_count,
+                "sla_eligible_count": row.sla_eligible_count,
+                "success_count": row.success_count,
+                "error_count": service_error_count,
+                "service_error_count": service_error_count,
+                "user_error_count": row.user_error_count,
                 "output_tokens": row.output_tokens,
                 "avg_output_tps": rounded_option(row.avg_output_tps, 2),
                 "avg_first_byte_time_ms": rounded_option(row.avg_first_byte_time_ms, 2),
                 "avg_response_time_ms": rounded_option(row.avg_response_time_ms, 2),
                 "slow_request_count": row.slow_request_count,
-                "success_rate": success_rate(row.request_count, row.success_count),
+                "success_rate": success_rate(row.sla_eligible_count, row.success_count),
+                "service_error_rate": success_rate(row.sla_eligible_count, service_error_count),
+                "user_error_rate": success_rate(row.request_count, row.user_error_count),
             })
         })
         .collect::<Vec<_>>();
@@ -1147,7 +1191,17 @@ pub fn build_admin_stats_provider_performance_response(
     Json(json!({
         "summary": {
             "request_count": summary.request_count,
-            "success_rate": success_rate(summary.request_count, summary.success_count),
+            "sla_eligible_count": summary.sla_eligible_count,
+            "success_count": summary.success_count,
+            "error_count": summary.sla_eligible_count.saturating_sub(summary.success_count),
+            "service_error_count": summary.sla_eligible_count.saturating_sub(summary.success_count),
+            "user_error_count": summary.user_error_count,
+            "success_rate": success_rate(summary.sla_eligible_count, summary.success_count),
+            "service_error_rate": success_rate(
+                summary.sla_eligible_count,
+                summary.sla_eligible_count.saturating_sub(summary.success_count),
+            ),
+            "user_error_rate": success_rate(summary.request_count, summary.user_error_count),
             "avg_output_tps": rounded_option(summary.avg_output_tps, 2),
             "avg_first_byte_time_ms": rounded_option(summary.avg_first_byte_time_ms, 2),
             "avg_response_time_ms": rounded_option(summary.avg_response_time_ms, 2),
@@ -1644,8 +1698,15 @@ pub fn aggregate_usage_stats(items: &[StoredRequestUsageAudit]) -> AdminStatsAgg
         aggregate.total_cost += item.total_cost_usd;
         aggregate.actual_total_cost += item.actual_total_cost_usd;
         aggregate.total_response_time_ms += item.response_time_ms.unwrap_or(0) as f64;
-        if item.status_code.is_some_and(|value| value >= 400) || item.error_message.is_some() {
+        let outcome = item.outcome_class();
+        if outcome.is_sla_eligible() {
+            aggregate.sla_eligible_requests = aggregate.sla_eligible_requests.saturating_add(1);
+        }
+        if outcome.is_service_error() {
             aggregate.error_requests = aggregate.error_requests.saturating_add(1);
+        }
+        if outcome.is_user_error() {
+            aggregate.user_error_requests = aggregate.user_error_requests.saturating_add(1);
         }
     }
     aggregate

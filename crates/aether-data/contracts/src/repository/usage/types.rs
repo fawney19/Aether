@@ -339,6 +339,18 @@ pub struct StoredRequestUsageAudit {
 }
 
 impl StoredRequestUsageAudit {
+    pub fn outcome_class(&self) -> super::RequestOutcomeClass {
+        super::classify_request_outcome(
+            self.status.as_str(),
+            self.status_code,
+            self.error_message.as_deref(),
+        )
+    }
+
+    pub fn sla_eligible(&self) -> bool {
+        self.outcome_class().is_sla_eligible()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
@@ -908,8 +920,11 @@ impl StoredProviderUsageWindow {
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct StoredProviderUsageSummary {
     pub total_requests: u64,
+    pub sla_eligible_requests: u64,
     pub successful_requests: u64,
+    /// Service failures only.
     pub failed_requests: u64,
+    pub user_error_requests: u64,
     pub avg_response_time_ms: f64,
     pub total_cost_usd: f64,
 }
@@ -1029,12 +1044,17 @@ pub struct StoredUsageAuditAggregation {
     pub total_cost_usd: f64,
     pub actual_total_cost_usd: f64,
     pub avg_response_time_ms: Option<f64>,
+    /// Requests included in the service SLA denominator.
+    pub sla_eligible_count: Option<u64>,
     pub success_count: Option<u64>,
+    /// Caller-caused HTTP 400 responses, excluded from the service SLA denominator.
+    pub user_error_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct StoredUsageAuditSummary {
     pub total_requests: u64,
+    pub sla_eligible_requests: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub recorded_total_tokens: u64,
@@ -1047,7 +1067,9 @@ pub struct StoredUsageAuditSummary {
     pub cache_creation_cost_usd: f64,
     pub cache_read_cost_usd: f64,
     pub total_response_time_ms: f64,
+    /// Service errors only. HTTP 400 is reported through `user_error_requests`.
     pub error_requests: u64,
+    pub user_error_requests: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -1146,6 +1168,7 @@ pub struct UsageDashboardSummaryQuery {
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct StoredUsageDashboardSummary {
     pub total_requests: u64,
+    pub sla_eligible_requests: u64,
     pub input_tokens: u64,
     pub effective_input_tokens: u64,
     pub output_tokens: u64,
@@ -1157,7 +1180,9 @@ pub struct StoredUsageDashboardSummary {
     pub cache_read_cost_usd: f64,
     pub total_cost_usd: f64,
     pub actual_total_cost_usd: f64,
+    /// Service errors only. HTTP 400 is reported through `user_error_requests`.
     pub error_requests: u64,
+    pub user_error_requests: u64,
     pub response_time_sum_ms: f64,
     pub response_time_samples: u64,
 }
@@ -1226,6 +1251,7 @@ pub struct UsageBreakdownSummaryQuery {
 pub struct StoredUsageBreakdownSummaryRow {
     pub group_key: String,
     pub request_count: u64,
+    pub sla_eligible_count: u64,
     pub input_tokens: u64,
     pub total_tokens: u64,
     pub output_tokens: u64,
@@ -1238,6 +1264,7 @@ pub struct StoredUsageBreakdownSummaryRow {
     pub total_cost_usd: f64,
     pub actual_total_cost_usd: f64,
     pub success_count: u64,
+    pub user_error_count: u64,
     pub response_time_sum_ms: f64,
     pub response_time_samples: u64,
     pub overall_response_time_sum_ms: f64,
@@ -1314,7 +1341,9 @@ fn default_usage_provider_performance_include_timeline() -> bool {
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct StoredUsageProviderPerformanceSummary {
     pub request_count: u64,
+    pub sla_eligible_count: u64,
     pub success_count: u64,
+    pub user_error_count: u64,
     pub avg_output_tps: Option<f64>,
     pub avg_first_byte_time_ms: Option<f64>,
     pub avg_response_time_ms: Option<f64>,
@@ -1333,7 +1362,9 @@ pub struct StoredUsageProviderPerformanceProviderRow {
     pub provider_id: String,
     pub provider: String,
     pub request_count: u64,
+    pub sla_eligible_count: u64,
     pub success_count: u64,
+    pub user_error_count: u64,
     pub output_tokens: u64,
     pub avg_output_tps: Option<f64>,
     pub avg_first_byte_time_ms: Option<f64>,
@@ -1354,7 +1385,9 @@ pub struct StoredUsageProviderPerformanceTimelineRow {
     pub provider_id: String,
     pub provider: String,
     pub request_count: u64,
+    pub sla_eligible_count: u64,
     pub success_count: u64,
+    pub user_error_count: u64,
     pub output_tokens: u64,
     pub avg_output_tps: Option<f64>,
     pub avg_first_byte_time_ms: Option<f64>,
@@ -1973,6 +2006,18 @@ pub struct UpsertUsageRecord {
 }
 
 impl UpsertUsageRecord {
+    pub fn outcome_class(&self) -> super::RequestOutcomeClass {
+        super::classify_request_outcome(
+            self.status.as_str(),
+            self.status_code,
+            self.error_message.as_deref(),
+        )
+    }
+
+    pub fn sla_eligible(&self) -> bool {
+        self.outcome_class().is_sla_eligible()
+    }
+
     pub fn validate(&self) -> Result<(), crate::DataLayerError> {
         if self.request_id.trim().is_empty() {
             return Err(crate::DataLayerError::InvalidInput(

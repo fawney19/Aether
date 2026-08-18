@@ -154,7 +154,19 @@ impl RequestCandidateReadRepository for SqliteRequestCandidateRepository {
             return Ok(Vec::new());
         }
         let mut builder = QueryBuilder::<Sqlite>::new(
-            "SELECT endpoint_id, status, COUNT(id) AS count FROM request_candidates",
+            "SELECT endpoint_id, \
+             CASE \
+               WHEN status = 'skipped' THEN 'skipped' \
+               WHEN status_code = 400 THEN 'failed' \
+               WHEN status = 'success' \
+                 AND (status_code IS NULL OR status_code < 400) \
+                 AND TRIM(COALESCE(error_message, '')) = '' THEN 'success' \
+               ELSE 'failed' \
+             END AS status, \
+             COUNT(id) AS count, \
+             SUM(CASE WHEN status <> 'skipped' AND status_code = 400 THEN 1 ELSE 0 END) AS user_error_count, \
+             SUM(CASE WHEN status <> 'skipped' AND (status_code IS NULL OR status_code <> 400) THEN 1 ELSE 0 END) AS sla_eligible_count \
+             FROM request_candidates",
         );
         let mut where_clause = WhereClause::new();
         push_in(&mut builder, &mut where_clause, "endpoint_id", endpoint_ids);
@@ -162,7 +174,16 @@ impl RequestCandidateReadRepository for SqliteRequestCandidateRepository {
             .push(" AND created_at >= ")
             .push_bind(unix_secs_to_ms_i64(since_unix_secs)?)
             .push(" AND status IN ('success', 'failed', 'skipped')")
-            .push(" GROUP BY endpoint_id, status");
+            .push(
+                " GROUP BY endpoint_id, CASE \
+               WHEN status = 'skipped' THEN 'skipped' \
+               WHEN status_code = 400 THEN 'failed' \
+               WHEN status = 'success' \
+                 AND (status_code IS NULL OR status_code < 400) \
+                 AND TRIM(COALESCE(error_message, '')) = '' THEN 'success' \
+               ELSE 'failed' \
+             END",
+            );
         let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
         rows.iter()
             .map(|row| {
@@ -178,6 +199,22 @@ impl RequestCandidateReadRepository for SqliteRequestCandidateRepository {
                             )
                         },
                     )?,
+                    sla_eligible_count: u64::try_from(
+                        row.try_get::<i64, _>("sla_eligible_count").map_sql_err()?,
+                    )
+                    .map_err(|_| {
+                        DataLayerError::UnexpectedValue(
+                            "public health SLA eligible count out of range".to_string(),
+                        )
+                    })?,
+                    user_error_count: u64::try_from(
+                        row.try_get::<i64, _>("user_error_count").map_sql_err()?,
+                    )
+                    .map_err(|_| {
+                        DataLayerError::UnexpectedValue(
+                            "public health user error count out of range".to_string(),
+                        )
+                    })?,
                 })
             })
             .collect()
@@ -705,18 +742,27 @@ fn aggregate_timeline(
                 endpoint_id,
                 segment_idx,
                 total_count: 0,
+                sla_eligible_count: 0,
                 success_count: 0,
                 failed_count: 0,
+                user_error_count: 0,
                 min_created_at_unix_ms: Some(candidate.created_at_unix_ms),
                 max_created_at_unix_ms: Some(candidate.created_at_unix_ms),
             },
         );
         bucket.total_count += 1;
-        if candidate.status == RequestCandidateStatus::Success {
+        let outcome = candidate.outcome_class();
+        if outcome.is_sla_eligible() {
+            bucket.sla_eligible_count += 1;
+        }
+        if outcome.is_success() {
             bucket.success_count += 1;
         }
-        if candidate.status == RequestCandidateStatus::Failed {
+        if outcome.is_service_error() {
             bucket.failed_count += 1;
+        }
+        if outcome.is_user_error() {
+            bucket.user_error_count += 1;
         }
         bucket.min_created_at_unix_ms = bucket
             .min_created_at_unix_ms
@@ -732,8 +778,10 @@ fn aggregate_timeline(
                     endpoint_id: endpoint_id.clone(),
                     segment_idx,
                     total_count: 0,
+                    sla_eligible_count: 0,
                     success_count: 0,
                     failed_count: 0,
+                    user_error_count: 0,
                     min_created_at_unix_ms: None,
                     max_created_at_unix_ms: None,
                 },
@@ -966,6 +1014,56 @@ mod tests {
                 .expect("old candidates should delete"),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn sqlite_health_counts_http_400_as_user_error_only() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        run_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+        let repository = SqliteRequestCandidateRepository::new(pool);
+        let mut candidate = sample_upsert(
+            "candidate-user-error",
+            RequestCandidateStatus::Failed,
+            None,
+            1_000_000,
+        );
+        candidate.status_code = Some(400);
+        candidate.error_message = Some("invalid user request".to_string());
+        repository
+            .upsert(candidate)
+            .await
+            .expect("user-error candidate should insert");
+
+        let counts = repository
+            .count_finalized_statuses_by_endpoint_ids_since(&["endpoint-1".to_string()], 900)
+            .await
+            .expect("health counts should load");
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts[0].sla_eligible_count, 0);
+        assert_eq!(counts[0].user_error_count, 1);
+
+        let timeline = repository
+            .aggregate_finalized_timeline_by_endpoint_ids_since(
+                &["endpoint-1".to_string()],
+                900,
+                1_200,
+                3,
+            )
+            .await
+            .expect("health timeline should load");
+        let populated = timeline
+            .iter()
+            .find(|bucket| bucket.total_count > 0)
+            .expect("user error bucket should exist");
+        assert_eq!(populated.sla_eligible_count, 0);
+        assert_eq!(populated.failed_count, 0);
+        assert_eq!(populated.user_error_count, 1);
     }
 
     #[tokio::test]

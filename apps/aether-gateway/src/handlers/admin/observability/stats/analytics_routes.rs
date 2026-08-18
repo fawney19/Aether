@@ -43,11 +43,13 @@ fn usage_summary_to_admin_stats_aggregate(
 ) -> AdminStatsAggregate {
     AdminStatsAggregate {
         total_requests: summary.total_requests,
+        sla_eligible_requests: summary.sla_eligible_requests,
         total_tokens: summary.recorded_total_tokens,
         total_cost: summary.total_cost_usd,
         actual_total_cost: summary.actual_total_cost_usd,
         total_response_time_ms: summary.total_response_time_ms,
         error_requests: summary.error_requests,
+        user_error_requests: summary.user_error_requests,
     }
 }
 

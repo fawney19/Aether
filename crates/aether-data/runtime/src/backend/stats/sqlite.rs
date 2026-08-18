@@ -117,11 +117,10 @@ WHERE created_at_unix_ms >= ?
 const SQLITE_STATS_AGGREGATE_SQL: &str = r#"
 SELECT
   COUNT(*) AS total_requests,
-  COALESCE(SUM(CASE
-    WHEN status = 'failed'
-      OR status_code >= 400
-      OR error_message IS NOT NULL
-    THEN 1 ELSE 0 END), 0) AS error_requests,
+  COALESCE(SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END), 0) AS success_requests,
+  COALESCE(SUM(CASE WHEN sla_eligible <> 0 THEN 1 ELSE 0 END), 0) AS sla_eligible_requests,
+  COALESCE(SUM(CASE WHEN outcome_class = 'service_error' THEN 1 ELSE 0 END), 0) AS error_requests,
+  COALESCE(SUM(CASE WHEN outcome_class = 'user_error' THEN 1 ELSE 0 END), 0) AS user_error_requests,
   COALESCE(SUM(input_tokens), 0) AS input_tokens,
   COALESCE(SUM(output_tokens), 0) AS output_tokens,
   COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_tokens,
@@ -152,20 +151,26 @@ async fn perform_sqlite_stats_hourly_aggregation(
         .await
         .map_sql_err()?;
     let total_requests: i64 = row.try_get("total_requests").map_sql_err()?;
+    let success_requests: i64 = row.try_get("success_requests").map_sql_err()?;
+    let sla_eligible_requests: i64 = row.try_get("sla_eligible_requests").map_sql_err()?;
     let error_requests: i64 = row.try_get("error_requests").map_sql_err()?;
+    let user_error_requests: i64 = row.try_get("user_error_requests").map_sql_err()?;
 
     sqlx::query(
         r#"
 INSERT INTO stats_hourly (
   id, hour_utc, total_requests, success_requests, error_requests,
+  sla_eligible_requests, user_error_requests,
   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
   total_cost, actual_total_cost, avg_response_time_ms, is_complete,
   aggregated_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
 ON CONFLICT (hour_utc) DO UPDATE SET
   total_requests = excluded.total_requests,
   success_requests = excluded.success_requests,
   error_requests = excluded.error_requests,
+  sla_eligible_requests = excluded.sla_eligible_requests,
+  user_error_requests = excluded.user_error_requests,
   input_tokens = excluded.input_tokens,
   output_tokens = excluded.output_tokens,
   cache_creation_tokens = excluded.cache_creation_tokens,
@@ -181,8 +186,10 @@ ON CONFLICT (hour_utc) DO UPDATE SET
     .bind(stats_id(&format!("stats-hourly:{hour_utc_unix_secs}")))
     .bind(hour_utc_unix_secs)
     .bind(total_requests)
-    .bind(total_requests.saturating_sub(error_requests))
+    .bind(success_requests)
     .bind(error_requests)
+    .bind(sla_eligible_requests)
+    .bind(user_error_requests)
     .bind(row.try_get::<i64, _>("input_tokens").map_sql_err()?)
     .bind(row.try_get::<i64, _>("output_tokens").map_sql_err()?)
     .bind(
@@ -261,7 +268,10 @@ async fn perform_sqlite_stats_daily_aggregation(
         .await
         .map_sql_err()?;
     let total_requests: i64 = row.try_get("total_requests").map_sql_err()?;
+    let success_requests: i64 = row.try_get("success_requests").map_sql_err()?;
+    let sla_eligible_requests: i64 = row.try_get("sla_eligible_requests").map_sql_err()?;
     let error_requests: i64 = row.try_get("error_requests").map_sql_err()?;
+    let user_error_requests: i64 = row.try_get("user_error_requests").map_sql_err()?;
     let unique_models =
         sqlite_group_count(&mut tx, "model", start_unix_secs, end_unix_secs).await? as i64;
     let unique_providers =
@@ -273,14 +283,17 @@ async fn perform_sqlite_stats_daily_aggregation(
         r#"
 INSERT INTO stats_daily (
   id, "date", total_requests, success_requests, error_requests,
+  sla_eligible_requests, user_error_requests,
   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
   total_cost, actual_total_cost, avg_response_time_ms, fallback_count,
   unique_models, unique_providers, is_complete, aggregated_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
 ON CONFLICT ("date") DO UPDATE SET
   total_requests = excluded.total_requests,
   success_requests = excluded.success_requests,
   error_requests = excluded.error_requests,
+  sla_eligible_requests = excluded.sla_eligible_requests,
+  user_error_requests = excluded.user_error_requests,
   input_tokens = excluded.input_tokens,
   output_tokens = excluded.output_tokens,
   cache_creation_tokens = excluded.cache_creation_tokens,
@@ -299,8 +312,10 @@ ON CONFLICT ("date") DO UPDATE SET
     .bind(stats_id(&format!("stats-daily:{day_start_unix_secs}")))
     .bind(day_start_unix_secs)
     .bind(total_requests)
-    .bind(total_requests.saturating_sub(error_requests))
+    .bind(success_requests)
     .bind(error_requests)
+    .bind(sla_eligible_requests)
+    .bind(user_error_requests)
     .bind(row.try_get::<i64, _>("input_tokens").map_sql_err()?)
     .bind(row.try_get::<i64, _>("output_tokens").map_sql_err()?)
     .bind(
@@ -393,16 +408,15 @@ async fn upsert_sqlite_stats_hourly_user_rows(
         r#"
 INSERT INTO stats_hourly_user (
   id, hour_utc, user_id, total_requests, success_requests, error_requests,
+  sla_eligible_requests, user_error_requests,
   input_tokens, output_tokens, total_cost, created_at, updated_at
 )
 SELECT
   lower(hex(randomblob(32))), ?, user_id, COUNT(*),
-  COUNT(*) - COALESCE(SUM(CASE
-    WHEN status = 'failed' OR status_code >= 400 OR error_message IS NOT NULL
-    THEN 1 ELSE 0 END), 0),
-  COALESCE(SUM(CASE
-    WHEN status = 'failed' OR status_code >= 400 OR error_message IS NOT NULL
-    THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN outcome_class = 'service_error' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN sla_eligible <> 0 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN outcome_class = 'user_error' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
   CAST(COALESCE(SUM(total_cost_usd), 0) AS REAL), ?, ?
 FROM "usage"
@@ -415,6 +429,8 @@ ON CONFLICT (hour_utc, user_id) DO UPDATE SET
   total_requests = excluded.total_requests,
   success_requests = excluded.success_requests,
   error_requests = excluded.error_requests,
+  sla_eligible_requests = excluded.sla_eligible_requests,
+  user_error_requests = excluded.user_error_requests,
   input_tokens = excluded.input_tokens,
   output_tokens = excluded.output_tokens,
   total_cost = excluded.total_cost,
@@ -665,17 +681,16 @@ async fn upsert_sqlite_stats_daily_api_key_rows(
         r#"
 INSERT INTO stats_daily_api_key (
   id, api_key_id, "date", total_requests, success_requests, error_requests,
+  sla_eligible_requests, user_error_requests,
   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
   total_cost, api_key_name, created_at, updated_at
 )
 SELECT
   lower(hex(randomblob(32))), usage.api_key_id, ?, COUNT(*),
-  COUNT(*) - COALESCE(SUM(CASE
-    WHEN usage.status = 'failed' OR usage.status_code >= 400
-      OR usage.error_message IS NOT NULL THEN 1 ELSE 0 END), 0),
-  COALESCE(SUM(CASE
-    WHEN usage.status = 'failed' OR usage.status_code >= 400
-      OR usage.error_message IS NOT NULL THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.outcome_class = 'success' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.outcome_class = 'service_error' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.sla_eligible <> 0 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.outcome_class = 'user_error' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(usage.input_tokens), 0), COALESCE(SUM(usage.output_tokens), 0),
   COALESCE(SUM(usage.cache_creation_input_tokens), 0),
   COALESCE(SUM(usage.cache_read_input_tokens), 0),
@@ -689,6 +704,8 @@ ON CONFLICT ("date", api_key_id) DO UPDATE SET
   total_requests = excluded.total_requests,
   success_requests = excluded.success_requests,
   error_requests = excluded.error_requests,
+  sla_eligible_requests = excluded.sla_eligible_requests,
+  user_error_requests = excluded.user_error_requests,
   input_tokens = excluded.input_tokens,
   output_tokens = excluded.output_tokens,
   cache_creation_tokens = excluded.cache_creation_tokens,
@@ -731,6 +748,7 @@ SELECT
   COUNT(*), ?, ?
 FROM "usage"
 WHERE created_at_unix_ms >= ? AND created_at_unix_ms < ?
+  AND outcome_class = 'service_error'
   AND error_category IS NOT NULL AND error_category <> ''
 GROUP BY error_category, provider_name, model
 "#,
@@ -757,17 +775,16 @@ async fn upsert_sqlite_stats_user_daily_rows(
         r#"
 INSERT INTO stats_user_daily (
   id, user_id, "date", total_requests, success_requests, error_requests,
+  sla_eligible_requests, user_error_requests,
   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
   total_cost, username, created_at, updated_at
 )
 SELECT
   lower(hex(randomblob(32))), usage.user_id, ?, COUNT(*),
-  COUNT(*) - COALESCE(SUM(CASE
-    WHEN usage.status = 'failed' OR usage.status_code >= 400
-      OR usage.error_message IS NOT NULL THEN 1 ELSE 0 END), 0),
-  COALESCE(SUM(CASE
-    WHEN usage.status = 'failed' OR usage.status_code >= 400
-      OR usage.error_message IS NOT NULL THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.outcome_class = 'success' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.outcome_class = 'service_error' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.sla_eligible <> 0 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.outcome_class = 'user_error' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(usage.input_tokens), 0), COALESCE(SUM(usage.output_tokens), 0),
   COALESCE(SUM(usage.cache_creation_input_tokens), 0),
   COALESCE(SUM(usage.cache_read_input_tokens), 0),
@@ -783,6 +800,8 @@ ON CONFLICT ("date", user_id) DO UPDATE SET
   total_requests = excluded.total_requests,
   success_requests = excluded.success_requests,
   error_requests = excluded.error_requests,
+  sla_eligible_requests = excluded.sla_eligible_requests,
+  user_error_requests = excluded.user_error_requests,
   input_tokens = excluded.input_tokens,
   output_tokens = excluded.output_tokens,
   cache_creation_tokens = excluded.cache_creation_tokens,

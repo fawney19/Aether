@@ -57,7 +57,9 @@ INSERT INTO "usage" (
   request_metadata,
   finalized_at,
   created_at,
-  updated_at_unix_secs
+  updated_at_unix_secs,
+  outcome_class,
+  sla_eligible
 ) VALUES (
   $1,
   $2,
@@ -149,7 +151,9 @@ INSERT INTO "usage" (
   COALESCE(
     NULLIF($56::bigint, 0),
     CAST(EXTRACT(EPOCH FROM COALESCE(TO_TIMESTAMP($55::double precision), NOW())) AS BIGINT)
-  )
+  ),
+  $62,
+  $63
 )
 ON CONFLICT (request_id)
 DO UPDATE SET
@@ -221,6 +225,16 @@ DO UPDATE SET
     WHEN "usage".status = 'streaming' AND EXCLUDED.status = 'pending' THEN "usage".status
     ELSE EXCLUDED.status
   END ELSE "usage".status END,
+  outcome_class = CASE WHEN "usage".billing_status = 'pending' THEN CASE
+    WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND EXCLUDED.status IN ('pending', 'streaming') THEN "usage".outcome_class
+    WHEN "usage".status = 'streaming' AND EXCLUDED.status = 'pending' THEN "usage".outcome_class
+    ELSE EXCLUDED.outcome_class
+  END ELSE "usage".outcome_class END,
+  sla_eligible = CASE WHEN "usage".billing_status = 'pending' THEN CASE
+    WHEN "usage".status IN ('completed', 'failed', 'cancelled') AND EXCLUDED.status IN ('pending', 'streaming') THEN "usage".sla_eligible
+    WHEN "usage".status = 'streaming' AND EXCLUDED.status = 'pending' THEN "usage".sla_eligible
+    ELSE EXCLUDED.sla_eligible
+  END ELSE "usage".sla_eligible END,
   billing_status = CASE WHEN "usage".billing_status = 'pending' THEN EXCLUDED.billing_status ELSE "usage".billing_status END,
   request_headers = NULL,
   request_body = CASE WHEN "usage".billing_status = 'pending' AND $61 THEN CASE

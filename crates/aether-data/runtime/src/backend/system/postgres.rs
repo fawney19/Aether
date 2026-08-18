@@ -77,6 +77,8 @@ SELECT
     COALESCE(total_requests, 0)::BIGINT AS total_requests,
     COALESCE(success_requests, 0)::BIGINT AS success_requests,
     COALESCE(error_requests, 0)::BIGINT AS error_requests,
+    COALESCE(sla_eligible_requests, 0)::BIGINT AS sla_eligible_requests,
+    COALESCE(user_error_requests, 0)::BIGINT AS user_error_requests,
     COALESCE(input_tokens, 0)::BIGINT AS input_tokens,
     COALESCE(output_tokens, 0)::BIGINT AS output_tokens,
     COALESCE(cache_creation_tokens, 0)::BIGINT AS cache_creation_tokens,
@@ -92,6 +94,8 @@ WHERE total_requests <> 0
    OR cache_creation_tokens <> 0
    OR cache_read_tokens <> 0
    OR total_cost <> 0
+   OR sla_eligible_requests <> 0
+   OR user_error_requests <> 0
 ORDER BY date ASC
 "#,
     )
@@ -109,6 +113,8 @@ SELECT
     COALESCE(total_requests, 0)::BIGINT AS total_requests,
     COALESCE(success_requests, 0)::BIGINT AS success_requests,
     COALESCE(error_requests, 0)::BIGINT AS error_requests,
+    COALESCE(sla_eligible_requests, 0)::BIGINT AS sla_eligible_requests,
+    COALESCE(user_error_requests, 0)::BIGINT AS user_error_requests,
     COALESCE(input_tokens, 0)::BIGINT AS input_tokens,
     COALESCE(output_tokens, 0)::BIGINT AS output_tokens,
     COALESCE(cache_creation_tokens, 0)::BIGINT AS cache_creation_tokens,
@@ -121,7 +127,9 @@ WHERE user_id IS NOT NULL
     OR output_tokens <> 0
     OR cache_creation_tokens <> 0
     OR cache_read_tokens <> 0
-    OR total_cost <> 0)
+    OR total_cost <> 0
+    OR sla_eligible_requests <> 0
+    OR user_error_requests <> 0)
 ORDER BY user_id ASC, date ASC
 "#,
     )
@@ -141,6 +149,8 @@ SELECT
     COALESCE(total_requests, 0)::BIGINT AS total_requests,
     COALESCE(success_requests, 0)::BIGINT AS success_requests,
     COALESCE(error_requests, 0)::BIGINT AS error_requests,
+    COALESCE(sla_eligible_requests, 0)::BIGINT AS sla_eligible_requests,
+    COALESCE(user_error_requests, 0)::BIGINT AS user_error_requests,
     COALESCE(input_tokens, 0)::BIGINT AS input_tokens,
     COALESCE(output_tokens, 0)::BIGINT AS output_tokens,
     COALESCE(cache_creation_tokens, 0)::BIGINT AS cache_creation_tokens,
@@ -153,7 +163,9 @@ WHERE api_key_id IS NOT NULL
     OR output_tokens <> 0
     OR cache_creation_tokens <> 0
     OR cache_read_tokens <> 0
-    OR total_cost <> 0)
+    OR total_cost <> 0
+    OR sla_eligible_requests <> 0
+    OR user_error_requests <> 0)
 ORDER BY api_key_id ASC, date ASC
 "#,
     )
@@ -198,19 +210,22 @@ async fn import_postgres_admin_system_usage_aggregates(
             r#"
 INSERT INTO stats_daily (
     id, date, total_requests, success_requests, error_requests,
+    sla_eligible_requests, user_error_requests,
     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
     total_cost, actual_total_cost, is_complete, aggregated_at, created_at, updated_at
 )
 VALUES (
-    $1, TO_TIMESTAMP($2::double precision), $3, $4, $5,
-    $6, $7, $8, $9, $10, $11, $12,
-    CASE WHEN $13::BIGINT IS NULL THEN NULL ELSE TO_TIMESTAMP($13::double precision) END,
+    $1, TO_TIMESTAMP($2::double precision), $3, $4, $5, $6, $7,
+    $8, $9, $10, $11, $12, $13, $14,
+    CASE WHEN $15::BIGINT IS NULL THEN NULL ELSE TO_TIMESTAMP($15::double precision) END,
     NOW(), NOW()
 )
 ON CONFLICT (date) DO UPDATE
 SET total_requests = EXCLUDED.total_requests,
     success_requests = EXCLUDED.success_requests,
     error_requests = EXCLUDED.error_requests,
+    sla_eligible_requests = EXCLUDED.sla_eligible_requests,
+    user_error_requests = EXCLUDED.user_error_requests,
     input_tokens = EXCLUDED.input_tokens,
     output_tokens = EXCLUDED.output_tokens,
     cache_creation_tokens = EXCLUDED.cache_creation_tokens,
@@ -235,6 +250,14 @@ SET total_requests = EXCLUDED.total_requests,
         .bind(i64_from_u64(
             row.error_requests,
             "stats_daily.error_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.sla_eligible_requests,
+            "stats_daily.sla_eligible_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.user_error_requests,
+            "stats_daily.user_error_requests",
         )?)
         .bind(i64_from_u64(row.input_tokens, "stats_daily.input_tokens")?)
         .bind(i64_from_u64(
@@ -289,18 +312,21 @@ SET total_requests = EXCLUDED.total_requests,
             r#"
 INSERT INTO stats_user_daily (
     id, user_id, username, date, total_requests, success_requests, error_requests,
+    sla_eligible_requests, user_error_requests,
     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
     total_cost, created_at, updated_at
 )
 VALUES (
-    $1, $2, $3, TO_TIMESTAMP($4::double precision), $5, $6, $7,
-    $8, $9, $10, $11, $12, NOW(), NOW()
+    $1, $2, $3, TO_TIMESTAMP($4::double precision), $5, $6, $7, $8, $9,
+    $10, $11, $12, $13, $14, NOW(), NOW()
 )
 ON CONFLICT (date, user_id) DO UPDATE
 SET username = EXCLUDED.username,
     total_requests = EXCLUDED.total_requests,
     success_requests = EXCLUDED.success_requests,
     error_requests = EXCLUDED.error_requests,
+    sla_eligible_requests = EXCLUDED.sla_eligible_requests,
+    user_error_requests = EXCLUDED.user_error_requests,
     input_tokens = EXCLUDED.input_tokens,
     output_tokens = EXCLUDED.output_tokens,
     cache_creation_tokens = EXCLUDED.cache_creation_tokens,
@@ -324,6 +350,14 @@ SET username = EXCLUDED.username,
         .bind(i64_from_u64(
             row.error_requests,
             "stats_user_daily.error_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.sla_eligible_requests,
+            "stats_user_daily.sla_eligible_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.user_error_requests,
+            "stats_user_daily.user_error_requests",
         )?)
         .bind(i64_from_u64(
             row.input_tokens,
@@ -375,18 +409,21 @@ SET username = EXCLUDED.username,
             r#"
 INSERT INTO stats_daily_api_key (
     id, api_key_id, api_key_name, date, total_requests, success_requests, error_requests,
+    sla_eligible_requests, user_error_requests,
     input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
     total_cost, created_at, updated_at
 )
 VALUES (
-    $1, $2, $3, TO_TIMESTAMP($4::double precision), $5, $6, $7,
-    $8, $9, $10, $11, $12, NOW(), NOW()
+    $1, $2, $3, TO_TIMESTAMP($4::double precision), $5, $6, $7, $8, $9,
+    $10, $11, $12, $13, $14, NOW(), NOW()
 )
 ON CONFLICT (date, api_key_id) DO UPDATE
 SET api_key_name = EXCLUDED.api_key_name,
     total_requests = EXCLUDED.total_requests,
     success_requests = EXCLUDED.success_requests,
     error_requests = EXCLUDED.error_requests,
+    sla_eligible_requests = EXCLUDED.sla_eligible_requests,
+    user_error_requests = EXCLUDED.user_error_requests,
     input_tokens = EXCLUDED.input_tokens,
     output_tokens = EXCLUDED.output_tokens,
     cache_creation_tokens = EXCLUDED.cache_creation_tokens,
@@ -413,6 +450,14 @@ SET api_key_name = EXCLUDED.api_key_name,
         .bind(i64_from_u64(
             row.error_requests,
             "stats_daily_api_key.error_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.sla_eligible_requests,
+            "stats_daily_api_key.sla_eligible_requests",
+        )?)
+        .bind(i64_from_u64(
+            row.user_error_requests,
+            "stats_daily_api_key.user_error_requests",
         )?)
         .bind(i64_from_u64(
             row.input_tokens,
@@ -1267,6 +1312,10 @@ pub(super) fn map_stats_daily_aggregate(
         total_requests: u64_from_i64(row.try_get("total_requests").map_postgres_err()?),
         success_requests: u64_from_i64(row.try_get("success_requests").map_postgres_err()?),
         error_requests: u64_from_i64(row.try_get("error_requests").map_postgres_err()?),
+        sla_eligible_requests: u64_from_i64(
+            row.try_get("sla_eligible_requests").map_postgres_err()?,
+        ),
+        user_error_requests: u64_from_i64(row.try_get("user_error_requests").map_postgres_err()?),
         input_tokens: u64_from_i64(row.try_get("input_tokens").map_postgres_err()?),
         output_tokens: u64_from_i64(row.try_get("output_tokens").map_postgres_err()?),
         cache_creation_tokens: u64_from_i64(
@@ -1293,6 +1342,10 @@ pub(super) fn map_stats_user_daily_aggregate(
         total_requests: u64_from_i64(row.try_get("total_requests").map_postgres_err()?),
         success_requests: u64_from_i64(row.try_get("success_requests").map_postgres_err()?),
         error_requests: u64_from_i64(row.try_get("error_requests").map_postgres_err()?),
+        sla_eligible_requests: u64_from_i64(
+            row.try_get("sla_eligible_requests").map_postgres_err()?,
+        ),
+        user_error_requests: u64_from_i64(row.try_get("user_error_requests").map_postgres_err()?),
         input_tokens: u64_from_i64(row.try_get("input_tokens").map_postgres_err()?),
         output_tokens: u64_from_i64(row.try_get("output_tokens").map_postgres_err()?),
         cache_creation_tokens: u64_from_i64(
@@ -1313,6 +1366,10 @@ pub(super) fn map_stats_daily_api_key_aggregate(
         total_requests: u64_from_i64(row.try_get("total_requests").map_postgres_err()?),
         success_requests: u64_from_i64(row.try_get("success_requests").map_postgres_err()?),
         error_requests: u64_from_i64(row.try_get("error_requests").map_postgres_err()?),
+        sla_eligible_requests: u64_from_i64(
+            row.try_get("sla_eligible_requests").map_postgres_err()?,
+        ),
+        user_error_requests: u64_from_i64(row.try_get("user_error_requests").map_postgres_err()?),
         input_tokens: u64_from_i64(row.try_get("input_tokens").map_postgres_err()?),
         output_tokens: u64_from_i64(row.try_get("output_tokens").map_postgres_err()?),
         cache_creation_tokens: u64_from_i64(

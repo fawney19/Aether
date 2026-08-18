@@ -489,6 +489,8 @@ fn build_users_me_usage_record_payload(
         "request_path": users_me_usage_metadata_string(item, "request_path"),
         "request_path_and_query": users_me_usage_metadata_string(item, "request_path_and_query"),
         "status": item.status,
+        "outcome_class": item.outcome_class().as_str(),
+        "sla_eligible": item.sla_eligible(),
         "has_fallback": item.has_fallback(),
         "created_at": unix_secs_to_rfc3339(item.created_at_unix_ms),
         "cache_creation_input_tokens": cache_creation_input_tokens,
@@ -543,6 +545,8 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
     let mut payload = json!({
         "id": item.id,
         "status": item.status,
+        "outcome_class": item.outcome_class().as_str(),
+        "sla_eligible": item.sla_eligible(),
         "request_type": item.request_type,
         "input_tokens": item.input_tokens,
         "effective_input_tokens": users_me_usage_effective_input_tokens(item),
@@ -660,7 +664,15 @@ fn users_me_usage_terminal_candidate_state_override(
 ) -> Option<Value> {
     let candidate = users_me_usage_current_candidate(candidates)?;
 
+    let outcome = candidate.outcome_class();
     let status = match candidate.status {
+        RequestCandidateStatus::Success | RequestCandidateStatus::Failed
+            if outcome.is_user_error() =>
+        {
+            // Keep the terminal lifecycle as failed. `outcome_class` remains
+            // user_error so metrics can exclude it from SLA/success-rate math.
+            "failed"
+        }
         RequestCandidateStatus::Success => "completed",
         RequestCandidateStatus::Failed => "failed",
         RequestCandidateStatus::Cancelled => "cancelled",
@@ -673,7 +685,11 @@ fn users_me_usage_terminal_candidate_state_override(
                 .saturating_sub(candidate.started_at_unix_ms?),
         )
     });
-    let mut payload = json!({ "status": status });
+    let mut payload = json!({
+        "status": status,
+        "outcome_class": outcome.as_str(),
+        "sla_eligible": outcome.is_sla_eligible(),
+    });
     if let Some(latency_ms) = latency_ms {
         payload["response_time_ms"] = json!(latency_ms);
         if let Some(response_time_updated_at) = candidate
@@ -725,21 +741,24 @@ async fn resolve_users_me_usage_active_state_overrides_by_request_id(
 }
 
 fn users_me_usage_is_failed(item: &StoredRequestUsageAudit) -> bool {
+    // Active-record filtering is lifecycle-oriented.  Keep terminal user
+    // errors out of the active list even though their `user_error` outcome is
+    // intentionally excluded from SLA/service-error aggregates.
     let has_failure_signal = item.status_code.is_some_and(|value| value >= 400)
         || item
             .error_message
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty());
     let status = item.status.trim().to_ascii_lowercase();
-    if status.is_empty() {
-        return has_failure_signal;
+    if !status.is_empty() {
+        return match status.as_str() {
+            "completed" | "cancelled" => false,
+            "pending" | "streaming" => has_failure_signal,
+            "failed" => true,
+            _ => false,
+        };
     }
-    match status.as_str() {
-        "completed" | "cancelled" => false,
-        "pending" | "streaming" => has_failure_signal,
-        "failed" => true,
-        _ => false,
-    }
+    has_failure_signal
 }
 
 fn build_users_me_usage_summary_by_model(
@@ -748,9 +767,17 @@ fn build_users_me_usage_summary_by_model(
 ) -> Vec<serde_json::Value> {
     rows.iter()
         .map(|row| {
+            let service_error_count = row.sla_eligible_count.saturating_sub(row.success_count);
             let mut value = json!({
                 "model": row.group_key,
                 "requests": row.request_count,
+                "sla_eligible_count": row.sla_eligible_count,
+                "success_count": row.success_count,
+                "service_error_count": service_error_count,
+                "user_error_count": row.user_error_count,
+                "success_rate": if row.sla_eligible_count == 0 { 100.0 } else {
+                    round_to(row.success_count as f64 / row.sla_eligible_count as f64 * 100.0, 2)
+                },
                 "input_tokens": row.input_tokens,
                 "effective_input_tokens": row.effective_input_tokens,
                 "output_tokens": row.output_tokens,
@@ -782,6 +809,7 @@ fn build_users_me_usage_summary_by_provider(
             json!({
                 "provider": row.group_key,
                 "requests": row.request_count,
+                "sla_eligible_count": row.sla_eligible_count,
                 "effective_input_tokens": row.effective_input_tokens,
                 "total_tokens": row.total_tokens,
                 "total_input_context": row.total_input_context,
@@ -795,10 +823,16 @@ fn build_users_me_usage_summary_by_provider(
                     row.cache_read_tokens,
                 ),
                 "total_cost_usd": round_to(row.total_cost_usd, 6),
-                "success_rate": if row.request_count == 0 {
+                "success_count": row.success_count,
+                "service_error_count": row.sla_eligible_count.saturating_sub(row.success_count),
+                "user_error_count": row.user_error_count,
+                "success_rate": if row.sla_eligible_count == 0 {
                     100.0
                 } else {
-                    round_to(row.success_count as f64 / row.request_count as f64 * 100.0, 2)
+                    round_to(
+                        row.success_count as f64 / row.sla_eligible_count as f64 * 100.0,
+                        2,
+                    )
                 },
                 "avg_response_time_ms": if row.response_time_samples == 0 {
                     0.0
@@ -818,6 +852,15 @@ fn build_users_me_usage_summary_by_api_format(
             json!({
                 "api_format": row.group_key,
                 "request_count": row.request_count,
+                "sla_eligible_count": row.sla_eligible_count,
+                "success_count": row.success_count,
+                "service_error_count": row.sla_eligible_count.saturating_sub(row.success_count),
+                "user_error_count": row.user_error_count,
+                "success_rate": if row.sla_eligible_count == 0 {
+                    100.0
+                } else {
+                    round_to(row.success_count as f64 / row.sla_eligible_count as f64 * 100.0, 2)
+                },
                 "total_tokens": row.total_tokens,
                 "effective_input_tokens": row.effective_input_tokens,
                 "total_input_context": row.total_input_context,
@@ -1205,6 +1248,10 @@ pub(super) async fn handle_users_me_usage_get(
     }
 
     let total_requests = usage_summary.total_requests;
+    let sla_eligible_count = usage_summary.sla_eligible_requests;
+    let service_error_count = usage_summary.error_requests;
+    let user_error_count = usage_summary.user_error_requests;
+    let success_count = sla_eligible_count.saturating_sub(service_error_count);
     let total_input_tokens = usage_summary.input_tokens;
     let total_output_tokens = usage_summary.output_tokens;
     let total_tokens = usage_summary.total_tokens;
@@ -1241,6 +1288,20 @@ pub(super) async fn handle_users_me_usage_get(
 
     let mut payload = json!({
         "total_requests": total_requests,
+        "sla_eligible_count": sla_eligible_count,
+        "success_count": success_count,
+        "error_count": service_error_count,
+        "service_error_count": service_error_count,
+        "user_error_count": user_error_count,
+        "success_rate": if sla_eligible_count == 0 { 100.0 } else {
+            round_to(success_count as f64 / sla_eligible_count as f64 * 100.0, 2)
+        },
+        "service_error_rate": if sla_eligible_count == 0 { 0.0 } else {
+            round_to(service_error_count as f64 / sla_eligible_count as f64 * 100.0, 2)
+        },
+        "user_error_rate": if total_requests == 0 { 0.0 } else {
+            round_to(user_error_count as f64 / total_requests as f64 * 100.0, 2)
+        },
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
         "total_tokens": total_tokens,
@@ -1755,12 +1816,42 @@ mod tests {
             users_me_usage_terminal_candidate_state_override(&[candidate]).expect("override");
 
         assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["outcome_class"], "success");
+        assert_eq!(payload["sla_eligible"], true);
         assert_eq!(payload["response_time_ms"], 9_210);
         assert_eq!(payload["status_code"], 200);
         assert_eq!(
             payload["response_time_updated_at"],
             "1970-01-01T00:00:10.210+00:00"
         );
+    }
+
+    #[test]
+    fn user_usage_active_override_classifies_http_400_as_user_error() {
+        let candidate = sample_candidate(
+            RequestCandidateStatus::Failed,
+            Some(400),
+            Some(1_000),
+            Some("invalid request"),
+        );
+
+        let payload =
+            users_me_usage_terminal_candidate_state_override(&[candidate]).expect("override");
+
+        assert_eq!(payload["status"], "failed");
+        assert_eq!(payload["outcome_class"], "user_error");
+        assert_eq!(payload["sla_eligible"], false);
+        assert_eq!(payload["status_code"], 400);
+
+        let mut active = build_users_me_usage_active_payload(&sample_usage("pending"));
+        for (key, value) in payload.as_object().expect("override object") {
+            active[key] = value.clone();
+        }
+
+        assert_eq!(active["status"], "failed");
+        assert_eq!(active["outcome_class"], "user_error");
+        assert_eq!(active["sla_eligible"], false);
+        assert_eq!(active["status_code"], 400);
     }
 
     #[test]

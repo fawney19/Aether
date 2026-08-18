@@ -50,8 +50,26 @@ SELECT
   endpoint_id,
   FLOOR(EXTRACT(EPOCH FROM (created_at - TO_TIMESTAMP($2))) / $4)::BIGINT AS segment_idx,
   COUNT(id) AS total_count,
-  SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
-  SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+  SUM(CASE
+    WHEN status = 'success'
+      AND (status_code IS NULL OR status_code < 400)
+      AND BTRIM(COALESCE(error_message, '')) = ''
+    THEN 1 ELSE 0 END) AS success_count,
+  SUM(CASE
+    WHEN status IN ('success', 'failed')
+      AND status_code IS DISTINCT FROM 400
+      AND NOT (
+        status = 'success'
+        AND (status_code IS NULL OR status_code < 400)
+        AND BTRIM(COALESCE(error_message, '')) = ''
+      )
+    THEN 1 ELSE 0 END) AS failed_count,
+  SUM(CASE
+    WHEN status IN ('success', 'failed') AND status_code IS DISTINCT FROM 400
+    THEN 1 ELSE 0 END) AS sla_eligible_count,
+  SUM(CASE
+    WHEN status IN ('success', 'failed') AND status_code = 400
+    THEN 1 ELSE 0 END) AS user_error_count,
   CAST(EXTRACT(EPOCH FROM MIN(created_at)) * 1000 AS BIGINT) AS min_created_at_unix_ms,
   CAST(EXTRACT(EPOCH FROM MAX(created_at)) * 1000 AS BIGINT) AS max_created_at_unix_ms
 FROM request_candidates
@@ -655,14 +673,42 @@ impl SqlxRequestCandidateReadRepository {
         }
 
         let mut builder = QueryBuilder::<Postgres>::new(
-            "SELECT endpoint_id, status, COUNT(id) AS count FROM request_candidates",
+            r#"SELECT
+  endpoint_id,
+  CASE
+    WHEN status = 'skipped' THEN 'skipped'
+    WHEN status_code = 400 THEN 'failed'
+    WHEN status = 'success'
+      AND (status_code IS NULL OR status_code < 400)
+      AND BTRIM(COALESCE(error_message, '')) = ''
+    THEN 'success'
+    ELSE 'failed'
+  END AS status,
+  COUNT(id) AS count,
+  SUM(CASE
+    WHEN status IN ('success', 'failed') AND status_code IS DISTINCT FROM 400
+    THEN 1 ELSE 0 END) AS sla_eligible_count,
+  SUM(CASE
+    WHEN status IN ('success', 'failed') AND status_code = 400
+    THEN 1 ELSE 0 END) AS user_error_count
+FROM request_candidates"#,
         );
         let mut where_clause = WhereClause::new();
         push_in(&mut builder, &mut where_clause, "endpoint_id", endpoint_ids);
         builder
             .push(" AND created_at >= TO_TIMESTAMP(")
             .push_bind(since_unix_secs as f64)
-            .push(") AND status IN ('success', 'failed', 'skipped') GROUP BY endpoint_id, status");
+            .push(
+                ") AND status IN ('success', 'failed', 'skipped') GROUP BY endpoint_id, CASE
+    WHEN status = 'skipped' THEN 'skipped'
+    WHEN status_code = 400 THEN 'failed'
+    WHEN status = 'success'
+      AND (status_code IS NULL OR status_code < 400)
+      AND BTRIM(COALESCE(error_message, '')) = ''
+    THEN 'success'
+    ELSE 'failed'
+  END",
+            );
         let rows = builder
             .build()
             .fetch_all(&self.pool)
@@ -680,6 +726,18 @@ impl SqlxRequestCandidateReadRepository {
                             "public health status count out of range".to_string(),
                         )
                     })?,
+                    sla_eligible_count: u64::try_from(row_get::<i64>(row, "sla_eligible_count")?)
+                        .map_err(|_| {
+                        DataLayerError::UnexpectedValue(
+                            "public health SLA eligible count out of range".to_string(),
+                        )
+                    })?,
+                    user_error_count: u64::try_from(row_get::<i64>(row, "user_error_count")?)
+                        .map_err(|_| {
+                            DataLayerError::UnexpectedValue(
+                                "public health user error count out of range".to_string(),
+                            )
+                        })?,
                 })
             })
             .collect()
@@ -748,6 +806,18 @@ impl SqlxRequestCandidateReadRepository {
                             )
                         },
                     )?,
+                    sla_eligible_count: u64::try_from(row_get::<i64>(&row, "sla_eligible_count")?)
+                        .map_err(|_| {
+                            DataLayerError::UnexpectedValue(
+                                "public health SLA eligible count out of range".to_string(),
+                            )
+                        })?,
+                    user_error_count: u64::try_from(row_get::<i64>(&row, "user_error_count")?)
+                        .map_err(|_| {
+                            DataLayerError::UnexpectedValue(
+                                "public health user error count out of range".to_string(),
+                            )
+                        })?,
                     min_created_at_unix_ms: row_get::<Option<i64>>(&row, "min_created_at_unix_ms")?
                         .map(|value| {
                             u64::try_from(value).map_err(|_| {

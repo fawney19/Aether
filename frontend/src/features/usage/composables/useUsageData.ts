@@ -15,6 +15,14 @@ import { log } from '@/utils/logger'
 import { getErrorStatus } from '@/types/api-error'
 import { isUsageProviderVisible, normalizeUsageProviderStats } from '../utils/providerStats'
 import {
+  resolveServiceErrorCount,
+  resolveServiceErrorRate,
+  resolveSlaEligibleCount,
+  resolveSlaSuccessRate,
+  resolveUserErrorCount,
+  resolveUserErrorRate,
+} from '@/utils/outcomeMetrics'
+import {
   mergeUsageRecordErrorMessage,
   mergeUsageRecordFirstByteTimeMs,
   mergeUsageRecordResponseTiming,
@@ -167,6 +175,11 @@ export function useUsageData(options: UseUsageDataOptions) {
             total_cost: statsData.total_cost || 0,
             total_actual_cost: statsData.total_actual_cost,
             avg_response_time: statsData.avg_response_time || 0,
+            sla_eligible_count: resolveSlaEligibleCount(statsData) ?? undefined,
+            service_error_count: resolveServiceErrorCount(statsData) ?? undefined,
+            service_error_rate: resolveServiceErrorRate(statsData) ?? undefined,
+            user_error_count: resolveUserErrorCount(statsData) ?? undefined,
+            user_error_rate: resolveUserErrorRate(statsData) ?? undefined,
             error_count: typeof statsRaw.error_count === 'number' ? statsRaw.error_count : undefined,
             error_rate: typeof statsRaw.error_rate === 'number' ? statsRaw.error_rate : undefined,
             cache_stats: statsRaw.cache_stats as UsageStatsState['cache_stats'],
@@ -301,7 +314,12 @@ export function useUsageData(options: UseUsageDataOptions) {
           cacheCreationTokens: item.cache_creation_tokens || 0,
           cacheHitRate: item.cache_hit_rate || 0,
           totalCost: item.total_cost_usd || 0,
-          successRate: item.success_rate || 0,
+          successRate: resolveSlaSuccessRate(item),
+          slaEligibleCount: resolveSlaEligibleCount(item) ?? undefined,
+          serviceErrorCount: resolveServiceErrorCount(item) ?? undefined,
+          serviceErrorRate: resolveServiceErrorRate(item) ?? undefined,
+          userErrorCount: resolveUserErrorCount(item) ?? undefined,
+          userErrorRate: resolveUserErrorRate(item) ?? undefined,
           avgResponseTime: (item.avg_response_time_ms ?? 0) > 0
             ? `${((item.avg_response_time_ms ?? 0) / 1000).toFixed(2)}s`
             : '-'
@@ -599,6 +617,12 @@ export function useUsageData(options: UseUsageDataOptions) {
         ...record,
         // 保留详情抽屉/活跃轮询已经拿到的完整指标，避免列表刷新用 0 或空值回退。
         status: mergedStatus,
+        outcome_class: statusProgressed
+          ? (record.outcome_class ?? undefined)
+          : existing.outcome_class,
+        sla_eligible: statusProgressed
+          ? (record.sla_eligible ?? undefined)
+          : existing.sla_eligible,
         provider: statusProgressed
           ? (protectProvider ? existing.provider : (record.provider || existing.provider))
           : existing.provider,

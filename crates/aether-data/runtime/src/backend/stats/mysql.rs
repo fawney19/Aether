@@ -109,11 +109,10 @@ WHERE created_at_unix_ms >= ?
 const MYSQL_STATS_AGGREGATE_SQL: &str = r#"
 SELECT
   CAST(COUNT(*) AS SIGNED) AS total_requests,
-  CAST(COALESCE(SUM(CASE
-    WHEN status = 'failed'
-      OR status_code >= 400
-      OR error_message IS NOT NULL
-    THEN 1 ELSE 0 END), 0) AS SIGNED) AS error_requests,
+  CAST(COALESCE(SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END), 0) AS SIGNED) AS success_requests,
+  CAST(COALESCE(SUM(CASE WHEN sla_eligible <> 0 THEN 1 ELSE 0 END), 0) AS SIGNED) AS sla_eligible_requests,
+  CAST(COALESCE(SUM(CASE WHEN outcome_class = 'service_error' THEN 1 ELSE 0 END), 0) AS SIGNED) AS error_requests,
+  CAST(COALESCE(SUM(CASE WHEN outcome_class = 'user_error' THEN 1 ELSE 0 END), 0) AS SIGNED) AS user_error_requests,
   CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS input_tokens,
   CAST(COALESCE(SUM(output_tokens), 0) AS SIGNED) AS output_tokens,
   CAST(COALESCE(SUM(cache_creation_input_tokens), 0) AS SIGNED) AS cache_creation_tokens,
@@ -144,20 +143,26 @@ async fn perform_mysql_stats_hourly_aggregation(
         .await
         .map_sql_err()?;
     let total_requests: i64 = row.try_get("total_requests").map_sql_err()?;
+    let success_requests: i64 = row.try_get("success_requests").map_sql_err()?;
+    let sla_eligible_requests: i64 = row.try_get("sla_eligible_requests").map_sql_err()?;
     let error_requests: i64 = row.try_get("error_requests").map_sql_err()?;
+    let user_error_requests: i64 = row.try_get("user_error_requests").map_sql_err()?;
 
     sqlx::query(
         r#"
 INSERT INTO stats_hourly (
   id, hour_utc, total_requests, success_requests, error_requests,
+  sla_eligible_requests, user_error_requests,
   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
   total_cost, actual_total_cost, avg_response_time_ms, is_complete,
   aggregated_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   total_requests = VALUES(total_requests),
   success_requests = VALUES(success_requests),
   error_requests = VALUES(error_requests),
+  sla_eligible_requests = VALUES(sla_eligible_requests),
+  user_error_requests = VALUES(user_error_requests),
   input_tokens = VALUES(input_tokens),
   output_tokens = VALUES(output_tokens),
   cache_creation_tokens = VALUES(cache_creation_tokens),
@@ -173,8 +178,10 @@ ON DUPLICATE KEY UPDATE
     .bind(stats_id(&format!("stats-hourly:{hour_utc_unix_secs}")))
     .bind(hour_utc_unix_secs)
     .bind(total_requests)
-    .bind(total_requests.saturating_sub(error_requests))
+    .bind(success_requests)
     .bind(error_requests)
+    .bind(sla_eligible_requests)
+    .bind(user_error_requests)
     .bind(row.try_get::<i64, _>("input_tokens").map_sql_err()?)
     .bind(row.try_get::<i64, _>("output_tokens").map_sql_err()?)
     .bind(
@@ -256,7 +263,10 @@ async fn perform_mysql_stats_daily_aggregation(
         .await
         .map_sql_err()?;
     let total_requests: i64 = row.try_get("total_requests").map_sql_err()?;
+    let success_requests: i64 = row.try_get("success_requests").map_sql_err()?;
+    let sla_eligible_requests: i64 = row.try_get("sla_eligible_requests").map_sql_err()?;
     let error_requests: i64 = row.try_get("error_requests").map_sql_err()?;
+    let user_error_requests: i64 = row.try_get("user_error_requests").map_sql_err()?;
     let unique_models =
         mysql_group_count(&mut tx, "model", start_unix_secs, end_unix_secs).await? as i64;
     let unique_providers =
@@ -268,14 +278,17 @@ async fn perform_mysql_stats_daily_aggregation(
         r#"
 INSERT INTO stats_daily (
   id, `date`, total_requests, success_requests, error_requests,
+  sla_eligible_requests, user_error_requests,
   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
   total_cost, actual_total_cost, avg_response_time_ms, fallback_count,
   unique_models, unique_providers, is_complete, aggregated_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   total_requests = VALUES(total_requests),
   success_requests = VALUES(success_requests),
   error_requests = VALUES(error_requests),
+  sla_eligible_requests = VALUES(sla_eligible_requests),
+  user_error_requests = VALUES(user_error_requests),
   input_tokens = VALUES(input_tokens),
   output_tokens = VALUES(output_tokens),
   cache_creation_tokens = VALUES(cache_creation_tokens),
@@ -294,8 +307,10 @@ ON DUPLICATE KEY UPDATE
     .bind(stats_id(&format!("stats-daily:{day_start_unix_secs}")))
     .bind(day_start_unix_secs)
     .bind(total_requests)
-    .bind(total_requests.saturating_sub(error_requests))
+    .bind(success_requests)
     .bind(error_requests)
+    .bind(sla_eligible_requests)
+    .bind(user_error_requests)
     .bind(row.try_get::<i64, _>("input_tokens").map_sql_err()?)
     .bind(row.try_get::<i64, _>("output_tokens").map_sql_err()?)
     .bind(
@@ -391,16 +406,15 @@ async fn upsert_mysql_stats_hourly_user_rows(
         r#"
 INSERT INTO stats_hourly_user (
   id, hour_utc, user_id, total_requests, success_requests, error_requests,
+  sla_eligible_requests, user_error_requests,
   input_tokens, output_tokens, total_cost, created_at, updated_at
 )
 SELECT
   SHA2(UUID(), 256), ?, user_id, COUNT(*),
-  COUNT(*) - COALESCE(SUM(CASE
-    WHEN status = 'failed' OR status_code >= 400 OR error_message IS NOT NULL
-    THEN 1 ELSE 0 END), 0),
-  COALESCE(SUM(CASE
-    WHEN status = 'failed' OR status_code >= 400 OR error_message IS NOT NULL
-    THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN outcome_class = 'service_error' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN sla_eligible <> 0 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN outcome_class = 'user_error' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
   COALESCE(SUM(total_cost_usd), 0), ?, ?
 FROM `usage`
@@ -412,6 +426,8 @@ GROUP BY user_id
 ON DUPLICATE KEY UPDATE
   total_requests = VALUES(total_requests), success_requests = VALUES(success_requests),
   error_requests = VALUES(error_requests), input_tokens = VALUES(input_tokens),
+  sla_eligible_requests = VALUES(sla_eligible_requests),
+  user_error_requests = VALUES(user_error_requests),
   output_tokens = VALUES(output_tokens), total_cost = VALUES(total_cost),
   updated_at = VALUES(updated_at)
 "#,
@@ -637,16 +653,15 @@ async fn upsert_mysql_stats_daily_api_key_rows(
         r#"
 INSERT INTO stats_daily_api_key (
   id, api_key_id, `date`, total_requests, success_requests, error_requests,
+  sla_eligible_requests, user_error_requests,
   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
   total_cost, api_key_name, created_at, updated_at
 )
 SELECT SHA2(UUID(), 256), usage.api_key_id, ?, COUNT(*),
-  COUNT(*) - COALESCE(SUM(CASE
-    WHEN usage.status = 'failed' OR usage.status_code >= 400
-      OR usage.error_message IS NOT NULL THEN 1 ELSE 0 END), 0),
-  COALESCE(SUM(CASE
-    WHEN usage.status = 'failed' OR usage.status_code >= 400
-      OR usage.error_message IS NOT NULL THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.outcome_class = 'success' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.outcome_class = 'service_error' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.sla_eligible <> 0 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.outcome_class = 'user_error' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(usage.input_tokens), 0), COALESCE(SUM(usage.output_tokens), 0),
   COALESCE(SUM(usage.cache_creation_input_tokens), 0),
   COALESCE(SUM(usage.cache_read_input_tokens), 0),
@@ -659,6 +674,8 @@ GROUP BY usage.api_key_id
 ON DUPLICATE KEY UPDATE
   total_requests = VALUES(total_requests), success_requests = VALUES(success_requests),
   error_requests = VALUES(error_requests), input_tokens = VALUES(input_tokens),
+  sla_eligible_requests = VALUES(sla_eligible_requests),
+  user_error_requests = VALUES(user_error_requests),
   output_tokens = VALUES(output_tokens), cache_creation_tokens = VALUES(cache_creation_tokens),
   cache_read_tokens = VALUES(cache_read_tokens), total_cost = VALUES(total_cost),
   api_key_name = COALESCE(VALUES(api_key_name), stats_daily_api_key.api_key_name),
@@ -696,6 +713,7 @@ INSERT INTO stats_daily_error (
 SELECT SHA2(UUID(), 256), ?, error_category, provider_name, model, COUNT(*), ?, ?
 FROM `usage`
 WHERE created_at_unix_ms >= ? AND created_at_unix_ms < ?
+  AND outcome_class = 'service_error'
   AND error_category IS NOT NULL AND error_category <> ''
 GROUP BY error_category, provider_name, model
 "#,
@@ -722,16 +740,15 @@ async fn upsert_mysql_stats_user_daily_rows(
         r#"
 INSERT INTO stats_user_daily (
   id, user_id, `date`, total_requests, success_requests, error_requests,
+  sla_eligible_requests, user_error_requests,
   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
   total_cost, username, created_at, updated_at
 )
 SELECT SHA2(UUID(), 256), usage.user_id, ?, COUNT(*),
-  COUNT(*) - COALESCE(SUM(CASE
-    WHEN usage.status = 'failed' OR usage.status_code >= 400
-      OR usage.error_message IS NOT NULL THEN 1 ELSE 0 END), 0),
-  COALESCE(SUM(CASE
-    WHEN usage.status = 'failed' OR usage.status_code >= 400
-      OR usage.error_message IS NOT NULL THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.outcome_class = 'success' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.outcome_class = 'service_error' THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.sla_eligible <> 0 THEN 1 ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN usage.outcome_class = 'user_error' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(usage.input_tokens), 0), COALESCE(SUM(usage.output_tokens), 0),
   COALESCE(SUM(usage.cache_creation_input_tokens), 0),
   COALESCE(SUM(usage.cache_read_input_tokens), 0),
@@ -746,6 +763,8 @@ GROUP BY usage.user_id
 ON DUPLICATE KEY UPDATE
   total_requests = VALUES(total_requests), success_requests = VALUES(success_requests),
   error_requests = VALUES(error_requests), input_tokens = VALUES(input_tokens),
+  sla_eligible_requests = VALUES(sla_eligible_requests),
+  user_error_requests = VALUES(user_error_requests),
   output_tokens = VALUES(output_tokens), cache_creation_tokens = VALUES(cache_creation_tokens),
   cache_read_tokens = VALUES(cache_read_tokens), total_cost = VALUES(total_cost),
   username = COALESCE(VALUES(username), stats_user_daily.username),

@@ -65,7 +65,14 @@ async fn admin_monitoring_trace_request_returns_local_payload() {
     assert_eq!(payload["request_id"], json!("request-1"));
     assert_eq!(payload["total_candidates"], json!(1));
     assert_eq!(payload["final_status"], json!("failed"));
+    assert_eq!(payload["outcome_class"], json!("service_error"));
+    assert_eq!(payload["sla_eligible"], json!(true));
     assert_eq!(payload["candidates"][0]["id"], json!("cand-used"));
+    assert_eq!(
+        payload["candidates"][0]["outcome_class"],
+        json!("service_error")
+    );
+    assert_eq!(payload["candidates"][0]["sla_eligible"], json!(true));
     assert_eq!(payload["candidates"][0]["provider_name"], json!("OpenAI"));
     assert_eq!(
         payload["candidates"][0]["provider_website"],
@@ -274,12 +281,19 @@ async fn admin_monitoring_trace_request_falls_back_to_usage_routing_snapshot() {
     assert_eq!(payload["request_id"], json!("request-usage-snapshot"));
     assert_eq!(payload["total_candidates"], json!(1));
     assert_eq!(payload["final_status"], json!("failed"));
+    assert_eq!(payload["outcome_class"], json!("service_error"));
+    assert_eq!(payload["sla_eligible"], json!(true));
     assert_eq!(payload["candidates"][0]["id"], json!("routing-cand-1"));
     assert_eq!(payload["candidates"][0]["status"], json!("failed"));
     assert_eq!(
         payload["candidates"][0]["skip_reason"],
         json!("provider_request_body_build_failed")
     );
+    assert_eq!(
+        payload["candidates"][0]["outcome_class"],
+        json!("service_error")
+    );
+    assert_eq!(payload["candidates"][0]["sla_eligible"], json!(true));
     assert_eq!(
         payload["candidates"][0]["error_type"],
         json!("no_local_stream_plans")
@@ -831,6 +845,15 @@ async fn admin_monitoring_trace_request_prefers_ref_backed_usage_response_body()
         .await
         .expect("body should read");
     let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    assert_eq!(payload["final_status"], json!("user_error"));
+    assert_eq!(payload["outcome_class"], json!("user_error"));
+    assert_eq!(payload["sla_eligible"], json!(false));
+    assert_eq!(payload["candidates"][0]["status"], json!("user_error"));
+    assert_eq!(
+        payload["candidates"][0]["outcome_class"],
+        json!("user_error")
+    );
+    assert_eq!(payload["candidates"][0]["sla_eligible"], json!(false));
     let upstream_response = &payload["candidates"][0]["extra_data"]["upstream_response"];
     assert_eq!(
         upstream_response["headers"],
@@ -1045,6 +1068,15 @@ async fn admin_monitoring_trace_provider_stats_returns_local_payload() {
             None,
             None,
         ),
+        sample_candidate(
+            "cand-6",
+            "req-f",
+            0,
+            RequestCandidateStatus::Success,
+            Some(401),
+            Some(80),
+            Some(400),
+        ),
     ]));
     let state = AppState::new()
         .expect("state should build")
@@ -1065,16 +1097,19 @@ async fn admin_monitoring_trace_provider_stats_returns_local_payload() {
         .expect("body should read");
     let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
     assert_eq!(payload["provider_id"], json!("provider-1"));
-    assert_eq!(payload["total_attempts"], json!(5));
+    assert_eq!(payload["total_attempts"], json!(6));
     assert_eq!(payload["success_count"], json!(1));
     assert_eq!(payload["failed_count"], json!(1));
+    assert_eq!(payload["service_error_count"], json!(1));
+    assert_eq!(payload["user_error_count"], json!(1));
+    assert_eq!(payload["sla_eligible_count"], json!(2));
     assert_eq!(payload["cancelled_count"], json!(1));
     assert_eq!(payload["skipped_count"], json!(0));
     assert_eq!(payload["pending_count"], json!(0));
     assert_eq!(payload["available_count"], json!(1));
     assert_eq!(payload["unused_count"], json!(1));
     assert_eq!(payload["failure_rate"], json!(50.0));
-    assert_eq!(payload["avg_latency_ms"], json!(40.0));
+    assert_eq!(payload["avg_latency_ms"], json!(50.0));
 }
 
 #[tokio::test]

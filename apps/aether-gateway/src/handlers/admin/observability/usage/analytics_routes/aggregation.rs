@@ -63,11 +63,18 @@ fn admin_usage_aggregation_by_provider_json(
                 serde_json::Value::Null
             };
             let success_count = row.success_count.unwrap_or_default();
-            let error_count = row.request_count.saturating_sub(success_count);
-            let success_rate = if row.request_count == 0 {
+            let user_error_count = row.user_error_count.unwrap_or_default();
+            // Older aggregate rows may not have the canonical SLA denominator yet.
+            // Exclude known user errors from the legacy request-count fallback so
+            // HTTP 400s cannot silently re-enter SLA/success-rate calculations.
+            let sla_eligible_count = row
+                .sla_eligible_count
+                .unwrap_or_else(|| row.request_count.saturating_sub(user_error_count));
+            let service_error_count = sla_eligible_count.saturating_sub(success_count);
+            let success_rate = if sla_eligible_count == 0 {
                 0.0
             } else {
-                round_to(success_count as f64 / row.request_count as f64 * 100.0, 2)
+                round_to(success_count as f64 / sla_eligible_count as f64 * 100.0, 2)
             };
             let provider_name = row
                 .display_name
@@ -81,6 +88,7 @@ fn admin_usage_aggregation_by_provider_json(
                 "provider_identity_source": identity_source,
                 "provider": provider_name,
                 "request_count": row.request_count,
+                "sla_eligible_count": sla_eligible_count,
                 "total_tokens": row.total_tokens,
                 "effective_input_tokens": row.effective_input_tokens,
                 "total_input_context": row.total_input_context,
@@ -89,7 +97,16 @@ fn admin_usage_aggregation_by_provider_json(
                 "actual_cost": round_to(row.actual_total_cost_usd, 6),
                 "avg_response_time_ms": round_to(row.avg_response_time_ms.unwrap_or(0.0), 2),
                 "success_rate": success_rate,
-                "error_count": error_count,
+                "success_count": success_count,
+                "error_count": service_error_count,
+                "service_error_count": service_error_count,
+                "user_error_count": user_error_count,
+                "service_error_rate": if sla_eligible_count == 0 { 0.0 } else {
+                    round_to(service_error_count as f64 / sla_eligible_count as f64 * 100.0, 2)
+                },
+                "user_error_rate": if row.request_count == 0 { 0.0 } else {
+                    round_to(user_error_count as f64 / row.request_count as f64 * 100.0, 2)
+                },
                 "cache_creation_tokens": row.cache_creation_tokens,
                 "cache_creation_ephemeral_5m_tokens": row.cache_creation_ephemeral_5m_tokens,
                 "cache_creation_ephemeral_1h_tokens": row.cache_creation_ephemeral_1h_tokens,

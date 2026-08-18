@@ -66,6 +66,9 @@
             :avg-first-byte-ms="provider.avg_first_byte_ms"
             :avg-tps="provider.avg_tps"
             :total-attempts="provider.total_attempts"
+            :sla-eligible-count="provider.sla_eligible_count"
+            :service-error-count="provider.service_error_count ?? provider.failed_count"
+            :user-error-count="provider.user_error_count"
             :success-rate="provider.success_rate"
           />
 
@@ -186,8 +189,11 @@ function openDetails(provider: ProviderStatusMonitor) {
       title: provider.provider_name,
       metaText: null,
       totalAttempts: provider.total_attempts,
+      slaEligibleCount: provider.sla_eligible_count,
       successCount: provider.success_count,
       failedCount: provider.failed_count,
+      serviceErrorCount: provider.service_error_count ?? provider.failed_count,
+      userErrorCount: provider.user_error_count,
       successRate: provider.success_rate,
       avgLatencyMs: provider.avg_latency_ms,
       avgFirstByteMs: provider.avg_first_byte_ms,

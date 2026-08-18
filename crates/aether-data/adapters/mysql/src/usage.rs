@@ -293,6 +293,8 @@ INSERT INTO `usage` (
   response_time_ms,
   first_byte_time_ms,
   status,
+  outcome_class,
+  sla_eligible,
   billing_status,
   request_metadata,
   candidate_id,
@@ -309,7 +311,7 @@ INSERT INTO `usage` (
 ) VALUES (
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-  ?
+  ?, ?, ?
 )
 ON DUPLICATE KEY UPDATE
   user_id = VALUES(user_id),
@@ -383,6 +385,16 @@ ON DUPLICATE KEY UPDATE
     WHEN status = 'streaming' AND VALUES(status) = 'pending' THEN status_code
     WHEN status = 'streaming' AND VALUES(status) = 'streaming' AND VALUES(status_code) IS NULL THEN status_code
     ELSE VALUES(status_code)
+  END,
+  outcome_class = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN outcome_class
+    WHEN status = 'streaming' AND VALUES(status) = 'pending' THEN outcome_class
+    ELSE VALUES(outcome_class)
+  END,
+  sla_eligible = CASE
+    WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN sla_eligible
+    WHEN status = 'streaming' AND VALUES(status) = 'pending' THEN sla_eligible
+    ELSE VALUES(sla_eligible)
   END,
   error_message = CASE
     WHEN status IN ('completed', 'failed', 'cancelled') AND VALUES(status) IN ('pending', 'streaming') THEN error_message
@@ -539,23 +551,14 @@ GREATEST(
 
 const MYSQL_PROVIDER_KEY_SUCCESS_FLAG_EXPR: &str = r#"
 CASE
-  WHEN status IN ('completed', 'success', 'ok', 'billed', 'settled')
-       AND (status_code IS NULL OR status_code < 400)
-       AND (error_message IS NULL OR TRIM(error_message) = '')
-  THEN 1
+  WHEN outcome_class = 'success' THEN 1
   ELSE 0
 END
 "#;
 
 const MYSQL_PROVIDER_KEY_ERROR_FLAG_EXPR: &str = r#"
 CASE
-  WHEN status NOT IN ('pending', 'streaming')
-       AND NOT (
-         status IN ('completed', 'success', 'ok', 'billed', 'settled')
-         AND (status_code IS NULL OR status_code < 400)
-         AND (error_message IS NULL OR TRIM(error_message) = '')
-       )
-  THEN 1
+  WHEN outcome_class = 'service_error' THEN 1
   ELSE 0
 END
 "#;
@@ -726,6 +729,7 @@ ORDER BY `date` ASC
                 r#"
 SELECT
   CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS total_requests,
+  CAST(COALESCE(SUM(sla_eligible_requests), 0) AS SIGNED) AS sla_eligible_requests,
   CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS input_tokens,
   CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS effective_input_tokens,
   CAST(COALESCE(SUM(output_tokens), 0) AS SIGNED) AS output_tokens,
@@ -738,6 +742,7 @@ SELECT
   CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS total_cost_usd,
   CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS actual_total_cost_usd,
   CAST(COALESCE(SUM(error_requests), 0) AS SIGNED) AS error_requests,
+  CAST(COALESCE(SUM(user_error_requests), 0) AS SIGNED) AS user_error_requests,
   CAST(0.0 AS DOUBLE) AS response_time_sum_ms,
   CAST(0 AS SIGNED) AS response_time_samples
 FROM stats_user_daily
@@ -763,6 +768,7 @@ WHERE user_id = ?
                 r#"
 SELECT
   CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS total_requests,
+  CAST(COALESCE(SUM(sla_eligible_requests), 0) AS SIGNED) AS sla_eligible_requests,
   CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS input_tokens,
   CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS effective_input_tokens,
   CAST(COALESCE(SUM(output_tokens), 0) AS SIGNED) AS output_tokens,
@@ -775,6 +781,7 @@ SELECT
   CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS total_cost_usd,
   CAST(COALESCE(SUM(COALESCE(actual_total_cost, 0)), 0) AS DOUBLE) AS actual_total_cost_usd,
   CAST(COALESCE(SUM(error_requests), 0) AS SIGNED) AS error_requests,
+  CAST(COALESCE(SUM(user_error_requests), 0) AS SIGNED) AS user_error_requests,
   CAST(0.0 AS DOUBLE) AS response_time_sum_ms,
   CAST(0 AS SIGNED) AS response_time_samples
 FROM stats_daily
@@ -796,6 +803,7 @@ WHERE `date` >= ?
 
         Ok(Some(StoredUsageDashboardSummary {
             total_requests,
+            sla_eligible_requests: row_u64(&row, "sla_eligible_requests")?,
             input_tokens: row_u64(&row, "input_tokens")?,
             effective_input_tokens: row_u64(&row, "effective_input_tokens")?,
             output_tokens: row_u64(&row, "output_tokens")?,
@@ -808,6 +816,7 @@ WHERE `date` >= ?
             total_cost_usd: row.try_get("total_cost_usd").map_sql_err()?,
             actual_total_cost_usd: row.try_get("actual_total_cost_usd").map_sql_err()?,
             error_requests: row_u64(&row, "error_requests")?,
+            user_error_requests: row_u64(&row, "user_error_requests")?,
             response_time_sum_ms: row.try_get("response_time_sum_ms").map_sql_err()?,
             response_time_samples: row_u64(&row, "response_time_samples")?,
         }))
@@ -1165,7 +1174,9 @@ SET api_keys.total_requests = aggregated.total_requests,
 UPDATE provider_api_keys
 SET request_count = 0,
     success_count = 0,
+    sla_eligible_count = 0,
     error_count = 0,
+    user_error_count = 0,
     total_tokens = 0,
     total_cost_usd = 0,
     total_response_time_ms = 0,
@@ -1184,7 +1195,9 @@ JOIN (
     provider_api_key_id,
     COUNT(*) AS request_count,
     COALESCE(SUM({success_flag_expr}), 0) AS success_count,
+    COALESCE(SUM(CASE WHEN sla_eligible THEN 1 ELSE 0 END), 0) AS sla_eligible_count,
     COALESCE(SUM({error_flag_expr}), 0) AS error_count,
+    COALESCE(SUM(CASE WHEN outcome_class = 'user_error' THEN 1 ELSE 0 END), 0) AS user_error_count,
     COALESCE(SUM(CASE
       WHEN status IN ('pending', 'streaming') THEN 0
       ELSE {canonical_total_tokens_expr}
@@ -1208,7 +1221,9 @@ JOIN (
 ) AS aggregated ON aggregated.provider_api_key_id = provider_api_keys.id
 SET provider_api_keys.request_count = aggregated.request_count,
     provider_api_keys.success_count = aggregated.success_count,
+    provider_api_keys.sla_eligible_count = aggregated.sla_eligible_count,
     provider_api_keys.error_count = aggregated.error_count,
+    provider_api_keys.user_error_count = aggregated.user_error_count,
     provider_api_keys.total_tokens = aggregated.total_tokens,
     provider_api_keys.total_cost_usd = aggregated.total_cost_usd,
     provider_api_keys.total_response_time_ms = aggregated.total_response_time_ms,
@@ -1280,7 +1295,9 @@ SET provider_api_keys.request_count = aggregated.request_count,
 UPDATE `usage`
 SET status = 'completed',
     status_code = 200,
-    error_message = NULL
+    error_message = NULL,
+    outcome_class = 'success',
+    sla_eligible = TRUE
 WHERE request_id = ?
 "#,
                     )
@@ -1321,6 +1338,8 @@ UPDATE `usage`
 SET status = 'failed',
     status_code = ?,
     error_message = ?,
+    outcome_class = ?,
+    sla_eligible = ?,
     billing_status = 'void',
     finalized_at = ?,
     total_cost_usd = 0,
@@ -1330,6 +1349,12 @@ WHERE request_id = ?
                     )
                     .bind(status_code_i64)
                     .bind(&error_message)
+                    .bind(if status_code == 400 {
+                        "user_error"
+                    } else {
+                        "service_error"
+                    })
+                    .bind(status_code != 400)
                     .bind(to_i64(now_unix_secs, "usage finalized_at")?)
                     .bind(&row.request_id)
                     .execute(&mut *tx)
@@ -1347,12 +1372,20 @@ WHERE request_id = ?
 UPDATE `usage`
 SET status = 'failed',
     status_code = ?,
-    error_message = ?
+    error_message = ?,
+    outcome_class = ?,
+    sla_eligible = ?
 WHERE request_id = ?
 "#,
                     )
                     .bind(status_code_i64)
                     .bind(&error_message)
+                    .bind(if status_code == 400 {
+                        "user_error"
+                    } else {
+                        "service_error"
+                    })
+                    .bind(status_code != 400)
                     .bind(&row.request_id)
                     .execute(&mut *tx)
                     .await
@@ -1711,6 +1744,8 @@ fn bind_upsert<'q>(
         .bind(usage.response_time_ms.map(|value| value as i64))
         .bind(usage.first_byte_time_ms.map(|value| value as i64))
         .bind(&usage.status)
+        .bind(usage.outcome_class().as_str())
+        .bind(usage.sla_eligible())
         .bind(&usage.billing_status)
         .bind(request_metadata)
         .bind(usage.candidate_id.as_deref())
