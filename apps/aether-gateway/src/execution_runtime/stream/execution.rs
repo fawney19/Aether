@@ -6787,7 +6787,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             candidate_started_unix_secs,
             stream_elapsed_ms_since(stream_started_at),
             failure,
-            retry_scope_out.as_deref_mut(),
+            retry_scope_out,
         )
         .await;
     }
