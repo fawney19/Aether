@@ -159,13 +159,23 @@ pub(crate) fn should_fallback_to_control_sync(
     sync_body_has_embedded_error(Some(body_json))
 }
 
-/// A successful OpenAI Responses body always carries a top-level `"error": null`,
-/// so presence of the key alone must not be read as an embedded provider error.
-/// Mirrors the null-aware check used by the formats registry.
+/// Mirrors the top-level markers `is_error_like_sync_body` uses in the formats layer, so a
+/// body the conversion layer refuses as error-like is never forwarded as a success instead.
+///
+/// A successful OpenAI Responses body always carries a top-level `"error": null`, so the key
+/// alone must not be read as an embedded provider error — but `"status": "failed"` still is
+/// one even when `error` is null, as is a top-level `"type": "error"` envelope.
 pub(crate) fn sync_body_has_embedded_error(body_json: Option<&serde_json::Value>) -> bool {
-    body_json
-        .and_then(|value| value.get("error"))
-        .is_some_and(|error| !error.is_null())
+    let Some(object) = body_json.and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+
+    object.get("error").is_some_and(|error| !error.is_null())
+        || object.get("status").and_then(serde_json::Value::as_str) == Some("failed")
+        || object
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value == "error")
 }
 
 pub(crate) fn should_finalize_sync_response(report_kind: Option<&str>) -> bool {
@@ -1339,6 +1349,45 @@ mod tests {
         });
         assert!(sync_body_has_embedded_error(Some(&failure)));
         assert!(!sync_body_has_embedded_error(None));
+    }
+
+    #[test]
+    fn failed_responses_body_with_null_error_is_still_a_provider_error() {
+        // A failed Responses turn can arrive as HTTP 200 with `error` left null; ignoring the
+        // null must not let the failed provider body through as a successful response.
+        let failed = serde_json::json!({
+            "id": "resp_1",
+            "object": "response",
+            "status": "failed",
+            "error": null,
+            "output": [],
+        });
+        assert!(sync_body_has_embedded_error(Some(&failed)));
+
+        let error_envelope = serde_json::json!({
+            "type": "error",
+            "error": null,
+        });
+        assert!(sync_body_has_embedded_error(Some(&error_envelope)));
+
+        let result = ExecutionResult {
+            request_id: "req-1".to_string(),
+            candidate_id: None,
+            status_code: 200,
+            headers: Default::default(),
+            response_observation: None,
+            body: None,
+            telemetry: None,
+            error: None,
+        };
+        assert_eq!(
+            resolve_core_sync_error_finalize_report_kind(
+                "openai_chat_sync",
+                &result,
+                Some(&failed)
+            ),
+            Some("openai_chat_sync_finalize".to_string())
+        );
     }
 
     #[test]
