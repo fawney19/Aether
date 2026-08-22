@@ -3279,7 +3279,17 @@ fn maybe_build_implicit_sync_finalize_outcome(
     body_base64: &Option<String>,
     telemetry: &Option<ExecutionTelemetry>,
 ) -> Result<Option<ImplicitSyncFinalizeOutcome>, GatewayError> {
-    if status_code >= 400 || body_json.is_some() || body_base64.is_none() {
+    if status_code >= 400 {
+        return Ok(None);
+    }
+    if body_json.is_none() && body_base64.is_none() {
+        return Ok(None);
+    }
+    // A parsed JSON provider body normally means the surface owns the response and the
+    // raw bytes are forwarded as-is. That is only correct when client and provider speak
+    // the same API format: a cross-format attempt still has to be converted back before it
+    // reaches the client, so it must reach finalize like the stream-captured path does.
+    if body_json.is_some() && !sync_report_context_needs_conversion(report_context.as_ref()) {
         return Ok(None);
     }
 
@@ -3287,6 +3297,15 @@ fn maybe_build_implicit_sync_finalize_outcome(
         return Ok(None);
     };
 
+    // Only the stream-captured path may hand raw bytes to finalize: there they are an SSE
+    // capture that has to be aggregated. When the provider body already parsed as JSON the
+    // bytes are just its own encoding, and feeding them to the stream aggregators would
+    // fail closed, so the JSON body is the single source of truth.
+    let body_base64 = if body_json.is_some() {
+        None
+    } else {
+        body_base64.clone()
+    };
     let payload = GatewaySyncReportRequest {
         trace_id: trace_id.to_string(),
         report_kind: report_kind.to_string(),
@@ -3295,7 +3314,7 @@ fn maybe_build_implicit_sync_finalize_outcome(
         headers: headers.clone(),
         body_json: body_json.clone(),
         client_body_json: None,
-        body_base64: body_base64.clone(),
+        body_base64,
         telemetry: telemetry.clone(),
     };
     let Some(outcome) = maybe_build_sync_finalize_outcome(trace_id, decision, &payload)? else {
@@ -3303,6 +3322,13 @@ fn maybe_build_implicit_sync_finalize_outcome(
     };
 
     Ok(Some(ImplicitSyncFinalizeOutcome { payload, outcome }))
+}
+
+fn sync_report_context_needs_conversion(report_context: Option<&serde_json::Value>) -> bool {
+    report_context
+        .and_then(|context| context.get("needs_conversion"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 #[allow(clippy::too_many_arguments)] // internal helper mirroring execute path context

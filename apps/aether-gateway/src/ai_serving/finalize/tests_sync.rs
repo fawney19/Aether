@@ -2352,3 +2352,114 @@ async fn local_finalize_forces_gpt_image_stream_response_to_b64_json_even_when_u
     assert_eq!(response_json["data"][0]["b64_json"], "aGVsbG8=");
     assert!(response_json["data"][0].get("url").is_none());
 }
+
+#[test]
+fn local_finalize_converts_openai_responses_sync_response_from_claude_messages() {
+    // Mirrors a production trace: client spoke openai:responses, the attempt was routed to a
+    // claude:messages provider, and the provider answered non-streaming JSON.
+    let payload = GatewaySyncReportRequest {
+        trace_id: "trace-responses-from-claude".to_string(),
+        report_kind: "openai_responses_sync_finalize".to_string(),
+        report_context: Some(json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "claude:messages",
+            "model": "deepseek-v4-flash",
+            "needs_conversion": true,
+            "has_envelope": false,
+        })),
+        status_code: 200,
+        headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        body_json: Some(json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "deepseek-v4-flash",
+            "content": [{"type": "text", "text": "connection ok"}],
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 12, "output_tokens": 3}
+        })),
+        client_body_json: None,
+        body_base64: None,
+        telemetry: None,
+    };
+
+    let outcome = maybe_build_local_core_sync_finalize_response(
+        "trace-responses-from-claude",
+        &test_decision(),
+        &payload,
+    )
+    .expect("local finalize should succeed")
+    .expect("cross-format sync response must be finalized, not passed through");
+
+    assert_eq!(outcome.response.status(), 200);
+    let report = outcome
+        .background_report
+        .expect("cross-format finalize should carry a success report");
+    let client_body = report.client_body_json.expect("client body should exist");
+    assert_eq!(client_body["object"], "response");
+    assert!(
+        client_body
+            .get("output")
+            .and_then(|v| v.as_array())
+            .is_some(),
+        "client body must be an openai:responses payload, got {client_body}"
+    );
+    assert!(
+        client_body.get("content").is_none(),
+        "client body must not keep the Anthropic Messages shape"
+    );
+}
+
+#[test]
+fn local_finalize_converts_openai_responses_sync_response_from_openai_chat() {
+    // Mirrors a production trace: client spoke openai:responses, the attempt was routed to an
+    // openai:chat provider, and the provider answered a non-streaming chat.completion.
+    let payload = GatewaySyncReportRequest {
+        trace_id: "trace-responses-from-chat".to_string(),
+        report_kind: "openai_responses_sync_finalize".to_string(),
+        report_context: Some(json!({
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:chat",
+            "model": "stealth/ox-alpha",
+            "needs_conversion": true,
+            "has_envelope": false,
+        })),
+        status_code: 200,
+        headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        body_json: Some(json!({
+            "id": "chatcmpl_1",
+            "object": "chat.completion",
+            "created": 1_787_379_436u64,
+            "model": "stealth/ox-alpha",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "connection ok"}
+            }],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12}
+        })),
+        client_body_json: None,
+        body_base64: None,
+        telemetry: None,
+    };
+
+    let outcome = maybe_build_local_core_sync_finalize_response(
+        "trace-responses-from-chat",
+        &test_decision(),
+        &payload,
+    )
+    .expect("local finalize should succeed")
+    .expect("cross-format sync response must be finalized, not passed through");
+
+    assert_eq!(outcome.response.status(), 200);
+    let report = outcome
+        .background_report
+        .expect("cross-format finalize should carry a success report");
+    let client_body = report.client_body_json.expect("client body should exist");
+    assert_eq!(client_body["object"], "response");
+    assert!(
+        client_body.get("choices").is_none(),
+        "client body must not keep the chat.completion shape"
+    );
+}
