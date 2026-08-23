@@ -1047,6 +1047,40 @@ fn decode_non_stream_sync_capture_body(body_base64: &str) -> Option<Value> {
     serde_json::from_slice::<Value>(&body_bytes)
         .ok()
         .filter(Value::is_object)
+        .filter(|body_json| !is_stream_event_object(body_json))
+}
+
+/// Whether a complete JSON object is a single stream event rather than a provider response body.
+///
+/// `parse_stream_json_events` accepts unframed JSON lines on purpose, so a capture holding one
+/// event parses as a complete object just like a non-streaming body does. Those still belong to
+/// the aggregators, which know how to unwrap the response the event carries.
+///
+/// Provider response bodies never match: OpenAI Responses and Chat carry no top-level `type`,
+/// Gemini carries neither, and an Anthropic Messages body is `"type": "message"` with its payload
+/// under `content` rather than nested beside the event name.
+fn is_stream_event_object(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object
+        .get("object")
+        .and_then(Value::as_str)
+        .is_some_and(|object| object.ends_with(".chunk"))
+    {
+        return true;
+    }
+    object
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|event_type| {
+            // OpenAI Responses names its events `response.*`; the other formats nest the payload
+            // the event carries beside the event name.
+            event_type.contains('.')
+                || ["response", "message", "item", "delta", "content_block"]
+                    .iter()
+                    .any(|nested| object.contains_key(*nested))
+        })
 }
 
 fn is_error_like_sync_body(value: &Value) -> bool {
@@ -3986,7 +4020,8 @@ mod tests {
         aggregate_claude_stream_sync_response, aggregate_gemini_stream_sync_response,
         aggregate_openai_chat_stream_sync_response,
         aggregate_openai_responses_stream_sync_response, convert_standard_chat_response,
-        convert_standard_cli_response, materialize_openai_responses_reasoning_item,
+        convert_standard_cli_response, decode_non_stream_sync_capture_body,
+        materialize_openai_responses_reasoning_item,
         maybe_build_openai_chat_cross_format_sync_product_from_normalized_payload,
         maybe_build_openai_responses_cross_format_sync_product_from_normalized_payload,
         maybe_build_openai_responses_same_family_sync_body_from_normalized_payload,
@@ -4481,6 +4516,42 @@ mod tests {
             product.expect("product should exist").provider_body_json,
             provider_body_json
         );
+    }
+
+    #[test]
+    fn a_single_unframed_stream_event_is_not_mistaken_for_a_provider_body() {
+        for event in [
+            json!({"type": "response.completed", "response": {"status": "completed"}}),
+            json!({"type": "response.output_text.delta", "delta": "hi"}),
+            json!({"type": "message_start", "message": {"id": "msg_1"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"text": "hi"}}),
+            json!({"object": "chat.completion.chunk", "choices": []}),
+        ] {
+            let body_base64 = base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&event).expect("serialize event"));
+            assert!(
+                decode_non_stream_sync_capture_body(&body_base64).is_none(),
+                "stream events belong to the aggregators: {event}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_response_bodies_are_still_recovered_from_a_capture() {
+        for body in [
+            json!({"id": "resp_1", "object": "response", "status": "completed", "output": []}),
+            json!({"id": "chatcmpl_1", "object": "chat.completion", "choices": []}),
+            json!({"id": "msg_1", "type": "message", "role": "assistant", "content": []}),
+            json!({"candidates": [], "modelVersion": "probe-model"}),
+        ] {
+            let body_base64 = base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&body).expect("serialize body"));
+            assert_eq!(
+                decode_non_stream_sync_capture_body(&body_base64),
+                Some(body.clone()),
+                "a complete provider body is not a stream: {body}"
+            );
+        }
     }
 
     #[test]

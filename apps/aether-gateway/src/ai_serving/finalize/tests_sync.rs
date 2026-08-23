@@ -2640,3 +2640,66 @@ fn local_finalize_still_aggregates_a_real_cross_format_stream_capture() {
     assert_eq!(client_body["type"], "message");
     assert_eq!(client_body["content"][0]["text"], "connection ok");
 }
+
+#[test]
+fn local_finalize_keeps_an_unframed_stream_event_on_the_aggregation_path() {
+    // `parse_stream_json_events` accepts unframed JSON lines, so a capture holding a single
+    // terminal event is also a complete JSON object. It is still a stream, and the aggregator is
+    // the only thing that knows to unwrap the response the event carries.
+    let event = json!({
+        "type": "response.completed",
+        "response": {
+            "id": "resp_1",
+            "object": "response",
+            "status": "completed",
+            "model": "probe-model",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "connection ok"}]
+            }],
+            "usage": {"input_tokens": 9, "output_tokens": 3, "total_tokens": 12}
+        }
+    });
+    let body_base64 = base64::engine::general_purpose::STANDARD
+        .encode(serde_json::to_vec(&event).expect("serialize terminal event"));
+
+    let payload = GatewaySyncReportRequest {
+        trace_id: "trace-claude-from-unframed-event".to_string(),
+        report_kind: "claude_chat_sync_finalize".to_string(),
+        report_context: Some(json!({
+            "client_api_format": "claude:messages",
+            "provider_api_format": "openai:responses",
+            "model": "probe-model",
+            "needs_conversion": true,
+            "has_envelope": false,
+            "upstream_is_stream": true,
+        })),
+        status_code: 200,
+        headers: BTreeMap::from([("content-type".to_string(), "text/event-stream".to_string())]),
+        body_json: None,
+        client_body_json: None,
+        body_base64: Some(body_base64),
+        telemetry: None,
+    };
+
+    let outcome = maybe_build_local_core_sync_finalize_response(
+        "trace-claude-from-unframed-event",
+        &test_decision(),
+        &payload,
+    )
+    .expect("local finalize should succeed")
+    .expect("an unframed terminal event must still aggregate, not pass through");
+
+    let report = outcome
+        .background_report
+        .expect("cross-format finalize should carry a success report");
+    let client_body = report.client_body_json.expect("client body should exist");
+    assert_eq!(client_body["type"], "message");
+    assert_eq!(client_body["content"][0]["text"], "connection ok");
+    assert!(
+        client_body.get("response").is_none(),
+        "the event envelope must not reach the client: {client_body}"
+    );
+}
